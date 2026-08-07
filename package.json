@@ -5,6 +5,12 @@
 	"type": "module",
 	"license": "MIT",
 	"keywords": ["pi-package", "pi-extension", "cliproxyapi", "compaction"],
+	"scripts": {
+		"test": "vitest run"
+	},
+	"devDependencies": {
+		"vitest": "^4.1.9"
+	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",
