@@ -5,7 +5,8 @@
 		"skipLibCheck": true,
 		"module": "nodenext",
 		"moduleResolution": "nodenext",
-		"target": "es2022",
+		"target": "es2023",
+		"allowImportingTsExtensions": true,
 		"types": ["node"]
 	},
 	"include": ["extensions"]
