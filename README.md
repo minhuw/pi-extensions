@@ -1,6 +1,13 @@
-# pi-statusline-footer
+# Pi extensions
 
-A rich multi-line statusline footer for [pi](https://github.com/earendil-works/pi-coding-agent), inspired by [claude-tui](https://github.com/slima4/claude-tui)'s Claude Code statusline.
+A small collection of extensions for [pi](https://github.com/earendil-works/pi-coding-agent):
+
+- `statusline-footer` — a rich multi-line footer inspired by [claude-tui](https://github.com/slima4/claude-tui)'s Claude Code statusline
+- `cliproxyapi-native-compaction` — OpenAI Responses native compaction for genuine OpenAI models routed through CLIProxyAPI
+
+Installing this package loads both extensions. Native compaction is inert unless the active provider, API, and exact model ID pass its allowlist.
+
+## Statusline footer
 
 Three rows, one theme per row:
 
@@ -48,7 +55,7 @@ Or try it without installing (current run only):
 pi -e git:github.com/minhuw/pi-statusline-footer
 ```
 
-## Usage
+## Statusline usage
 
 | Command | Effect |
 | ------- | ------ |
@@ -57,6 +64,20 @@ pi -e git:github.com/minhuw/pi-statusline-footer
 | `/footer compact` | 1-row layout |
 | `/footer off` | Restore pi's default footer |
 | `/footer debug` | Show metric-collection internals (useful for diagnosing provider latency) |
+
+## CLIProxyAPI native compaction
+
+Install the CLIProxyAPI provider alongside this package:
+
+```bash
+pi install npm:@router-for-me/pi-cliproxyapi-provider
+```
+
+For the default configuration, native compaction activates only for provider `cliproxyapi`, API `cliproxyapi-codex-responses`, and exact model ID `gpt-5.6-sol`. Kimi, Claude, Gemini, and other OpenAI-compatible models continue using Pi's built-in text-summary compaction.
+
+Use Pi's ordinary `/compact` command. The extension also intercepts Pi's automatic threshold and overflow compaction paths. Run `/cliproxyapi-native-compaction` to inspect the active gate.
+
+See [the extension documentation](extensions/cliproxyapi-native-compaction/README.md) for configuration, endpoint routing, and failure behavior.
 
 ## Requirements
 
