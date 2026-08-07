@@ -576,8 +576,14 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (next === "full" || next === "compact" || next === "off") {
 				mode = next as Mode;
-			} else {
+			} else if (next === "") {
 				mode = mode === "off" ? "full" : "off";
+			} else {
+				ctx.ui.notify(
+					`Unknown /footer argument '${args.trim()}' — usage: /footer [full|compact|off|debug]`,
+					"warning",
+				);
+				return;
 			}
 			if (mode === "off") {
 				installedCtx = undefined;
