@@ -156,6 +156,29 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		return unwrapReply(await invokeHerderTool("herder_submit", { planDirectory: planDir, ...event }) as Record<string, unknown>);
 	};
 
+	const managerTransportRetriable = (error: unknown): boolean => {
+		if (error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError") return true;
+		const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+		if (cause && typeof cause.code === "string" && ["ECONNREFUSED", "ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(cause.code)) return true;
+		return message(error).includes("fetch failed");
+	};
+
+	// The manager dedupes events by eventId, so resending the identical payload after a
+	// client-side abort or connection drop is safe and recovers replies that would
+	// otherwise be lost (a lost reply can strand proposed dispatches forever).
+	const postEventReliable = async (planDir: string, input: unknown): Promise<ManagerReply> => {
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 6; attempt += 1) {
+			try { return await postEvent(planDir, input); }
+			catch (error) {
+				lastError = error;
+				if (!managerTransportRetriable(error) || attempt === 5) throw error;
+				await new Promise<void>((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 15_000) + Math.floor(Math.random() * 500)));
+			}
+		}
+		throw lastError;
+	};
+
 	const enqueueManager = <T>(task: () => Promise<T>): Promise<T> => {
 		const next = managerQueue.then(task, task);
 		managerQueue = next.then(() => undefined, () => undefined);
@@ -178,7 +201,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				}
 			}
 			try {
-				reply = await postEvent(reply.planDirectory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: results });
+				reply = await postEventReliable(reply.planDirectory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: results });
 			} catch (error) {
 				for (const handle of prepared) {
 					workers.delete(handle);
@@ -261,7 +284,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				error: "Pi user requested Herder stop",
 			}));
 			if (interrupted.length > 0) {
-				reply = await postEvent(currentState!.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
+				reply = await postEventReliable(currentState!.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
 			}
 			updateFromReply(reply);
 			return `Stop requested for Herder run ${reply.runId}. Repository state was preserved.`;
@@ -385,7 +408,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				...(completed.error ? { error: completed.error } : {}),
 				usage: completed.usage,
 			};
-			const reply = await postEvent(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
+			const reply = await postEventReliable(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
 			updateFromReply(reply);
 			await dispatchReply(reply);
 		}).catch((error) => lastContext?.ui.notify(`Herder completion handling failed: ${message(error)}`, "error"));
@@ -402,7 +425,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 					updateFromReply(reply);
 					const interrupted = interruptedPiWorkers(reply.active, (handle) => engine.has(handle));
 					if (interrupted.length > 0) {
-						reply = await postEvent(reply.planDirectory, {
+						reply = await postEventReliable(reply.planDirectory, {
 							eventId: randomUUID(),
 							kind: "terminals",
 							terminals: interrupted,

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -34,15 +34,24 @@ export async function requestService(service: StoredService, pathname: string, i
 	}
 }
 
-export async function healthyService(planDirectory: string): Promise<StoredService | null> {
+const HEALTH_TIMEOUT_MS = 2_000;
+const SERVICE_WAIT_INTERVAL_MS = 500;
+const DEFAULT_UNRESPONSIVE_GRACE_MS = 45_000;
+
+function registeredService(planDirectory: string): StoredService | null {
 	let store: RunStore;
 	try { store = new RunStore(planDirectory, { readOnly: true }); }
 	catch { return null; }
 	const service = store.getService();
 	store.close();
+	return service;
+}
+
+export async function healthyService(planDirectory: string): Promise<StoredService | null> {
+	const service = registeredService(planDirectory);
 	if (!service) return null;
 	try {
-		const health = await requestService(service, "/health", undefined, 750);
+		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
 		return health.instanceId === service.instanceId && Number(health.pid) === service.pid ? service : null;
 	} catch {
 		return null;
@@ -56,6 +65,27 @@ function processAlive(pid: number): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** Pid liveness plus a best-effort guard against pid reuse by an unrelated process. */
+function serviceProcessAlive(pid: number): boolean {
+	if (!processAlive(pid)) return false;
+	try {
+		const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		return command.includes("service.ts") || command.includes("herder");
+	} catch {
+		return true;
+	}
+}
+
+async function terminateServiceProcess(pid: number): Promise<void> {
+	try { process.kill(pid, "SIGTERM"); } catch { return; }
+	const deadline = Date.now() + 2_000;
+	while (Date.now() < deadline) {
+		if (!processAlive(pid)) return;
+		await delay(100);
+	}
+	try { process.kill(pid, "SIGKILL"); } catch {}
 }
 
 function acquireStartLock(lockPath: string): number | null {
@@ -73,7 +103,7 @@ function acquireStartLock(lockPath: string): number | null {
 	}
 }
 
-export async function ensureService(planDirectoryInput: string, options: { dashboardPort?: number } = {}): Promise<StoredService> {
+export async function ensureService(planDirectoryInput: string, options: { dashboardPort?: number; unresponsiveGraceMs?: number } = {}): Promise<StoredService> {
 	const planDirectory = fs.realpathSync(path.resolve(planDirectoryInput));
 	const readme = path.join(planDirectory, "README.md");
 	if (!fs.existsSync(readme) || fs.lstatSync(readme).isSymbolicLink() || !fs.statSync(readme).isFile()) {
@@ -90,6 +120,19 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 		try {
 			const rechecked = await healthyService(planDirectory);
 			if (rechecked) return rechecked;
+			const registered = registeredService(planDirectory);
+			if (registered && serviceProcessAlive(registered.pid)) {
+				// A live daemon already owns this plan directory. Never spawn a duplicate:
+				// give a busy daemon time to answer, and replace it only if it stays wedged.
+				const deadline = Date.now() + (options.unresponsiveGraceMs ?? DEFAULT_UNRESPONSIVE_GRACE_MS);
+				while (Date.now() < deadline) {
+					await delay(SERVICE_WAIT_INTERVAL_MS);
+					const service = await healthyService(planDirectory);
+					if (service) return service;
+					if (!serviceProcessAlive(registered.pid)) break;
+				}
+				if (serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
+			}
 			const logPath = path.join(runtimeDirectory, "service.log");
 			const log = fs.openSync(logPath, "a", 0o600);
 			const child = spawn(process.execPath, [
@@ -114,10 +157,10 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 			try { fs.unlinkSync(lockPath); } catch {}
 		}
 	}
-	for (let attempt = 0; attempt < 80; attempt += 1) {
+	for (let attempt = 0; attempt < 150; attempt += 1) {
 		const service = await healthyService(planDirectory);
 		if (service) return service;
-		await delay(100);
+		await delay(SERVICE_WAIT_INTERVAL_MS);
 	}
 	const logPath = path.join(planDirectory, ".herder", "service.log");
 	let detail = "";

@@ -4,10 +4,11 @@ import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import { openExecutionDatabase } from "./execution-store.ts";
-import { HerderRunManager, type EventInput, type PlanEditInput, type StartInput } from "../core/run-manager.ts";
+import type { ManagerWorkerResult } from "./manager-worker.ts";
 import { RunStore } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
@@ -52,6 +53,65 @@ async function readBody(request: http.IncomingMessage): Promise<unknown> {
 	return length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
+/**
+ * Runs the deterministic manager core on a worker thread so blocking Git and
+ * SQLite work never starves this process's event loop. Calls are serialized by
+ * the service queue, so at most one call is in flight; a crashed worker is
+ * replaced lazily on the next call (run state lives in SQLite by design).
+ */
+class ManagerExecutor {
+	private readonly planDirectory: string;
+	private worker: Worker | undefined;
+	private nextId = 1;
+	private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+
+	constructor(planDirectory: string) {
+		this.planDirectory = planDirectory;
+	}
+
+	private attach(worker: Worker): void {
+		worker.on("message", (reply: ManagerWorkerResult) => {
+			const entry = this.pending.get(reply.id);
+			if (!entry) return;
+			this.pending.delete(reply.id);
+			if (reply.ok) entry.resolve(reply.result);
+			else entry.reject(new Error(reply.error || "Herder manager call failed"));
+		});
+		const crash = (error: Error) => {
+			if (this.worker === worker) this.worker = undefined;
+			for (const entry of this.pending.values()) entry.reject(error);
+			this.pending.clear();
+		};
+		worker.once("error", (error: unknown) => crash(error instanceof Error ? error : new Error(String(error))));
+		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
+	}
+
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "auditScheduler", input?: unknown): Promise<unknown> {
+		if (!this.worker) {
+			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
+			this.attach(worker);
+			this.worker = worker;
+		}
+		const worker = this.worker;
+		const id = this.nextId++;
+		return await new Promise((resolve, reject) => {
+			this.pending.set(id, { resolve, reject });
+			worker.postMessage({ id, method, input });
+		});
+	}
+
+	async close(): Promise<void> {
+		const worker = this.worker;
+		this.worker = undefined;
+		if (!worker) return;
+		worker.removeAllListeners("error");
+		worker.removeAllListeners("exit");
+		for (const entry of this.pending.values()) entry.reject(new Error("Herder service is shutting down"));
+		this.pending.clear();
+		await worker.terminate();
+	}
+}
+
 export async function startHerderService(input: { planDirectory: string; dashboardPort?: number }) {
 	const planDirectory = fs.realpathSync(input.planDirectory);
 	openExecutionDatabase(planDirectory, { create: true })!.close();
@@ -63,6 +123,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	let queue = Promise.resolve();
 	let auditTimer: NodeJS.Timeout | undefined;
 	let closeService: () => Promise<void> = async () => {};
+	const executor = new ManagerExecutor(planDirectory);
 
 	const server = http.createServer((request, response) => {
 		let url: URL;
@@ -82,28 +143,25 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		}
 		const execute = async () => {
 			try {
-				const manager = new HerderRunManager(planDirectory);
-				try {
-					if (request.method === "GET" && url.pathname === "/v1/status") send(response, 200, { ok: true, reply: manager.reply() });
-					else if (request.method !== "POST") send(response, 405, { ok: false, error: "method-not-allowed" });
-					else if (url.pathname === "/v1/start") {
-						const body = await readBody(request) as Record<string, unknown>;
-						send(response, 200, { ok: true, reply: await manager.start({ ...(body as unknown as StartInput), planDirectory, dashboardUrl: forwardedUrl || dashboardUrl }) });
-					} else if (url.pathname === "/v1/event") {
-						const body = await readBody(request) as Record<string, unknown>;
-						send(response, 200, { ok: true, reply: await manager.event(body as unknown as EventInput) });
-					} else if (url.pathname === "/v1/edit") {
-						const body = await readBody(request) as Record<string, unknown>;
-						send(response, 200, { ok: true, ...await manager.edit(body as unknown as PlanEditInput) });
-					} else if (url.pathname === "/v1/stop") {
-						await readBody(request);
-						send(response, 200, { ok: true, reply: manager.stop() });
-					} else if (url.pathname === "/shutdown") {
-						await readBody(request);
-						send(response, 200, { ok: true, instanceId });
-						setImmediate(() => void closeService());
-					} else send(response, 404, { ok: false, error: "not-found" });
-				} finally { manager.close(); }
+				if (request.method === "GET" && url.pathname === "/v1/status") send(response, 200, { ok: true, reply: await executor.call("reply") });
+				else if (request.method !== "POST") send(response, 405, { ok: false, error: "method-not-allowed" });
+				else if (url.pathname === "/v1/start") {
+					const body = await readBody(request) as Record<string, unknown>;
+					send(response, 200, { ok: true, reply: await executor.call("start", { ...body, planDirectory, dashboardUrl: forwardedUrl || dashboardUrl }) });
+				} else if (url.pathname === "/v1/event") {
+					const body = await readBody(request) as Record<string, unknown>;
+					send(response, 200, { ok: true, reply: await executor.call("event", body) });
+				} else if (url.pathname === "/v1/edit") {
+					const body = await readBody(request) as Record<string, unknown>;
+					send(response, 200, { ok: true, ...(await executor.call("edit", body) as Record<string, unknown>) });
+				} else if (url.pathname === "/v1/stop") {
+					await readBody(request);
+					send(response, 200, { ok: true, reply: await executor.call("stop") });
+				} else if (url.pathname === "/shutdown") {
+					await readBody(request);
+					send(response, 200, { ok: true, instanceId });
+					setImmediate(() => void closeService());
+				} else send(response, 404, { ok: false, error: "not-found" });
 			} catch (error) {
 				send(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
 			}
@@ -140,10 +198,8 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 
 	auditTimer = setInterval(() => {
 		const audit = async () => {
-			const manager = new HerderRunManager(planDirectory);
-			try { await manager.auditScheduler(); }
+			try { await executor.call("auditScheduler"); }
 			catch (error) { process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`); }
-			finally { manager.close(); }
 		};
 		queue = queue.then(audit, audit);
 	}, 1500);
@@ -152,6 +208,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	closeService = async () => {
 		if (auditTimer) clearInterval(auditTimer);
 		await close();
+		await executor.close();
 	};
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());
