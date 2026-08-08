@@ -23,7 +23,7 @@ import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } 
 import { HerderWidget } from "./worker-fleet.ts";
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "../..");
+const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "..");
 const PROFILE_CATALOG = path.join(PACKAGE_ROOT, "assets/profiles/profiles.json");
 const PI_AGENT_ROOT = path.join(PACKAGE_ROOT, "assets/roles/pi");
 interface PlanSummary {

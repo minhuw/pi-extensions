@@ -25,6 +25,7 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
 	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
+	assert.match(extension, /const PACKAGE_ROOT = path\.resolve\(EXTENSION_ROOT, "\.\."\);/);
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
 	assert.match(extension, /engine\.prepare\(\{ action, planDirectory: reply\.planDirectory \}\)/);
