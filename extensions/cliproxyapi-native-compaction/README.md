@@ -1,30 +1,41 @@
-# CLIProxyAPI native compaction
+# CLIProxyAPI Native Compaction
 
-This Pi extension bridges `@router-for-me/pi-cliproxyapi-provider` to CLIProxyAPI's native OpenAI Responses compact endpoint.
+A Pi extension that bridges [`@router-for-me/pi-cliproxyapi-provider`](https://www.npmjs.com/package/@router-for-me/pi-cliproxyapi-provider) to CLIProxyAPI's native OpenAI Responses compact endpoint.
 
-It intercepts Pi's compaction lifecycle, calls:
+It participates in Pi's ordinary compaction lifecycle, sends the current conversation window to:
 
 ```text
 POST {CLIProxyAPI}/backend-api/codex/responses/compact
 ```
 
-and stores the returned canonical compacted window in the Pi session. Later provider requests replace the discarded transcript with that window and append only post-compaction turns.
+and stores the returned canonical compacted window in the Pi session. Later requests replace the discarded transcript with that window and append only post-compaction turns.
 
-## Safety boundary
+## Install
 
-OpenAI-compatible syntax alone does not enable native compaction. All of these must match:
+Install this extension collection and the CLIProxyAPI provider:
 
-- provider: `cliproxyapi`
-- API: `cliproxyapi-codex-responses`
-- model: explicitly allowlisted
+```bash
+pi install git:github.com/minhuw/pi-extensions
+pi install npm:@router-for-me/pi-cliproxyapi-provider
+```
 
-The default allowlist contains only `gpt-5.6-sol`. Models such as Kimi, Claude, or Gemini continue using Pi's built-in text-summary compaction.
+Configure the provider normally, then select an eligible model. The extension remains inert for every provider, API, or model that does not pass its exact gate.
 
 ## Usage
 
-Use Pi's ordinary `/compact` command for manual compaction. Pi's normal threshold and overflow compaction paths are intercepted automatically for eligible models.
+Use Pi's ordinary `/compact` command for manual compaction. The extension also intercepts Pi's automatic threshold and overflow compaction paths for eligible models.
 
-Run `/cliproxyapi-native-compaction` to see whether the selected model currently passes the gate.
+Run `/cliproxyapi-native-compaction` to inspect the current provider, API, model, endpoint, and gate result.
+
+## Activation gate
+
+OpenAI-compatible syntax alone does not enable native compaction. All of these must match:
+
+- Provider: `cliproxyapi`
+- API: `cliproxyapi-codex-responses`
+- Model: explicitly allowlisted by exact ID
+
+The default allowlist contains only `gpt-5.6-sol`. Kimi, Claude, Gemini, and other OpenAI-compatible models continue using Pi's built-in text-summary compaction.
 
 ## Configuration
 
@@ -49,18 +60,24 @@ The `models` array uses exact model IDs deliberately. Add an alias only after ve
 
 Optional environment overrides:
 
-- `PI_CLIPROXYAPI_NATIVE_COMPACTION_MODELS`: comma-separated exact model IDs
-- `PI_CLIPROXYAPI_NATIVE_COMPACTION_ENDPOINT`: explicit full compact endpoint URL
+| Variable | Effect |
+| --- | --- |
+| `PI_CLIPROXYAPI_NATIVE_COMPACTION_MODELS` | Comma-separated exact model IDs. |
+| `PI_CLIPROXYAPI_NATIVE_COMPACTION_ENDPOINT` | Explicit full compact endpoint URL. |
 
-## Failure behavior
+## Failure and compatibility behavior
 
-The extension fails closed. A malformed compact response, authentication failure, model mismatch, or network error cancels compaction rather than replacing history with incomplete data. Once a session contains an opaque OpenAI checkpoint, switching it to an incompatible model is blocked because that model cannot safely recover the discarded transcript.
+The extension fails closed. A malformed compact response, authentication failure, model mismatch, or network error cancels compaction instead of replacing history with incomplete data.
 
-The implementation accepts both opaque item names currently encountered in practice:
+Once a session contains an opaque OpenAI checkpoint, switching it to an incompatible model is blocked because that model cannot safely recover the discarded transcript.
 
-- `compaction` (public Responses documentation)
-- `compaction_summary` (observed through the CLIProxyAPI Codex backend route)
+The implementation accepts both opaque item names encountered in supported Responses flows:
 
-The complete compact endpoint `output` array is always preserved without pruning.
+- `compaction`, used by the public Responses API.
+- `compaction_summary`, observed through CLIProxyAPI's Codex backend route.
 
-Parts of the Pi lifecycle and history conversion are adapted from Can Celik's MIT-licensed [`pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction). Its license notice is included in this directory.
+The complete compact endpoint `output` array is preserved without pruning.
+
+## Attribution and license
+
+Parts of the Pi lifecycle and history conversion are adapted from Can Celik's MIT-licensed [`pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction). See the included [MIT license notice](LICENSE).

@@ -30,7 +30,7 @@
 	},
 	"pi": {
 		"extensions": [
-			"./extensions/statusline-footer.ts",
+			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/pi/index.ts"
 		],
