@@ -15,6 +15,9 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 		const contents = await readFile(path.join(extensionRoot, "skills", skill, "SKILL.md"), "utf8");
 		assert.match(contents, new RegExp(`^name: herder-${skill}$`, "m"));
 	}
+	const improve = await readFile(path.join(extensionRoot, "skills/improve/SKILL.md"), "utf8");
+	assert.doesNotMatch(improve, /closing-the-loop|`plan <description>`|`review-plan <file>`|`execute(?: \[<plan>\])?`|`reconcile`|`--issues`/);
+	await assert.rejects(() => readFile(path.join(extensionRoot, "skills/improve/references/closing-the-loop.md"), "utf8"), /ENOENT/);
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);
 });
 

@@ -11,5 +11,6 @@ Herder-specific modifications:
 - write plans to `herder-plans/` through the shared Herder Plans protocol and template;
 - validate generated plans with the Herder plan manager;
 - delegate execution to Herder Fire instead of maintaining a second scheduler;
-- adapt reconciliation and status ownership to Herder Plans; and
+- remove upstream command variants whose responsibilities belong to Grill, Validate, Fire, and deterministic plan operations;
+- leave execution, reconciliation, status, and external publishing outside Improve; and
 - normalize skill metadata for packaged discovery.
