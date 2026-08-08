@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { workerFleetLines } from "../../../../adapters/pi/lib/worker-fleet.ts";
+import { workerFleetLines } from "../../../../adapters/pi/worker-fleet.ts";
 
 test("Pi worker fleet is compact and information dense", () => {
 	assert.deepEqual(workerFleetLines([{

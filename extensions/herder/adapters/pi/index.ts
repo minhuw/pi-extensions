@@ -7,20 +7,20 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ManagerReply, TerminalEvent } from "../../src/shared/protocol.ts";
 import { invokeHerderTool } from "../../src/application/tools.ts";
-import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./lib/arguments.ts";
+import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./arguments.ts";
 import {
 	activeModelMatches,
 	loadPiProfile,
 	unavailableProfileModels,
 	type ResolvedPiProfile,
-} from "./lib/profile.ts";
-import { HERDER_STATE_ENTRY, restoreLastRun, type HerderRunState } from "./lib/state.ts";
-import { resolvePlanDirectory } from "./lib/paths.ts";
-import { registerPiPlanningWorkflows } from "./lib/planning-workflows.ts";
-import { validateHerderRoleAgents } from "./lib/role-config.ts";
-import { interruptedPiWorkers } from "./lib/recovery.ts";
-import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } from "./lib/worker-engine.ts";
-import { workerFleetLines } from "./lib/worker-fleet.ts";
+} from "./profile.ts";
+import { HERDER_STATE_ENTRY, restoreLastRun, type HerderRunState } from "./state.ts";
+import { resolvePlanDirectory } from "./paths.ts";
+import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
+import { validateHerderRoleAgents } from "./role-config.ts";
+import { interruptedPiWorkers } from "./recovery.ts";
+import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } from "./worker-engine.ts";
+import { workerFleetLines } from "./worker-fleet.ts";
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "../..");

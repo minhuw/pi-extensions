@@ -21,7 +21,7 @@ test("Herder is a self-contained Pi-only extension", () => {
 
 test("Pi and planning commands share one direct application facade", () => {
 	const adapter = readFileSync(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const planning = readFileSync(path.join(extensionRoot, "adapters/pi/lib/planning-workflows.ts"), "utf8");
+	const planning = readFileSync(path.join(extensionRoot, "adapters/pi/planning-workflows.ts"), "utf8");
 	const application = readFileSync(path.join(extensionRoot, "src/application/tools.ts"), "utf8");
 	assert.match(adapter, /src\/application\/tools\.ts/);
 	assert.match(planning, /src\/application\/tools\.ts/);

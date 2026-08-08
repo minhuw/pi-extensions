@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadPiProfile } from "../../../../adapters/pi/lib/profile.ts";
-import { loadHerderPiRole, validateHerderRoleAgents } from "../../../../adapters/pi/lib/role-config.ts";
+import { loadPiProfile } from "../../../../adapters/pi/profile.ts";
+import { loadHerderPiRole, validateHerderRoleAgents } from "../../../../adapters/pi/role-config.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");

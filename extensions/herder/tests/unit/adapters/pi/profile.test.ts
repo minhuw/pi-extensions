@@ -14,7 +14,7 @@ import {
 	modelSupportsServiceTier,
 	serviceTierRequestValue,
 	unavailableProfileModels,
-} from "../../../../adapters/pi/lib/profile.ts";
+} from "../../../../adapters/pi/profile.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");

@@ -24,7 +24,7 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 test("deterministic manager owns scheduling while Pi workers cannot recurse", async () => {
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const engine = await readFile(path.join(extensionRoot, "adapters/pi/lib/worker-engine.ts"), "utf8");
+	const engine = await readFile(path.join(extensionRoot, "adapters/pi/worker-engine.ts"), "utf8");
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
 	assert.match(extension, /engine\.prepare\(\{ action, planDirectory: reply\.planDirectory \}\)/);
@@ -45,7 +45,7 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 
 test("Pi exposes current-session agentic workflows, direct plan commands, and the exact plan application tool", async () => {
 	const extension = await readFile(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const workflows = await readFile(path.join(extensionRoot, "adapters/pi/lib/planning-workflows.ts"), "utf8");
+	const workflows = await readFile(path.join(extensionRoot, "adapters/pi/planning-workflows.ts"), "utf8");
 	assert.match(extension, /registerPiPlanningWorkflows\(pi, PACKAGE_ROOT/);
 	for (const command of ["herder-improve", "herder-grill", "herder-validate", "herder-plans"]) {
 		assert.match(workflows, new RegExp(`command: "${command}"`));

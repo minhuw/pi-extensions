@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { interruptedPiWorkers } from "../../../../adapters/pi/lib/recovery.ts";
+import { interruptedPiWorkers } from "../../../../adapters/pi/recovery.ts";
 
 test("recovery interrupts only missing built-in workers", () => {
 	assert.deepEqual(interruptedPiWorkers([

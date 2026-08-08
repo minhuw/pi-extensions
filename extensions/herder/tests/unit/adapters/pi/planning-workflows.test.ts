@@ -10,7 +10,7 @@ import {
 	executePiPlanCommand,
 	formatPlanCommandResult,
 	launchPlanningWorkflow,
-} from "../../../../adapters/pi/lib/planning-workflows.ts";
+} from "../../../../adapters/pi/planning-workflows.ts";
 
 async function fixture(): Promise<string> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-planning-"));

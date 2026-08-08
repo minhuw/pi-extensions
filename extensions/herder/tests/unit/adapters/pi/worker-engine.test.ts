@@ -9,7 +9,7 @@ import {
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
-} from "../../../../adapters/pi/lib/worker-engine.ts";
+} from "../../../../adapters/pi/worker-engine.ts";
 
 function action(id = "action-1", planId = "001"): ManagerAction {
 	return {

@@ -1,5 +1,5 @@
-import { resolvePiProfile, type PiProfileDefinition } from "../../../src/core/profile-registry.ts";
-import type { ResolvedProfile } from "../../../src/shared/protocol.ts";
+import { resolvePiProfile, type PiProfileDefinition } from "../../src/core/profile-registry.ts";
+import type { ResolvedProfile } from "../../src/shared/protocol.ts";
 
 export const HERDER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
 export type HerderRole = (typeof HERDER_ROLES)[number];

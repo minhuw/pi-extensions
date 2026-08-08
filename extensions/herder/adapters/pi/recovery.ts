@@ -1,4 +1,4 @@
-import type { TerminalEvent } from "../../../src/shared/protocol.ts";
+import type { TerminalEvent } from "../../src/shared/protocol.ts";
 
 export interface ActivePiAction {
 	actionId: string;

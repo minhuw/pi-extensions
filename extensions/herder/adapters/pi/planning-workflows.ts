@@ -7,7 +7,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { invokeHerderTool } from "../../../src/application/tools.ts";
+import { invokeHerderTool } from "../../src/application/tools.ts";
 import { parsePlanCommandArguments, type PlanCommandOptions } from "./arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 
