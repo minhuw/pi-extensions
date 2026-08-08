@@ -23,14 +23,14 @@ Full mode is enabled by default when Pi starts.
 Full mode renders three rows, with one theme per row:
 
 ```text
-  k3 (moonshot) │   ███░░░░░░░░░░░░░░ 8% 78.9k/1.05M │   1x │   1h 32m   9 │  65.2k   31.4k │   96% │   $0.75 (~$0.058/turn)
+  k3 • high (moonshot) │   ███░░░░░░░░░░░░░░ 8% 78.9k/1.05M │   1x │   1h 32m   9 │  65.2k   31.4k │   96% │   $0.75 (~$0.058/turn)
   μ 4.2s    2.1s │   1.8s │   μ 28.9 tok/s    31.2 │   42 │   2 (4.8%)
   main │ +42 −17 in 3 │   5 touched │   ~/code/my-project
 ```
 
 | Row | Theme | Contents |
 | --- | --- | --- |
-| 1 | Model state | Model and provider, context-window bar, compactions, elapsed time, turns, token totals, cache ratio, and session cost. |
+| 1 | Model state | Model, current thinking effort, provider, context-window bar, compactions, elapsed time, turns, token totals, cache ratio, and session cost. |
 | 2 | Performance | Mean and latest time to first token, time to first byte, token throughput, tool calls, and error rate. |
 | 3 | Local state | Git branch, working-tree diff, files touched during the session, and current directory. |
 
@@ -49,6 +49,7 @@ Compact mode renders the essential model, context, cost, time, turn, throughput,
 ## Features
 
 - A live context-window bar changes from green to yellow to red as usage approaches the model limit.
+- The current thinking effort appears immediately after the model name and updates when the session setting changes.
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
 - Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history.

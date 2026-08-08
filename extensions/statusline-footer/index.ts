@@ -3,7 +3,7 @@
  * https://github.com/slima4/claude-tui (claude-code-statusline).
  *
  * Full mode (3 lines), one theme per line:
- *   1 · Model state:  name (provider), context bar + %/tokens, compactions,
+ *   1 · Model state:  name + thinking effort (provider), context bar + %/tokens, compactions,
  *                     elapsed · turns, in/out tokens, cache ratio, cost ($/turn)
  *   2 · Performance:  mean + last TTFT, TTFB, weighted-avg + last tok/s,
  *                     tool call count, error rate
@@ -285,14 +285,29 @@ function ctxColor(pct: number): "success" | "warning" | "error" {
 	return "error";
 }
 
+function renderModelLabel(ctx: ExtensionContext, theme: Theme, includeProvider: boolean): string {
+	const model = ctx.model;
+	if (!model) return theme.fg("accent", theme.bold("no-model"));
+
+	const thinkingLevel = ctx.thinkingLevel ?? "off";
+	const thinking = model.reasoning
+		? theme.fg(
+				"dim",
+				thinkingLevel === "off" ? " • thinking off" : ` • ${thinkingLevel}`,
+			)
+		: "";
+	const provider = includeProvider ? theme.fg("muted", ` (${model.provider})`) : "";
+
+	return theme.fg("accent", theme.bold(model.id)) + thinking + provider;
+}
+
 function renderCompact(ctx: ExtensionContext, theme: Theme, width: number): string {
 	const s = collectStats(ctx);
 	const usage = ctx.getContextUsage();
 	const sep = theme.fg("borderMuted", " │ ");
 
 	const parts: string[] = [
-		theme.fg("accent", `${I.model} `) +
-			theme.fg("accent", theme.bold(ctx.model?.id || "no-model")),
+		theme.fg("accent", `${I.model} `) + renderModelLabel(ctx, theme, false),
 	];
 	if (usage?.percent != null) {
 		const pct = Math.round(usage.percent);
@@ -330,10 +345,9 @@ function renderFull(
 
 	// ── Line 1 · Model state: identity, context capacity, elapsed, tokens, cost
 	const l1: string[] = [];
-	const model = ctx.model;
 	l1.push(
 		theme.fg("syntaxKeyword", `${I.model} `) +
-			theme.fg("accent", theme.bold(model ? `${model.id} (${model.provider})` : "no-model")),
+			renderModelLabel(ctx, theme, true),
 	);
 	if (usage?.percent != null) {
 		const pct = Math.round(usage.percent);
