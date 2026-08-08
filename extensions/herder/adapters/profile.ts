@@ -33,7 +33,11 @@ export interface AvailableModel {
 }
 
 /** Pi-ai provider APIs whose request options accept a service tier. */
-export const SERVICE_TIER_APIS = new Set(["openai-responses", "openai-codex-responses"]);
+export const SERVICE_TIER_APIS = new Set([
+	"openai-responses",
+	"openai-codex-responses",
+	"cliproxyapi-codex-responses",
+]);
 
 const SERVICE_TIER_REQUEST_VALUES: Record<string, string> = {
 	fast: "priority",

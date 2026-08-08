@@ -55,6 +55,7 @@ test("service tiers map to exact provider request values on capable APIs only", 
 	assert.throws(() => serviceTierRequestValue("flex"), /Unknown Herder service tier/);
 	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-responses" }), true);
 	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-codex-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "cliproxyapi", id: "gpt-5.6-luna", api: "cliproxyapi-codex-responses" }), true);
 	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5", api: "openai-completions" }), false);
 	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5" }), false);
 });

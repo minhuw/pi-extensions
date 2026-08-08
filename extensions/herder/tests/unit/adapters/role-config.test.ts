@@ -38,8 +38,8 @@ test("Herder refuses tiered roles when the resolved model cannot honor the tier"
 	const profile = await loadPiProfile(catalog, "eclipse");
 	assert.equal(profile.roles["plan-implementer"].service_tier, "fast");
 	const tiered = [
-		{ provider: "openai", id: "gpt-5.6-sol", fullId: "openai/gpt-5.6-sol", api: "openai-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
-		{ provider: "openai", id: "gpt-5.6-luna", fullId: "openai/gpt-5.6-luna", api: "openai-responses", thinkingLevelMap: { max: "max" } },
+		{ provider: "cliproxyapi", id: "gpt-5.6-sol", fullId: "cliproxyapi/gpt-5.6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+		{ provider: "cliproxyapi", id: "gpt-5.6-luna", fullId: "cliproxyapi/gpt-5.6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, tiered));
 	await assert.rejects(
