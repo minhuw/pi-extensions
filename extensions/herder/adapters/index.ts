@@ -108,6 +108,18 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		});
 	};
 
+	const renderLaunching = (ctx: ExtensionContext, planDir: string, profile: string, maxParallel: number) => {
+		if (!ctx.hasUI) return;
+		ctx.ui.setStatus("herder", ctx.ui.theme.fg("accent", "Herder initializing"));
+		widget.update(ctx, {
+			status: "initializing",
+			profile,
+			maxParallel,
+			planName: path.basename(planDir),
+			workers: [],
+		});
+	};
+
 	const repositoryRoot = async (ctx: ExtensionContext): Promise<string> => {
 		const result = await pi.exec("git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"], { timeout: 5_000 });
 		if (result.code !== 0 || !result.stdout.trim()) throw new Error("Herder requires a Git worktree.");
@@ -233,33 +245,46 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		const planDir = resolvePlanDirectory(repoRoot, options.planDir);
 		if (!existsSync(path.join(planDir, "README.md"))) throw new Error(`Herder plan index is missing: ${path.join(planDir, "README.md")}`);
 		const profile = await resolveProfile(ctx, options.profile || (options.mode === "resume" ? currentState?.profile : undefined));
-		await preflight(ctx, profile);
-		const reply = unwrapReply(await invokeHerderTool("herder_run", {
-			operation: options.mode,
-			repositoryRoot: repoRoot,
-			planDirectory: planDir,
-			profile: profile.profile,
-			...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
-			dashboardPort: options.dashboardPort,
-		}) as Record<string, unknown>);
-		if (reply.status === "idle") throw new Error("Herder manager did not create a run.");
-		const now = Date.now();
-		persist({
-			version: 1,
-			mode: options.mode,
-			status: reply.status,
-			runId: reply.runId,
-			repoRoot,
-			planDir,
-			profile: profile.profile,
-			maxParallel: reply.maxParallel,
-			dashboardEnabled: true,
-			startedAt: now,
-			updatedAt: now,
-			...(reply.dashboardUrl ? { dashboardUrl: reply.dashboardUrl } : {}),
-		});
-		await enqueueManager(() => dispatchReply(reply));
-		return `Herder ${options.mode} started with deterministic manager ${reply.runId}, profile ${profile.profile}, and max parallel ${reply.maxParallel}. Dashboard: ${reply.dashboardUrl || "unavailable"}`;
+		renderLaunching(ctx, planDir, profile.profile, options.maxParallel ?? currentState?.maxParallel ?? 5);
+		try {
+			await preflight(ctx, profile);
+			const reply = unwrapReply(await invokeHerderTool("herder_run", {
+				operation: options.mode,
+				repositoryRoot: repoRoot,
+				planDirectory: planDir,
+				profile: profile.profile,
+				...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
+				dashboardPort: options.dashboardPort,
+			}) as Record<string, unknown>);
+			if (reply.status === "idle") throw new Error("Herder manager did not create a run.");
+			const now = Date.now();
+			persist({
+				version: 1,
+				mode: options.mode,
+				status: reply.status,
+				runId: reply.runId,
+				repoRoot,
+				planDir,
+				profile: profile.profile,
+				maxParallel: reply.maxParallel,
+				dashboardEnabled: true,
+				startedAt: now,
+				updatedAt: now,
+				...(reply.dashboardUrl ? { dashboardUrl: reply.dashboardUrl } : {}),
+			});
+			lastSummary = {
+				counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
+				inProgress: reply.summary.inProgress,
+			};
+			// Paint the authoritative run state before preparing the first worker batch;
+			// creating several clean Pi sessions can take long enough to look unresponsive.
+			render(ctx);
+			await enqueueManager(() => dispatchReply(reply));
+			return `Herder ${options.mode} started with deterministic manager ${reply.runId}, profile ${profile.profile}, and max parallel ${reply.maxParallel}. Dashboard: ${reply.dashboardUrl || "unavailable"}`;
+		} catch (error) {
+			render(ctx);
+			throw error;
+		}
 	};
 
 	const status = async (planDirInput: string | undefined, ctx: ExtensionContext): Promise<string> => {
