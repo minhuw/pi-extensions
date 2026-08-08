@@ -9,7 +9,7 @@ Cold-read a Herder backlog as an executor with no producer-session context. Use 
 
 ## Invocation
 
-Interpret tokens after the skill name as arguments. Pi accepts `/herder-validate ...` and `/skill:herder-validate ...`.
+Interpret tokens after the command name as arguments. Pi accepts `/herder-validate ...`.
 
 ```text
 /herder-validate [<plan-dir>] [--fix]

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	buildPlanningSkillPrompt,
 	executePiPlanCommand,
@@ -31,38 +31,33 @@ Read [the playbook](references/playbook.md), then audit.
 test("Pi planning prompt preserves the exact packaged skill and arguments", async () => {
 	const root = await fixture();
 	try {
-		const prompt = await buildPlanningSkillPrompt(root, "improve", "quick security");
+		const prompt = await buildPlanningSkillPrompt(root, "improve", "quick security", "HERDER_ACTIVE_PLAN_EDIT_V1\nPLAN_ID: 002");
 		assert.match(prompt, /^<skill name="herder-improve" location=".*SKILL\.md">/);
 		assert.match(prompt, /References are relative to .*skills\/improve\./);
 		assert.match(prompt, /# Improve/);
 		assert.doesNotMatch(prompt, /description: Audit/);
+		assert.match(prompt, /<herder-runtime>\nHERDER_ACTIVE_PLAN_EDIT_V1\nPLAN_ID: 002\n<\/herder-runtime>/);
 		assert.match(prompt, /\n\nquick security$/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("Pi agentic planning commands replace the root with a parentless session", async () => {
+test("Pi agentic planning commands inject the packaged skill into the current session", async () => {
 	const root = await fixture();
 	let waited = false;
-	let replacement: Parameters<ExtensionCommandContext["newSession"]>[0];
 	let submitted = "";
+	const pi = {
+		sendUserMessage: (content: string | unknown[]) => { submitted = String(content); },
+	} as Pick<ExtensionAPI, "sendUserMessage">;
 	const context = {
 		isProjectTrusted: () => true,
 		waitForIdle: async () => { waited = true; },
-		newSession: async (options: Parameters<ExtensionCommandContext["newSession"]>[0]) => {
-			replacement = options;
-			await options?.withSession?.({
-				sendUserMessage: async (content: string | unknown[]) => { submitted = String(content); },
-			} as never);
-			return { cancelled: false };
-		},
 	} as unknown as ExtensionCommandContext;
 	try {
-		const result = await launchPlanningWorkflow(context, root, "improve", "quick", () => {});
-		assert.deepEqual(result, { cancelled: false });
+		const result = await launchPlanningWorkflow(pi, context, root, "improve", "quick");
+		assert.deepEqual(result, { submitted: true });
 		assert.equal(waited, true);
-		assert.equal(Object.hasOwn(replacement || {}, "parentSession"), false);
 		assert.match(submitted, /^<skill name="herder-improve"/);
 		assert.match(submitted, /\n\nquick$/);
 	} finally {
@@ -106,20 +101,22 @@ test("Pi plan commands call the deterministic application without a model sessio
 	}
 });
 
-test("active Fire protection runs before session replacement", async () => {
+test("active Fire protection runs before current-session prompt injection", async () => {
 	const root = await fixture();
-	let replaced = false;
+	let submitted = false;
+	const pi = {
+		sendUserMessage: () => { submitted = true; },
+	} as Pick<ExtensionAPI, "sendUserMessage">;
 	const context = {
 		isProjectTrusted: () => true,
 		waitForIdle: async () => {},
-		newSession: async () => { replaced = true; return { cancelled: false }; },
 	} as unknown as ExtensionCommandContext;
 	try {
 		await assert.rejects(
-			() => launchPlanningWorkflow(context, root, "improve", "", () => { throw new Error("Fire is active"); }),
+			() => launchPlanningWorkflow(pi, context, root, "improve", "", async () => { throw new Error("Fire is active"); }),
 			/Fire is active/,
 		);
-		assert.equal(replaced, false);
+		assert.equal(submitted, false);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

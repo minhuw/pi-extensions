@@ -7,12 +7,12 @@ import { fileURLToPath } from "node:url";
 import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import { openExecutionDatabase } from "./execution-store.ts";
-import { HerderRunManager, type EventInput, type StartInput } from "../core/run-manager.ts";
+import { HerderRunManager, type EventInput, type PlanEditInput, type StartInput } from "../core/run-manager.ts";
 import { RunStore } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 4 * 1024 * 1024;
-const CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/start", "/v1/event", "/v1/stop", "/shutdown"]);
+const CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/start", "/v1/event", "/v1/edit", "/v1/stop", "/shutdown"]);
 
 function parseArguments(argv: string[]): { planDirectory: string; dashboardPort: number } {
 	let planDirectory = "herder-plans";
@@ -92,6 +92,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 					} else if (url.pathname === "/v1/event") {
 						const body = await readBody(request) as Record<string, unknown>;
 						send(response, 200, { ok: true, reply: await manager.event(body as unknown as EventInput) });
+					} else if (url.pathname === "/v1/edit") {
+						const body = await readBody(request) as Record<string, unknown>;
+						send(response, 200, { ok: true, ...await manager.edit(body as unknown as PlanEditInput) });
 					} else if (url.pathname === "/v1/stop") {
 						await readBody(request);
 						send(response, 200, { ok: true, reply: manager.stop() });

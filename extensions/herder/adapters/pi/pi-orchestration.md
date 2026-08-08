@@ -10,7 +10,9 @@ The service can disappear without losing run authority. A replacement reconstruc
 
 ## Planning workflows
 
-`/herder-improve`, `/herder-grill`, and `/herder-validate` create a new parentless root session and inject the exact package-owned skill with its arguments. Namespaced equivalents remain available through Pi's standard `/skill:herder-<name>` surface. Planning-session replacement is rejected while the current Pi session owns an active Fire run.
+`/herder-improve`, `/herder-grill`, and `/herder-validate` inject the exact package-owned instructions and arguments into the current root session. The instruction files are not separately registered as Pi skills, leaving one canonical command for each workflow. Improve and graph-wide mutation remain rejected during Fire.
+
+`/herder-grill --plan <id>` may run during Fire only after the manager atomically reserves an unstarted `TODO` or decision-blocked plan. A reserved plan is excluded from scheduling while unrelated workers continue against their immutable assignments. After confirmed edits pass shape and validation, Grill requests a revision barrier. The manager stops proposing new actions, lets existing actions reach terminal state, verifies that only the reserved plan changed, records the next generation assignment, releases the reservation, and resumes scheduling. A cancelled interview may release the reservation only when the graph still matches its original fingerprint.
 
 `/herder-plans` parses deterministic init, validate, shape, status, ready, snapshot, report, track, and untrack subcommands and delegates them directly to the shared application layer without a model turn. Mutating configuration operations are rejected during an active run. The native `herder_plan` tool exposes those same canonical operations to the active model.
 

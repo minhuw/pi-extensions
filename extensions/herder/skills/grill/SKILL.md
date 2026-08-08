@@ -1,6 +1,6 @@
 ---
 name: herder-grill
-description: Interview the user one decision at a time, investigate repository facts, maintain domain-model and ADR obligations, and create a focused validated Herder plan or dependency-aware subplan set from confirmed intent. Also refine an existing TODO or decision-blocked plan when invoked with --plan. Use when the user invokes /herder-grill, wants to clarify a feature or change before implementation, asks to turn product intent into plans, or wants to grill or stress-test an existing plan before Herder Fire executes it.
+description: Interview the user one decision at a time, investigate repository facts, maintain domain-model and ADR obligations, and create a focused validated Herder plan or dependency-aware subplan set from confirmed intent. Also refine an existing TODO or decision-blocked plan when invoked with --plan, including a manager-reserved unstarted plan during active Herder Fire. Use when the user invokes /herder-grill, wants to clarify a feature or change before implementation, asks to turn product intent into plans, or wants to grill or stress-test an existing plan.
 ---
 
 # Herder Grill
@@ -9,7 +9,7 @@ Turn one confirmed objective into an execution-ready Herder plan graph. Investig
 
 ## Invocation
 
-Interpret tokens after the skill name as arguments. Pi accepts `/herder-grill ...` and `/skill:herder-grill ...`.
+Interpret tokens after the command name as arguments. Pi accepts `/herder-grill ...`.
 
 ```text
 /herder-grill <change-description> [--plan-dir <plan-dir>]
@@ -17,6 +17,14 @@ Interpret tokens after the skill name as arguments. Pi accepts `/herder-grill ..
 ```
 
 Default to `herder-plans/`. Without `--plan`, use the remaining text as the request; if empty, ask what to change. With `--plan`, accept a numeric ID or `NNN-*.md` path and refine that plan in place. Preserve one coherent user objective, but create as many focused subplans as its safe implementation graph requires. Ask the user to narrow only when the request contains independently selectable objectives or unresolved product scope—not merely because implementation needs multiple plans.
+
+If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_EDIT_V1`, the manager has already reserved the named never-started plan. Treat `PLAN_ID`, `PLAN_DIRECTORY`, and `EDIT_TOKEN` as an exact capability contract:
+
+- Edit only the reserved plan and necessary index fields; do not create, remove, or modify another plan.
+- Do not change the edit token, plan directory, or target identity.
+- After the confirmed edit passes `shape` and `validate`, call `herder_plan` with `operation: "finish_edit"`, the exact `planDirectory`, and `editToken`. The manager will wait for active workers to settle and adopt the next immutable generation automatically.
+- If the interview is cancelled or produces no file changes, call `herder_plan` with `operation: "cancel_edit"`. Cancellation fails closed if the graph changed.
+- Never call `/herder-revise` for this reserved path; explicit revise remains for manual or externally authored graph changes.
 
 ## Prepare
 

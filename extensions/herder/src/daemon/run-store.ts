@@ -100,6 +100,19 @@ export interface StoredGeneration {
 	createdAt: string;
 }
 
+export interface StoredPlanEdit {
+	runId: string;
+	planId: string;
+	editToken: string;
+	state: "reserved" | "barrier";
+	baseGraphSha256: string;
+	basePlanFingerprint: string;
+	proposedGraphSha256: string | null;
+	proposedPlanFingerprint: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
 export interface StoredApproval {
 	runId: string;
 	planId: string;
@@ -242,6 +255,22 @@ function rowToGeneration(row: Record<string, unknown>): StoredGeneration {
 		runAssignmentSha256: String(row.run_assignment_sha256),
 		runSnapshotSha256: String(row.run_snapshot_sha256),
 		createdAt: String(row.created_at),
+	};
+}
+
+function rowToPlanEdit(row: Record<string, unknown> | undefined): StoredPlanEdit | null {
+	if (!row) return null;
+	return {
+		runId: String(row.run_id),
+		planId: String(row.plan_id),
+		editToken: String(row.edit_token),
+		state: row.state as StoredPlanEdit["state"],
+		baseGraphSha256: String(row.base_graph_sha256),
+		basePlanFingerprint: String(row.base_plan_fingerprint),
+		proposedGraphSha256: row.proposed_graph_sha256 === null ? null : String(row.proposed_graph_sha256),
+		proposedPlanFingerprint: row.proposed_plan_fingerprint === null ? null : String(row.proposed_plan_fingerprint),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
 	};
 }
 
@@ -388,6 +417,45 @@ export class RunStore {
 			new Date().toISOString(),
 		);
 		return this.getGeneration(input.runId, input.generation)!;
+	}
+
+	getPlanEdit(runId: string): StoredPlanEdit | null {
+		return rowToPlanEdit(this.database.prepare("SELECT * FROM manager_plan_edits WHERE run_id = ?").get(runId) as Record<string, unknown> | undefined);
+	}
+
+	putPlanEdit(input: Omit<StoredPlanEdit, "createdAt" | "updatedAt" | "proposedGraphSha256" | "proposedPlanFingerprint">): StoredPlanEdit {
+		const existing = this.getPlanEdit(input.runId);
+		if (existing) {
+			if (existing.planId !== input.planId) throw new Error(`Plan ${existing.planId} already has the active Herder edit reservation`);
+			return existing;
+		}
+		const now = new Date().toISOString();
+		this.database.prepare(`
+			INSERT INTO manager_plan_edits (
+				run_id, plan_id, edit_token, state, base_graph_sha256,
+				base_plan_fingerprint, proposed_graph_sha256, proposed_plan_fingerprint,
+				created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+		`).run(
+			input.runId, input.planId, input.editToken, input.state,
+			input.baseGraphSha256, input.basePlanFingerprint, now, now,
+		);
+		return this.getPlanEdit(input.runId)!;
+	}
+
+	putPlanEditBarrier(runId: string, proposedGraphSha256: string, proposedPlanFingerprint: string): StoredPlanEdit {
+		const edit = this.getPlanEdit(runId);
+		if (!edit) throw new Error("No Herder plan edit reservation exists");
+		this.database.prepare(`
+			UPDATE manager_plan_edits
+			SET state = 'barrier', proposed_graph_sha256 = ?, proposed_plan_fingerprint = ?, updated_at = ?
+			WHERE run_id = ?
+		`).run(proposedGraphSha256, proposedPlanFingerprint, new Date().toISOString(), runId);
+		return this.getPlanEdit(runId)!;
+	}
+
+	deletePlanEdit(runId: string): void {
+		this.database.prepare("DELETE FROM manager_plan_edits WHERE run_id = ?").run(runId);
 	}
 
 	createRun(input: Omit<StoredRun, "createdAt" | "updatedAt" | "dashboardUrl" | "terminalDetail"> & { dashboardUrl?: string | null }): StoredRun {

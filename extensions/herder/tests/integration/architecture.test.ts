@@ -10,12 +10,7 @@ const repositoryRoot = path.resolve(extensionRoot, "../..");
 test("Herder is a self-contained Pi-only extension", () => {
 	const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/pi/index.ts"));
-	assert.deepEqual(manifest.pi.skills.filter((entry: string) => entry.startsWith("./extensions/herder/")), [
-		"./extensions/herder/skills/improve",
-		"./extensions/herder/skills/grill",
-		"./extensions/herder/skills/plans",
-		"./extensions/herder/skills/validate",
-	]);
+	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
 	for (const directory of ["adapters/pi", "src/application", "src/core", "src/daemon", "src/client", "src/dashboard", "src/shared", "assets/roles/pi", "assets/roles/contracts", "assets/profiles", "skills", "tests"]) {
 		assert.equal(existsSync(path.join(extensionRoot, directory)), true, directory);
 	}

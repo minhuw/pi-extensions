@@ -7,7 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ManagerReply, TerminalEvent } from "../../src/shared/protocol.ts";
 import { invokeHerderTool } from "../../src/application/tools.ts";
-import { parseFireArguments, parsePlanDirArguments, type FireOptions } from "./lib/arguments.ts";
+import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./lib/arguments.ts";
 import {
 	activeModelMatches,
 	loadPiProfile,
@@ -288,10 +288,60 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		},
 	});
 
-	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, () => {
-		if (currentState?.status === "running" || workers.size > 0 || engine.snapshots().length > 0) {
-			throw new Error("Finish or stop the active Herder Fire run before starting another planning workflow or changing plan configuration.");
-		}
+	const activeFire = () => Boolean(currentState && !["complete", "failed", "stopped"].includes(currentState.status)) || workers.size > 0 || engine.snapshots().length > 0;
+	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, {
+		assertMutationAllowed: () => {
+			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
+		},
+		prepareWorkflow: async (skill, args, ctx) => {
+			if (!activeFire()) return {};
+			if (skill !== "grill") throw new Error("Only /herder-grill --plan <unstarted-plan> may run while Herder Fire is active.");
+			const target = parseGrillPlanTarget(args);
+			if (!target) throw new Error("Active Herder Fire requires /herder-grill --plan <unstarted-plan>.");
+			const repoRoot = await repositoryRoot(ctx);
+			const planDir = resolvePlanDirectory(repoRoot, target.planDir ?? currentState?.planDir ?? "herder-plans");
+			if (currentState?.planDir && path.resolve(currentState.planDir) !== planDir) {
+				throw new Error(`Active Herder Fire owns ${currentState.planDir}; Grill cannot edit ${planDir}.`);
+			}
+			const reserved = await invokeHerderTool("herder_plan", {
+				operation: "begin_edit",
+				planDirectory: planDir,
+				planId: target.planId,
+			}) as Record<string, unknown>;
+			const edit = reserved.edit as Record<string, unknown> | undefined;
+			const editToken = typeof edit?.editToken === "string" ? edit.editToken : "";
+			const planId = typeof edit?.planId === "string" ? edit.planId : target.planId;
+			if (!editToken) throw new Error("Herder manager did not return a plan edit token.");
+			if (reserved.reply && typeof reserved.reply === "object") updateFromReply(reserved.reply as ManagerReply);
+			return {
+				runtimeContext: [
+					"HERDER_ACTIVE_PLAN_EDIT_V1",
+					`PLAN_ID: ${planId}`,
+					`PLAN_DIRECTORY: ${planDir}`,
+					`EDIT_TOKEN: ${editToken}`,
+					"The manager has reserved this never-started plan while unrelated Fire workers continue.",
+					"Edit only the reserved plan and necessary index fields. Do not add, remove, or change another plan.",
+					"After confirmed edits pass shape and validation, call herder_plan with operation finish_edit, this planDirectory, and editToken.",
+					"If no files were changed, call herder_plan with operation cancel_edit instead.",
+				].join("\n"),
+				rollback: async () => {
+					const cancelled = await invokeHerderTool("herder_plan", {
+						operation: "cancel_edit",
+						planDirectory: planDir,
+						editToken,
+					}) as Record<string, unknown>;
+					if (cancelled.reply && typeof cancelled.reply === "object") updateFromReply(cancelled.reply as ManagerReply);
+				},
+			};
+		},
+		handleManagerReply: async (value) => {
+			if (!value || typeof value !== "object" || Array.isArray(value)) return;
+			await enqueueManager(async () => {
+				const reply = value as ManagerReply;
+				updateFromReply(reply);
+				await dispatchReply(reply);
+			});
+		},
 	});
 
 	pi.registerTool({

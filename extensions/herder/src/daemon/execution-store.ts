@@ -32,7 +32,7 @@ export interface RunConfiguration {
 }
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
-export const EXECUTION_SCHEMA_VERSION = 6
+export const EXECUTION_SCHEMA_VERSION = 7
 
 const IDENTITY_FIELDS = [
   "attempt",
@@ -86,6 +86,24 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
   if (version === EXECUTION_SCHEMA_VERSION) return
+  if (version === 6 && allowInitialize) {
+    database.exec(`
+      CREATE TABLE manager_plan_edits (
+        run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        edit_token TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
+        base_graph_sha256 TEXT NOT NULL,
+        base_plan_fingerprint TEXT NOT NULL,
+        proposed_graph_sha256 TEXT,
+        proposed_plan_fingerprint TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      PRAGMA user_version = 7;
+    `)
+    return
+  }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
   if (!allowInitialize) fail("Execution database has no initialized schema")
   database.exec(`
@@ -244,6 +262,19 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       );
       CREATE UNIQUE INDEX manager_plan_specs_ordinal ON manager_plan_specs(run_id, graph_generation, ordinal);
 
+      CREATE TABLE manager_plan_edits (
+        run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        edit_token TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
+        base_graph_sha256 TEXT NOT NULL,
+        base_plan_fingerprint TEXT NOT NULL,
+        proposed_graph_sha256 TEXT,
+        proposed_plan_fingerprint TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE manager_approvals (
         run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
         plan_id TEXT NOT NULL,
@@ -263,7 +294,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         PRIMARY KEY (run_id, plan_id, generation)
       );
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
-      PRAGMA user_version = 6;
+      PRAGMA user_version = 7;
   `)
 }
 
@@ -513,16 +544,17 @@ function parseJsonColumn<T>(value: unknown, fallback: T): T {
 
 export function readManagerState(planDir: string) {
   const database = openDatabase(planDir, { readOnly: true })
-  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], service: null }
+  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, service: null }
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
-    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], service: null }
+    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, service: null }
     const run = (database.prepare("SELECT * FROM manager_runs ORDER BY created_at DESC LIMIT 1").get() as SqlRow | undefined) ?? null
     const plans = run ? database.prepare("SELECT * FROM manager_plans WHERE run_id = ? ORDER BY plan_id").all(run.run_id) as SqlRow[] : []
     const specs = run ? database.prepare("SELECT * FROM manager_plan_specs WHERE run_id = ? AND graph_generation = ? ORDER BY ordinal, plan_id").all(run.run_id, run.current_generation) as SqlRow[] : []
     const actions = run ? database.prepare("SELECT * FROM manager_actions WHERE run_id = ? ORDER BY created_at, action_id").all(run.run_id) as SqlRow[] : []
     const generations = run ? database.prepare("SELECT * FROM manager_generations WHERE run_id = ? ORDER BY generation").all(run.run_id) as SqlRow[] : []
     const approvals = run ? database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? ORDER BY plan_id, generation").all(run.run_id) as SqlRow[] : []
+    const edit = run ? database.prepare("SELECT * FROM manager_plan_edits WHERE run_id = ?").get(run.run_id) as SqlRow | undefined : undefined
     const service = database.prepare(`
       SELECT instance_id, pid, port, dashboard_url, forwarded_url, started_at
       FROM manager_service WHERE singleton = 1
@@ -617,6 +649,13 @@ export function readManagerState(planDir: string) {
         proofSha256: approval.proof_sha256,
         createdAt: approval.created_at,
       })),
+      edit: edit ? {
+        planId: edit.plan_id,
+        state: edit.state,
+        baseGraphSha256: edit.base_graph_sha256,
+        createdAt: edit.created_at,
+        updatedAt: edit.updated_at,
+      } : null,
       service: service ? {
         instanceId: service.instance_id,
         pid: service.pid,

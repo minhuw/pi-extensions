@@ -615,6 +615,94 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 	}
 });
 
+test("active Grill rejects started plans and releases unchanged reservations", { timeout: 10_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-guard-test-"));
+	const fixture = writeFixture(root);
+	addIndependentPlan(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await requestService(service, "/v1/start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		});
+		await assert.rejects(() => requestService(service, "/v1/edit", { operation: "begin", planId: "001" }), /execution already started/);
+		const begun = payload(await requestService(service, "/v1/edit", { operation: "begin", planId: "2" }));
+		const edit = payload(begun.edit);
+		const cancelled = payload(await requestService(service, "/v1/edit", { operation: "cancel", editToken: edit.editToken }));
+		assert.equal(payload(cancelled.reply).planEdit, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		assert.equal(store.getPlanEdit(store.getRun()!.runId), null);
+		store.close();
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("active Grill reserves an unstarted plan and adopts it after current workers settle", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-test-"));
+	const fixture = writeFixture(root);
+	addIndependentPlan(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestService(service, "/v1/start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		const implementer = payload((started.actions as unknown[])[0]);
+		assert.equal(implementer.planId, "001");
+		await requestService(service, "/v1/event", {
+			eventId: "plan-edit-dispatch-implementer", kind: "dispatch_results",
+			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: "plan-edit-implementer" }],
+		});
+
+		const begun = payload(await requestService(service, "/v1/edit", { operation: "begin", planId: "002-update-other.md" }));
+		const edit = payload(begun.edit);
+		assert.equal(edit.planId, "002");
+		assert.equal(edit.state, "reserved");
+		assert.match(String(edit.editToken), /^[0-9a-f-]{36}$/i);
+		assert.deepEqual(payload(begun.reply).planEdit, { planId: "002", state: "reserved" });
+
+		fs.appendFileSync(path.join(fixture.planDirectory, "002-update-other.md"), "\nGrill refinement: keep the other export stable and focused.\n");
+		const finished = payload(await requestService(service, "/v1/edit", { operation: "finish", editToken: edit.editToken }));
+		assert.deepEqual(payload(finished.reply).planEdit, { planId: "002", state: "barrier" });
+		assert.equal(payload(payload(finished.reply).scheduler).reason, "revision-barrier");
+		const beforeAdoption = new RunStore(fixture.planDirectory);
+		assert.equal(beforeAdoption.getRun()!.currentGeneration, 1);
+		assert.equal(beforeAdoption.getPlanEdit(beforeAdoption.getRun()!.runId)!.state, "barrier");
+		beforeAdoption.close();
+
+		const worktree = String(implementer.worktree);
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
+		git(worktree, ["add", "src/value.mjs"]);
+		git(worktree, ["commit", "-q", "-m", "fix: complete work during grill"]);
+		const advanced = payload(payload(await requestService(service, "/v1/event", {
+			eventId: "plan-edit-terminal-implementer", kind: "terminals",
+			terminals: [{
+				actionId: implementer.actionId,
+				hostHandle: "plan-edit-implementer",
+				response: `STATUS: COMPLETE\nCOMMITS: ${git(worktree, ["rev-parse", "HEAD"]).stdout.trim()}\nCHECKS: npm test — passed\nFILES CHANGED: src/value.mjs\nDISCOVERED_PATHS: none\nNOTES: value updated\nUSAGE: input_tokens=10; cached_input_tokens=0; output_tokens=5; reasoning_tokens=0; source=test-host`,
+			}],
+		})).reply);
+		assert.equal(advanced.planEdit, undefined);
+		assert.deepEqual((advanced.actions as unknown[]).map((action) => [payload(action).planId, payload(action).role]), [["001", "plan-reviewer"]]);
+
+		const adopted = new RunStore(fixture.planDirectory);
+		const run = adopted.getRun()!;
+		assert.equal(run.currentGeneration, 2);
+		assert.equal(adopted.getPlanEdit(run.runId), null);
+		assert.notEqual(
+			adopted.getPlanSpecs(run.runId, 1).find((spec) => spec.planId === "002")!.planFingerprint,
+			adopted.getPlanSpecs(run.runId, 2).find((spec) => spec.planId === "002")!.planFingerprint,
+		);
+		assert.equal(adopted.getPlan(run.runId, "001")!.generation, 1);
+		adopted.close();
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("plan graph revision adopts additions while preserving exact completed evidence", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-revision-test-"));
 	const fixture = writeFixture(root);

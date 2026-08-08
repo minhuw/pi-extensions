@@ -33,12 +33,6 @@
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/pi/index.ts"
-		],
-		"skills": [
-			"./extensions/herder/skills/improve",
-			"./extensions/herder/skills/grill",
-			"./extensions/herder/skills/plans",
-			"./extensions/herder/skills/validate"
 		]
 	}
 }

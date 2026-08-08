@@ -40,6 +40,7 @@ import {
 	type StoredAction,
 	type StoredApproval,
 	type StoredPlan,
+	type StoredPlanEdit,
 	type StoredPlanSpec,
 	type StoredRun,
 } from "../daemon/run-store.ts";
@@ -66,6 +67,21 @@ interface EventInput {
 	dispatchResults?: DispatchResult[];
 	terminals?: TerminalEvent[];
 	userInput?: string;
+}
+
+interface PlanEditInput {
+	operation: "begin" | "finish" | "cancel";
+	planId?: string;
+	editToken?: string;
+}
+
+interface PlanEditReply {
+	edit: {
+		planId: string;
+		state: StoredPlanEdit["state"];
+		editToken?: string;
+	};
+	reply: ManagerReply;
 }
 
 function validateStartInput(input: StartInput): void {
@@ -103,6 +119,19 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
 	}
+}
+
+function normalizePlanId(value: string | undefined): string {
+	const normalized = String(value ?? "").trim();
+	const match = path.basename(normalized).match(/^(\d+)(?:-|\.|$)/);
+	if (!match) throw new Error("Plan edit requires a numeric plan ID or NNN-*.md plan path");
+	return match[1]!.padStart(3, "0");
+}
+
+function validatePlanEditInput(input: PlanEditInput): void {
+	if (!input || !["begin", "finish", "cancel"].includes(input.operation)) throw new Error("Plan edit operation must be begin, finish, or cancel");
+	if (input.operation === "begin") normalizePlanId(input.planId);
+	else if (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken)) throw new Error("Plan edit token is required");
 }
 
 function resolveProfile(requested?: string): ResolvedProfile {
@@ -398,8 +427,18 @@ export class HerderRunManager {
 	}
 
 	private graphDrift(run: StoredRun): { changed: boolean; detail: string | null } {
+		const edit = this.store.getPlanEdit(run.runId);
+		if (edit?.state === "reserved") return { changed: false, detail: null };
 		try {
 			const compiled = this.compileCurrentGraph(run);
+			if (edit?.state === "barrier") {
+				return {
+					changed: compiled.graphSha256 !== edit.proposedGraphSha256,
+					detail: compiled.graphSha256 === edit.proposedGraphSha256
+						? null
+						: `Reserved plan ${edit.planId} changed after its revision barrier was requested. Finish the edit again after repairing the graph.`,
+				};
+			}
 			return {
 				changed: compiled.graphSha256 !== run.graphSha256,
 				detail: compiled.graphSha256 === run.graphSha256
@@ -414,7 +453,8 @@ export class HerderRunManager {
 	private projectLifecycle(run: StoredRun): void {
 		const plans = this.store.getPlans(run.runId);
 		const runtime = new Map(plans.map((plan) => [plan.planId, plan]));
-		projectStatuses(this.planDirectory, this.specs(run).map((spec) => {
+		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
+		projectStatuses(this.planDirectory, this.specs(run).filter((spec) => spec.planId !== reservedPlanId).map((spec) => {
 			const plan = runtime.get(spec.planId) ?? null;
 			const status = lifecycleStatus(spec, plan);
 			const detail = plan?.phase === "BLOCKED" || plan?.phase === "NEEDS_INPUT"
@@ -545,26 +585,11 @@ export class HerderRunManager {
 		return this.reconcile(profile);
 	}
 
-	async revise(input: StartInput): Promise<ManagerReply> {
-		const run = this.store.getRun();
-		if (!run) throw new Error("No deterministic Herder run exists");
-		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Revision repository does not match the recorded run");
-		if (input.planName && input.planName !== run.planName) throw new Error(`Revision plan name must remain ${run.planName}`);
-		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
-			throw new Error(`Revision must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
-		}
-		if (activeActions(this.store, run.runId).length > 0) {
-			throw new Error("Plan graph revision requires zero proposed or dispatched workers; wait for terminal events or stop them first");
-		}
-		const profile = resolveProfile(input.profile || run.profileName);
-		if (profile.profile_sha256 !== run.profileSha256 || profile.profile !== run.profileName) {
-			throw new Error(`Recorded profile ${run.profileName} no longer matches its immutable binding`);
-		}
-		const driver = this.driver(run);
-		await driver.verifyCheckout(run.checkoutStateToken);
-		const nextGeneration = run.currentGeneration + 1;
-		const compiled = this.compileCurrentGraph(run, nextGeneration);
-		if (compiled.graphSha256 === run.graphSha256) throw new Error(`Plan graph still matches generation ${run.currentGeneration}; use resume`);
+	private validateRevisionChanges(
+		run: StoredRun,
+		compiled: { graph: ReturnType<typeof buildGraph>; specs: StoredPlanSpec[]; graphSha256: string },
+		reservedPlanId?: string,
+	): void {
 		const previous = new Map(this.specs(run).map((spec) => [spec.planId, spec]));
 		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
 		const removed = [...previous.keys()].filter((planId) => !next.has(planId));
@@ -572,18 +597,30 @@ export class HerderRunManager {
 		for (const spec of compiled.specs) {
 			const prior = previous.get(spec.planId);
 			if (!prior) {
+				if (reservedPlanId) throw new Error(`Active Grill may refine only reserved plan ${reservedPlanId}; it cannot add plan ${spec.planId}`);
 				const graphPlan = compiled.graph.plans.find((plan) => plan.id === spec.planId)!;
 				if (["DONE", "IN PROGRESS"].includes(graphPlan.status)) throw new Error(`New plan ${spec.planId} cannot adopt lifecycle state ${graphPlan.status}`);
 				continue;
 			}
 			if (prior.planFingerprint === spec.planFingerprint) continue;
-			const runtime = this.store.getPlan(run.runId, spec.planId);
-			if (runtime) {
-				throw new Error(`Graph revision changed ${spec.planId} after execution started; create a trusted-base recovery namespace instead`);
+			if (reservedPlanId && spec.planId !== reservedPlanId) {
+				throw new Error(`Active Grill reserved ${reservedPlanId} but also changed ${spec.planId}`);
 			}
+			const runtime = this.store.getPlan(run.runId, spec.planId);
+			if (runtime) throw new Error(`Graph revision changed ${spec.planId} after execution started; create a trusted-base recovery namespace instead`);
 		}
+	}
+
+	private adoptCompiledRevision(
+		run: StoredRun,
+		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
+		detail: string,
+		clearPlanEdit = false,
+	): void {
+		const driver = this.driver(run);
 		const namespace = driver.inspectNamespace("resume");
 		if (!namespace.ok) throw new Error(`Cannot revise ambiguous Herder namespace: ${namespace.reason}`);
+		const nextGeneration = run.currentGeneration + 1;
 		const integrationHead = driver.branchHead(run.integrationBranch);
 		const assignment = driver.materializeRunAssignment(integrationHead, compiled.specs.map((spec) => spec.assignment), nextGeneration);
 		this.store.transaction(() => {
@@ -598,14 +635,118 @@ export class HerderRunManager {
 				runSnapshotSha256: assignment.snapshotSha256,
 			});
 			this.store.deletePlan(run.runId, "RUN");
+			if (clearPlanEdit) this.store.deletePlanEdit(run.runId);
 			this.store.updateRun({
 				status: "running",
-				terminalDetail: `Adopted plan graph generation ${nextGeneration} from generation ${run.currentGeneration}.`,
+				terminalDetail: detail,
 				currentGeneration: nextGeneration,
 				graphSha256: compiled.graphSha256,
 			});
 		});
+	}
+
+	async revise(input: StartInput): Promise<ManagerReply> {
+		const run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Revision repository does not match the recorded run");
+		if (input.planName && input.planName !== run.planName) throw new Error(`Revision plan name must remain ${run.planName}`);
+		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
+			throw new Error(`Revision must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
+		}
+		if (activeActions(this.store, run.runId).length > 0) {
+			throw new Error("Plan graph revision requires zero proposed or dispatched workers; wait for terminal events or stop them first");
+		}
+		if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the active Grill plan edit before running Herder revise");
+		const profile = resolveProfile(input.profile || run.profileName);
+		if (profile.profile_sha256 !== run.profileSha256 || profile.profile !== run.profileName) {
+			throw new Error(`Recorded profile ${run.profileName} no longer matches its immutable binding`);
+		}
+		const driver = this.driver(run);
+		await driver.verifyCheckout(run.checkoutStateToken);
+		const nextGeneration = run.currentGeneration + 1;
+		const compiled = this.compileCurrentGraph(run, nextGeneration);
+		if (compiled.graphSha256 === run.graphSha256) throw new Error(`Plan graph still matches generation ${run.currentGeneration}; use resume`);
+		this.validateRevisionChanges(run, compiled);
+		this.adoptCompiledRevision(run, compiled, `Adopted plan graph generation ${nextGeneration} from generation ${run.currentGeneration}.`);
 		return this.reconcile(profile);
+	}
+
+	private compiledReservedEdit(run: StoredRun, edit: StoredPlanEdit) {
+		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
+		this.validateRevisionChanges(run, compiled, edit.planId);
+		const target = compiled.specs.find((spec) => spec.planId === edit.planId);
+		if (!target) throw new Error(`Reserved plan ${edit.planId} is missing from the revised graph`);
+		if (target.planFingerprint === edit.basePlanFingerprint || compiled.graphSha256 === edit.baseGraphSha256) {
+			throw new Error(`Reserved plan ${edit.planId} has not changed; cancel the edit instead`);
+		}
+		return { compiled, target };
+	}
+
+	private adoptReservedEdit(run: StoredRun, edit: StoredPlanEdit): void {
+		if (activeActions(this.store, run.runId).length > 0) throw new Error("Reserved plan revision is still waiting for active workers to settle");
+		const { compiled, target } = this.compiledReservedEdit(run, edit);
+		if (edit.proposedGraphSha256 !== compiled.graphSha256 || edit.proposedPlanFingerprint !== target.planFingerprint) {
+			throw new Error(`Reserved plan ${edit.planId} changed after its revision barrier was requested`);
+		}
+		const nextGeneration = run.currentGeneration + 1;
+		this.adoptCompiledRevision(
+			run,
+			compiled,
+			`Adopted Grill revision for plan ${edit.planId} as graph generation ${nextGeneration}.`,
+			true,
+		);
+	}
+
+	async edit(input: PlanEditInput): Promise<PlanEditReply> {
+		validatePlanEditInput(input);
+		let run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		if (input.operation === "begin") {
+			if (run.status !== "running") throw new Error(`Active Grill requires a running Herder Fire run; current status is ${run.status}`);
+			const planId = normalizePlanId(input.planId);
+			const existing = this.store.getPlanEdit(run.runId);
+			if (existing) {
+				if (existing.planId !== planId) throw new Error(`Plan ${existing.planId} already has the active Grill reservation`);
+				if (existing.state !== "reserved") throw new Error(`Plan ${planId} is already waiting at the revision barrier`);
+				return { edit: { planId, state: existing.state, editToken: existing.editToken }, reply: this.reply() };
+			}
+			const drift = this.graphDrift(run);
+			if (drift.changed) throw new Error(`${drift.detail} Resolve graph drift before starting Grill.`);
+			const spec = this.spec(run, planId);
+			if (!["TODO", "BLOCKED"].includes(spec.initialStatus)) throw new Error(`Plan ${planId} is ${spec.initialStatus}, not an unstarted editable plan`);
+			if (this.store.getPlan(run.runId, planId) || this.store.getActions(run.runId).some((action) => action.planId === planId)) {
+				throw new Error(`Plan ${planId} cannot be grilled because execution already started`);
+			}
+			const edit = this.store.putPlanEdit({
+				runId: run.runId,
+				planId,
+				editToken: randomUUID(),
+				state: "reserved",
+				baseGraphSha256: run.graphSha256,
+				basePlanFingerprint: spec.planFingerprint,
+			});
+			return { edit: { planId, state: edit.state, editToken: edit.editToken }, reply: this.reply() };
+		}
+
+		const edit = this.store.getPlanEdit(run.runId);
+		if (!edit || edit.editToken !== input.editToken) throw new Error("Plan edit token does not match the active Grill reservation");
+		if (input.operation === "cancel") {
+			const compiled = this.compileCurrentGraph(run);
+			if (compiled.graphSha256 !== edit.baseGraphSha256) throw new Error(`Plan ${edit.planId} changed; restore the reserved graph or finish the edit before cancelling`);
+			this.store.deletePlanEdit(run.runId);
+			return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply() };
+		}
+		if (run.status !== "running") throw new Error(`Cannot finish a Grill revision while Herder is ${run.status}`);
+
+		const { compiled, target } = this.compiledReservedEdit(run, edit);
+		const barrier = this.store.putPlanEditBarrier(run.runId, compiled.graphSha256, target.planFingerprint);
+		if (activeActions(this.store, run.runId).length === 0) {
+			await this.driver(run).verifyCheckout(run.checkoutStateToken);
+			this.adoptReservedEdit(run, barrier);
+			run = this.store.getRun()!;
+			return { edit: { planId: edit.planId, state: "barrier" }, reply: await this.reconcile(boundProfile(run, this.store)) };
+		}
+		return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
 	}
 
 	async event(input: EventInput): Promise<ManagerReply> {
@@ -1011,6 +1152,16 @@ export class HerderRunManager {
 
 		run = this.store.getRun()!;
 		if (run.status !== "running") return this.reply();
+		const pendingEdit = this.store.getPlanEdit(run.runId);
+		if (pendingEdit?.state === "barrier") {
+			if (activeActions(this.store, run.runId).length > 0) {
+				this.projectLifecycle(run);
+				await driver.verifyCheckout(run.checkoutStateToken);
+				return this.reply("revision-barrier");
+			}
+			this.adoptReservedEdit(run, pendingEdit);
+			run = this.store.getRun()!;
+		}
 		const current = this.store.getPlans(run.runId);
 		const overview = summarizeRun(this.specs(run), current);
 		if (overview.complete && activeActions(this.store, run.runId).length === 0) {
@@ -1081,6 +1232,7 @@ export class HerderRunManager {
 	private async schedule(profile: ResolvedProfile): Promise<void> {
 		const run = this.store.getRun()!;
 		const driver = this.driver(run);
+		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
 		let occupied = activeActions(this.store, run.runId).length;
 		const owned = assignedPlanIds(this.store, run.runId);
 		const plans = this.store.getPlans(run.runId);
@@ -1099,6 +1251,7 @@ export class HerderRunManager {
 		for (const spec of overview.ready) {
 			if (occupied >= run.maxParallel) break;
 			const planId = spec.planId;
+			if (planId === reservedPlanId) continue;
 			if (this.store.getPlan(run.runId, planId)) continue;
 			const execution = driver.ensurePlanWorktree(planId, spec.assignment);
 			const plan = this.store.putPlan({
@@ -1212,28 +1365,32 @@ export class HerderRunManager {
 		return action;
 	}
 
-	private schedulerState(run: StoredRun, suppression?: "host-backpressure"): ManagerReply["scheduler"] {
+	private schedulerState(run: StoredRun, suppression?: "host-backpressure" | "revision-barrier"): ManagerReply["scheduler"] {
 		const active = activeActions(this.store, run.runId);
+		const edit = this.store.getPlanEdit(run.runId);
+		if (edit?.state === "barrier") suppression = "revision-barrier";
+		const reservedPlanId = edit?.planId;
 		const owned = new Set(active.map((action) => action.planId));
 		const plans = this.store.getPlans(run.runId);
 		const runtimeIds = new Set(plans.map((plan) => plan.planId));
 		const runnablePlanIds = [
 			...plans.filter((plan) => !owned.has(plan.planId) && roleForPhase(plan.phase)).map((plan) => plan.planId),
-			...summarizeRun(this.specs(run), plans).ready.filter((spec) => !runtimeIds.has(spec.planId)).map((spec) => spec.planId),
+			...summarizeRun(this.specs(run), plans).ready.filter((spec) => !runtimeIds.has(spec.planId) && spec.planId !== reservedPlanId).map((spec) => spec.planId),
 		].sort();
 		const freeSlots = Math.max(0, run.maxParallel - active.length);
-		const expectedNewActions = Math.min(freeSlots, runnablePlanIds.length);
+		const expectedNewActions = suppression === "revision-barrier" ? 0 : Math.min(freeSlots, runnablePlanIds.length);
 		const inactive = run.status !== "running";
-		const workConserving = inactive || suppression === "host-backpressure" || expectedNewActions === 0;
+		const workConserving = inactive || suppression === "host-backpressure" || suppression === "revision-barrier" || expectedNewActions === 0;
 		const reason = inactive ? "inactive"
 			: suppression === "host-backpressure" ? "host-backpressure"
+				: suppression === "revision-barrier" ? "revision-barrier"
 				: freeSlots === 0 ? "saturated"
 					: runnablePlanIds.length === 0 ? "no-runnable-work"
 						: "scheduler-stall";
 		return { active: active.length, freeSlots, runnable: runnablePlanIds.length, runnablePlanIds, expectedNewActions, workConserving, reason, checkedAt: new Date().toISOString() };
 	}
 
-	reply(suppression?: "host-backpressure"): ManagerReply {
+	reply(suppression?: "host-backpressure" | "revision-barrier"): ManagerReply {
 		let run = this.store.getRun();
 		if (!run) return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -1255,6 +1412,7 @@ export class HerderRunManager {
 		const proposed = this.store.getActions(run.runId, ["proposed"]);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
 		const questionPlan = this.store.getPlans(run.runId).find((plan) => plan.phase === "NEEDS_INPUT");
+		const planEdit = this.store.getPlanEdit(run.runId);
 		const scheduler = this.schedulerState(run, suppression);
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -1278,8 +1436,11 @@ export class HerderRunManager {
 				available: Math.max(0, run.maxParallel - active.length),
 			},
 			scheduler,
-			message: run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
+			message: planEdit
+				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
+				: run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
 			...(questionPlan?.repair[0] ? { question: questionPlan.repair[0] } : {}),
+			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 		};
 	}
 
@@ -1291,4 +1452,4 @@ export class HerderRunManager {
 	}
 }
 
-export type { EventInput, StartInput };
+export type { EventInput, PlanEditInput, StartInput };

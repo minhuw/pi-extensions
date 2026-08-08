@@ -25,6 +25,13 @@ function planDirectory(args: JsonObject): string {
 async function planTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);
+	if (["begin_edit", "finish_edit", "cancel_edit"].includes(operation)) {
+		const service = await ensureService(directory);
+		return requestService(service, "/v1/edit", {
+			operation: operation === "begin_edit" ? "begin" : operation === "finish_edit" ? "finish" : "cancel",
+			...(operation === "begin_edit" ? { planId: requiredString(args, "planId") } : { editToken: requiredString(args, "editToken") }),
+		});
+	}
 	if (operation === "init") return initPlanDir(directory, { track: args.track === true });
 	if (operation === "validate" || operation === "status") return buildGraph(directory);
 	if (operation === "shape") return getShapeReport(directory);

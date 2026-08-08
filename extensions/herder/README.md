@@ -39,7 +39,8 @@ The deterministic Run Manager owns plan state, Git coordination, gates, recovery
 
 | Command | Purpose |
 | --- | --- |
-| `/herder-grill <change>` | Clarify product intent and create a focused validated plan graph. |
+| `/herder-grill <change>` | Clarify product intent and create a focused validated plan graph in the current session. |
+| `/herder-grill --plan <id>` | Refine an unstarted plan; during Fire, reserve it and adopt the edit at a safe revision barrier. |
 | `/herder-improve [quick\|standard\|deep] [focus]` | Audit the repository and write prioritized improvement plans. |
 | `/herder-validate [plan-dir] [--fix]` | Run a repository-aware semantic plan audit and conservative repair workflow. |
 | `/herder-plans init [plan-dir] [--track]` | Initialize a plan directory. |
@@ -56,9 +57,9 @@ The deterministic Run Manager owns plan state, Git coordination, gates, recovery
 
 Fire, resume, and revise accept `--profile <name>` and `--dashboard-port <port>`; fire and resume also accept `--max-parallel <count>`.
 
-The agentic planning commands replace the active root with a clean parentless planning session containing the exact package-owned skill and supplied arguments. `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the native `herder_plan` application tool without spending a model turn. Mechanical `/herder-plans validate` and semantic `/herder-validate` are intentionally separate.
+The agentic planning commands inject the exact package-owned instructions and supplied arguments into the current Pi conversation, preserving the user's context. The instruction files remain private implementation assets, so each workflow has one public `/herder-*` command. `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the native `herder_plan` application tool without spending a model turn. Mechanical `/herder-plans validate` and semantic `/herder-validate` are intentionally separate.
 
-Pi also exposes the packaged planning skills as `/skill:herder-improve`, `/skill:herder-grill`, `/skill:herder-plans`, and `/skill:herder-validate`.
+During an active Fire run, Improve and graph-wide planning mutations remain blocked. `/herder-grill --plan <id>` is allowed only when SQLite proves the target has never started. The manager reserves that plan so unrelated work continues, then stops new dispatches after the confirmed edit, lets current workers settle, adopts a new immutable graph generation, and resumes automatically. Manual or externally authored graph changes still use `/herder-revise`.
 
 ## Profiles
 

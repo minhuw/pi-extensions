@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 2;
+export const MANAGER_PROTOCOL_VERSION = 3;
 export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"] as const;
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
 export const PLAN_PHASES = [
@@ -87,6 +87,11 @@ export interface TerminalEvent {
 	usage?: Partial<UsageEvidence>;
 }
 
+export interface ManagerPlanEdit {
+	planId: string;
+	state: "reserved" | "barrier";
+}
+
 export interface ManagerReply {
 	protocolVersion: number;
 	runId: string;
@@ -110,11 +115,12 @@ export interface ManagerReply {
 		runnablePlanIds: string[];
 		expectedNewActions: number;
 		workConserving: boolean;
-		reason: "saturated" | "no-runnable-work" | "scheduled" | "host-backpressure" | "scheduler-stall" | "inactive";
+		reason: "saturated" | "no-runnable-work" | "scheduled" | "host-backpressure" | "revision-barrier" | "scheduler-stall" | "inactive";
 		checkedAt: string;
 	};
 	message: string;
 	question?: string;
+	planEdit?: ManagerPlanEdit;
 }
 
 export function stableJson(value: unknown): string {

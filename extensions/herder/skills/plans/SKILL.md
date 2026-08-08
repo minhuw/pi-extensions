@@ -7,7 +7,7 @@ description: Initialize, shape, validate, inspect, snapshot, and report Herder M
 
 Read [references/plan-format.md](references/plan-format.md) and [references/plan-template.md](references/plan-template.md) before authoring or repairing plans. Use `herder_plan` for every plan operation; never invoke a bundled script or open the runtime database directly.
 
-Pi exposes deterministic operations through `/herder-plans <operation>` and makes this guidance available to the model as `/skill:herder-plans`. Use `/herder-grill` for new product intent and `/herder-validate --fix` for semantic plan repair.
+Pi exposes deterministic operations through `/herder-plans <operation>` and the native `herder_plan` tool. Use `/herder-grill` for new product intent and `/herder-validate --fix` for semantic plan repair.
 
 - `init`: create the plan index and tracking policy.
 - `shape`: report semantic shape, size, and unordered write-scope overlaps.

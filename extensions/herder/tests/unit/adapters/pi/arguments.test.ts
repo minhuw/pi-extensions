@@ -3,13 +3,19 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseFireArguments, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../../adapters/pi/lib/arguments.ts";
+import { parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../../adapters/pi/lib/arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../../adapters/pi/lib/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
 	assert.deepEqual(tokenizeArguments(`"plans with spaces" --profile 'poorman'`), ["plans with spaces", "--profile", "poorman"]);
 	assert.deepEqual(tokenizeArguments("plans\\ with\\ spaces"), ["plans with spaces"]);
 	assert.throws(() => tokenizeArguments("'unfinished"), /unterminated quote/);
+});
+
+test("extracts an active-Fire Grill target without consuming the skill arguments", () => {
+	assert.deepEqual(parseGrillPlanTarget("--plan 7 --plan-dir custom-plans"), { planId: "7", planDir: "custom-plans" });
+	assert.deepEqual(parseGrillPlanTarget("refine this later"), null);
+	assert.throws(() => parseGrillPlanTarget("--plan 1 --plan 2"), /more than once/);
 });
 
 test("fire defaults to a five-worker pool and an ephemeral dashboard port", () => {

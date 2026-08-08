@@ -34,9 +34,11 @@ Available commands:
 - `/herder-dashboard [plan-dir]`
 - `/herder-stop`
 
-The agentic planning commands—`/herder-improve`, `/herder-grill`, and `/herder-validate`—replace the current root session with a parentless session and inject the exact package-owned skill plus the supplied arguments. Pi also exposes the namespaced skills as `/skill:herder-improve`, `/skill:herder-grill`, `/skill:herder-plans`, and `/skill:herder-validate`.
+The agentic planning commands—`/herder-improve`, `/herder-grill`, and `/herder-validate`—inject the exact package-owned instructions plus the supplied arguments into the current Pi session. The skill files are command-owned implementation assets rather than separately exposed `/skill:` commands.
 
 `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the shared plan application directly without spending a model turn. `validate` there is mechanical graph validation; `/herder-validate` is the repository-aware semantic audit and optional repair workflow. Mutating plan-configuration operations refuse to run while the current Pi session owns an active Fire run. The active model receives the same native `herder_plan` tool for canonical plan operations.
+
+`/herder-grill --plan <id>` is the narrow active-Fire exception. The manager must prove the plan has no runtime, action, attempt, worktree, or approval evidence before reserving it. While Grill interviews and edits, only that plan is withheld from scheduling. Finishing the edit raises a revision barrier: existing workers settle, no new workers dispatch, the validated target-only change becomes the next immutable graph generation, and scheduling resumes. Cancelling without changes releases the reservation.
 
 The `herder` tool exposes fire, resume, revise, status, and dashboard actions to the active Pi model. Fire and resume start or reuse the persistent local Run Manager and its dashboard, dispatch the first available worker batch, then return. Revise adopts a validated new immutable graph generation after all active workers settle. A compact Pi widget and the dashboard report progress.
 

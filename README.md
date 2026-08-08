@@ -22,7 +22,7 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
-Installing the package loads all three extensions and Herder's planning skills. See each extension's README for setup, activation conditions, and usage.
+Installing the package loads all three extensions. Herder's command-owned planning workflows load their packaged instructions on demand. See each extension's README for setup, activation conditions, and usage.
 
 ## Development
 

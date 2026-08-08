@@ -27,6 +27,21 @@ export interface PiPlanCommandExecution {
 	message: string;
 }
 
+export interface PreparedPlanningWorkflow {
+	runtimeContext?: string;
+	rollback?: () => Promise<void>;
+}
+
+export interface PiPlanningRuntime {
+	assertMutationAllowed: () => void;
+	prepareWorkflow?: (
+		skill: PiPlanningSkill,
+		argumentsText: string,
+		ctx: ExtensionCommandContext,
+	) => Promise<PreparedPlanningWorkflow>;
+	handleManagerReply?: (reply: unknown) => Promise<void>;
+}
+
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -45,6 +60,7 @@ export async function buildPlanningSkillPrompt(
 	packageRoot: string,
 	skill: PiPlanningSkill,
 	argumentsText = "",
+	runtimeContext = "",
 ): Promise<string> {
 	const workflow = planningWorkflow(skill);
 	const skillDirectory = path.join(packageRoot, "skills", skill);
@@ -52,26 +68,31 @@ export async function buildPlanningSkillPrompt(
 	const body = stripFrontmatter(await readFile(skillFile, "utf8")).trim();
 	if (!body) throw new Error(`Herder Pi workflow ${skill} has no instructions.`);
 	const block = `<skill name="${xmlAttribute(workflow.skillName)}" location="${xmlAttribute(skillFile)}">\nReferences are relative to ${skillDirectory}.\n\n${body}\n</skill>`;
-	const argumentsValue = argumentsText.trim();
-	return argumentsValue ? `${block}\n\n${argumentsValue}` : block;
+	const sections = [block];
+	if (runtimeContext.trim()) sections.push(`<herder-runtime>\n${runtimeContext.trim()}\n</herder-runtime>`);
+	if (argumentsText.trim()) sections.push(argumentsText.trim());
+	return sections.join("\n\n");
 }
 
 export async function launchPlanningWorkflow(
+	pi: Pick<ExtensionAPI, "sendUserMessage">,
 	ctx: ExtensionCommandContext,
 	packageRoot: string,
 	skill: PiPlanningSkill,
 	argumentsText: string,
-	assertReplaceable: () => void,
-): Promise<{ cancelled: boolean }> {
+	prepareWorkflow?: PiPlanningRuntime["prepareWorkflow"],
+): Promise<{ submitted: true }> {
 	if (!ctx.isProjectTrusted()) throw new Error("Trust this project before starting a Herder planning workflow.");
-	assertReplaceable();
-	const prompt = await buildPlanningSkillPrompt(packageRoot, skill, argumentsText);
 	await ctx.waitForIdle();
-	return ctx.newSession({
-		withSession: async (fresh) => {
-			await fresh.sendUserMessage(prompt);
-		},
-	});
+	const prepared = await prepareWorkflow?.(skill, argumentsText, ctx) ?? {};
+	try {
+		const prompt = await buildPlanningSkillPrompt(packageRoot, skill, argumentsText, prepared.runtimeContext);
+		pi.sendUserMessage(prompt);
+		return { submitted: true };
+	} catch (error) {
+		await prepared.rollback?.().catch(() => {});
+		throw error;
+	}
 }
 
 function count(value: unknown): number {
@@ -143,15 +164,14 @@ export function registerPiPlanningWorkflows(
 	pi: ExtensionAPI,
 	packageRoot: string,
 	repositoryRoot: (ctx: ExtensionContext) => Promise<string>,
-	assertReplaceable: () => void,
+	runtime: PiPlanningRuntime,
 ): void {
 	for (const workflow of PI_PLANNING_WORKFLOWS.filter((candidate) => candidate.mode === "session")) {
 		pi.registerCommand(workflow.command, {
 			description: workflow.description,
 			handler: async (args, ctx) => {
 				try {
-					const result = await launchPlanningWorkflow(ctx, packageRoot, workflow.skill, args, assertReplaceable);
-					if (result.cancelled) ctx.ui.notify(`Herder ${workflow.skill} was cancelled before the clean planning session started.`, "warning");
+					await launchPlanningWorkflow(pi, ctx, packageRoot, workflow.skill, args, runtime.prepareWorkflow);
 				} catch (error) {
 					ctx.ui.notify(message(error), "error");
 				}
@@ -165,7 +185,7 @@ export function registerPiPlanningWorkflows(
 		handler: async (args, ctx) => {
 			try {
 				if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder plan operations.");
-				const execution = await executePiPlanCommand(args, await repositoryRoot(ctx), assertReplaceable);
+				const execution = await executePiPlanCommand(args, await repositoryRoot(ctx), runtime.assertMutationAllowed);
 				ctx.ui.notify(execution.message, "info");
 			} catch (error) {
 				ctx.ui.notify(message(error), "error");
@@ -176,15 +196,17 @@ export function registerPiPlanningWorkflows(
 	pi.registerTool({
 		name: "herder_plan",
 		label: "Herder Plan",
-		description: "Initialize, validate, shape, inspect, snapshot, or report a Herder plan graph.",
+		description: "Initialize, validate, shape, inspect, snapshot, report, or coordinate a reserved Herder plan edit.",
 		parameters: Type.Object({
 			operation: Type.Union([
 				Type.Literal("init"), Type.Literal("validate"), Type.Literal("shape"),
 				Type.Literal("status"), Type.Literal("ready"), Type.Literal("snapshot"),
 				Type.Literal("report"), Type.Literal("track"), Type.Literal("untrack"),
+				Type.Literal("begin_edit"), Type.Literal("finish_edit"), Type.Literal("cancel_edit"),
 			]),
 			planDirectory: Type.String(),
 			planId: Type.Optional(Type.String()),
+			editToken: Type.Optional(Type.String()),
 			track: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -192,12 +214,15 @@ export function registerPiPlanningWorkflows(
 				return { content: [{ type: "text" as const, text: "Trust this project before using Herder plan operations." }], isError: true, details: {} };
 			}
 			try {
-				if (["init", "track", "untrack"].includes(params.operation)) assertReplaceable();
+				if (["init", "track", "untrack"].includes(params.operation)) runtime.assertMutationAllowed();
 				const repoRoot = await repositoryRoot(ctx);
 				const planDirectory = params.operation === "init"
 					? resolvePlanDirectoryTarget(repoRoot, params.planDirectory)
 					: resolvePlanDirectory(repoRoot, params.planDirectory);
 				const result = await invokeHerderTool("herder_plan", { ...params, planDirectory });
+				if (params.operation === "finish_edit" && result && typeof result === "object" && !Array.isArray(result)) {
+					await runtime.handleManagerReply?.((result as JsonObject).reply);
+				}
 				return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { result } };
 			} catch (error) {
 				return { content: [{ type: "text" as const, text: message(error) }], isError: true, details: {} };

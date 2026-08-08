@@ -10,6 +10,11 @@ export interface PlanDirOptions {
 	planDir?: string;
 }
 
+export interface GrillPlanTarget {
+	planId: string;
+	planDir?: string;
+}
+
 export const HERDER_PLAN_COMMAND_USAGE = [
 	"Usage:",
 	"  /herder-plans init [plan-dir] [--track]",
@@ -130,6 +135,27 @@ export function parsePlanDirArguments(input: string): PlanDirOptions {
 	if (tokens.length > 1) throw new Error("Expected at most one plan directory.");
 	if (tokens[0]?.startsWith("--")) throw new Error(`Unknown option: ${tokens[0]}`);
 	return tokens[0] ? { planDir: tokens[0] } : {};
+}
+
+export function parseGrillPlanTarget(input: string): GrillPlanTarget | null {
+	const tokens = tokenizeArguments(input);
+	let planId: string | undefined;
+	let planDir: string | undefined;
+	for (let index = 0; index < tokens.length; index += 1) {
+		const argument = tokens[index]!;
+		if (argument === "--plan" || argument === "--plan-dir") {
+			const value = valueAfter(tokens, index, argument);
+			index += 1;
+			if (argument === "--plan") {
+				if (planId) throw new Error("--plan was provided more than once.");
+				planId = value;
+			} else {
+				if (planDir) throw new Error("--plan-dir was provided more than once.");
+				planDir = value;
+			}
+		}
+	}
+	return planId ? { planId, ...(planDir ? { planDir } : {}) } : null;
 }
 
 export function parsePlanCommandArguments(input: string): PlanCommandOptions {
