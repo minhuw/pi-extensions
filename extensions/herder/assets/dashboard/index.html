@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark light">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#171717">
+    <title>Herder Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+    <div class="page-shell">
+      <header class="site-header" aria-label="Dashboard header">
+        <a class="wordmark" href="#overview" aria-label="Herder dashboard overview">
+          <span class="wordmark-mark" aria-hidden="true">H</span>
+          <span>HERDER</span>
+          <span class="wordmark-muted">/ DASHBOARD</span>
+        </a>
+        <div class="header-actions">
+          <div class="observer-badge" title="This dashboard never changes plan or Git state">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>READ ONLY</span>
+          </div>
+          <button class="icon-button" id="refresh-toggle" type="button" aria-label="Pause automatic refresh" title="Pause automatic refresh">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4"/></svg>
+          </button>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="Change color theme" title="Change color theme">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content">
+        <section class="hero animate-in" id="overview" aria-labelledby="hero-title">
+          <div class="eyebrow-row">
+            <p class="eyebrow">LOCAL OBSERVER / <span id="snapshot-state">CONNECTING</span></p>
+            <p class="last-updated" id="last-updated">—</p>
+          </div>
+          <div class="overall-progress" aria-label="Overall plan progress">
+            <div class="overall-progress-heading">
+              <span>ALL PLANS</span>
+              <strong id="overall-progress-value">0 / 0</strong>
+            </div>
+            <div class="progress-track" id="overall-progress-track" role="progressbar" aria-label="Finished plans" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="overall-progress-fill"></span>
+            </div>
+            <div class="overall-progress-meta" id="overall-progress-meta"></div>
+          </div>
+          <div class="hero-grid">
+            <div>
+              <h1 id="hero-title"><span id="plan-name">Herder</span><span class="hero-slash">/</span><span class="hero-subtitle">Execution</span></h1>
+            </div>
+            <div class="hero-status" aria-live="polite">
+              <span class="live-orb" aria-hidden="true"></span>
+              <div>
+                <span class="hero-status-label">CURRENTLY</span>
+                <strong id="run-state">Loading</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section animate-in delay-1" aria-labelledby="pipeline-heading" data-collapsible-section>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">PLAN SET / LIVE PIPELINE</p>
+              <h2 id="pipeline-heading">Dependency map</h2>
+            </div>
+            <div class="section-controls">
+              <div class="filter-group" aria-label="Filter plans">
+                <button class="filter-button is-active" type="button" data-filter="all">All</button>
+                <button class="filter-button" type="button" data-filter="active">Active</button>
+                <button class="filter-button" type="button" data-filter="attention">Attention</button>
+                <button class="filter-button" type="button" data-filter="finished">Finished</button>
+              </div>
+              <button class="section-toggle" type="button" data-section-toggle data-section-label="dependency map" aria-controls="pipeline-content" aria-expanded="true">
+                <span class="sr-only">Collapse dependency map</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="pipeline-layout" id="pipeline-content">
+            <div class="graph-card">
+              <div class="graph-meta">
+                <div class="legend" aria-label="Plan status legend">
+                  <span><i class="legend-dot ready"></i>Ready</span>
+                  <span><i class="legend-dot active"></i>Active</span>
+                  <span><i class="legend-dot blocked"></i>Blocked</span>
+                  <span><i class="legend-dot complete"></i>Finished</span>
+                </div>
+                <p id="graph-caption">—</p>
+              </div>
+              <div class="graph-scroll" tabindex="0" aria-label="Scrollable dependency graph">
+                <svg id="plan-graph" role="img" aria-labelledby="graph-title graph-description">
+                  <title id="graph-title">Herder plan dependency graph</title>
+                  <desc id="graph-description">Plans are arranged from left to right by dependency depth.</desc>
+                </svg>
+                <div class="empty-state" id="graph-empty" hidden>No plans match this view.</div>
+              </div>
+            </div>
+
+            <aside class="detail-panel" id="plan-detail" aria-label="Selected plan details">
+              <div class="detail-placeholder">
+                <span class="detail-index">—</span>
+                <p>Select a plan.</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="section animate-in delay-2" aria-labelledby="integration-heading" data-collapsible-section>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">FINAL LOCK / INTEGRATION</p>
+              <h2 id="integration-heading">Integration lane</h2>
+            </div>
+            <button class="section-toggle" type="button" data-section-toggle data-section-label="integration lane" aria-controls="integration-lane" aria-expanded="true">
+              <span class="sr-only">Collapse integration lane</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg>
+            </button>
+          </div>
+          <div class="integration-lane" id="integration-lane"></div>
+        </section>
+
+        <section class="section animate-in delay-3" aria-labelledby="finished-heading" data-collapsible-section>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ARCHIVE / REVIEWED OUTCOMES</p>
+              <h2 id="finished-heading">Finished pipelines</h2>
+            </div>
+            <div class="section-controls">
+              <p class="section-note" id="finished-count"></p>
+              <button class="section-toggle" type="button" data-section-toggle data-section-label="finished pipelines" aria-controls="finished-grid" aria-expanded="true">
+                <span class="sr-only">Collapse finished pipelines</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="finished-grid" id="finished-grid"></div>
+        </section>
+
+      </main>
+
+      <footer class="site-footer">
+        <p>HERDER / LOCAL EXECUTION OBSERVER</p>
+        <p>README · SQLITE · GIT</p>
+      </footer>
+    </div>
+
+    <div class="connection-toast" id="connection-toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/dashboard.js"></script>
+  </body>
+</html>

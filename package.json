@@ -1,14 +1,26 @@
 {
-	"name": "pi-statusline-footer",
-	"version": "0.1.0",
-	"description": "Pi extensions for a rich statusline footer and CLIProxyAPI-backed OpenAI native compaction",
+	"name": "pi-extensions",
+	"version": "0.2.0",
+	"description": "Maintained Pi extensions for deterministic multi-agent execution, status telemetry, and native compaction",
 	"type": "module",
 	"license": "MIT",
-	"keywords": ["pi-package", "pi-extension", "cliproxyapi", "compaction"],
+	"keywords": ["pi-package", "pi-extension", "herder", "multi-agent", "cliproxyapi", "compaction"],
 	"scripts": {
-		"test": "vitest run"
+		"test": "vitest run test/native-compaction.test.ts && npm run test:herder",
+		"test:herder": "node extensions/herder/tests/run-smoke.ts",
+		"test:e2e:herder": "HERDER_LIVE_E2E=1 node --experimental-strip-types --test extensions/herder/tests/e2e/live-hosts.test.ts",
+		"typecheck": "tsc -p tsconfig.json"
+	},
+	"dependencies": {
+		"typebox": "^1.3.7"
 	},
 	"devDependencies": {
+		"@earendil-works/pi-agent-core": "^0.84.1",
+		"@earendil-works/pi-ai": "^0.84.1",
+		"@earendil-works/pi-coding-agent": "^0.84.1",
+		"@earendil-works/pi-tui": "^0.84.1",
+		"@types/node": "^24.12.0",
+		"typescript": "^5.9.3",
 		"vitest": "^4.1.9"
 	},
 	"peerDependencies": {
@@ -19,7 +31,14 @@
 	"pi": {
 		"extensions": [
 			"./extensions/statusline-footer.ts",
-			"./extensions/cliproxyapi-native-compaction/index.ts"
+			"./extensions/cliproxyapi-native-compaction/index.ts",
+			"./extensions/herder/adapters/pi/index.ts"
+		],
+		"skills": [
+			"./extensions/herder/skills/improve",
+			"./extensions/herder/skills/grill",
+			"./extensions/herder/skills/plans",
+			"./extensions/herder/skills/validate"
 		]
 	}
 }

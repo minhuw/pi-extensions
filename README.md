@@ -2,10 +2,35 @@
 
 A small collection of extensions for [pi](https://github.com/earendil-works/pi-coding-agent):
 
+- `herder` — deterministic multi-agent implementation and independent review over isolated Git worktrees
 - `statusline-footer` — a rich multi-line footer inspired by [claude-tui](https://github.com/slima4/claude-tui)'s Claude Code statusline
 - `cliproxyapi-native-compaction` — OpenAI Responses native compaction for genuine OpenAI models routed through CLIProxyAPI
 
-Installing this package loads both extensions. Native compaction is inert unless the active provider, API, and exact model ID pass its allowlist.
+Installing this package loads all three extensions and Herder's planning skills. Native compaction is inert unless the active provider, API, and exact model ID pass its allowlist.
+
+## Install
+
+```bash
+pi install git:github.com/minhuw/pi-extensions
+```
+
+For a local checkout:
+
+```bash
+pi install /absolute/path/to/pi-extensions
+```
+
+## Herder
+
+Herder turns a validated Markdown plan graph into concurrent Implementer and Reviewer pipelines. Its deterministic manager owns scheduling, SQLite accounting, stable branches/worktrees, immutable assignments, gates, exact review approval, recovery, and serialized integration. Pi workers start with clean histories and never inherit the root transcript or load nested extensions.
+
+```text
+/herder-fire herder-plans --profile eclipse
+```
+
+Agentic planning commands are `/herder-grill`, `/herder-improve`, and `/herder-validate`. `/herder-plans` provides immediate deterministic graph operations without a model turn. Execution commands are `/herder-fire`, `/herder-resume`, `/herder-revise`, `/herder-status`, `/herder-dashboard`, and `/herder-stop`.
+
+Profiles select exact root and worker models; Herder never substitutes an unavailable model. See [Herder's extension documentation](extensions/herder/README.md) for the profile list and runtime contract.
 
 ## Statusline footer
 
@@ -34,26 +59,6 @@ A one-line compact mode is also available.
 - **Git awareness** — branch plus working-tree `+adds −dels`, refreshed in the background (zero render cost)
 - **Nerd Font icons + semantic theme colors** — respects your pi theme
 - **Zero hot-path cost** — session stats are cached keyed by branch leaf; git stats are throttled and async
-
-## Install
-
-From git (replace with the actual repo URL):
-
-```bash
-pi install git:github.com/minhuw/pi-statusline-footer
-```
-
-Or from a local clone:
-
-```bash
-git clone <repo-url> && pi install /path/to/pi-statusline-footer
-```
-
-Or try it without installing (current run only):
-
-```bash
-pi -e git:github.com/minhuw/pi-statusline-footer
-```
 
 ## Statusline usage
 

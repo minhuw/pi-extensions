@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+
+import process from "node:process"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+
+const PLAN_ID = /^\d{3,}$/
+const PLAN_NAME = /^[a-z0-9][a-z0-9._-]*$/
+const CURRENT_GENERATION = /^generation-(\d+)$/
+
+export interface CheckpointRef {
+  kind: "checkpoint"
+  plan: string
+  generation: string
+  generationNumber?: string
+  ordinal: string
+  format: "generation" | "numeric-legacy"
+  ref?: string
+  relative?: string
+}
+
+export type CoordinationRef = CheckpointRef
+  | { kind: "base"; plan: null }
+  | { kind: "completed"; plan: string }
+  | { kind: "run-checkpoint"; plan: null; ordinal: string }
+
+export interface FormatCheckpointInput {
+  planName: string
+  plan: string
+  generation: string
+  ordinal: string | number | bigint
+}
+
+function fail(message: string): never {
+  throw new Error(message)
+}
+
+function validPlanName(value: string): boolean {
+  return PLAN_NAME.test(value)
+    && !value.includes("..")
+    && !value.endsWith(".")
+    && !value.endsWith(".lock")
+}
+
+export function parseCheckpointRefRelative(relative: string): CheckpointRef | null {
+  const current = String(relative).match(/^checkpoints\/(\d{3,})\/(generation-(\d+))-(\d+)$/)
+  if (current) {
+    return {
+      kind: "checkpoint",
+      plan: current[1],
+      generation: current[2],
+      generationNumber: current[3],
+      ordinal: current[4],
+      format: "generation",
+    }
+  }
+  const numeric = String(relative).match(/^checkpoints\/(\d{3,})\/(\d+)-(\d+)$/)
+  if (numeric) {
+    return {
+      kind: "checkpoint",
+      plan: numeric[1],
+      generation: numeric[2],
+      generationNumber: numeric[2],
+      ordinal: numeric[3],
+      format: "numeric-legacy",
+    }
+  }
+  return null
+}
+
+export function parseCoordinationRefRelative(relative: string): CoordinationRef | null {
+  const value = String(relative)
+  if (value === "base") return { kind: "base", plan: null }
+  const completed = value.match(/^completed\/(\d{3,})$/)
+  if (completed) return { kind: "completed", plan: completed[1] }
+  const checkpoint = parseCheckpointRefRelative(value)
+  if (checkpoint) return checkpoint
+  const runCheckpoint = value.match(/^checkpoints\/RUN\/(\d+)$/)
+  if (runCheckpoint) {
+    return { kind: "run-checkpoint", plan: null, ordinal: runCheckpoint[1] }
+  }
+  return null
+}
+
+export function formatCheckpointRef({ planName, plan, generation, ordinal }: FormatCheckpointInput): CheckpointRef & { ref: string; relative: string; format: "generation" } {
+  const normalizedPlanName = String(planName)
+  const normalizedPlan = String(plan)
+  const normalizedGeneration = String(generation)
+  const normalizedOrdinal = String(ordinal)
+  if (!validPlanName(normalizedPlanName)) fail(`Invalid plan-set name: ${JSON.stringify(planName)}`)
+  if (!PLAN_ID.test(normalizedPlan)) fail(`Invalid checkpoint plan ID: ${JSON.stringify(plan)}`)
+  if (!CURRENT_GENERATION.test(normalizedGeneration)) {
+    fail(`Checkpoint generation must use generation-<n>: ${JSON.stringify(generation)}`)
+  }
+  if (!/^\d+$/.test(normalizedOrdinal) || BigInt(normalizedOrdinal) < 1n) {
+    fail(`Checkpoint ordinal must be a positive integer: ${JSON.stringify(ordinal)}`)
+  }
+  const canonicalOrdinal = BigInt(normalizedOrdinal).toString().padStart(3, "0")
+  const relative = `checkpoints/${normalizedPlan}/${normalizedGeneration}-${canonicalOrdinal}`
+  return {
+    ref: `refs/plan-herder/${normalizedPlanName}/${relative}`,
+    relative,
+    kind: "checkpoint",
+    plan: normalizedPlan,
+    generation: normalizedGeneration,
+    ordinal: canonicalOrdinal,
+    format: "generation",
+  }
+}
+
+function takeValue(args: string[], index: number, name: string): string {
+  const value = args[index + 1]
+  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
+  return value
+}
+
+function main(argv: string[]): void {
+  const command = argv.shift()
+  if (command !== "format-checkpoint") {
+    fail("usage: coordination-ref.ts format-checkpoint --plan-name <name> --plan <id> --generation generation-<n> --ordinal <n> [--pretty]")
+  }
+  const options: Partial<Record<"planName" | "plan" | "generation" | "ordinal", string>> & { pretty: boolean } = { pretty: false }
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument === "--pretty") {
+      options.pretty = true
+      continue
+    }
+    if (!["--plan-name", "--plan", "--generation", "--ordinal"].includes(argument)) {
+      fail(`Unknown argument: ${argument}`)
+    }
+    const key = argument.slice(2).replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase()) as "planName" | "plan" | "generation" | "ordinal"
+    options[key] = takeValue(argv, index, argument)
+    index += 1
+  }
+  for (const name of ["planName", "plan", "generation", "ordinal"] as const) {
+    if (!options[name]) fail(`--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} is required`)
+  }
+  const result = { ok: true, command, ...formatCheckpointRef(options as FormatCheckpointInput) }
+  process.stdout.write(`${JSON.stringify(result, null, options.pretty ? 2 : 0)}\n`)
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
+  try {
+    main(process.argv.slice(2))
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`)
+    process.exitCode = 1
+  }
+}

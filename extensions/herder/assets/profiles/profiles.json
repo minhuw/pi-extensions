@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "default": "eclipse",
+  "profiles": [
+    {
+      "name": "eclipse",
+      "description": "Sol orchestrates and reviews while Luna implements.",
+      "orchestrator": { "model": "gpt-5.6-sol", "effort": "max" },
+      "roles": {
+        "plan-implementer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
+        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+        "plan-judge": { "model": "gpt-5.6-sol", "effort": "xhigh" }
+      }
+    },
+    {
+      "name": "shannon",
+      "description": "Claude orchestrates, implements, reviews, and judges.",
+      "orchestrator": { "model": "claude-opus-4-8", "effort": "high" },
+      "roles": {
+        "plan-implementer": { "model": "claude-opus-4-8", "effort": "high" },
+        "plan-reviewer": { "model": "claude-opus-4-8", "effort": "xhigh" },
+        "plan-judge": { "model": "claude-opus-4-8", "effort": "xhigh" }
+      }
+    },
+    {
+      "name": "offcut",
+      "description": "Kimi orchestrates, Grok implements, and Sol reviews and judges.",
+      "orchestrator": { "model": "kimi-k3", "effort": "max" },
+      "roles": {
+        "plan-implementer": { "model": "grok-4.5", "effort": "high" },
+        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+        "plan-judge": { "model": "gpt-5.6-sol", "effort": "xhigh" }
+      }
+    }
+  ]
+}
