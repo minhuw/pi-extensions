@@ -46,8 +46,6 @@ The `herder` tool exposes fire, resume, revise, status, and dashboard actions to
 
 The shared deterministic Run Manager retains ownership of plan state, SQLite accounting, stable branches/worktrees, immutable assignments, review rounds, recovery, gates, and serialized integration. The native Pi adapter supplies only fresh child sessions and their lifecycle events.
 
-The extension translates manager actions directly into Implementer, Reviewer, and Judge child sessions and sends their terminal evidence back to the service. The manager backfills the global pool as soon as any role finishes. Each plan keeps one Herder-owned branch/worktree; the worker engine never creates another worktree or branch. Only integration is globally serialized.
-
 Three generic package agents are available for every profile:
 
 ```text
@@ -57,3 +55,21 @@ herder.plan-judge
 ```
 
 The profile supplies each exact model and Pi thinking level at launch. Before repository mutation, Herder validates the root model, requested child-model efforts, and package-owned definitions against the same Pi model runtime used for children. It never substitutes another model after failure.
+
+## Orchestration workflow
+
+Pi is Herder's only host. The adapter translates deterministic manager actions into native clean child sessions; it does not schedule work itself.
+
+**Service and dashboard.** Fire, resume, and revise check the authenticated service identity stored in the plan directory's SQLite database. A healthy service is reused; a live but unresponsive one is waited out through a grace period and replaced only when wedged, never duplicated. The service runs the manager core on a worker thread, so loopback health stays responsive during reconciliation, and starts the read-only dashboard on an ephemeral port. The service can disappear without losing run authority: a replacement reconstructs state from SQLite generations and phases, exact Git refs, worktrees, leases, and immutable assignments. README lifecycle is a projection; Pi session entries are UI hints only.
+
+**Worker transport.** The manager returns a batch of exact actions. For each action, the adapter creates one native Pi SDK session with:
+
+- the exact profile-selected role agent, model, thinking level, and service tier;
+- a new persisted `SessionManager` with no parent and zero inherited messages;
+- the manager-owned stable worktree as `cwd`;
+- the complete manager prompt and immutable assignment evidence; and
+- no extensions, skills, nested agents, managed temporary worktree, or second scheduler.
+
+The adapter prepares the clean sessions, returns action IDs and opaque `pi-worker:` session handles as one dispatch-results event, and starts workers only after that event is accepted. Each completion maps directly to its action and returns token and timing evidence as one terminal event. Event posts retry transport failures with backoff while reusing the same event ID, because the manager dedupes exact replays; a serialized adapter queue prevents simultaneous completions from racing manager transitions. The manager applies gates, review policy, accounting, integration, and role-agnostic slot backfill before returning the next batch. Worker sessions never receive the root transcript.
+
+**Concurrency and recovery.** `maxParallel` is the complete Implementer/Reviewer/Judge pool. No control slot is reserved. Reviews and judgments for one plan may overlap implementation on another; only integration is serialized in the manager service. On Pi session restart, an in-process worker handle that vanished is reported as interrupted so the manager applies its transport-retry policy; a foreign or legacy engine handle fails closed instead of dispatching a competing worker. Plan edits pause resume on graph drift; `/herder-revise` adopts a validated new immutable generation once workers settle. Stop aborts active child sessions, marks their exact actions interrupted, and preserves repository evidence.

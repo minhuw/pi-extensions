@@ -59,7 +59,7 @@ test("Pi exposes current-session agentic workflows, direct plan commands, and th
 });
 
 test("Pi orchestration specifies clean sessions and serialized integration", async () => {
-	const protocol = await readFile(path.join(extensionRoot, "adapters/orchestration.md"), "utf8");
+	const protocol = await readFile(path.join(extensionRoot, "adapters/README.md"), "utf8");
 	assert.match(protocol, /new persisted `SessionManager` with no parent/);
 	assert.match(protocol, /managed temporary worktree/);
 	assert.match(protocol, /opaque `pi-worker:` session handles/);
