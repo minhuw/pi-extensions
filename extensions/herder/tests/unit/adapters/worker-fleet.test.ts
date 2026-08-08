@@ -36,15 +36,16 @@ test("Pi worker fleet renders a plan and worker hierarchy", () => {
 
 	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
 	assert.equal(lines[1], "└─ Plan 018");
-	assert.match(lines[2]!, /^   └─ ⠋ Reviewer  running command…\s+r2 · ↻2 · 3 tools · 12\.4k · 1m05\.0s$/);
+	assert.match(lines[2]!, /^   └─ ⠋ Reviewer  running command…\s+r2 · ↻2 · 3 tools · 12\.4k · 1m 05s$/);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
 });
 
-test("worker elapsed time advances in tenths and formats long runs", () => {
-	assert.equal(formatWorkerElapsed(1_000, 1_050), "0.0s");
-	assert.equal(formatWorkerElapsed(1_000, 2_250), "1.2s");
-	assert.equal(formatWorkerElapsed(1_000, 66_250), "1m05.2s");
-	assert.equal(formatWorkerElapsed(1_000, 3_667_250), "1h01m06.2s");
+test("worker elapsed time uses compact whole-second formatting", () => {
+	assert.equal(formatWorkerElapsed(1_000, 1_050), "0s");
+	assert.equal(formatWorkerElapsed(1_000, 2_250), "1s");
+	assert.equal(formatWorkerElapsed(1_000, 66_250), "1m 05s");
+	assert.equal(formatWorkerElapsed(1_000, 582_000), "9m 41s");
+	assert.equal(formatWorkerElapsed(1_000, 3_667_250), "1h 01m 06s");
 });
 
 test("live widget registers once and requests lightweight rerenders", () => {

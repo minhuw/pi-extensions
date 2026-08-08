@@ -3,7 +3,7 @@ import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui"
 import type { PiWorkerSnapshot } from "./worker-engine.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const TICK_MS = 1_000;
+const TICK_MS = 200;
 const MAX_VISIBLE_WORKERS = 5;
 
 // Nerd Font glyphs (Font Awesome range), matching the statusline footer.
@@ -58,15 +58,13 @@ function formatTokens(tokens: number): string {
 }
 
 export function formatWorkerElapsed(startedAt: number, now = Date.now()): string {
-	const elapsed = Math.max(0, now - startedAt);
-	const wholeSeconds = Math.floor(elapsed / 1_000);
-	const tenths = Math.floor((elapsed % 1_000) / 100);
-	if (wholeSeconds < 60) return `${wholeSeconds}.${tenths}s`;
+	const wholeSeconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+	if (wholeSeconds < 60) return `${wholeSeconds}s`;
 	const minutes = Math.floor(wholeSeconds / 60);
 	const seconds = wholeSeconds % 60;
-	if (minutes < 60) return `${minutes}m${String(seconds).padStart(2, "0")}.${tenths}s`;
+	if (minutes < 60) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 	const hours = Math.floor(minutes / 60);
-	return `${hours}h${String(minutes % 60).padStart(2, "0")}m${String(seconds).padStart(2, "0")}.${tenths}s`;
+	return `${hours}h ${String(minutes % 60).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
 }
 
 function statusStyle(status: HerderWidgetModel["status"]): { color: ThemeColor; icon: string } {
