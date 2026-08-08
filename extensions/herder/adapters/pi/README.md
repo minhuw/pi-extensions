@@ -14,7 +14,7 @@ Start Pi with the root model and thinking level required by the chosen profile:
 
 ```text
 pi --model <provider>/kimi-k3 --thinking max
-/herder-fire herder-plans --profile offcut
+/herder-fire herder-plans --profile poorman
 ```
 
 Available commands:

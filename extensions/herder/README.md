@@ -65,8 +65,7 @@ Pi also exposes the packaged planning skills as `/skill:herder-improve`, `/skill
 | Profile | Orchestrator | Implementer | Reviewer and Judge |
 | --- | --- | --- | --- |
 | `eclipse` (default) | `gpt-5.6-sol` at `max` | `gpt-5.6-luna` at `max` on the fast tier | `gpt-5.6-sol` at `xhigh` |
-| `shannon` | `claude-opus-4-8` at `high` | `claude-opus-4-8` at `high` | `claude-opus-4-8` at `xhigh` |
-| `offcut` | `kimi-k3` at `max` | `grok-4.5` at `high` | `gpt-5.6-sol` at `xhigh` |
+| `poorman` | `kimi-k3` at `max` | `deepseek-v4-flash` at `high` | `gpt-5.6-luna` at `max` |
 
 Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`.
 

@@ -14,7 +14,7 @@ Run only Herder's deterministic suite with:
 npm run test:herder
 ```
 
-The live Pi/Offcut fixture requires the configured models and provider endpoint:
+The live Pi/Poorman fixture requires the configured models and provider endpoint:
 
 ```sh
 npm run test:e2e:herder
@@ -24,6 +24,6 @@ The live test starts Pi with extension discovery disabled and explicitly loads t
 
 ## Live CI
 
-`.github/workflows/herder-live-e2e.yml` runs the Pi/Offcut fixture after Herder-related pushes to `master` and through manual dispatch. It installs the CLIProxyAPI Pi provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
+`.github/workflows/herder-live-e2e.yml` runs the Pi/Poorman fixture after Herder-related pushes to `master` and through manual dispatch. It installs the CLIProxyAPI Pi provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
 
 The workflow requires the `CLIPROXY_API_KEY` and `CLIPROXY_BASE_URL` repository secrets. Never place their values in workflow files, logs, fixtures, or committed environment files.
