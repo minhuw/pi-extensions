@@ -20,7 +20,7 @@ import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } from "./worker-engine.ts";
-import { workerFleetLines } from "./worker-fleet.ts";
+import { HerderWidget } from "./worker-fleet.ts";
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "../..");
@@ -69,6 +69,7 @@ function toolResult(text: string, isError = false) {
 export default function registerHerderPi(pi: ExtensionAPI): void {
 	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT);
 	const engine = new PiWorkerEngine(sessionFactory);
+	const widget = new HerderWidget();
 	const workers = new Map<string, WorkerBinding>();
 	let currentState: HerderRunState | undefined;
 	let lastContext: ExtensionContext | undefined;
@@ -84,16 +85,27 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		if (!ctx?.hasUI) return;
 		if (!currentState) {
 			ctx.ui.setStatus("herder", undefined);
-			ctx.ui.setWidget("herder", undefined);
+			widget.update(ctx, undefined);
 			return;
 		}
-		ctx.ui.setStatus("herder", `Herder ${currentState.status}`);
-		ctx.ui.setWidget("herder", [
-			stateLine(currentState),
-			summaryLine(lastSummary),
-			...workerFleetLines(engine.snapshots()),
-			currentState.dashboardUrl,
-		].filter((line): line is string => Boolean(line)), { placement: "belowEditor" });
+		const statusColor = currentState.status === "complete"
+			? "success"
+			: currentState.status === "failed"
+				? "error"
+				: ["needs_input", "paused"].includes(currentState.status)
+					? "warning"
+					: "accent";
+		ctx.ui.setStatus("herder", ctx.ui.theme.fg(statusColor, `Herder ${currentState.status}`));
+		const summary = summaryLine(lastSummary);
+		widget.update(ctx, {
+			status: currentState.status,
+			profile: currentState.profile,
+			maxParallel: currentState.maxParallel,
+			planName: path.basename(currentState.planDir),
+			...(summary ? { summaryLine: summary } : {}),
+			...(currentState.dashboardUrl ? { dashboardUrl: currentState.dashboardUrl } : {}),
+			workers: engine.snapshots(),
+		});
 	};
 
 	const repositoryRoot = async (ctx: ExtensionContext): Promise<string> => {
@@ -442,6 +454,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		widget.dispose();
 		lastContext = undefined;
 	});
 }

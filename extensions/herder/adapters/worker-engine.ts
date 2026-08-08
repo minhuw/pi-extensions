@@ -29,6 +29,7 @@ export interface PiWorkerSnapshot {
 	handle: string;
 	actionId: string;
 	planId: string;
+	round: number;
 	role: ManagerAction["role"];
 	model: string;
 	effort: string;
@@ -337,6 +338,7 @@ export class PiWorkerEngine {
 			handle,
 			actionId: request.action.actionId,
 			planId: request.action.planId,
+			round: request.action.round,
 			role: request.action.role,
 			model: request.action.model,
 			effort: request.action.effort,
