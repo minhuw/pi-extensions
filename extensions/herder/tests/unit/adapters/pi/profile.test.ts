@@ -19,15 +19,15 @@ const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 const registry = path.join(packageRoot, "src/core/profile-registry.ts");
 
 test("Pi resolves profile models into three generic package agents", async () => {
-	const profile = await loadPiProfile(catalog, "offcut");
+	const profile = await loadPiProfile(catalog, "poorman");
 	assert.equal(profile.host, "pi");
 	assert.deepEqual(profile.orchestrator, { model: "kimi-k3", effort: "max" });
 	assert.equal(profile.roles["plan-implementer"].agent_type, "herder.plan-implementer");
-	assert.equal(profile.roles["plan-implementer"].model, "grok-4.5");
+	assert.equal(profile.roles["plan-implementer"].model, "deepseek-v4-flash");
 	assert.equal(profile.roles["plan-implementer"].effort, "high");
 	assert.equal(profile.roles["plan-reviewer"].agent_type, "herder.plan-reviewer");
 
-	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "offcut"], { encoding: "utf8" }));
+	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
 	assert.deepEqual(profile.roles, registryProfile.roles);
 });
@@ -48,16 +48,16 @@ test("Pi rejects thinking levels that the resolved model cannot honor", () => {
 });
 
 test("model checks accept provider-qualified catalog entries without substitution", async () => {
-	const profile = await loadPiProfile(catalog, "offcut");
+	const profile = await loadPiProfile(catalog, "poorman");
 	const available = [
 		{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3" },
-		{ provider: "proxy", id: "grok-4.5", fullId: "proxy/grok-4.5" },
-		{ provider: "proxy", id: "gpt-5.6-sol", fullId: "proxy/gpt-5.6-sol" },
+		{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash" },
+		{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna" },
 	];
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[0]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-sol"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
 });
 
 test("Pi profile catalogs reject host-specific compatibility fields", async () => {

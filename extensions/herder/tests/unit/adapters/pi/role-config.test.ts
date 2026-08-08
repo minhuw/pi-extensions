@@ -13,8 +13,8 @@ const agentRoot = path.join(packageRoot, "assets/roles/pi");
 
 const available = [
 	{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3", thinkingLevelMap: { max: "max" } },
-	{ provider: "proxy", id: "grok-4.5", fullId: "proxy/grok-4.5", thinkingLevelMap: { high: "high", max: null } },
-	{ provider: "proxy", id: "gpt-5.6-sol", fullId: "proxy/gpt-5.6-sol", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+	{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash", thinkingLevelMap: { high: "high", max: null } },
+	{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna", thinkingLevelMap: { max: "max" } },
 ];
 
 test("Herder loads exact non-recursive Pi role definitions", async () => {
@@ -26,10 +26,10 @@ test("Herder loads exact non-recursive Pi role definitions", async () => {
 });
 
 test("Herder validates package roles against the built-in engine model catalog", async () => {
-	const profile = await loadPiProfile(catalog, "offcut");
+	const profile = await loadPiProfile(catalog, "poorman");
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, available));
 	await assert.rejects(
-		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "grok-4.5" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
+		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "deepseek-v4-flash" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
 		/does not support thinking high/,
 	);
 });

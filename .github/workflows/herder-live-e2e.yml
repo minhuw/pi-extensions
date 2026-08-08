@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   live-e2e:
-    name: Pi / Offcut
+    name: Pi / Poorman
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

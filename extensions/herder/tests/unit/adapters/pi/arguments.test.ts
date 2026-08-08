@@ -7,7 +7,7 @@ import { parseFireArguments, parsePlanCommandArguments, parsePlanDirArguments, t
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../../adapters/pi/lib/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
-	assert.deepEqual(tokenizeArguments(`"plans with spaces" --profile 'offcut'`), ["plans with spaces", "--profile", "offcut"]);
+	assert.deepEqual(tokenizeArguments(`"plans with spaces" --profile 'poorman'`), ["plans with spaces", "--profile", "poorman"]);
 	assert.deepEqual(tokenizeArguments("plans\\ with\\ spaces"), ["plans with spaces"]);
 	assert.throws(() => tokenizeArguments("'unfinished"), /unterminated quote/);
 });
@@ -29,10 +29,10 @@ test("fire defaults to a five-worker pool and an ephemeral dashboard port", () =
 		planDir: "herder-plans",
 		dashboardPort: 0,
 	});
-	assert.deepEqual(parseFireArguments("custom --profile offcut --max-parallel 7 --dashboard-port 4312", "resume"), {
+	assert.deepEqual(parseFireArguments("custom --profile poorman --max-parallel 7 --dashboard-port 4312", "resume"), {
 		mode: "resume",
 		planDir: "custom",
-		profile: "offcut",
+		profile: "poorman",
 		maxParallel: 7,
 		dashboardPort: 4312,
 	});

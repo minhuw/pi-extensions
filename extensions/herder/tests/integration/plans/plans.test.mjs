@@ -179,13 +179,13 @@ try {
 
   const readmeBeforeUsage = fs.readFileSync(valid.readme, "utf8")
   const runProfile = {
-    profile: "offcut",
+    profile: "poorman",
     profileSha256: "1c5a08366d983d588fe0b8dfaf9f2c03d1c0801ab194b27c85da8b5e7f6453e2",
     host: "pi",
     roles: {
-      "plan-implementer": { agent_type: "herder.plan-implementer", model: "grok-4.5", effort: "high" },
-      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
-      "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-sol", effort: "xhigh" },
+      "plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek-v4-flash", effort: "high" },
+      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-luna", effort: "max" },
+      "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-luna", effort: "max" },
     },
   }
   assert.equal(bindRunProfile(valid.planDir, runProfile).recorded, true)
@@ -193,14 +193,14 @@ try {
   assert.deepEqual(getRunProfile(valid.planDir).configuration.roles, runProfile.roles)
   expectFailure(
     () => bindRunProfile(valid.planDir, { ...runProfile, profile: "eclipse" }),
-    /already bound to offcut/,
+    /already bound to poorman/,
   )
   const implementerUsage = {
     plan: "002",
     role: "plan-implementer",
     attempt: "run-1-002-implementer-1",
-    model: "gpt-5.6-luna",
-    effort: "max",
+    model: "deepseek-v4-flash",
+    effort: "high",
     outcome: "COMPLETE",
     inputTokens: "1000",
     cachedInputTokens: "400",
@@ -221,8 +221,8 @@ try {
     plan: "002",
     role: "plan-reviewer",
     attempt: "run-1-002-reviewer-1",
-    model: "gpt-5.6-sol",
-    effort: "xhigh",
+    model: "gpt-5.6-luna",
+    effort: "max",
     outcome: "APPROVE",
     source: "unknown",
     round: "1",
@@ -243,9 +243,9 @@ try {
     knownTokens: 1200,
   }])
   assert.equal(usage.byRole.find((row) => row.key === "plan-implementer").knownTokens, 1200)
-  assert.equal(usage.byModel.find((row) => row.key === "gpt-5.6-sol / xhigh").tokenAttempts, 0)
+  assert.equal(usage.byModel.find((row) => row.key === "gpt-5.6-luna / max").tokenAttempts, 0)
   assert.equal(usage.storage, "sqlite")
-  assert.equal(usage.runConfiguration.profile, "offcut")
+  assert.equal(usage.runConfiguration.profile, "poorman")
   assert.equal(fs.readFileSync(valid.readme, "utf8"), readmeBeforeUsage)
   assert.equal(fs.existsSync(executionDatabasePath(valid.planDir)), true)
   const databaseBeforeReports = fs.readFileSync(executionDatabasePath(valid.planDir))
@@ -262,7 +262,7 @@ try {
   assert.equal(planReport.byGeneration.find((row) => row.key === "generation-1").attempts, 2)
   assert.equal(planReport.byServiceTier.find((row) => row.key === "fast").attempts, 1)
   assert.equal(planReport.lifecycle.status, "TODO")
-  assert.equal(planReport.runConfiguration.profile, "offcut")
+  assert.equal(planReport.runConfiguration.profile, "poorman")
   assert.deepEqual(fs.readFileSync(executionDatabasePath(valid.planDir)), databaseBeforeReports)
   expectFailure(
     () => recordUsage(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),

@@ -10,7 +10,7 @@ test("session restoration uses the newest valid Herder entry", () => {
 		runId: "run-1",
 		repoRoot: "/tmp/repo",
 		planDir: "/tmp/repo/herder-plans",
-		profile: "offcut",
+		profile: "poorman",
 		maxParallel: 5,
 		dashboardEnabled: true,
 		startedAt: 1,

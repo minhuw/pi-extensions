@@ -34,7 +34,7 @@ async function invokePi(repository: string, planDirectory: string, logFile: stri
 	child.stdin.write(`${JSON.stringify({
 		id: "herder-fire",
 		type: "prompt",
-		message: "/herder-fire herder-plans --profile offcut --max-parallel 1",
+		message: "/herder-fire herder-plans --profile poorman --max-parallel 1",
 	})}\n`);
 	const deadline = Date.now() + timeout;
 	try {
@@ -57,7 +57,7 @@ async function invokePi(repository: string, planDirectory: string, logFile: stri
 	}
 }
 
-test("live Pi/Offcut run", { skip: !enabled, timeout: timeout + 60_000 }, async () => {
+test("live Pi/Poorman run", { skip: !enabled, timeout: timeout + 60_000 }, async () => {
 	const workspace = mkdtempSync(path.join(os.tmpdir(), "herder-pi-live-"));
 	const logFile = path.join(workspace, "pi.log");
 	let passed = false;
@@ -65,7 +65,7 @@ test("live Pi/Offcut run", { skip: !enabled, timeout: timeout + 60_000 }, async 
 		execFileSync(process.execPath, [fixtureScript, "create", workspace], { cwd: extensionRoot, stdio: "pipe" });
 		const fixture = JSON.parse(readFileSync(path.join(workspace, "fixture.json"), "utf8"));
 		await invokePi(fixture.repository, fixture.planDirectory, logFile);
-		execFileSync(process.execPath, [fixtureScript, "verify", workspace, "--host", "pi", "--profile", "offcut"], {
+		execFileSync(process.execPath, [fixtureScript, "verify", workspace, "--host", "pi", "--profile", "poorman"], {
 			cwd: extensionRoot,
 			stdio: "pipe",
 			timeout: 60_000,
