@@ -27,8 +27,28 @@ export interface AvailableModel {
 	provider?: string;
 	id?: string;
 	fullId?: string;
+	api?: string;
 	reasoning?: boolean;
 	thinkingLevelMap?: Partial<Record<ThinkingEffort, string | null>>;
+}
+
+/** Pi-ai provider APIs whose request options accept a service tier. */
+export const SERVICE_TIER_APIS = new Set(["openai-responses", "openai-codex-responses"]);
+
+const SERVICE_TIER_REQUEST_VALUES: Record<string, string> = {
+	fast: "priority",
+	standard: "default",
+};
+
+/** Maps a Herder profile service tier to the exact provider request value. */
+export function serviceTierRequestValue(tier: string): string {
+	const value = SERVICE_TIER_REQUEST_VALUES[tier];
+	if (!value) throw new Error(`Unknown Herder service tier ${JSON.stringify(tier)}.`);
+	return value;
+}
+
+export function modelSupportsServiceTier(model: AvailableModel): boolean {
+	return Boolean(model.api && SERVICE_TIER_APIS.has(model.api));
 }
 
 export function modelMatches(requested: string, candidate: AvailableModel): boolean {

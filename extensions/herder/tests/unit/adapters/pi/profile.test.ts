@@ -11,6 +11,8 @@ import {
 	loadPiProfile,
 	modelMatches,
 	modelSupportsEffort,
+	modelSupportsServiceTier,
+	serviceTierRequestValue,
 	unavailableProfileModels,
 } from "../../../../adapters/pi/lib/profile.ts";
 
@@ -45,6 +47,16 @@ test("Pi rejects thinking levels that the resolved model cannot honor", () => {
 	assert.equal(effectiveModelSupportsEffort("proxy/grok-4.5:high", "high", [grok]), true);
 	assert.equal(effectiveModelSupportsEffort("proxy/grok-4.5:max", "max", [grok]), false);
 	assert.equal(effectiveModelSupportsEffort("other/grok-4.5:high", "high", [grok]), false);
+});
+
+test("service tiers map to exact provider request values on capable APIs only", () => {
+	assert.equal(serviceTierRequestValue("fast"), "priority");
+	assert.equal(serviceTierRequestValue("standard"), "default");
+	assert.throws(() => serviceTierRequestValue("flex"), /Unknown Herder service tier/);
+	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-codex-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5", api: "openai-completions" }), false);
+	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5" }), false);
 });
 
 test("model checks accept provider-qualified catalog entries without substitution", async () => {

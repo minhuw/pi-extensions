@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction } from "../../../../src/shared/protocol.ts";
 import {
+	applyServiceTier,
 	finalAssistantResult,
 	PiWorkerEngine,
 	type PiWorkerRequest,
@@ -109,6 +110,25 @@ class FakeFactory implements PiWorkerSessionFactory {
 		return session;
 	}
 }
+
+test("applyServiceTier pins every stream request to the exact provider tier", () => {
+	const seen: unknown[] = [];
+	const session = {
+		agent: {
+			streamFunction: (_model: unknown, _context: unknown, options?: unknown) => {
+				seen.push(options);
+				return "stream";
+			},
+		},
+	};
+	applyServiceTier(session as never, "fast");
+	const result = session.agent.streamFunction("model", "context", { reasoning: "max" });
+	assert.equal(result, "stream");
+	assert.deepEqual(seen[0], { reasoning: "max", serviceTier: "priority" });
+	session.agent.streamFunction("model", "context");
+	assert.deepEqual(seen[1], { serviceTier: "priority" });
+	assert.throws(() => applyServiceTier(session as never, "flex"), /Unknown Herder service tier/);
+});
 
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
 	const factory = new FakeFactory();

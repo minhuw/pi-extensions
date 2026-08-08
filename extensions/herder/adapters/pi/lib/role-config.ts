@@ -5,6 +5,7 @@ import {
 	HERDER_ROLES,
 	modelMatches,
 	modelSupportsEffort,
+	modelSupportsServiceTier,
 	type AvailableModel,
 	type HerderRole,
 	type ResolvedPiProfile,
@@ -69,6 +70,9 @@ export async function validateHerderRoleAgents(
 		const candidate = availableModels.find((model) => modelMatches(mapping.model, model));
 		if (!candidate || !modelSupportsEffort(candidate, mapping.effort)) {
 			throw new Error(`Herder role ${definition.agentType} cannot start because ${mapping.model} does not support thinking ${mapping.effort}.`);
+		}
+		if (mapping.service_tier && !modelSupportsServiceTier(candidate)) {
+			throw new Error(`Herder role ${definition.agentType} cannot start because ${mapping.model} (${candidate.api || "unknown api"}) does not support service tier ${mapping.service_tier}.`);
 		}
 	}
 }

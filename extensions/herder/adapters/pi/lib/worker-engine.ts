@@ -13,7 +13,14 @@ import {
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction, UsageEvidence } from "../../../src/shared/protocol.ts";
-import { modelMatches, modelSupportsEffort, type AvailableModel, type ThinkingEffort } from "./profile.ts";
+import {
+	modelMatches,
+	modelSupportsEffort,
+	modelSupportsServiceTier,
+	serviceTierRequestValue,
+	type AvailableModel,
+	type ThinkingEffort,
+} from "./profile.ts";
 import { loadHerderPiRole } from "./role-config.ts";
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
@@ -78,6 +85,17 @@ type TerminalListener = (terminal: PiWorkerTerminal) => void | Promise<void>;
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Pins every request of a worker session to the profile's exact service tier by
+ * wrapping the agent stream function. Herder never downgrades a tier silently.
+ */
+export function applyServiceTier(session: AgentSession, tier: string): void {
+	const serviceTier = serviceTierRequestValue(tier);
+	const base = session.agent.streamFunction;
+	session.agent.streamFunction = (model, context, options) =>
+		base(model, context, { ...options, serviceTier } as typeof options);
 }
 
 function roleFromAgentType(agentType: string): ManagerAction["role"] {
@@ -189,6 +207,9 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		if (!modelSupportsEffort(model, request.action.effort as ThinkingEffort)) {
 			throw new Error(`Pi worker model ${request.action.model} does not support thinking ${request.action.effort}.`);
 		}
+		if (request.action.serviceTier && !modelSupportsServiceTier(model)) {
+			throw new Error(`Pi worker model ${request.action.model} (${model.api || "unknown api"}) does not support service tier ${request.action.serviceTier}.`);
+		}
 
 		const sessionRoot = path.join(request.planDirectory, ".herder", "pi-sessions");
 		await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
@@ -219,6 +240,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			session.dispose();
 			throw new Error("Herder Pi worker session was not created with clean history.");
 		}
+		if (request.action.serviceTier) applyServiceTier(session, request.action.serviceTier);
 		return session;
 	}
 }
