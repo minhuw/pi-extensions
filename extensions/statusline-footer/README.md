@@ -51,6 +51,7 @@ Compact mode renders the essential model, context, cost, time, turn, throughput,
 - A live context-window bar changes from green to yellow to red as usage approaches the model limit.
 - The current thinking effort appears immediately after the model name and updates when the session setting changes.
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated.
+- Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
 - Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history.
 - Git branch and working-tree additions/deletions refresh asynchronously in the background.

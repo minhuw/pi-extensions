@@ -86,15 +86,22 @@ interface StatsCache {
 	stats: Stats;
 }
 
-let statsCache: StatsCache | undefined;
+interface SessionState {
+	statsCache?: StatsCache;
+	metrics: StreamMetrics;
+	gitStat: GitStat | null;
+	gitStatAt: number;
+	gitStatCwd: string;
+	requestRender?: () => void;
+}
 
-function collectStats(ctx: ExtensionContext): Stats {
+function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 	const leafId = ctx.sessionManager.getLeafId();
-	if (statsCache && statsCache.leafId === leafId) {
-		statsCache.stats.durationMs = statsCache.firstTs
-			? Math.max(0, Date.now() - statsCache.firstTs)
+	if (state.statsCache && state.statsCache.leafId === leafId) {
+		state.statsCache.stats.durationMs = state.statsCache.firstTs
+			? Math.max(0, Date.now() - state.statsCache.firstTs)
 			: 0;
-		return statsCache.stats;
+		return state.statsCache.stats;
 	}
 
 	const s: Stats = {
@@ -143,7 +150,7 @@ function collectStats(ctx: ExtensionContext): Stats {
 
 	s.files = files.size;
 	s.durationMs = firstTs ? Math.max(0, Date.now() - firstTs) : 0;
-	statsCache = { leafId, firstTs, stats: s };
+	state.statsCache = { leafId, firstTs, stats: s };
 	return s;
 }
 
@@ -193,14 +200,12 @@ function freshMetrics(): StreamMetrics {
 	};
 }
 
-const metrics = freshMetrics();
-
-function avgTokPerSec(): number | null {
+function avgTokPerSec(metrics: StreamMetrics): number | null {
 	if (metrics.totalStreamMs <= 0 || metrics.totalOutput <= 0) return null;
 	return metrics.totalOutput / (metrics.totalStreamMs / 1000);
 }
 
-function avgTtftMs(): number | null {
+function avgTtftMs(metrics: StreamMetrics): number | null {
 	if (metrics.ttftCount === 0) return null;
 	return metrics.totalTtftMs / metrics.ttftCount;
 }
@@ -223,30 +228,44 @@ interface GitStat {
 	dels: number;
 }
 
-let gitStat: GitStat | null = null;
-let gitStatAt = 0;
-let gitStatCwd = "";
-let requestRender: (() => void) | undefined;
+// Extension modules are cached within the process, while pi-subagents binds a
+// fresh extension activation to every child AgentSession. Keep telemetry keyed
+// by session so child lifecycle and stream events cannot reset or corrupt the
+// interactive parent's footer. The map also preserves metrics across /reload.
+const sessionStates = new Map<string, SessionState>();
 
-function refreshGitStat(cwd: string) {
+function freshSessionState(metrics = freshMetrics()): SessionState {
+	return {
+		metrics,
+		gitStat: null,
+		gitStatAt: 0,
+		gitStatCwd: "",
+	};
+}
+
+function getSessionState(ctx: ExtensionContext): SessionState | undefined {
+	return sessionStates.get(ctx.sessionManager.getSessionId());
+}
+
+function refreshGitStat(cwd: string, state: SessionState) {
 	const now = Date.now();
-	if (gitStatCwd === cwd && now - gitStatAt < 15_000) return;
-	gitStatAt = now;
-	gitStatCwd = cwd;
+	if (state.gitStatCwd === cwd && now - state.gitStatAt < 15_000) return;
+	state.gitStatAt = now;
+	state.gitStatCwd = cwd;
 	execFile("git", ["diff", "--shortstat", "HEAD"], { cwd, timeout: 5000 }, (err, stdout) => {
 		if (err) {
-			gitStat = null;
+			state.gitStat = null;
 			return;
 		}
 		const files = /(\d+) files? changed/.exec(stdout);
 		const adds = /(\d+) insertions?\(\+\)/.exec(stdout);
 		const dels = /(\d+) deletions?\(-\)/.exec(stdout);
-		gitStat = {
+		state.gitStat = {
 			files: files ? Number(files[1]) : 0,
 			adds: adds ? Number(adds[1]) : 0,
 			dels: dels ? Number(dels[1]) : 0,
 		};
-		requestRender?.();
+		state.requestRender?.();
 	});
 }
 
@@ -301,8 +320,13 @@ function renderModelLabel(ctx: ExtensionContext, theme: Theme, includeProvider: 
 	return theme.fg("accent", theme.bold(model.id)) + thinking + provider;
 }
 
-function renderCompact(ctx: ExtensionContext, theme: Theme, width: number): string {
-	const s = collectStats(ctx);
+function renderCompact(
+	ctx: ExtensionContext,
+	theme: Theme,
+	width: number,
+	state: SessionState,
+): string {
+	const s = collectStats(ctx, state);
 	const usage = ctx.getContextUsage();
 	const sep = theme.fg("borderMuted", " │ ");
 
@@ -320,7 +344,7 @@ function renderCompact(ctx: ExtensionContext, theme: Theme, width: number): stri
 	parts.push(theme.fg("warning", `${I.cost} ${fmtCost(s.cost)}`));
 	parts.push(theme.fg("muted", `${I.elapsed} `) + theme.fg("dim", fmtDuration(s.durationMs)));
 	parts.push(theme.fg("muted", `${I.turns} `) + theme.fg("dim", `${s.turns}`));
-	const avg = avgTokPerSec();
+	const avg = avgTokPerSec(state.metrics);
 	if (avg != null) parts.push(theme.fg("success", `${I.speed} ${fmtTokPerSec(avg)}`));
 	if (s.compactions > 0) parts.push(theme.fg("muted", `${I.compact} ${s.compactions}x`));
 
@@ -338,8 +362,9 @@ function renderFull(
 	theme: Theme,
 	footerData: ReadonlyFooterDataProvider,
 	width: number,
+	state: SessionState,
 ): string[] {
-	const s = collectStats(ctx);
+	const s = collectStats(ctx, state);
 	const usage = ctx.getContextUsage();
 	const sep = theme.fg("borderMuted", " │ ");
 
@@ -394,7 +419,8 @@ function renderFull(
 
 	// ── Line 2 · Performance: TTFT, TTFB, tok/s, tool calls, error rate
 	const l2: string[] = [];
-	const avgTtft = avgTtftMs();
+	const { metrics } = state;
+	const avgTtft = avgTtftMs(metrics);
 	if (avgTtft != null) {
 		l2.push(
 			theme.fg(ttftColor(avgTtft), `${I.ttft} μ ${fmtTtft(avgTtft)}`) +
@@ -407,7 +433,7 @@ function renderFull(
 	}
 	if (metrics.lastTtfbMs != null)
 		l2.push(theme.fg("muted", `${I.ttfb} `) + theme.fg("dim", fmtTtft(metrics.lastTtfbMs)));
-	const avg = avgTokPerSec();
+	const avg = avgTokPerSec(metrics);
 	if (avg != null) {
 		l2.push(
 			theme.fg("success", `${I.speed} μ ${fmtTokPerSec(avg)}`) +
@@ -434,7 +460,7 @@ function renderFull(
 	const line2 = truncateToWidth(l2.join(sep), width);
 
 	// ── Line 3 · Local state: git branch, working-tree diff, touched files, cwd
-	refreshGitStat(ctx.cwd); // throttled, async; paints cached value
+	refreshGitStat(ctx.cwd, state); // throttled, async; paints cached value
 	const l3: string[] = [];
 	const branch = footerData.getGitBranch();
 	l3.push(
@@ -442,12 +468,12 @@ function renderFull(
 			? theme.fg("syntaxKeyword", `${I.branch} `) + theme.fg("accent", branch)
 			: theme.fg("dim", `${I.branch} no git`),
 	);
-	if (gitStat && (gitStat.adds > 0 || gitStat.dels > 0)) {
+	if (state.gitStat && (state.gitStat.adds > 0 || state.gitStat.dels > 0)) {
 		l3.push(
-			theme.fg("toolDiffAdded", `+${gitStat.adds}`) +
+			theme.fg("toolDiffAdded", `+${state.gitStat.adds}`) +
 				" " +
-				theme.fg("toolDiffRemoved", `-${gitStat.dels}`) +
-				theme.fg("dim", ` in ${gitStat.files}`),
+				theme.fg("toolDiffRemoved", `-${state.gitStat.dels}`) +
+				theme.fg("dim", ` in ${state.gitStat.files}`),
 		);
 	} else if (branch) {
 		l3.push(theme.fg("success", `${I.ok} clean`));
@@ -469,12 +495,12 @@ export default function (pi: ExtensionAPI) {
 	let mode: Mode = "full";
 	let installedCtx: ExtensionContext | undefined;
 
-	function install(ctx: ExtensionContext) {
-		if (!ctx.hasUI || installedCtx === ctx) return;
+	function install(ctx: ExtensionContext, state: SessionState) {
+		if (ctx.mode !== "tui" || installedCtx === ctx) return;
 		installedCtx = ctx;
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			requestRender = () => tui.requestRender();
+			state.requestRender = () => tui.requestRender();
 			const unsubBranch = footerData.onBranchChange(() => tui.requestRender());
 			// Keep duration fresh even when idle
 			const timer = setInterval(() => tui.requestRender(), 30_000);
@@ -489,25 +515,34 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					if (mode === "off") return [];
 					return mode === "compact"
-						? [renderCompact(ctx, theme, width)]
-						: renderFull(ctx, theme, footerData, width);
+						? [renderCompact(ctx, theme, width, state)]
+						: renderFull(ctx, theme, footerData, width, state);
 				},
 			};
 		});
 	}
 
 	pi.on("session_start", async (event, ctx) => {
+		// Programmatic AgentSessions (including @tintinweb/pi-subagents) bind
+		// extensions in print mode. This footer is TUI-only, so those activations
+		// must not collect provider events or touch the interactive session state.
+		if (ctx.mode !== "tui") return;
+
 		installedCtx = undefined; // new session runtime → reinstall
-		statsCache = undefined; // branch belongs to a different session now
-		// Keep accumulated metrics across /reload — the session continues;
-		// only a genuinely new session resets them.
-		if (event.reason !== "reload") Object.assign(metrics, freshMetrics());
-		if (mode !== "off") install(ctx);
+		const sessionId = ctx.sessionManager.getSessionId();
+		const previous = sessionStates.get(sessionId);
+		const state = freshSessionState(
+			event.reason === "reload" ? previous?.metrics : undefined,
+		);
+		sessionStates.set(sessionId, state);
+		if (mode !== "off") install(ctx, state);
 	});
 
-	// ── streaming metrics collection (works in all modes, not just TUI)
+	// ── streaming metrics collection (TUI session only)
 
-	pi.on("before_provider_headers", () => {
+	pi.on("before_provider_headers", (_event, ctx) => {
+		const metrics = getSessionState(ctx)?.metrics;
+		if (!metrics || ctx.mode !== "tui") return;
 		// Request is about to hit the wire (fires once per LLM call;
 		// retries reuse the same headers and don't re-fire).
 		metrics.headersSeen++;
@@ -516,7 +551,9 @@ export default function (pi: ExtensionAPI) {
 		metrics.curTtftMs = null;
 	});
 
-	pi.on("after_provider_response", () => {
+	pi.on("after_provider_response", (_event, ctx) => {
+		const metrics = getSessionState(ctx)?.metrics;
+		if (!metrics || ctx.mode !== "tui") return;
 		// Response headers received (TTFB). Not all providers expose this.
 		metrics.responsesSeen++;
 		if (metrics.requestSentAt > 0) {
@@ -524,7 +561,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("message_start", (event) => {
+	pi.on("message_start", (event, ctx) => {
+		const metrics = getSessionState(ctx)?.metrics;
+		if (!metrics || ctx.mode !== "tui") return;
 		// Fallback start marker for providers that never fire
 		// before_provider_headers (stream consumption is beginning).
 		if (event.message.role === "assistant" && metrics.requestSentAt === 0) {
@@ -532,7 +571,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("message_update", (event) => {
+	pi.on("message_update", (event, ctx) => {
+		const metrics = getSessionState(ctx)?.metrics;
+		if (!metrics || ctx.mode !== "tui") return;
 		// First content-block start or delta (text/thinking/toolcall)
 		// ≈ first token from the provider.
 		const t = event.assistantMessageEvent.type;
@@ -545,8 +586,10 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("message_end", (event) => {
-		if (event.message.role !== "assistant") return;
+	pi.on("message_end", (event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
+		const { metrics } = state;
 		const usage = (event.message as AssistantMessage).usage;
 		const streamStart = metrics.firstTokenAt || metrics.requestSentAt;
 		const streamMs = streamStart > 0 ? Date.now() - streamStart : 0;
@@ -565,12 +608,16 @@ export default function (pi: ExtensionAPI) {
 		metrics.requestSentAt = 0;
 		metrics.firstTokenAt = 0;
 		metrics.curTtftMs = null;
-		requestRender?.();
+		state.requestRender?.();
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event, ctx) => {
+		if (ctx.mode !== "tui") return;
 		installedCtx = undefined;
-		requestRender = undefined;
+		const sessionId = ctx.sessionManager.getSessionId();
+		const state = sessionStates.get(sessionId);
+		if (state) state.requestRender = undefined;
+		if (event.reason !== "reload") sessionStates.delete(sessionId);
 	});
 
 	pi.registerCommand("footer", {
@@ -578,12 +625,15 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const next = args.trim().toLowerCase();
 			if (next === "debug") {
+				const metrics = getSessionState(ctx)?.metrics;
 				ctx.ui.notify(
-					[
-						`mode=${mode}`,
-						`headersSeen=${metrics.headersSeen} responsesSeen=${metrics.responsesSeen} requests=${metrics.requests}`,
-						`lastTtfb=${metrics.lastTtfbMs ?? "-"} avgTtft=${avgTtftMs()?.toFixed(0) ?? "-"} lastTtft=${metrics.lastTtftMs ?? "-"} lastTok/s=${metrics.lastTokPerSec?.toFixed(1) ?? "-"}`,
-					].join(" | "),
+					metrics
+						? [
+								`mode=${mode}`,
+								`headersSeen=${metrics.headersSeen} responsesSeen=${metrics.responsesSeen} requests=${metrics.requests}`,
+								`lastTtfb=${metrics.lastTtfbMs ?? "-"} avgTtft=${avgTtftMs(metrics)?.toFixed(0) ?? "-"} lastTtft=${metrics.lastTtftMs ?? "-"} lastTok/s=${metrics.lastTokPerSec?.toFixed(1) ?? "-"}`,
+							].join(" | ")
+						: `mode=${mode} | metrics unavailable outside the TUI session`,
 					"info",
 				);
 				return;
@@ -599,14 +649,15 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
+			const state = getSessionState(ctx);
 			if (mode === "off") {
 				installedCtx = undefined;
-				requestRender = undefined;
+				if (state) state.requestRender = undefined;
 				ctx.ui.setFooter(undefined); // restore pi's default footer
 				ctx.ui.notify("Default footer restored", "info");
-			} else {
+			} else if (state) {
 				installedCtx = undefined; // force reinstall
-				install(ctx);
+				install(ctx, state);
 				ctx.ui.notify(`Statusline footer: ${mode} mode`, "info");
 			}
 		},
