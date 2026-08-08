@@ -3,13 +3,13 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
 	isEligibleModel,
 	type NativeCompactionConfig,
-} from "../extensions/cliproxyapi-native-compaction/config.ts";
+} from "../config.ts";
 import {
 	buildCompactHeaders,
 	buildCompactRequestBody,
 	parseCompactResponse,
 	resolveCompactUrl,
-} from "../extensions/cliproxyapi-native-compaction/native-compaction.ts";
+} from "../native-compaction.ts";
 
 const model = {
 	id: "gpt-5.6-sol",

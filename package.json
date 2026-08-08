@@ -6,7 +6,7 @@
 	"license": "MIT",
 	"keywords": ["pi-package", "pi-extension", "herder", "multi-agent", "cliproxyapi", "compaction"],
 	"scripts": {
-		"test": "vitest run test/native-compaction.test.ts && npm run test:herder",
+		"test": "vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
 		"test:herder": "node extensions/herder/tests/run-smoke.ts",
 		"test:e2e:herder": "HERDER_LIVE_E2E=1 node --experimental-strip-types --test extensions/herder/tests/e2e/live-hosts.test.ts",
 		"typecheck": "tsc -p tsconfig.json"
