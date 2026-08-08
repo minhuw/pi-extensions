@@ -556,6 +556,65 @@ export class RunStore {
 		return (rows as Record<string, unknown>[]).map(rowToAction);
 	}
 
+	countActions(runId: string, filters: {
+		states?: StoredAction["state"][];
+		planId?: string;
+		generation?: number;
+		round?: number;
+		role?: string;
+	} = {}): number {
+		const clauses = ["run_id = ?"];
+		const values: Array<string | number> = [runId];
+		if (filters.states?.length) {
+			clauses.push(`state IN (${filters.states.map(() => "?").join(",")})`);
+			values.push(...filters.states);
+		}
+		if (filters.planId !== undefined) { clauses.push("plan_id = ?"); values.push(filters.planId); }
+		if (filters.generation !== undefined) { clauses.push("generation = ?"); values.push(filters.generation); }
+		if (filters.round !== undefined) { clauses.push("round_number = ?"); values.push(filters.round); }
+		if (filters.role !== undefined) { clauses.push("role = ?"); values.push(filters.role); }
+		const row = this.database.prepare(`SELECT COUNT(*) AS count FROM manager_actions WHERE ${clauses.join(" AND ")}`).get(...values) as Record<string, unknown>;
+		return Number(row.count);
+	}
+
+	getTerminalActionsMissingUsage(runId: string): StoredAction[] {
+		const rows = this.database.prepare(`
+			SELECT action.*
+			FROM manager_actions AS action
+			LEFT JOIN attempts AS usage ON usage.attempt_id = action.attempt_id
+			WHERE action.run_id = ? AND action.state = 'terminal' AND usage.attempt_id IS NULL
+			ORDER BY action.created_at, action.action_id
+		`).all(runId) as Record<string, unknown>[];
+		return rows.map(rowToAction);
+	}
+
+	getTerminalLeaseReasons(runId: string): Set<string> {
+		const rows = this.database.prepare(`
+			SELECT lease_reason FROM manager_actions
+			WHERE run_id = ? AND state = 'terminal'
+		`).all(runId) as Array<{ lease_reason: string }>;
+		return new Set(rows.map((row) => String(row.lease_reason)));
+	}
+
+	getLatestAction(runId: string, filters: {
+		planId: string;
+		generation: number;
+		round: number;
+		role: string;
+		state?: StoredAction["state"];
+	}): StoredAction | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_actions
+			WHERE run_id = ? AND plan_id = ? AND generation = ? AND round_number = ? AND role = ?
+				${filters.state ? "AND state = ?" : ""}
+			ORDER BY created_at DESC, action_id DESC LIMIT 1
+		`).get(
+			runId, filters.planId, filters.generation, filters.round, filters.role,
+			...(filters.state ? [filters.state] : []),
+		) as Record<string, unknown> | undefined;
+		return row ? rowToAction(row) : null;
+	}
+
 	getAction(actionId: string): StoredAction | null {
 		const row = this.database.prepare("SELECT * FROM manager_actions WHERE action_id = ?").get(actionId) as Record<string, unknown> | undefined;
 		return row ? rowToAction(row) : null;

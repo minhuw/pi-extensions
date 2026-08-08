@@ -34,6 +34,12 @@ export interface RunConfiguration {
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_SCHEMA_VERSION = 7
 
+// Integrity checks scan the database. Running one for every short-lived reader
+// (the dashboard polls every two seconds) turns an O(1) open into O(database).
+// Check each file identity at startup and periodically thereafter instead.
+const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000
+const HEALTHY_DATABASES = new Map<string, { dev: number; ino: number; checkedAt: number }>()
+
 const IDENTITY_FIELDS = [
   "attempt",
   "plan",
@@ -331,7 +337,16 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
   try {
     configureDatabase(database, { readOnly })
     initializeSchema(database, { allowInitialize: !readOnly })
-    assertHealthy(database, databasePath)
+    const identity = fs.statSync(databasePath)
+    const lastCheck = HEALTHY_DATABASES.get(databasePath)
+    if (!lastCheck
+      || lastCheck.dev !== identity.dev
+      || lastCheck.ino !== identity.ino
+      || Date.now() - lastCheck.checkedAt >= HEALTH_CHECK_INTERVAL_MS) {
+      assertHealthy(database, databasePath)
+      if (HEALTHY_DATABASES.size >= 256) HEALTHY_DATABASES.delete(HEALTHY_DATABASES.keys().next().value!)
+      HEALTHY_DATABASES.set(databasePath, { dev: identity.dev, ino: identity.ino, checkedAt: Date.now() })
+    }
     if (!existed) {
       fs.chmodSync(runtimeDirectory, 0o700)
       fs.chmodSync(databasePath, 0o600)
@@ -548,10 +563,31 @@ export function readManagerState(planDir: string) {
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
     if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, service: null }
-    const run = (database.prepare("SELECT * FROM manager_runs ORDER BY created_at DESC LIMIT 1").get() as SqlRow | undefined) ?? null
-    const plans = run ? database.prepare("SELECT * FROM manager_plans WHERE run_id = ? ORDER BY plan_id").all(run.run_id) as SqlRow[] : []
-    const specs = run ? database.prepare("SELECT * FROM manager_plan_specs WHERE run_id = ? AND graph_generation = ? ORDER BY ordinal, plan_id").all(run.run_id, run.current_generation) as SqlRow[] : []
-    const actions = run ? database.prepare("SELECT * FROM manager_actions WHERE run_id = ? ORDER BY created_at, action_id").all(run.run_id) as SqlRow[] : []
+    const run = (database.prepare(`
+      SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel,
+        current_generation, graph_sha256, status, integration_branch,
+        integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
+      FROM manager_runs ORDER BY created_at DESC LIMIT 1
+    `).get() as SqlRow | undefined) ?? null
+    const plans = run ? database.prepare(`
+      SELECT plan_id, generation, round_number, phase, branch, worktree,
+        review_pass, findings_json, repair_json, gate_json, rebase_json, updated_at
+      FROM manager_plans WHERE run_id = ? ORDER BY plan_id
+    `).all(run.run_id) as SqlRow[] : []
+    const specs = run ? database.prepare(`
+      SELECT graph_generation, plan_id, plan_fingerprint, ordinal, title, priority,
+        effort, kind, dependencies_json, initial_status, initial_status_detail,
+        gate_commands_json, plan_file
+      FROM manager_plan_specs
+      WHERE run_id = ? AND graph_generation = ?
+      ORDER BY ordinal, plan_id
+    `).all(run.run_id, run.current_generation) as SqlRow[] : []
+    const actions = run ? database.prepare(`
+      SELECT action_id, plan_id, generation, round_number, role, attempt_id,
+        state, agent_type, model, effort, service_tier, worker_mode, task_name,
+        host_handle, created_at, updated_at
+      FROM manager_actions WHERE run_id = ? ORDER BY created_at, action_id
+    `).all(run.run_id) as SqlRow[] : []
     const generations = run ? database.prepare("SELECT * FROM manager_generations WHERE run_id = ? ORDER BY generation").all(run.run_id) as SqlRow[] : []
     const approvals = run ? database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? ORDER BY plan_id, generation").all(run.run_id) as SqlRow[] : []
     const edit = run ? database.prepare("SELECT * FROM manager_plan_edits WHERE run_id = ?").get(run.run_id) as SqlRow | undefined : undefined
@@ -732,18 +768,24 @@ export function initializeExecutionStore(planDir: string) {
   }
 }
 
-export function recordUsageRecord(planDir: string, input: UsageRecordInput) {
+export function insertUsageRecordInDatabase(database: DatabaseSync, input: UsageRecordInput) {
   const record = normalizeUsageRecord(input)
+  const recorded = insertRecord(database, record)
+  return { recorded, record }
+}
+
+export function recordUsageRecordInDatabase(database: DatabaseSync, input: UsageRecordInput) {
+  return withTransaction(database, () => insertUsageRecordInDatabase(database, input))
+}
+
+export function recordUsageRecord(planDir: string, input: UsageRecordInput) {
   const database = openDatabase(planDir, { create: true })
-  let recorded
-  let records
   try {
-    recorded = withTransaction(database, () => insertRecord(database, record))
-    records = readDatabaseRecords(database)
+    const stored = recordUsageRecordInDatabase(database, input)
+    return { ...stored, records: readDatabaseRecords(database), database: executionDatabasePath(planDir) }
   } finally {
     database.close()
   }
-  return { recorded, record, records, database: executionDatabasePath(planDir) }
 }
 
 export function readUsageState(planDir: string) {
@@ -772,24 +814,20 @@ export function readUsageState(planDir: string) {
 }
 
 function summarizeRecords(records: UsageRecord[], keyFor: (record: UsageRecord) => string) {
-  const groups = new Map<string, UsageRecord[]>()
+  const groups = new Map<string, { attempts: number; tokenAttempts: number; knownTokens: number }>()
   for (const record of records) {
     const key = keyFor(record)
-    const group = groups.get(key) ?? []
-    group.push(record)
+    const group = groups.get(key) ?? { attempts: 0, tokenAttempts: 0, knownTokens: 0 }
+    group.attempts += 1
+    if (record.inputTokens !== null && record.outputTokens !== null) {
+      group.tokenAttempts += 1
+      group.knownTokens += record.inputTokens + record.outputTokens
+    }
     groups.set(key, group)
   }
   return [...groups.entries()]
     .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
-    .map(([key, entries]) => {
-      const tokenEntries = entries.filter((entry) => entry.inputTokens !== null && entry.outputTokens !== null)
-      return {
-        key,
-        attempts: entries.length,
-        tokenAttempts: tokenEntries.length,
-        knownTokens: tokenEntries.reduce((sum, entry) => sum + entry.inputTokens! + entry.outputTokens!, 0),
-      }
-    })
+    .map(([key, summary]) => ({ key, ...summary }))
 }
 
 export function usageReport(records: UsageRecord[]) {
@@ -802,15 +840,13 @@ export function usageReport(records: UsageRecord[]) {
   }
 }
 
-function sumKnown(records: UsageRecord[], field: "inputTokens" | "cachedInputTokens" | "outputTokens" | "reasoningTokens"): number {
-  return records.reduce((sum, record) => sum + (record[field] ?? 0), 0)
-}
-
 function timestampRange(records: UsageRecord[]) {
-  const starts = records.map((record) => record.startedAt).filter((value): value is string => Boolean(value)).sort()
-  const finishes = records.map((record) => record.finishedAt).filter((value): value is string => Boolean(value)).sort()
-  const startedAt = starts[0] ?? null
-  const finishedAt = finishes.at(-1) ?? null
+  let startedAt: string | null = null
+  let finishedAt: string | null = null
+  for (const record of records) {
+    if (record.startedAt && (startedAt === null || record.startedAt < startedAt)) startedAt = record.startedAt
+    if (record.finishedAt && (finishedAt === null || record.finishedAt > finishedAt)) finishedAt = record.finishedAt
+  }
   return {
     startedAt,
     finishedAt,
@@ -820,31 +856,53 @@ function timestampRange(records: UsageRecord[]) {
 
 export function executionReport(records: UsageRecord[], selector = "RUN") {
   const selected = selector === "RUN" ? records : records.filter((record) => record.plan === selector)
-  const tokenAttempts = selected.filter((record) => record.inputTokens !== null && record.outputTokens !== null)
-  const durations = selected.filter((record) => record.durationMs !== null)
-  const rounds = [...new Set(selected.map((record) => record.round).filter((round): round is number => round !== null))].sort((a, b) => a - b)
+  const roundSet = new Set<number>()
+  let interruptions = 0
+  let tokenAttempts = 0
+  let durationAttempts = 0
+  let attemptDurationMs = 0
+  let inputTokens = 0
+  let cachedInputTokens = 0
+  let outputTokens = 0
+  let reasoningTokens = 0
+  let reportedInputOutput = 0
+  for (const record of selected) {
+    if (record.round !== null) roundSet.add(record.round)
+    if (record.outcome.toUpperCase() === "INTERRUPTED") interruptions += 1
+    inputTokens += record.inputTokens ?? 0
+    cachedInputTokens += record.cachedInputTokens ?? 0
+    outputTokens += record.outputTokens ?? 0
+    reasoningTokens += record.reasoningTokens ?? 0
+    if (record.inputTokens !== null && record.outputTokens !== null) {
+      tokenAttempts += 1
+      reportedInputOutput += record.inputTokens + record.outputTokens
+    }
+    if (record.durationMs !== null) {
+      durationAttempts += 1
+      attemptDurationMs += record.durationMs
+    }
+  }
+  const rounds = [...roundSet].sort((a, b) => a - b)
   return {
     plan: selector,
     attempts: selected.length,
     rounds,
-    interruptions: selected.filter((record) => record.outcome.toUpperCase() === "INTERRUPTED").length,
+    interruptions,
     tokenCoverage: {
-      reported: tokenAttempts.length,
+      reported: tokenAttempts,
       total: selected.length,
     },
     tokens: {
-      input: sumKnown(selected, "inputTokens"),
-      cachedInput: sumKnown(selected, "cachedInputTokens"),
-      output: sumKnown(selected, "outputTokens"),
-      reasoning: sumKnown(selected, "reasoningTokens"),
-      reportedInputOutput: tokenAttempts.reduce((sum, record) => sum + record.inputTokens! + record.outputTokens!, 0),
+      input: inputTokens,
+      cachedInput: cachedInputTokens,
+      output: outputTokens,
+      reasoning: reasoningTokens,
+      reportedInputOutput,
     },
     timing: {
       ...timestampRange(selected),
-      attemptDurationMs: durations.length > 0
-        ? durations.reduce((sum, record) => sum + record.durationMs!, 0)
-        : null,
-      durationCoverage: { reported: durations.length, total: selected.length },
+      attemptDurationMs: durationAttempts > 0 ? attemptDurationMs : null,
+      durationCoverage: { reported: durationAttempts, total: selected.length },
     },
     byPlan: summarizeRecords(selected, (record) => record.plan),
     byRole: summarizeRecords(selected, (record) => record.role),

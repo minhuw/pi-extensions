@@ -25,24 +25,28 @@ const port = parentPort;
 // The manager core intentionally keeps synchronous Git and SQLite semantics
 // (atomic transactions interleave with worktree checks). It runs here, off the
 // HTTP thread, so the service stays responsive to /health no matter how long a
-// reconciliation takes. Calls arrive serialized from the service queue.
+// reconciliation takes. Keep one manager and SQLite connection for this worker
+// lifetime; the service queue serializes calls and run state remains durable.
+const manager = new HerderRunManager(planDirectory);
+let queue = Promise.resolve();
+
+async function handle(call: ManagerWorkerCall): Promise<void> {
+	try {
+		let result: unknown;
+		if (call.method === "reply") result = manager.reply();
+		else if (call.method === "start") result = await manager.start(call.input as StartInput);
+		else if (call.method === "event") result = await manager.event(call.input as EventInput);
+		else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
+		else if (call.method === "stop") result = manager.stop();
+		else if (call.method === "auditScheduler") { await manager.auditScheduler({ includeReply: false }); result = null; }
+		else throw new Error(`Unknown Herder manager method ${JSON.stringify(call.method)}.`);
+		port.postMessage({ id: call.id, ok: true, result } satisfies ManagerWorkerResult);
+	} catch (error) {
+		port.postMessage({ id: call.id, ok: false, error: message(error) } satisfies ManagerWorkerResult);
+	}
+}
+
 port.on("message", (call: ManagerWorkerCall) => {
-	void (async () => {
-		const manager = new HerderRunManager(planDirectory);
-		try {
-			let result: unknown;
-			if (call.method === "reply") result = manager.reply();
-			else if (call.method === "start") result = await manager.start(call.input as StartInput);
-			else if (call.method === "event") result = await manager.event(call.input as EventInput);
-			else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
-			else if (call.method === "stop") result = manager.stop();
-			else if (call.method === "auditScheduler") result = await manager.auditScheduler();
-			else throw new Error(`Unknown Herder manager method ${JSON.stringify(call.method)}.`);
-			port.postMessage({ id: call.id, ok: true, result } satisfies ManagerWorkerResult);
-		} catch (error) {
-			port.postMessage({ id: call.id, ok: false, error: message(error) } satisfies ManagerWorkerResult);
-		} finally {
-			manager.close();
-		}
-	})();
+	queue = queue.then(() => handle(call), () => handle(call));
 });
+port.once("close", () => manager.close());

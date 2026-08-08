@@ -13,6 +13,7 @@ import { RunStore } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 4 * 1024 * 1024;
+const MAX_PENDING_CONTROLS = 32;
 const CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/start", "/v1/event", "/v1/edit", "/v1/stop", "/shutdown"]);
 
 function parseArguments(argv: string[]): { planDirectory: string; dashboardPort: number } {
@@ -121,7 +122,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	let dashboardUrl = "";
 	let forwardedUrl: string | null = null;
 	let queue = Promise.resolve();
+	let pendingControls = 0;
 	let auditTimer: NodeJS.Timeout | undefined;
+	let closing = false;
 	let closeService: () => Promise<void> = async () => {};
 	const executor = new ManagerExecutor(planDirectory);
 
@@ -141,6 +144,11 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			send(response, 200, { ok: true, instanceId, pid: process.pid, planDirectory, dashboardUrl, forwardedUrl });
 			return;
 		}
+		if (pendingControls >= MAX_PENDING_CONTROLS) {
+			send(response, 429, { ok: false, error: "control-queue-full" });
+			return;
+		}
+		pendingControls += 1;
 		const execute = async () => {
 			try {
 				if (request.method === "GET" && url.pathname === "/v1/status") send(response, 200, { ok: true, reply: await executor.call("reply") });
@@ -164,6 +172,8 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				} else send(response, 404, { ok: false, error: "not-found" });
 			} catch (error) {
 				send(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+			} finally {
+				pendingControls -= 1;
 			}
 		};
 		queue = queue.then(execute, execute);
@@ -196,18 +206,28 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		throw error;
 	}
 
-	auditTimer = setInterval(() => {
-		const audit = async () => {
-			try { await executor.call("auditScheduler"); }
-			catch (error) { process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`); }
-		};
-		queue = queue.then(audit, audit);
-	}, 1500);
-	auditTimer.unref();
+	const scheduleAudit = () => {
+		if (closing) return;
+		auditTimer = setTimeout(() => {
+			const audit = async () => {
+				if (closing) return;
+				try { await executor.call("auditScheduler"); }
+				catch (error) { process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`); }
+			};
+			const auditRun = queue.then(audit, audit);
+			queue = auditRun;
+			void auditRun.then(scheduleAudit, scheduleAudit);
+		}, 1500);
+		auditTimer.unref();
+	};
+	scheduleAudit();
 
 	closeService = async () => {
-		if (auditTimer) clearInterval(auditTimer);
+		if (closing) return;
+		closing = true;
+		if (auditTimer) clearTimeout(auditTimer);
 		await close();
+		await queue.catch(() => {});
 		await executor.close();
 	};
 	process.once("SIGINT", () => void closeService());

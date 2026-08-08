@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +7,12 @@ import { compiledAssignmentEntry } from "../daemon/git/assignment-bundle.ts";
 import {
 	buildGraph,
 	projectStatuses,
-	snapshotPlanFromGraph,
+	snapshotPlansFromGraph,
 } from "./plans.ts";
 import {
+	insertUsageRecordInDatabase,
 	recordRunConfiguration,
-	recordUsageRecord,
+	recordUsageRecordInDatabase,
 } from "../daemon/execution-store.ts";
 import {
 	GitDriver,
@@ -157,12 +158,26 @@ function safeName(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
 }
 
+function graphInputSha256(planDirectory: string): string {
+	const files = fs.readdirSync(planDirectory)
+		.filter((name) => name === "README.md" || name === "CONTEXT.md" || /^\d{3,}-.*\.md$/i.test(name))
+		.sort();
+	const hash = createHash("sha256");
+	for (const name of files) {
+		hash.update(name);
+		hash.update("\0");
+		hash.update(fs.readFileSync(path.join(planDirectory, name)));
+		hash.update("\0");
+	}
+	return hash.digest("hex");
+}
+
 function activeActions(store: RunStore, runId: string): StoredAction[] {
 	return store.getActions(runId, ["proposed", "dispatched"]);
 }
 
-function assignedPlanIds(store: RunStore, runId: string): Set<string> {
-	return new Set(activeActions(store, runId).map((action) => action.planId));
+function activeActionCount(store: RunStore, runId: string): number {
+	return store.countActions(runId, { states: ["proposed", "dispatched"] });
 }
 
 function workerMode(plan: StoredPlan, role: WorkerRole): ManagerAction["workerMode"] {
@@ -173,7 +188,7 @@ function workerMode(plan: StoredPlan, role: WorkerRole): ManagerAction["workerMo
 }
 
 function attemptOrdinal(store: RunStore, runId: string, planId: string, role: string): number {
-	return store.getActions(runId).filter((action) => action.planId === planId && action.role === role).length + 1;
+	return store.countActions(runId, { planId, role }) + 1;
 }
 
 function requiredRole(profile: ResolvedProfile, role: WorkerRole) {
@@ -248,8 +263,9 @@ function compilePlanSpecs(input: {
 	previous?: StoredPlanSpec[];
 }): { specs: StoredPlanSpec[]; graphSha256: string } {
 	const previous = new Map((input.previous ?? []).map((spec) => [spec.planId, spec]));
+	const snapshots = snapshotPlansFromGraph(input.graph);
 	const specs = input.graph.plans.map((plan, ordinal) => {
-		const snapshot = snapshotPlanFromGraph(input.graph, plan.id);
+		const snapshot = snapshots[ordinal]!;
 		const assignment = compiledAssignmentEntry(snapshot);
 		const prior = previous.get(plan.id);
 		const semantic = {
@@ -377,6 +393,15 @@ function persistLeaks(planDirectory: string, planId: string, leaks: string[]): v
 export class HerderRunManager {
 	readonly planDirectory: string;
 	readonly store: RunStore;
+	private specsCache: { runId: string; generation: number; specs: StoredPlanSpec[]; byId: Map<string, StoredPlanSpec> } | null = null;
+	private graphDriftCache: {
+		inputSha256: string;
+		generation: number;
+		expectedGraphSha256: string;
+		editState: string;
+		result: { changed: boolean; detail: string | null };
+	} | null = null;
+	private terminalSideEffectsDirty = true;
 
 	constructor(planDirectory: string) {
 		this.planDirectory = fs.realpathSync(planDirectory);
@@ -401,14 +426,30 @@ export class HerderRunManager {
 		return this.store.putPlan({ ...plan, ...changes });
 	}
 
+	private cacheSpecs(specs: StoredPlanSpec[]): void {
+		const first = specs[0];
+		if (!first) { this.specsCache = null; return; }
+		this.specsCache = {
+			runId: first.runId,
+			generation: first.graphGeneration,
+			specs,
+			byId: new Map(specs.map((spec) => [spec.planId, spec])),
+		};
+	}
+
 	private specs(run: StoredRun): StoredPlanSpec[] {
+		if (this.specsCache?.runId === run.runId && this.specsCache.generation === run.currentGeneration) {
+			return this.specsCache.specs;
+		}
 		const specs = this.store.getPlanSpecs(run.runId);
 		if (specs.length === 0) throw new Error("Run has no compiled plan specification; start a fresh run with the current Herder version");
+		this.cacheSpecs(specs);
 		return specs;
 	}
 
 	private spec(run: StoredRun, planId: string): StoredPlanSpec {
-		const spec = this.specs(run).find((candidate) => candidate.planId === planId);
+		this.specs(run);
+		const spec = this.specsCache!.byId.get(planId);
 		if (!spec) throw new Error(`Run specification has no plan ${planId}`);
 		return spec;
 	}
@@ -430,21 +471,31 @@ export class HerderRunManager {
 		const edit = this.store.getPlanEdit(run.runId);
 		if (edit?.state === "reserved") return { changed: false, detail: null };
 		try {
+			const inputSha256 = graphInputSha256(this.planDirectory);
+			const expectedGraphSha256 = edit?.state === "barrier" ? edit.proposedGraphSha256! : run.graphSha256;
+			const editState = edit?.state === "barrier" ? `barrier:${edit.planId}` : "none";
+			const cached = this.graphDriftCache;
+			if (cached
+				&& cached.inputSha256 === inputSha256
+				&& cached.generation === run.currentGeneration
+				&& cached.expectedGraphSha256 === expectedGraphSha256
+				&& cached.editState === editState) return cached.result;
 			const compiled = this.compileCurrentGraph(run);
-			if (edit?.state === "barrier") {
-				return {
+			const result = edit?.state === "barrier"
+				? {
 					changed: compiled.graphSha256 !== edit.proposedGraphSha256,
 					detail: compiled.graphSha256 === edit.proposedGraphSha256
 						? null
 						: `Reserved plan ${edit.planId} changed after its revision barrier was requested. Finish the edit again after repairing the graph.`,
+				}
+				: {
+					changed: compiled.graphSha256 !== run.graphSha256,
+					detail: compiled.graphSha256 === run.graphSha256
+						? null
+						: `Plan graph changed after generation ${run.currentGeneration}; run Herder revise after active workers finish.`,
 				};
-			}
-			return {
-				changed: compiled.graphSha256 !== run.graphSha256,
-				detail: compiled.graphSha256 === run.graphSha256
-					? null
-					: `Plan graph changed after generation ${run.currentGeneration}; run Herder revise after active workers finish.`,
-			};
+			this.graphDriftCache = { inputSha256, generation: run.currentGeneration, expectedGraphSha256, editState, result };
+			return result;
 		} catch (error) {
 			return { changed: true, detail: `Plan graph is currently invalid: ${(error as Error).message}` };
 		}
@@ -524,6 +575,7 @@ export class HerderRunManager {
 			});
 			this.store.putPlanSpecs(specs);
 		});
+		this.cacheSpecs(specs);
 		try {
 			const assignment = driver.initializeFreshNamespace(baseCommit, specs.map((spec) => spec.assignment), graphGeneration);
 			this.store.transaction(() => {
@@ -643,6 +695,7 @@ export class HerderRunManager {
 				graphSha256: compiled.graphSha256,
 			});
 		});
+		this.cacheSpecs(compiled.specs);
 	}
 
 	async revise(input: StartInput): Promise<ManagerReply> {
@@ -653,7 +706,7 @@ export class HerderRunManager {
 		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
 			throw new Error(`Revision must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
 		}
-		if (activeActions(this.store, run.runId).length > 0) {
+		if (activeActionCount(this.store, run.runId) > 0) {
 			throw new Error("Plan graph revision requires zero proposed or dispatched workers; wait for terminal events or stop them first");
 		}
 		if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the active Grill plan edit before running Herder revise");
@@ -683,7 +736,7 @@ export class HerderRunManager {
 	}
 
 	private adoptReservedEdit(run: StoredRun, edit: StoredPlanEdit): void {
-		if (activeActions(this.store, run.runId).length > 0) throw new Error("Reserved plan revision is still waiting for active workers to settle");
+		if (activeActionCount(this.store, run.runId) > 0) throw new Error("Reserved plan revision is still waiting for active workers to settle");
 		const { compiled, target } = this.compiledReservedEdit(run, edit);
 		if (edit.proposedGraphSha256 !== compiled.graphSha256 || edit.proposedPlanFingerprint !== target.planFingerprint) {
 			throw new Error(`Reserved plan ${edit.planId} changed after its revision barrier was requested`);
@@ -714,7 +767,7 @@ export class HerderRunManager {
 			if (drift.changed) throw new Error(`${drift.detail} Resolve graph drift before starting Grill.`);
 			const spec = this.spec(run, planId);
 			if (!["TODO", "BLOCKED"].includes(spec.initialStatus)) throw new Error(`Plan ${planId} is ${spec.initialStatus}, not an unstarted editable plan`);
-			if (this.store.getPlan(run.runId, planId) || this.store.getActions(run.runId).some((action) => action.planId === planId)) {
+			if (this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId }) > 0) {
 				throw new Error(`Plan ${planId} cannot be grilled because execution already started`);
 			}
 			const edit = this.store.putPlanEdit({
@@ -740,7 +793,7 @@ export class HerderRunManager {
 
 		const { compiled, target } = this.compiledReservedEdit(run, edit);
 		const barrier = this.store.putPlanEditBarrier(run.runId, compiled.graphSha256, target.planFingerprint);
-		if (activeActions(this.store, run.runId).length === 0) {
+		if (activeActionCount(this.store, run.runId) === 0) {
 			await this.driver(run).verifyCheckout(run.checkoutStateToken);
 			this.adoptReservedEdit(run, barrier);
 			run = this.store.getRun()!;
@@ -797,7 +850,7 @@ export class HerderRunManager {
 				this.updatePlan(plan, { phase: readyPhaseForRole(action.role) });
 			}
 		}
-		if (capacityRejected && this.store.getActions(run.runId, ["dispatched"]).length === 0) {
+		if (capacityRejected && this.store.countActions(run.runId, { states: ["dispatched"] }) === 0) {
 			this.store.updateRun({ status: "paused", terminalDetail: "Host worker capacity is unavailable; resume when a child slot is free." });
 		}
 		return capacityRejected;
@@ -806,6 +859,11 @@ export class HerderRunManager {
 	private async applyTerminals(terminals: TerminalEvent[]): Promise<void> {
 		const run = this.store.getRun()!;
 		const driver = this.driver(run);
+		const recoveryWasDirty = this.terminalSideEffectsDirty;
+		if (terminals.length > 0) {
+			this.terminalSideEffectsDirty = true;
+			await driver.verifyCheckout(run.checkoutStateToken);
+		}
 		for (const terminal of [...terminals].sort((left, right) => left.actionId.localeCompare(right.actionId))) {
 			let action = this.store.getAction(terminal.actionId);
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown terminal action ${terminal.actionId}`);
@@ -822,7 +880,6 @@ export class HerderRunManager {
 			}
 			const plan = this.store.getPlan(run.runId, action.planId);
 			if (!plan) throw new Error(`Action ${action.actionId} has no plan runtime record`);
-			await driver.verifyCheckout(run.checkoutStateToken);
 			if (plan.phase !== phaseForRole(action.role as WorkerRole)) throw new Error(`Action ${action.actionId} does not own plan phase ${plan.phase}`);
 			if (plan.generation !== action.generation || plan.round !== action.round) {
 				throw new Error(`Action ${action.actionId} does not match plan generation/round`);
@@ -857,16 +914,17 @@ export class HerderRunManager {
 				if (transition.approval) this.store.putApproval(transition.approval);
 				this.store.putPlan(transition.plan);
 				if (transition.runUpdate) this.store.updateRun(transition.runUpdate);
+				this.recordTerminalUsage(run, action, record, true);
 			});
-			this.recordTerminalUsage(run, action, record);
 			driver.release(plan.worktree, action.leaseReason);
-			await driver.verifyCheckout(run.checkoutStateToken);
 		}
+		if (terminals.length > 0) await driver.verifyCheckout(run.checkoutStateToken);
+		if (!recoveryWasDirty) this.terminalSideEffectsDirty = false;
 	}
 
-	private recordTerminalUsage(run: StoredRun, action: StoredAction, record: StoredTerminalRecord): void {
+	private recordTerminalUsage(run: StoredRun, action: StoredAction, record: StoredTerminalRecord, inTransaction = false): void {
 		const usage = record.usage;
-		recordUsageRecord(this.planDirectory, {
+		const input = {
 			plan: action.planId,
 			role: action.role,
 			attempt: action.attemptId,
@@ -885,7 +943,9 @@ export class HerderRunManager {
 			startedAt: usage.startedAt,
 			finishedAt: usage.finishedAt,
 			durationMs: usage.durationMs,
-		});
+		};
+		if (inTransaction) insertUsageRecordInDatabase(this.store.database, input);
+		else recordUsageRecordInDatabase(this.store.database, input);
 	}
 
 	private retryImplementerTransport(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
@@ -899,12 +959,12 @@ export class HerderRunManager {
 	}
 
 	private retryTransportOrPause(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
-		const equivalentAttempts = this.store.getActions(run.runId).filter((candidate) =>
-			candidate.planId === action.planId
-			&& candidate.generation === action.generation
-			&& candidate.round === action.round
-			&& candidate.role === action.role
-		).length;
+		const equivalentAttempts = this.store.countActions(run.runId, {
+			planId: action.planId,
+			generation: action.generation,
+			round: action.round,
+			role: action.role,
+		});
 		if (equivalentAttempts < 3) {
 			return { plan: { ...plan, phase: readyPhaseForRole(action.role), repair: [detail] } };
 		}
@@ -1000,10 +1060,13 @@ export class HerderRunManager {
 		const decision = decideJudge({ round: plan.round, decision: result.decision });
 		if (decision.action === "READY_TO_INTEGRATE") {
 			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree) throw new Error(`Judge approval has no frozen patch for ${plan.planId}`);
-			const reviewer = this.store.getActions(run.runId).filter((candidate) =>
-				candidate.planId === plan.planId && candidate.generation === plan.generation
-				&& candidate.round === plan.round && candidate.role === "plan-reviewer" && candidate.state === "terminal"
-			).at(-1);
+			const reviewer = this.store.getLatestAction(run.runId, {
+				planId: plan.planId,
+				generation: plan.generation,
+				round: plan.round,
+				role: "plan-reviewer",
+				state: "terminal",
+			});
 			const reviewResult = reviewer ? storedWorkerResult(reviewer) : null;
 			if (!reviewer || !reviewResult || reviewResult.kind !== "reviewer") throw new Error(`Judge cannot approve ${plan.planId} without a terminal Reviewer result`);
 			const approval = createApproval({
@@ -1084,15 +1147,18 @@ export class HerderRunManager {
 	}
 
 	private recoverTerminalSideEffects(run: StoredRun, driver: GitDriver): void {
-		for (const action of this.store.getActions(run.runId, ["terminal"])) {
+		if (!this.terminalSideEffectsDirty) return;
+		for (const action of this.store.getTerminalActionsMissingUsage(run.runId)) {
 			const record = storedTerminalRecord(action);
 			if (!record) throw new Error(`Terminal action ${action.actionId} has no durable result envelope`);
 			this.recordTerminalUsage(run, action, record);
-			const plan = this.store.getPlan(run.runId, action.planId);
-			if (!plan) continue;
-			const lease = driver.leaseReason(plan.worktree);
-			if (lease === action.leaseReason) driver.release(plan.worktree, action.leaseReason);
 		}
+		const terminalLeases = this.store.getTerminalLeaseReasons(run.runId);
+		for (const plan of this.store.getPlans(run.runId)) {
+			const lease = driver.leaseReason(plan.worktree);
+			if (lease && terminalLeases.has(lease)) driver.release(plan.worktree, lease);
+		}
+		this.terminalSideEffectsDirty = false;
 	}
 
 	private async reconcile(profile: ResolvedProfile, options: { schedule?: boolean } = {}): Promise<ManagerReply> {
@@ -1154,7 +1220,7 @@ export class HerderRunManager {
 		if (run.status !== "running") return this.reply();
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
-			if (activeActions(this.store, run.runId).length > 0) {
+			if (activeActionCount(this.store, run.runId) > 0) {
 				this.projectLifecycle(run);
 				await driver.verifyCheckout(run.checkoutStateToken);
 				return this.reply("revision-barrier");
@@ -1164,7 +1230,7 @@ export class HerderRunManager {
 		}
 		const current = this.store.getPlans(run.runId);
 		const overview = summarizeRun(this.specs(run), current);
-		if (overview.complete && activeActions(this.store, run.runId).length === 0) {
+		if (overview.complete && activeActionCount(this.store, run.runId) === 0) {
 			const finalPlan = current.find((plan) => plan.planId === "RUN");
 			if (finalPlan?.phase === "FINAL_APPROVED") {
 				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
@@ -1215,7 +1281,7 @@ export class HerderRunManager {
 			}
 		}
 		const settled = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
-		if (activeActions(this.store, run.runId).length === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
+		if (activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
 			this.store.updateRun({ status: "failed", terminalDetail: `Blocked plans require recovery: ${settled.blocked.join(", ")}` });
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
@@ -1223,18 +1289,37 @@ export class HerderRunManager {
 		return this.reply(options.schedule === false ? "host-backpressure" : undefined);
 	}
 
-	async auditScheduler(): Promise<ManagerReply> {
+	async auditScheduler(): Promise<ManagerReply>;
+	async auditScheduler(options: { includeReply: false }): Promise<ManagerReply | null>;
+	async auditScheduler(options: { includeReply?: boolean } = {}): Promise<ManagerReply | null> {
 		const run = this.store.getRun();
-		if (!run || run.status !== "running") return this.reply();
-		return this.reconcile(boundProfile(run, this.store));
+		if (!run || run.status !== "running") return options.includeReply === false ? null : this.reply();
+		const drift = this.graphDrift(run);
+		if (drift.changed) {
+			this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
+			return options.includeReply === false ? null : this.reply();
+		}
+		const plans = this.store.getPlans(run.runId);
+		const activeActionsForRun = activeActions(this.store, run.runId);
+		const overview = summarizeRun(this.specs(run), plans);
+		const scheduler = this.schedulerState(run, undefined, { active: activeActionsForRun, plans });
+		const needsReconcile = this.terminalSideEffectsDirty
+			|| this.store.getPlanEdit(run.runId)?.state === "barrier"
+			|| plans.some((plan) => plan.phase === "READY_TO_INTEGRATE")
+			|| (overview.complete && activeActionsForRun.length === 0)
+			|| !scheduler.workConserving;
+		return needsReconcile
+			? this.reconcile(boundProfile(run, this.store))
+			: options.includeReply === false ? null : this.reply();
 	}
 
 	private async schedule(profile: ResolvedProfile): Promise<void> {
 		const run = this.store.getRun()!;
 		const driver = this.driver(run);
 		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
-		let occupied = activeActions(this.store, run.runId).length;
-		const owned = assignedPlanIds(this.store, run.runId);
+		const active = activeActions(this.store, run.runId);
+		let occupied = active.length;
+		const owned = new Set(active.map((action) => action.planId));
 		const plans = this.store.getPlans(run.runId);
 		for (const plan of plans.sort((a, b) => a.planId.localeCompare(b.planId))) {
 			if (occupied >= run.maxParallel) break;
@@ -1365,13 +1450,17 @@ export class HerderRunManager {
 		return action;
 	}
 
-	private schedulerState(run: StoredRun, suppression?: "host-backpressure" | "revision-barrier"): ManagerReply["scheduler"] {
-		const active = activeActions(this.store, run.runId);
+	private schedulerState(
+		run: StoredRun,
+		suppression?: "host-backpressure" | "revision-barrier",
+		state?: { active: StoredAction[]; plans: StoredPlan[] },
+	): ManagerReply["scheduler"] {
+		const active = state?.active ?? activeActions(this.store, run.runId);
 		const edit = this.store.getPlanEdit(run.runId);
 		if (edit?.state === "barrier") suppression = "revision-barrier";
 		const reservedPlanId = edit?.planId;
 		const owned = new Set(active.map((action) => action.planId));
-		const plans = this.store.getPlans(run.runId);
+		const plans = state?.plans ?? this.store.getPlans(run.runId);
 		const runtimeIds = new Set(plans.map((plan) => plan.planId));
 		const runnablePlanIds = [
 			...plans.filter((plan) => !owned.has(plan.planId) && roleForPhase(plan.phase)).map((plan) => plan.planId),
@@ -1408,12 +1497,13 @@ export class HerderRunManager {
 			const drift = this.graphDrift(run);
 			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
 		}
-		const overview = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
-		const proposed = this.store.getActions(run.runId, ["proposed"]);
+		const plans = this.store.getPlans(run.runId);
+		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
-		const questionPlan = this.store.getPlans(run.runId).find((plan) => plan.phase === "NEEDS_INPUT");
+		const proposed = active.filter((action) => action.state === "proposed");
+		const questionPlan = plans.find((plan) => plan.phase === "NEEDS_INPUT");
 		const planEdit = this.store.getPlanEdit(run.runId);
-		const scheduler = this.schedulerState(run, suppression);
+		const scheduler = this.schedulerState(run, suppression, { active, plans });
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
 			runId: run.runId,
