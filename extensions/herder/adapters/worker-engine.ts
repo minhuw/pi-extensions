@@ -95,8 +95,21 @@ function message(error: unknown): string {
 export function applyServiceTier(session: AgentSession, tier: string): void {
 	const serviceTier = serviceTierRequestValue(tier);
 	const base = session.agent.streamFunction;
-	session.agent.streamFunction = (model, context, options) =>
-		base(model, context, { ...options, serviceTier } as typeof options);
+	session.agent.streamFunction = (model, context, options) => {
+		const previousOnPayload = options?.onPayload;
+		return base(model, context, {
+			...options,
+			serviceTier,
+			onPayload: async (payload, payloadModel) => {
+				const transformed = await previousOnPayload?.(payload, payloadModel);
+				const finalPayload = transformed === undefined ? payload : transformed;
+				if (!finalPayload || typeof finalPayload !== "object" || Array.isArray(finalPayload)) {
+					throw new Error("Herder cannot pin a service tier on a non-object provider payload.");
+				}
+				return { ...finalPayload, service_tier: serviceTier };
+			},
+		} as typeof options);
+	};
 }
 
 function roleFromAgentType(agentType: string): ManagerAction["role"] {

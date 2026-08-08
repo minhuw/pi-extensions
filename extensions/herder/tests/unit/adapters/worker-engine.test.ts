@@ -111,7 +111,7 @@ class FakeFactory implements PiWorkerSessionFactory {
 	}
 }
 
-test("applyServiceTier pins every stream request to the exact provider tier", () => {
+test("applyServiceTier pins every stream request and final provider payload", async () => {
 	const seen: unknown[] = [];
 	const session = {
 		agent: {
@@ -122,11 +122,27 @@ test("applyServiceTier pins every stream request to the exact provider tier", ()
 		},
 	};
 	applyServiceTier(session as never, "fast");
-	const result = session.agent.streamFunction("model", "context", { reasoning: "max" });
+	const result = session.agent.streamFunction("model", "context", {
+		reasoning: "max",
+		onPayload: (payload: unknown) => ({ ...(payload as object), service_tier: "default", transformed: true }),
+	});
 	assert.equal(result, "stream");
-	assert.deepEqual(seen[0], { reasoning: "max", serviceTier: "priority" });
+	const first = seen[0] as { reasoning: string; serviceTier: string; onPayload: (payload: unknown, model: unknown) => Promise<unknown> };
+	assert.equal(first.reasoning, "max");
+	assert.equal(first.serviceTier, "priority");
+	assert.deepEqual(await first.onPayload({ model: "gpt-5.6-luna" }, "model"), {
+		model: "gpt-5.6-luna",
+		service_tier: "priority",
+		transformed: true,
+	});
 	session.agent.streamFunction("model", "context");
-	assert.deepEqual(seen[1], { serviceTier: "priority" });
+	const second = seen[1] as { serviceTier: string; onPayload: (payload: unknown, model: unknown) => Promise<unknown> };
+	assert.equal(second.serviceTier, "priority");
+	assert.deepEqual(await second.onPayload({ model: "gpt-5.6-luna" }, "model"), {
+		model: "gpt-5.6-luna",
+		service_tier: "priority",
+	});
+	await assert.rejects(() => second.onPayload("invalid", "model"), /non-object provider payload/);
 	assert.throws(() => applyServiceTier(session as never, "flex"), /Unknown Herder service tier/);
 });
 
