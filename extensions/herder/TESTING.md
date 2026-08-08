@@ -21,3 +21,9 @@ npm run test:e2e:herder
 ```
 
 The live test starts Pi with extension discovery disabled and explicitly loads this checkout's Herder entrypoint. It verifies one Implementer followed by two independent Reviewer approvals, exact model bindings and usage records, a clean unchanged user checkout, the integrated result, dashboard health, and parentless Pi worker trajectories.
+
+## Live CI
+
+`.github/workflows/herder-live-e2e.yml` runs the Pi/Offcut fixture after Herder-related pushes to `master` and through manual dispatch. It installs the CLIProxyAPI Pi provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
+
+The workflow requires the `CLIPROXY_API_KEY` and `CLIPROXY_BASE_URL` repository secrets. Never place their values in workflow files, logs, fixtures, or committed environment files.

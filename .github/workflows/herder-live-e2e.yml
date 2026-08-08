@@ -1,0 +1,102 @@
+name: Herder Live E2E
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/herder-live-e2e.yml
+      - extensions/herder/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: herder-live-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-e2e:
+    name: Pi / Offcut
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HERDER_E2E_TIMEOUT_MS: "2400000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install package dependencies
+        run: npm ci
+
+      - name: Validate CLIProxyAPI credentials
+        id: proxy
+        shell: bash
+        env:
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CLIPROXY_API_KEY" || -z "$CLIPROXY_BASE_URL" ]]; then
+            echo "CLIPROXY_API_KEY and CLIPROXY_BASE_URL repository secrets are required." >&2
+            exit 1
+          fi
+
+          proxy_root="${CLIPROXY_BASE_URL%/}"
+          proxy_root="${proxy_root%/backend-api}"
+          proxy_root="${proxy_root%/v1}"
+          echo "::add-mask::$proxy_root"
+          echo "::add-mask::$proxy_root/v1"
+          echo "root=$proxy_root" >> "$GITHUB_OUTPUT"
+
+          curl --fail --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer $CLIPROXY_API_KEY" \
+            "$proxy_root/v1/models?client_version=herder-ci" \
+            --output /dev/null
+
+      - name: Install and configure Pi
+        shell: bash
+        run: |
+          set -euo pipefail
+          pi_bin="$GITHUB_WORKSPACE/node_modules/.bin/pi"
+          "$pi_bin" install npm:@router-for-me/pi-cliproxyapi-provider@1.4.13 --approve
+          "$pi_bin" install "$GITHUB_WORKSPACE" --approve
+          echo "HERDER_PI_BIN=$pi_bin" >> "$GITHUB_ENV"
+
+      - name: Run live Pi E2E
+        env:
+          HERDER_KEEP_E2E: "1"
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
+          CLIPROXYAPI_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXYAPI_BASE_URL: ${{ steps.proxy.outputs.root }}
+        run: npm run test:e2e:herder
+
+      - name: Prepare live E2E diagnostics
+        if: always()
+        env:
+          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
+          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
+        run: >-
+          node --experimental-strip-types extensions/herder/tests/e2e/support/collect-live-artifacts.ts
+          --host pi
+          --output ${{ runner.temp }}/herder-live-artifacts/pi
+
+      - name: Upload live E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: herder-live-e2e-pi-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/herder-live-artifacts/pi
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

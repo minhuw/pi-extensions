@@ -21,7 +21,7 @@ interface CollectionReport {
 }
 
 export interface CollectionOptions {
-	host: "codex" | "claude" | "pi";
+	host: "pi";
 	output: string;
 	tmpRoot?: string;
 	environment?: NodeJS.ProcessEnv;
@@ -113,7 +113,7 @@ export function collectLiveArtifacts(options: CollectionOptions): CollectionRepo
 	}
 	fs.mkdirSync(output, { recursive: true });
 	const redactions = patterns(options.environment || process.env);
-	const prefix = `herder-v010-${options.host}-`;
+	const prefix = "herder-pi-live-";
 	for (const entry of fs.readdirSync(tmpRoot).filter((name) => name.startsWith(prefix)).sort()) {
 		const workspace = path.join(tmpRoot, entry);
 		if (!fs.lstatSync(workspace).isDirectory()) continue;
@@ -145,7 +145,7 @@ function parse(argv: string[]): CollectionOptions {
 		else if (option === "--output") output = value;
 		else tmpRoot = value;
 	}
-	if (!new Set(["codex", "claude", "pi"]).has(host) || !output) throw new Error("usage: collect-live-artifacts.ts --host codex|claude|pi --output <directory> [--tmp-root <directory>]");
+	if (host !== "pi" || !output) throw new Error("usage: collect-live-artifacts.ts --host pi --output <directory> [--tmp-root <directory>]");
 	return { host: host as CollectionOptions["host"], output, ...(tmpRoot ? { tmpRoot } : {}) };
 }
 
