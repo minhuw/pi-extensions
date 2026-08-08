@@ -7,7 +7,7 @@ import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
-import { buildGraph, snapshotPlan, snapshotPlanFromGraph } from "../../core/plans.ts"
+import { buildGraph, snapshotPlan, snapshotPlansFromGraph } from "../../core/plans.ts"
 import type { PlanSnapshot } from "../../core/plans.ts"
 import { parseCheckpointRefRelative } from "./coordination-ref.ts"
 
@@ -431,7 +431,7 @@ export function materializeAssignment(options: AssignmentOptions, configuration:
     if (run) {
       const graph = buildGraph(planDir)
       if (graph.plans.length === 0) throw new Error("cannot materialize a run assignment for an empty plan set")
-      entries = graph.plans.map((plan) => compiledAssignmentEntry(snapshotPlanFromGraph(graph, plan.id)))
+      entries = snapshotPlansFromGraph(graph).map(compiledAssignmentEntry)
     } else {
       entries = [compiledAssignmentEntry(snapshotPlan(planDir, planId!))]
     }

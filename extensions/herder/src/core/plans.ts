@@ -367,13 +367,21 @@ function buildWaves(plans: PlanRecord[]): string[][] {
   return waves
 }
 
-function transitivelyDependsOn(plansById: Map<string, PlanRecord>, from: string, target: string, seen = new Set<string>()): boolean {
-  if (seen.has(from)) return false
-  seen.add(from)
-  for (const dependency of plansById.get(from)?.dependencies ?? []) {
-    if (dependency === target || transitivelyDependsOn(plansById, dependency, target, seen)) return true
+function transitiveDependencies(plansById: Map<string, PlanRecord>): Map<string, Set<string>> {
+  const memo = new Map<string, Set<string>>()
+  const collect = (id: string): Set<string> => {
+    const cached = memo.get(id)
+    if (cached) return cached
+    const dependencies = new Set<string>()
+    for (const dependency of plansById.get(id)?.dependencies ?? []) {
+      dependencies.add(dependency)
+      for (const transitive of collect(dependency)) dependencies.add(transitive)
+    }
+    memo.set(id, dependencies)
+    return dependencies
   }
-  return false
+  for (const id of plansById.keys()) collect(id)
+  return memo
 }
 
 function sharedContextPath(planDir: string): string | null {
@@ -472,6 +480,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
     for (const issue of plan.shapeIssues) warnings.push(`Plan ${plan.id} shape: ${issue}`)
   }
 
+  const dependenciesByPlan = transitiveDependencies(plansById)
   const overlaps: PlanGraph["overlaps"] = []
   for (let leftIndex = 0; leftIndex < plans.length; leftIndex += 1) {
     const left = plans[leftIndex]
@@ -480,8 +489,8 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
       const right = plans[rightIndex]
       const paths = right.inScopePaths.filter((candidate) => leftPaths.has(candidate))
       if (paths.length === 0) continue
-      const ordered = transitivelyDependsOn(plansById, left.id, right.id)
-        || transitivelyDependsOn(plansById, right.id, left.id)
+      const ordered = dependenciesByPlan.get(left.id)!.has(right.id)
+        || dependenciesByPlan.get(right.id)!.has(left.id)
       overlaps.push({ plans: [left.id, right.id], paths, ordered })
       if (!ordered) {
         warnings.push(`Plans ${left.id} and ${right.id} have unordered overlapping in-scope paths: ${paths.join(", ")}`)
@@ -658,12 +667,8 @@ export interface PlanSnapshot {
   indexText: string
 }
 
-export function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanSnapshot {
-  const id = canonicalId(inputId)
-  const plan = graph.plans.find((candidate) => candidate.id === id)
-  if (!plan) fail(`Plan ${id} is not indexed in ${graph.readme}`)
+function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, contextText: string, indexText: string): PlanSnapshot {
   const sourcePlanText = fs.readFileSync(plan.file, "utf8")
-  const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
   const planText = contextText
     ? `<!-- herder-snapshot:shared-context -->\n${contextText.trim()}\n\n<!-- herder-snapshot:local-plan -->\n${sourcePlanText.trim()}\n`
     : sourcePlanText
@@ -688,8 +693,22 @@ export function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanS
     contextText,
     snapshotSha256: sha256(planText),
     snapshotInputs,
-    indexText: fs.readFileSync(graph.readme, "utf8"),
+    indexText,
   }
+}
+
+export function snapshotPlansFromGraph(graph: PlanGraph): PlanSnapshot[] {
+  const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
+  const indexText = fs.readFileSync(graph.readme, "utf8")
+  return graph.plans.map((plan) => createPlanSnapshot(graph, plan, contextText, indexText))
+}
+
+export function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanSnapshot {
+  const id = canonicalId(inputId)
+  const plan = graph.plans.find((candidate) => candidate.id === id)
+  if (!plan) fail(`Plan ${id} is not indexed in ${graph.readme}`)
+  const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
+  return createPlanSnapshot(graph, plan, contextText, fs.readFileSync(graph.readme, "utf8"))
 }
 
 export function snapshotPlan(inputDir = DEFAULT_PLAN_DIR, inputId: unknown): PlanSnapshot {
