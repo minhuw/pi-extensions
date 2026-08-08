@@ -14,6 +14,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 const ASSET_DIR = path.resolve(SCRIPT_DIR, "../../assets/dashboard")
 const LOOPBACK_HOST = "127.0.0.1"
 const DEFAULT_PORT = 4173
+const STATE_CACHE_MS = 1000
 const ASSETS = new Map<string, { file: string; type: string }>([
   ["/", { file: "index.html", type: "text/html; charset=utf-8" }],
   ["/dashboard.css", { file: "dashboard.css", type: "text/css; charset=utf-8" }],
@@ -157,7 +158,16 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
   const stateProvider = input.stateProvider ?? (() => buildDashboardState({ planDir, planName }))
   const allowedHosts = new Set<string>()
   const assets = readAssets()
-  stateProvider()
+  let cachedStateBody = ""
+  let stateExpiresAt = 0
+  const stateBody = (): string => {
+    const now = Date.now()
+    if (cachedStateBody && now < stateExpiresAt) return cachedStateBody
+    cachedStateBody = `${JSON.stringify(stateProvider())}\n`
+    stateExpiresAt = now + STATE_CACHE_MS
+    return cachedStateBody
+  }
+  stateBody()
 
   const handle = (request: IncomingMessage, response: ServerResponse): void => {
     const method = request.method ?? "GET"
@@ -179,7 +189,7 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
     }
     if (pathname === "/api/state") {
       try {
-        send(response, 200, `${JSON.stringify(stateProvider())}\n`, "application/json; charset=utf-8", method)
+        send(response, 200, stateBody(), "application/json; charset=utf-8", method)
       } catch (error) {
         send(response, 503, `${JSON.stringify({ error: "snapshot-unavailable", message: error instanceof Error ? error.message : String(error) })}\n`, "application/json; charset=utf-8", method)
       }

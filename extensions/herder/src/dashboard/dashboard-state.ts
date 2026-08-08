@@ -126,11 +126,16 @@ function rolePhase(role: unknown): DashboardPhase {
 }
 
 function latestRecord(records: UsageRecord[]): UsageRecord | null {
-  return [...records].sort((left, right) => {
-    const leftTime = left.finishedAt ?? left.recordedAt ?? ""
-    const rightTime = right.finishedAt ?? right.recordedAt ?? ""
-    return leftTime.localeCompare(rightTime)
-  }).at(-1) ?? null
+  let latest: UsageRecord | null = null
+  let latestTime = ""
+  for (const record of records) {
+    const time = record.finishedAt ?? record.recordedAt ?? ""
+    if (!latest || time >= latestTime) {
+      latest = record
+      latestTime = time
+    }
+  }
+  return latest
 }
 
 function outcomeContains(record: UsageRecord | null, words: string[]): boolean {
@@ -244,8 +249,8 @@ export function buildForecast(plans: ForecastPlan[], runReport: ReturnType<typeo
   }
 }
 
-function planReport(records: UsageRecord[], id: string) {
-  const report = executionReport(records, id)
+function planReport(records: UsageRecord[]) {
+  const report = executionReport(records)
   return {
     attempts: report.attempts,
     rounds: report.rounds,
@@ -309,6 +314,12 @@ export function buildDashboardState(input: DashboardInput = {}) {
   } : buildGraph(context.planDir)
   const usage = readUsageState(context.planDir)
   const records = usage.records
+  const recordsByPlan = new Map<string, UsageRecord[]>()
+  for (const record of records) {
+    const group = recordsByPlan.get(record.plan) ?? []
+    group.push(record)
+    recordsByPlan.set(record.plan, group)
+  }
   const branchPrefix = `refs/heads/herder/${context.planName}/`
   const coordinationPrefix = `refs/plan-herder/${context.planName}/`
   const branches = listRefs(context.repoRoot, branchPrefix)
@@ -339,7 +350,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
     const branchName = `herder/${context.planName}/${plan.id}`
     const worktree = worktreeByBranch.get(branchName) ?? null
     const completion = completionByPlan.get(plan.id) ?? null
-    const attempts = records.filter((record) => record.plan === plan.id)
+    const attempts = recordsByPlan.get(plan.id) ?? []
     const unsatisfied = (plan.dependencies as string[]).filter((id: string) => statusById.get(id) !== "DONE")
     const lease = worktree?.locked ? parseLease(worktree.lockReason, context.planName, plan.id) : null
     const planView: PlanView = {
@@ -364,7 +375,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
       completion: completion ? { ref: completion.ref, target: completion.target, shortTarget: shortSha(completion.target) } : null,
       phase: "coordination",
       rounds: attemptsByRound(attempts),
-      report: planReport(records, plan.id),
+      report: planReport(attempts),
     }
     const runtime = runtimeById.get(plan.id) ?? null
     planView.phase = manager.run
