@@ -9,7 +9,7 @@ const repositoryRoot = path.resolve(extensionRoot, "../..");
 
 test("Pi package registers Herder while keeping planning skills command-owned", async () => {
 	const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
-	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/pi/index.ts"));
+	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
 	for (const skill of ["improve", "grill", "plans", "validate"]) {
 		const contents = await readFile(path.join(extensionRoot, "skills", skill, "SKILL.md"), "utf8");
@@ -23,8 +23,8 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 
 test("deterministic manager owns scheduling while Pi workers cannot recurse", async () => {
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
-	const extension = await readFile(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const engine = await readFile(path.join(extensionRoot, "adapters/pi/worker-engine.ts"), "utf8");
+	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
+	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
 	assert.match(extension, /engine\.prepare\(\{ action, planDirectory: reply\.planDirectory \}\)/);
@@ -44,8 +44,8 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 });
 
 test("Pi exposes current-session agentic workflows, direct plan commands, and the exact plan application tool", async () => {
-	const extension = await readFile(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const workflows = await readFile(path.join(extensionRoot, "adapters/pi/planning-workflows.ts"), "utf8");
+	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
+	const workflows = await readFile(path.join(extensionRoot, "adapters/planning-workflows.ts"), "utf8");
 	assert.match(extension, /registerPiPlanningWorkflows\(pi, PACKAGE_ROOT/);
 	for (const command of ["herder-improve", "herder-grill", "herder-validate", "herder-plans"]) {
 		assert.match(workflows, new RegExp(`command: "${command}"`));
@@ -59,7 +59,7 @@ test("Pi exposes current-session agentic workflows, direct plan commands, and th
 });
 
 test("Pi orchestration specifies clean sessions and serialized integration", async () => {
-	const protocol = await readFile(path.join(extensionRoot, "adapters/pi/pi-orchestration.md"), "utf8");
+	const protocol = await readFile(path.join(extensionRoot, "adapters/orchestration.md"), "utf8");
 	assert.match(protocol, /new persisted `SessionManager` with no parent/);
 	assert.match(protocol, /managed temporary worktree/);
 	assert.match(protocol, /opaque `pi-worker:` session handles/);

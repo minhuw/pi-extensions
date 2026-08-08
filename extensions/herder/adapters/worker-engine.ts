@@ -12,7 +12,7 @@ import {
 	type AgentSessionEvent,
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
-import type { ManagerAction, UsageEvidence } from "../../src/shared/protocol.ts";
+import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
 import {
 	modelMatches,
 	modelSupportsEffort,

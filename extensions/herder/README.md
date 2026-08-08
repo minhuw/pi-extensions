@@ -76,7 +76,7 @@ Fire and resume start or reuse Herder's persistent local Run Manager, launch the
 
 Each plan keeps one Herder-owned branch and worktree for its entire pipeline; workers never create additional branches or worktrees. The user's checkout remains unchanged until Herder performs its serialized integration step.
 
-For the full adapter and runtime contracts, see [Herder for Pi](adapters/pi/README.md) and [Pi orchestration](adapters/pi/pi-orchestration.md).
+For the full adapter and runtime contracts, see [Herder for Pi](adapters/README.md) and [Pi orchestration](adapters/orchestration.md).
 
 ## Testing
 

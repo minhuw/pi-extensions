@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
-import type { ManagerAction } from "../../../../src/shared/protocol.ts";
+import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import {
 	applyServiceTier,
 	finalAssistantResult,
@@ -9,7 +9,7 @@ import {
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
-} from "../../../../adapters/pi/worker-engine.ts";
+} from "../../../adapters/worker-engine.ts";
 
 function action(id = "action-1", planId = "001"): ManagerAction {
 	return {

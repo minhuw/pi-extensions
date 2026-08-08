@@ -3,8 +3,8 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../../adapters/pi/arguments.ts";
-import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../../adapters/pi/paths.ts";
+import { parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
+import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../adapters/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
 	assert.deepEqual(tokenizeArguments(`"plans with spaces" --profile 'poorman'`), ["plans with spaces", "--profile", "poorman"]);

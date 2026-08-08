@@ -9,9 +9,9 @@ const repositoryRoot = path.resolve(extensionRoot, "../..");
 
 test("Herder is a self-contained Pi-only extension", () => {
 	const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
-	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/pi/index.ts"));
+	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
-	for (const directory of ["adapters/pi", "src/application", "src/core", "src/daemon", "src/client", "src/dashboard", "src/shared", "assets/roles/pi", "assets/roles/contracts", "assets/profiles", "skills", "tests"]) {
+	for (const directory of ["adapters", "src/application", "src/core", "src/daemon", "src/client", "src/dashboard", "src/shared", "assets/roles/pi", "assets/roles/contracts", "assets/profiles", "skills", "tests"]) {
 		assert.equal(existsSync(path.join(extensionRoot, directory)), true, directory);
 	}
 	for (const legacy of ["adapters/mcp", "agents", "assets/roles/codex", "assets/roles/claude", "src/core/profile-installer.ts", ".codex-plugin", ".claude-plugin", ".mcp.json"]) {
@@ -20,8 +20,8 @@ test("Herder is a self-contained Pi-only extension", () => {
 });
 
 test("Pi and planning commands share one direct application facade", () => {
-	const adapter = readFileSync(path.join(extensionRoot, "adapters/pi/index.ts"), "utf8");
-	const planning = readFileSync(path.join(extensionRoot, "adapters/pi/planning-workflows.ts"), "utf8");
+	const adapter = readFileSync(path.join(extensionRoot, "adapters/index.ts"), "utf8");
+	const planning = readFileSync(path.join(extensionRoot, "adapters/planning-workflows.ts"), "utf8");
 	const application = readFileSync(path.join(extensionRoot, "src/application/tools.ts"), "utf8");
 	assert.match(adapter, /src\/application\/tools\.ts/);
 	assert.match(planning, /src\/application\/tools\.ts/);

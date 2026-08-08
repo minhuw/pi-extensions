@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { ManagerReply, TerminalEvent } from "../../src/shared/protocol.ts";
-import { invokeHerderTool } from "../../src/application/tools.ts";
+import type { ManagerReply, TerminalEvent } from "../src/shared/protocol.ts";
+import { invokeHerderTool } from "../src/application/tools.ts";
 import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./arguments.ts";
 import {
 	activeModelMatches,

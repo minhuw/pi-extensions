@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HERDER_STATE_ENTRY, restoreLastRun, type HerderRunState } from "../../../../adapters/pi/state.ts";
+import { HERDER_STATE_ENTRY, restoreLastRun, type HerderRunState } from "../../../adapters/state.ts";
 
 test("session restoration uses the newest valid Herder entry", () => {
 	const state: HerderRunState = {
