@@ -14,10 +14,12 @@ import {
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
+  type ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { forwardAbortSignal } from "./abort-signal.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
@@ -486,13 +488,6 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
  * Wire an AbortSignal to abort a session.
  * Returns a cleanup function to remove the listener.
  */
-function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
-  if (!signal) return () => {};
-  const onAbort = () => session.abort();
-  signal.addEventListener("abort", onAbort, { once: true });
-  return () => signal.removeEventListener("abort", onAbort);
-}
-
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
@@ -506,6 +501,7 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  options.signal?.throwIfAborted();
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
 
@@ -516,6 +512,7 @@ export async function runAgent(
   const configCwd = options.configCwd ?? effectiveCwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
+  options.signal?.throwIfAborted();
 
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -649,6 +646,7 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await loader.reload();
+  options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -791,14 +789,14 @@ export async function runAgent(
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: ExtensionContext["modelRegistry"];
-    modelRuntime?: unknown;
+    modelRuntime?: ModelRuntime;
   } = {
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
     settingsManager,
     modelRegistry: ctx.modelRegistry,
-    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
+    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as ModelRuntime }),
     model,
     tools: sessionTools,
     resourceLoader: loader,
@@ -918,6 +916,9 @@ export async function runAgent(
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
   try {
+    // AbortSignal events do not replay. The forwarder handles a setup race,
+    // and this check prevents a cancelled child from starting its prompt.
+    options.signal?.throwIfAborted();
     await session.prompt(effectivePrompt);
   } finally {
     unsubTurns();
@@ -968,6 +969,7 @@ export async function resumeAgent(
     : () => {};
 
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(prompt);
   } finally {
     collector.unsubscribe();

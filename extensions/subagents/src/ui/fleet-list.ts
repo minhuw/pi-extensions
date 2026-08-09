@@ -188,6 +188,7 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
+      .filter(a => a.owner !== "herder")
       .filter(a => a.session && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId

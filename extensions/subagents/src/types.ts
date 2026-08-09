@@ -89,6 +89,20 @@ export interface AgentRecord {
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
+  /** Telemetry ownership and parentage for cross-extension foreground agents. */
+  owner?: string;
+  rootActionId?: string;
+  planId?: string;
+  parentAgentId?: string;
+  parentSessionId?: string;
+  sessionId?: string;
+  turnCount: number;
+  maxTurns?: number;
+  activeTools: string[];
+  responseText: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  serviceTier?: ServiceTierInput;
   toolUses: number;
   startedAt: number;
   completedAt?: number;

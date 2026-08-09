@@ -18,6 +18,7 @@ import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js"
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
+export type OnAgentUpdate = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
@@ -83,6 +84,13 @@ interface SpawnOptions {
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
+  /** Cross-extension telemetry ownership and nested parentage. */
+  metadata?: {
+    owner?: string;
+    rootActionId?: string;
+    planId?: string;
+    parentAgentId?: string;
+  };
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
@@ -105,6 +113,7 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
+  private onUpdate?: OnAgentUpdate;
   private maxConcurrent: number;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
@@ -120,10 +129,12 @@ export class AgentManager {
     maxConcurrent = DEFAULT_MAX_CONCURRENT,
     onStart?: OnAgentStart,
     onCompact?: OnAgentCompact,
+    onUpdate?: OnAgentUpdate,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
+    this.onUpdate = onUpdate;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -164,6 +175,18 @@ export class AgentManager {
       type,
       description: options.description,
       status: options.isBackground ? "queued" : "running",
+      owner: options.metadata?.owner,
+      rootActionId: options.metadata?.rootActionId,
+      planId: options.metadata?.planId,
+      parentAgentId: options.metadata?.parentAgentId,
+      parentSessionId: ctx.sessionManager?.getSessionId?.(),
+      turnCount: 0,
+      maxTurns: options.maxTurns,
+      activeTools: [],
+      responseText: "",
+      model: options.model ? `${options.model.provider}/${options.model.id}` : undefined,
+      thinking: options.thinkingLevel,
+      serviceTier: options.serviceTier,
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
@@ -240,7 +263,9 @@ export class AgentManager {
     // Wire parent abort signal to stop the subagent when the parent is interrupted
     let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
-      const onParentAbort = () => this.abort(id);
+      // Parent cancellation is the sole external control path for owned
+      // foreground children. Generic abort/steer/resume surfaces reject them.
+      const onParentAbort = () => this.abortRecord(id, true);
       options.signal.addEventListener("abort", onParentAbort, { once: true });
       detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
     }
@@ -264,14 +289,31 @@ export class AgentManager {
       configCwd: customCwd !== undefined ? ctx.cwd : undefined,
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        if (activity.type === "start") {
+          record.activeTools.push(activity.toolName);
+        } else {
+          const index = record.activeTools.indexOf(activity.toolName);
+          if (index >= 0) record.activeTools.splice(index, 1);
+          record.toolUses++;
+        }
         options.onToolActivity?.(activity);
+        this.onUpdate?.(record);
       },
-      onTurnEnd: options.onTurnEnd,
-      onTextDelta: options.onTextDelta,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+        this.onUpdate?.(record);
+      },
+      onTextDelta: (delta, fullText) => {
+        record.responseText = fullText;
+        options.onTextDelta?.(delta, fullText);
+        // Text deltas are intentionally not emitted individually. The next
+        // turn/tool/usage update carries the latest bounded response text.
+      },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         options.onAssistantUsage?.(usage);
+        this.onUpdate?.(record);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -280,6 +322,7 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        record.sessionId = session.sessionId;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -288,6 +331,7 @@ export class AgentManager {
           record.pendingSteers = undefined;
         }
         options.onSessionCreated?.(session);
+        this.onUpdate?.(record);
       },
     })
       .then(({ responseText, session, aborted, steered, failure }) => {
@@ -306,7 +350,10 @@ export class AgentManager {
           }
         }
         record.result = responseText;
+        record.responseText = responseText;
+        record.activeTools = [];
         record.session = session;
+        record.sessionId = session.sessionId;
         record.completedAt ??= Date.now();
 
         detach();
@@ -348,6 +395,7 @@ export class AgentManager {
           record.status = "error";
         }
         record.error = err instanceof Error ? err.message : String(err);
+        record.activeTools = [];
         record.completedAt ??= Date.now();
 
         detach();
@@ -451,7 +499,7 @@ export class AgentManager {
     signal?: AbortSignal,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
-    if (!record?.session) return undefined;
+    if (!record?.session || record.owner) return undefined;
 
     record.status = "running";
     record.startedAt = Date.now();
@@ -498,7 +546,7 @@ export class AgentManager {
    */
   steer(id: string, message: string): boolean {
     const record = this.agents.get(id);
-    if (!record) return false;
+    if (!record || record.owner) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {
       record.session.steer(message).catch(() => {});
@@ -520,8 +568,13 @@ export class AgentManager {
   }
 
   abort(id: string): boolean {
+    return this.abortRecord(id, false);
+  }
+
+  /** Abort one record; owned records are cancellable only by their parent signal. */
+  private abortRecord(id: string, allowOwned: boolean): boolean {
     const record = this.agents.get(id);
-    if (!record) return false;
+    if (!record || (record.owner && !allowOwned)) return false;
 
     // Remove from queue if queued
     if (record.status === "queued") {

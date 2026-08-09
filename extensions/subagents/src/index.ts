@@ -22,6 +22,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
+import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, subagentHostModelScopeDecision, type SubagentHost, type SubagentTelemetry, type SubagentTypeDescriptor } from "./host-registry.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -434,7 +435,42 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Background completion: route through group join or send individual nudge
+  const emitTelemetry = (record: AgentRecord, phase: SubagentTelemetry["phase"]) => {
+    const activeTools = [...record.activeTools];
+    const activityMap = new Map(activeTools.map((name, index) => [`${index}:${name}`, name]));
+    const telemetry: SubagentTelemetry = {
+      phase,
+      owner: record.owner,
+      rootActionId: record.rootActionId,
+      planId: record.planId,
+      parentAgentId: record.parentAgentId,
+      agentId: record.id,
+      status: record.status,
+      displayName: getDisplayName(record.type),
+      type: record.type,
+      description: record.description,
+      model: record.model,
+      thinking: record.thinking,
+      serviceTier: record.serviceTier,
+      turnCount: record.turnCount,
+      maxTurns: record.maxTurns,
+      toolUses: record.toolUses,
+      lifetimeTokens: getLifetimeTotal(record.lifetimeUsage),
+      contextPercent: getSessionContextPercent(record.session),
+      compactionCount: record.compactionCount,
+      activeTools,
+      activity: describeActivity(activityMap, record.responseText),
+      responseText: record.responseText || undefined,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      parentSessionId: record.parentSessionId,
+      sessionId: record.sessionId,
+    };
+    pi.events.emit("subagents:telemetry", telemetry);
+  };
+
   const manager = new AgentManager((record) => {
+    emitTelemetry(record, "completed");
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -475,6 +511,7 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
+    emitTelemetry(record, "started");
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -482,6 +519,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
     });
   }, (record, info) => {
+    emitTelemetry(record, "compacted");
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
       id: record.id,
@@ -491,9 +529,9 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
-  });
+  }, (record) => emitTelemetry(record, "updated"));
 
-  // Expose manager via Symbol.for() global registry for cross-package access.
+  // Expose the root manager through the public process-global host seam.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
   //
   // Claim the slot only if it's free: subagent sessions re-activate this
@@ -502,21 +540,96 @@ export default function (pi: ExtensionAPI) {
   // child manager — and the child's shutdown would then delete the root
   // session's entry. The first activation (the root session) wins; child
   // activations leave it alone.
-  const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-  const registryEntry = {
-    waitForAll: () => manager.waitForAll(),
-    hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
+  const descriptorFor = (name: string): SubagentTypeDescriptor | undefined => {
+    const resolved = resolveType(name);
+    const config = resolved ? getAgentConfig(resolved) : undefined;
+    if (!resolved || !config || config.enabled === false) return undefined;
+    const declared = config.builtinToolNames;
+    return {
+      name: resolved,
+      displayName: config.displayName ?? config.name,
+      description: config.description,
+      builtinToolNames: declared ? [...declared] : undefined,
+      readOnly: declared !== undefined && !declared.includes("edit") && !declared.includes("write"),
+    };
   };
-  const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
-  if (ownsManagerRegistry) {
-    (globalThis as any)[MANAGER_KEY] = registryEntry;
-  }
+  // Register only from a bound session_start. Pi executes extension factories
+  // before extension filtering, so factory-time registration would expose a
+  // host even when the subagents extension was excluded from the session.
+  let currentCtx: ExtensionContext | undefined;
+  let hostRegistration: symbol | undefined;
+  const host: SubagentHost = {
+    describeTypes: () => getAvailableTypes().map((name) => descriptorFor(name)).filter((value): value is SubagentTypeDescriptor => Boolean(value)),
+    resolveType: descriptorFor,
+    async spawnAndWait(piRef, ctx, request) {
+      if (request.isolated !== true) throw new Error("Subagent host foreground delegation requires isolated: true.");
+      const descriptor = descriptorFor(request.type);
+      if (!descriptor) throw new Error(`Unknown or disabled agent type: ${JSON.stringify(request.type)}.`);
+      const config = getAgentConfig(descriptor.name);
+      const effectiveModel = resolveSubagentHostModel(request.resolvedModel, config?.model, ctx.model, ctx.modelRegistry, resolveModel);
+      if (isScopeModelsEnabled() && effectiveModel) {
+        const scopeCtx = currentCtx ?? ctx;
+        const allowed = resolveEnabledModels(readEnabledModels(scopeCtx.cwd), scopeCtx.modelRegistry, scopeCtx.cwd);
+        const decision = subagentHostModelScopeDecision(effectiveModel, allowed, Boolean(request.resolvedModel));
+        if (decision !== "allow") {
+          const modelLabel = `${effectiveModel.provider}/${effectiveModel.id}`;
+          if (decision === "reject") {
+            const list = [...allowed!].sort().map((model) => `  ${model}`).join("\n");
+            throw new Error(`Model not in scope: "${modelLabel}".\n\nAllowed models (from enabledModels):\n${list}`);
+          }
+          scopeCtx.ui.notify(
+            `Agent "${descriptor.displayName}" using out-of-scope model "${config?.model ?? modelLabel}"`,
+            "warning",
+          );
+        }
+      }
+      const effectiveThinking = config?.thinking ?? request.thinking;
+      const effectiveServiceTier = config?.serviceTier ?? request.serviceTier;
+      if (effectiveServiceTier && effectiveModel && !modelSupportsServiceTier(effectiveModel)) {
+        throw new Error(`Model "${effectiveModel.provider}/${effectiveModel.id}" does not support service tier "${effectiveServiceTier}".`);
+      }
+      const effectiveMaxTurns = normalizeMaxTurns(config?.maxTurns ?? request.maxTurns ?? getDefaultMaxTurns());
+      const { record } = await manager.spawnAndWait(piRef, ctx, descriptor.name, request.prompt, {
+        description: request.description,
+        model: effectiveModel,
+        maxTurns: effectiveMaxTurns,
+        isolated: true,
+        inheritContext: false,
+        thinkingLevel: effectiveThinking,
+        serviceTier: effectiveServiceTier,
+        cwd: request.cwd,
+        signal: request.signal,
+        metadata: request.metadata,
+        invocation: {
+          modelName: effectiveModel?.name ?? effectiveModel?.id,
+          thinking: effectiveThinking,
+          serviceTier: effectiveServiceTier,
+          maxTurns: effectiveMaxTurns,
+          isolated: true,
+          inheritContext: false,
+          runInBackground: false,
+        },
+      });
+      return {
+        id: record.id,
+        status: record.status as "completed" | "steered" | "aborted" | "stopped" | "error",
+        output: record.result ?? "",
+        error: record.error,
+        startedAt: record.startedAt,
+        completedAt: record.completedAt,
+        turnCount: record.turnCount,
+        maxTurns: record.maxTurns,
+        toolUses: record.toolUses,
+        lifetimeTokens: getLifetimeTotal(record.lifetimeUsage),
+        contextPercent: getSessionContextPercent(record.session),
+        compactionCount: record.compactionCount,
+        sessionId: record.sessionId,
+        parentSessionId: record.parentSessionId,
+      };
+    },
+  };
 
   // --- Cross-extension RPC via pi.events ---
-  let currentCtx: ExtensionContext | undefined;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -552,6 +665,7 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    hostRegistration ??= registerSubagentHost(host);
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
@@ -583,11 +697,10 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle = undefined;
     currentCtx = undefined;
-    // Only release the global slot if this activation claimed it — a child
-    // session's shutdown must not delete the root session's registry entry.
-    if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
-      delete (globalThis as any)[MANAGER_KEY];
-    }
+    // The registration token prevents a child activation from releasing the
+    // root activation's process-global host slot.
+    releaseSubagentHost(hostRegistration);
+    hostRegistration = undefined;
     scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
@@ -1259,7 +1372,7 @@ Terse command-style prompts produce shallow, generic work.
       // Resume existing agent
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) {
+        if (!existing || existing.owner) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
         if (!existing.session) {
@@ -1510,7 +1623,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.owner) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -1589,7 +1702,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.owner) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
       if (record.status !== "running") {
@@ -1666,7 +1779,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter((agent) => !agent.owner);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -1787,7 +1900,7 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter((agent) => !agent.owner);
     if (agents.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
