@@ -10,9 +10,11 @@ import {
 	SessionManager,
 	type AgentSession,
 	type AgentSessionEvent,
+	type ExtensionAPI,
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
+import type { SubagentTelemetry } from "../../subagents/src/host-registry.ts";
 import {
 	modelMatches,
 	modelSupportsEffort,
@@ -21,9 +23,36 @@ import {
 	type AvailableModel,
 	type ThinkingEffort,
 } from "./profile.ts";
+import { createNestedAgentTool } from "./nested-agent-tool.ts";
 import { loadHerderPiRole } from "./role-config.ts";
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
+
+export interface PiNestedAgentSnapshot {
+	agentId: string;
+	parentAgentId?: string;
+	displayName: string;
+	type: string;
+	description: string;
+	status: SubagentTelemetry["status"];
+	model?: string;
+	effort?: string;
+	serviceTier?: string;
+	startedAt: number;
+	completedAt?: number;
+	turns: number;
+	maxTurns?: number;
+	toolUses: number;
+	lifetimeTokens: number;
+	contextPercent: number | null;
+	compactionCount: number;
+	activeTools: string[];
+	responseText?: string;
+	activity?: string;
+	parentSessionId?: string;
+	sessionId?: string;
+	children: PiNestedAgentSnapshot[];
+}
 
 export interface PiWorkerSnapshot {
 	handle: string;
@@ -33,12 +62,18 @@ export interface PiWorkerSnapshot {
 	role: ManagerAction["role"];
 	model: string;
 	effort: string;
+	serviceTier?: string;
 	status: PiWorkerStatus;
 	startedAt: number;
 	turns: number;
 	toolUses: number;
-	tokens: number;
+	lifetimeTokens: number;
+	contextPercent: number | null;
+	compactionCount: number;
+	activeTools: string[];
+	responseText?: string;
 	activity?: string;
+	children: PiNestedAgentSnapshot[];
 }
 
 export interface PiWorkerTerminal {
@@ -76,6 +111,7 @@ interface WorkerRecord {
 	request: PiWorkerRequest;
 	session: WorkerSession;
 	snapshot: PiWorkerSnapshot;
+	activeToolCalls: Map<string, string>;
 	unsubscribe: () => void;
 	started: boolean;
 	stopRequested: boolean;
@@ -127,6 +163,64 @@ function finiteCount(value: unknown): number | undefined {
 
 function record(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function responseActivity(text: string | undefined): string | undefined {
+	const line = text?.split("\n").find((candidate) => candidate.trim())?.trim();
+	if (!line) return undefined;
+	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
+}
+
+function assistantText(value: unknown): string | undefined {
+	const message = record(value);
+	if (message?.role !== "assistant" || !Array.isArray(message.content)) return undefined;
+	const text = message.content
+		.map(record)
+		.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
+		.map((item) => String(item.text))
+		.join("\n");
+	return text || undefined;
+}
+
+function cloneNested(agent: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
+	return { ...agent, activeTools: [...agent.activeTools], children: agent.children.map(cloneNested) };
+}
+
+const TELEMETRY_PHASES = new Set(["started", "updated", "compacted", "completed"]);
+const TELEMETRY_STATUSES = new Set(["queued", "running", "completed", "steered", "aborted", "stopped", "error"]);
+
+function optionalString(value: unknown): value is string | undefined {
+	return value === undefined || typeof value === "string";
+}
+
+function optionalFiniteCount(value: unknown): value is number | undefined {
+	return value === undefined || finiteCount(value) !== undefined;
+}
+
+function validSubagentTelemetry(value: unknown): value is SubagentTelemetry {
+	const telemetry = record(value);
+	if (!telemetry || telemetry.owner !== "herder") return false;
+	if (typeof telemetry.phase !== "string" || !TELEMETRY_PHASES.has(telemetry.phase)) return false;
+	if (typeof telemetry.status !== "string" || !TELEMETRY_STATUSES.has(telemetry.status)) return false;
+	for (const field of ["rootActionId", "agentId", "displayName", "type", "description"] as const) {
+		if (typeof telemetry[field] !== "string" || telemetry[field].trim().length === 0) return false;
+	}
+	for (const field of ["planId", "parentAgentId", "model", "thinking", "serviceTier", "activity", "responseText", "parentSessionId", "sessionId"] as const) {
+		if (!optionalString(telemetry[field])) return false;
+	}
+	if (telemetry.parentAgentId === telemetry.agentId) return false;
+	for (const field of ["turnCount", "maxTurns", "toolUses", "lifetimeTokens", "compactionCount", "completedAt"] as const) {
+		if (!optionalFiniteCount(telemetry[field])) return false;
+	}
+	if (finiteCount(telemetry.turnCount) === undefined
+		|| finiteCount(telemetry.toolUses) === undefined
+		|| finiteCount(telemetry.lifetimeTokens) === undefined
+		|| finiteCount(telemetry.compactionCount) === undefined
+		|| finiteCount(telemetry.startedAt) === undefined) return false;
+	if (telemetry.contextPercent !== null
+		&& (typeof telemetry.contextPercent !== "number" || !Number.isFinite(telemetry.contextPercent) || telemetry.contextPercent < 0)) return false;
+	if (!Array.isArray(telemetry.activeTools) || telemetry.activeTools.some((tool) => typeof tool !== "string" || tool.length === 0)) return false;
+	return true;
 }
 
 export function finalAssistantResult(messages: readonly unknown[]): { text?: string; error?: string; failed: boolean } {
@@ -184,10 +278,12 @@ function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: nu
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
 	private readonly agentDir: string;
+	private readonly pi: ExtensionAPI;
 	private modelRuntime?: ModelRuntime;
 
-	constructor(agentRoot: string, agentDir = getAgentDir()) {
+	constructor(agentRoot: string, pi: ExtensionAPI, agentDir = getAgentDir()) {
 		this.agentRoot = agentRoot;
+		this.pi = pi;
 		this.agentDir = agentDir;
 	}
 
@@ -240,6 +336,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			appendSystemPromptOverride: () => [],
 		});
 		await resourceLoader.reload();
+		const agentTool = createNestedAgentTool(this.pi, request.action);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
 			agentDir: this.agentDir,
@@ -247,6 +344,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			model,
 			thinkingLevel: request.action.effort as ThinkingLevel,
 			tools: definition.tools,
+			customTools: [agentTool],
 			resourceLoader,
 			sessionManager,
 		});
@@ -285,7 +383,11 @@ export class PiWorkerEngine {
 
 	snapshots(): PiWorkerSnapshot[] {
 		return [...this.workers.values()]
-			.map((worker) => ({ ...worker.snapshot }))
+			.map((worker) => ({
+				...worker.snapshot,
+				activeTools: [...worker.snapshot.activeTools],
+				children: worker.snapshot.children.map(cloneNested),
+			}))
 			.sort((left, right) => left.startedAt - right.startedAt || left.handle.localeCompare(right.handle));
 	}
 
@@ -298,9 +400,20 @@ export class PiWorkerEngine {
 		for (const listener of this.updates) listener(snapshot);
 	}
 
-	private refreshStats(worker: WorkerRecord): void {
+	private refreshContext(worker: WorkerRecord): void {
 		const stats = worker.session.getSessionStats();
-		worker.snapshot.tokens = stats.tokens.total;
+		worker.snapshot.contextPercent = stats.contextUsage?.percent ?? null;
+	}
+
+	private addLifetimeUsage(snapshot: Pick<PiWorkerSnapshot, "lifetimeTokens">, usage: unknown): void {
+		const value = record(usage);
+		if (!value) return;
+		snapshot.lifetimeTokens += (finiteCount(value.input) ?? 0) + (finiteCount(value.output) ?? 0) + (finiteCount(value.cacheWrite) ?? 0);
+	}
+
+	private syncTopActivity(worker: WorkerRecord): void {
+		worker.snapshot.activeTools = [...worker.activeToolCalls.values()];
+		worker.snapshot.activity = worker.snapshot.activeTools[0] ?? responseActivity(worker.snapshot.responseText);
 	}
 
 	private observe(worker: WorkerRecord, event: AgentSessionEvent): void {
@@ -311,26 +424,116 @@ export class PiWorkerEngine {
 		} else if (event.type === "turn_start") {
 			worker.snapshot.turns += 1;
 			changed = true;
-		}
-		else if (event.type === "tool_execution_start") {
+		} else if (event.type === "message_start" && event.message.role === "assistant") {
+			delete worker.snapshot.responseText;
+			this.syncTopActivity(worker);
+		} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+			worker.snapshot.responseText = (worker.snapshot.responseText ?? "") + event.assistantMessageEvent.delta;
+			this.syncTopActivity(worker);
+			// Keep token streaming cheap; the next meaningful state/stat event emits.
+		} else if (event.type === "tool_execution_start") {
 			worker.snapshot.toolUses += 1;
-			worker.snapshot.activity = event.toolName;
+			worker.activeToolCalls.set(event.toolCallId, event.toolName);
+			this.syncTopActivity(worker);
 			changed = true;
 		} else if (event.type === "tool_execution_end") {
-			if (worker.snapshot.activity === event.toolName) delete worker.snapshot.activity;
+			worker.activeToolCalls.delete(event.toolCallId);
+			this.syncTopActivity(worker);
 			changed = true;
 		} else if (event.type === "compaction_start") {
 			worker.snapshot.activity = "compacting";
 			changed = true;
-		} else if (event.type === "compaction_end" && worker.snapshot.activity === "compacting") {
-			delete worker.snapshot.activity;
+		} else if (event.type === "compaction_end") {
+			if (!event.aborted && event.result) worker.snapshot.compactionCount += 1;
+			this.syncTopActivity(worker);
 			changed = true;
 		}
-		if (event.type === "message_end" || event.type === "agent_end" || event.type === "agent_settled") {
-			this.refreshStats(worker);
+		if (event.type === "message_end" && record(event.message)?.role === "assistant") {
+			this.addLifetimeUsage(worker.snapshot, record(event.message)?.usage);
+			const text = assistantText(event.message);
+			if (text !== undefined) worker.snapshot.responseText = text;
+			this.syncTopActivity(worker);
+			this.refreshContext(worker);
+			changed = true;
+		} else if (event.type === "agent_end" || event.type === "agent_settled") {
+			this.refreshContext(worker);
 			changed = true;
 		}
 		if (changed) this.emitUpdate();
+	}
+
+	private findNested(children: PiNestedAgentSnapshot[], agentId: string): PiNestedAgentSnapshot | undefined {
+		for (const child of children) {
+			if (child.agentId === agentId) return child;
+			const nested = this.findNested(child.children, agentId);
+			if (nested) return nested;
+		}
+		return undefined;
+	}
+
+	private applyNestedTelemetry(target: PiNestedAgentSnapshot, telemetry: SubagentTelemetry): void {
+		target.parentAgentId = telemetry.parentAgentId;
+		target.displayName = telemetry.displayName;
+		target.type = telemetry.type;
+		target.description = telemetry.description;
+		target.status = telemetry.status;
+		target.model = telemetry.model;
+		target.effort = telemetry.thinking;
+		target.serviceTier = telemetry.serviceTier;
+		target.startedAt = telemetry.startedAt;
+		target.completedAt = telemetry.completedAt;
+		target.turns = telemetry.turnCount;
+		target.maxTurns = telemetry.maxTurns;
+		target.toolUses = telemetry.toolUses;
+		target.lifetimeTokens = telemetry.lifetimeTokens;
+		target.contextPercent = telemetry.contextPercent;
+		target.compactionCount = telemetry.compactionCount;
+		target.activeTools = [...telemetry.activeTools];
+		target.responseText = telemetry.responseText;
+		target.activity = telemetry.activity;
+		target.parentSessionId = telemetry.parentSessionId;
+		target.sessionId = telemetry.sessionId;
+	}
+
+	/** Attach live subagent telemetry to its active Herder root worker. */
+	acceptSubagentTelemetry(value: unknown): void {
+		if (!validSubagentTelemetry(value)) return;
+		const telemetry = value;
+		const worker = [...this.workers.values()].find((candidate) =>
+			candidate.request.action.actionId === telemetry.rootActionId
+			&& (!telemetry.planId || candidate.request.action.planId === telemetry.planId));
+		if (!worker) return;
+		const existing = this.findNested(worker.snapshot.children, telemetry.agentId);
+		if (existing) {
+			this.applyNestedTelemetry(existing, telemetry);
+			this.emitUpdate();
+			return;
+		}
+		let siblings = worker.snapshot.children;
+		if (telemetry.parentAgentId) {
+			const parent = this.findNested(worker.snapshot.children, telemetry.parentAgentId);
+			if (!parent) return;
+			siblings = parent.children;
+		}
+		const nested: PiNestedAgentSnapshot = {
+			agentId: telemetry.agentId,
+			displayName: telemetry.displayName,
+			type: telemetry.type,
+			description: telemetry.description,
+			status: telemetry.status,
+			startedAt: telemetry.startedAt,
+			turns: telemetry.turnCount,
+			toolUses: telemetry.toolUses,
+			lifetimeTokens: telemetry.lifetimeTokens,
+			contextPercent: telemetry.contextPercent,
+			compactionCount: telemetry.compactionCount,
+			activeTools: [...telemetry.activeTools],
+			children: [],
+		};
+		this.applyNestedTelemetry(nested, telemetry);
+		siblings.push(nested);
+		siblings.sort((left, right) => left.startedAt - right.startedAt || left.agentId.localeCompare(right.agentId));
+		this.emitUpdate();
 	}
 
 	async prepare(request: PiWorkerRequest): Promise<string> {
@@ -355,16 +558,22 @@ export class PiWorkerEngine {
 			role: request.action.role,
 			model: request.action.model,
 			effort: request.action.effort,
+			serviceTier: request.action.serviceTier,
 			status: "prepared",
 			startedAt: Date.now(),
 			turns: 0,
 			toolUses: 0,
-			tokens: 0,
+			lifetimeTokens: 0,
+			contextPercent: null,
+			compactionCount: 0,
+			activeTools: [],
+			children: [],
 		};
 		const worker = {
 			request,
 			session,
 			snapshot,
+			activeToolCalls: new Map(),
 			unsubscribe: () => {},
 			started: false,
 			stopRequested: false,

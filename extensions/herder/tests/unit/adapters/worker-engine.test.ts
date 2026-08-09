@@ -87,10 +87,11 @@ class FakeSession {
 			totalMessages: this.messages.length,
 			tokens: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, total: 16 },
 			cost: 0,
+			contextUsage: { tokens: 61_000, contextWindow: 100_000, percent: 61 },
 		};
 	}
 
-	private emit(event: AgentSessionEvent): void {
+	emit(event: AgentSessionEvent): void {
 		for (const listener of this.listeners) listener(event);
 	}
 }
@@ -237,6 +238,123 @@ test("worker terminals retain transport and provider diagnostics", async () => {
 	const result = await terminal;
 	assert.equal(result.response, "  partial output  \n");
 	assert.equal(result.error, "transport failed\nprovider failed");
+});
+
+function telemetry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		phase: "updated",
+		owner: "herder",
+		rootActionId: "action-1",
+		planId: "001",
+		agentId: "nested-1",
+		status: "running",
+		displayName: "Recon",
+		type: "recon",
+		description: "inspect code",
+		model: "proxy/gpt-5.6-luna",
+		thinking: "high",
+		turnCount: 2,
+		maxTurns: 4,
+		toolUses: 3,
+		lifetimeTokens: 1_234,
+		contextPercent: 42,
+		compactionCount: 1,
+		activeTools: ["read"],
+		activity: "read",
+		startedAt: 5_000,
+		...overrides,
+	};
+}
+
+test("worker lifetime usage excludes cache reads and compaction usage while context stays current", async () => {
+	const factory = new FakeFactory();
+	const engine = new PiWorkerEngine(factory);
+	await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	const session = factory.sessions[0]!;
+	session.emit({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "Checking the tree" }],
+			usage: { input: 10, output: 5, cacheRead: 10_000, cacheWrite: 2 },
+		} as never,
+	});
+	session.emit({
+		type: "message_end",
+		message: { role: "user", content: "ignore", usage: { input: 999, output: 999, cacheWrite: 999 } } as never,
+	});
+	session.emit({
+		type: "compaction_end",
+		reason: "threshold",
+		aborted: false,
+		willRetry: false,
+		result: {
+			summary: "summary",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 40_000,
+			usage: { input: 100, output: 50, cacheRead: 25, cacheWrite: 10, totalTokens: 185, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		},
+	});
+	let snapshot = engine.snapshots()[0]!;
+	assert.equal(snapshot.lifetimeTokens, 17);
+	assert.equal(snapshot.contextPercent, 61);
+	assert.equal(snapshot.compactionCount, 1);
+	assert.equal(snapshot.responseText, "Checking the tree");
+
+	session.emit({ type: "compaction_end", reason: "overflow", aborted: true, willRetry: false, result: undefined });
+	snapshot = engine.snapshots()[0]!;
+	assert.equal(snapshot.lifetimeTokens, 17);
+	assert.equal(snapshot.compactionCount, 1);
+});
+
+test("nested telemetry is filtered, attached, and supports a second level", async () => {
+	const engine = new PiWorkerEngine(new FakeFactory());
+	await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	for (const malformed of [
+		null,
+		{},
+		telemetry({ owner: "foreign" }),
+		telemetry({ activeTools: "read" }),
+		telemetry({ startedAt: Number.NaN }),
+		telemetry({ displayName: "" }),
+		telemetry({ parentAgentId: "nested-1" }),
+		telemetry({ planId: "999" }),
+	]) {
+		assert.doesNotThrow(() => engine.acceptSubagentTelemetry(malformed));
+	}
+	assert.deepEqual(engine.snapshots()[0]!.children, []);
+
+	engine.acceptSubagentTelemetry(telemetry());
+	engine.acceptSubagentTelemetry(telemetry({ lifetimeTokens: 2_000, activeTools: ["grep"] }));
+	engine.acceptSubagentTelemetry(telemetry({
+		agentId: "nested-2",
+		parentAgentId: "nested-1",
+		displayName: "Reviewer",
+		type: "reviewer",
+		description: "review evidence",
+		status: "completed",
+		activeTools: [],
+		completedAt: 8_000,
+	}));
+	const root = engine.snapshots()[0]!.children[0]!;
+	assert.equal(root.lifetimeTokens, 2_000);
+	assert.deepEqual(root.activeTools, ["grep"]);
+	assert.equal(root.children.length, 1);
+	assert.equal(root.children[0]!.agentId, "nested-2");
+	assert.equal(root.children[0]!.parentAgentId, "nested-1");
+});
+
+test("root worker completion removes its nested live telemetry tree", async () => {
+	const factory = new FakeFactory();
+	const engine = new PiWorkerEngine(factory);
+	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
+	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	engine.acceptSubagentTelemetry(telemetry());
+	assert.equal(engine.snapshots()[0]!.children.length, 1);
+	engine.start(handle);
+	await terminal;
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(engine.snapshots(), []);
 });
 
 test("assistant extraction uses only the exact final child response", () => {

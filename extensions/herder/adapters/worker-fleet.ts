@@ -1,26 +1,25 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import type { PiWorkerSnapshot } from "./worker-engine.ts";
+import type { PiNestedAgentSnapshot, PiWorkerSnapshot } from "./worker-engine.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 200;
-const MAX_VISIBLE_WORKERS = 5;
+const MAX_VISIBLE_AGENTS = 8;
 
-// Nerd Font glyphs (Font Awesome range), matching the statusline footer.
 const I = {
-	herder: "\uF0C0", // users
-	initializing: "\uF110", // spinner
-	running: "\uF04B", // play
-	paused: "\uF04C", // pause
-	needsInput: "\uF128", // question
-	complete: "\uF00C", // check
-	failed: "\uF00D", // times
-	stopped: "\uF04D", // stop
-	dashboard: "\uF0E4", // tachometer
-	profile: "\uF135", // rocket
-	parallel: "\uF0E8", // sitemap
-	plans: "\uF07C", // folder-open
-	progress: "\uF0AE", // tasks
+	herder: "\uF0C0",
+	initializing: "\uF110",
+	running: "\uF04B",
+	paused: "\uF04C",
+	needsInput: "\uF128",
+	complete: "\uF00C",
+	failed: "\uF00D",
+	stopped: "\uF04D",
+	dashboard: "\uF0E4",
+	profile: "\uF135",
+	parallel: "\uF0E8",
+	plans: "\uF07C",
+	progress: "\uF0AE",
 } as const;
 
 const ACTIVITY_LABELS: Record<string, string> = {
@@ -31,6 +30,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
 	ls: "listing files",
 	read: "reading",
 	write: "writing",
+	Agent: "delegating",
 };
 
 export interface HerderWidgetModel {
@@ -55,6 +55,13 @@ function formatTokens(tokens: number): string {
 	if (tokens < 1_000) return `${tokens}t`;
 	if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(tokens < 100_000 ? 1 : 0)}k`;
 	return `${(tokens / 1_000_000).toFixed(1)}m`;
+}
+
+function tokenStats(tokens: number, contextPercent: number | null, compactions: number): string {
+	const annotations: string[] = [];
+	if (contextPercent !== null) annotations.push(`${Math.round(contextPercent)}%`);
+	if (compactions > 0) annotations.push(`⇊${compactions}`);
+	return `${formatTokens(tokens)}${annotations.length ? ` (${annotations.join(" · ")})` : ""}`;
 }
 
 export function formatWorkerElapsed(startedAt: number, now = Date.now()): string {
@@ -83,39 +90,111 @@ function workerIcon(worker: PiWorkerSnapshot, frame: number, theme: Theme): stri
 	return theme.fg("accent", SPINNER[frame % SPINNER.length]!);
 }
 
+function nestedIcon(agent: PiNestedAgentSnapshot, frame: number, theme: Theme): string {
+	if (agent.status === "completed") return theme.fg("success", "✓");
+	if (agent.status === "steered") return theme.fg("warning", "✓");
+	if (["error", "aborted"].includes(agent.status)) return theme.fg("error", "✗");
+	if (agent.status === "stopped") return theme.fg("warning", "■");
+	if (agent.status === "queued") return theme.fg("muted", "○");
+	return theme.fg("accent", SPINNER[frame % SPINNER.length]!);
+}
+
+function activityLabel(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	return ACTIVITY_LABELS[value] ?? value;
+}
+
+function responseActivity(text: string | undefined): string | undefined {
+	return text?.split("\n").find((line) => line.trim())?.trim();
+}
+
 function workerActivity(worker: PiWorkerSnapshot): string {
 	if (worker.status === "stopping") return "stopping…";
 	if (worker.status === "prepared") return "starting…";
-	if (!worker.activity) return "thinking…";
-	return `${ACTIVITY_LABELS[worker.activity] ?? worker.activity}…`;
+	const active = activityLabel(worker.activeTools[0]);
+	const value = active ?? activityLabel(worker.activity) ?? responseActivity(worker.responseText) ?? "thinking";
+	return value.endsWith("…") ? value : `${value}…`;
+}
+
+function nestedActivity(agent: PiNestedAgentSnapshot): string {
+	if (agent.status === "completed") return "done";
+	if (agent.status === "steered") return "turn limit";
+	if (["error", "aborted", "stopped"].includes(agent.status)) return agent.status;
+	const active = activityLabel(agent.activeTools[0]);
+	const live = active ?? activityLabel(agent.activity) ?? responseActivity(agent.responseText);
+	if (live) return live.endsWith("…") ? live : `${live}…`;
+	return "thinking…";
 }
 
 function rightAlign(left: string, right: string, width: number): string {
 	if (width <= 0) return "";
 	const rightWidth = visibleWidth(right);
+	if (rightWidth >= width) return truncateToWidth(right, width);
 	const leftWidth = Math.max(0, width - rightWidth - 1);
 	const clampedLeft = truncateToWidth(left, leftWidth);
 	const gap = Math.max(1, width - visibleWidth(clampedLeft) - rightWidth);
-	return truncateToWidth(`${clampedLeft}${" ".repeat(gap)}${right}`, width);
+	return `${clampedLeft}${" ".repeat(gap)}${right}`;
 }
 
-function renderWorkerLine(
-	worker: PiWorkerSnapshot,
-	prefix: string,
-	connector: "├─" | "└─",
-	width: number,
-	theme: Theme,
-	now: number,
-	frame: number,
-): string {
-	const activity = theme.fg("dim", workerActivity(worker));
-	const left = `${theme.fg("dim", prefix + connector)} ${workerIcon(worker, frame, theme)} ${theme.bold(roleLabel(worker.role))}  ${activity}`;
-	const stats: string[] = [`r${worker.round}`];
-	if (worker.turns > 0) stats.push(`↻${worker.turns}`);
-	if (worker.toolUses > 0) stats.push(`${worker.toolUses} tool${worker.toolUses === 1 ? "" : "s"}`);
-	if (worker.tokens > 0) stats.push(formatTokens(worker.tokens));
-	stats.push(formatWorkerElapsed(worker.startedAt, now));
-	return rightAlign(left, theme.fg("dim", stats.join(" · ")), width);
+function topStats(worker: PiWorkerSnapshot, now: number): string {
+	return [
+		`r${worker.round}`,
+		`↻${worker.turns}`,
+		`${worker.toolUses} tool${worker.toolUses === 1 ? "" : "s"}`,
+		tokenStats(worker.lifetimeTokens, worker.contextPercent, worker.compactionCount),
+		formatWorkerElapsed(worker.startedAt, now),
+	].join(" · ");
+}
+
+function nestedStats(agent: PiNestedAgentSnapshot, now: number): string {
+	const turns = agent.maxTurns == null ? `↻${agent.turns}` : `↻${agent.turns}≤${agent.maxTurns}`;
+	return [
+		turns,
+		`${agent.toolUses} tool${agent.toolUses === 1 ? "" : "s"}`,
+		tokenStats(agent.lifetimeTokens, agent.contextPercent, agent.compactionCount),
+		formatWorkerElapsed(agent.startedAt, agent.completedAt ?? now),
+	].join(" · ");
+}
+
+interface RenderRow {
+	kind: "top" | "nested";
+	worker?: PiWorkerSnapshot;
+	agent?: PiNestedAgentSnapshot;
+	prefix: string;
+	connector: "├─" | "└─";
+}
+
+function appendNestedRows(rows: RenderRow[], children: readonly PiNestedAgentSnapshot[], prefix: string): void {
+	children.forEach((agent, index) => {
+		const connector = index === children.length - 1 ? "└─" : "├─";
+		rows.push({ kind: "nested", agent, prefix, connector });
+		appendNestedRows(rows, agent.children, `${prefix}${connector === "└─" ? "   " : "│  "}`);
+	});
+}
+
+function agentRows(workers: readonly PiWorkerSnapshot[]): RenderRow[] {
+	const rows: RenderRow[] = [];
+	workers.forEach((worker, index) => {
+		const connector = index === workers.length - 1 ? "└─" : "├─";
+		rows.push({ kind: "top", worker, prefix: "", connector });
+		// Start direct child connectors beneath the role segment while retaining
+		// the outer tree stem when a later plan sibling still follows.
+		const roleColumn = visibleWidth(`${connector} Plan ${worker.planId} · `);
+		const outerStem = connector === "├─" ? "│" : " ";
+		appendNestedRows(rows, worker.children, `${outerStem}${" ".repeat(Math.max(0, roleColumn - 1))}`);
+	});
+	return rows;
+}
+
+function renderRow(row: RenderRow, width: number, theme: Theme, now: number, frame: number): string {
+	if (row.kind === "top") {
+		const worker = row.worker!;
+		const left = `${theme.fg("dim", row.connector)} ${theme.fg("muted", `Plan ${worker.planId}`)} ${theme.fg("dim", "·")} ${workerIcon(worker, frame, theme)} ${theme.bold(roleLabel(worker.role))}  ${theme.fg("dim", workerActivity(worker))}`;
+		return rightAlign(left, theme.fg("dim", topStats(worker, now)), width);
+	}
+	const agent = row.agent!;
+	const left = `${row.prefix}${theme.fg("dim", row.connector)} ${nestedIcon(agent, frame, theme)} ${theme.bold(agent.displayName)}  ${theme.fg("dim", nestedActivity(agent))}`;
+	return rightAlign(left, theme.fg("dim", nestedStats(agent, now)), width);
 }
 
 export function workerFleetTreeLines(
@@ -124,64 +203,28 @@ export function workerFleetTreeLines(
 	width: number,
 	now = Date.now(),
 	frame = 0,
-	limit = MAX_VISIBLE_WORKERS,
+	limit = MAX_VISIBLE_AGENTS,
 ): string[] {
 	const style = statusStyle(model.status);
 	const separator = theme.fg("borderMuted", " · ");
 	const headerParts = [
 		theme.fg("accent", `${I.herder} `) + theme.bold("Herder") + " " + theme.fg(style.color, `${style.icon} ${model.status.toUpperCase()}`),
-		...(model.dashboardUrl
-			? [theme.fg("syntaxFunction", `${I.dashboard} `) + theme.fg("muted", `Dashboard ${model.dashboardUrl}`)]
-			: []),
+		...(model.dashboardUrl ? [theme.fg("syntaxFunction", `${I.dashboard} `) + theme.fg("muted", `Dashboard ${model.dashboardUrl}`)] : []),
 		theme.fg("syntaxKeyword", `${I.profile} `) + theme.fg("muted", model.profile),
 		theme.fg("syntaxFunction", `${I.parallel} `) + theme.fg("muted", `max ${model.maxParallel}`),
 		theme.fg("syntaxType", `${I.plans} `) + theme.fg("muted", model.planName),
-		...(model.summaryLine
-			? [theme.fg("success", `${I.progress} `) + theme.fg("muted", `Progress ${model.summaryLine}`)]
-			: []),
+		...(model.summaryLine ? [theme.fg("success", `${I.progress} `) + theme.fg("muted", `Progress ${model.summaryLine}`)] : []),
 	];
 	const lines = [truncateToWidth(headerParts.join(separator), width)];
-	const visibleWorkers = model.workers.slice(0, limit);
-	const groups = new Map<string, PiWorkerSnapshot[]>();
-	for (const worker of visibleWorkers) {
-		const group = groups.get(worker.planId) ?? [];
-		group.push(worker);
-		groups.set(worker.planId, group);
+	const rows = agentRows(model.workers);
+	if (rows.length === 0 && ["initializing", "running", "paused"].includes(model.status)) {
+		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", "Waiting for manager dispatch…")}`, width));
+		return lines;
 	}
-
-	type RootItem =
-		| { kind: "plan"; planId: string; workers: PiWorkerSnapshot[] }
-		| { kind: "waiting" }
-		| { kind: "overflow"; count: number };
-	const items: RootItem[] = [];
-	for (const [planId, workers] of groups) items.push({ kind: "plan", planId, workers });
-	if (model.workers.length === 0 && ["initializing", "running", "paused"].includes(model.status)) items.push({ kind: "waiting" });
-	if (model.workers.length > visibleWorkers.length) items.push({ kind: "overflow", count: model.workers.length - visibleWorkers.length });
-
-	for (const [itemIndex, item] of items.entries()) {
-		const isLastRoot = itemIndex === items.length - 1;
-		const connector = isLastRoot ? "└─" : "├─";
-		if (item.kind === "waiting") {
-			lines.push(truncateToWidth(`${theme.fg("dim", connector)} ${theme.fg("dim", "Waiting for manager dispatch…")}`, width));
-			continue;
-		}
-		if (item.kind === "overflow") {
-			lines.push(truncateToWidth(`${theme.fg("dim", connector)} ${theme.fg("dim", `+${item.count} more worker${item.count === 1 ? "" : "s"}`)}`, width));
-			continue;
-		}
-		lines.push(truncateToWidth(`${theme.fg("dim", connector)} ${theme.fg("muted", `Plan ${item.planId}`)}`, width));
-		const prefix = isLastRoot ? "   " : "│  ";
-		for (const [workerIndex, worker] of item.workers.entries()) {
-			lines.push(renderWorkerLine(
-				worker,
-				prefix,
-				workerIndex === item.workers.length - 1 ? "└─" : "├─",
-				width,
-				theme,
-				now,
-				frame,
-			));
-		}
+	const visible = rows.slice(0, Math.max(0, limit));
+	for (const row of visible) lines.push(renderRow(row, width, theme, now, frame));
+	if (rows.length > visible.length) {
+		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", `+${rows.length - visible.length} more agents`)}`, width));
 	}
 	return lines;
 }

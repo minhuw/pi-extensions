@@ -20,7 +20,7 @@ const available = [
 test("Herder loads exact non-recursive Pi role definitions", async () => {
 	const implementer = await loadHerderPiRole(agentRoot, "plan-implementer");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
-	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
+	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent"]);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
@@ -48,18 +48,30 @@ test("Herder refuses tiered roles when the resolved model cannot honor the tier"
 	);
 });
 
-test("role loading rejects metadata drift and recursive tools", async () => {
+test("role loading allows Agent but rejects every recursive orchestration tool", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-role-"));
 	try {
-		await writeFile(path.join(root, "plan-reviewer.md"), `---
+		const file = path.join(root, "plan-reviewer.md");
+		await writeFile(file, `---
 name: plan-reviewer
 package: herder
 description: Reviewer
-tools: read, subagent
+tools: read, Agent
 ---
 Review.
 `);
-		await assert.rejects(() => loadHerderPiRole(root, "plan-reviewer"), /recursive agent tools are forbidden/);
+		assert.deepEqual((await loadHerderPiRole(root, "plan-reviewer")).tools, ["read", "Agent"]);
+		for (const forbidden of ["herder", "subagent", "get_subagent_result", "steer_subagent"]) {
+			await writeFile(file, `---
+name: plan-reviewer
+package: herder
+description: Reviewer
+tools: read, ${forbidden}
+---
+Review.
+`);
+			await assert.rejects(() => loadHerderPiRole(root, "plan-reviewer"), new RegExp(`recursive agent tool ${forbidden} is forbidden`));
+		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

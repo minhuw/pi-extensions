@@ -21,11 +21,13 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);
 });
 
-test("deterministic manager owns scheduling while Pi workers cannot recurse", async () => {
+test("deterministic manager owns scheduling while Pi workers delegate only through the scoped Agent tool", async () => {
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
 	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
 	const transcript = await readFile(path.join(extensionRoot, "adapters/worker-transcript.ts"), "utf8");
+	const subagentsIndex = await readFile(path.join(repositoryRoot, "extensions/subagents/src/index.ts"), "utf8");
+	const subagentManager = await readFile(path.join(repositoryRoot, "extensions/subagents/src/agent-manager.ts"), "utf8");
 	assert.match(extension, /const PACKAGE_ROOT = path\.resolve\(EXTENSION_ROOT, "\.\."\);/);
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
@@ -44,14 +46,24 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
 	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
+	assert.match(subagentsIndex, /session_start[\s\S]*hostRegistration \?\?= registerSubagentHost\(host\)/);
+	assert.doesNotMatch(subagentsIndex, /const hostRegistration = registerSubagentHost\(host\)/);
+	assert.match(subagentsIndex, /record\.owner/);
+	assert.match(subagentsIndex, /listAgents\(\)\.filter\(\(agent\) => !agent\.owner\)/);
+	assert.match(subagentManager, /if \(!record\?\.session \|\| record\.owner\) return undefined/);
+	assert.match(subagentManager, /if \(!record \|\| record\.owner\) return false/);
+	assert.match(subagentManager, /abortRecord\(id, false\)/);
 	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
 	assert.match(engine, /noExtensions: true/);
+	assert.match(engine, /customTools: \[agentTool\]/);
+	assert.match(engine, /createNestedAgentTool/);
 	assert.match(engine, /session\.messages\.length !== 0/);
 	assert.doesNotMatch(engine, /forkFrom|parentSession:/);
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"]) {
 		const contents = await readFile(path.join(agentDir, `${role}.md`), "utf8");
 		assert.match(contents, /^package: herder$/m);
-		assert.doesNotMatch(contents, /^tools: .*subagent/m);
+		assert.match(contents, /^tools: .*Agent/m);
+		assert.doesNotMatch(contents, /^tools: .*(?:subagent|get_subagent_result|steer_subagent|herder)/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly:/);

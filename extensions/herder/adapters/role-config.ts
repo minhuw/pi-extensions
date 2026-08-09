@@ -34,9 +34,9 @@ function toolList(value: unknown, file: string): string[] {
 	const normalized = tools.map((tool) => tool.trim()).filter(Boolean);
 	if (normalized.length === 0) throw new Error(`missing tools in ${file}`);
 	if (new Set(normalized).size !== normalized.length) throw new Error(`duplicate tools in ${file}`);
-	if (normalized.includes("herder") || normalized.includes("subagent")) {
-		throw new Error(`recursive agent tools are forbidden in ${file}`);
-	}
+	const forbiddenRecursive = new Set(["herder", "subagent", "get_subagent_result", "steer_subagent"]);
+	const rejected = normalized.find((tool) => forbiddenRecursive.has(tool));
+	if (rejected) throw new Error(`recursive agent tool ${rejected} is forbidden in ${file}`);
 	return normalized;
 }
 
