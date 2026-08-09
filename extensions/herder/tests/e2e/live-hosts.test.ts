@@ -16,6 +16,7 @@ const providerExtension = process.env.HERDER_PI_PROVIDER_EXTENSION
 const enabled = process.env.HERDER_LIVE_E2E === "1";
 const keep = process.env.HERDER_KEEP_E2E === "1";
 const timeout = Number(process.env.HERDER_E2E_TIMEOUT_MS || 30 * 60_000);
+const stallTimeout = Number(process.env.HERDER_E2E_STALL_TIMEOUT_MS || 8 * 60_000);
 
 function liveEnvironment(): NodeJS.ProcessEnv {
 	const environment: NodeJS.ProcessEnv = { ...process.env, HERDER_LIVE_E2E_CHILD: "1" };
@@ -37,12 +38,38 @@ async function invokePi(repository: string, planDirectory: string, logFile: stri
 		message: "/herder-fire herder-plans --profile poorman --max-parallel 1",
 	})}\n`);
 	const deadline = Date.now() + timeout;
+	let lastProgress = "";
+	let lastProgressAt = Date.now();
+	let nextHeartbeatAt = 0;
+	process.stderr.write(`# live Herder log: ${logFile}\n`);
 	try {
 		while (Date.now() < deadline) {
 			if (child.exitCode !== null) throw new Error(`Pi RPC exited ${child.exitCode} before the run completed`);
 			const manager = readManagerState(planDirectory);
 			if (manager.run?.status === "complete") return;
-			if (manager.run && ["paused", "needs_input", "failed", "stopped"].includes(manager.run.status)) {
+			const progress = JSON.stringify({
+				status: manager.run?.status ?? "starting",
+				runUpdatedAt: manager.run?.updatedAt ?? null,
+				verification: manager.verification?.state ?? null,
+				verificationUpdatedAt: manager.verification?.updatedAt ?? null,
+				actions: manager.actions.map((action) => [action.actionId, action.state, action.updatedAt]),
+			});
+			const now = Date.now();
+			if (progress !== lastProgress) {
+				lastProgress = progress;
+				lastProgressAt = now;
+				nextHeartbeatAt = now + 30_000;
+				process.stderr.write(`# live Herder progress: ${progress}\n`);
+			} else if (now >= nextHeartbeatAt) {
+				process.stderr.write(`# live Herder waiting: ${Math.round((now - lastProgressAt) / 1_000)}s without manager progress\n`);
+				nextHeartbeatAt = now + 30_000;
+			}
+			if (now - lastProgressAt >= stallTimeout) {
+				throw new Error(`Pi manager made no observable progress for ${stallTimeout}ms; last state: ${progress}`);
+			}
+			const awaitingMainSessionVerification = manager.run?.status === "paused"
+				&& manager.verification?.state === "awaiting_manifest";
+			if (manager.run && !awaitingMainSessionVerification && ["paused", "needs_input", "failed", "stopped"].includes(manager.run.status)) {
 				throw new Error(`Pi manager entered ${manager.run.status}: ${manager.run.terminalDetail || "no detail"}`);
 			}
 			await new Promise((resolve) => setTimeout(resolve, 500));

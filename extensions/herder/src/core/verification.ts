@@ -91,8 +91,7 @@ export function normalizeVerificationManifest(
 		ids.add(gateId);
 		const label = oneLine(gate.label, `Verification gate ${gateId} label`, 160);
 		const cwd = oneLine(gate.cwd || ".", `Verification gate ${gateId} cwd`, 1_024);
-		if (path.isAbsolute(cwd)) throw new Error(`Verification gate ${gateId} cwd must be relative to the integration worktree`);
-		const resolvedCwd = fs.realpathSync(path.resolve(worktree, cwd));
+		const resolvedCwd = fs.realpathSync(path.isAbsolute(cwd) ? cwd : path.resolve(worktree, cwd));
 		if (!inside(worktree, resolvedCwd)) throw new Error(`Verification gate ${gateId} cwd escapes the integration worktree`);
 		if (!Array.isArray(gate.argv) || gate.argv.length < 1 || gate.argv.length > MAX_ARGUMENTS) {
 			throw new Error(`Verification gate ${gateId} argv must contain 1 through ${MAX_ARGUMENTS} arguments`);

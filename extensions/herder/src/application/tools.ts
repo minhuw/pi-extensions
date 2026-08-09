@@ -8,6 +8,8 @@ import {
 	setTracking,
 	snapshotPlan,
 } from "../core/plans.ts";
+import { normalizeVerificationManifest } from "../core/verification.ts";
+import type { VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
 import {
 	ensureService,
 	executeManagerOperation,
@@ -97,6 +99,10 @@ async function verificationTool(args: JsonObject): Promise<unknown> {
 export interface PendingHerderOperation {
 	planDirectory: string;
 	operationId: string;
+}
+
+export function prepareHerderVerificationManifest(request: VerificationRequest, manifest: VerificationManifest): VerificationManifest {
+	return normalizeVerificationManifest(request, manifest).manifest;
 }
 
 export async function submitHerderVerification(args: JsonObject): Promise<PendingHerderOperation> {

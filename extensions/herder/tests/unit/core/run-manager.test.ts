@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
+import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
@@ -167,11 +168,13 @@ function payload(value: unknown): Record<string, unknown> {
 
 async function submitFinalVerification(
 	service: Awaited<ReturnType<typeof ensureService>>,
+	planDirectory: string,
 	reply: Record<string, unknown>,
 	prefix: string,
 ): Promise<Record<string, unknown>> {
 	const request = payload(reply.verificationRequest);
 	assert.equal(reply.status, "paused");
+	assert.equal(readManagerState(planDirectory).verification?.state, "awaiting_manifest");
 	assert.ok(request.requestId);
 	return payload(payload(await requestService(service, "/v1/verification", {
 		schemaVersion: 1,
@@ -231,7 +234,7 @@ async function completeSinglePlan(
 			response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 		}],
 	})).reply);
-	const verified = await submitFinalVerification(service, afterReviewer, prefix);
+	const verified = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, prefix);
 	const finalReviewer = payload((verified.actions as unknown[])[0]);
 	await requestService(service, "/v1/event", {
 		eventId: `${prefix}-dispatch-final`, kind: "dispatch_results",
@@ -402,7 +405,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 			}],
 		}));
-		const verified = await submitFinalVerification(service, payload(reviewerTerminal.reply), "persistent");
+		const verified = await submitFinalVerification(service, fixture.planDirectory, payload(reviewerTerminal.reply), "persistent");
 		const finalReviewer = payload((verified.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");

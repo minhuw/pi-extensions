@@ -623,10 +623,10 @@ function parseJsonColumn<T>(value: unknown, fallback: T): T {
 
 export function readManagerState(planDir: string) {
   const database = openDatabase(planDir, { readOnly: true })
-  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, service: null }
+  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, service: null }
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
-    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, service: null }
+    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, service: null }
     const run = (database.prepare(`
       SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel,
         current_generation, graph_sha256, status, integration_branch,
@@ -655,6 +655,13 @@ export function readManagerState(planDir: string) {
     const generations = run ? database.prepare("SELECT * FROM manager_generations WHERE run_id = ? ORDER BY generation").all(run.run_id) as SqlRow[] : []
     const approvals = run ? database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? ORDER BY plan_id, generation").all(run.run_id) as SqlRow[] : []
     const edit = run ? database.prepare("SELECT * FROM manager_plan_edits WHERE run_id = ?").get(run.run_id) as SqlRow | undefined : undefined
+    const verificationTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_verifications'").get()
+    const verification = run && verificationTable ? database.prepare(`
+      SELECT request_id, generation, state, terminal_detail, updated_at
+      FROM manager_verifications
+      WHERE run_id = ? AND generation = ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
     const service = database.prepare(`
       SELECT instance_id, pid, port, dashboard_url, forwarded_url, started_at
       FROM manager_service WHERE singleton = 1
@@ -755,6 +762,13 @@ export function readManagerState(planDir: string) {
         baseGraphSha256: edit.base_graph_sha256,
         createdAt: edit.created_at,
         updatedAt: edit.updated_at,
+      } : null,
+      verification: verification ? {
+        requestId: verification.request_id,
+        generation: verification.generation,
+        state: verification.state,
+        terminalDetail: verification.terminal_detail,
+        updatedAt: verification.updated_at,
       } : null,
       service: service ? {
         instanceId: service.instance_id,

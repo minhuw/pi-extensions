@@ -4,9 +4,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ManagerReply, TerminalEvent, VerificationRequest } from "../src/shared/protocol.ts";
+import type { ManagerReply, TerminalEvent, VerificationManifest, VerificationRequest } from "../src/shared/protocol.ts";
 import {
 	invokeHerderTool,
+	prepareHerderVerificationManifest,
 	submitHerderVerification,
 	waitHerderOperation,
 } from "../src/application/tools.ts";
@@ -166,7 +167,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		await validateHerderRoleAgents(PI_AGENT_ROOT, profile, await engine.availableModels());
 	};
 
-	const delegateVerification = (reply: ManagerReply) => {
+	const delegateVerification = (reply: ManagerReply, retryDetail?: string) => {
 		if (shuttingDown) return;
 		const request = reply.verificationRequest;
 		if (!request) return;
@@ -180,6 +181,8 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
 			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
 			"Represent every command as direct argv. Use [\"/bin/sh\", \"-lc\", \"...\"] only when shell syntax is genuinely required.",
+			"Set each gate cwd to '.' or a relative path inside INTEGRATION_WORKTREE; do not copy the absolute INTEGRATION_WORKTREE value into cwd.",
+			...(retryDetail ? [`PREVIOUS_MANIFEST_ERROR: ${retryDetail.replace(/\s+/g, " ").slice(0, 1_000)}`, "Correct the rejected manifest and submit it again."] : []),
 			"As your final action, call herder_verification exactly once. Do not provide a prose-only answer.",
 			`REQUEST_ID: ${request.requestId}`,
 			`REQUEST_SHA256: ${request.requestSha256}`,
@@ -203,7 +206,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		}
 	};
 
-	const updateFromReply = (reply: ManagerReply, profile?: string, mode?: "fire" | "resume" | "revise") => {
+	const updateFromReply = (reply: ManagerReply, profile?: string, mode?: "fire" | "resume" | "revise", verificationRetryDetail?: string) => {
 		if (reply.status === "idle") {
 			currentState = undefined;
 			lastSummary = undefined;
@@ -234,14 +237,15 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		};
 		for (const operation of reply.operations ?? []) {
 			if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
-			monitorVerification(operation.operationId, { planDirectory: reply.planDirectory, operationId: operation.operationId });
+			const operationRequestId = operation.operationId.match(/^verification:([^:]+):/)?.[1];
+			monitorVerification(operation.operationId, { planDirectory: reply.planDirectory, operationId: operation.operationId }, reply.verificationRequest?.requestId ?? operationRequestId);
 		}
 		for (const active of reply.active) {
 			if (!active.hostHandle || !engine.has(active.hostHandle) || workers.has(active.hostHandle)) continue;
 			workers.set(active.hostHandle, { actionId: active.actionId, handle: active.hostHandle, managerRunId: reply.runId, planDir: reply.planDirectory });
 		}
 		render();
-		delegateVerification(reply);
+		delegateVerification(reply, verificationRetryDetail);
 	};
 
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
@@ -338,7 +342,11 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		return reply;
 	};
 
-	function monitorVerification(operationId: string, pending: Awaited<ReturnType<typeof submitHerderVerification>>): void {
+	function monitorVerification(
+		operationId: string,
+		pending: Awaited<ReturnType<typeof submitHerderVerification>>,
+		requestId?: string,
+	): void {
 		if (verificationMonitors.has(operationId)) return;
 		verificationMonitors.add(operationId);
 		const epoch = sessionEpoch;
@@ -350,8 +358,23 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				updateFromReply(reply);
 				await dispatchReply(reply);
 			});
-		}).catch((error) => lastContext?.ui.notify(`Herder verification handling failed: ${message(error)}`, "error"))
-			.finally(() => verificationMonitors.delete(operationId));
+		}).catch(async (error) => {
+			const detail = message(error);
+			lastContext?.ui.notify(`Herder verification handling failed: ${detail}`, "error");
+			if (!requestId || epoch !== sessionEpoch) return;
+			promptedVerifications.delete(requestId);
+			try {
+				await enqueueManager(async () => {
+					const reply = unwrapReply(await invokeHerderTool("herder_run", {
+						operation: "status",
+						planDirectory: pending.planDirectory,
+					}) as Record<string, unknown>);
+					updateFromReply(reply, undefined, undefined, detail);
+				});
+			} catch (refreshError) {
+				lastContext?.ui.notify(`Herder could not re-request verification: ${message(refreshError)}`, "error");
+			}
+		}).finally(() => verificationMonitors.delete(operationId));
 	}
 
 	const launch = async (options: FireOptions, ctx: ExtensionContext): Promise<string> => {
@@ -559,30 +582,27 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				throw new Error(`Herder verification request ${params.requestId} is not bound to this main session`);
 			}
 			await resolveProfile(ctx, currentState.profile);
-			const operationId = `verification:${request.requestId}:${randomUUID()}`;
-			const pending = await submitHerderVerification({
-				planDirectory,
-				operationId,
-				manifest: {
-					schemaVersion: 1,
-					requestId: request.requestId,
-					requestSha256: request.requestSha256,
-					runId: request.runId,
-					generation: request.generation,
-					graphSha256: request.graphSha256,
-					runAssignmentSha256: request.runAssignmentSha256,
-					integrationHead: request.integrationHead,
-					integrationTree: request.integrationTree,
-					rationale: params.rationale,
-					gates: params.gates,
-					selector: {
-						...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
-						...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
-						sessionId: ctx.sessionManager.getSessionId(),
-					},
+			const manifest = prepareHerderVerificationManifest(request, {
+				schemaVersion: 1,
+				requestId: request.requestId,
+				requestSha256: request.requestSha256,
+				runId: request.runId,
+				generation: request.generation,
+				graphSha256: request.graphSha256,
+				runAssignmentSha256: request.runAssignmentSha256,
+				integrationHead: request.integrationHead,
+				integrationTree: request.integrationTree,
+				rationale: params.rationale,
+				gates: params.gates,
+				selector: {
+					...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+					...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
+					sessionId: ctx.sessionManager.getSessionId(),
 				},
-			});
-			monitorVerification(operationId, pending);
+			} satisfies VerificationManifest);
+			const operationId = `verification:${request.requestId}:${randomUUID()}`;
+			const pending = await submitHerderVerification({ planDirectory, operationId, manifest });
+			monitorVerification(operationId, pending, request.requestId);
 			return {
 				content: [{ type: "text" as const, text: `Verification manifest accepted as ${operationId}. Herder is executing ${params.gates.length} gate(s) in the background.` }],
 				details: { operationId, requestId: request.requestId, gates: params.gates.length },

@@ -22,6 +22,7 @@ import {
 	type GateResult,
 } from "../daemon/git-driver.ts";
 import {
+	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
 	canonicalEventPayload,
 	normalizeUsage,
@@ -511,7 +512,7 @@ export class HerderRunManager {
 	private pauseForFinalVerification(run: StoredRun, driver: GitDriver): void {
 		const existing = this.store.getVerification(run.runId, run.currentGeneration);
 		if (existing && existing.state !== "failed") {
-			if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+			if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
 			return;
 		}
 		const generation = this.store.getGeneration(run.runId, run.currentGeneration);
@@ -534,7 +535,7 @@ export class HerderRunManager {
 		});
 		this.store.transaction(() => {
 			this.store.putVerificationRequest(request);
-			this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+			this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
 		});
 	}
 
@@ -1439,7 +1440,7 @@ export class HerderRunManager {
 					});
 					this.store.transaction(() => {
 						this.store.putVerificationRequest(request);
-						this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+						this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
 					});
 					return this.reply();
 				}
