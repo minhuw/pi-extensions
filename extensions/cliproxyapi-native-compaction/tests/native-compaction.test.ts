@@ -66,6 +66,47 @@ describe("compact endpoint transport", () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
 		expect(buildCompactRequestBody(model, input)).toEqual({ model: "gpt-5.6-sol", input });
 	});
+
+	it("removes output-only status from replayed messages and reasoning", () => {
+		const input = [
+			{ type: "reasoning", id: "rs_1", status: "completed", summary: [], encrypted_content: "opaque" },
+			{
+				type: "message",
+				role: "assistant",
+				id: "msg_1",
+				status: "completed",
+				content: [{ type: "output_text", text: "hello", annotations: [] }],
+			},
+			{
+				type: "tool_search_output",
+				call_id: "search_1",
+				execution: "client",
+				status: "completed",
+				tools: [],
+			},
+		];
+
+		expect(buildCompactRequestBody(model, input)).toEqual({
+			model: "gpt-5.6-sol",
+			input: [
+				{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque" },
+				{
+					type: "message",
+					role: "assistant",
+					id: "msg_1",
+					content: [{ type: "output_text", text: "hello", annotations: [] }],
+				},
+				{
+					type: "tool_search_output",
+					call_id: "search_1",
+					execution: "client",
+					status: "completed",
+					tools: [],
+				},
+			],
+		});
+		expect(input[0]).toHaveProperty("status", "completed");
+	});
 });
 
 describe("canonical compacted output", () => {

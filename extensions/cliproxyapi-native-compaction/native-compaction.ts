@@ -53,6 +53,16 @@ function clone<T>(value: T): T {
 	return structuredClone(value);
 }
 
+export function normalizeResponseInputItem(item: ResponseItem): ResponseItem {
+	const normalized = clone(item);
+	// Codex /responses/compact rejects output-only status on replayed message
+	// and reasoning items, even though regular Responses requests may accept it.
+	if (normalized.type === "message" || normalized.type === "reasoning") {
+		delete normalized.status;
+	}
+	return normalized;
+}
+
 export function modelKey(model: Pick<Model<any>, "provider" | "api" | "id">): string {
 	return `${model.provider}:${model.api}:${model.id}`;
 }
@@ -242,7 +252,9 @@ export function messagesToResponseItems(model: Model<any>, messages: Message[], 
 				if (block.type === "thinking" && typeof block.thinkingSignature === "string") {
 					try {
 						const reasoning: unknown = JSON.parse(block.thinkingSignature);
-						if (isJsonObject(reasoning) && reasoning.type === "reasoning") items.push(clone(reasoning));
+						if (isJsonObject(reasoning) && reasoning.type === "reasoning") {
+							items.push(normalizeResponseInputItem(reasoning));
+						}
 					} catch {
 						// A missing/legacy reasoning signature cannot be replayed.
 					}
@@ -258,7 +270,6 @@ export function messagesToResponseItems(model: Model<any>, messages: Message[], 
 						type: "message",
 						role: "assistant",
 						id,
-						status: "completed",
 						content: [{ type: "output_text", text: block.text, annotations: [] }],
 						...(signature.phase ? { phase: signature.phase } : {}),
 					});
@@ -339,7 +350,7 @@ export function effectiveInputForBranch(params: {
 		}
 		const tail = branch.slice(checkpoint.checkpoint.entryIndex + 1);
 		return [
-			...checkpoint.checkpoint.details.replacementHistory.map(clone),
+			...checkpoint.checkpoint.details.replacementHistory.map(normalizeResponseInputItem),
 			...entriesToResponseItems(params.model, tail, params.tools),
 		];
 	}
@@ -383,7 +394,7 @@ export function buildCompactHeaders(params: {
 export function buildCompactRequestBody(model: Model<any>, input: ResponseItem[]): JsonObject {
 	return {
 		model: model.id,
-		input: input.map(clone),
+		input: input.map(normalizeResponseInputItem),
 	};
 }
 
