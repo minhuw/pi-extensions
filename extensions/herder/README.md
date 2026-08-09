@@ -28,12 +28,12 @@ Herder refuses to start when Pi's active providers cannot resolve every required
 - Dependency-aware scheduling with a configurable global worker limit.
 - Clean, parentless Pi worker sessions with no inherited root transcript or nested extension runtime.
 - One stable Herder branch and isolated Git worktree per plan.
-- Immutable worker assignments, review rounds, completion proofs, and exact approval gates.
+- Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.
 - Serialized integration after independent review, while unrelated worker pipelines continue concurrently.
 - A compact Pi progress widget and a read-only local dashboard.
 
-The deterministic Run Manager owns plan state, Git coordination, gates, recovery, and integration. Pi supplies fresh Implementer, Reviewer, and Judge sessions and returns their lifecycle evidence to the manager.
+The deterministic Run Manager owns plan state, Git coordination, verification execution, recovery, and integration. Pi supplies fresh Implementer, Reviewer, and Judge sessions and returns their lifecycle evidence to the manager. Plan Markdown is never parsed as executable configuration: after integration, the main Pi session semantically selects a structured, non-redundant verification manifest for the frozen tree, and the manager alone executes and records it.
 
 ## Planning and execution commands
 
@@ -72,7 +72,9 @@ Profiles configure three generic package roles: `herder.plan-implementer`, `herd
 
 ## Runtime model
 
-Fire and resume start or reuse Herder's persistent local Run Manager, launch the read-only dashboard, dispatch the first eligible worker batch, and return control to the root session. As workers finish, the manager backfills the global pool, advances review rounds, and integrates approved plans in dependency order.
+Fire and resume start or reuse Herder's persistent local Run Manager, launch the read-only dashboard, dispatch the first eligible worker batch, and return control to the root session. All mutating manager calls use durable submit-and-poll operations: loopback requests only accept or read persisted state and never wait for reconciliation, Git integration, or verification commands. As workers finish, the manager backfills the global pool, advances review rounds, and integrates approved plans in dependency order.
+
+After ordinary plans integrate, Herder asks the main Pi session to inspect the exact integration tree and submit a typed `herder_verification` manifest. The main session chooses commands but does not execute them. The manager validates the manifest's run, generation, assignment, head, tree, argv, and working directories, executes the gates in the background, and creates the final aggregate Reviewer only after they pass.
 
 Each plan keeps one Herder-owned branch and worktree for its entire pipeline; workers never create additional branches or worktrees. The user's checkout remains unchanged until Herder performs its serialized integration step.
 

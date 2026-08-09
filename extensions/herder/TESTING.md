@@ -6,7 +6,7 @@ Run the collection suite from the `pi-extensions` repository root:
 npm test
 ```
 
-This runs the existing extension tests, strict TypeScript checks, Herder's profile/plan/Git/dashboard integration fixtures, Pi adapter tests, deterministic manager tests, and clean worker-engine tests.
+This runs the existing extension tests, strict TypeScript checks, Herder's profile/plan/Git/dashboard integration fixtures, Pi adapter tests, durable operation submit/poll tests, exact-tree verification-manifest validation, deterministic manager tests, and clean worker-engine tests.
 
 Run only Herder's deterministic suite with:
 
@@ -20,7 +20,7 @@ The live Pi/Poorman fixture requires the configured models and provider endpoint
 npm run test:e2e:herder
 ```
 
-The live test starts Pi with extension discovery disabled and explicitly loads this checkout's Herder entrypoint. It verifies one Implementer followed by two independent Reviewer approvals, exact model bindings and usage records, a clean unchanged user checkout, the integrated result, dashboard health, and parentless Pi worker trajectories.
+The live test starts Pi with extension discovery disabled and explicitly loads this checkout's Herder entrypoint. It verifies an Implementer, independent plan review, main-session final verification selection, manager-executed gate evidence, final aggregate review, exact model bindings and usage records, a clean unchanged user checkout, the integrated result, dashboard health, and parentless Pi worker trajectories.
 
 ## Live CI
 
