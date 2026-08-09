@@ -79,6 +79,7 @@ interface WorkerRecord {
 	unsubscribe: () => void;
 	started: boolean;
 	stopRequested: boolean;
+	completion?: Promise<void>;
 }
 
 type UpdateListener = (workers: readonly PiWorkerSnapshot[]) => void;
@@ -381,7 +382,8 @@ export class PiWorkerEngine {
 		worker.started = true;
 		worker.snapshot.status = "running";
 		this.emitUpdate();
-		void this.run(handle, worker);
+		worker.completion = this.run(handle, worker);
+		void worker.completion.catch(() => {});
 	}
 
 	async discard(handle: string): Promise<void> {
@@ -405,6 +407,7 @@ export class PiWorkerEngine {
 			return;
 		}
 		await worker.session.abort();
+		await worker.completion?.catch(() => {});
 	}
 
 	private async run(handle: string, worker: WorkerRecord): Promise<void> {

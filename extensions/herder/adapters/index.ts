@@ -86,6 +86,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	let lastSummary: PlanSummary | undefined;
 	let managerQueue = Promise.resolve();
 	let sessionEpoch = 0;
+	let shuttingDown = false;
 	const verificationRequests = new Map<string, VerificationRequest>();
 	const promptedVerifications = new Set<string>();
 	const verificationMonitors = new Set<string>();
@@ -166,6 +167,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	};
 
 	const delegateVerification = (reply: ManagerReply) => {
+		if (shuttingDown) return;
 		const request = reply.verificationRequest;
 		if (!request) return;
 		verificationRequests.set(request.requestId, request);
@@ -278,7 +280,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 
 	const dispatchReply = async (initial: ManagerReply): Promise<ManagerReply> => {
 		let reply = initial;
-		while (reply.actions.length > 0 && reply.status === "running") {
+		while (!shuttingDown && reply.actions.length > 0 && reply.status === "running") {
 			const results = [];
 			const prepared: string[] = [];
 			for (const action of reply.actions) {
@@ -305,6 +307,26 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 					await engine.discard(handle);
 				}
 				throw error;
+			}
+			if (shuttingDown) {
+				for (const handle of prepared) {
+					const binding = workers.get(handle);
+					if (binding?.transcript) {
+						appendWorkerEntry(HERDER_WORKER_INPUT_ENTRY, binding.transcript);
+						appendWorkerEntry(HERDER_WORKER_OUTPUT_ENTRY, createWorkerOutputEntry(binding.transcript, {
+							actionId: binding.actionId,
+							hostHandle: handle,
+							interrupted: true,
+							error: "Pi session shut down before worker start",
+						}));
+					}
+					workers.delete(handle);
+					await engine.discard(handle);
+				}
+				// Leave the accepted handles for the replacement session's deterministic
+				// recovery pass. Holding shutdown open for reconciliation would recreate
+				// the long blocking control path that durable manager operations removed.
+				return reply;
 			}
 			for (const handle of prepared) {
 				const binding = workers.get(handle);
@@ -599,6 +621,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			createWorkerOutputEntry(binding.transcript, completed),
 		);
 		workers.delete(completed.handle);
+		if (shuttingDown) return;
 		await enqueueManager(async () => {
 			const terminal: TerminalEvent = {
 				actionId: binding.actionId,
@@ -610,12 +633,13 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			};
 			const reply = await postEventReliable(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
 			updateFromReply(reply);
-			await dispatchReply(reply);
+			if (!shuttingDown) await dispatchReply(reply);
 		}).catch((error) => lastContext?.ui.notify(`Herder completion handling failed: ${message(error)}`, "error"));
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEpoch += 1;
+		shuttingDown = false;
 		lastContext = ctx;
 		sessionFactory.bindModelRegistry(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
@@ -645,6 +669,10 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		sessionEpoch += 1;
+		shuttingDown = true;
+		const handles = engine.snapshots().map((worker) => worker.handle);
+		await Promise.all(handles.map((handle) => engine.stop(handle).catch(() => {})));
+		workers.clear();
 		widget.dispose();
 		verificationRequests.clear();
 		promptedVerifications.clear();

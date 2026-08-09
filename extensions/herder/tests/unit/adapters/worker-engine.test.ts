@@ -191,6 +191,28 @@ test("built-in Pi engine starts every manager-admitted worker without a private 
 	while (engine.snapshots().length > 0) await new Promise((resolve) => setImmediate(resolve));
 });
 
+test("stopping a worker waits until its session and terminal listeners settle", async () => {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	const factory = new FakeFactory([], gate);
+	const engine = new PiWorkerEngine(factory);
+	let terminalSeen = false;
+	engine.onTerminal(async () => {
+		await new Promise((resolve) => setImmediate(resolve));
+		terminalSeen = true;
+	});
+	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	engine.start(handle);
+	const stopping = engine.stop(handle);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(factory.sessions[0]!.aborted, true);
+	assert.equal(terminalSeen, false);
+	release();
+	await stopping;
+	assert.equal(terminalSeen, true);
+	assert.deepEqual(engine.snapshots(), []);
+});
+
 test("worker terminals retain transport and provider diagnostics", async () => {
 	class FailingSession extends FakeSession {
 		override async prompt(): Promise<void> {
