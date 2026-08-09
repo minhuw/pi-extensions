@@ -117,6 +117,30 @@ function roleLabel(role: ManagerAction["role"]): string {
 	return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+function modelLabel(model: string): string {
+	return model
+		.replace(/^gpt-/i, "GPT-")
+		.replace(/^deepseek-/i, "DeepSeek-")
+		.replace(/^kimi-/i, "Kimi-")
+		.replace(/^grok-/i, "Grok-")
+		.replace(/^claude-/i, "Claude-")
+		.replace(/^gemini-/i, "Gemini-");
+}
+
+function serviceTierLabel(serviceTier: string | undefined): string {
+	if (!serviceTier) return "Standard";
+	return serviceTier.charAt(0).toUpperCase() + serviceTier.slice(1).toLowerCase();
+}
+
+function workerIdentity(entry: HerderWorkerTranscriptContext): string {
+	return [
+		`Plan ${entry.planId}`,
+		modelLabel(entry.model),
+		entry.effort.toUpperCase(),
+		serviceTierLabel(entry.serviceTier),
+	].join(" · ");
+}
+
 function formatDuration(durationMs: number): string {
 	const seconds = Math.max(0, Math.round(durationMs / 1_000));
 	if (seconds < 60) return `${seconds}s`;
@@ -159,13 +183,10 @@ export function workerInputDisplay(
 	expandHint = "ctrl+o to expand",
 ): string {
 	const title = `▸ ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))}`;
-	const identity = theme.fg("muted", `Plan ${entry.planId} · round ${entry.round} · ${entry.workerMode}`);
-	const invocation = [entry.taskName, entry.model, `thinking: ${entry.effort}`, entry.serviceTier ? `tier: ${entry.serviceTier}` : undefined]
-		.filter((value): value is string => Boolean(value))
-		.join(" · ");
+	const identity = theme.fg("muted", workerIdentity(entry));
 	const lines = [
 		`${title}  ${identity}`,
-		theme.fg("dim", `  ${invocation}`),
+		theme.fg("dim", `  round ${entry.round} · ${entry.workerMode} · ${entry.taskName}`),
 		...themedLines(entry.prompt || "No worker prompt recorded.", expanded, theme, expandHint),
 	];
 	if (expanded) {
@@ -186,9 +207,10 @@ export function workerOutputDisplay(
 	const icon = interrupted ? theme.fg("error", "✗") : theme.fg("success", "✓");
 	const state = interrupted ? "interrupted" : "returned";
 	const stats = [formatTokens(entry.usage), formatDuration(entry.durationMs)].filter((value): value is string => Boolean(value)).join(" · ");
-	const header = `${icon} ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))}  ${theme.fg("muted", `Plan ${entry.planId} · round ${entry.round} · ${state}`)}`;
+	const header = `${icon} ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))}  ${theme.fg("muted", workerIdentity(entry))}`;
 	const body = entry.response || entry.error || "No worker response recorded.";
-	const lines = [header, ...(stats ? [theme.fg("dim", `  ${stats}`)] : []), ...themedLines(body, expanded, theme, expandHint)];
+	const outcome = [`round ${entry.round}`, state, ...(stats ? [stats] : [])].join(" · ");
+	const lines = [header, theme.fg("dim", `  ${outcome}`), ...themedLines(body, expanded, theme, expandHint)];
 	if (entry.error && entry.response) lines.push(...themedLines(`ERROR: ${entry.error}`, expanded, theme, expandHint, "error"));
 	if (expanded) {
 		lines.push(theme.fg("muted", `  action: ${entry.actionId}`));
