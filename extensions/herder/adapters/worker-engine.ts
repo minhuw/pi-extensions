@@ -1,6 +1,7 @@
 import path from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -14,7 +15,6 @@ import {
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
-import type { SubagentTelemetry } from "../../subagents/src/host-registry.ts";
 import {
 	modelMatches,
 	modelSupportsEffort,
@@ -23,36 +23,17 @@ import {
 	type AvailableModel,
 	type ThinkingEffort,
 } from "./profile.ts";
+import {
+	HerderNestedAgentScope,
+	mergeNestedUsage,
+	type NestedWorkerSession,
+	type PiNestedAgentSnapshot,
+} from "./nested-agent-executor.ts";
 import { createNestedAgentTool } from "./nested-agent-tool.ts";
 import { loadHerderPiRole } from "./role-config.ts";
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
-
-export interface PiNestedAgentSnapshot {
-	agentId: string;
-	parentAgentId?: string;
-	displayName: string;
-	type: string;
-	description: string;
-	status: SubagentTelemetry["status"];
-	model?: string;
-	effort?: string;
-	serviceTier?: string;
-	startedAt: number;
-	completedAt?: number;
-	turns: number;
-	maxTurns?: number;
-	toolUses: number;
-	lifetimeTokens: number;
-	contextPercent: number | null;
-	compactionCount: number;
-	activeTools: string[];
-	responseText?: string;
-	activity?: string;
-	parentSessionId?: string;
-	sessionId?: string;
-	children: PiNestedAgentSnapshot[];
-}
+export type { PiNestedAgentSnapshot } from "./nested-agent-executor.ts";
 
 export interface PiWorkerSnapshot {
 	handle: string;
@@ -102,17 +83,24 @@ interface WorkerSession {
 	getSessionStats(): SessionStats;
 }
 
+export interface PreparedWorkerSession {
+	session: WorkerSession;
+	nested: HerderNestedAgentScope;
+}
+
 export interface PiWorkerSessionFactory {
 	availableModels(): Promise<readonly AvailableModel[]>;
-	create(request: PiWorkerRequest): Promise<WorkerSession>;
+	create(request: PiWorkerRequest): Promise<PreparedWorkerSession>;
 }
 
 interface WorkerRecord {
 	request: PiWorkerRequest;
 	session: WorkerSession;
+	nested: HerderNestedAgentScope;
 	snapshot: PiWorkerSnapshot;
 	activeToolCalls: Map<string, string>;
 	unsubscribe: () => void;
+	unsubscribeNested: () => void;
 	started: boolean;
 	stopRequested: boolean;
 	completion?: Promise<void>;
@@ -149,6 +137,26 @@ export function applyServiceTier(session: AgentSession, tier: string): void {
 	};
 }
 
+export interface TurnLimitState {
+	reached: boolean;
+}
+
+/** Gracefully stop a child after its final allowed turn, before another provider request starts. */
+export function applyTurnLimit(session: AgentSession, maxTurns: number): TurnLimitState {
+	if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("Herder nested maxTurns must be a positive integer.");
+	const state: TurnLimitState = { reached: false };
+	let completedTurns = 0;
+	const previous = session.agent.shouldStopAfterTurn;
+	session.agent.shouldStopAfterTurn = async (context, signal) => {
+		completedTurns += 1;
+		const previousStop = await previous?.(context, signal);
+		const wouldContinue = context.message.content.some((item) => item.type === "toolCall");
+		if (completedTurns >= maxTurns && wouldContinue) state.reached = true;
+		return state.reached || previousStop === true;
+	};
+	return state;
+}
+
 function roleFromAgentType(agentType: string): ManagerAction["role"] {
 	const role = agentType.startsWith("herder.") ? agentType.slice("herder.".length) : agentType;
 	if (!new Set(["plan-implementer", "plan-reviewer", "plan-judge"]).has(role)) {
@@ -183,44 +191,7 @@ function assistantText(value: unknown): string | undefined {
 }
 
 function cloneNested(agent: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
-	return { ...agent, activeTools: [...agent.activeTools], children: agent.children.map(cloneNested) };
-}
-
-const TELEMETRY_PHASES = new Set(["started", "updated", "compacted", "completed"]);
-const TELEMETRY_STATUSES = new Set(["queued", "running", "completed", "steered", "aborted", "stopped", "error"]);
-
-function optionalString(value: unknown): value is string | undefined {
-	return value === undefined || typeof value === "string";
-}
-
-function optionalFiniteCount(value: unknown): value is number | undefined {
-	return value === undefined || finiteCount(value) !== undefined;
-}
-
-function validSubagentTelemetry(value: unknown): value is SubagentTelemetry {
-	const telemetry = record(value);
-	if (!telemetry || telemetry.owner !== "herder") return false;
-	if (typeof telemetry.phase !== "string" || !TELEMETRY_PHASES.has(telemetry.phase)) return false;
-	if (typeof telemetry.status !== "string" || !TELEMETRY_STATUSES.has(telemetry.status)) return false;
-	for (const field of ["rootActionId", "agentId", "displayName", "type", "description"] as const) {
-		if (typeof telemetry[field] !== "string" || telemetry[field].trim().length === 0) return false;
-	}
-	for (const field of ["planId", "parentAgentId", "model", "thinking", "serviceTier", "activity", "responseText", "parentSessionId", "sessionId"] as const) {
-		if (!optionalString(telemetry[field])) return false;
-	}
-	if (telemetry.parentAgentId === telemetry.agentId) return false;
-	for (const field of ["turnCount", "maxTurns", "toolUses", "lifetimeTokens", "compactionCount", "completedAt"] as const) {
-		if (!optionalFiniteCount(telemetry[field])) return false;
-	}
-	if (finiteCount(telemetry.turnCount) === undefined
-		|| finiteCount(telemetry.toolUses) === undefined
-		|| finiteCount(telemetry.lifetimeTokens) === undefined
-		|| finiteCount(telemetry.compactionCount) === undefined
-		|| finiteCount(telemetry.startedAt) === undefined) return false;
-	if (telemetry.contextPercent !== null
-		&& (typeof telemetry.contextPercent !== "number" || !Number.isFinite(telemetry.contextPercent) || telemetry.contextPercent < 0)) return false;
-	if (!Array.isArray(telemetry.activeTools) || telemetry.activeTools.some((tool) => typeof tool !== "string" || tool.length === 0)) return false;
-	return true;
+	return { ...agent, activeTools: [...agent.activeTools] };
 }
 
 export function finalAssistantResult(messages: readonly unknown[]): { text?: string; error?: string; failed: boolean } {
@@ -306,7 +277,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		return await this.runtime().getAvailable();
 	}
 
-	async create(request: PiWorkerRequest): Promise<AgentSession> {
+	async create(request: PiWorkerRequest): Promise<PreparedWorkerSession> {
 		const role = roleFromAgentType(request.action.agentType);
 		if (role !== request.action.role) throw new Error(`Action role ${request.action.role} does not match ${request.action.agentType}.`);
 		const definition = await loadHerderPiRole(this.agentRoot, role);
@@ -323,6 +294,63 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 
 		const sessionRoot = path.join(request.planDirectory, ".herder", "pi-sessions");
 		await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
+		const nestedRoot = path.join(sessionRoot, "nested", request.action.actionId.replace(/[^A-Za-z0-9._-]+/g, "_"));
+		const nested = new HerderNestedAgentScope({
+			action: request.action,
+			agentRoot: this.agentRoot,
+			createSession: async ({ definition: childDefinition, maxTurns, signal }) => {
+				signal.throwIfAborted();
+				await mkdir(nestedRoot, { recursive: true, mode: 0o700 });
+				signal.throwIfAborted();
+				const childManager = SessionManager.create(request.action.worktree, nestedRoot);
+				if (childManager.getHeader()?.parentSession) throw new Error("Herder nested agents cannot inherit a parent session.");
+				const childLoader = new DefaultResourceLoader({
+					cwd: request.action.worktree,
+					agentDir: this.agentDir,
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					systemPromptOverride: () => childDefinition.systemPrompt,
+					appendSystemPromptOverride: () => [],
+				});
+				await childLoader.reload();
+				signal.throwIfAborted();
+				const { session: child } = await createAgentSession({
+					cwd: request.action.worktree,
+					agentDir: this.agentDir,
+					modelRuntime: runtime,
+					model: model as Model<any>,
+					thinkingLevel: request.action.effort as ThinkingLevel,
+					tools: childDefinition.tools,
+					resourceLoader: childLoader,
+					sessionManager: childManager,
+				});
+				if (signal.aborted) {
+					await child.abort();
+					child.dispose();
+					signal.throwIfAborted();
+				}
+				if (child.messages.length !== 0) {
+					child.dispose();
+					throw new Error("Herder nested agent session was not created with clean history.");
+				}
+				if (request.action.serviceTier) applyServiceTier(child, request.action.serviceTier);
+				const turnLimit = applyTurnLimit(child, maxTurns);
+				return {
+					get sessionId() { return child.sessionId; },
+					get messages() { return child.messages; },
+					subscribe: (listener) => child.subscribe(listener),
+					prompt: (text, options) => child.prompt(text, options),
+					abort: () => child.abort(),
+					dispose: () => child.dispose(),
+					getSessionStats: () => child.getSessionStats(),
+					turnLimitReached: () => turnLimit.reached,
+				} satisfies NestedWorkerSession;
+			},
+		});
+
 		const sessionManager = SessionManager.create(request.action.worktree, sessionRoot);
 		if (sessionManager.getHeader()?.parentSession) throw new Error("Herder Pi workers cannot inherit a parent session.");
 		const resourceLoader = new DefaultResourceLoader({
@@ -336,12 +364,12 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			appendSystemPromptOverride: () => [],
 		});
 		await resourceLoader.reload();
-		const agentTool = createNestedAgentTool(this.pi, request.action);
+		const agentTool = createNestedAgentTool(request.action, nested);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
 			agentDir: this.agentDir,
 			modelRuntime: runtime,
-			model,
+			model: model as Model<any>,
 			thinkingLevel: request.action.effort as ThinkingLevel,
 			tools: definition.tools,
 			customTools: [agentTool],
@@ -350,10 +378,11 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		});
 		if (session.messages.length !== 0) {
 			session.dispose();
+			await nested.stop("Parent Herder session creation failed");
 			throw new Error("Herder Pi worker session was not created with clean history.");
 		}
 		if (request.action.serviceTier) applyServiceTier(session, request.action.serviceTier);
-		return session;
+		return { session, nested };
 	}
 }
 
@@ -462,92 +491,21 @@ export class PiWorkerEngine {
 		if (changed) this.emitUpdate();
 	}
 
-	private findNested(children: PiNestedAgentSnapshot[], agentId: string): PiNestedAgentSnapshot | undefined {
-		for (const child of children) {
-			if (child.agentId === agentId) return child;
-			const nested = this.findNested(child.children, agentId);
-			if (nested) return nested;
-		}
-		return undefined;
-	}
-
-	private applyNestedTelemetry(target: PiNestedAgentSnapshot, telemetry: SubagentTelemetry): void {
-		target.parentAgentId = telemetry.parentAgentId;
-		target.displayName = telemetry.displayName;
-		target.type = telemetry.type;
-		target.description = telemetry.description;
-		target.status = telemetry.status;
-		target.model = telemetry.model;
-		target.effort = telemetry.thinking;
-		target.serviceTier = telemetry.serviceTier;
-		target.startedAt = telemetry.startedAt;
-		target.completedAt = telemetry.completedAt;
-		target.turns = telemetry.turnCount;
-		target.maxTurns = telemetry.maxTurns;
-		target.toolUses = telemetry.toolUses;
-		target.lifetimeTokens = telemetry.lifetimeTokens;
-		target.contextPercent = telemetry.contextPercent;
-		target.compactionCount = telemetry.compactionCount;
-		target.activeTools = [...telemetry.activeTools];
-		target.responseText = telemetry.responseText;
-		target.activity = telemetry.activity;
-		target.parentSessionId = telemetry.parentSessionId;
-		target.sessionId = telemetry.sessionId;
-	}
-
-	/** Attach live subagent telemetry to its active Herder root worker. */
-	acceptSubagentTelemetry(value: unknown): void {
-		if (!validSubagentTelemetry(value)) return;
-		const telemetry = value;
-		const worker = [...this.workers.values()].find((candidate) =>
-			candidate.request.action.actionId === telemetry.rootActionId
-			&& (!telemetry.planId || candidate.request.action.planId === telemetry.planId));
-		if (!worker) return;
-		const existing = this.findNested(worker.snapshot.children, telemetry.agentId);
-		if (existing) {
-			this.applyNestedTelemetry(existing, telemetry);
-			this.emitUpdate();
-			return;
-		}
-		let siblings = worker.snapshot.children;
-		if (telemetry.parentAgentId) {
-			const parent = this.findNested(worker.snapshot.children, telemetry.parentAgentId);
-			if (!parent) return;
-			siblings = parent.children;
-		}
-		const nested: PiNestedAgentSnapshot = {
-			agentId: telemetry.agentId,
-			displayName: telemetry.displayName,
-			type: telemetry.type,
-			description: telemetry.description,
-			status: telemetry.status,
-			startedAt: telemetry.startedAt,
-			turns: telemetry.turnCount,
-			toolUses: telemetry.toolUses,
-			lifetimeTokens: telemetry.lifetimeTokens,
-			contextPercent: telemetry.contextPercent,
-			compactionCount: telemetry.compactionCount,
-			activeTools: [...telemetry.activeTools],
-			children: [],
-		};
-		this.applyNestedTelemetry(nested, telemetry);
-		siblings.push(nested);
-		siblings.sort((left, right) => left.startedAt - right.startedAt || left.agentId.localeCompare(right.agentId));
-		this.emitUpdate();
-	}
-
 	async prepare(request: PiWorkerRequest): Promise<string> {
 		if ([...this.workers.values()].some((worker) => worker.request.action.actionId === request.action.actionId)) {
 			throw new Error(`Pi worker action ${request.action.actionId} is already prepared.`);
 		}
-		const session = await this.factory.create(request);
+		const prepared = await this.factory.create(request);
+		const { session, nested } = prepared;
 		if (session.messages.length !== 0) {
 			session.dispose();
+			await nested.stop("Parent Herder session contained inherited history");
 			throw new Error("Herder Pi workers require a session with zero inherited messages.");
 		}
 		const handle = `pi-worker:${session.sessionId}`;
 		if (this.workers.has(handle)) {
 			session.dispose();
+			await nested.stop("Duplicate parent Herder session");
 			throw new Error(`Duplicate Pi worker session ${session.sessionId}.`);
 		}
 		const snapshot: PiWorkerSnapshot = {
@@ -572,13 +530,19 @@ export class PiWorkerEngine {
 		const worker = {
 			request,
 			session,
+			nested,
 			snapshot,
 			activeToolCalls: new Map(),
 			unsubscribe: () => {},
+			unsubscribeNested: () => {},
 			started: false,
 			stopRequested: false,
 		} satisfies WorkerRecord;
 		worker.unsubscribe = session.subscribe((event) => this.observe(worker, event));
+		worker.unsubscribeNested = nested.onUpdate((children) => {
+			worker.snapshot.children = children.map(cloneNested);
+			this.emitUpdate();
+		});
 		this.workers.set(handle, worker);
 		this.emitUpdate();
 		return handle;
@@ -599,6 +563,8 @@ export class PiWorkerEngine {
 		const worker = this.workers.get(handle);
 		if (!worker) return;
 		if (worker.started) throw new Error(`Cannot discard running Pi worker ${handle}.`);
+		await worker.nested.stop("Prepared Herder worker was discarded");
+		worker.unsubscribeNested();
 		worker.unsubscribe();
 		worker.session.dispose();
 		this.workers.delete(handle);
@@ -615,7 +581,10 @@ export class PiWorkerEngine {
 			await this.discard(handle);
 			return;
 		}
-		await worker.session.abort();
+		await Promise.allSettled([
+			worker.session.abort(),
+			worker.nested.stop("Parent Herder worker was stopped"),
+		]);
 		await worker.completion?.catch(() => {});
 	}
 
@@ -626,6 +595,7 @@ export class PiWorkerEngine {
 		} catch (error) {
 			failure = message(error);
 		}
+		await worker.nested.stop("Parent Herder worker completed");
 		const finishedAt = Date.now();
 		const result = finalAssistantResult(worker.session.messages);
 		const interrupted = worker.stopRequested || Boolean(failure) || result.failed || !result.text;
@@ -637,11 +607,15 @@ export class PiWorkerEngine {
 			...(result.text ? { response: result.text } : {}),
 			...(interrupted ? { interrupted: true } : {}),
 			...(interrupted ? { error: errors.join("\n") || (worker.stopRequested ? "Pi worker stopped" : "Pi worker produced no terminal result") } : {}),
-			usage: usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
+			usage: mergeNestedUsage(
+				usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
+				worker.nested.usage(),
+			),
 		};
 		try {
 			await Promise.all([...this.terminals].map((listener) => listener(terminal)));
 		} finally {
+			worker.unsubscribeNested();
 			worker.unsubscribe();
 			worker.session.dispose();
 			this.workers.delete(handle);

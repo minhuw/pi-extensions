@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
+import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import {
 	applyServiceTier,
+	applyTurnLimit,
 	finalAssistantResult,
 	PiWorkerEngine,
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
 } from "../../../adapters/worker-engine.ts";
+
+const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
 
 function action(id = "action-1", planId = "001"): ManagerAction {
 	return {
@@ -98,6 +104,8 @@ class FakeSession {
 
 class FakeFactory implements PiWorkerSessionFactory {
 	readonly sessions: FakeSession[] = [];
+	readonly nestedScopes: HerderNestedAgentScope[] = [];
+	readonly childSessions: FakeSession[] = [];
 	private readonly inherited: unknown[];
 	private readonly gate?: Promise<void>;
 	constructor(inherited: unknown[] = [], gate?: Promise<void>) {
@@ -105,10 +113,20 @@ class FakeFactory implements PiWorkerSessionFactory {
 		this.gate = gate;
 	}
 	async availableModels() { return [{ provider: "proxy", id: "grok-4.5" }]; }
-	async create(_request: PiWorkerRequest): Promise<FakeSession> {
+	async create(request: PiWorkerRequest) {
 		const session = new FakeSession(`session-${this.sessions.length + 1}`, this.inherited, this.gate);
 		this.sessions.push(session);
-		return session;
+		const nested = new HerderNestedAgentScope({
+			action: request.action,
+			agentRoot,
+			createSession: async ({ id }) => {
+				const child = new FakeSession(`child-${id}`);
+				this.childSessions.push(child);
+				return child;
+			},
+		});
+		this.nestedScopes.push(nested);
+		return { session, nested };
 	}
 }
 
@@ -145,6 +163,23 @@ test("applyServiceTier pins every stream request and final provider payload", as
 	});
 	await assert.rejects(() => second.onPayload("invalid", "model"), /non-object provider payload/);
 	assert.throws(() => applyServiceTier(session as never, "flex"), /Unknown Herder service tier/);
+});
+
+test("applyTurnLimit gracefully stops before a provider request exceeds the child turn bound", async () => {
+	const session = { agent: { shouldStopAfterTurn: async (_context?: unknown, _signal?: AbortSignal) => false } };
+	const state = applyTurnLimit(session as never, 2);
+	const toolTurn = { message: { content: [{ type: "toolCall" }] } };
+	const finalTurn = { message: { content: [{ type: "text" }] } };
+	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), false);
+	assert.equal(state.reached, false);
+	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), true);
+	assert.equal(state.reached, true);
+	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), true);
+	const naturalSession = { agent: { shouldStopAfterTurn: async (_context?: unknown, _signal?: AbortSignal) => false } };
+	const naturalState = applyTurnLimit(naturalSession as never, 1);
+	assert.equal(await naturalSession.agent.shouldStopAfterTurn(finalTurn, undefined), false);
+	assert.equal(naturalState.reached, false);
+	assert.throws(() => applyTurnLimit(session as never, 0), /positive integer/);
 });
 
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
@@ -229,7 +264,16 @@ test("worker terminals retain transport and provider diagnostics", async () => {
 	const session = new FailingSession("session-failed");
 	const factory: PiWorkerSessionFactory = {
 		async availableModels() { return [{ provider: "proxy", id: "grok-4.5" }]; },
-		async create() { return session; },
+		async create(request) {
+			return {
+				session,
+				nested: new HerderNestedAgentScope({
+					action: request.action,
+					agentRoot,
+					createSession: async () => { throw new Error("unused"); },
+				}),
+			};
+		},
 	};
 	const engine = new PiWorkerEngine(factory);
 	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
@@ -239,32 +283,6 @@ test("worker terminals retain transport and provider diagnostics", async () => {
 	assert.equal(result.response, "  partial output  \n");
 	assert.equal(result.error, "transport failed\nprovider failed");
 });
-
-function telemetry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-	return {
-		phase: "updated",
-		owner: "herder",
-		rootActionId: "action-1",
-		planId: "001",
-		agentId: "nested-1",
-		status: "running",
-		displayName: "Recon",
-		type: "recon",
-		description: "inspect code",
-		model: "proxy/gpt-5.6-luna",
-		thinking: "high",
-		turnCount: 2,
-		maxTurns: 4,
-		toolUses: 3,
-		lifetimeTokens: 1_234,
-		contextPercent: 42,
-		compactionCount: 1,
-		activeTools: ["read"],
-		activity: "read",
-		startedAt: 5_000,
-		...overrides,
-	};
-}
 
 test("worker lifetime usage excludes cache reads and compaction usage while context stays current", async () => {
 	const factory = new FakeFactory();
@@ -307,52 +325,39 @@ test("worker lifetime usage excludes cache reads and compaction usage while cont
 	assert.equal(snapshot.compactionCount, 1);
 });
 
-test("nested telemetry is filtered, attached, and supports a second level", async () => {
-	const engine = new PiWorkerEngine(new FakeFactory());
+test("worker snapshots receive flat child state directly from the internal nested scope", async () => {
+	const factory = new FakeFactory();
+	const engine = new PiWorkerEngine(factory);
 	await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
-	for (const malformed of [
-		null,
-		{},
-		telemetry({ owner: "foreign" }),
-		telemetry({ activeTools: "read" }),
-		telemetry({ startedAt: Number.NaN }),
-		telemetry({ displayName: "" }),
-		telemetry({ parentAgentId: "nested-1" }),
-		telemetry({ planId: "999" }),
-	]) {
-		assert.doesNotThrow(() => engine.acceptSubagentTelemetry(malformed));
-	}
 	assert.deepEqual(engine.snapshots()[0]!.children, []);
-
-	engine.acceptSubagentTelemetry(telemetry());
-	engine.acceptSubagentTelemetry(telemetry({ lifetimeTokens: 2_000, activeTools: ["grep"] }));
-	engine.acceptSubagentTelemetry(telemetry({
-		agentId: "nested-2",
-		parentAgentId: "nested-1",
-		displayName: "Reviewer",
-		type: "reviewer",
-		description: "review evidence",
-		status: "completed",
-		activeTools: [],
-		completedAt: 8_000,
-	}));
-	const root = engine.snapshots()[0]!.children[0]!;
-	assert.equal(root.lifetimeTokens, 2_000);
-	assert.deepEqual(root.activeTools, ["grep"]);
-	assert.equal(root.children.length, 1);
-	assert.equal(root.children[0]!.agentId, "nested-2");
-	assert.equal(root.children[0]!.parentAgentId, "nested-1");
+	const child = await factory.nestedScopes[0]!.run({
+		type: "recon",
+		prompt: "Inspect code",
+		description: "inspect code",
+		maxTurns: 4,
+	});
+	assert.equal(child.status, "completed");
+	const snapshot = engine.snapshots()[0]!.children[0]!;
+	assert.equal(snapshot.type, "recon");
+	assert.equal(snapshot.status, "completed");
+	assert.equal(snapshot.turns, 1);
+	assert.equal(snapshot.toolUses, 1);
+	assert.equal("children" in snapshot, false);
 });
 
-test("root worker completion removes its nested live telemetry tree", async () => {
+test("worker terminal aggregates direct nested child usage and removes child state", async () => {
 	const factory = new FakeFactory();
 	const engine = new PiWorkerEngine(factory);
 	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
 	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
-	engine.acceptSubagentTelemetry(telemetry());
-	assert.equal(engine.snapshots()[0]!.children.length, 1);
+	await factory.nestedScopes[0]!.run({ type: "recon", prompt: "Inspect", description: "inspect" });
 	engine.start(handle);
-	await terminal;
+	const result = await terminal;
+	assert.equal(result.usage.inputTokens, 20);
+	assert.equal(result.usage.cachedInputTokens, 4);
+	assert.equal(result.usage.outputTokens, 10);
+	assert.equal(result.usage.reasoningTokens, 6);
+	assert.match(result.usage.source || "", /direct nested child sessions/);
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.deepEqual(engine.snapshots(), []);
 });

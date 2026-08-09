@@ -1,13 +1,13 @@
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ManagerAction } from "../src/shared/protocol.ts";
-import { getSubagentHost } from "../../subagents/src/host-registry.ts";
-import { resolveModel } from "../../subagents/src/model-resolver.ts";
-import { parseServiceTier } from "../../subagents/src/service-tier.ts";
-import type { ThinkingLevel } from "../../subagents/src/types.ts";
+import {
+	HerderNestedAgentScope,
+	type NestedAgentResult,
+} from "./nested-agent-executor.ts";
+import { HERDER_NESTED_AGENT_TYPES, type HerderNestedAgentType } from "./role-config.ts";
 
 const MAX_NESTED_CALLS = 8;
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export interface NestedAgentToolDetails {
 	agentId: string;
@@ -15,7 +15,7 @@ export interface NestedAgentToolDetails {
 	type: string;
 	displayName: string;
 	turnCount: number;
-	maxTurns?: number;
+	maxTurns: number;
 	toolUses: number;
 	lifetimeTokens: number;
 	contextPercent: number | null;
@@ -30,98 +30,74 @@ function compactTokens(tokens: number): string {
 	return `${(tokens / 1_000_000).toFixed(1)}m`;
 }
 
-function resultText(output: string, details: NestedAgentToolDetails): string {
-	const turns = details.maxTurns == null ? `↻${details.turnCount}` : `↻${details.turnCount}≤${details.maxTurns}`;
-	const stats = [turns, `${details.toolUses} tool${details.toolUses === 1 ? "" : "s"}`, compactTokens(details.lifetimeTokens), `${(details.durationMs / 1_000).toFixed(1)}s`].join(" · ");
-	if (details.status === "error" || details.status === "aborted" || details.status === "stopped") {
-		return `Agent ${details.status}: ${details.error ?? "child did not complete"}\n${stats}${output.trim() ? `\n\nPartial output:\n${output.trim()}` : ""}`;
-	}
-	if (details.status === "steered") {
-		return `Agent wrapped up at the turn limit; output may be partial (${stats}).\n\n${output.trim() || "No output."}`;
-	}
-	return `Agent completed (${stats}).\n\n${output.trim() || "No output."}`;
+function displayName(type: string): string {
+	return type.charAt(0).toUpperCase() + type.slice(1);
 }
 
-/** Create the one foreground-only Agent tool scoped to a single Herder worker. */
-export function createNestedAgentTool(pi: ExtensionAPI, action: ManagerAction) {
+function resultText(result: NestedAgentResult, details: NestedAgentToolDetails): string {
+	const turns = `↻${details.turnCount}≤${details.maxTurns}`;
+	const stats = [turns, `${details.toolUses} tool${details.toolUses === 1 ? "" : "s"}`, compactTokens(details.lifetimeTokens), `${(details.durationMs / 1_000).toFixed(1)}s`].join(" · ");
+	if (details.status === "limited") {
+		return `Agent reached the turn limit; output may be partial (${stats}).\n\n${result.output.trim() || "No output."}`;
+	}
+	if (details.status !== "completed") {
+		return `Agent ${details.status}: ${details.error ?? "child did not complete"}\n${stats}${result.output.trim() ? `\n\nPartial output:\n${result.output.trim()}` : ""}`;
+	}
+	return `Agent completed (${stats}).\n\n${result.output.trim() || "No output."}`;
+}
+
+/** Create the one-level, foreground-only Agent tool scoped to a single Herder action. */
+export function createNestedAgentTool(action: ManagerAction, scope: HerderNestedAgentScope) {
 	let calls = 0;
 	return defineTool({
 		name: "Agent",
 		label: "Agent",
-		description: "Delegate one bounded foreground task to an isolated generic subagent. The parent Herder worker remains accountable for checking and integrating the result.",
-		promptSnippet: "Delegate bounded foreground work to an isolated subagent",
+		description: [
+			"Delegate one bounded foreground task to a package-owned Herder nested agent.",
+			"The child inherits this role's exact model, thinking level, service tier, stable worktree, and action lifetime.",
+			"Available types: recon and reviewer are strictly read-only; worker may mutate and is available only to Implementer roles.",
+			"Nested children have no Agent tool, extensions, skills, inherited conversation, scheduling, resume, or secondary worktree.",
+		].join(" "),
+		promptSnippet: "Delegate bounded foreground work to a one-level Herder child",
 		promptGuidelines: [
-			"Use Agent only for a bounded subtask. It runs in the current stable Herder worktree, without extensions, skills, orchestration tools, background execution, resume, or worktree creation.",
-			"You remain accountable for verifying the child's claims and for the role's exact terminal contract.",
+			"Use Agent only for a bounded subtask with a self-contained prompt; the child has no parent conversation.",
+			"Herder Agent children inherit the current action's exact model and worktree and cannot delegate again.",
+			"The parent role remains accountable for verifying the child's claims and repository effects.",
 		],
 		parameters: Type.Object({
-			prompt: Type.String({ description: "The bounded task for the child agent." }),
-			description: Type.String({ description: "A short 3–5 word UI description." }),
-			subagent_type: Type.String({ description: "An enabled generic subagent type exposed by the host." }),
-			model: Type.Optional(Type.String({ description: "Optional provider/model or fuzzy model override." })),
-			thinking: Type.Optional(Type.String({ description: "Optional thinking level: off, minimal, low, medium, high, xhigh, or max." })),
-			service_tier: Type.Optional(Type.String({ description: "Optional OpenAI-compatible service tier." })),
-			max_turns: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum child agentic turns." })),
-			run_in_background: Type.Optional(Type.Boolean({ description: "Background execution is unsupported; omit or set false." })),
+			prompt: Type.String({ description: "Complete self-contained task for the child agent." }),
+			description: Type.String({ description: "Short 3–5 word UI description." }),
+			subagent_type: Type.String({ description: `Package-owned nested type: ${HERDER_NESTED_AGENT_TYPES.join(", ")}.` }),
+			max_turns: Type.Optional(Type.Integer({ minimum: 1, maximum: 64, description: "Maximum child agentic turns. Default: 8." })),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (params.run_in_background === true) throw new Error("Herder Agent delegation is foreground-only; run_in_background: true is not allowed.");
+		async execute(_toolCallId, params, signal) {
 			if (calls >= MAX_NESTED_CALLS) throw new Error(`Herder workers may call Agent at most ${MAX_NESTED_CALLS} times.`);
+			if (!HERDER_NESTED_AGENT_TYPES.includes(params.subagent_type as HerderNestedAgentType)) {
+				throw new Error(`Unknown Herder nested agent type: ${JSON.stringify(params.subagent_type)}.`);
+			}
 			calls += 1;
-
-			const host = getSubagentHost();
-			if (!host) throw new Error("The subagents host is unavailable. Ensure the subagents extension is active in the root Pi session.");
-			const descriptor = host.resolveType(params.subagent_type);
-			if (!descriptor) throw new Error(`Unknown or disabled subagent type: ${JSON.stringify(params.subagent_type)}.`);
-			if (action.role !== "plan-implementer" && !descriptor.readOnly) {
-				throw new Error(`${action.role} may delegate only to agent types with an explicitly declared read-only built-in tool set; ${descriptor.displayName} is not read-only.`);
-			}
-
-			let resolvedModel;
-			if (params.model) {
-				const resolved = resolveModel(params.model, ctx.modelRegistry);
-				if (typeof resolved === "string") throw new Error(resolved);
-				resolvedModel = resolved;
-			}
-			let thinking: ThinkingLevel | undefined;
-			if (params.thinking) {
-				if (!THINKING_LEVELS.has(params.thinking)) throw new Error(`Unknown thinking level: ${JSON.stringify(params.thinking)}.`);
-				thinking = params.thinking as ThinkingLevel;
-			}
-			const serviceTier = params.service_tier ? parseServiceTier(params.service_tier) : undefined;
-			const result = await host.spawnAndWait(pi, ctx, {
+			const result = await scope.run({
+				type: params.subagent_type as HerderNestedAgentType,
 				prompt: params.prompt,
 				description: params.description,
-				type: descriptor.name,
-				resolvedModel,
-				thinking,
-				serviceTier,
 				maxTurns: params.max_turns,
-				signal,
-				isolated: true,
-				cwd: action.worktree,
-				metadata: {
-					owner: "herder",
-					rootActionId: action.actionId,
-					planId: action.planId,
-				},
-			});
+			}, signal);
 			const details: NestedAgentToolDetails = {
 				agentId: result.id,
 				status: result.status,
-				type: descriptor.name,
-				displayName: descriptor.displayName,
+				type: params.subagent_type,
+				displayName: displayName(params.subagent_type),
 				turnCount: result.turnCount,
 				maxTurns: result.maxTurns,
 				toolUses: result.toolUses,
 				lifetimeTokens: result.lifetimeTokens,
 				contextPercent: result.contextPercent,
 				compactionCount: result.compactionCount,
-				durationMs: Math.max(0, (result.completedAt ?? Date.now()) - result.startedAt),
-				error: result.error,
+				durationMs: Math.max(0, result.completedAt - result.startedAt),
+				...(result.error ? { error: result.error } : {}),
 			};
-			return { content: [{ type: "text" as const, text: resultText(result.output, details) }], details };
+			return { content: [{ type: "text" as const, text: resultText(result, details) }], details };
 		},
 	});
 }

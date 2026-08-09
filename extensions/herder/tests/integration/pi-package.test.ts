@@ -26,8 +26,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
 	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
 	const transcript = await readFile(path.join(extensionRoot, "adapters/worker-transcript.ts"), "utf8");
-	const subagentsIndex = await readFile(path.join(repositoryRoot, "extensions/subagents/src/index.ts"), "utf8");
-	const subagentManager = await readFile(path.join(repositoryRoot, "extensions/subagents/src/agent-manager.ts"), "utf8");
+	const nestedExecutor = await readFile(path.join(extensionRoot, "adapters/nested-agent-executor.ts"), "utf8");
+	const nestedTool = await readFile(path.join(extensionRoot, "adapters/nested-agent-tool.ts"), "utf8");
+	const roleConfig = await readFile(path.join(extensionRoot, "adapters/role-config.ts"), "utf8");
 	assert.match(extension, /const PACKAGE_ROOT = path\.resolve\(EXTENSION_ROOT, "\.\."\);/);
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
@@ -46,19 +47,33 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
 	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
-	assert.match(subagentsIndex, /session_start[\s\S]*hostRegistration \?\?= registerSubagentHost\(host\)/);
-	assert.doesNotMatch(subagentsIndex, /const hostRegistration = registerSubagentHost\(host\)/);
-	assert.match(subagentsIndex, /record\.owner/);
-	assert.match(subagentsIndex, /listAgents\(\)\.filter\(\(agent\) => !agent\.owner\)/);
-	assert.match(subagentManager, /if \(!record\?\.session \|\| record\.owner\) return undefined/);
-	assert.match(subagentManager, /if \(!record \|\| record\.owner\) return false/);
-	assert.match(subagentManager, /abortRecord\(id, false\)/);
+	assert.doesNotMatch(extension + engine + nestedExecutor + nestedTool + roleConfig, /extensions\/subagents|subagents\/src|subagents:telemetry|registerSubagentHost|getSubagentHost/);
 	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
 	assert.match(engine, /noExtensions: true/);
+	assert.match(engine, /noSkills: true/);
+	assert.match(engine, /noPromptTemplates: true/);
+	assert.match(engine, /noThemes: true/);
+	assert.match(engine, /noContextFiles: true/);
 	assert.match(engine, /customTools: \[agentTool\]/);
 	assert.match(engine, /createNestedAgentTool/);
+	assert.match(engine, /shouldStopAfterTurn/);
+	assert.match(engine, /turnLimitReached/);
 	assert.match(engine, /session\.messages\.length !== 0/);
 	assert.doesNotMatch(engine, /forkFrom|parentSession:/);
+	assert.match(nestedTool, /executionMode: "sequential"/);
+	assert.doesNotMatch(nestedTool, /run_in_background|resolvedModel|thinking:|service_tier/);
+	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "reviewer", "worker"\]/);
+	assert.match(roleConfig, /allowAgent = true/);
+	assert.match(roleConfig, /STRICT_READ_ONLY_NESTED_TOOLS/);
+	assert.match(nestedExecutor, /this\.action\.model/);
+	assert.match(nestedExecutor, /this\.action\.effort/);
+	assert.match(nestedExecutor, /scopeController/);
+	for (const type of ["recon", "reviewer", "worker"]) {
+		const nested = await readFile(path.join(agentDir, "nested", `${type}.md`), "utf8");
+		assert.match(nested, /^package: herder$/m);
+		assert.match(nested, /^kind: nested$/m);
+		assert.doesNotMatch(nested, /^tools: .*Agent/m);
+	}
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"]) {
 		const contents = await readFile(path.join(agentDir, `${role}.md`), "utf8");
 		assert.match(contents, /^package: herder$/m);

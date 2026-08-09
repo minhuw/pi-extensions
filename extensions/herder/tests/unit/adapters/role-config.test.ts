@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadPiProfile } from "../../../adapters/profile.ts";
-import { loadHerderPiRole, validateHerderRoleAgents } from "../../../adapters/role-config.ts";
+import { loadHerderNestedAgent, loadHerderPiRole, validateHerderRoleAgents } from "../../../adapters/role-config.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
@@ -23,6 +23,18 @@ test("Herder loads exact non-recursive Pi role definitions", async () => {
 	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent"]);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
+});
+
+test("Herder loads package-owned one-level nested definitions with explicit permissions", async () => {
+	const recon = await loadHerderNestedAgent(agentRoot, "recon");
+	const reviewer = await loadHerderNestedAgent(agentRoot, "reviewer");
+	const worker = await loadHerderNestedAgent(agentRoot, "worker");
+	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
+	assert.equal(recon.readOnly, true);
+	assert.equal(reviewer.readOnly, true);
+	assert.equal(worker.readOnly, false);
+	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
+	for (const definition of [recon, reviewer, worker]) assert.equal(definition.tools.includes("Agent"), false);
 });
 
 test("Herder validates package roles against the built-in engine model catalog", async () => {
@@ -46,6 +58,39 @@ test("Herder refuses tiered roles when the resolved model cannot honor the tier"
 		() => validateHerderRoleAgents(agentRoot, profile, tiered.map((model) => model.id === "gpt-5.6-luna" ? { ...model, api: "openai-completions" } : model)),
 		/does not support service tier fast/,
 	);
+});
+
+test("nested role loading rejects Agent and mutating tools declared read-only", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-nested-role-"));
+	try {
+		const nestedRoot = path.join(root, "nested");
+		await mkdir(nestedRoot);
+		const file = path.join(nestedRoot, "reviewer.md");
+		await writeFile(file, `---
+name: reviewer
+package: herder
+kind: nested
+description: Reviewer
+readOnly: true
+tools: read, Agent
+---
+Review.
+`);
+		await assert.rejects(() => loadHerderNestedAgent(root, "reviewer"), /recursive agent tool Agent is forbidden/);
+		await writeFile(file, `---
+name: reviewer
+package: herder
+kind: nested
+description: Reviewer
+readOnly: true
+tools: read, bash
+---
+Review.
+`);
+		await assert.rejects(() => loadHerderNestedAgent(root, "reviewer"), /requests a mutating or unrestricted tool/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("role loading allows Agent but rejects every recursive orchestration tool", async () => {

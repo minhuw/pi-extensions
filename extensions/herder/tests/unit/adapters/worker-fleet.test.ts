@@ -17,6 +17,8 @@ function nested(overrides: Partial<PiNestedAgentSnapshot> = {}): PiNestedAgentSn
 		type: "recon",
 		description: "inspect code",
 		status: "running",
+		model: "gpt-5.6-sol",
+		effort: "xhigh",
 		startedAt: 6_000,
 		turns: 1,
 		maxTurns: 4,
@@ -25,7 +27,6 @@ function nested(overrides: Partial<PiNestedAgentSnapshot> = {}): PiNestedAgentSn
 		contextPercent: 34.4,
 		compactionCount: 1,
 		activeTools: ["read"],
-		children: [],
 		...overrides,
 	};
 }
@@ -64,27 +65,8 @@ function model(workers: PiWorkerSnapshot[]): HerderWidgetModel {
 	};
 }
 
-test("Pi worker fleet flattens Plan and Role and renders nested rich stats on one line", () => {
-	const child = nested({
-		children: [nested({
-			agentId: "nested-2",
-			parentAgentId: "nested-1",
-			displayName: "Reviewer",
-			type: "reviewer",
-			description: "check findings",
-			status: "completed",
-			startedAt: 10_000,
-			completedAt: 31_000,
-			turns: 2,
-			maxTurns: undefined,
-			toolUses: 1,
-			lifetimeTokens: 900,
-			contextPercent: null,
-			compactionCount: 0,
-			activeTools: [],
-			activity: "done",
-		})],
-	});
+test("Pi worker fleet flattens Plan and Role and renders direct child stats on one line", () => {
+	const child = nested();
 	const lines = workerFleetTreeLines(model([
 		worker({ children: [child] }),
 		worker({
@@ -101,8 +83,7 @@ test("Pi worker fleet flattens Plan and Role and renders nested rich stats on on
 	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
 	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon  reading…\s+↻1≤4 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
-	assert.match(lines[3]!, /^│ {16}└─ ✓ Reviewer  done\s+↻2 · 1 tool · 900t · 21s$/);
-	assert.match(lines[4]!, /^└─ Plan 019 · ⠋ Implementer  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
+	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
 });
 
@@ -116,15 +97,22 @@ test("nested connector alignment retains the outer plan sibling stem", () => {
 	assert.equal(lines[3]![0], "└");
 });
 
-test("turn-limited nested agents render as warnings instead of clean completion", () => {
+test("turn-limited nested agents render as warnings", () => {
 	const lines = workerFleetTreeLines(model([
-		worker({ children: [nested({ status: "steered", activeTools: [], activity: "final partial output" })] }),
+		worker({ children: [nested({ status: "limited", activeTools: [], activity: "turn limit" })] }),
 	]), theme, 120, 66_000, 0);
-	assert.match(lines[2]!, /✓ Recon  turn limit\s+↻1≤4/);
+	assert.match(lines[2]!, /! Recon  turn limit\s+↻1≤4/);
 });
 
-test("worker fleet overflow counts nested rows and respects narrow widths", () => {
-	const workers = [worker({ children: [nested({ children: [nested({ agentId: "nested-2" })] })] }), worker({ handle: "pi-worker:two", actionId: "action-2", planId: "019" })];
+test("aborted nested agents render as failures", () => {
+	const lines = workerFleetTreeLines(model([
+		worker({ children: [nested({ status: "aborted", activeTools: [], activity: "aborted" })] }),
+	]), theme, 120, 66_000, 0);
+	assert.match(lines[2]!, /✗ Recon  aborted\s+↻1≤4/);
+});
+
+test("worker fleet overflow counts direct nested rows and respects narrow widths", () => {
+	const workers = [worker({ children: [nested(), nested({ agentId: "nested-2" })] }), worker({ handle: "pi-worker:two", actionId: "action-2", planId: "019" })];
 	const overflow = workerFleetTreeLines(model(workers), theme, 80, 66_000, 0, 2);
 	assert.equal(overflow.length, 4);
 	assert.equal(overflow[3], "└─ +2 more agents");

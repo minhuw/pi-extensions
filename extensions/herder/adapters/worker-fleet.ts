@@ -92,10 +92,9 @@ function workerIcon(worker: PiWorkerSnapshot, frame: number, theme: Theme): stri
 
 function nestedIcon(agent: PiNestedAgentSnapshot, frame: number, theme: Theme): string {
 	if (agent.status === "completed") return theme.fg("success", "✓");
-	if (agent.status === "steered") return theme.fg("warning", "✓");
+	if (agent.status === "limited") return theme.fg("warning", "!");
 	if (["error", "aborted"].includes(agent.status)) return theme.fg("error", "✗");
 	if (agent.status === "stopped") return theme.fg("warning", "■");
-	if (agent.status === "queued") return theme.fg("muted", "○");
 	return theme.fg("accent", SPINNER[frame % SPINNER.length]!);
 }
 
@@ -118,7 +117,7 @@ function workerActivity(worker: PiWorkerSnapshot): string {
 
 function nestedActivity(agent: PiNestedAgentSnapshot): string {
 	if (agent.status === "completed") return "done";
-	if (agent.status === "steered") return "turn limit";
+	if (agent.status === "limited") return "turn limit";
 	if (["error", "aborted", "stopped"].includes(agent.status)) return agent.status;
 	const active = activityLabel(agent.activeTools[0]);
 	const live = active ?? activityLabel(agent.activity) ?? responseActivity(agent.responseText);
@@ -168,7 +167,6 @@ function appendNestedRows(rows: RenderRow[], children: readonly PiNestedAgentSna
 	children.forEach((agent, index) => {
 		const connector = index === children.length - 1 ? "└─" : "├─";
 		rows.push({ kind: "nested", agent, prefix, connector });
-		appendNestedRows(rows, agent.children, `${prefix}${connector === "└─" ? "   " : "│  "}`);
 	});
 }
 

@@ -27,6 +27,7 @@ Herder refuses to start when Pi's active providers cannot resolve every required
 
 - Dependency-aware scheduling with a configurable global worker limit.
 - Clean, parentless Pi worker sessions with no inherited root transcript or nested extension runtime.
+- A package-owned, one-level nested executor whose children inherit the parent action binding but cannot delegate again.
 - One stable Herder branch and isolated Git worktree per plan.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.
@@ -76,7 +77,7 @@ Fire and resume start or reuse Herder's persistent local Run Manager, launch the
 
 After ordinary plans integrate, Herder asks the main Pi session to inspect the exact integration tree and submit a typed `herder_verification` manifest. The main session chooses commands but does not execute them. Gate working directories are TreeRelative (`"."` or a path inside the integration worktree); absolute host paths are rejected. The manager validates the manifest's run, generation, assignment, head, tree, argv, and working directories, executes the gates in the background, and creates the final aggregate Reviewer only after they pass.
 
-Each plan keeps one Herder-owned branch and worktree for its entire pipeline; workers never create additional branches or worktrees. The user's checkout remains unchanged until Herder performs its serialized integration step.
+Each plan keeps one Herder-owned branch and worktree for its entire pipeline; workers and their direct nested children never create additional branches or worktrees. Nested children run through Herder's own foreground-only executor, not the standalone subagents extension. They inherit the parent action's exact model, effort, service tier, worktree, and cancellation lifetime; receive no extensions, skills, project context, inherited conversation, or `Agent` tool; and therefore cannot nest again. Reviewer and Judge may launch only Herder's strictly read-only `recon` and `reviewer` children. Implementer may additionally launch `worker`. The user's checkout remains unchanged until Herder performs its serialized integration step.
 
 For the full adapter and runtime contracts, see [Herder for Pi](adapters/README.md).
 

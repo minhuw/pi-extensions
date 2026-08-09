@@ -79,7 +79,6 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	registerWorkerTranscriptRenderers(pi);
 	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT, pi);
 	const engine = new PiWorkerEngine(sessionFactory);
-	const telemetryUnsubscribe = pi.events.on("subagents:telemetry", (event) => engine.acceptSubagentTelemetry(event));
 	const widget = new HerderWidget();
 	const workers = new Map<string, WorkerBinding>();
 	let currentState: HerderRunState | undefined;
@@ -690,7 +689,6 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
-		telemetryUnsubscribe();
 		sessionEpoch += 1;
 		shuttingDown = true;
 		const handles = engine.snapshots().map((worker) => worker.handle);
