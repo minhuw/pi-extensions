@@ -26,7 +26,8 @@ test("Pi and planning commands share one direct application facade", () => {
 	assert.match(adapter, /src\/application\/tools\.ts/);
 	assert.match(planning, /src\/application\/tools\.ts/);
 	assert.doesNotMatch(adapter + planning + application, /adapters\/mcp|herder_wait|codex_terminal|herder_profile/);
-	assert.match(application, /"herder_plan" \| "herder_run" \| "herder_submit"/);
+	assert.match(application, /"herder_plan" \| "herder_run" \| "herder_submit" \| "herder_verification"/);
+	assert.match(application, /submitHerderVerification/);
 });
 
 test("runtime and profiles expose only Pi host behavior", () => {
@@ -36,4 +37,5 @@ test("runtime and profiles expose only Pi host behavior", () => {
 	assert.match(protocol, /HostName = "pi"/);
 	assert.doesNotMatch(manager + profiles, /input\.host|roles\/claude|roles\/codex/);
 	assert.match(manager, /assets.*roles.*contracts/);
+	assert.doesNotMatch(manager, /extractGateCommands|runGates\(/);
 });

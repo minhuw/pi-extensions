@@ -4,7 +4,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ensureService, stopService } from "../../../src/client/index.ts";
+import {
+	ensureService,
+	requestService,
+	stopService,
+	submitManagerOperation,
+	waitManagerOperation,
+} from "../../../src/client/index.ts";
 import { git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
@@ -68,6 +74,28 @@ test("ensureService reuses one daemon for concurrent callers", async () => {
 		const [first, second] = await Promise.all([ensureService(planDirectory), ensureService(planDirectory)]);
 		assert.equal(second.instanceId, first.instanceId);
 		assert.equal(second.pid, first.pid);
+	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("manager controls use immediate durable submission and polling", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	try {
+		const service = await ensureService(planDirectory);
+		const started = Date.now();
+		const receipt = await submitManagerOperation(service, "stop", {}, "client-operation-test");
+		assert.ok(Date.now() - started < 1_000, "operation submission waited for manager execution");
+		assert.equal(receipt.operationId, "client-operation-test");
+		assert.ok(["accepted", "running", "succeeded"].includes(receipt.state));
+		assert.equal((await requestService(service, "/health")).ok, true);
+		const result = await waitManagerOperation(service, receipt.operationId) as Record<string, unknown>;
+		assert.equal(result.status, "idle");
+		const replay = await submitManagerOperation(service, "stop", {}, receipt.operationId);
+		assert.equal(replay.state, "succeeded");
+		await assert.rejects(() => submitManagerOperation(service, "stop", { changed: true }, receipt.operationId), /replayed with different payload/);
 	} finally {
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });
