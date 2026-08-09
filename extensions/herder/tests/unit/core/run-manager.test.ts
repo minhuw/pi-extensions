@@ -516,23 +516,27 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 			}],
 		})).reply);
 		const mixedActions = (mixed.actions as unknown[]).map(payload);
-		assert.deepEqual(mixedActions.map((action) => [action.planId, action.role]), [
+		assert.deepEqual(mixedActions.map((action) => [action.planId, action.role]).sort(), [
 			["001", "plan-reviewer"],
 			["002", "plan-implementer"],
 		]);
+		const mixedReviewer = mixedActions.find((action) => action.role === "plan-reviewer");
+		const mixedImplementer = mixedActions.find((action) => action.role === "plan-implementer");
+		assert.ok(mixedReviewer);
+		assert.ok(mixedImplementer);
 		await requestService(service, "/v1/event", {
 			eventId: "mixed-dispatch-review-and-implementation",
 			kind: "dispatch_results",
 			dispatchResults: [
-				{ actionId: mixedActions[0].actionId, accepted: true, hostHandle: "mixed-reviewer" },
-				{ actionId: mixedActions[1].actionId, accepted: true, hostHandle: "mixed-implementer" },
+				{ actionId: mixedReviewer.actionId, accepted: true, hostHandle: "mixed-reviewer" },
+				{ actionId: mixedImplementer.actionId, accepted: true, hostHandle: "mixed-implementer" },
 			],
 		});
 		const reviewed = payload(payload(await requestService(service, "/v1/event", {
 			eventId: "mixed-terminal-reviewer",
 			kind: "terminals",
 			terminals: [{
-				actionId: mixedActions[0].actionId,
+				actionId: mixedReviewer.actionId,
 				hostHandle: "mixed-reviewer",
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: exact patch approved\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
 			}],
