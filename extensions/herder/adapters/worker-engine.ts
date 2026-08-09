@@ -1,14 +1,17 @@
 import path from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
+	DefaultPackageManager,
 	DefaultResourceLoader,
 	getAgentDir,
 	ModelRegistry,
 	ModelRuntime,
 	SessionManager,
+	SettingsManager,
 	type AgentSession,
 	type AgentSessionEvent,
 	type ExtensionAPI,
@@ -29,7 +32,7 @@ import {
 	type NestedWorkerSession,
 	type PiNestedAgentSnapshot,
 } from "./nested-agent-executor.ts";
-import { createNestedAgentTool } from "./nested-agent-tool.ts";
+import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { loadHerderPiRole } from "./role-config.ts";
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
@@ -173,6 +176,34 @@ function record(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
+const SEARCHER_TOOL_NAMES = new Set(["web_search", "source_check", "fetch_content", "get_search_content"]);
+
+export function applySearcherToolPolicy(toolName: string, rawInput: unknown): { block: true; reason: string } | undefined {
+	if (!SEARCHER_TOOL_NAMES.has(toolName)) return { block: true, reason: `Herder searcher cannot call unexpected tool ${toolName}.` };
+	const input = record(rawInput);
+	if (!input) return undefined;
+	// Apply by capability envelope rather than assumed semantic name: pi-web-access
+	// permits configured tool-name swaps, so every allowed call gets both guards.
+	input.workflow = "none";
+	const values = [input.url, ...(Array.isArray(input.urls) ? input.urls : [])]
+		.filter((value): value is string => typeof value === "string");
+	if (values.some((value) => /^(?:file:|\/|\.\.?\/)/i.test(value.trim()))) {
+		return { block: true, reason: "Herder searcher may fetch only remote URLs." };
+	}
+	return undefined;
+}
+
+export function trustedNestedExtensionPath(agentDir: string, installed: string, source: string): string {
+	const trustedRoot = path.join(agentDir, "npm");
+	const realRoot = realpathSync(trustedRoot);
+	const realInstalled = realpathSync(installed);
+	const relative = path.relative(realRoot, realInstalled);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error(`Herder nested extension ${source} resolves outside the trusted user package store.`);
+	}
+	return realInstalled;
+}
+
 function responseActivity(text: string | undefined): string | undefined {
 	const line = text?.split("\n").find((candidate) => candidate.trim())?.trim();
 	if (!line) return undefined;
@@ -250,6 +281,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
 	private readonly agentDir: string;
 	private readonly pi: ExtensionAPI;
+	private readonly nestedExtensionPaths = new Map<string, string>();
 	private modelRuntime?: ModelRuntime;
 
 	constructor(agentRoot: string, pi: ExtensionAPI, agentDir = getAgentDir()) {
@@ -277,6 +309,24 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		return await this.runtime().getAvailable();
 	}
 
+	private resolveNestedExtensionPaths(sources: readonly string[], cwd: string): string[] {
+		if (sources.length === 0) return [];
+		const settingsManager = SettingsManager.create(cwd, this.agentDir);
+		const packageManager = new DefaultPackageManager({ cwd, agentDir: this.agentDir, settingsManager });
+		return sources.map((source) => {
+			const cacheKey = `${cwd}\0${source}`;
+			const cached = this.nestedExtensionPaths.get(cacheKey);
+			if (cached && existsSync(cached)) return cached;
+			const installed = packageManager.getInstalledPath(source, "user");
+			if (!installed || !existsSync(installed)) {
+				throw new Error(`Herder nested extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
+			}
+			const trusted = trustedNestedExtensionPath(this.agentDir, installed, source);
+			this.nestedExtensionPaths.set(cacheKey, trusted);
+			return trusted;
+		});
+	}
+
 	async create(request: PiWorkerRequest): Promise<PreparedWorkerSession> {
 		const role = roleFromAgentType(request.action.agentType);
 		if (role !== request.action.role) throw new Error(`Action role ${request.action.role} does not match ${request.action.agentType}.`);
@@ -298,15 +348,24 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot: this.agentRoot,
-			createSession: async ({ definition: childDefinition, maxTurns, signal }) => {
+			createSession: async ({ id, definition: childDefinition, maxTurns, signal }) => {
 				signal.throwIfAborted();
-				await mkdir(nestedRoot, { recursive: true, mode: 0o700 });
+				const extensionPaths = this.resolveNestedExtensionPaths(childDefinition.extensions, request.action.worktree);
+				const childRoot = path.join(nestedRoot, id);
+				await mkdir(childRoot, { recursive: true, mode: 0o700 });
 				signal.throwIfAborted();
-				const childManager = SessionManager.create(request.action.worktree, nestedRoot);
+				const childManager = SessionManager.create(request.action.worktree, childRoot);
 				if (childManager.getHeader()?.parentSession) throw new Error("Herder nested agents cannot inherit a parent session.");
 				const childLoader = new DefaultResourceLoader({
 					cwd: request.action.worktree,
 					agentDir: this.agentDir,
+					additionalExtensionPaths: extensionPaths,
+					extensionFactories: childDefinition.name === "searcher" ? [{
+						name: "herder-searcher-policy",
+						factory: (childPi) => {
+							childPi.on("tool_call", (event) => applySearcherToolPolicy(event.toolName, event.input));
+						},
+					}] : [],
 					noExtensions: true,
 					noSkills: true,
 					noPromptTemplates: true,
@@ -316,6 +375,10 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					appendSystemPromptOverride: () => [],
 				});
 				await childLoader.reload();
+				const extensionErrors = childLoader.getExtensions().errors;
+				if (extensionErrors.length > 0) {
+					throw new Error(`Herder nested extensions failed to load: ${extensionErrors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
+				}
 				signal.throwIfAborted();
 				const { session: child } = await createAgentSession({
 					cwd: request.action.worktree,
@@ -335,6 +398,12 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 				if (child.messages.length !== 0) {
 					child.dispose();
 					throw new Error("Herder nested agent session was not created with clean history.");
+				}
+				const activeChildTools = new Set(child.agent.state.tools.map((tool) => tool.name));
+				const missingChildTools = childDefinition.tools.filter((tool) => !activeChildTools.has(tool));
+				if (missingChildTools.length > 0) {
+					child.dispose();
+					throw new Error(`Herder nested agent ${childDefinition.name} is missing required tools: ${missingChildTools.join(", ")}.`);
 				}
 				if (request.action.serviceTier) applyServiceTier(child, request.action.serviceTier);
 				const turnLimit = applyTurnLimit(child, maxTurns);
@@ -364,7 +433,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			appendSystemPromptOverride: () => [],
 		});
 		await resourceLoader.reload();
-		const agentTool = createNestedAgentTool(request.action, nested);
+		const nestedTools = createNestedAgentTools(request.action, nested);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
 			agentDir: this.agentDir,
@@ -372,7 +441,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			model: model as Model<any>,
 			thinkingLevel: request.action.effort as ThinkingLevel,
 			tools: definition.tools,
-			customTools: [agentTool],
+			customTools: [...nestedTools],
 			resourceLoader,
 			sessionManager,
 		});
@@ -594,6 +663,12 @@ export class PiWorkerEngine {
 			await worker.session.prompt(worker.request.action.prompt, { expandPromptTemplates: false, source: "extension" });
 		} catch (error) {
 			failure = message(error);
+		}
+		const uncollected = worker.nested.uncollectedBackgroundIds();
+		if (!worker.stopRequested && uncollected.length > 0) {
+			failure = [failure, `Pi worker completed without collecting background nested agents: ${uncollected.join(", ")}`]
+				.filter(Boolean)
+				.join("\n");
 		}
 		await worker.nested.stop("Parent Herder worker completed");
 		const finishedAt = Date.now();

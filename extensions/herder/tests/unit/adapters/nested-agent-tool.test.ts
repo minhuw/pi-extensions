@@ -4,8 +4,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
-import { HerderNestedAgentScope, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
-import { createNestedAgentTool } from "../../../adapters/nested-agent-tool.ts";
+import {
+	HerderNestedAgentScope,
+	type NestedWorkerSession,
+} from "../../../adapters/nested-agent-executor.ts";
+import { createNestedAgentTool, createNestedAgentTools } from "../../../adapters/nested-agent-tool.ts";
 
 const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
 
@@ -111,15 +114,15 @@ function params(overrides: Record<string, unknown> = {}) {
 	return {
 		prompt: "Inspect the bounded change",
 		description: "inspect bounded change",
-		subagent_type: "reviewer",
+		subagent_type: "recon",
 		...overrides,
 	};
 }
 
-function resultText(result: Awaited<ReturnType<ReturnType<typeof createNestedAgentTool>["execute"]>>): string {
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	const item = result.content[0];
 	assert.equal(item?.type, "text");
-	return item.type === "text" ? item.text : "";
+	return item.type === "text" ? item.text ?? "" : "";
 }
 
 test("nested Agent runs one package-owned foreground child with inherited action binding", async () => {
@@ -134,6 +137,45 @@ test("nested Agent runs one package-owned foreground child with inherited action
 	assert.equal(snapshot.effort, "high");
 	assert.equal(snapshot.status, "completed");
 	assert.deepEqual(snapshot.activeTools, []);
+});
+
+test("background children return IDs and must be collected through the scoped result tool", async () => {
+	const { value } = scope();
+	const [agentTool, resultTool] = createNestedAgentTools(action(), value);
+	assert.equal(agentTool.executionMode, "parallel");
+	assert.equal(resultTool.executionMode, "parallel");
+	const launched = await agentTool.execute("background", params({ run_in_background: true }), undefined, undefined, undefined as never);
+	const agentId = (launched.details as { agentId: string }).agentId;
+	assert.match(resultText(launched), new RegExp(`Agent started in background: ${agentId}`));
+	assert.deepEqual(value.uncollectedBackgroundIds(), [agentId]);
+	const collected = await resultTool.execute("collect", { agent_id: agentId, wait: true }, undefined, undefined, undefined as never);
+	assert.match(resultText(collected), /^Agent completed/);
+	assert.deepEqual(value.uncollectedBackgroundIds(), []);
+});
+
+test("each role may run four children concurrently and rejects a fifth", async () => {
+	const sessions: BlockingNestedSession[] = [];
+	const value = new HerderNestedAgentScope({
+		action: action(),
+		agentRoot,
+		createSession: async ({ id }) => {
+			const session = new BlockingNestedSession(id);
+			sessions.push(session);
+			return session;
+		},
+	});
+	const [agentTool] = createNestedAgentTools(action(), value);
+	for (let index = 0; index < 4; index += 1) {
+		await agentTool.execute(`background-${index}`, params({ run_in_background: true }), undefined, undefined, undefined as never);
+	}
+	assert.equal(value.activeCount(), 4);
+	await assert.rejects(
+		() => agentTool.execute("background-5", params({ run_in_background: true }), undefined, undefined, undefined as never),
+		/may run at most 4 nested agents concurrently/,
+	);
+	await value.stop("test complete");
+	assert.equal(sessions.length, 4);
+	assert.equal(sessions.every((session) => session.aborted && session.disposed), true);
 });
 
 test("a gracefully bounded child preserves partial output with an explicit limited status", async () => {

@@ -30,6 +30,10 @@ try {
     assert.match(role, /longest event-driven or blocking process wait/);
     assert.doesNotMatch(role, /^model:/m);
   }
+  const reviewProtocol = await readFile(path.join(pluginRoot, "assets", "review", "code-review-protocol.md"), "utf8");
+  assert.match(reviewProtocol, /four fresh `recon` children/);
+  assert.match(reviewProtocol, /CONFIDENCE: <integer 0-100>/);
+  assert.match(reviewProtocol, /confidence at least 80/);
 
   const gateWorktree = path.join(root, "gate-worktree");
   const gateLogs = path.join(root, "gate-logs");

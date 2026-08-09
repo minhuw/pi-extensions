@@ -217,6 +217,9 @@ function assignmentPrompt(input: {
 		`ATTEMPT_ID: ${action.attemptId}`,
 		`ROLE: ${action.role}`,
 		`ROLE_CONTRACT_PATH: ${path.join(PLUGIN_ROOT, "assets", "roles", "contracts", `${action.role}.md`)}`,
+		...(action.role === "plan-reviewer" ? [
+			`REVIEW_PROTOCOL_PATH: ${path.join(PLUGIN_ROOT, "assets", "review", "code-review-protocol.md")}`,
+		] : []),
 		`PLAN: ${plan.planId}`,
 		`GENERATION: generation-${plan.generation}`,
 		`ROUND: ${plan.round}`,

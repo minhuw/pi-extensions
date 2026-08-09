@@ -11,7 +11,7 @@ test("Herder is a self-contained Pi-only extension", () => {
 	const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
-	for (const directory of ["adapters", "src/application", "src/core", "src/daemon", "src/client", "src/dashboard", "src/shared", "assets/roles/pi", "assets/roles/pi/nested", "assets/roles/contracts", "assets/profiles", "skills", "tests"]) {
+	for (const directory of ["adapters", "src/application", "src/core", "src/daemon", "src/client", "src/dashboard", "src/shared", "assets/roles/pi", "assets/roles/pi/nested", "assets/roles/contracts", "assets/review", "assets/profiles", "skills", "tests"]) {
 		assert.equal(existsSync(path.join(extensionRoot, directory)), true, directory);
 	}
 	for (const legacy of ["adapters/mcp", "agents", "assets/roles/codex", "assets/roles/claude", "src/core/profile-installer.ts", ".codex-plugin", ".claude-plugin", ".mcp.json"]) {
@@ -37,5 +37,6 @@ test("runtime and profiles expose only Pi host behavior", () => {
 	assert.match(protocol, /HostName = "pi"/);
 	assert.doesNotMatch(manager + profiles, /input\.host|roles\/claude|roles\/codex/);
 	assert.match(manager, /assets.*roles.*contracts/);
+	assert.match(manager, /assets.*review.*code-review-protocol/);
 	assert.doesNotMatch(manager, /extractGateCommands|runGates\(/);
 });

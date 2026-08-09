@@ -19,18 +19,23 @@ export interface HerderPiRoleDefinition {
 	systemPrompt: string;
 }
 
-export const HERDER_NESTED_AGENT_TYPES = ["recon", "reviewer", "worker"] as const;
+export const HERDER_NESTED_AGENT_TYPES = ["recon", "searcher", "worker"] as const;
 export type HerderNestedAgentType = typeof HERDER_NESTED_AGENT_TYPES[number];
 
 export interface HerderNestedAgentDefinition {
 	name: HerderNestedAgentType;
 	description: string;
 	tools: string[];
+	extensions: string[];
 	readOnly: boolean;
 	systemPrompt: string;
 }
 
-const STRICT_READ_ONLY_NESTED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
+	"read", "grep", "find", "ls",
+	"web_search", "source_check", "fetch_content", "get_search_content",
+]);
+const ALLOWED_NESTED_EXTENSION_SOURCES = new Set(["npm:pi-web-access"]);
 
 function stringField(frontmatter: Record<string, unknown>, name: string, file: string): string {
 	const value = frontmatter[name];
@@ -40,15 +45,20 @@ function stringField(frontmatter: Record<string, unknown>, name: string, file: s
 	return value.trim();
 }
 
-function toolList(value: unknown, file: string, allowAgent = true): string[] {
-	const tools = Array.isArray(value)
+function stringList(value: unknown): string[] {
+	const items = Array.isArray(value)
 		? value.filter((item): item is string => typeof item === "string")
 		: typeof value === "string" ? value.split(",") : [];
-	const normalized = tools.map((tool) => tool.trim()).filter(Boolean);
+	return items.map((item) => item.trim()).filter(Boolean);
+}
+
+function toolList(value: unknown, file: string, allowedNestedTools: readonly string[] = ["Agent", "get_subagent_result"]): string[] {
+	const normalized = stringList(value);
 	if (normalized.length === 0) throw new Error(`missing tools in ${file}`);
 	if (new Set(normalized).size !== normalized.length) throw new Error(`duplicate tools in ${file}`);
-	const forbiddenRecursive = new Set(["herder", "subagent", "get_subagent_result", "steer_subagent", ...(allowAgent ? [] : ["Agent"])]);
-	const rejected = normalized.find((tool) => forbiddenRecursive.has(tool));
+	const orchestrationTools = new Set(["herder", "subagent", "Agent", "get_subagent_result", "steer_subagent"]);
+	const allowed = new Set(allowedNestedTools);
+	const rejected = normalized.find((tool) => orchestrationTools.has(tool) && !allowed.has(tool));
 	if (rejected) throw new Error(`recursive agent tool ${rejected} is forbidden in ${file}`);
 	return normalized;
 }
@@ -80,7 +90,11 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 	}
 	if (typeof parsed.frontmatter.readOnly !== "boolean") throw new Error(`missing readOnly in ${file}`);
 	if (parsed.body.trim().length === 0) throw new Error(`missing system prompt in ${file}`);
-	const tools = toolList(parsed.frontmatter.tools, file, false);
+	const tools = toolList(parsed.frontmatter.tools, file, []);
+	const extensions = stringList(parsed.frontmatter.extensions);
+	if (new Set(extensions).size !== extensions.length) throw new Error(`duplicate extensions in ${file}`);
+	const rejectedExtension = extensions.find((source) => !ALLOWED_NESTED_EXTENSION_SOURCES.has(source));
+	if (rejectedExtension) throw new Error(`nested agent ${type} requests forbidden extension ${rejectedExtension} in ${file}`);
 	const readOnly = parsed.frontmatter.readOnly;
 	if (readOnly && tools.some((tool) => !STRICT_READ_ONLY_NESTED_TOOLS.has(tool))) {
 		throw new Error(`read-only nested agent ${type} requests a mutating or unrestricted tool in ${file}`);
@@ -89,6 +103,7 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 		name: type,
 		description: stringField(parsed.frontmatter, "description", file),
 		tools,
+		extensions,
 		readOnly,
 		systemPrompt: parsed.body.trim(),
 	};

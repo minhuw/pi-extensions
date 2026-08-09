@@ -354,6 +354,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		);
 		assert.match(String(initialImplementer.prompt), /change to the exact absolute REPOSITORY_WORKTREE, verify pwd and EXPECTED_BRANCH/);
 		assert.match(String(initialImplementer.prompt), /ROLE_CONTRACT_PATH: .*assets\/roles\/contracts\/plan-implementer\.md/);
+		assert.doesNotMatch(String(initialImplementer.prompt), /REVIEW_PROTOCOL_PATH:/);
 		await stopService(fixture.planDirectory);
 		let service = await ensureService(fixture.planDirectory);
 		assert.notEqual(service.instanceId, first.instanceId);
@@ -390,6 +391,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		}));
 		const reviewer = payload((payload(implementerTerminal.reply).actions as unknown[])[0]);
 		assert.equal(reviewer.role, "plan-reviewer");
+		assert.match(String(reviewer.prompt), /REVIEW_PROTOCOL_PATH: .*assets\/review\/code-review-protocol\.md/);
 
 		await requestService(service, "/v1/event", {
 			eventId: "dispatch-reviewer",
@@ -409,6 +411,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		const finalReviewer = payload((verified.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
+		assert.match(String(finalReviewer.prompt), /REVIEW_PROTOCOL_PATH: .*assets\/review\/code-review-protocol\.md/);
 
 		await requestService(service, "/v1/event", {
 			eventId: "dispatch-final",

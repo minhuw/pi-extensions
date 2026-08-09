@@ -20,21 +20,27 @@ const available = [
 test("Herder loads exact non-recursive Pi role definitions", async () => {
 	const implementer = await loadHerderPiRole(agentRoot, "plan-implementer");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
-	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent"]);
+	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
 
 test("Herder loads package-owned one-level nested definitions with explicit permissions", async () => {
 	const recon = await loadHerderNestedAgent(agentRoot, "recon");
-	const reviewer = await loadHerderNestedAgent(agentRoot, "reviewer");
+	const searcher = await loadHerderNestedAgent(agentRoot, "searcher");
 	const worker = await loadHerderNestedAgent(agentRoot, "worker");
 	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
+	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
-	assert.equal(reviewer.readOnly, true);
+	assert.equal(searcher.readOnly, true);
+	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
+	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content"]);
 	assert.equal(worker.readOnly, false);
 	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
-	for (const definition of [recon, reviewer, worker]) assert.equal(definition.tools.includes("Agent"), false);
+	for (const definition of [recon, searcher, worker]) {
+		assert.equal(definition.tools.includes("Agent"), false);
+		assert.equal(definition.tools.includes("get_subagent_result"), false);
+	}
 });
 
 test("Herder validates package roles against the built-in engine model catalog", async () => {
@@ -65,9 +71,9 @@ test("nested role loading rejects Agent and mutating tools declared read-only", 
 	try {
 		const nestedRoot = path.join(root, "nested");
 		await mkdir(nestedRoot);
-		const file = path.join(nestedRoot, "reviewer.md");
+		const file = path.join(nestedRoot, "searcher.md");
 		await writeFile(file, `---
-name: reviewer
+name: searcher
 package: herder
 kind: nested
 description: Reviewer
@@ -76,9 +82,20 @@ tools: read, Agent
 ---
 Review.
 `);
-		await assert.rejects(() => loadHerderNestedAgent(root, "reviewer"), /recursive agent tool Agent is forbidden/);
+		await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /recursive agent tool Agent is forbidden/);
 		await writeFile(file, `---
-name: reviewer
+name: searcher
+package: herder
+kind: nested
+description: Reviewer
+readOnly: true
+tools: read, get_subagent_result
+---
+Review.
+`);
+		await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /recursive agent tool get_subagent_result is forbidden/);
+		await writeFile(file, `---
+name: searcher
 package: herder
 kind: nested
 description: Reviewer
@@ -87,13 +104,25 @@ tools: read, bash
 ---
 Review.
 `);
-		await assert.rejects(() => loadHerderNestedAgent(root, "reviewer"), /requests a mutating or unrestricted tool/);
+		await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /requests a mutating or unrestricted tool/);
+		await writeFile(file, `---
+name: searcher
+package: herder
+kind: nested
+description: Searcher
+readOnly: true
+tools: web_search
+extensions: npm:untrusted-extension
+---
+Search.
+`);
+		await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /requests forbidden extension npm:untrusted-extension/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("role loading allows Agent but rejects every recursive orchestration tool", async () => {
+test("role loading allows scoped nested tools but rejects broader orchestration tools", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-role-"));
 	try {
 		const file = path.join(root, "plan-reviewer.md");
@@ -101,12 +130,12 @@ test("role loading allows Agent but rejects every recursive orchestration tool",
 name: plan-reviewer
 package: herder
 description: Reviewer
-tools: read, Agent
+tools: read, Agent, get_subagent_result
 ---
 Review.
 `);
-		assert.deepEqual((await loadHerderPiRole(root, "plan-reviewer")).tools, ["read", "Agent"]);
-		for (const forbidden of ["herder", "subagent", "get_subagent_result", "steer_subagent"]) {
+		assert.deepEqual((await loadHerderPiRole(root, "plan-reviewer")).tools, ["read", "Agent", "get_subagent_result"]);
+		for (const forbidden of ["herder", "subagent", "steer_subagent"]) {
 			await writeFile(file, `---
 name: plan-reviewer
 package: herder

@@ -64,6 +64,16 @@ export interface NestedAgentRunRequest {
 	maxTurns?: number;
 }
 
+export interface NestedAgentLaunch {
+	id: string;
+	snapshot: PiNestedAgentSnapshot;
+}
+
+export interface NestedAgentLookup {
+	snapshot: PiNestedAgentSnapshot;
+	result?: NestedAgentResult;
+}
+
 export interface NestedWorkerSession {
 	readonly sessionId: string;
 	readonly messages: readonly unknown[];
@@ -91,8 +101,12 @@ interface NestedRecord {
 	session?: NestedWorkerSession;
 	activeToolCalls: Map<string, string>;
 	promise: Promise<NestedAgentResult>;
+	background: boolean;
+	collected: boolean;
+	result?: NestedAgentResult;
 }
 
+export const MAX_NESTED_CONCURRENCY_PER_ACTION = 4;
 const DEFAULT_MAX_TURNS = 8;
 
 function finiteCount(value: unknown): number | undefined {
@@ -176,6 +190,16 @@ function forwardAbort(source: AbortSignal | undefined, target: AbortController):
 	return () => source.removeEventListener("abort", abort);
 }
 
+async function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return await promise;
+	signal.throwIfAborted();
+	return await new Promise<T>((resolve, reject) => {
+		const abort = () => reject(signal.reason instanceof Error ? signal.reason : new Error("Nested result wait aborted."));
+		signal.addEventListener("abort", abort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+	});
+}
+
 export function mergeNestedUsage(
 	parent: Partial<UsageEvidence>,
 	nested: NestedAgentUsage,
@@ -200,8 +224,10 @@ export class HerderNestedAgentScope {
 	private readonly agentRoot: string;
 	private readonly createSession: NestedSessionCreator;
 	private readonly records = new Map<string, NestedRecord>();
+	private readonly pendingLaunches = new Set<Promise<NestedAgentLaunch>>();
 	private readonly listeners = new Set<UpdateListener>();
 	private readonly scopeController = new AbortController();
+	private active = 0;
 	private stopped = false;
 	private usageTotals: NestedAgentUsage = {
 		inputTokens: 0,
@@ -234,6 +260,27 @@ export class HerderNestedAgentScope {
 
 	usage(): NestedAgentUsage {
 		return { ...this.usageTotals };
+	}
+
+	activeCount(): number { return this.active; }
+
+	uncollectedBackgroundIds(): string[] {
+		return [...this.records.values()]
+			.filter((item) => item.background && !item.collected)
+			.map((item) => item.snapshot.agentId);
+	}
+
+	private reserveConcurrency(): () => void {
+		if (this.active >= MAX_NESTED_CONCURRENCY_PER_ACTION) {
+			throw new Error(`A Herder role may run at most ${MAX_NESTED_CONCURRENCY_PER_ACTION} nested agents concurrently.`);
+		}
+		this.active += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.active = Math.max(0, this.active - 1);
+		};
 	}
 
 	private emitUpdate(): void {
@@ -299,42 +346,83 @@ export class HerderNestedAgentScope {
 	}
 
 	async run(request: NestedAgentRunRequest, signal?: AbortSignal): Promise<NestedAgentResult> {
+		const launch = await this.launch(request, false, signal);
+		return (await this.result(launch.id, true, signal)).result!;
+	}
+
+	async spawnBackground(request: NestedAgentRunRequest, signal?: AbortSignal): Promise<NestedAgentLaunch> {
+		return await this.launch(request, true, signal);
+	}
+
+	async result(agentId: string, wait: boolean, signal?: AbortSignal): Promise<NestedAgentLookup> {
+		const item = this.records.get(agentId);
+		if (!item) throw new Error(`Unknown Herder nested agent ${JSON.stringify(agentId)}.`);
+		if (wait && !item.result) await waitWithSignal(item.promise, signal);
+		if (item.result) item.collected = true;
+		return {
+			snapshot: cloneSnapshot(item.snapshot),
+			...(item.result ? { result: item.result } : {}),
+		};
+	}
+
+	private launch(request: NestedAgentRunRequest, background: boolean, signal?: AbortSignal): Promise<NestedAgentLaunch> {
+		const pending = this.launchInternal(request, background, signal);
+		this.pendingLaunches.add(pending);
+		void pending.then(
+			() => this.pendingLaunches.delete(pending),
+			() => this.pendingLaunches.delete(pending),
+		);
+		return pending;
+	}
+
+	private async launchInternal(request: NestedAgentRunRequest, background: boolean, signal?: AbortSignal): Promise<NestedAgentLaunch> {
 		if (this.stopped || this.scopeController.signal.aborted) throw new Error("Herder nested agent scope is closed.");
-		const definition = await loadHerderNestedAgent(this.agentRoot, request.type);
-		if (this.action.role !== "plan-implementer" && !definition.readOnly) {
-			throw new Error(`${this.action.role} may delegate only to package-owned read-only nested agent types; ${request.type} is mutation-capable.`);
+		signal?.throwIfAborted();
+		const releaseConcurrency = this.reserveConcurrency();
+		try {
+			const definition = await loadHerderNestedAgent(this.agentRoot, request.type);
+			if (this.action.role !== "plan-implementer" && !definition.readOnly) {
+				throw new Error(`${this.action.role} may delegate only to package-owned read-only nested agent types; ${request.type} is mutation-capable.`);
+			}
+			const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
+			if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("Nested Agent max_turns must be a positive integer.");
+			const id = randomUUID();
+			const startedAt = Date.now();
+			const snapshot: PiNestedAgentSnapshot = {
+				agentId: id,
+				displayName: definition.name.charAt(0).toUpperCase() + definition.name.slice(1),
+				type: definition.name,
+				description: request.description,
+				status: "running",
+				model: this.action.model,
+				effort: this.action.effort,
+				serviceTier: this.action.serviceTier,
+				startedAt,
+				turns: 0,
+				maxTurns,
+				toolUses: 0,
+				lifetimeTokens: 0,
+				contextPercent: null,
+				compactionCount: 0,
+				activeTools: [],
+			};
+			const item: NestedRecord = {
+				snapshot,
+				activeToolCalls: new Map<string, string>(),
+				promise: Promise.resolve({} as NestedAgentResult),
+				background,
+				collected: !background,
+			};
+			this.records.set(id, item);
+			this.emitUpdate();
+			item.promise = this.execute(item, { ...request, maxTurns }, definition, signal)
+				.finally(releaseConcurrency);
+			void item.promise.catch(() => {});
+			return { id, snapshot: cloneSnapshot(snapshot) };
+		} catch (error) {
+			releaseConcurrency();
+			throw error;
 		}
-		const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
-		if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("Nested Agent max_turns must be a positive integer.");
-		const id = randomUUID();
-		const startedAt = Date.now();
-		const snapshot: PiNestedAgentSnapshot = {
-			agentId: id,
-			displayName: definition.name.charAt(0).toUpperCase() + definition.name.slice(1),
-			type: definition.name,
-			description: request.description,
-			status: "running",
-			model: this.action.model,
-			effort: this.action.effort,
-			serviceTier: this.action.serviceTier,
-			startedAt,
-			turns: 0,
-			maxTurns,
-			toolUses: 0,
-			lifetimeTokens: 0,
-			contextPercent: null,
-			compactionCount: 0,
-			activeTools: [],
-		};
-		const item: NestedRecord = {
-			snapshot,
-			activeToolCalls: new Map<string, string>(),
-			promise: Promise.resolve({} as NestedAgentResult),
-		};
-		this.records.set(id, item);
-		this.emitUpdate();
-		item.promise = this.execute(item, { ...request, maxTurns }, definition, signal);
-		return await item.promise;
 	}
 
 	private async execute(
@@ -389,7 +477,7 @@ export class HerderNestedAgentScope {
 			this.usageTotals.reasoningTokens += usage.reasoningTokens;
 			this.usageTotals.reasoningKnown ||= usage.reasoningKnown;
 			this.emitUpdate();
-			return {
+			const result: NestedAgentResult = {
 				id: item.snapshot.agentId,
 				status: item.snapshot.status,
 				output: final.text ?? "",
@@ -405,6 +493,8 @@ export class HerderNestedAgentScope {
 				sessionId: item.snapshot.sessionId,
 				usage,
 			};
+			item.result = result;
+			return result;
 		} finally {
 			unsubscribe();
 			detachSessionAbort();
@@ -419,6 +509,7 @@ export class HerderNestedAgentScope {
 			this.stopped = true;
 			this.scopeController.abort(new Error(reason));
 		}
+		await Promise.allSettled([...this.pendingLaunches]);
 		await Promise.allSettled([...this.records.values()].map((item) => item.promise));
 	}
 }

@@ -50,38 +50,67 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.doesNotMatch(extension + engine + nestedExecutor + nestedTool + roleConfig, /extensions\/subagents|subagents\/src|subagents:telemetry|registerSubagentHost|getSubagentHost/);
 	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
 	assert.match(engine, /noExtensions: true/);
+	assert.match(engine, /additionalExtensionPaths: extensionPaths/);
+	assert.match(engine, /getInstalledPath\(source, "user"\)/);
+	assert.doesNotMatch(engine, /getInstalledPath\(source, "project"\)/);
+	assert.match(engine, /realpathSync\(trustedRoot\)/);
+	assert.match(engine, /resolves outside the trusted user package store/);
+	assert.match(engine, /pi install \$\{source\}/);
+	assert.match(engine, /SEARCHER_TOOL_NAMES/);
+	assert.match(engine, /input\.workflow = "none"/);
+	assert.match(engine, /Herder searcher may fetch only remote URLs/);
+	assert.match(engine, /const cacheKey = `\$\{cwd\}\\0\$\{source\}`/);
+	assert.match(engine, /missing required tools/);
 	assert.match(engine, /noSkills: true/);
 	assert.match(engine, /noPromptTemplates: true/);
 	assert.match(engine, /noThemes: true/);
 	assert.match(engine, /noContextFiles: true/);
-	assert.match(engine, /customTools: \[agentTool\]/);
-	assert.match(engine, /createNestedAgentTool/);
+	assert.match(engine, /customTools: \[\.\.\.nestedTools\]/);
+	assert.match(engine, /createNestedAgentTools/);
 	assert.match(engine, /shouldStopAfterTurn/);
 	assert.match(engine, /turnLimitReached/);
 	assert.match(engine, /session\.messages\.length !== 0/);
 	assert.doesNotMatch(engine, /forkFrom|parentSession:/);
-	assert.match(nestedTool, /executionMode: "sequential"/);
-	assert.doesNotMatch(nestedTool, /run_in_background|resolvedModel|thinking:|service_tier/);
-	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "reviewer", "worker"\]/);
-	assert.match(roleConfig, /allowAgent = true/);
+	assert.match(nestedTool, /executionMode: "parallel"/);
+	assert.match(nestedTool, /run_in_background/);
+	assert.match(nestedTool, /name: "get_subagent_result"/);
+	assert.doesNotMatch(nestedTool, /resolvedModel|thinking:|service_tier/);
+	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker"\]/);
+	assert.match(roleConfig, /\["Agent", "get_subagent_result"\]/);
 	assert.match(roleConfig, /STRICT_READ_ONLY_NESTED_TOOLS/);
 	assert.match(nestedExecutor, /this\.action\.model/);
 	assert.match(nestedExecutor, /this\.action\.effort/);
 	assert.match(nestedExecutor, /scopeController/);
-	for (const type of ["recon", "reviewer", "worker"]) {
+	assert.match(nestedExecutor, /MAX_NESTED_CONCURRENCY_PER_ACTION = 4/);
+	assert.doesNotMatch(nestedExecutor, /MAX_GLOBAL_NESTED_CONCURRENCY|globalLimiter/);
+	for (const type of ["recon", "searcher", "worker"]) {
 		const nested = await readFile(path.join(agentDir, "nested", `${type}.md`), "utf8");
 		assert.match(nested, /^package: herder$/m);
 		assert.match(nested, /^kind: nested$/m);
 		assert.doesNotMatch(nested, /^tools: .*Agent/m);
 	}
+	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
+	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
+	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content$/m);
+	await assert.rejects(() => readFile(path.join(agentDir, "nested/reviewer.md"), "utf8"), /ENOENT/);
+	const reviewProtocol = await readFile(path.join(extensionRoot, "assets/review/code-review-protocol.md"), "utf8");
+	assert.match(reviewProtocol, /Wave 1: parallel candidate detection/);
+	assert.match(reviewProtocol, /Wave 2: parallel independent validation/);
+	assert.match(reviewProtocol, /Only `CONFIRM` records with confidence at least 80/);
+	assert.match(reviewProtocol, /fresh `recon` children/);
+	assert.doesNotMatch(reviewProtocol, /subagent type.*(?:critic|validator)/i);
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"]) {
 		const contents = await readFile(path.join(agentDir, `${role}.md`), "utf8");
 		assert.match(contents, /^package: herder$/m);
-		assert.match(contents, /^tools: .*Agent/m);
-		assert.doesNotMatch(contents, /^tools: .*(?:subagent|get_subagent_result|steer_subagent|herder)/m);
+		assert.match(contents, /^tools: .*Agent.*get_subagent_result/m);
+		assert.doesNotMatch(contents, /^tools: .*(?:steer_subagent|herder)/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly:/);
+		if (role === "plan-reviewer") {
+			assert.match(contents, /REVIEW_PROTOCOL_PATH/);
+			assert.match(contract, /review protocol's bounded multi-agent workflow/);
+		}
 	}
 });
 

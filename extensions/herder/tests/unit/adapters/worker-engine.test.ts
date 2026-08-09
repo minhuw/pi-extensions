@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -6,10 +8,12 @@ import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import {
+	applySearcherToolPolicy,
 	applyServiceTier,
 	applyTurnLimit,
 	finalAssistantResult,
 	PiWorkerEngine,
+	trustedNestedExtensionPath,
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
@@ -163,6 +167,43 @@ test("applyServiceTier pins every stream request and final provider payload", as
 	});
 	await assert.rejects(() => second.onPayload("invalid", "model"), /non-object provider payload/);
 	assert.throws(() => applyServiceTier(session as never, "flex"), /Unknown Herder service tier/);
+});
+
+test("searcher policy is name-swap safe and blocks local fetch inputs", () => {
+	const search: { queries: string[]; workflow?: string } = { queries: ["current docs"] };
+	assert.equal(applySearcherToolPolicy("fetch_content", search), undefined);
+	assert.equal(search.workflow, "none");
+	const remote: { url: string; workflow?: string } = { url: "https://example.com" };
+	assert.equal(applySearcherToolPolicy("web_search", remote), undefined);
+	assert.equal(remote.workflow, "none");
+	assert.deepEqual(applySearcherToolPolicy("web_search", { url: "file:///tmp/secret" }), {
+		block: true,
+		reason: "Herder searcher may fetch only remote URLs.",
+	});
+	assert.deepEqual(applySearcherToolPolicy("unexpected", {}), {
+		block: true,
+		reason: "Herder searcher cannot call unexpected tool unexpected.",
+	});
+});
+
+test("nested extensions resolve only inside the trusted user package store", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-nested-extension-"));
+	try {
+		const agentDir = path.join(root, "agent");
+		const trustedPackage = path.join(agentDir, "npm/node_modules/pi-web-access");
+		const outsidePackage = path.join(root, "outside/pi-web-access");
+		await mkdir(trustedPackage, { recursive: true });
+		await mkdir(outsidePackage, { recursive: true });
+		assert.equal(trustedNestedExtensionPath(agentDir, trustedPackage, "npm:pi-web-access"), await realpath(trustedPackage));
+		const shadow = path.join(agentDir, "npm/node_modules/shadow");
+		await symlink(outsidePackage, shadow, "dir");
+		assert.throws(
+			() => trustedNestedExtensionPath(agentDir, shadow, "npm:pi-web-access"),
+			/resolves outside the trusted user package store/,
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("applyTurnLimit gracefully stops before a provider request exceeds the child turn bound", async () => {
@@ -343,6 +384,20 @@ test("worker snapshots receive flat child state directly from the internal neste
 	assert.equal(snapshot.turns, 1);
 	assert.equal(snapshot.toolUses, 1);
 	assert.equal("children" in snapshot, false);
+});
+
+test("worker completion fails closed when a background child was not collected", async () => {
+	const factory = new FakeFactory();
+	const engine = new PiWorkerEngine(factory);
+	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
+	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	const launch = await factory.nestedScopes[0]!.spawnBackground({ type: "recon", prompt: "Inspect", description: "inspect" });
+	assert.deepEqual(factory.nestedScopes[0]!.uncollectedBackgroundIds(), [launch.id]);
+	engine.start(handle);
+	const result = await terminal;
+	assert.equal(result.interrupted, true);
+	assert.match(result.error || "", /completed without collecting background nested agents/);
+	assert.match(result.error || "", new RegExp(launch.id));
 });
 
 test("worker terminal aggregates direct nested child usage and removes child state", async () => {
