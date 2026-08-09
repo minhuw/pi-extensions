@@ -300,7 +300,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	const close = () => new Promise<void>((resolve) => server.close(() => resolve()));
 	try {
 		try {
-			const access = await enableDashboardHostAccess({ url: dashboardUrl, allowHost: dashboard.allowHost });
+			const access = await enableDashboardHostAccess({ url: dashboardUrl });
 			forwardedUrl = typeof access.forwardedUrl === "string" ? access.forwardedUrl : null;
 		} catch {}
 

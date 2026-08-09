@@ -5,8 +5,7 @@ const COMMAND_OUTPUT_LIMIT = 16 * 1024
 const COMMAND_TIMEOUT_MS = 5000
 
 export interface DashboardEnvironment {
-  kind: "orca" | "vscode" | "terminal"
-  remote: boolean
+  kind: "orca" | "terminal"
 }
 
 export interface HostCommandResult {
@@ -36,57 +35,21 @@ function present(value: unknown): value is string {
 export function detectDashboardEnvironment(env: Environment = process.env): DashboardEnvironment {
   const terminal = String(env.TERM_PROGRAM ?? "").toLowerCase()
   const orca = terminal === "orca"
+    || present(env.ORCA_PI_STATUS_OWNED)
     || present(env.ORCA_WORKTREE_ID)
     || present(env.ORCA_PANE_KEY)
     || present(env.ORCA_TERMINAL_HANDLE)
-  if (orca) {
-    return {
-      kind: "orca",
-      remote: present(env.ORCA_ENVIRONMENT)
-        || present(env.ORCA_PAIRING_CODE)
-        || present(env.ORCA_CLI_COMMAND)
-        || present(env.SSH_CONNECTION),
-    }
-  }
-
-  const vscode = terminal === "vscode"
-    || present(env.VSCODE_IPC_HOOK_CLI)
-    || present(env.VSCODE_REMOTE_NAME)
-    || present(env.REMOTE_CONTAINERS)
-    || present(env.CODESPACES)
-  if (vscode) {
-    return {
-      kind: "vscode",
-      remote: present(env.VSCODE_REMOTE_NAME)
-        || present(env.REMOTE_CONTAINERS)
-        || present(env.CODESPACES)
-        || present(env.SSH_CONNECTION)
-        || present(env.WSL_DISTRO_NAME),
-    }
-  }
-  return { kind: "terminal", remote: false }
-}
-
-export function resolveVSCodeProxyUrl(localUrl: string, env: Environment = process.env): string | null {
-  const template = env.VSCODE_PROXY_URI
-  if (!present(template)) return null
-  const port = new URL(localUrl).port
-  if (!port || !/(?:\{\{port\}\}|\$\{port\})/.test(template)) return null
-  const candidate = template
-    .replaceAll("{{port}}", port)
-    .replaceAll("${port}", port)
-  try {
-    const url = new URL(candidate)
-    return ["http:", "https:"].includes(url.protocol) ? url.toString() : null
-  } catch {
-    return null
-  }
+    || present(env.ORCA_ENVIRONMENT)
+    || present(env.ORCA_PAIRING_CODE)
+    || present(env.ORCA_CLI_COMMAND)
+    || present(env.ORCA_DEV_REPO_ROOT)
+  return { kind: orca ? "orca" : "terminal" }
 }
 
 export function resolveOrcaCommand(env: Environment = process.env, platform = process.platform): string {
   if (present(env.ORCA_CLI_COMMAND)) return env.ORCA_CLI_COMMAND
   if (present(env.ORCA_DEV_REPO_ROOT)) return "orca-dev"
-  if (platform === "linux" && String(env.TERM_PROGRAM ?? "").toLowerCase() !== "orca") return "orca-ide"
+  if (platform === "linux" && detectDashboardEnvironment(env).kind !== "orca") return "orca-ide"
   return "orca"
 }
 
@@ -146,54 +109,28 @@ export async function enableDashboardHostAccess(input: {
   env?: Environment
   platform?: NodeJS.Platform
   runCommand?: RunCommand
-  allowHost?: (host: string) => void
 }): Promise<DashboardHostAccess> {
   const env = input.env ?? process.env
   const environment = detectDashboardEnvironment(env)
-  const runCommand = input.runCommand ?? runHostCommand
   if (environment.kind === "terminal") {
     return { environment, attempted: false, opened: false, targetUrl: input.url, forwardedUrl: null, error: null }
   }
 
-  if (environment.kind === "orca") {
-    const targetUrl = input.url
-    const command = resolveOrcaCommand(env, input.platform ?? process.platform)
-    const result = await runCommand(command, ["tab", "create", "--url", targetUrl, "--json"], { env })
-    return {
-      environment,
-      attempted: true,
-      opened: result.ok,
-      targetUrl,
-      forwardedUrl: null,
-      error: result.ok ? null : compactError(result),
-    }
-  }
-
-  const forwardedUrl = resolveVSCodeProxyUrl(input.url, env)
-  if (forwardedUrl && input.allowHost) input.allowHost(new URL(forwardedUrl).host)
-  const targetUrl = forwardedUrl ?? input.url.replace("127.0.0.1", "localhost")
-  const result = await runCommand("code", ["--open-url", targetUrl], { env })
+  const command = resolveOrcaCommand(env, input.platform ?? process.platform)
+  const result = await (input.runCommand ?? runHostCommand)(command, ["tab", "create", "--url", input.url, "--json"], { env })
   return {
     environment,
     attempted: true,
     opened: result.ok,
-    targetUrl,
-    forwardedUrl,
+    targetUrl: input.url,
+    forwardedUrl: null,
     error: result.ok ? null : compactError(result),
   }
 }
 
 export function describeDashboardHostAccess(access: DashboardHostAccess): string[] {
   if (!access.attempted) return []
-  if (access.environment.kind === "orca") {
-    return [access.opened
-      ? "Host integration: opened in Orca's workspace browser"
-      : `Host integration: Orca browser unavailable (${access.error})`]
-  }
-  const label = access.environment.remote ? "VS Code Remote" : "VS Code"
-  const lines = [access.opened
-    ? `Host integration: opened through ${label}`
-    : `Host integration: ${label} forwarding unavailable (${access.error})`]
-  if (access.forwardedUrl) lines.push(`Forwarded URL: ${access.forwardedUrl}`)
-  return lines
+  return [access.opened
+    ? "Host integration: opened in Orca's workspace browser"
+    : `Host integration: Orca browser unavailable (${access.error})`]
 }

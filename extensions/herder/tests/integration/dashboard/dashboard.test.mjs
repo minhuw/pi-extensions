@@ -11,7 +11,7 @@ import { recordUsage } from "../../../src/core/plans.ts"
 import { executionDatabasePath } from "../../../src/daemon/execution-store.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { buildDashboardState, buildForecast, derivePlanPhase, parseLease, parseWorktreeList } from "../../../src/dashboard/dashboard-state.ts"
-import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, resolveVSCodeProxyUrl, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
+import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
 import { createDashboardServer, parseDashboardArguments } from "../../../src/dashboard/herder-dashboard.ts"
 
 function git(root, ...args) {
@@ -294,45 +294,34 @@ async function runTests() {
     })
     assert.equal(parseDashboardArguments(["--no-host-integration"]).hostIntegration, false)
     assert.throws(() => parseDashboardArguments(["--port", "70000"]), /0 through 65535/)
-    assert.deepEqual(detectDashboardEnvironment({ TERM_PROGRAM: "Orca", VSCODE_REMOTE_NAME: "ssh-remote" }), {
-      kind: "orca",
-      remote: false,
-    })
-    assert.deepEqual(detectDashboardEnvironment({ TERM_PROGRAM: "vscode", VSCODE_REMOTE_NAME: "ssh-remote" }), {
-      kind: "vscode",
-      remote: true,
-    })
-    assert.deepEqual(detectDashboardEnvironment({}), { kind: "terminal", remote: false })
-    assert.equal(resolveVSCodeProxyUrl("http://127.0.0.1:4321/", {
-      VSCODE_PROXY_URI: "https://{{port}}-workspace.example.invalid/",
-    }), "https://4321-workspace.example.invalid/")
-    assert.equal(resolveVSCodeProxyUrl("http://127.0.0.1:4321/", { VSCODE_PROXY_URI: "invalid" }), null)
+    assert.deepEqual(detectDashboardEnvironment({ TERM_PROGRAM: "Orca" }), { kind: "orca" })
+    assert.deepEqual(detectDashboardEnvironment({
+      TERM_PROGRAM: "vscode",
+      ORCA_PI_STATUS_OWNED: "30011",
+    }), { kind: "orca" })
+    assert.deepEqual(detectDashboardEnvironment({
+      TERM_PROGRAM: "vscode",
+      VSCODE_REMOTE_NAME: "ssh-remote",
+    }), { kind: "terminal" })
+    assert.deepEqual(detectDashboardEnvironment({}), { kind: "terminal" })
     assert.equal(resolveOrcaCommand({ ORCA_CLI_COMMAND: "/opt/orca-cli" }, "linux"), "/opt/orca-cli")
+    assert.equal(resolveOrcaCommand({ TERM_PROGRAM: "vscode", ORCA_PI_STATUS_OWNED: "30011" }, "linux"), "orca")
     const hostCalls = []
-    const allowedHosts = []
     const fakeRunCommand = async (command, args) => {
       hostCalls.push({ command, args })
       return { ok: true, code: 0, stdout: "", stderr: "", error: null }
     }
-    const vscodeAccess = await enableDashboardHostAccess({
+    const unsupportedAccess = await enableDashboardHostAccess({
       url: "http://127.0.0.1:4321/",
-      env: {
-        TERM_PROGRAM: "vscode",
-        VSCODE_REMOTE_NAME: "ssh-remote",
-        VSCODE_PROXY_URI: "https://{{port}}-workspace.example.invalid/",
-      },
-      allowHost: (host) => allowedHosts.push(host),
+      env: { TERM_PROGRAM: "vscode", VSCODE_REMOTE_NAME: "ssh-remote" },
       runCommand: fakeRunCommand,
     })
-    assert.equal(vscodeAccess.forwardedUrl, "https://4321-workspace.example.invalid/")
-    assert.deepEqual(allowedHosts, ["4321-workspace.example.invalid"])
-    assert.deepEqual(hostCalls.pop(), {
-      command: "code",
-      args: ["--open-url", "https://4321-workspace.example.invalid/"],
-    })
+    assert.equal(unsupportedAccess.attempted, false)
+    assert.equal(unsupportedAccess.forwardedUrl, null)
+    assert.deepEqual(hostCalls, [])
     const orcaAccess = await enableDashboardHostAccess({
       url: "http://127.0.0.1:4321/",
-      env: { TERM_PROGRAM: "Orca", ORCA_CLI_COMMAND: "/opt/orca-cli" },
+      env: { TERM_PROGRAM: "vscode", ORCA_PI_STATUS_OWNED: "30011", ORCA_CLI_COMMAND: "/opt/orca-cli" },
       platform: "linux",
       runCommand: fakeRunCommand,
     })

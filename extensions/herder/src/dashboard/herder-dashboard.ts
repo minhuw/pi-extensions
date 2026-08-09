@@ -268,10 +268,7 @@ async function main(argv: string[]): Promise<void> {
     "Press Ctrl+C to stop.",
   ].join("\n"))
   if (options.hostIntegration) {
-    const access = await enableDashboardHostAccess({
-      url: dashboard.url,
-      allowHost: dashboard.allowHost,
-    })
+    const access = await enableDashboardHostAccess({ url: dashboard.url })
     for (const line of describeDashboardHostAccess(access)) process.stdout.write(`\n${line}`)
   }
   process.stdout.write("\n")
