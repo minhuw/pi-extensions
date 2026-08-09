@@ -9,5 +9,8 @@
 		"allowImportingTsExtensions": true,
 		"types": ["node"]
 	},
-	"include": ["extensions"]
+	"include": ["extensions"],
+	"exclude": [
+		"extensions/subagents"
+	]
 }

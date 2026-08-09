@@ -1,10 +1,18 @@
 {
 	"name": "pi-extensions",
 	"version": "0.2.0",
-	"description": "Maintained Pi extensions for deterministic multi-agent execution, status telemetry, and native compaction",
+	"description": "Maintained Pi extensions for deterministic multi-agent execution, status telemetry, native compaction, and sub-agents",
 	"type": "module",
 	"license": "MIT",
-	"keywords": ["pi-package", "pi-extension", "herder", "multi-agent", "cliproxyapi", "compaction"],
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"herder",
+		"multi-agent",
+		"subagents",
+		"cliproxyapi",
+		"compaction"
+	],
 	"scripts": {
 		"test": "npm run test:statusline && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
 		"test:statusline": "vitest run extensions/statusline-footer/tests/statusline-footer.test.ts",
@@ -13,6 +21,9 @@
 		"typecheck": "tsc -p tsconfig.json"
 	},
 	"dependencies": {
+		"@sinclair/typebox": "^0.34.52",
+		"croner": "^10.0.1",
+		"nanoid": "^5.1.16",
 		"typebox": "^1.3.7"
 	},
 	"devDependencies": {
@@ -33,7 +44,8 @@
 		"extensions": [
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",
-			"./extensions/herder/adapters/index.ts"
+			"./extensions/herder/adapters/index.ts",
+			"./extensions/subagents/src/index.ts"
 		]
 	}
 }
