@@ -4,7 +4,19 @@ import {
 	openExecutionDatabase,
 	withExecutionTransaction,
 } from "./execution-store.ts";
-import { canonicalEventPayload, type ManagerAction, type PlanPhase, type RunStatus } from "../shared/protocol.ts";
+import {
+	MANAGER_PROTOCOL_VERSION,
+	canonicalEventPayload,
+	type ManagerAction,
+	type ManagerOperationKind,
+	type ManagerOperationReceipt,
+	type ManagerOperationState,
+	type ManagerReply,
+	type PlanPhase,
+	type RunStatus,
+	type VerificationManifest,
+	type VerificationRequest,
+} from "../shared/protocol.ts";
 
 type Database = DatabaseSync;
 
@@ -64,6 +76,7 @@ export interface StoredPlanSpec {
 	graphGeneration: number;
 	planId: string;
 	planFingerprint: string;
+	fingerprintVersion: 1 | 2;
 	ordinal: number;
 	title: string;
 	priority: string;
@@ -170,6 +183,32 @@ export interface StoredProfileBinding {
 	roles: Record<string, { agent_type: string; model: string; effort: string; service_tier?: string }>;
 }
 
+export interface StoredManagerOperation {
+	sequence: number;
+	operationId: string;
+	kind: ManagerOperationKind;
+	payload: unknown;
+	payloadSha256: string;
+	state: ManagerOperationState;
+	attemptCount: number;
+	result: unknown;
+	error: string | null;
+	acceptedAt: string;
+	startedAt: string | null;
+	finishedAt: string | null;
+	updatedAt: string;
+}
+
+export interface StoredVerification {
+	request: VerificationRequest;
+	state: "awaiting_manifest" | "running" | "passed" | "failed";
+	manifest: VerificationManifest | null;
+	manifestSha256: string | null;
+	result: unknown;
+	terminalDetail: string | null;
+	updatedAt: string;
+}
+
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
 	return JSON.parse(value) as T;
@@ -231,6 +270,7 @@ function rowToPlanSpec(row: Record<string, unknown>): StoredPlanSpec {
 		graphGeneration: Number(row.graph_generation),
 		planId: String(row.plan_id),
 		planFingerprint: String(row.plan_fingerprint),
+		fingerprintVersion: Number(row.fingerprint_version) as StoredPlanSpec["fingerprintVersion"],
 		ordinal: Number(row.ordinal),
 		title: String(row.title),
 		priority: String(row.priority),
@@ -318,6 +358,68 @@ function rowToAction(row: Record<string, unknown>): StoredAction {
 	};
 }
 
+function rowToOperation(row: Record<string, unknown>): StoredManagerOperation {
+	return {
+		sequence: Number(row.sequence),
+		operationId: String(row.operation_id),
+		kind: row.kind as ManagerOperationKind,
+		payload: JSON.parse(String(row.payload_json)),
+		payloadSha256: String(row.payload_sha256),
+		state: row.state as ManagerOperationState,
+		attemptCount: Number(row.attempt_count),
+		result: parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null),
+		error: row.error === null ? null : String(row.error),
+		acceptedAt: String(row.accepted_at),
+		startedAt: row.started_at === null ? null : String(row.started_at),
+		finishedAt: row.finished_at === null ? null : String(row.finished_at),
+		updatedAt: String(row.updated_at),
+	};
+}
+
+function rowToVerification(row: Record<string, unknown>): StoredVerification {
+	const request: VerificationRequest = {
+		schemaVersion: 1,
+		requestId: String(row.request_id),
+		requestSha256: String(row.request_sha256),
+		runId: String(row.run_id),
+		generation: Number(row.generation),
+		graphSha256: String(row.graph_sha256),
+		runAssignmentPath: String(row.run_assignment_path),
+		runAssignmentSha256: String(row.run_assignment_sha256),
+		integrationBranch: String(row.integration_branch),
+		integrationWorktree: String(row.integration_worktree),
+		integrationHead: String(row.integration_head),
+		integrationTree: String(row.integration_tree),
+		requestedAt: String(row.created_at),
+	};
+	return {
+		request,
+		state: row.state as StoredVerification["state"],
+		manifest: parseJson<VerificationManifest | null>(row.manifest_json === null ? null : String(row.manifest_json), null),
+		manifestSha256: row.manifest_sha256 === null ? null : String(row.manifest_sha256),
+		result: parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null),
+		terminalDetail: row.terminal_detail === null ? null : String(row.terminal_detail),
+		updatedAt: String(row.updated_at),
+	};
+}
+
+function operationReceipt(operation: StoredManagerOperation): ManagerOperationReceipt {
+	return {
+		protocolVersion: MANAGER_PROTOCOL_VERSION,
+		operationId: operation.operationId,
+		kind: operation.kind,
+		payloadSha256: operation.payloadSha256,
+		state: operation.state,
+		acceptedAt: operation.acceptedAt,
+		updatedAt: operation.updatedAt,
+		pollPath: `/v1/operation?id=${encodeURIComponent(operation.operationId)}`,
+		...(operation.startedAt ? { startedAt: operation.startedAt } : {}),
+		...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
+		...(operation.state === "succeeded" ? { result: operation.result } : {}),
+		...(operation.error ? { error: operation.error } : {}),
+	};
+}
+
 export class RunStore {
 	readonly databasePath: string;
 	readonly database: Database;
@@ -354,6 +456,166 @@ export class RunStore {
 		};
 	}
 
+	getOperation(operationId: string): StoredManagerOperation | null {
+		const row = this.database.prepare("SELECT * FROM manager_operations WHERE operation_id = ?").get(operationId) as Record<string, unknown> | undefined;
+		return row ? rowToOperation(row) : null;
+	}
+
+	submitOperation(operationId: string, kind: ManagerOperationKind, payload: unknown): ManagerOperationReceipt {
+		if (!operationId || operationId.length > 200 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 200 characters");
+		const canonicalPayload = canonicalEventPayload(payload);
+		const identity = canonicalEventPayload({ kind, payload });
+		const existing = this.getOperation(operationId);
+		if (existing) {
+			if (existing.kind !== kind || existing.payloadSha256 !== identity.sha256) throw new Error(`Operation ${operationId} was replayed with different payload`);
+			return operationReceipt(existing);
+		}
+		const now = new Date().toISOString();
+		this.database.prepare(`
+			INSERT INTO manager_operations (
+				operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+				result_json, error, accepted_at, started_at, finished_at, updated_at
+			) VALUES (?, ?, ?, ?, 'accepted', 0, NULL, NULL, ?, NULL, NULL, ?)
+		`).run(operationId, kind, canonicalPayload.json, identity.sha256, now, now);
+		return operationReceipt(this.getOperation(operationId)!);
+	}
+
+	countPendingOperations(): number {
+		const row = this.database.prepare("SELECT COUNT(*) AS count FROM manager_operations WHERE state IN ('accepted', 'running')").get() as { count: number };
+		return Number(row.count);
+	}
+
+	recoverRunningOperations(): void {
+		const running = (this.database.prepare("SELECT * FROM manager_operations WHERE state = 'running' ORDER BY sequence").all() as Record<string, unknown>[]).map(rowToOperation);
+		for (const operation of running) {
+			const mode = operation.kind === "start" && operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
+				? String((operation.payload as { mode?: unknown }).mode || "") : "";
+			const replaySafe = operation.kind === "event" || operation.kind === "stop" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
+			if (replaySafe) {
+				this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
+					.run(new Date().toISOString(), operation.operationId);
+				continue;
+			}
+			const detail = `Operation ${operation.operationId} was interrupted while ${operation.kind} was running; its side effects are ambiguous and were not replayed.`;
+			const now = new Date().toISOString();
+			this.transaction(() => {
+				this.database.prepare("UPDATE manager_operations SET state = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE operation_id = ?")
+					.run(detail, now, now, operation.operationId);
+				if (operation.kind === "verification") {
+					this.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ?, updated_at = ? WHERE state = 'running'")
+						.run(detail, now);
+					this.database.prepare("UPDATE manager_runs SET status = 'failed', terminal_detail = ?, updated_at = ? WHERE status IN ('running', 'paused')")
+						.run(detail, now);
+				}
+			});
+		}
+	}
+
+	claimNextOperation(): StoredManagerOperation | null {
+		return this.transaction(() => {
+			const row = this.database.prepare("SELECT * FROM manager_operations WHERE state = 'accepted' ORDER BY sequence LIMIT 1").get() as Record<string, unknown> | undefined;
+			if (!row) return null;
+			const now = new Date().toISOString();
+			this.database.prepare("UPDATE manager_operations SET state = 'running', attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?), updated_at = ? WHERE operation_id = ? AND state = 'accepted'")
+				.run(now, now, String(row.operation_id));
+			return this.getOperation(String(row.operation_id));
+		});
+	}
+
+	completeOperation(operationId: string, result: unknown): ManagerOperationReceipt {
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_operations SET state = 'succeeded', result_json = ?, error = NULL, finished_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'running'")
+			.run(JSON.stringify(result), now, now, operationId);
+		const operation = this.getOperation(operationId);
+		if (!operation || operation.state !== "succeeded") throw new Error(`Operation ${operationId} is not running`);
+		return operationReceipt(operation);
+	}
+
+	failOperation(operationId: string, error: string): ManagerOperationReceipt {
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_operations SET state = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'running'")
+			.run(error.slice(0, 16_384), now, now, operationId);
+		const operation = this.getOperation(operationId);
+		if (!operation || operation.state !== "failed") throw new Error(`Operation ${operationId} is not running`);
+		return operationReceipt(operation);
+	}
+
+	operationReceipt(operationId: string): ManagerOperationReceipt | null {
+		const operation = this.getOperation(operationId);
+		return operation ? operationReceipt(operation) : null;
+	}
+
+	pendingOperationReceipts(): ManagerOperationReceipt[] {
+		return (this.database.prepare("SELECT * FROM manager_operations WHERE state IN ('accepted', 'running') ORDER BY sequence LIMIT 32").all() as Record<string, unknown>[])
+			.map((row) => operationReceipt(rowToOperation(row)));
+	}
+
+	putSnapshot(reply: ManagerReply): void {
+		const current = this.database.prepare("SELECT revision FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number } | undefined;
+		const revision = Number(current?.revision ?? 0) + 1;
+		this.database.prepare(`
+			INSERT INTO manager_snapshots (singleton, revision, reply_json, updated_at)
+			VALUES (1, ?, ?, ?)
+			ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision, reply_json = excluded.reply_json, updated_at = excluded.updated_at
+		`).run(revision, JSON.stringify(reply), new Date().toISOString());
+	}
+
+	getSnapshot(): ManagerReply | null {
+		return this.getSnapshotEnvelope()?.reply ?? null;
+	}
+
+	getSnapshotEnvelope(): { revision: number; updatedAt: string; reply: ManagerReply } | null {
+		const row = this.database.prepare("SELECT revision, reply_json, updated_at FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number; reply_json?: string; updated_at?: string } | undefined;
+		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: JSON.parse(row.reply_json) as ManagerReply } : null;
+	}
+
+	getVerification(runId: string, generation?: number): StoredVerification | null {
+		const row = generation === undefined
+			? this.database.prepare("SELECT * FROM manager_verifications WHERE run_id = ? ORDER BY generation DESC, created_at DESC LIMIT 1").get(runId)
+			: this.database.prepare("SELECT * FROM manager_verifications WHERE run_id = ? AND generation = ? ORDER BY created_at DESC LIMIT 1").get(runId, generation);
+		return row ? rowToVerification(row as Record<string, unknown>) : null;
+	}
+
+	putVerificationRequest(request: VerificationRequest): StoredVerification {
+		const existing = this.getVerification(request.runId, request.generation);
+		if (existing && existing.state !== "failed") {
+			if (existing.request.requestSha256 !== request.requestSha256) throw new Error(`Verification request changed for generation ${request.generation}`);
+			return existing;
+		}
+		this.database.prepare(`
+			INSERT INTO manager_verifications (
+				request_id, run_id, generation, graph_sha256, run_assignment_path, run_assignment_sha256,
+				integration_branch, integration_worktree, integration_head, integration_tree, request_sha256,
+				state, manifest_json, manifest_sha256, result_json, terminal_detail, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_manifest', NULL, NULL, NULL, NULL, ?, ?)
+		`).run(
+			request.requestId, request.runId, request.generation, request.graphSha256,
+			request.runAssignmentPath, request.runAssignmentSha256, request.integrationBranch,
+			request.integrationWorktree, request.integrationHead, request.integrationTree,
+			request.requestSha256, request.requestedAt, request.requestedAt,
+		);
+		return this.getVerification(request.runId, request.generation)!;
+	}
+
+	startVerification(requestId: string, manifest: VerificationManifest, manifestSha256: string): StoredVerification {
+		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		if (!row) throw new Error(`Unknown verification request ${requestId}`);
+		const existing = rowToVerification(row);
+		if (existing.manifestSha256 && existing.manifestSha256 !== manifestSha256) throw new Error(`Verification request ${requestId} was submitted with a different manifest`);
+		if (existing.state === "passed" || existing.state === "failed") return existing;
+		this.database.prepare("UPDATE manager_verifications SET state = 'running', manifest_json = ?, manifest_sha256 = ?, terminal_detail = NULL, updated_at = ? WHERE request_id = ?")
+			.run(JSON.stringify(manifest), manifestSha256, new Date().toISOString(), requestId);
+		return rowToVerification(this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown>);
+	}
+
+	finishVerification(requestId: string, state: "passed" | "failed", result: unknown, terminalDetail: string | null): StoredVerification {
+		this.database.prepare("UPDATE manager_verifications SET state = ?, result_json = ?, terminal_detail = ?, updated_at = ? WHERE request_id = ?")
+			.run(state, JSON.stringify(result), terminalDetail, new Date().toISOString(), requestId);
+		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		if (!row) throw new Error(`Unknown verification request ${requestId}`);
+		return rowToVerification(row);
+	}
+
 	getPlanSpecs(runId: string, graphGeneration?: number): StoredPlanSpec[] {
 		const generation = graphGeneration ?? this.getRun()?.currentGeneration;
 		if (!generation) return [];
@@ -363,11 +625,12 @@ export class RunStore {
 	putPlanSpecs(specs: StoredPlanSpec[]): void {
 		const statement = this.database.prepare(`
 			INSERT INTO manager_plan_specs (
-				run_id, graph_generation, plan_id, plan_fingerprint, ordinal, title, priority, effort, kind, dependencies_json,
+				run_id, graph_generation, plan_id, plan_fingerprint, fingerprint_version, ordinal, title, priority, effort, kind, dependencies_json,
 				initial_status, initial_status_detail, gate_commands_json, plan_file, assignment_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(run_id, graph_generation, plan_id) DO UPDATE SET
 				plan_fingerprint = excluded.plan_fingerprint,
+				fingerprint_version = excluded.fingerprint_version,
 				ordinal = excluded.ordinal,
 				title = excluded.title,
 				priority = excluded.priority,
@@ -382,7 +645,7 @@ export class RunStore {
 		`);
 		for (const input of specs) {
 			statement.run(
-				input.runId, input.graphGeneration, input.planId, input.planFingerprint,
+				input.runId, input.graphGeneration, input.planId, input.planFingerprint, input.fingerprintVersion,
 				input.ordinal, input.title, input.priority, input.effort,
 				input.kind, JSON.stringify(input.dependencies), input.initialStatus, input.initialStatusDetail,
 				JSON.stringify(input.gateCommands), input.planFile, JSON.stringify(input.assignment),

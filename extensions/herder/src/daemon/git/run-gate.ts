@@ -13,6 +13,7 @@ interface GateArguments {
   label: string
   logDir: string
   pretty: boolean
+  timeoutMs: number
   command: string[]
 }
 
@@ -27,15 +28,17 @@ interface GateResult {
   logPath: string
   logBytes: number
   logSha256: string
+  timedOut: boolean
   error?: string
 }
 
 function parseArguments(argv: string[]): GateArguments {
-  const options: { cwd: string | null; label: string | null; logDir: string | null; pretty: boolean } = {
+  const options: { cwd: string | null; label: string | null; logDir: string | null; pretty: boolean; timeoutMs: number } = {
     cwd: null,
     label: null,
     logDir: null,
     pretty: false,
+    timeoutMs: 30 * 60 * 1_000,
   }
   let index = 0
   for (; index < argv.length; index += 1) {
@@ -48,13 +51,19 @@ function parseArguments(argv: string[]): GateArguments {
       options.pretty = true
       continue
     }
-    if (["--cwd", "--label", "--log-dir"].includes(argument)) {
+    if (["--cwd", "--label", "--log-dir", "--timeout-ms"].includes(argument)) {
       const value = argv[index + 1]
       if (!value || value === "--") throw new Error(`${argument} requires a value`)
       index += 1
       if (argument === "--cwd") options.cwd = value
       else if (argument === "--label") options.label = value
-      else options.logDir = value
+      else if (argument === "--log-dir") options.logDir = value
+      else {
+        options.timeoutMs = Number(value)
+        if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1_000 || options.timeoutMs > 2 * 60 * 60 * 1_000) {
+          throw new Error("--timeout-ms must be between 1000 and 7200000")
+        }
+      }
       continue
     }
     throw new Error(`unknown argument: ${argument}`)
@@ -65,12 +74,17 @@ function parseArguments(argv: string[]): GateArguments {
   if (!options.logDir) throw new Error("--log-dir is required")
   if (!options.label) throw new Error("--label is required")
   if (command.length === 0) throw new Error("a command is required after --")
-  return { cwd: options.cwd, logDir: options.logDir, pretty: options.pretty, label: safeLabel(options.label), command } as GateArguments
+  return { cwd: options.cwd, logDir: options.logDir, pretty: options.pretty, timeoutMs: options.timeoutMs, label: safeLabel(options.label), command } as GateArguments
 }
 
 function isInside(parent: string, candidate: string): boolean {
   const relative = path.relative(parent, candidate)
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+}
+
+function gateEnvironment(): NodeJS.ProcessEnv {
+  const sensitive = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH|CREDENTIAL|COOKIE)(?:_|$)/i
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => !sensitive.test(name)))
 }
 
 function safeLabel(label: string): string {
@@ -142,18 +156,38 @@ async function main(): Promise<void> {
   let childExitCode: number | null = null
   let childSignal: NodeJS.Signals | null = null
   let spawnError: Error | null = null
+  let timedOut = false
 
   try {
     await new Promise<void>((resolve) => {
       const child = spawn(parsed.command[0]!, parsed.command.slice(1), {
         cwd,
-        env: process.env,
+        env: gateEnvironment(),
+        detached: process.platform !== "win32",
         stdio: ["ignore", logHandle.fd, logHandle.fd],
       })
+      let killTimer: NodeJS.Timeout | undefined
+      const timeout = setTimeout(() => {
+        timedOut = true
+        try {
+          if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
+          else child.kill("SIGTERM")
+        } catch {}
+        killTimer = setTimeout(() => {
+          try {
+            if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
+            else child.kill("SIGKILL")
+          } catch {}
+        }, 5_000)
+        killTimer.unref()
+      }, parsed.timeoutMs)
+      timeout.unref()
       child.once("error", (error) => {
         spawnError = error
       })
       child.once("close", (code, signal) => {
+        clearTimeout(timeout)
+        if (killTimer) clearTimeout(killTimer)
         childExitCode = code
         childSignal = signal
         resolve()
@@ -165,7 +199,7 @@ async function main(): Promise<void> {
 
   const durationMs = Math.round(performance.now() - started)
   const logStatus = await stat(logPath)
-  const ok = !spawnError && childExitCode === 0
+  const ok = !spawnError && !timedOut && childExitCode === 0
   const result: GateResult = {
     ok,
     label: parsed.label,
@@ -177,8 +211,10 @@ async function main(): Promise<void> {
     logPath,
     logBytes: logStatus.size,
     logSha256: await sha256(logPath),
+    timedOut,
   }
-  if (spawnError) result.error = (spawnError as Error).message
+  if (timedOut) result.error = `command exceeded ${parsed.timeoutMs} ms`
+  else if (spawnError) result.error = (spawnError as Error).message
   print(result, parsed.pretty)
   process.exitCode = ok ? 0 : 1
 }

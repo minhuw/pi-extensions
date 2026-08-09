@@ -33,6 +33,7 @@ import {
 	type ManagerReply,
 	type ResolvedProfile,
 	type TerminalEvent,
+	type VerificationManifest,
 	type WorkerResult,
 	type WorkerRole,
 } from "../shared/protocol.ts";
@@ -47,6 +48,7 @@ import {
 } from "../daemon/run-store.ts";
 import { resolvePiProfile } from "./profile-registry.ts";
 import { lifecycleStatus, phaseForRole, readyPhaseForRole, roleForPhase, summarizeRun } from "./workflow.ts";
+import { createVerificationRequest, normalizeVerificationManifest } from "./verification.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
@@ -226,7 +228,7 @@ function assignmentPrompt(input: {
 		`FROZEN_HEAD: ${plan.approvedHead ?? "none"}`,
 		`FROZEN_TREE: ${plan.approvedTree ?? "none"}`,
 		`CHANGED_PATHS: ${input.changedPaths.length ? input.changedPaths.join(", ") : "none"}`,
-		`GATES: ${gates}`,
+		`VERIFICATION_EVIDENCE: ${gates}`,
 		"FINDING_LEDGER:",
 		findings,
 		"REPAIR_CONTRACT:",
@@ -259,7 +261,6 @@ function compilePlanSpecs(input: {
 	runId: string;
 	graphGeneration: number;
 	graph: ReturnType<typeof buildGraph>;
-	driver: GitDriver;
 	previous?: StoredPlanSpec[];
 }): { specs: StoredPlanSpec[]; graphSha256: string } {
 	const previous = new Map((input.previous ?? []).map((spec) => [spec.planId, spec]));
@@ -268,14 +269,18 @@ function compilePlanSpecs(input: {
 		const snapshot = snapshots[ordinal]!;
 		const assignment = compiledAssignmentEntry(snapshot);
 		const prior = previous.get(plan.id);
+		const fingerprintVersion = prior?.fingerprintVersion ?? 2;
 		const semantic = {
+			...(fingerprintVersion === 2 ? { fingerprintVersion: 2 } : {}),
 			planId: plan.id,
 			title: plan.title,
 			priority: plan.priority,
 			effort: plan.effort,
 			kind: plan.kind,
 			dependencies: plan.dependencies,
-			gateCommands: input.driver.extractGateCommands(snapshot.planText),
+			// Preserve schema-7 fingerprint identity for existing generations without
+			// ever executing the legacy Markdown-derived commands.
+			...(fingerprintVersion === 1 ? { gateCommands: prior?.gateCommands ?? [] } : {}),
 			planFile: path.basename(plan.file),
 			assignment,
 		};
@@ -284,6 +289,7 @@ function compilePlanSpecs(input: {
 			graphGeneration: input.graphGeneration,
 			planId: plan.id,
 			planFingerprint: sha256(stableJson(semantic)),
+			fingerprintVersion,
 			ordinal,
 			title: plan.title,
 			priority: plan.priority,
@@ -292,7 +298,9 @@ function compilePlanSpecs(input: {
 			dependencies: plan.dependencies,
 			initialStatus: prior?.initialStatus ?? plan.status as StoredPlanSpec["initialStatus"],
 			initialStatusDetail: prior?.initialStatusDetail ?? plan.statusDetail,
-			gateCommands: semantic.gateCommands,
+			// Compatibility evidence only. Natural-language plans are not executable
+			// configuration; final gates come from the main session.
+			gateCommands: prior?.gateCommands ?? [],
 			planFile: semantic.planFile,
 			assignment,
 		} satisfies StoredPlanSpec;
@@ -310,7 +318,7 @@ interface StoredTerminalRecord {
 
 interface TerminalTransition {
 	plan: StoredPlan;
-	runUpdate?: { status: "needs_input"; terminalDetail: string };
+	runUpdate?: { status: "needs_input" | "paused"; terminalDetail: string };
 	approval?: Omit<StoredApproval, "createdAt">;
 }
 
@@ -462,7 +470,6 @@ export class HerderRunManager {
 			runId: run.runId,
 			graphGeneration,
 			graph,
-			driver: this.driver(run),
 			previous: this.specs(run),
 		}) };
 	}
@@ -499,6 +506,52 @@ export class HerderRunManager {
 		} catch (error) {
 			return { changed: true, detail: `Plan graph is currently invalid: ${(error as Error).message}` };
 		}
+	}
+
+	private pauseForFinalVerification(run: StoredRun, driver: GitDriver): void {
+		const existing = this.store.getVerification(run.runId, run.currentGeneration);
+		if (existing && existing.state !== "failed") {
+			if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+			return;
+		}
+		const generation = this.store.getGeneration(run.runId, run.currentGeneration);
+		if (!generation) throw new Error(`Run generation ${run.currentGeneration} has no assignment evidence`);
+		const bytes = fs.readFileSync(generation.runAssignmentPath);
+		if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
+		if (driver.worktreeStatus(run.integrationWorktree)) throw new Error("Final verification requires a clean integration worktree");
+		const request = createVerificationRequest({
+			requestId: randomUUID(),
+			runId: run.runId,
+			generation: run.currentGeneration,
+			graphSha256: run.graphSha256,
+			runAssignmentPath: generation.runAssignmentPath,
+			runAssignmentSha256: generation.runAssignmentSha256,
+			integrationBranch: run.integrationBranch,
+			integrationWorktree: run.integrationWorktree,
+			integrationHead: driver.branchHead(run.integrationBranch),
+			integrationTree: gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}"),
+			requestedAt: new Date().toISOString(),
+		});
+		this.store.transaction(() => {
+			this.store.putVerificationRequest(request);
+			this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+		});
+	}
+
+	private migrateLegacyFinalPlan(run: StoredRun, driver: GitDriver): void {
+		if (run.status === "complete" || this.store.getVerification(run.runId, run.currentGeneration)) return;
+		const finalPlan = this.store.getPlan(run.runId, "RUN");
+		if (!finalPlan) return;
+		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]).filter((action) => action.planId === "RUN");
+		if (active.some((action) => action.state === "dispatched")) {
+			this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the legacy final Reviewer to settle before exact-tree verification." });
+			return;
+		}
+		for (const action of active) this.store.markCancelled(action.actionId, { error: "Superseded by main-session exact-tree verification" });
+		const lease = driver.leaseReason(finalPlan.worktree);
+		if (lease && active.some((action) => action.leaseReason === lease)) driver.release(finalPlan.worktree, lease);
+		this.store.deletePlan(run.runId, "RUN");
+		this.pauseForFinalVerification(this.store.getRun()!, driver);
 	}
 
 	private projectLifecycle(run: StoredRun): void {
@@ -552,7 +605,7 @@ export class HerderRunManager {
 		});
 		const runId = randomUUID();
 		const graphGeneration = 1;
-		const compiled = compilePlanSpecs({ runId, graphGeneration, graph, driver });
+		const compiled = compilePlanSpecs({ runId, graphGeneration, graph });
 		const specs = compiled.specs;
 		this.store.transaction(() => {
 			this.store.createRun({
@@ -631,6 +684,24 @@ export class HerderRunManager {
 		} else {
 			const namespace = driver.inspectNamespace("resume");
 			if (!namespace.ok) throw new Error(`Cannot resume ambiguous Herder namespace: ${namespace.reason}`);
+		}
+		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
+		if (run.status === "failed" && failedVerification?.state === "failed" && !this.store.getPlan(run.runId, "RUN")) {
+			if (driver.branchHead(run.integrationBranch) !== failedVerification.request.integrationHead
+				|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== failedVerification.request.integrationTree
+				|| driver.worktreeStatus(run.integrationWorktree)) {
+				throw new Error("Cannot retry verification because the frozen integration tree changed");
+			}
+			const request = createVerificationRequest({
+				...failedVerification.request,
+				requestId: randomUUID(),
+				requestedAt: new Date().toISOString(),
+			});
+			this.store.transaction(() => {
+				this.store.putVerificationRequest(request);
+				this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit a replacement verification manifest." });
+			});
+			return this.reply();
 		}
 		if (["failed", "stopped", "paused"].includes(run.status)) this.store.updateRun({ status: "running", terminalDetail: null });
 		run = this.store.getRun()!;
@@ -800,6 +871,105 @@ export class HerderRunManager {
 			return { edit: { planId: edit.planId, state: "barrier" }, reply: await this.reconcile(boundProfile(run, this.store)) };
 		}
 		return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
+	}
+
+	async verification(input: VerificationManifest): Promise<ManagerReply> {
+		let run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		const stored = this.store.getVerification(run.runId, run.currentGeneration);
+		if (!stored) throw new Error("Herder is not waiting for a verification manifest");
+		const { manifest, manifestSha256 } = normalizeVerificationManifest(stored.request, input);
+		if (stored.state === "passed" || stored.state === "failed") {
+			if (stored.manifestSha256 !== manifestSha256) throw new Error(`Verification request ${stored.request.requestId} was replayed with a different manifest`);
+			if (stored.state === "passed") {
+				if (run.status !== "running") this.store.updateRun({ status: "running", terminalDetail: "Recovering passed verification." });
+				run = this.store.getRun()!;
+				return this.reconcile(boundProfile(run, this.store));
+			}
+			return this.reply();
+		}
+		const driver = this.driver(run);
+		await driver.verifyCheckout(run.checkoutStateToken);
+		if (driver.branchHead(run.integrationBranch) !== stored.request.integrationHead
+			|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
+			|| driver.worktreeStatus(run.integrationWorktree)) {
+			throw new Error("Integration worktree changed after the verification request was created");
+		}
+		const assignment = fs.readFileSync(stored.request.runAssignmentPath);
+		if (sha256(assignment) !== stored.request.runAssignmentSha256) throw new Error("Verification run assignment changed after the request was created");
+		this.store.transaction(() => {
+			this.store.startVerification(stored.request.requestId, manifest, manifestSha256);
+			this.store.updateRun({ status: "running", terminalDetail: "Executing the main-session verification manifest." });
+		});
+		const gates: GateResult[] = [];
+		try {
+			const frozenStateError = async (): Promise<string | null> => {
+				await driver.verifyCheckout(run!.checkoutStateToken);
+				const namespace = driver.inspectNamespace("resume");
+				if (!namespace.ok) return `Verification gate changed the Herder namespace: ${namespace.reason}`;
+				if (driver.branchHead(run!.integrationBranch) !== stored.request.integrationHead
+					|| gitValue(run!.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
+					|| driver.worktreeStatus(run!.integrationWorktree)) return "Verification gate changed the frozen integration worktree.";
+				const live = this.store.getVerification(run!.runId, run!.currentGeneration);
+				if (!live || live.state !== "running" || live.manifestSha256 !== manifestSha256) return "Verification gate changed manager-owned verification state.";
+				return null;
+			};
+			let detail: string | null = null;
+			for (const gate of manifest.gates) {
+				detail = await frozenStateError();
+				if (detail) break;
+				const [result] = driver.runVerificationGates(stored.request.requestId, run.integrationWorktree, [gate]);
+				gates.push(result!);
+				detail = await frozenStateError();
+				if (detail) break;
+				if (!result!.ok) {
+					detail = `Verification gate ${result!.gateId} failed (log ${result!.logPath}).`;
+					break;
+				}
+			}
+			const evidence = {
+				schemaVersion: 1,
+				request: stored.request,
+				manifestSha256,
+				manifest,
+				gates,
+				passed: !detail,
+				finishedAt: new Date().toISOString(),
+			};
+			if (detail) {
+				this.store.transaction(() => {
+					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
+					this.store.updateRun({ status: "failed", terminalDetail: detail });
+				});
+				return this.reply();
+			}
+			this.store.transaction(() => {
+				this.store.finishVerification(stored.request.requestId, "passed", evidence, null);
+				this.store.updateRun({ status: "running", terminalDetail: "Final verification passed; preparing the aggregate audit." });
+			});
+			run = this.store.getRun()!;
+			return this.reconcile(boundProfile(run, this.store));
+		} catch (error) {
+			const detail = `Verification execution failed: ${error instanceof Error ? error.message : String(error)}`;
+			const evidence = {
+				schemaVersion: 1,
+				request: stored.request,
+				manifestSha256,
+				manifest,
+				gates,
+				passed: false,
+				finishedAt: new Date().toISOString(),
+				error: detail,
+			};
+			const live = this.store.getVerification(run.runId, run.currentGeneration);
+			if (live?.state === "running") {
+				this.store.transaction(() => {
+					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
+					this.store.updateRun({ status: "failed", terminalDetail: detail });
+				});
+			}
+			return this.reply();
+		}
 	}
 
 	async event(input: EventInput): Promise<ManagerReply> {
@@ -992,12 +1162,7 @@ export class HerderRunManager {
 		if (!failure && head === reviewBase) failure = "Implementer produced no commit";
 		const changedPaths = failure ? [] : driver.changedPaths(plan.worktree, reviewBase);
 		if (!failure && changedPaths.length === 0) failure = "Implementer produced no changed paths";
-		let gates: GateResult[] = [];
-		if (!failure) {
-			gates = driver.runGates(plan.planId, plan.worktree, this.spec(run, plan.planId).gateCommands);
-			const failed = gates.find((gate) => !gate.ok);
-			if (failed) failure = `Required gate failed: ${failed.command} (log ${failed.logPath})`;
-		}
+		const gates: GateResult[] = [];
 		if (failure) {
 			if (plan.round >= 6) {
 				return { plan: { ...plan, phase: "BLOCKED", repair: [failure], gates } };
@@ -1020,6 +1185,19 @@ export class HerderRunManager {
 		const blockers = countBlocking(result.findings);
 		const verdict = result.verdict === "REVISE" && blockers === 0 && result.scope === "PASS" ? "APPROVE" : result.verdict;
 		if (plan.planId === "RUN") {
+			const verification = this.store.getVerification(run.runId, plan.generation);
+			if (!verification) {
+				const detail = "Legacy final Reviewer evidence was discarded; exact-tree verification is required.";
+				return {
+					plan: { ...plan, phase: "BLOCKED", reviewPass: plan.reviewPass + 1, repair: [detail] },
+					runUpdate: { status: "paused", terminalDetail: detail },
+				};
+			}
+			if (verification.state !== "passed"
+				|| verification.request.integrationHead !== plan.approvedHead
+				|| verification.request.integrationTree !== plan.approvedTree) {
+				throw new Error("Final Reviewer is not bound to passed verification evidence for its frozen tree");
+			}
 			if (verdict === "APPROVE" && result.scope === "PASS" && blockers === 0) {
 				return { plan: { ...plan, phase: "FINAL_APPROVED", reviewPass: plan.reviewPass + 1, findings: result.findings } };
 			}
@@ -1189,7 +1367,6 @@ export class HerderRunManager {
 				approvedHead: plan.approvedHead,
 				generation: plan.generation,
 				checkpointOrdinal: plan.reviewPass || 1,
-				gateCommands: this.spec(run, plan.planId).gateCommands,
 				approval: completionProof,
 			});
 			if (integration.status === "conflict") {
@@ -1237,18 +1414,42 @@ export class HerderRunManager {
 				return this.reply();
 			}
 			if (!finalPlan) {
-				const finalGates = this.specs(run).flatMap((spec) => driver.runGates(spec.planId, run.integrationWorktree, spec.gateCommands));
-				const failedGate = finalGates.find((gate) => !gate.ok);
-				if (failedGate) {
-					this.store.updateRun({ status: "failed", terminalDetail: `Final integration gate failed: ${failedGate.command} (log ${failedGate.logPath})` });
-					return this.reply();
-				}
 				const generation = this.store.getGeneration(run.runId, run.currentGeneration);
 				if (!generation) throw new Error(`Run generation ${run.currentGeneration} has no assignment evidence`);
 				const assignmentPath = generation.runAssignmentPath;
 				const bytes = fs.readFileSync(assignmentPath);
 				if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
 				const assignment = JSON.parse(bytes.toString("utf8")) as { snapshotSha256: string; assignment: { generationBase: string } };
+				const integrationHead = driver.branchHead(run.integrationBranch);
+				const integrationTree = gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}");
+				const verification = this.store.getVerification(run.runId, run.currentGeneration);
+				if (!verification) {
+					const request = createVerificationRequest({
+						requestId: randomUUID(),
+						runId: run.runId,
+						generation: run.currentGeneration,
+						graphSha256: run.graphSha256,
+						runAssignmentPath: assignmentPath,
+						runAssignmentSha256: generation.runAssignmentSha256,
+						integrationBranch: run.integrationBranch,
+						integrationWorktree: run.integrationWorktree,
+						integrationHead,
+						integrationTree,
+						requestedAt: new Date().toISOString(),
+					});
+					this.store.transaction(() => {
+						this.store.putVerificationRequest(request);
+						this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the main Pi session to submit an exact-tree verification manifest." });
+					});
+					return this.reply();
+				}
+				if (verification.state !== "passed") {
+					if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: verification.terminalDetail || "Waiting for final verification." });
+					return this.reply();
+				}
+				if (verification.request.integrationHead !== integrationHead || verification.request.integrationTree !== integrationTree) {
+					throw new Error("Passed verification no longer matches the integration branch");
+				}
 				this.store.putPlan({
 					runId: run.runId,
 					planId: "RUN",
@@ -1264,10 +1465,10 @@ export class HerderRunManager {
 					reviewPass: 0,
 					findings: [],
 					repair: [],
-					gates: finalGates,
+					gates: [verification.result],
 					approvedBase: run.baseCommit,
-					approvedHead: driver.branchHead(run.integrationBranch),
-					approvedTree: gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}"),
+					approvedHead: integrationHead,
+					approvedTree: integrationTree,
 					rebase: null,
 				});
 			}
@@ -1493,6 +1694,8 @@ export class HerderRunManager {
 			scheduler: { active: 0, freeSlots: 0, runnable: 0, runnablePlanIds: [], expectedNewActions: 0, workConserving: true, reason: "inactive", checkedAt: new Date().toISOString() },
 			message: "No Herder run has started.",
 		};
+		this.migrateLegacyFinalPlan(run, this.driver(run));
+		run = this.store.getRun()!;
 		if (run.status === "running") {
 			const drift = this.graphDrift(run);
 			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
@@ -1503,6 +1706,7 @@ export class HerderRunManager {
 		const proposed = active.filter((action) => action.state === "proposed");
 		const questionPlan = plans.find((plan) => plan.phase === "NEEDS_INPUT");
 		const planEdit = this.store.getPlanEdit(run.runId);
+		const verification = this.store.getVerification(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -1531,6 +1735,7 @@ export class HerderRunManager {
 				: run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
 			...(questionPlan?.repair[0] ? { question: questionPlan.repair[0] } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
+			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
 		};
 	}
 

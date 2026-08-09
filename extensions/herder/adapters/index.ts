@@ -5,8 +5,12 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { ManagerReply, TerminalEvent } from "../src/shared/protocol.ts";
-import { invokeHerderTool } from "../src/application/tools.ts";
+import type { ManagerReply, TerminalEvent, VerificationRequest } from "../src/shared/protocol.ts";
+import {
+	invokeHerderTool,
+	submitHerderVerification,
+	waitHerderOperation,
+} from "../src/application/tools.ts";
 import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./arguments.ts";
 import {
 	activeModelMatches,
@@ -75,6 +79,10 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	let lastContext: ExtensionContext | undefined;
 	let lastSummary: PlanSummary | undefined;
 	let managerQueue = Promise.resolve();
+	let sessionEpoch = 0;
+	const verificationRequests = new Map<string, VerificationRequest>();
+	const promptedVerifications = new Set<string>();
+	const verificationMonitors = new Set<string>();
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -141,10 +149,48 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		await validateHerderRoleAgents(PI_AGENT_ROOT, profile, await engine.availableModels());
 	};
 
+	const delegateVerification = (reply: ManagerReply) => {
+		const request = reply.verificationRequest;
+		if (!request) return;
+		verificationRequests.set(request.requestId, request);
+		if ((reply.operations ?? []).some((operation) => operation.kind === "verification" && operation.operationId.startsWith(`verification:${request.requestId}:`))) return;
+		if (promptedVerifications.has(request.requestId) || !lastContext) return;
+		promptedVerifications.add(request.requestId);
+		const prompt = [
+			"HERDER_MAIN_SESSION_VERIFICATION_V1",
+			"Herder has finished integrating the ordinary plans and needs this main Pi session to select final verification semantically.",
+			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
+			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
+			"Represent every command as direct argv. Use [\"/bin/sh\", \"-lc\", \"...\"] only when shell syntax is genuinely required.",
+			"As your final action, call herder_verification exactly once. Do not provide a prose-only answer.",
+			`REQUEST_ID: ${request.requestId}`,
+			`REQUEST_SHA256: ${request.requestSha256}`,
+			`RUN_ID: ${request.runId}`,
+			`PLAN_DIRECTORY: ${reply.planDirectory}`,
+			`GENERATION: ${request.generation}`,
+			`GRAPH_SHA256: ${request.graphSha256}`,
+			`RUN_ASSIGNMENT: ${request.runAssignmentPath}`,
+			`RUN_ASSIGNMENT_SHA256: ${request.runAssignmentSha256}`,
+			`INTEGRATION_WORKTREE: ${request.integrationWorktree}`,
+			`INTEGRATION_BRANCH: ${request.integrationBranch}`,
+			`INTEGRATION_HEAD: ${request.integrationHead}`,
+			`INTEGRATION_TREE: ${request.integrationTree}`,
+		].join("\n");
+		try {
+			if (lastContext.isIdle()) pi.sendUserMessage(prompt);
+			else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		} catch (error) {
+			promptedVerifications.delete(request.requestId);
+			lastContext.ui.notify(`Herder could not delegate final verification: ${message(error)}`, "warning");
+		}
+	};
+
 	const updateFromReply = (reply: ManagerReply, profile?: string, mode?: "fire" | "resume" | "revise") => {
 		if (reply.status === "idle") {
 			currentState = undefined;
 			lastSummary = undefined;
+			verificationRequests.clear();
+			promptedVerifications.clear();
 			render();
 			return;
 		}
@@ -168,11 +214,16 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
 			inProgress: reply.summary.inProgress,
 		};
+		for (const operation of reply.operations ?? []) {
+			if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
+			monitorVerification(operation.operationId, { planDirectory: reply.planDirectory, operationId: operation.operationId });
+		}
 		for (const active of reply.active) {
 			if (!active.hostHandle || !engine.has(active.hostHandle) || workers.has(active.hostHandle)) continue;
 			workers.set(active.hostHandle, { actionId: active.actionId, handle: active.hostHandle, managerRunId: reply.runId, planDir: reply.planDirectory });
 		}
 		render();
+		delegateVerification(reply);
 	};
 
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
@@ -238,6 +289,22 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		}
 		return reply;
 	};
+
+	function monitorVerification(operationId: string, pending: Awaited<ReturnType<typeof submitHerderVerification>>): void {
+		if (verificationMonitors.has(operationId)) return;
+		verificationMonitors.add(operationId);
+		const epoch = sessionEpoch;
+		void waitHerderOperation(pending).then((value) => {
+			if (epoch !== sessionEpoch) return;
+			return enqueueManager(async () => {
+				if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Verification operation returned no manager reply");
+				const reply = value as ManagerReply;
+				updateFromReply(reply);
+				await dispatchReply(reply);
+			});
+		}).catch((error) => lastContext?.ui.notify(`Herder verification handling failed: ${message(error)}`, "error"))
+			.finally(() => verificationMonitors.delete(operationId));
+	}
 
 	const launch = async (options: FireOptions, ctx: ExtensionContext): Promise<string> => {
 		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before starting Herder.");
@@ -405,6 +472,70 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "herder_verification",
+		label: "Herder Verification",
+		description: "Submit the main Pi session's structured, exact-tree final verification manifest. Herder executes the gates asynchronously; this tool only selects them.",
+		parameters: Type.Object({
+			planDirectory: Type.String(),
+			requestId: Type.String(),
+			rationale: Type.String(),
+			gates: Type.Array(Type.Object({
+				gateId: Type.String(),
+				label: Type.String(),
+				cwd: Type.String(),
+				argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
+				timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
+				rationale: Type.String(),
+			}), { maxItems: 32 }),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			lastContext = ctx;
+			if (!ctx.isProjectTrusted()) throw new Error("Trust this project before submitting Herder verification.");
+			const repoRoot = await repositoryRoot(ctx);
+			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
+			let request = verificationRequests.get(params.requestId);
+			if (!request) {
+				const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
+				updateFromReply(reply);
+				request = verificationRequests.get(params.requestId);
+			}
+			if (!request || request.requestId !== params.requestId || currentState?.runId !== request.runId || currentState.profile === "unknown") {
+				throw new Error(`Herder verification request ${params.requestId} is not bound to this main session`);
+			}
+			await resolveProfile(ctx, currentState.profile);
+			const operationId = `verification:${request.requestId}:${randomUUID()}`;
+			const pending = await submitHerderVerification({
+				planDirectory,
+				operationId,
+				manifest: {
+					schemaVersion: 1,
+					requestId: request.requestId,
+					requestSha256: request.requestSha256,
+					runId: request.runId,
+					generation: request.generation,
+					graphSha256: request.graphSha256,
+					runAssignmentSha256: request.runAssignmentSha256,
+					integrationHead: request.integrationHead,
+					integrationTree: request.integrationTree,
+					rationale: params.rationale,
+					gates: params.gates,
+					selector: {
+						...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+						...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
+						sessionId: ctx.sessionManager.getSessionId(),
+					},
+				},
+			});
+			monitorVerification(operationId, pending);
+			return {
+				content: [{ type: "text" as const, text: `Verification manifest accepted as ${operationId}. Herder is executing ${params.gates.length} gate(s) in the background.` }],
+				details: { operationId, requestId: request.requestId, gates: params.gates.length },
+				terminate: true,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "herder",
 		label: "Herder",
 		description: "Start, resume, revise, inspect, or open the dashboard for a deterministic Herder plan run.",
@@ -452,6 +583,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		sessionEpoch += 1;
 		lastContext = ctx;
 		sessionFactory.bindModelRegistry(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
@@ -479,7 +611,10 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+		sessionEpoch += 1;
 		widget.dispose();
+		verificationRequests.clear();
+		promptedVerifications.clear();
 		lastContext = undefined;
 	});
 }

@@ -7,14 +7,21 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
-import { openExecutionDatabase } from "./execution-store.ts";
+import {
+	MANAGER_OPERATION_KINDS,
+	MANAGER_PROTOCOL_VERSION,
+	type ManagerOperationKind,
+	type ManagerReply,
+} from "../shared/protocol.ts";
+import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "./execution-store.ts";
 import type { ManagerWorkerResult } from "./manager-worker.ts";
-import { RunStore } from "./run-store.ts";
+import { RunStore, type StoredManagerOperation } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 4 * 1024 * 1024;
-const MAX_PENDING_CONTROLS = 32;
-const CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/start", "/v1/event", "/v1/edit", "/v1/stop", "/shutdown"]);
+const MAX_PENDING_OPERATIONS = 32;
+const DIRECT_CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/operation", "/shutdown"]);
+const LEGACY_BLOCKING_PATHS = new Set(["/v1/start", "/v1/event", "/v1/edit", "/v1/stop"]);
 
 function parseArguments(argv: string[]): { planDirectory: string; dashboardPort: number } {
 	let planDirectory = "herder-plans";
@@ -32,6 +39,7 @@ function parseArguments(argv: string[]): { planDirectory: string; dashboardPort:
 }
 
 function send(response: http.ServerResponse, status: number, value: unknown): void {
+	if (response.destroyed || response.writableEnded) return;
 	const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
 	response.writeHead(status, {
 		"Cache-Control": "no-store",
@@ -40,6 +48,27 @@ function send(response: http.ServerResponse, status: number, value: unknown): vo
 		"X-Content-Type-Options": "nosniff",
 	});
 	response.end(bytes);
+}
+
+function processAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function acquireServiceOwnership(planDirectory: string, instanceId: string): { descriptor: number; lockPath: string } {
+	const lockPath = path.join(planDirectory, ".herder", "service-owner.lock");
+	fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+	try {
+		const descriptor = fs.openSync(lockPath, "wx", 0o600);
+		fs.writeFileSync(descriptor, `${process.pid} ${instanceId}\n`);
+		return { descriptor, lockPath };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		let owner = 0;
+		try { owner = Number(fs.readFileSync(lockPath, "utf8").trim().split(/\s+/)[0]); } catch {}
+		if (owner > 0 && processAlive(owner)) throw new Error(`Herder service ownership is already held by pid ${owner}`);
+		try { fs.unlinkSync(lockPath); } catch {}
+		return acquireServiceOwnership(planDirectory, instanceId);
+	}
 }
 
 async function readBody(request: http.IncomingMessage): Promise<unknown> {
@@ -55,10 +84,9 @@ async function readBody(request: http.IncomingMessage): Promise<unknown> {
 }
 
 /**
- * Runs the deterministic manager core on a worker thread so blocking Git and
- * SQLite work never starves this process's event loop. Calls are serialized by
- * the service queue, so at most one call is in flight; a crashed worker is
- * replaced lazily on the next call (run state lives in SQLite by design).
+ * The manager keeps synchronous Git and SQLite semantics on one worker thread.
+ * HTTP never waits on this worker: durable operations are accepted into SQLite,
+ * processed here in sequence, and observed through short polling requests.
  */
 class ManagerExecutor {
 	private readonly planDirectory: string;
@@ -87,7 +115,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "auditScheduler", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
@@ -113,26 +141,86 @@ class ManagerExecutor {
 	}
 }
 
+function operationReply(kind: ManagerOperationKind, result: unknown): ManagerReply | null {
+	if (kind === "edit") {
+		const reply = result && typeof result === "object" && !Array.isArray(result) ? (result as { reply?: unknown }).reply : undefined;
+		return reply && typeof reply === "object" && !Array.isArray(reply) ? reply as ManagerReply : null;
+	}
+	return result && typeof result === "object" && !Array.isArray(result) ? result as ManagerReply : null;
+}
+
 export async function startHerderService(input: { planDirectory: string; dashboardPort?: number }) {
 	const planDirectory = fs.realpathSync(input.planDirectory);
-	openExecutionDatabase(planDirectory, { create: true })!.close();
 	const instanceId = randomUUID();
+	const ownership = acquireServiceOwnership(planDirectory, instanceId);
+	try { openExecutionDatabase(planDirectory, { create: true })!.close(); }
+	catch (error) {
+		fs.closeSync(ownership.descriptor);
+		try { fs.unlinkSync(ownership.lockPath); } catch {}
+		throw error;
+	}
 	const authToken = randomBytes(32).toString("base64url");
 	const dashboard = createDashboardHandler({ planDir: planDirectory });
 	let dashboardUrl = "";
 	let forwardedUrl: string | null = null;
-	let queue = Promise.resolve();
-	let pendingControls = 0;
 	let auditTimer: NodeJS.Timeout | undefined;
 	let closing = false;
 	let closeService: () => Promise<void> = async () => {};
+	let backgroundQueue = Promise.resolve();
+	let drainScheduled = false;
 	const executor = new ManagerExecutor(planDirectory);
+	const store = new RunStore(planDirectory);
+	store.recoverRunningOperations();
+
+	const enqueueBackground = <T>(task: () => Promise<T>): Promise<T> => {
+		const next = backgroundQueue.then(task, task);
+		backgroundQueue = next.then(() => undefined, () => undefined);
+		return next;
+	};
+
+	const executeOperation = async (operation: StoredManagerOperation): Promise<void> => {
+		try {
+			const payload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
+				&& operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
+				&& (operation.payload as { mode?: unknown }).mode === "fire"
+				? { ...(operation.payload as Record<string, unknown>), mode: "resume" }
+				: operation.payload;
+			const result = await executor.call(operation.kind, payload);
+			const reply = operationReply(operation.kind, result);
+			store.transaction(() => {
+				store.completeOperation(operation.operationId, result);
+				if (reply) store.putSnapshot(reply);
+			});
+		} catch (error) {
+			store.failOperation(operation.operationId, error instanceof Error ? error.message : String(error));
+		}
+	};
+
+	const drainOperations = async (): Promise<void> => {
+		while (!closing) {
+			const operation = store.claimNextOperation();
+			if (!operation) return;
+			await executeOperation(operation);
+		}
+	};
+
+	const scheduleDrain = (): void => {
+		if (closing || drainScheduled) return;
+		drainScheduled = true;
+		void enqueueBackground(async () => {
+			try { await drainOperations(); }
+			finally {
+				drainScheduled = false;
+				if (!closing && store.countPendingOperations() > 0) scheduleDrain();
+			}
+		});
+	};
 
 	const server = http.createServer((request, response) => {
 		let url: URL;
 		try { url = new URL(request.url || "/", `http://${LOOPBACK}`); }
 		catch { send(response, 400, { ok: false, error: "invalid-url" }); return; }
-		if (!CONTROL_PATHS.has(url.pathname)) {
+		if (!DIRECT_CONTROL_PATHS.has(url.pathname) && !LEGACY_BLOCKING_PATHS.has(url.pathname)) {
 			dashboard.handle(request, response);
 			return;
 		}
@@ -141,42 +229,65 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			return;
 		}
 		if (request.method === "GET" && url.pathname === "/health") {
-			send(response, 200, { ok: true, instanceId, pid: process.pid, planDirectory, dashboardUrl, forwardedUrl });
+			send(response, 200, {
+				ok: true,
+				instanceId,
+				pid: process.pid,
+				planDirectory,
+				dashboardUrl,
+				forwardedUrl,
+				managerProtocolVersion: MANAGER_PROTOCOL_VERSION,
+				executionSchemaVersion: EXECUTION_SCHEMA_VERSION,
+				capabilities: ["durable-operations", "snapshot-status", "main-session-verification"],
+			});
 			return;
 		}
-		if (pendingControls >= MAX_PENDING_CONTROLS) {
-			send(response, 429, { ok: false, error: "control-queue-full" });
+		if (request.method === "GET" && url.pathname === "/v1/status") {
+			const snapshot = store.getSnapshotEnvelope();
+			const operations = store.pendingOperationReceipts();
+			send(response, snapshot ? 200 : 503, snapshot ? {
+				ok: true,
+				reply: { ...snapshot.reply, ...(operations.length > 0 ? { operations } : {}) },
+				snapshot: { revision: snapshot.revision, updatedAt: snapshot.updatedAt },
+				operations,
+			} : { ok: false, error: "manager-snapshot-unavailable" });
 			return;
 		}
-		pendingControls += 1;
-		const execute = async () => {
-			try {
-				if (request.method === "GET" && url.pathname === "/v1/status") send(response, 200, { ok: true, reply: await executor.call("reply") });
-				else if (request.method !== "POST") send(response, 405, { ok: false, error: "method-not-allowed" });
-				else if (url.pathname === "/v1/start") {
-					const body = await readBody(request) as Record<string, unknown>;
-					send(response, 200, { ok: true, reply: await executor.call("start", { ...body, planDirectory, dashboardUrl: forwardedUrl || dashboardUrl }) });
-				} else if (url.pathname === "/v1/event") {
-					const body = await readBody(request) as Record<string, unknown>;
-					send(response, 200, { ok: true, reply: await executor.call("event", body) });
-				} else if (url.pathname === "/v1/edit") {
-					const body = await readBody(request) as Record<string, unknown>;
-					send(response, 200, { ok: true, ...(await executor.call("edit", body) as Record<string, unknown>) });
-				} else if (url.pathname === "/v1/stop") {
-					await readBody(request);
-					send(response, 200, { ok: true, reply: await executor.call("stop") });
-				} else if (url.pathname === "/shutdown") {
-					await readBody(request);
-					send(response, 200, { ok: true, instanceId });
-					setImmediate(() => void closeService());
-				} else send(response, 404, { ok: false, error: "not-found" });
-			} catch (error) {
-				send(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
-			} finally {
-				pendingControls -= 1;
-			}
-		};
-		queue = queue.then(execute, execute);
+		if (request.method === "GET" && url.pathname === "/v1/operation") {
+			const operationId = url.searchParams.get("id") || "";
+			const operation = operationId ? store.operationReceipt(operationId) : null;
+			send(response, operation ? 200 : 404, operation ? { ok: true, operation } : { ok: false, error: "operation-not-found" });
+			return;
+		}
+		if (request.method === "POST" && url.pathname === "/v1/operation") {
+			void readBody(request).then((body) => {
+				const record = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+				const operationId = String(record.operationId || "");
+				const kind = String(record.kind || "") as ManagerOperationKind;
+				if (!MANAGER_OPERATION_KINDS.includes(kind)) throw new Error(`Unknown manager operation kind: ${kind}`);
+				const existing = operationId ? store.getOperation(operationId) : null;
+				if (!existing && store.countPendingOperations() >= MAX_PENDING_OPERATIONS) {
+					send(response, 429, { ok: false, error: "operation-queue-full" });
+					return;
+				}
+				const operation = store.submitOperation(operationId, kind, record.input ?? {});
+				send(response, 202, { ok: true, operation });
+				scheduleDrain();
+			}).catch((error) => send(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }));
+			return;
+		}
+		if (request.method === "POST" && url.pathname === "/shutdown") {
+			void readBody(request).then(() => {
+				send(response, 200, { ok: true, instanceId });
+				setImmediate(() => void closeService());
+			}).catch((error) => send(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }));
+			return;
+		}
+		if (LEGACY_BLOCKING_PATHS.has(url.pathname)) {
+			send(response, 410, { ok: false, error: "blocking-control-endpoint-removed; submit /v1/operation and poll /v1/operation?id=..." });
+			return;
+		}
+		send(response, 405, { ok: false, error: "method-not-allowed" });
 	});
 
 	await new Promise<void>((resolve, reject) => {
@@ -194,14 +305,18 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		} catch {}
 
 		const now = new Date().toISOString();
-		const store = new RunStore(planDirectory);
-		try {
-			store.transaction(() => {
-				store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, forwardedUrl, startedAt: now });
-				if (store.getRun()) store.updateRun({ dashboardUrl: forwardedUrl || dashboardUrl });
-			});
-		} finally { store.close(); }
+		if (store.getRun()) store.updateRun({ dashboardUrl: forwardedUrl || dashboardUrl });
+		const initialReply = await executor.call("reply") as ManagerReply;
+		store.transaction(() => {
+			store.putSnapshot(initialReply);
+			// Publish service ownership only after the status snapshot is ready, so a
+			// client cannot discover the new daemon and read the previous daemon's URL.
+			store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, forwardedUrl, startedAt: now });
+		});
 	} catch (error) {
+		store.close();
+		fs.closeSync(ownership.descriptor);
+		try { fs.unlinkSync(ownership.lockPath); } catch {}
 		await close();
 		throw error;
 	}
@@ -209,17 +324,19 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	const scheduleAudit = () => {
 		if (closing) return;
 		auditTimer = setTimeout(() => {
-			const audit = async () => {
-				if (closing) return;
-				try { await executor.call("auditScheduler"); }
-				catch (error) { process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`); }
-			};
-			const auditRun = queue.then(audit, audit);
-			queue = auditRun;
-			void auditRun.then(scheduleAudit, scheduleAudit);
+			void enqueueBackground(async () => {
+				if (closing || store.countPendingOperations() > 0) return;
+				try {
+					const reply = await executor.call("auditScheduler") as ManagerReply | null;
+					if (reply) store.putSnapshot(reply);
+				} catch (error) {
+					process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`);
+				}
+			}).finally(scheduleAudit);
 		}, 1500);
 		auditTimer.unref();
 	};
+	scheduleDrain();
 	scheduleAudit();
 
 	closeService = async () => {
@@ -227,8 +344,11 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		closing = true;
 		if (auditTimer) clearTimeout(auditTimer);
 		await close();
-		await queue.catch(() => {});
+		await backgroundQueue.catch(() => {});
 		await executor.close();
+		store.close();
+		fs.closeSync(ownership.descriptor);
+		try { fs.unlinkSync(ownership.lockPath); } catch {}
 	};
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());

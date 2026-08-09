@@ -15,7 +15,7 @@ import {
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
-import { stableJson } from "../shared/protocol.ts";
+import { stableJson, type VerificationGate } from "../shared/protocol.ts";
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
 
@@ -27,11 +27,18 @@ export interface AssignmentEvidence {
 }
 
 export interface GateResult {
+	gateId: string;
+	label: string;
+	cwd: string;
+	argv: string[];
+	timeoutMs: number;
+	rationale: string;
 	command: string;
 	ok: boolean;
 	exitCode: number | null;
 	durationMs: number;
 	logPath: string;
+	logBytes: number;
 	logSha256: string;
 }
 
@@ -133,10 +140,6 @@ function realRepositoryRoot(repoRoot: string): string {
 function isInside(parent: string, candidate: string): boolean {
 	const relative = path.relative(parent, candidate);
 	return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-function isGateCommand(value: string): boolean {
-	return /^(?:(?:npm|pnpm|yarn|bun|node|deno|python|python3|pytest|uv|cargo|go|make|cmake|ninja|swift|xcodebuild|gradle|mvn|dotnet|ruby|bundle|rspec)(?:\s|$)|git\s+(?:diff|grep)(?:\s|$)|rg(?:\s|$))/.test(value);
 }
 
 function completionPayload(approval: CompletionApprovalProof, integratedHead: string): CompletionTagPayload {
@@ -372,45 +375,31 @@ export class GitDriver {
 		return git(worktree, ["diff", "--name-only", "-z", `${base}..HEAD`, "--"]).stdout.split("\0").filter(Boolean).sort();
 	}
 
-	extractGateCommands(text: string): string[] {
-		const commands: string[] = [];
-		let section = "";
-		for (const line of text.split(/\r?\n/)) {
-			const heading = line.match(/^##+\s+(.+?)\s*$/);
-			if (heading) section = heading[1]!.toLowerCase();
-			if (section === "commands you will need" && /^\|/.test(line)) {
-				const cells = line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
-				if (cells.length >= 2 && !/^(?:purpose|-+)$/i.test(cells[0] || "")) {
-					const match = cells[1]!.match(/`([^`]+)`/);
-					if (match && isGateCommand(match[1]!.trim())) commands.push(match[1]!.trim());
-				}
-			}
-			if (["steps", "test plan", "done criteria"].includes(section)) {
-				for (const match of line.matchAll(/`([^`\n]+)`/g)) {
-					const candidate = match[1]!.trim();
-					if (isGateCommand(candidate)) commands.push(candidate);
-				}
-			}
-		}
-		return [...new Set(commands)].filter((command) => !/[\r\n\0]/.test(command));
-	}
-
-	runGates(planId: string, worktree: string, commands: string[]): GateResult[] {
-		const logDir = path.join(this.planDirectory, ".herder", "logs", planId);
+	runVerificationGates(requestId: string, worktree: string, gates: VerificationGate[]): GateResult[] {
+		const logDir = path.join(this.planDirectory, ".herder", "logs", "RUN", requestId);
 		const gateRunner = path.join(this.helperRoot, "run-gate.ts");
-		return commands.map((command, index) => {
+		return gates.map((gate, index) => {
+			const cwd = path.resolve(worktree, gate.cwd);
 			const result = runJson(gateRunner, [
-				"--cwd", worktree,
-				"--label", `${planId}-${String(index + 1).padStart(2, "0")}`,
+				"--cwd", cwd,
+				"--label", `${String(index + 1).padStart(2, "0")}-${gate.gateId}`,
 				"--log-dir", logDir,
-				"--", "/bin/sh", "-lc", command,
+				"--timeout-ms", String(gate.timeoutMs ?? 30 * 60 * 1_000),
+				"--", ...gate.argv,
 			], { allowFailure: true, allowNotOk: true });
 			return {
-				command,
+				gateId: gate.gateId,
+				label: gate.label,
+				cwd: gate.cwd,
+				argv: gate.argv,
+				timeoutMs: gate.timeoutMs ?? 30 * 60 * 1_000,
+				rationale: gate.rationale,
+				command: gate.argv.join(" "),
 				ok: Boolean(result.ok),
 				exitCode: result.exitCode === null ? null : Number(result.exitCode),
 				durationMs: Number(result.durationMs),
 				logPath: String(result.logPath),
+				logBytes: Number(result.logBytes),
 				logSha256: String(result.logSha256),
 			};
 		});
@@ -424,7 +413,6 @@ export class GitDriver {
 		approvedHead: string;
 		generation: number;
 		checkpointOrdinal: number;
-		gateCommands: string[];
 		approval: CompletionApprovalProof;
 	}): IntegrationResult {
 		let integrationHead = this.branchHead(this.integrationBranch);
@@ -492,8 +480,6 @@ export class GitDriver {
 			if (equivalent.status !== 0 || equivalent.stdout.split(/\r?\n/).filter(Boolean).some((line) => !line.startsWith("-"))) {
 				throw new Error(`Restacked plan ${input.planId} is not patch-equivalent to its reviewed checkpoint`);
 			}
-			const gates = this.runGates(input.planId, input.worktree, input.gateCommands);
-			if (gates.some((gate) => !gate.ok)) throw new Error(`Restacked plan ${input.planId} failed required gates`);
 		}
 		git(this.integrationWorktree, ["merge", "--ff-only", input.branch]);
 		integrationHead = this.branchHead(this.integrationBranch);

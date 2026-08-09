@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 3;
+export const MANAGER_PROTOCOL_VERSION = 4;
 export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"] as const;
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
 export const PLAN_PHASES = [
@@ -92,6 +92,70 @@ export interface ManagerPlanEdit {
 	state: "reserved" | "barrier";
 }
 
+export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification"] as const;
+export const MANAGER_OPERATION_STATES = ["accepted", "running", "succeeded", "failed"] as const;
+export type ManagerOperationKind = typeof MANAGER_OPERATION_KINDS[number];
+export type ManagerOperationState = typeof MANAGER_OPERATION_STATES[number];
+
+export interface ManagerOperationReceipt {
+	protocolVersion: number;
+	operationId: string;
+	kind: ManagerOperationKind;
+	payloadSha256: string;
+	state: ManagerOperationState;
+	acceptedAt: string;
+	updatedAt: string;
+	pollPath: string;
+	startedAt?: string;
+	finishedAt?: string;
+	result?: unknown;
+	error?: string;
+}
+
+export interface VerificationRequest {
+	schemaVersion: 1;
+	requestId: string;
+	requestSha256: string;
+	runId: string;
+	generation: number;
+	graphSha256: string;
+	runAssignmentPath: string;
+	runAssignmentSha256: string;
+	integrationBranch: string;
+	integrationWorktree: string;
+	integrationHead: string;
+	integrationTree: string;
+	requestedAt: string;
+}
+
+export interface VerificationGate {
+	gateId: string;
+	label: string;
+	cwd: string;
+	argv: string[];
+	timeoutMs?: number;
+	rationale: string;
+}
+
+export interface VerificationManifest {
+	schemaVersion: 1;
+	requestId: string;
+	requestSha256: string;
+	runId: string;
+	generation: number;
+	graphSha256: string;
+	runAssignmentSha256: string;
+	integrationHead: string;
+	integrationTree: string;
+	rationale: string;
+	gates: VerificationGate[];
+	selector?: {
+		model?: string;
+		thinkingLevel?: string;
+		sessionId?: string;
+	};
+}
+
 export interface ManagerReply {
 	protocolVersion: number;
 	runId: string;
@@ -121,6 +185,8 @@ export interface ManagerReply {
 	message: string;
 	question?: string;
 	planEdit?: ManagerPlanEdit;
+	verificationRequest?: VerificationRequest;
+	operations?: ManagerOperationReceipt[];
 }
 
 export function stableJson(value: unknown): string {

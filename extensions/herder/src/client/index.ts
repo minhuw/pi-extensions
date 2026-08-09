@@ -1,10 +1,12 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { openExecutionDatabase } from "../daemon/execution-store.ts";
+import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "../daemon/execution-store.ts";
 import { RunStore, type StoredService } from "../daemon/run-store.ts";
+import { MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
 const CLIENT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE_ENTRY = path.resolve(CLIENT_ROOT, "../daemon/service.ts");
@@ -13,7 +15,7 @@ function delay(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+async function rawRequest(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
@@ -34,6 +36,55 @@ export async function requestService(service: StoredService, pathname: string, i
 	}
 }
 
+export async function submitManagerOperation(
+	service: StoredService,
+	kind: ManagerOperationKind,
+	input: unknown,
+	operationId: string = randomUUID(),
+): Promise<ManagerOperationReceipt> {
+	const body = await rawRequest(service, "/v1/operation", { operationId, kind, input }, 10_000);
+	const operation = body.operation;
+	if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new Error("Herder service returned no operation receipt");
+	return operation as ManagerOperationReceipt;
+}
+
+export async function pollManagerOperation(service: StoredService, operationId: string): Promise<ManagerOperationReceipt> {
+	const body = await rawRequest(service, `/v1/operation?id=${encodeURIComponent(operationId)}`, undefined, 10_000);
+	const operation = body.operation;
+	if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new Error("Herder service returned no operation state");
+	return operation as ManagerOperationReceipt;
+}
+
+export async function waitManagerOperation(service: StoredService, operationId: string): Promise<unknown> {
+	for (;;) {
+		const operation = await pollManagerOperation(service, operationId);
+		if (operation.state === "succeeded") return operation.result;
+		if (operation.state === "failed") throw new Error(operation.error || `Herder operation ${operationId} failed`);
+		await delay(250);
+	}
+}
+
+const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
+	"/v1/start": "start",
+	"/v1/event": "event",
+	"/v1/edit": "edit",
+	"/v1/stop": "stop",
+	"/v1/verification": "verification",
+};
+
+export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+	const kind = OPERATION_PATHS[pathname];
+	if (!kind) return rawRequest(service, pathname, input, timeoutMs);
+	const eventId = kind === "event" && input && typeof input === "object" && !Array.isArray(input)
+		? String((input as { eventId?: unknown }).eventId || "")
+		: "";
+	const operationId = eventId ? `event:${eventId}` : randomUUID();
+	const operation = await submitManagerOperation(service, kind, input ?? {}, operationId);
+	const result = operation.state === "succeeded" ? operation.result : await waitManagerOperation(service, operation.operationId);
+	if (kind === "edit") return { ok: true, ...(result as Record<string, unknown>) };
+	return { ok: true, reply: result };
+}
+
 const HEALTH_TIMEOUT_MS = 2_000;
 const SERVICE_WAIT_INTERVAL_MS = 500;
 const DEFAULT_UNRESPONSIVE_GRACE_MS = 45_000;
@@ -47,12 +98,29 @@ function registeredService(planDirectory: string): StoredService | null {
 	return service;
 }
 
+async function incompatibleService(service: StoredService): Promise<boolean> {
+	try {
+		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
+		return health.instanceId === service.instanceId && Number(health.pid) === service.pid
+			&& (Number(health.managerProtocolVersion) !== MANAGER_PROTOCOL_VERSION
+				|| Number(health.executionSchemaVersion) !== EXECUTION_SCHEMA_VERSION
+				|| !Array.isArray(health.capabilities)
+				|| !health.capabilities.includes("durable-operations"));
+	} catch { return false; }
+}
+
 export async function healthyService(planDirectory: string): Promise<StoredService | null> {
 	const service = registeredService(planDirectory);
 	if (!service) return null;
 	try {
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
-		return health.instanceId === service.instanceId && Number(health.pid) === service.pid ? service : null;
+		return health.instanceId === service.instanceId
+			&& Number(health.pid) === service.pid
+			&& Number(health.managerProtocolVersion) === MANAGER_PROTOCOL_VERSION
+			&& Number(health.executionSchemaVersion) === EXECUTION_SCHEMA_VERSION
+			&& Array.isArray(health.capabilities)
+			&& health.capabilities.includes("durable-operations")
+			? service : null;
 	} catch {
 		return null;
 	}
@@ -122,16 +190,21 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 			if (rechecked) return rechecked;
 			const registered = registeredService(planDirectory);
 			if (registered && serviceProcessAlive(registered.pid)) {
-				// A live daemon already owns this plan directory. Never spawn a duplicate:
-				// give a busy daemon time to answer, and replace it only if it stays wedged.
-				const deadline = Date.now() + (options.unresponsiveGraceMs ?? DEFAULT_UNRESPONSIVE_GRACE_MS);
-				while (Date.now() < deadline) {
-					await delay(SERVICE_WAIT_INTERVAL_MS);
-					const service = await healthyService(planDirectory);
-					if (service) return service;
-					if (!serviceProcessAlive(registered.pid)) break;
+				// An authenticated daemon that explicitly reports an obsolete protocol is
+				// replaced immediately. An unresponsive owner still receives the grace period.
+				if (await incompatibleService(registered)) await terminateServiceProcess(registered.pid);
+				else {
+					// A live daemon already owns this plan directory. Never spawn a duplicate:
+					// give a busy daemon time to answer, and replace it only if it stays wedged.
+					const deadline = Date.now() + (options.unresponsiveGraceMs ?? DEFAULT_UNRESPONSIVE_GRACE_MS);
+					while (Date.now() < deadline) {
+						await delay(SERVICE_WAIT_INTERVAL_MS);
+						const service = await healthyService(planDirectory);
+						if (service) return service;
+						if (!serviceProcessAlive(registered.pid)) break;
+					}
+					if (serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
 				}
-				if (serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
 			}
 			const logPath = path.join(runtimeDirectory, "service.log");
 			const log = fs.openSync(logPath, "a", 0o600);
@@ -166,6 +239,55 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 	let detail = "";
 	try { detail = fs.readFileSync(logPath, "utf8").trim().split(/\r?\n/).slice(-4).join(" "); } catch {}
 	throw new Error(`Herder service did not become healthy${detail ? `: ${detail}` : ""}`);
+}
+
+function transportFailure(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+	return Boolean(cause && typeof cause.code === "string" && ["ECONNREFUSED", "ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(cause.code))
+		|| /fetch failed|socket|operation-not-found|service did not become healthy/i.test(text)
+		|| Boolean(error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError");
+}
+
+export async function submitManagerOperationReliable(
+	planDirectory: string,
+	kind: ManagerOperationKind,
+	input: unknown,
+	operationId: string = randomUUID(),
+): Promise<ManagerOperationReceipt> {
+	let service = await ensureService(planDirectory);
+	for (;;) {
+		try { return await submitManagerOperation(service, kind, input, operationId); }
+		catch (error) {
+			if (!transportFailure(error)) throw error;
+			service = await ensureService(planDirectory);
+		}
+	}
+}
+
+export async function executeManagerOperation(
+	planDirectory: string,
+	kind: ManagerOperationKind,
+	input: unknown,
+	operationId: string = randomUUID(),
+): Promise<unknown> {
+	let service = await ensureService(planDirectory);
+	let submitted = false;
+	for (;;) {
+		try {
+			if (!submitted) {
+				const receipt = await submitManagerOperation(service, kind, input, operationId);
+				submitted = true;
+				if (receipt.state === "succeeded") return receipt.result;
+				if (receipt.state === "failed") throw new Error(receipt.error || `Herder operation ${operationId} failed`);
+			}
+			return await waitManagerOperation(service, operationId);
+		} catch (error) {
+			if (!transportFailure(error)) throw error;
+			service = await ensureService(planDirectory);
+			submitted = false;
+		}
+	}
 }
 
 export async function stopService(planDirectory: string): Promise<void> {

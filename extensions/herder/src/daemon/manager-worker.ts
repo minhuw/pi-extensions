@@ -1,9 +1,10 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { HerderRunManager, type EventInput, type PlanEditInput, type StartInput } from "../core/run-manager.ts";
+import type { VerificationManifest } from "../shared/protocol.ts";
 
 export interface ManagerWorkerCall {
 	id: number;
-	method: "reply" | "start" | "event" | "edit" | "stop" | "auditScheduler";
+	method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler";
 	input?: unknown;
 }
 
@@ -38,7 +39,8 @@ async function handle(call: ManagerWorkerCall): Promise<void> {
 		else if (call.method === "event") result = await manager.event(call.input as EventInput);
 		else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
 		else if (call.method === "stop") result = manager.stop();
-		else if (call.method === "auditScheduler") { await manager.auditScheduler({ includeReply: false }); result = null; }
+		else if (call.method === "verification") result = await manager.verification(call.input as VerificationManifest);
+		else if (call.method === "auditScheduler") result = await manager.auditScheduler();
 		else throw new Error(`Unknown Herder manager method ${JSON.stringify(call.method)}.`);
 		port.postMessage({ id: call.id, ok: true, result } satisfies ManagerWorkerResult);
 	} catch (error) {

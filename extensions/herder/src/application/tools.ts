@@ -8,7 +8,13 @@ import {
 	setTracking,
 	snapshotPlan,
 } from "../core/plans.ts";
-import { ensureService, requestService } from "../client/index.ts";
+import {
+	ensureService,
+	executeManagerOperation,
+	requestService,
+	submitManagerOperationReliable,
+	waitManagerOperation,
+} from "../client/index.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -26,8 +32,7 @@ async function planTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);
 	if (["begin_edit", "finish_edit", "cancel_edit"].includes(operation)) {
-		const service = await ensureService(directory);
-		return requestService(service, "/v1/edit", {
+		return executeManagerOperation(directory, "edit", {
 			operation: operation === "begin_edit" ? "begin" : operation === "finish_edit" ? "finish" : "cancel",
 			...(operation === "begin_edit" ? { planId: requiredString(args, "planId") } : { editToken: requiredString(args, "editToken") }),
 		});
@@ -57,9 +62,9 @@ async function runTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const service = await ensureService(directory, args.dashboardPort === undefined ? {} : { dashboardPort: Number(args.dashboardPort) });
 	if (operation === "status") return requestService(service, "/v1/status");
-	if (operation === "stop") return requestService(service, "/v1/stop", {});
+	if (operation === "stop") return { ok: true, reply: await executeManagerOperation(directory, "stop", {}) };
 	if (!["fire", "resume", "revise"].includes(operation)) throw new Error(`Unknown run operation: ${operation}`);
-	return requestService(service, "/v1/start", {
+	return { ok: true, reply: await executeManagerOperation(directory, "start", {
 		mode: operation,
 		repositoryRoot: path.resolve(requiredString(args, "repositoryRoot")),
 		planDirectory: directory,
@@ -67,26 +72,55 @@ async function runTool(args: JsonObject): Promise<unknown> {
 		...(args.profile ? { profile: String(args.profile) } : {}),
 		...(args.maxParallel === undefined ? {} : { maxParallel: Number(args.maxParallel) }),
 		dashboardUrl: service.forwardedUrl || service.dashboardUrl,
-	});
+	}) };
 }
 
 async function submitTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const kind = requiredString(args, "kind");
 	if (!["dispatch_results", "terminals", "user_input"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
-	const service = await ensureService(directory);
-	return requestService(service, "/v1/event", {
-		eventId: String(args.eventId || randomUUID()),
+	const eventId = String(args.eventId || randomUUID());
+	return { ok: true, reply: await executeManagerOperation(directory, "event", {
+		eventId,
 		kind,
 		...(kind === "dispatch_results" ? { dispatchResults: args.dispatchResults } : {}),
 		...(kind === "terminals" ? { terminals: args.terminals } : {}),
 		...(kind === "user_input" ? { userInput: args.userInput } : {}),
-	});
+	}, `event:${eventId}`) };
 }
 
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit", args: JsonObject): Promise<unknown> {
+async function verificationTool(args: JsonObject): Promise<unknown> {
+	const directory = planDirectory(args);
+	return { ok: true, reply: await executeManagerOperation(directory, "verification", args.manifest) };
+}
+
+export interface PendingHerderOperation {
+	planDirectory: string;
+	operationId: string;
+}
+
+export async function submitHerderVerification(args: JsonObject): Promise<PendingHerderOperation> {
+	const directory = planDirectory(args);
+	const receipt = await submitManagerOperationReliable(directory, "verification", args.manifest, String(args.operationId || randomUUID()));
+	return { planDirectory: directory, operationId: receipt.operationId };
+}
+
+export async function waitHerderOperation(pending: PendingHerderOperation): Promise<unknown> {
+	let service = await ensureService(pending.planDirectory);
+	for (;;) {
+		try { return await waitManagerOperation(service, pending.operationId); }
+		catch (error) {
+			const text = error instanceof Error ? error.message : String(error);
+			if (!/fetch failed|ECONNREFUSED|ECONNRESET|socket|operation-not-found/i.test(text)) throw error;
+			service = await ensureService(pending.planDirectory);
+		}
+	}
+}
+
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
+	if (name === "herder_verification") return verificationTool(args);
 	return submitTool(args);
 }

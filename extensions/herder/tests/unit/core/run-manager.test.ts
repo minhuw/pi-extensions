@@ -165,6 +165,29 @@ function payload(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+async function submitFinalVerification(
+	service: Awaited<ReturnType<typeof ensureService>>,
+	reply: Record<string, unknown>,
+	prefix: string,
+): Promise<Record<string, unknown>> {
+	const request = payload(reply.verificationRequest);
+	assert.equal(reply.status, "paused");
+	assert.ok(request.requestId);
+	return payload(payload(await requestService(service, "/v1/verification", {
+		schemaVersion: 1,
+		requestId: request.requestId,
+		requestSha256: request.requestSha256,
+		runId: request.runId,
+		generation: request.generation,
+		graphSha256: request.graphSha256,
+		runAssignmentSha256: request.runAssignmentSha256,
+		integrationHead: request.integrationHead,
+		integrationTree: request.integrationTree,
+		rationale: "The fixture has one complete repository test command.",
+		gates: [{ gateId: `${prefix}-npm-test`, label: "fixture tests", cwd: ".", argv: ["npm", "test"], rationale: "Exercises the integrated fixture." }],
+	})).reply);
+}
+
 async function completeSinglePlan(
 	service: Awaited<ReturnType<typeof ensureService>>,
 	fixture: { repo: string; planDirectory: string },
@@ -208,7 +231,8 @@ async function completeSinglePlan(
 			response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 		}],
 	})).reply);
-	const finalReviewer = payload((afterReviewer.actions as unknown[])[0]);
+	const verified = await submitFinalVerification(service, afterReviewer, prefix);
+	const finalReviewer = payload((verified.actions as unknown[])[0]);
 	await requestService(service, "/v1/event", {
 		eventId: `${prefix}-dispatch-final`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
@@ -286,13 +310,6 @@ test("persistent service drives a complete deterministic run and reuses its proc
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-test-"));
 	const fixture = writeFixture(root);
 	try {
-		const gateReader = new GitDriver({
-			repoRoot: fixture.repo,
-			planDirectory: fixture.planDirectory,
-			planName: "herder-plans",
-			helperRoot: root,
-		});
-		assert.deepEqual(gateReader.extractGateCommands(fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")), ["npm test"]);
 		assert.throws(() => new GitDriver({
 			repoRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -385,7 +402,8 @@ test("persistent service drives a complete deterministic run and reuses its proc
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 			}],
 		}));
-		const finalReviewer = payload((payload(reviewerTerminal.reply).actions as unknown[])[0]);
+		const verified = await submitFinalVerification(service, payload(reviewerTerminal.reply), "persistent");
+		const finalReviewer = payload((verified.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
 

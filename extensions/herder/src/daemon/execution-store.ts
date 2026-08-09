@@ -32,7 +32,7 @@ export interface RunConfiguration {
 }
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
-export const EXECUTION_SCHEMA_VERSION = 7
+export const EXECUTION_SCHEMA_VERSION = 8
 
 // Integrity checks scan the database. Running one for every short-lived reader
 // (the dashboard polls every two seconds) turns an O(1) open into O(database).
@@ -88,11 +88,67 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
   database.exec("PRAGMA synchronous = FULL")
 }
 
+const SCHEMA_8_TABLES = `
+  CREATE TABLE IF NOT EXISTS manager_operations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification')),
+    payload_json TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    result_json TEXT,
+    error TEXT,
+    accepted_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
+
+  CREATE TABLE IF NOT EXISTS manager_snapshots (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    reply_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS manager_verifications (
+    request_id TEXT PRIMARY KEY NOT NULL,
+    run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    graph_sha256 TEXT NOT NULL,
+    run_assignment_path TEXT NOT NULL,
+    run_assignment_sha256 TEXT NOT NULL,
+    integration_branch TEXT NOT NULL,
+    integration_worktree TEXT NOT NULL,
+    integration_head TEXT NOT NULL,
+    integration_tree TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK (state IN ('awaiting_manifest', 'running', 'passed', 'failed')),
+    manifest_json TEXT,
+    manifest_sha256 TEXT,
+    result_json TEXT,
+    terminal_detail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS manager_verifications_run_generation ON manager_verifications(run_id, generation, created_at);
+`
+
+function ensureLegacyFingerprintVersion(database: Database): void {
+  const columns = database.prepare("PRAGMA table_info(manager_plan_specs)").all() as Array<{ name: string }>
+  if (!columns.some((column) => column.name === "fingerprint_version")) {
+    database.exec("ALTER TABLE manager_plan_specs ADD COLUMN fingerprint_version INTEGER NOT NULL DEFAULT 1 CHECK (fingerprint_version IN (1, 2));")
+  }
+}
+
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
   if (version === EXECUTION_SCHEMA_VERSION) return
   if (version === 6 && allowInitialize) {
+    ensureLegacyFingerprintVersion(database)
     database.exec(`
       CREATE TABLE manager_plan_edits (
         run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
@@ -106,8 +162,14 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-      PRAGMA user_version = 7;
+      ${SCHEMA_8_TABLES}
+      PRAGMA user_version = 8;
     `)
+    return
+  }
+  if (version === 7 && allowInitialize) {
+    ensureLegacyFingerprintVersion(database)
+    database.exec(`${SCHEMA_8_TABLES}\nPRAGMA user_version = 8;`)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -253,6 +315,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         graph_generation INTEGER NOT NULL CHECK (graph_generation > 0),
         plan_id TEXT NOT NULL,
         plan_fingerprint TEXT NOT NULL,
+        fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK (fingerprint_version IN (1, 2)),
         ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
         title TEXT NOT NULL,
         priority TEXT NOT NULL,
@@ -300,7 +363,8 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         PRIMARY KEY (run_id, plan_id, generation)
       );
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
-      PRAGMA user_version = 7;
+      ${SCHEMA_8_TABLES}
+      PRAGMA user_version = 8;
   `)
 }
 
