@@ -32,6 +32,9 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 	assert.match(extension, /engine\.prepare\(\{ action, planDirectory: reply\.planDirectory \}\)/);
 	assert.match(extension, /name: "herder_verification"/);
 	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_V1/);
+	assert.match(extension, /PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/);
+	assert.match(extension, /Tree-relative path inside the integration worktree/);
+	assert.match(extension, /EXAMPLE_GATE: \{"gateId":"unit"/);
 	assert.match(extension, /pi\.sendUserMessage\(prompt/);
 	assert.match(extension, /submitHerderVerification/);
 	assert.match(extension, /appendWorkerEntry\(HERDER_WORKER_INPUT_ENTRY, binding\.transcript\)/);

@@ -132,6 +132,7 @@ export interface VerificationRequest {
 export interface VerificationGate {
 	gateId: string;
 	label: string;
+	/** TreeRelative path inside the integration worktree. Use "." for the worktree root; absolute paths are invalid. */
 	cwd: string;
 	argv: string[];
 	timeoutMs?: number;

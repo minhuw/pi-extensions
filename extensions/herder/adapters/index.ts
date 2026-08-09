@@ -181,7 +181,8 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
 			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
 			"Represent every command as direct argv. Use [\"/bin/sh\", \"-lc\", \"...\"] only when shell syntax is genuinely required.",
-			"Set each gate cwd to '.' or a relative path inside INTEGRATION_WORKTREE; do not copy the absolute INTEGRATION_WORKTREE value into cwd.",
+			"PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot for inspection only. Each gate cwd is TreeRelative: use '.' for the worktree root or a relative path such as 'pkg'. Absolute paths in cwd are invalid; never copy INTEGRATION_WORKTREE into cwd.",
+			'EXAMPLE_GATE: {"gateId":"unit","label":"unit tests","cwd":".","argv":["npm","test"],"rationale":"Covers the integrated change."}',
 			...(retryDetail ? [`PREVIOUS_MANIFEST_ERROR: ${retryDetail.replace(/\s+/g, " ").slice(0, 1_000)}`, "Correct the rejected manifest and submit it again."] : []),
 			"As your final action, call herder_verification exactly once. Do not provide a prose-only answer.",
 			`REQUEST_ID: ${request.requestId}`,
@@ -561,7 +562,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 			gates: Type.Array(Type.Object({
 				gateId: Type.String(),
 				label: Type.String(),
-				cwd: Type.String(),
+				cwd: Type.String({ description: "Tree-relative path inside the integration worktree. Use '.' for the worktree root. Absolute paths are invalid." }),
 				argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
 				timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
 				rationale: Type.String(),

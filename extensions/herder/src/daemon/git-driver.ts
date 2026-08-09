@@ -379,6 +379,9 @@ export class GitDriver {
 		const logDir = path.join(this.planDirectory, ".herder", "logs", "RUN", requestId);
 		const gateRunner = path.join(this.helperRoot, "run-gate.ts");
 		return gates.map((gate, index) => {
+			if (!gate.cwd || path.isAbsolute(gate.cwd)) {
+				throw new Error(`Verification gate ${gate.gateId} cwd must be relative to the integration worktree`);
+			}
 			const cwd = path.resolve(worktree, gate.cwd);
 			const result = runJson(gateRunner, [
 				"--cwd", cwd,
