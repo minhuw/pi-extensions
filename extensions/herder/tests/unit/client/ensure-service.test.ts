@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -66,6 +66,30 @@ function registerService(planDirectory: string, pid: number): void {
 function alive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 }
+
+test("detached daemon startup does not invoke Orca host integration", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	const command = path.join(root, "fake-orca.cjs");
+	const calls = path.join(root, "orca-calls.log");
+	writeFileSync(command, `#!/usr/bin/env node\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\n`);
+	chmodSync(command, 0o755);
+	const previousOwned = process.env.ORCA_PI_STATUS_OWNED;
+	const previousCommand = process.env.ORCA_CLI_COMMAND;
+	process.env.ORCA_PI_STATUS_OWNED = "test-owned";
+	process.env.ORCA_CLI_COMMAND = command;
+	try {
+		await ensureService(planDirectory);
+		assert.equal(existsSync(calls), false, "daemon startup opened an Orca tab");
+	} finally {
+		if (previousOwned === undefined) delete process.env.ORCA_PI_STATUS_OWNED;
+		else process.env.ORCA_PI_STATUS_OWNED = previousOwned;
+		if (previousCommand === undefined) delete process.env.ORCA_CLI_COMMAND;
+		else process.env.ORCA_CLI_COMMAND = previousCommand;
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("ensureService reuses one daemon for concurrent callers", async () => {
 	const root = planRoot();

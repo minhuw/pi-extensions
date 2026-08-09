@@ -442,7 +442,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		const planDir = planDirInput
 			? resolvePlanDirectory(repoRoot, planDirInput)
 			: currentState?.planDir ?? resolvePlanDirectory(repoRoot, "herder-plans");
-		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
+		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "dashboard", planDirectory: planDir }) as Record<string, unknown>);
 		return `Herder dashboard: ${reply.dashboardUrl || "unavailable"}`;
 	};
 

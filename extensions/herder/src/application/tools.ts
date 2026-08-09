@@ -9,6 +9,7 @@ import {
 	snapshotPlan,
 } from "../core/plans.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
+import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import type { VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
 import {
 	ensureService,
@@ -59,22 +60,33 @@ async function planTool(args: JsonObject): Promise<unknown> {
 	throw new Error(`Unknown plan operation: ${operation}`);
 }
 
+async function openDashboard(service: Awaited<ReturnType<typeof ensureService>>): Promise<void> {
+	try { await enableDashboardHostAccess({ url: service.forwardedUrl || service.dashboardUrl }); }
+	catch { /* Host integration is best-effort and must not block manager controls. */ }
+}
+
 async function runTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);
 	const service = await ensureService(directory, args.dashboardPort === undefined ? {} : { dashboardPort: Number(args.dashboardPort) });
 	if (operation === "status") return requestService(service, "/v1/status");
+	if (operation === "dashboard") {
+		await openDashboard(service);
+		return requestService(service, "/v1/status");
+	}
 	if (operation === "stop") return { ok: true, reply: await executeManagerOperation(directory, "stop", {}) };
 	if (!["fire", "resume", "revise"].includes(operation)) throw new Error(`Unknown run operation: ${operation}`);
-	return { ok: true, reply: await executeManagerOperation(directory, "start", {
+	await executeManagerOperation(directory, "start", {
 		mode: operation,
 		repositoryRoot: path.resolve(requiredString(args, "repositoryRoot")),
 		planDirectory: directory,
 		...(args.planName ? { planName: String(args.planName) } : {}),
 		...(args.profile ? { profile: String(args.profile) } : {}),
 		...(args.maxParallel === undefined ? {} : { maxParallel: Number(args.maxParallel) }),
-		dashboardUrl: service.forwardedUrl || service.dashboardUrl,
-	}) };
+	});
+	const currentService = await ensureService(directory);
+	await openDashboard(currentService);
+	return requestService(currentService, "/v1/status");
 }
 
 async function submitTool(args: JsonObject): Promise<unknown> {

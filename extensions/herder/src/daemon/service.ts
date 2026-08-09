@@ -6,7 +6,6 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
-import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import {
 	MANAGER_OPERATION_KINDS,
 	MANAGER_PROTOCOL_VERSION,
@@ -162,7 +161,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	const authToken = randomBytes(32).toString("base64url");
 	const dashboard = createDashboardHandler({ planDir: planDirectory });
 	let dashboardUrl = "";
-	let forwardedUrl: string | null = null;
+	const forwardedUrl: string | null = null;
 	let auditTimer: NodeJS.Timeout | undefined;
 	let closing = false;
 	let closeService: () => Promise<void> = async () => {};
@@ -180,11 +179,14 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 
 	const executeOperation = async (operation: StoredManagerOperation): Promise<void> => {
 		try {
-			const payload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
+			const recoveredPayload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
 				&& operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
 				&& (operation.payload as { mode?: unknown }).mode === "fire"
 				? { ...(operation.payload as Record<string, unknown>), mode: "resume" }
 				: operation.payload;
+			const payload = operation.kind === "start" && recoveredPayload && typeof recoveredPayload === "object" && !Array.isArray(recoveredPayload)
+				? { ...(recoveredPayload as Record<string, unknown>), dashboardUrl: forwardedUrl || dashboardUrl }
+				: recoveredPayload;
 			const result = await executor.call(operation.kind, payload);
 			const reply = operationReply(operation.kind, result);
 			store.transaction(() => {
@@ -299,11 +301,6 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	dashboardUrl = `http://${LOOPBACK}:${address.port}/`;
 	const close = () => new Promise<void>((resolve) => server.close(() => resolve()));
 	try {
-		try {
-			const access = await enableDashboardHostAccess({ url: dashboardUrl });
-			forwardedUrl = typeof access.forwardedUrl === "string" ? access.forwardedUrl : null;
-		} catch {}
-
 		const now = new Date().toISOString();
 		if (store.getRun()) store.updateRun({ dashboardUrl: forwardedUrl || dashboardUrl });
 		const initialReply = await executor.call("reply") as ManagerReply;

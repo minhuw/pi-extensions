@@ -337,10 +337,11 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			planDirectory: fixture.planDirectory,
 			profile: "eclipse",
 			maxParallel: 2,
-			dashboardUrl: first.dashboardUrl,
+			dashboardUrl: "http://127.0.0.1:1/",
 		}));
 		const startReply = payload(started.reply);
 		assert.equal(startReply.status, "running");
+		assert.equal(startReply.dashboardUrl, first.dashboardUrl, "service trusted a stale client dashboard URL");
 		await assert.rejects(() => requestService(first, "/v1/event", {
 			eventId: "invalid-kind",
 			kind: "unexpected",
