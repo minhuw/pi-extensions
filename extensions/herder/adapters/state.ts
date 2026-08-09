@@ -16,6 +16,21 @@ export interface HerderRunState {
 	dashboardUrl?: string;
 }
 
+export function sameHerderRunState(left: HerderRunState, right: HerderRunState): boolean {
+	return left.version === right.version
+		&& left.mode === right.mode
+		&& left.status === right.status
+		&& left.runId === right.runId
+		&& left.asyncDir === right.asyncDir
+		&& left.repoRoot === right.repoRoot
+		&& left.planDir === right.planDir
+		&& left.profile === right.profile
+		&& left.maxParallel === right.maxParallel
+		&& left.dashboardEnabled === right.dashboardEnabled
+		&& left.startedAt === right.startedAt
+		&& left.dashboardUrl === right.dashboardUrl;
+}
+
 function isRunState(value: unknown): value is HerderRunState {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const state = value as Partial<HerderRunState>;

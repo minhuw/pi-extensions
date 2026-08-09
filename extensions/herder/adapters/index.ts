@@ -17,7 +17,7 @@ import {
 	unavailableProfileModels,
 	type ResolvedPiProfile,
 } from "./profile.ts";
-import { HERDER_STATE_ENTRY, restoreLastRun, type HerderRunState } from "./state.ts";
+import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
@@ -81,6 +81,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	const widget = new HerderWidget();
 	const workers = new Map<string, WorkerBinding>();
 	let currentState: HerderRunState | undefined;
+	let lastPersistedState: HerderRunState | undefined;
 	let lastContext: ExtensionContext | undefined;
 	let lastSummary: PlanSummary | undefined;
 	let managerQueue = Promise.resolve();
@@ -91,7 +92,11 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
-		pi.appendEntry(HERDER_STATE_ENTRY, state);
+		if (lastPersistedState && sameHerderRunState(lastPersistedState, state)) return;
+		try {
+			pi.appendEntry(HERDER_STATE_ENTRY, state);
+			lastPersistedState = state;
+		} catch { /* The durable manager remains authoritative; retry on the next reply. */ }
 	};
 
 	const appendWorkerEntry = <T>(customType: string, data: T): void => {
@@ -614,6 +619,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		lastContext = ctx;
 		sessionFactory.bindModelRegistry(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
+		lastPersistedState = currentState;
 		if (currentState) {
 			try {
 				await enqueueManager(async () => {
