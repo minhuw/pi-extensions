@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ManagerReply, TerminalEvent, VerificationRequest } from "../src/shared/protocol.ts";
 import {
@@ -25,6 +24,14 @@ import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
+import {
+	createWorkerInputEntry,
+	createWorkerOutputEntry,
+	HERDER_WORKER_INPUT_ENTRY,
+	HERDER_WORKER_OUTPUT_ENTRY,
+	registerWorkerTranscriptRenderers,
+	type HerderWorkerInputEntry,
+} from "./worker-transcript.ts";
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "..");
@@ -41,6 +48,7 @@ interface WorkerBinding {
 	handle: string;
 	managerRunId: string;
 	planDir: string;
+	transcript?: HerderWorkerInputEntry;
 }
 
 function message(error: unknown): string {
@@ -56,10 +64,6 @@ function summaryLine(summary: PlanSummary | undefined): string | undefined {
 	return `${summary.counts.done ?? 0}/${summary.counts.total} done · ${summary.inProgress ?? 0} in progress · ${summary.counts.rejected ?? 0} rejected`;
 }
 
-function stateLine(state: HerderRunState): string {
-	return `${state.status.toUpperCase()} · ${state.profile} · max ${state.maxParallel} · ${path.basename(state.planDir)}`;
-}
-
 function unwrapReply(value: Record<string, unknown>): ManagerReply {
 	const reply = value.reply;
 	if (!reply || typeof reply !== "object" || Array.isArray(reply)) throw new Error("Herder service returned no manager reply.");
@@ -71,6 +75,7 @@ function toolResult(text: string, isError = false) {
 }
 
 export default function registerHerderPi(pi: ExtensionAPI): void {
+	registerWorkerTranscriptRenderers(pi);
 	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT);
 	const engine = new PiWorkerEngine(sessionFactory);
 	const widget = new HerderWidget();
@@ -87,6 +92,12 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	const persist = (state: HerderRunState) => {
 		currentState = state;
 		pi.appendEntry(HERDER_STATE_ENTRY, state);
+	};
+
+	const appendWorkerEntry = <T>(customType: string, data: T): void => {
+		if (!lastContext) return;
+		try { pi.appendEntry(customType, data); }
+		catch { /* Transcript rendering is best-effort and must never block manager progress. */ }
 	};
 
 	const render = (ctx = lastContext) => {
@@ -269,7 +280,13 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				try {
 					const handle = await engine.prepare({ action, planDirectory: reply.planDirectory });
 					prepared.push(handle);
-					workers.set(handle, { actionId: action.actionId, handle, managerRunId: reply.runId, planDir: reply.planDirectory });
+					workers.set(handle, {
+						actionId: action.actionId,
+						handle,
+						managerRunId: reply.runId,
+						planDir: reply.planDirectory,
+						transcript: createWorkerInputEntry(action, handle),
+					});
 					results.push({ actionId: action.actionId, accepted: true, hostHandle: handle });
 				} catch (error) {
 					results.push({ actionId: action.actionId, accepted: false, error: message(error) });
@@ -284,7 +301,11 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 				}
 				throw error;
 			}
-			for (const handle of prepared) engine.start(handle);
+			for (const handle of prepared) {
+				const binding = workers.get(handle);
+				if (binding?.transcript) appendWorkerEntry(HERDER_WORKER_INPUT_ENTRY, binding.transcript);
+				engine.start(handle);
+			}
 			updateFromReply(reply);
 		}
 		return reply;
@@ -379,6 +400,14 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		return enqueueManager(async () => {
 			let reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "stop", planDirectory: currentState!.planDir }) as Record<string, unknown>);
 			const active = [...workers.values()];
+			for (const worker of active) {
+				if (worker.transcript) appendWorkerEntry(HERDER_WORKER_OUTPUT_ENTRY, createWorkerOutputEntry(worker.transcript, {
+					actionId: worker.actionId,
+					hostHandle: worker.handle,
+					interrupted: true,
+					error: "Pi user requested Herder stop",
+				}));
+			}
 			workers.clear();
 			await Promise.all(active.map((worker) => engine.stop(worker.handle).catch(() => {})));
 			const interrupted: TerminalEvent[] = active.map((worker) => ({
@@ -556,16 +585,14 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerEntryRenderer<HerderRunState>(HERDER_STATE_ENTRY, (entry, _options, theme) => {
-		const state = entry.data;
-		if (!state) return new Text(theme.fg("warning", "Herder state unavailable"), 0, 0);
-		return new Text(theme.fg(state.status === "running" ? "accent" : state.status === "complete" ? "success" : "warning", `Herder ${stateLine(state)}`), 0, 0);
-	});
-
 	engine.onUpdate(() => render());
 	engine.onTerminal(async (completed: PiWorkerTerminal) => {
 		const binding = workers.get(completed.handle);
 		if (!binding || binding.actionId !== completed.actionId) return;
+		if (binding.transcript) appendWorkerEntry(
+			HERDER_WORKER_OUTPUT_ENTRY,
+			createWorkerOutputEntry(binding.transcript, completed),
+		);
 		workers.delete(completed.handle);
 		await enqueueManager(async () => {
 			const terminal: TerminalEvent = {

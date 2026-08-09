@@ -25,6 +25,7 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
 	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
+	const transcript = await readFile(path.join(extensionRoot, "adapters/worker-transcript.ts"), "utf8");
 	assert.match(extension, /const PACKAGE_ROOT = path\.resolve\(EXTENSION_ROOT, "\.\."\);/);
 	assert.match(extension, /invokeHerderTool/);
 	assert.doesNotMatch(extension, /requestService|ensureService/);
@@ -33,7 +34,11 @@ test("deterministic manager owns scheduling while Pi workers cannot recurse", as
 	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_V1/);
 	assert.match(extension, /pi\.sendUserMessage\(prompt/);
 	assert.match(extension, /submitHerderVerification/);
-	assert.match(extension, /for \(const handle of prepared\) engine\.start\(handle\)/);
+	assert.match(extension, /appendWorkerEntry\(HERDER_WORKER_INPUT_ENTRY, binding\.transcript\)/);
+	assert.match(extension, /createWorkerOutputEntry\(binding\.transcript, completed\)/);
+	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
+	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
+	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
 	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
 	assert.match(engine, /noExtensions: true/);
 	assert.match(engine, /session\.messages\.length !== 0/);

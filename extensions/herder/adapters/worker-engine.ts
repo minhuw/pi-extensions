@@ -137,14 +137,13 @@ export function finalAssistantResult(messages: readonly unknown[]): { text?: str
 			.map(record)
 			.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
 			.map((item) => String(item.text))
-			.join("\n")
-			.trim();
+			.join("\n");
 		const stopReason = String(candidate.stopReason || "");
 		const error = typeof candidate.errorMessage === "string" && candidate.errorMessage.trim()
 			? candidate.errorMessage.trim()
 			: undefined;
 		return {
-			...(text ? { text } : {}),
+			...(text.trim() ? { text } : {}),
 			...(error ? { error } : {}),
 			failed: stopReason === "error" || stopReason === "aborted" || Boolean(error),
 		};
@@ -418,13 +417,14 @@ export class PiWorkerEngine {
 		const finishedAt = Date.now();
 		const result = finalAssistantResult(worker.session.messages);
 		const interrupted = worker.stopRequested || Boolean(failure) || result.failed || !result.text;
+		const errors = [...new Set([failure, result.error].filter((value): value is string => Boolean(value)))];
 		const terminal: PiWorkerTerminal = {
 			handle,
 			actionId: worker.request.action.actionId,
 			planDirectory: worker.request.planDirectory,
 			...(result.text ? { response: result.text } : {}),
 			...(interrupted ? { interrupted: true } : {}),
-			...(interrupted ? { error: failure || result.error || (worker.stopRequested ? "Pi worker stopped" : "Pi worker produced no terminal result") } : {}),
+			...(interrupted ? { error: errors.join("\n") || (worker.stopRequested ? "Pi worker stopped" : "Pi worker produced no terminal result") } : {}),
 			usage: usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
 		};
 		try {

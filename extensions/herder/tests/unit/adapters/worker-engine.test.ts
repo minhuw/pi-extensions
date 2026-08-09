@@ -191,10 +191,36 @@ test("built-in Pi engine starts every manager-admitted worker without a private 
 	while (engine.snapshots().length > 0) await new Promise((resolve) => setImmediate(resolve));
 });
 
-test("assistant extraction uses only the final child response", () => {
+test("worker terminals retain transport and provider diagnostics", async () => {
+	class FailingSession extends FakeSession {
+		override async prompt(): Promise<void> {
+			this.messages.push({
+				role: "assistant",
+				content: [{ type: "text", text: "  partial output  \n" }],
+				stopReason: "error",
+				errorMessage: "provider failed",
+			});
+			throw new Error("transport failed");
+		}
+	}
+	const session = new FailingSession("session-failed");
+	const factory: PiWorkerSessionFactory = {
+		async availableModels() { return [{ provider: "proxy", id: "grok-4.5" }]; },
+		async create() { return session; },
+	};
+	const engine = new PiWorkerEngine(factory);
+	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
+	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	engine.start(handle);
+	const result = await terminal;
+	assert.equal(result.response, "  partial output  \n");
+	assert.equal(result.error, "transport failed\nprovider failed");
+});
+
+test("assistant extraction uses only the exact final child response", () => {
 	assert.deepEqual(finalAssistantResult([
 		{ role: "assistant", content: [{ type: "text", text: "draft" }], stopReason: "toolUse" },
 		{ role: "toolResult", content: [{ type: "text", text: "result" }] },
-		{ role: "assistant", content: [{ type: "text", text: "VERDICT: APPROVE" }], stopReason: "stop" },
-	]), { text: "VERDICT: APPROVE", failed: false });
+		{ role: "assistant", content: [{ type: "text", text: "  VERDICT: APPROVE  \n" }], stopReason: "stop" },
+	]), { text: "  VERDICT: APPROVE  \n", failed: false });
 });
