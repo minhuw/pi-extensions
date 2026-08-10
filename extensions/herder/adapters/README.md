@@ -85,3 +85,11 @@ The adapter prepares the clean sessions, returns action IDs and opaque `pi-worke
 - **TreeRelative** — positions inside an already-known LocationRoot. Verification gate `cwd` is TreeRelative only (`"."` or a clean relative path such as `pkg`). Absolute gate `cwd` values are rejected with no compatibility rewrite; execution resolves `path.resolve(integrationWorktree, gate.cwd)`.
 
 **Concurrency and recovery.** `maxParallel` is the complete Implementer/Reviewer/Judge pool. No control slot is reserved. Reviews and judgments for one plan may overlap implementation on another; only integration is serialized in the manager service. Before Pi reloads, switches, forks, or exits the current session, the adapter aborts and settles its in-process children without holding shutdown open for manager reconciliation or dispatching replacements from the stale session. The replacement or later resumed session reports each vanished handle interrupted so the manager applies its transport-retry policy; a foreign or legacy engine handle fails closed instead of dispatching a competing worker. Plan edits pause resume on graph drift; `/herder-revise` adopts a validated new immutable generation once workers settle. Stop aborts active child sessions, marks their exact actions interrupted, and preserves repository evidence.
+
+## Final verification environment
+
+Final verification gates run with an explicit minimal environment. Command discovery (`PATH`), locale settings, and the Windows launch variables required to start ordinary commands are retained; ambient variables are not inherited. In particular, credential variables and ambient configuration are unavailable to deterministic gates.
+
+Each gate receives a fresh private state root under the external verification log directory. `HOME`, XDG configuration/data/cache/state/runtime paths, platform home and application-data paths, and temporary directories point into that root. The root is removed after the gate evidence is finalized, while the mode-`0600` log and its hashes are preserved.
+
+Credential-backed verification is unsupported until it has a separate safe contract. Gate logs are not raw-log-redacted; artifact sanitization is a separate responsibility.

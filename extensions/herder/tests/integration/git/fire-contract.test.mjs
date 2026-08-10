@@ -37,7 +37,78 @@ try {
 
   const gateWorktree = path.join(root, "gate-worktree");
   const gateLogs = path.join(root, "gate-logs");
+  const isInside = (parent, candidate) => {
+    const relative = path.relative(parent, candidate);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
   await mkdir(gateWorktree);
+
+  const ambientHome = path.join(root, "ambient-home-sentinel");
+  const ambientXdg = path.join(root, "ambient-xdg-sentinel");
+  const ambientCredential = "herder-ambient-credential-sentinel";
+  const isolationScript = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const names = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"];',
+    'const values = Object.fromEntries(names.map((name) => [name, process.env[name] ?? null]));',
+    'for (const directory of [...new Set(Object.values(values).filter(Boolean))]) fs.accessSync(directory);',
+    'const probePath = path.join(process.env.TMPDIR, "probe.txt");',
+    'fs.writeFileSync(probePath, "usable");',
+    'process.stdout.write(JSON.stringify({ ...values, credential: process.env.HERDER_SYNTHETIC_CREDENTIAL ?? null, probe: fs.readFileSync(probePath, "utf8") }));',
+  ].join("");
+  const isolation = spawnSync(process.execPath, [
+    gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "isolation", "--",
+    process.execPath, "-e", isolationScript,
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: ambientHome,
+      XDG_CONFIG_HOME: path.join(ambientXdg, "config"),
+      XDG_CACHE_HOME: path.join(ambientXdg, "cache"),
+      XDG_DATA_HOME: path.join(ambientXdg, "data"),
+      XDG_STATE_HOME: path.join(ambientXdg, "state"),
+      XDG_RUNTIME_DIR: path.join(ambientXdg, "runtime"),
+      HERDER_SYNTHETIC_CREDENTIAL: ambientCredential,
+    },
+  });
+  assert.equal(isolation.status, 0);
+  const isolationEvidence = JSON.parse(isolation.stdout);
+  const isolationLog = await readFile(isolationEvidence.logPath, "utf8");
+  const isolationReport = JSON.parse(isolationLog);
+  assert.equal(isolationReport.credential, null);
+  assert.equal(isolationReport.probe, "usable");
+  for (const directory of [
+    isolationReport.HOME,
+    isolationReport.XDG_CONFIG_HOME,
+    isolationReport.XDG_CACHE_HOME,
+    isolationReport.XDG_DATA_HOME,
+    isolationReport.XDG_STATE_HOME,
+    isolationReport.XDG_RUNTIME_DIR,
+    isolationReport.TMPDIR,
+    isolationReport.TMP,
+    isolationReport.TEMP,
+  ]) {
+    assert.equal(path.isAbsolute(directory), true);
+    assert.equal(isInside(gateWorktree, directory), false);
+  }
+  assert.notEqual(isolationReport.HOME, ambientHome);
+  assert.equal(isolationLog.includes(ambientCredential), false);
+  assert.equal(isolationLog.includes(ambientHome), false);
+  assert.equal(isolationLog.includes(ambientXdg), false);
+  await assert.rejects(stat(isolationReport.HOME), { code: "ENOENT" });
+  assert.ok((await stat(isolationEvidence.logPath)).isFile());
+
+  const commandName = path.basename(process.execPath);
+  const discoveryPath = [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter);
+  const discovery = spawnSync(process.execPath, [
+    gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "discovery", "--",
+    commandName, "-e", 'process.stdout.write("command discovered")',
+  ], { encoding: "utf8", env: { ...process.env, PATH: discoveryPath } });
+  assert.equal(discovery.status, 0);
+  const discoveryEvidence = JSON.parse(discovery.stdout);
+  assert.match(await readFile(discoveryEvidence.logPath, "utf8"), /command discovered/);
+
   const success = spawnSync(process.execPath, [
     gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "success", "--",
     process.execPath, "-e", 'process.stdout.write("x".repeat(250000))',
