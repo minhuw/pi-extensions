@@ -3,6 +3,7 @@
 import assert from "node:assert/strict"
 import path from "node:path"
 import process from "node:process"
+import test from "node:test"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import {
@@ -13,6 +14,7 @@ import {
 
 const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/coordination-ref.ts")
 
+test("coordination references format and reject malformed values", () => {
 const formatted = formatCheckpointRef({
   planName: "herder-plans",
   plan: "009",
@@ -86,3 +88,4 @@ assert.equal(cli.status, 0, cli.stderr || cli.stdout)
 assert.equal(JSON.parse(cli.stdout).ref, "refs/plan-herder/herder-plans/checkpoints/021/generation-2-012")
 
 process.stdout.write("herder coordination-ref tests passed\n")
+})

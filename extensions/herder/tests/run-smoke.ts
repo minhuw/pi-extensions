@@ -16,25 +16,18 @@ function filesBelow(directory: string, suffix: string): string[] {
 	}).sort();
 }
 
-const integrationScripts = [
-	"tests/integration/profiles/profiles.test.mjs",
-	"tests/integration/plans/plans.test.mjs",
-	"tests/integration/git/fire-contract.test.mjs",
-	"tests/integration/git/coordination-ref-test.mjs",
-	"tests/integration/git/checkout-state-test.mjs",
-	"tests/integration/git/namespace-test.mjs",
-	"tests/integration/git/assignment-bundle-test.mjs",
-	"tests/integration/git/branch-model-test.mjs",
-	"tests/integration/git/cleanup-test.mjs",
-	"tests/integration/dashboard/dashboard.test.mjs",
-].map((file) => path.join(extensionRoot, file));
+const integrationRoot = path.join(extensionRoot, "tests/integration");
+const legacyIntegration = filesBelow(integrationRoot, ".mjs");
+if (legacyIntegration.length > 0) {
+	process.stderr.write(`Legacy integration test files are not supported:\n${legacyIntegration.map((file) => path.relative(extensionRoot, file)).join("\n")}\n`);
+	process.exit(1);
+}
 
-const typedIntegration = filesBelow(path.join(extensionRoot, "tests/integration"), ".test.ts");
+const typedIntegration = filesBelow(integrationRoot, ".test.ts");
 const unit = filesBelow(path.join(extensionRoot, "tests/unit"), ".test.ts");
 const checks: Array<[string, string[], string]> = [
 	["npm", ["run", "typecheck"], repositoryRoot],
-	...integrationScripts.map((file): [string, string[], string] => [process.execPath, [file], extensionRoot]),
-	[process.execPath, ["--experimental-strip-types", "--test", ...typedIntegration], extensionRoot],
+	[process.execPath, ["--experimental-strip-types", "--test", "--test-concurrency=2", ...typedIntegration], extensionRoot],
 	[process.execPath, ["--experimental-strip-types", "--test", ...unit], extensionRoot],
 ];
 

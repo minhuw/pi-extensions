@@ -7,20 +7,22 @@ import os from "node:os"
 import path from "node:path"
 import process from "node:process"
 import { spawnSync } from "node:child_process"
+import test from "node:test"
 import { recordUsage } from "../../../src/core/plans.ts"
-import { executionDatabasePath } from "../../../src/daemon/execution-store.ts"
+import { executionDatabasePath, executionReport } from "../../../src/daemon/execution-store.ts"
+import type { UsageRecord } from "../../../src/daemon/execution-store.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { buildDashboardState, buildForecast, derivePlanPhase, parseLease, parseWorktreeList } from "../../../src/dashboard/dashboard-state.ts"
 import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
 import { createDashboardServer, parseDashboardArguments } from "../../../src/dashboard/herder-dashboard.ts"
 
-function git(root, ...args) {
+function git(root: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" })
   assert.equal(result.status, 0, result.stderr || result.stdout)
   return result.stdout.trim()
 }
 
-function addCompletionProof(repo, planId) {
+function addCompletionProof(repo: string, planId: string): void {
   const head = git(repo, "rev-parse", "HEAD")
   const payload = buildCompletionProofPayload({
     runId: "dashboard-test",
@@ -41,10 +43,10 @@ function addCompletionProof(repo, planId) {
   writeCompletionProof(repo, `refs/plan-herder/demo/completed/${planId}`, payload, `herder-demo-${planId}-generation-1`)
 }
 
-function requestWithHost(url, host) {
+function requestWithHost(url: string, host: string): Promise<{ status: number | undefined; body: string }> {
   return new Promise((resolve, reject) => {
     const request = http.get(url, { headers: { Host: host } }, (response) => {
-      const chunks = []
+      const chunks: Buffer[] = []
       response.on("data", (chunk) => chunks.push(chunk))
       response.on("end", () => resolve({
         status: response.statusCode,
@@ -55,7 +57,7 @@ function requestWithHost(url, host) {
   })
 }
 
-function planBody(id, title, dependencies) {
+function planBody(id: string, title: string, dependencies: string): string {
   return `# Plan ${id}: ${title}
 
 ## Status
@@ -133,7 +135,7 @@ Keep this fixture deterministic.
 `
 }
 
-function writePlans(repo) {
+function writePlans(repo: string): string {
   const planDir = path.join(repo, "herder-plans")
   fs.mkdirSync(planDir, { recursive: true })
   fs.writeFileSync(path.join(planDir, ".gitignore"), ".herder/\n")
@@ -158,7 +160,7 @@ The pipeline consumes the execution store; integration consumes the reviewed pip
 
 The fixture intentionally contains one blocked plan.
 `)
-  const plans = [
+  const plans: Array<[string, string, string, string]> = [
     ["001", "Build execution store", "none", "foundation"],
     ["002", "Run implementation review loop", "herder-plans/001-*.md", "pipeline"],
     ["003", "Integrate reviewed branch", "herder-plans/002-*.md", "integration"],
@@ -172,8 +174,10 @@ The fixture intentionally contains one blocked plan.
   return planDir
 }
 
-function usage(planDir, input) {
-  return recordUsage(planDir, {
+type UsageInput = Parameters<typeof recordUsage>[1]
+
+function usage(planDir: string, input: Partial<UsageInput>): void {
+  recordUsage(planDir, {
     model: "gpt-5.6-sol",
     effort: "xhigh",
     source: "codex-exec",
@@ -280,7 +284,7 @@ function createFixture() {
   }
 }
 
-async function runTests() {
+async function runTests(): Promise<void> {
   const fixture = createFixture()
   try {
     assert.deepEqual(parseDashboardArguments(["--plan-dir", fixture.planDir, "--port", "0", "--pretty"]), {
@@ -306,8 +310,8 @@ async function runTests() {
     assert.deepEqual(detectDashboardEnvironment({}), { kind: "terminal" })
     assert.equal(resolveOrcaCommand({ ORCA_CLI_COMMAND: "/opt/orca-cli" }, "linux"), "/opt/orca-cli")
     assert.equal(resolveOrcaCommand({ TERM_PROGRAM: "vscode", ORCA_PI_STATUS_OWNED: "30011" }, "linux"), "orca")
-    const hostCalls = []
-    const fakeRunCommand = async (command, args) => {
+    const hostCalls: Array<{ command: string; args: string[] }> = []
+    const fakeRunCommand: NonNullable<Parameters<typeof enableDashboardHostAccess>[0]["runCommand"]> = async (command, args) => {
       hostCalls.push({ command, args })
       return { ok: true, code: 0, stdout: "", stderr: "", error: null }
     }
@@ -343,19 +347,39 @@ async function runTests() {
       { path: "/tmp/repo", head: "abc123", branch: "main", detached: false, locked: false, lockReason: null },
       { path: "/tmp/worker", head: "def456", branch: "herder/demo/002", detached: false, locked: true, lockReason: "plan-herder:demo:002:plan-reviewer:a:r" },
     ])
+    const reviewAttempt: UsageRecord = {
+      attempt: "attempt-2",
+      plan: "002",
+      role: "plan-reviewer",
+      model: "gpt-5.6-luna",
+      effort: "max",
+      outcome: "REVISE",
+      inputTokens: null,
+      cachedInputTokens: null,
+      outputTokens: null,
+      reasoningTokens: null,
+      source: "test",
+      round: 3,
+      generation: "generation-1",
+      harness: "pi",
+      serviceTier: "fast",
+      startedAt: null,
+      finishedAt: "2026-08-03T00:00:00Z",
+      durationMs: null,
+    }
     assert.equal(derivePlanPhase(
       { status: "IN PROGRESS", unsatisfied: [] },
-      [{ role: "plan-reviewer", outcome: "REVISE", round: 3, finishedAt: "2026-08-03T00:00:00Z" }],
+      [reviewAttempt],
       null,
       null,
     ), "judge-queued")
     assert.equal(derivePlanPhase(
       { status: "IN PROGRESS", unsatisfied: [] },
       [],
-      { role: "plan-judge" },
+      { role: "plan-judge", attempt: null, task: null, reason: "test" },
       null,
     ), "judge")
-    assert.deepEqual(buildForecast([], { timing: { wallClockMs: null } }), {
+    assert.deepEqual(buildForecast([], executionReport([])), {
       finished: 0,
       unfinished: 0,
       percent: 0,
@@ -366,20 +390,29 @@ async function runTests() {
       estimatedRemainingMs: null,
       byPlan: {},
     })
+    const emptyReport = executionReport([])
     const oneSample = buildForecast([
       {
         id: "001",
         phase: "complete",
-        report: { attempts: 1, timing: { attemptDurationMs: 120000, durationCoverage: { reported: 1, total: 1 } } },
+        report: {
+          ...emptyReport,
+          attempts: 1,
+          timing: { ...emptyReport.timing, attemptDurationMs: 120000, durationCoverage: { reported: 1, total: 1 } },
+        },
       },
       {
         id: "002",
         phase: "ready",
-        report: { attempts: 0, timing: { attemptDurationMs: null, durationCoverage: { reported: 0, total: 0 } } },
+        report: {
+          ...emptyReport,
+          timing: { ...emptyReport.timing, attemptDurationMs: null, durationCoverage: { reported: 0, total: 0 } },
+        },
       },
-    ], { timing: { wallClockMs: 120000 } })
+    ], { ...emptyReport, timing: { ...emptyReport.timing, wallClockMs: 120000 } })
     assert.equal(oneSample.sufficientEvidence, false)
     assert.equal(oneSample.estimatedRemainingMs, null)
+    assert.ok(oneSample.byPlan["002"])
     assert.equal(oneSample.byPlan["002"].remainingMs, null)
 
     const statusBefore = git(fixture.repo, "status", "--porcelain=v1")
@@ -392,18 +425,26 @@ async function runTests() {
     assert.equal(state.accounting.storage, "sqlite")
     assert.equal(state.accounting.attempts, 7)
     assert.equal(state.accounting.tokens.reportedInputOutput, 8400)
+    assert.ok(state.integration.branch)
     assert.equal(state.integration.branch.name, "herder/demo/integration")
     assert.deepEqual(state.integration.completedPlans, ["001", "005"])
     const plans = new Map(state.plans.map((plan) => [plan.id, plan]))
-    assert.equal(plans.get("001").phase, "complete")
-    assert.equal(plans.get("002").phase, "review")
-    assert.equal(plans.get("002").lease.role, "plan-reviewer")
-    assert.equal(plans.get("002").rounds[0].attempts.length, 2)
-    assert.equal(plans.get("003").phase, "waiting")
-    assert.deepEqual(plans.get("003").unsatisfied, ["002"])
-    assert.equal(plans.get("004").phase, "blocked")
-    assert.equal(plans.get("005").phase, "complete")
-    assert.equal(plans.get("006").phase, "ready")
+    const plan = (id: string) => {
+      const value = plans.get(id)
+      assert.ok(value, id)
+      return value
+    }
+    assert.equal(plan("001").phase, "complete")
+    const reviewingPlan = plan("002")
+    assert.equal(reviewingPlan.phase, "review")
+    assert.ok(reviewingPlan.lease)
+    assert.equal(reviewingPlan.lease.role, "plan-reviewer")
+    assert.equal(reviewingPlan.rounds[0].attempts.length, 2)
+    assert.equal(plan("003").phase, "waiting")
+    assert.deepEqual(plan("003").unsatisfied, ["002"])
+    assert.equal(plan("004").phase, "blocked")
+    assert.equal(plan("005").phase, "complete")
+    assert.equal(plan("006").phase, "ready")
     assert.deepEqual(state.forecast, {
       finished: 2,
       unfinished: 4,
@@ -429,7 +470,7 @@ async function runTests() {
     try {
       const page = await fetch(dashboard.url)
       assert.equal(page.status, 200)
-      assert.match(page.headers.get("content-security-policy"), /default-src 'self'/)
+      assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'self'/)
       const pageText = await page.text()
       assert.match(pageText, /Herder dashboard overview/)
       assert.equal((pageText.match(/data-section-toggle/g) ?? []).length, 3)
@@ -446,7 +487,8 @@ async function runTests() {
       const api = await fetch(new URL("api/state", dashboard.url))
       assert.equal(api.status, 200)
       assert.equal(api.headers.get("cache-control"), "no-store")
-      assert.equal((await api.json()).planSet.name, "demo")
+      const apiState = await api.json() as { planSet: { name: string } }
+      assert.equal(apiState.planSet.name, "demo")
       const health = await fetch(new URL("api/health", dashboard.url))
       assert.deepEqual(await health.json(), { ok: true, readOnly: true })
       const head = await fetch(dashboard.url, { method: "HEAD" })
@@ -471,7 +513,7 @@ async function runTests() {
   }
 }
 
-async function serveFixture() {
+async function serveFixture(): Promise<void> {
   const fixture = createFixture()
   const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
   process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
@@ -485,8 +527,8 @@ async function serveFixture() {
 }
 
 const serve = process.argv.slice(2).includes("--serve")
-const main = serve ? serveFixture : runTests
-main().catch((error) => {
-  process.stderr.write(`${path.basename(new URL(import.meta.url).pathname)}: ${error.stack ?? error.message}\n`)
-  process.exitCode = 1
-})
+if (serve) {
+  await serveFixture()
+} else {
+  test("dashboard state, host access, and HTTP behavior remain observable", runTests)
+}

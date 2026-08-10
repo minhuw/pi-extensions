@@ -5,7 +5,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import process from "node:process"
-import { spawnSync } from "node:child_process"
+import { spawnSync, type SpawnSyncReturns } from "node:child_process"
+import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { parseWorktreeRecords } from "../../../src/daemon/git/cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
@@ -14,17 +15,36 @@ import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const cleanup = path.resolve(scriptDir, "../../../src/daemon/git/cleanup-run.ts")
 
-function run(command, args, { cwd, allowFailure = false, env = process.env } = {}) {
+type CommandOptions = { cwd?: string; allowFailure?: boolean; env?: NodeJS.ProcessEnv }
+
+type CleanupAction = { branch: string; kind?: string; proof?: string }
+type CleanupSkip = { branch: string; reason: string }
+type CleanupJson = {
+  planName: string
+  integrationBranch: string
+  actions: CleanupAction[]
+  removed: CleanupAction[]
+  preserved: { coordinationRefs: string | null; integrationBranch: string | null }
+  skipped: CleanupSkip[]
+  finalization: {
+    eligible: boolean
+    blockers: Array<{ reason: string; ref?: string }>
+    refsPlanned: Array<{ ref: string; target: string; kind: string; plan?: string }>
+  }
+  handoff: { eligible: boolean; blockers: Array<{ reason: string }>; removed: boolean }
+}
+
+function run(command: string, args: string[], { cwd, allowFailure = false, env = process.env }: CommandOptions = {}): SpawnSyncReturns<string> {
   const result = spawnSync(command, args, { cwd, env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
   if (!allowFailure) assert.equal(result.status, 0, result.stderr || result.stdout)
   return result
 }
 
-function git(repo, ...args) {
+function git(repo: string, ...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
-function planBody(id, title) {
+function planBody(id: string, title: string): string {
   return `# Plan ${id}: ${title}
 
 ## Status
@@ -84,7 +104,9 @@ Keep the fixture small.
 `
 }
 
-function writePlans(repo, rows) {
+type PlanRow = { id: string; title: string; status: string }
+
+function writePlans(repo: string, rows: PlanRow[]): string {
   const planDir = path.join(repo, "plans")
   fs.mkdirSync(planDir)
   const tableRows = rows.map(({ id, title, status }) => `| [${id}](${id}-${title.toLowerCase().replaceAll(" ", "-")}.md) | ${title} | P1 | S | — | ${status} |`)
@@ -102,20 +124,20 @@ ${tableRows.join("\n")}
   return planDir
 }
 
-function addWorktree(repo, root, branch, startPoint) {
+function addWorktree(repo: string, root: string, branch: string, startPoint: string): string {
   git(repo, "branch", branch, startPoint)
   const worktree = path.join(root, branch.replaceAll("/", "-"))
   git(repo, "worktree", "add", "-q", worktree, branch)
   return worktree
 }
 
-function commitFile(worktree, name, contents, message) {
+function commitFile(worktree: string, name: string, contents: string, message: string): void {
   fs.writeFileSync(path.join(worktree, name), contents)
   git(worktree, "add", name)
   git(worktree, "commit", "-q", "-m", message)
 }
 
-function addCompletionProof(repo, ref, planId, commit) {
+function addCompletionProof(repo: string, ref: string, planId: string, commit: string) {
   const payload = buildCompletionProofPayload({
     runId: "cleanup-test",
     planId,
@@ -135,7 +157,9 @@ function addCompletionProof(repo, ref, planId, commit) {
   return writeCompletionProof(repo, ref, payload, `herder-plans-${planId}-generation-1`)
 }
 
-function cleanupResult(repo, planDir, extra = [], { allowFailure = false, env = process.env } = {}) {
+type CleanupOptions = { allowFailure?: boolean; env?: NodeJS.ProcessEnv }
+
+function cleanupResult(repo: string, planDir: string, extra: string[] = [], { allowFailure = false, env = process.env }: CleanupOptions = {}) {
   const result = run(process.execPath, [
     cleanup,
     "--repo", repo,
@@ -143,10 +167,14 @@ function cleanupResult(repo, planDir, extra = [], { allowFailure = false, env = 
     "--pretty",
     ...extra,
   ], { cwd: repo, allowFailure, env })
-  return { process: result, json: result.status === 0 ? JSON.parse(result.stdout) : null }
+  return {
+    process: result,
+    json: result.status === 0 ? JSON.parse(result.stdout) as CleanupJson : {} as CleanupJson,
+  }
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-cleanup-test-"))
+test("cleanup preserves evidence and finalizes eligible namespaces", () => {
 try {
   const removedRuntime = run(process.execPath, [
     cleanup,
@@ -234,11 +262,16 @@ try {
   assert.equal(preview.actions[0].proof, "ancestor")
   assert.equal(preview.removed.length, 0)
   assert.equal(preview.preserved.coordinationRefs, "refs/plan-herder/plans/")
-  assert.equal(preview.skipped.find((item) => item.branch === blockedBranch).reason, "preserved-non-done-evidence")
-  assert.equal(preview.skipped.find((item) => item.branch === prooflessBranch).reason, "completion-proof-missing")
-  assert.equal(preview.skipped.find((item) => item.branch === dirtyDoneBranch).reason, "worktree-dirty")
-  assert.equal(preview.skipped.find((item) => item.branch === lockedDoneBranch).reason, "worktree-locked")
-  assert.equal(preview.skipped.find((item) => item.branch === unknownBranch).reason, "unrecognized-plan-branch")
+  const skipped = (branch: string) => {
+    const item = preview.skipped.find((candidate) => candidate.branch === branch)
+    assert.ok(item)
+    return item
+  }
+  assert.equal(skipped(blockedBranch).reason, "preserved-non-done-evidence")
+  assert.equal(skipped(prooflessBranch).reason, "completion-proof-missing")
+  assert.equal(skipped(dirtyDoneBranch).reason, "worktree-dirty")
+  assert.equal(skipped(lockedDoneBranch).reason, "worktree-locked")
+  assert.equal(skipped(unknownBranch).reason, "unrecognized-plan-branch")
 
   const scoped = cleanupResult(repo, planDir, ["--plan", "1", "--dry-run"]).json
   assert.deepEqual(scoped.actions.map((item) => item.branch), [doneBranch])
@@ -361,3 +394,4 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})

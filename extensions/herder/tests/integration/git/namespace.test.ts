@@ -5,6 +5,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import process from "node:process"
+import test from "node:test"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { inspectNamespace, validatePlanName } from "../../../src/daemon/git/namespace-run.ts"
@@ -12,17 +13,17 @@ import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts
 
 const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/namespace-run.ts")
 
-function run(command, args, { cwd, allowFailure = false } = {}) {
+function run(command: string, args: string[], { cwd, allowFailure = false }: { cwd?: string; allowFailure?: boolean } = {}) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
   if (!allowFailure) assert.equal(result.status, 0, result.stderr || result.stdout)
   return result
 }
 
-function git(repo, ...args) {
+function git(repo: string, ...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
-function planBody(id) {
+function planBody(id: string): string {
   return `# Plan ${id}: Namespace fixture
 
 ## Status
@@ -82,7 +83,7 @@ Keep the fixture small.
 `
 }
 
-function writePlans(repo) {
+function writePlans(repo: string): string {
   const planDir = path.join(repo, "plans")
   const planIds = ["001", "009", "019", "020", "021", "023"]
   fs.mkdirSync(planDir)
@@ -101,6 +102,7 @@ ${planIds.map((id) => `| [${id}](${id}-namespace.md) | Namespace ${id} | P1 | S 
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-namespace-test-"))
+test("Git namespace inspection rejects collisions and preserves coordination refs", () => {
 try {
   const repo = path.join(root, "repo")
   fs.mkdirSync(repo)
@@ -137,6 +139,8 @@ try {
 
   const resumed = inspectNamespace({ repo, planDir, mode: "resume" })
   assert.equal(resumed.ok, true)
+  assert.ok(resumed.integration)
+  assert.ok(resumed.baseRef)
   assert.equal(resumed.integration.branch, "herder/plans/integration")
   assert.equal(resumed.baseRef.ref, "refs/plan-herder/plans/base")
   assert.deepEqual(resumed.planBranches.map((item) => item.relative), ["001"])
@@ -198,3 +202,4 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})

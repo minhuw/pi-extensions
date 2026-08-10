@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict"
-import { spawnSync } from "node:child_process"
+import { spawnSync, type SpawnSyncReturns } from "node:child_process"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import process from "node:process"
+import test from "node:test"
 import { fileURLToPath } from "node:url"
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
@@ -14,21 +15,32 @@ const root = await mkdtemp(path.join(tmpdir(), "herder-checkout-state-test-"))
 const repo = path.join(root, "repo")
 const planDir = path.join(repo, "herder-plans")
 
-function run(command, args, { expectedStatus = 0 } = {}) {
+type CheckoutState = {
+  ok: boolean
+  mode: string
+  fingerprint: string
+  stateToken: string
+  summary: { trackedContentCount: number; untrackedContentCount: number }
+  changedComponents: string[]
+  error: string
+}
+
+function run(command: string, args: string[], { expectedStatus = 0 }: { expectedStatus?: number } = {}): SpawnSyncReturns<string> {
   const result = spawnSync(command, args, { cwd: repo, encoding: "utf8" })
   assert.equal(result.status, expectedStatus, result.stderr || result.stdout)
   return result
 }
 
-function git(...args) {
+function git(...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
-function checkoutState(args = [], expectedStatus = 0) {
+function checkoutState(args: string[] = [], expectedStatus = 0): CheckoutState {
   const result = run(process.execPath, [guard, "--repo", repo, "--exclude", planDir, ...args], { expectedStatus })
-  return JSON.parse(result.stdout)
+  return JSON.parse(result.stdout) as CheckoutState
 }
 
+test("checkout state captures and detects user-owned changes", async () => {
 try {
   await mkdir(planDir, { recursive: true })
   git("init", "-q")
@@ -97,3 +109,4 @@ try {
 } finally {
   await rm(root, { recursive: true, force: true })
 }
+})

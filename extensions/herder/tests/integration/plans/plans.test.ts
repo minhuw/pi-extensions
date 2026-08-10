@@ -5,6 +5,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import test from "node:test"
 import {
   bindRunProfile,
   buildGraph,
@@ -20,13 +21,13 @@ import {
 } from "../../../src/core/plans.ts"
 import { executionDatabasePath } from "../../../src/daemon/execution-store.ts"
 
-function git(root, ...args) {
+function git(root: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" })
   assert.equal(result.status, 0, result.stderr || result.stdout)
   return result.stdout.trim()
 }
 
-function planBody(id, title, dependencies) {
+function planBody(id: string, title: string, dependencies: string): string {
   return `# Plan ${id}: ${title}
 
 ## Status
@@ -104,7 +105,7 @@ Keep the fixture small.
 `
 }
 
-function writeFixture(root, { cycle = false, mismatch = false } = {}) {
+function writeFixture(root: string, { cycle = false, mismatch = false }: { cycle?: boolean; mismatch?: boolean } = {}): string {
   const planDir = path.join(root, "herder-plans")
   fs.mkdirSync(planDir, { recursive: true })
   fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
@@ -123,11 +124,17 @@ function writeFixture(root, { cycle = false, mismatch = false } = {}) {
   return planDir
 }
 
-function expectFailure(fn, pattern) {
+function expectFailure(fn: () => unknown, pattern: RegExp): void {
   assert.throws(fn, pattern)
 }
 
+function required<T>(value: T | null | undefined): T {
+  assert.ok(value)
+  return value
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-plans-test-"))
+test("plan graph, snapshots, and usage reports preserve their contracts", () => {
 try {
   const repo = path.join(root, "repo")
   fs.mkdirSync(repo)
@@ -170,12 +177,13 @@ try {
   assert.equal(valid.shapeReady, true)
   assert.equal(valid.plans.length, 3, "non-executable leak records entered the plan graph")
   assert.deepEqual(valid.overlaps, [])
-  assert.equal(valid.plans.find((plan) => plan.id === "003").statusDetail, "previous attempt stopped")
+  assert.equal(required(valid.plans.find((plan) => plan.id === "003")).statusDetail, "previous attempt stopped")
   const shape = getShapeReport(valid.planDir)
   assert.equal(shape.shapeReady, true)
-  assert.equal(shape.plans.find((plan) => plan.id === "002").planWords < 1200, true)
-  assert.equal(Number.isSafeInteger(shape.plans.find((plan) => plan.id === "002").planLines), true)
-  assert.equal(Object.hasOwn(shape.plans.find((plan) => plan.id === "002"), "reviewBudget"), false)
+  const shapePlan = required(shape.plans.find((plan) => plan.id === "002"))
+  assert.equal(shapePlan.planWords < 1200, true)
+  assert.equal(Number.isSafeInteger(shapePlan.planLines), true)
+  assert.equal(Object.hasOwn(shapePlan, "reviewBudget"), false)
 
   const readmeBeforeUsage = fs.readFileSync(valid.readme, "utf8")
   const runProfile = {
@@ -190,7 +198,7 @@ try {
   }
   assert.equal(bindRunProfile(valid.planDir, runProfile).recorded, true)
   assert.equal(bindRunProfile(valid.planDir, runProfile).recorded, false)
-  assert.deepEqual(getRunProfile(valid.planDir).configuration.roles, runProfile.roles)
+  assert.deepEqual(required(getRunProfile(valid.planDir).configuration).roles, runProfile.roles)
   expectFailure(
     () => bindRunProfile(valid.planDir, { ...runProfile, profile: "eclipse" }),
     /already bound to poorman/,
@@ -242,10 +250,10 @@ try {
     tokenAttempts: 1,
     knownTokens: 1200,
   }])
-  assert.equal(usage.byRole.find((row) => row.key === "plan-implementer").knownTokens, 1200)
-  assert.equal(usage.byModel.find((row) => row.key === "gpt-5.6-luna / max").tokenAttempts, 0)
+  assert.equal(required(usage.byRole.find((row) => row.key === "plan-implementer")).knownTokens, 1200)
+  assert.equal(required(usage.byModel.find((row) => row.key === "gpt-5.6-luna / max")).tokenAttempts, 0)
   assert.equal(usage.storage, "sqlite")
-  assert.equal(usage.runConfiguration.profile, "poorman")
+  assert.equal(required(usage.runConfiguration).profile, "poorman")
   assert.equal(fs.readFileSync(valid.readme, "utf8"), readmeBeforeUsage)
   assert.equal(fs.existsSync(executionDatabasePath(valid.planDir)), true)
   const databaseBeforeReports = fs.readFileSync(executionDatabasePath(valid.planDir))
@@ -257,12 +265,12 @@ try {
   assert.equal(planReport.timing.wallClockMs, 5000)
   assert.equal(planReport.timing.attemptDurationMs, 5000)
   assert.deepEqual(planReport.timing.durationCoverage, { reported: 2, total: 2 })
-  assert.equal(planReport.byRole.find((row) => row.key === "plan-reviewer").attempts, 1)
-  assert.equal(planReport.byHarness.find((row) => row.key === "pi").attempts, 2)
-  assert.equal(planReport.byGeneration.find((row) => row.key === "generation-1").attempts, 2)
-  assert.equal(planReport.byServiceTier.find((row) => row.key === "fast").attempts, 1)
+  assert.equal(required(planReport.byRole.find((row) => row.key === "plan-reviewer")).attempts, 1)
+  assert.equal(required(planReport.byHarness.find((row) => row.key === "pi")).attempts, 2)
+  assert.equal(required(planReport.byGeneration.find((row) => row.key === "generation-1")).attempts, 2)
+  assert.equal(required(planReport.byServiceTier.find((row) => row.key === "fast")).attempts, 1)
   assert.equal(planReport.lifecycle.status, "TODO")
-  assert.equal(planReport.runConfiguration.profile, "poorman")
+  assert.equal(required(planReport.runConfiguration).profile, "poorman")
   assert.deepEqual(fs.readFileSync(executionDatabasePath(valid.planDir)), databaseBeforeReports)
   expectFailure(
     () => recordUsage(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),
@@ -298,12 +306,12 @@ Keep shared fixture facts in one compiled snapshot input.
   assert.equal(composedSnapshot.contextText.includes("Plan-Set Context"), true)
 
   projectStatuses(valid.planDir, [{ id: "002", status: "IN PROGRESS" }])
-  assert.equal(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002").status, "IN PROGRESS")
+  assert.equal(required(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002")).status, "IN PROGRESS")
   expectFailure(() => projectStatuses(valid.planDir, [{ id: "002", status: "BLOCKED" }]), /requires a one-line status detail/)
   projectStatuses(valid.planDir, [{ id: "002", status: "BLOCKED", detail: "verification failed" }])
-  assert.equal(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002").statusDetail, "verification failed")
+  assert.equal(required(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002")).statusDetail, "verification failed")
   projectStatuses(valid.planDir, [{ id: "002", status: "DONE" }])
-  assert.equal(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002").status, "DONE")
+  assert.equal(required(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002")).status, "DONE")
 
   expectFailure(
     () => buildGraph(writeFixture(path.join(root, "mismatch"), { mismatch: true })),
@@ -338,7 +346,7 @@ Keep shared fixture facts in one compiled snapshot input.
       "- **Parent objective**: Exercise the plan manager fixture\n- **Review budget**: arbitrary legacy value, changed_lines<=0\n",
     ),
   )
-  const ignoredLegacyBudget = buildGraph(legacyBudget).plans.find((plan) => plan.id === "002")
+  const ignoredLegacyBudget = required(buildGraph(legacyBudget).plans.find((plan) => plan.id === "002"))
   assert.equal(Object.hasOwn(ignoredLegacyBudget, "reviewBudget"), false)
   assert.equal(ignoredLegacyBudget.shapeReady, true)
 
@@ -410,3 +418,4 @@ Keep shared fixture facts in one compiled snapshot input.
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
+import test from "node:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -14,19 +15,41 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const assignmentManager = path.resolve(scriptDir, "../../../src/daemon/git/assignment-bundle.ts")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-assignment-test-"))
 
-function git(cwd, ...args) {
+type AssignmentResult = {
+  ok: boolean
+  scope: string
+  branch: string
+  relativePath: string
+  bundlePath: string
+  bundleSha256: string
+  snapshotSha256: string
+  verificationMode: string
+  workerMode: string
+  detachedHead: string
+  rebaseOnto: string
+  rebaseOrigHead: string
+  planHead: string
+  checkpointRef: string
+  checkpoint: string
+  rebaseStateSha256: string
+  conflicts: string[]
+  error: string
+  [key: string]: unknown
+}
+
+function git(cwd: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" })
   assert.equal(result.status, 0, result.stderr || result.stdout)
   return result.stdout.trim()
 }
 
-function assignment(args, expectedStatus = 0) {
+function assignment(args: string[], expectedStatus = 0): AssignmentResult {
   const result = spawnSync(process.execPath, [assignmentManager, ...args], { encoding: "utf8" })
   assert.equal(result.status, expectedStatus, result.stderr || result.stdout)
   return JSON.parse(result.stdout)
 }
 
-function replaceOption(args, flag, value) {
+function replaceOption(args: string[], flag: string, value: string): string[] {
   const copy = [...args]
   const index = copy.indexOf(flag)
   assert.notEqual(index, -1, `missing fixture option ${flag}`)
@@ -34,7 +57,7 @@ function replaceOption(args, flag, value) {
   return copy
 }
 
-function planBody() {
+function planBody(): string {
   return `# Plan 001: Keep assignment context local
 
 ## Status
@@ -112,7 +135,7 @@ Keep assignment transport deterministic.
 `
 }
 
-function writePlan(planDir) {
+function writePlan(planDir: string): void {
   fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
 
 ## Execution order & status
@@ -124,7 +147,7 @@ function writePlan(planDir) {
   fs.writeFileSync(path.join(planDir, "001-local-assignment.md"), planBody())
 }
 
-function createFixture(name, { track }) {
+function createFixture(name: string, { track }: { track: boolean }) {
   const repo = path.join(root, name)
   const worktree = path.join(root, `${name}-worktree`)
   fs.mkdirSync(repo)
@@ -145,6 +168,7 @@ function createFixture(name, { track }) {
   return { repo, worktree, planDir, head, branch, snapshot: snapshotPlan(planDir, "001") }
 }
 
+test("assignment bundles remain immutable and worktree-bound", () => {
 try {
   for (const track of [false, true]) {
     const name = track ? "tracked" : "local"
@@ -170,7 +194,7 @@ try {
     )
 
     const bundleBytes = fs.readFileSync(materialized.bundlePath)
-    const bundle = JSON.parse(bundleBytes)
+    const bundle = JSON.parse(bundleBytes.toString("utf8"))
     assert.equal(bundle.schemaVersion, 1)
     assert.equal(bundle.kind, "herder-plan-assignment")
     assert.equal(bundle.plan.id, "001")
@@ -180,7 +204,7 @@ try {
     assert.equal(bundle.snapshotSha256, fixture.snapshot.snapshotSha256)
     assert.equal(bundle.assignment.branch, fixture.branch)
     assert.equal(bundle.assignment.generationBase, fixture.head)
-    assert.equal(bundle.snapshotInputs.some((input) => Object.hasOwn(input, "file")), false)
+    assert.equal(bundle.snapshotInputs.some((input: Record<string, unknown>) => Object.hasOwn(input, "file")), false)
     assert.equal(bundleBytes.includes(Buffer.from(fixture.repo)), false)
     assert.equal(fs.statSync(materialized.bundlePath).mode & 0o222, 0)
 
@@ -214,7 +238,7 @@ try {
     ])
     assert.equal(runMaterialized.scope, "RUN")
     assert.equal(runMaterialized.relativePath, "herder-plans/.herder/run-assignment-generation-1.json")
-    const runBundle = JSON.parse(fs.readFileSync(runMaterialized.bundlePath))
+    const runBundle = JSON.parse(fs.readFileSync(runMaterialized.bundlePath, "utf8"))
     assert.equal(runBundle.kind, "herder-run-assignment")
     assert.equal(runBundle.assignment.graphGeneration, 1)
     assert.equal(runBundle.plans.length, 1)
@@ -501,3 +525,4 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})

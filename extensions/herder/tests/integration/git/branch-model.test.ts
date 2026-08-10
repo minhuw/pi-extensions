@@ -6,6 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import process from "node:process"
 import { spawnSync } from "node:child_process"
+import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
@@ -14,17 +15,17 @@ import { projectStatuses } from "../../../src/core/plans.ts"
 
 const cleanup = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/cleanup-run.ts")
 
-function run(command, args, { cwd, input, allowFailure = false } = {}) {
+function run(command: string, args: string[], { cwd, input, allowFailure = false }: { cwd?: string; input?: string; allowFailure?: boolean } = {}) {
   const result = spawnSync(command, args, { cwd, input, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
   if (!allowFailure) assert.equal(result.status, 0, result.stderr || result.stdout)
   return result
 }
 
-function git(repo, ...args) {
+function git(repo: string, ...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
-function planBody() {
+function planBody(): string {
   return `# Plan 001: Branch model
 
 ## Status
@@ -85,6 +86,7 @@ Keep the fixture deterministic.
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-branch-model-test-"))
+test("plan branches rebase, integrate, and clean up deterministically", () => {
 try {
   const repo = path.join(root, "repo")
   const worktreeRoot = path.join(root, "worktrees", "plans")
@@ -194,7 +196,7 @@ try {
     "--plan", "001",
     "--pretty",
   ], { cwd: repo })
-  const cleaned = JSON.parse(cleanupResult.stdout)
+  const cleaned = JSON.parse(cleanupResult.stdout) as { removed: Array<{ branch: string }> }
   assert.deepEqual(cleaned.removed.map((item) => item.branch), [planBranch])
   assert.equal(git(repo, "branch", "--list", planBranch), "")
   assert.notEqual(git(repo, "branch", "--list", integrationBranch), "")
@@ -213,3 +215,4 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})

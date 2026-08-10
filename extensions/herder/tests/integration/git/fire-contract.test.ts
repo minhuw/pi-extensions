@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -15,8 +16,9 @@ const roundPolicy = path.resolve(scriptDir, "../../../src/daemon/git/round-polic
 const pluginRoot = path.resolve(scriptDir, "../../..");
 const root = await mkdtemp(path.join(tmpdir(), "herder-fire-test-"));
 
+test("Fire policy and gate execution remain isolated and fail-closed", async () => {
 try {
-  const policy = (...args) => JSON.parse(execFileSync(process.execPath, [roundPolicy, ...args], { encoding: "utf8" }));
+  const policy = (...args: string[]) => JSON.parse(execFileSync(process.execPath, [roundPolicy, ...args], { encoding: "utf8" }));
   assert.equal(policy("review", "--round", "1", "--verdict", "APPROVE", "--scope", "PASS", "--open-blockers", "0").action, "READY_TO_INTEGRATE");
   assert.equal(policy("review", "--round", "2", "--verdict", "REVISE", "--scope", "PASS", "--open-blockers", "1").action, "REPAIR_DIRECT");
   assert.equal(policy("review", "--round", "3", "--verdict", "REVISE", "--scope", "PASS", "--open-blockers", "1").action, "JUDGE");
@@ -38,7 +40,7 @@ try {
 
   const gateWorktree = path.join(root, "gate-worktree");
   const gateLogs = path.join(root, "gate-logs");
-  const isInside = (parent, candidate) => {
+  const isInside = (parent: string, candidate: string) => {
     const relative = path.relative(parent, candidate);
     return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
   };
@@ -191,3 +193,4 @@ try {
 } finally {
   await rm(root, { recursive: true, force: true });
 }
+});
