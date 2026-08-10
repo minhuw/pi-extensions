@@ -298,6 +298,38 @@ test("a service log symlink is rejected without changing its target or registeri
 	}
 });
 
+test("active healthy reuse repairs a broadened service log", { skip: !POSIX }, async () => {
+	const root = planRoot();
+	const directory = planDirectory(root);
+	const logPath = path.join(directory, ".herder", "service.log");
+	try {
+		const initial = await ensureService(directory);
+		fs.chmodSync(logPath, 0o644);
+		const reused = await ensureService(directory);
+		assert.equal(reused.instanceId, initial.instanceId);
+		assert.equal(mode(logPath), 0o600);
+	} finally {
+		await stopService(directory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a runtime directory symlink is rejected before lock mutation", { skip: !POSIX }, async () => {
+	const root = planRoot();
+	const directory = planDirectory(root);
+	const external = fs.mkdtempSync(path.join(os.tmpdir(), "herder-runtime-external-"));
+	const staleLock = path.join(external, "service-start.lock");
+	fs.writeFileSync(staleLock, "999999\\n", { mode: 0o600 });
+	fs.symlinkSync(external, path.join(directory, ".herder"));
+	try {
+		await assert.rejects(() => ensureService(directory), /real directory/);
+		assert.equal(fs.existsSync(staleLock), true);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(external, { recursive: true, force: true });
+	}
+});
+
 test("a broad regular service log is repaired before daemon startup", { skip: !POSIX }, async () => {
 	const root = planRoot();
 	const directory = planDirectory(root);

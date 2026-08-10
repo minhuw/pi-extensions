@@ -124,13 +124,14 @@ export async function healthyService(planDirectory: string): Promise<StoredServi
 	if (!service) return null;
 	try {
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
-		return health.instanceId === service.instanceId
+		const compatible = health.instanceId === service.instanceId
 			&& Number(health.pid) === service.pid
 			&& Number(health.managerProtocolVersion) === MANAGER_PROTOCOL_VERSION
 			&& Number(health.executionSchemaVersion) === EXECUTION_SCHEMA_VERSION
 			&& Array.isArray(health.capabilities)
-			&& health.capabilities.includes("durable-operations")
-			? service : null;
+			&& health.capabilities.includes("durable-operations");
+		if (!compatible) return null;
+		return existingServiceLogIsSafe(path.join(path.resolve(planDirectory), ".herder", "service.log")) ? service : null;
 	} catch {
 		return null;
 	}
@@ -187,8 +188,59 @@ function acquireStartLock(lockPath: string): number | null {
 	}
 }
 
+function ensureRuntimeDirectory(directoryPath: string): fs.Stats {
+	let stat: fs.Stats | null;
+	try { stat = fs.lstatSync(directoryPath); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		try { fs.mkdirSync(directoryPath, { mode: 0o700 }); }
+		catch (mkdirError) {
+			if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+		}
+		stat = fs.lstatSync(directoryPath);
+	}
+	if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Execution runtime path must be a real directory: ${directoryPath}`);
+	return stat;
+}
+
 function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
 	return left.dev === right.dev && left.ino === right.ino;
+}
+
+function privateServiceLogMode(stat: fs.Stats): boolean {
+	return process.platform === "win32" || (stat.mode & 0o7777) === 0o600;
+}
+
+function existingServiceLogIsSafe(logPath: string): boolean {
+	if (!fs.constants.O_NOFOLLOW) throw new Error(`Safe service log opening is unavailable: ${logPath}`);
+	let descriptor: number | undefined;
+	try {
+		let named: fs.Stats;
+		try { named = fs.lstatSync(logPath); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw error;
+		}
+		if (named.isSymbolicLink() || !named.isFile()) return false;
+		descriptor = fs.openSync(logPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+		const opened = fs.fstatSync(descriptor);
+		if (opened.isSymbolicLink() || !opened.isFile() || !sameFileIdentity(opened, named)) return false;
+		if (!privateServiceLogMode(opened)) fs.fchmodSync(descriptor, 0o600);
+		const repaired = fs.fstatSync(descriptor);
+		const verified = fs.lstatSync(logPath);
+		return repaired.isFile()
+			&& privateServiceLogMode(repaired)
+			&& !verified.isSymbolicLink()
+			&& verified.isFile()
+			&& sameFileIdentity(repaired, verified);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ELOOP") return false;
+		return false;
+	} finally {
+		if (descriptor !== undefined) {
+			try { fs.closeSync(descriptor); } catch {}
+		}
+	}
 }
 
 function openServiceLog(logPath: string): number {
@@ -219,7 +271,7 @@ function openServiceLog(logPath: string): number {
 		fs.fchmodSync(descriptor, 0o600);
 		const repaired = fs.fstatSync(descriptor);
 		const verified = fs.lstatSync(logPath);
-		if (!repaired.isFile() || (repaired.mode & 0o077) !== 0 || verified.isSymbolicLink() || !verified.isFile() || !sameFileIdentity(repaired, verified)) {
+		if (!repaired.isFile() || !privateServiceLogMode(repaired) || verified.isSymbolicLink() || !verified.isFile() || !sameFileIdentity(repaired, verified)) {
 			throw new Error(`Service log is not a private regular file: ${logPath}`);
 		}
 		return descriptor;
@@ -257,8 +309,9 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 		throw new Error(`Herder plan index is missing or unsafe: ${readme}`);
 	}
 	const runtimeDirectory = path.join(planDirectory, ".herder");
-	fs.mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+	ensureRuntimeDirectory(runtimeDirectory);
 	const lockPath = path.join(runtimeDirectory, "service-start.lock");
+	const logPath = path.join(runtimeDirectory, "service.log");
 	const runWithStartLock = async (lock: number): Promise<StoredService | null> => {
 		let releaseRotationEpoch: (() => void) | undefined;
 		try {
@@ -283,13 +336,23 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 			markerIdentity = executionRotationMarkerIdentity(planDirectory);
 			rotationRequired = markerIdentity !== null;
 			const registered = registeredService(planDirectory);
+			const registeredLogSafe = registered ? existingServiceLogIsSafe(logPath) : true;
+			const registeredLogPresent = registered ? (() => {
+				try { fs.lstatSync(logPath); return true; }
+				catch { return false; }
+			})() : false;
 			if (rotationRequired && registered && serviceProcessAlive(registered.pid)) {
 				await terminateServiceProcess(registered.pid);
 			} else if (registered && serviceProcessAlive(registered.pid)) {
-				// An authenticated daemon that explicitly reports an obsolete protocol is
-				// replaced immediately. An unresponsive owner still receives the grace period.
-				if (await incompatibleService(registered)) await terminateServiceProcess(registered.pid);
-				else {
+				if (!registeredLogSafe && registeredLogPresent) {
+					// Never reuse a daemon whose append target cannot be proven to be a
+					// private regular file. The startup helper will refuse symlinks too.
+					await terminateServiceProcess(registered.pid);
+				} else if (await incompatibleService(registered)) {
+					// An authenticated daemon that explicitly reports an obsolete protocol is
+					// replaced immediately. An unresponsive owner still receives the grace period.
+					await terminateServiceProcess(registered.pid);
+				} else {
 					// A live daemon already owns this plan directory. Never spawn a duplicate:
 					// give a busy daemon time to answer, and replace it only if it stays wedged.
 					const deadline = Date.now() + (options.unresponsiveGraceMs ?? DEFAULT_UNRESPONSIVE_GRACE_MS);
@@ -392,7 +455,7 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 				return null;
 			};
 			for (;;) {
-				spawnServiceProcess(planDirectory, options, path.join(runtimeDirectory, "service.log"));
+				spawnServiceProcess(planDirectory, options, logPath);
 				let result = await waitForService(SERVICE_STARTUP_ATTEMPTS, 100);
 				if (result === "restart") continue;
 				if (result) return result;
@@ -414,22 +477,35 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 		}
 	};
 
+	let launchAttempted = false;
+	ensureRuntimeDirectory(runtimeDirectory);
 	let lock = acquireStartLock(lockPath);
 	if (lock !== null) {
+		launchAttempted = true;
 		const result = await runWithStartLock(lock);
 		if (result) return result;
 	}
 	for (let attempt = 0; attempt < SERVICE_REPLACEMENT_ATTEMPTS; attempt += 1) {
-		lock = acquireStartLock(lockPath);
-		if (lock !== null) {
-			const result = await runWithStartLock(lock);
-			if (result) return result;
+		const service = await healthyUnmarkedService(planDirectory);
+		if (service) return service;
+		if (!launchAttempted) {
+			ensureRuntimeDirectory(runtimeDirectory);
+			lock = acquireStartLock(lockPath);
+			if (lock !== null) {
+				launchAttempted = true;
+				const result = await runWithStartLock(lock);
+				if (result) return result;
+			}
 		}
 		await delay(SERVICE_WAIT_INTERVAL_MS);
 	}
-	const logPath = path.join(planDirectory, ".herder", "service.log");
 	let detail = "";
-	try { detail = fs.readFileSync(logPath, "utf8").trim().split(/\r?\n/).slice(-4).join(" "); } catch {}
+	try {
+		const logStat = fs.lstatSync(logPath);
+		if (!logStat.isSymbolicLink() && logStat.isFile()) {
+			detail = fs.readFileSync(logPath, "utf8").trim().split(/\r?\n/).slice(-4).join(" ");
+		}
+	} catch {}
 	throw new Error(`Herder service did not become healthy${detail ? `: ${detail}` : ""}`);
 }
 

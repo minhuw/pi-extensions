@@ -94,7 +94,7 @@ test("authority handoff is locked out between runtime privacy repair and marker 
 		const runtimeDirectory = path.join(planDirectory, ".herder");
 		const runtimeIdentity = fs.statSync(runtimeDirectory);
 		const markerPath = executionRotationMarkerPath(planDirectory);
-		const lockPath = path.join(runtimeDirectory, "rotation-epoch.lock");
+		const lockPath = path.join(planDirectory, ".rotation-epoch.lock");
 		fs.chmodSync(runtimeDirectory, 0o755);
 		let observedPrivacyRepair = false;
 		fs.fchmodSync = ((descriptor: number, mode: number) => {
@@ -230,6 +230,20 @@ test("identity-checked marker clearing preserves a concurrent fresh marker", { s
 	}
 });
 
+test("writable opens canonicalize owner-only database modes without rotating authority", { skip: process.platform === "win32" }, () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-canonical-mode-"));
+	try {
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		const databasePath = executionDatabasePath(planDirectory);
+		fs.chmodSync(databasePath, 0o700);
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		assert.equal(fs.statSync(databasePath).mode & 0o777, 0o600);
+		assert.equal(fs.existsSync(executionRotationMarkerPath(planDirectory)), false);
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("read-only opens reject exposed runtime storage without changing it", { skip: process.platform === "win32" }, () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-read-only-"));
 	try {
@@ -251,6 +265,39 @@ test("read-only opens reject exposed runtime storage without changing it", { ski
 		assert.deepEqual(fs.readFileSync(databasePath), exposedRuntime);
 		assert.equal(fs.statSync(runtimeDirectory).mode & 0o777, 0o755);
 	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("database replacement during exposure repair is revalidated and privately repaired", { skip: process.platform === "win32" }, () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-database-swap-"));
+	const originalFchmod = fs.fchmodSync;
+	try {
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		const runtimeDirectory = path.join(planDirectory, ".herder");
+		const databasePath = executionDatabasePath(planDirectory);
+		const templatePath = path.join(os.tmpdir(), `herder-execution-template-${process.pid}.sqlite3`);
+		fs.copyFileSync(databasePath, templatePath);
+		const runtimeIdentity = fs.statSync(runtimeDirectory);
+		let swapped = false;
+		fs.chmodSync(runtimeDirectory, 0o777);
+		fs.fchmodSync = ((descriptor: number, mode: number) => {
+			const opened = fs.fstatSync(descriptor);
+			if (!swapped && mode === 0o700 && opened.isDirectory() && opened.dev === runtimeIdentity.dev && opened.ino === runtimeIdentity.ino) {
+				swapped = true;
+				fs.unlinkSync(databasePath);
+				fs.copyFileSync(templatePath, databasePath);
+				fs.chmodSync(databasePath, 0o666);
+			}
+			return originalFchmod(descriptor, mode);
+		}) as typeof fs.fchmodSync;
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		assert.equal(swapped, true);
+		assert.equal(fs.statSync(databasePath).mode & 0o777, 0o600);
+		assert.equal(fs.existsSync(executionRotationMarkerPath(planDirectory)), true);
+		fs.rmSync(templatePath, { force: true });
+	} finally {
+		fs.fchmodSync = originalFchmod;
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });

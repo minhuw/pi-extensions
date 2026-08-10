@@ -106,6 +106,10 @@ function ownerOnlyMode(stat: fs.Stats): boolean {
   return (stat.mode & 0o077) === 0
 }
 
+function canonicalPrivateMode(stat: fs.Stats, expected: number): boolean {
+  return process.platform === "win32" || (stat.mode & 0o7777) === expected
+}
+
 function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino
 }
@@ -163,7 +167,10 @@ function canonicalPath(candidate: string): string {
 }
 
 function rotationEpochLockPath(planDir: string): string {
-  return path.join(canonicalPath(planDir), ".herder", ROTATION_EPOCH_LOCK_NAME)
+  // The runtime directory is intentionally writable while it is being repaired.
+  // Keep the synchronization epoch in the already-private plan namespace so an
+  // exposed .herder entry cannot unlink or replace the authority lock.
+  return path.join(canonicalPath(planDir), `.${ROTATION_EPOCH_LOCK_NAME}`)
 }
 
 function rotationEpochKeyFromMarker(markerPath: string): string {
@@ -862,83 +869,146 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
 
   const markerPath = executionRotationMarkerPath(planDir)
   let markerStat = validateRotationMarker(markerPath, { readOnly })
-  const runtimeExposed = !ownerOnlyMode(runtimeStat)
-  if (readOnly && runtimeExposed) {
-    fail(`Execution runtime path must be owner-only for read-only access: ${runtimeDirectory}`)
-  }
-
-  if (!databaseStat) {
-    createDatabaseFile(databasePath)
-    databaseStat = lstatIfPresent(databasePath)
-  }
-  if (!databaseStat) fail(`Execution database could not be created: ${databasePath}`)
-  assertRegularFile(databasePath, databaseStat, "Execution database path")
-  const databaseExposed = !ownerOnlyMode(databaseStat)
-  if (readOnly && databaseExposed) {
-    fail(`Execution database must be owner-only for read-only access: ${databasePath}`)
-  }
+  if (!databaseStat && readOnly) return null
+  if (!databaseStat && !create) return null
 
   if (!readOnly) {
-    if (runtimeExposed || databaseExposed) {
-      // Secure the marker's parent before creating or replacing the marker. This
-      // prevents another user from unlinking the marker during a writable repair.
-      // Keep any exposed database mode unchanged until the marker is durable: if
-      // marker publication fails before a temporary file exists, that mode is
-      // the retry-detectable pending-rotation state.
-      const originalRuntimeStat = runtimeStat
-      const originalRuntimeMode = runtimeStat.mode & 0o7777
-      const originalDatabaseStat = databaseStat
-      const publication: RotationPublicationState = { currentEpochDurable: false }
-      withRotationEpochLock(planDir, () => {
-        try {
-          if (runtimeExposed) {
-            runtimeStat = enforcePrivateMode(runtimeDirectory, originalRuntimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE, "Execution runtime path", true)
-          }
-          // A fresh marker identity records every new exposure while rotation is
-          // pending; the client must prove a later instance is healthy. Hold the
-          // shared epoch lock from parent repair through durable publication and
-          // database repair so authority cannot pass through the intermediate
-          // private-directory/no-marker state.
-          withRotationEpochLock(planDir, () => createRotationMarker(markerPath, publication))
+    const initialRuntimeStat = runtimeStat
+    const initialDatabaseStat = databaseStat
+    const initialRuntimeExposed = !ownerOnlyMode(initialRuntimeStat)
+    const initialDatabaseExposed = initialDatabaseStat ? !ownerOnlyMode(initialDatabaseStat) : false
+    const initialRuntimeMode = initialRuntimeStat.mode & 0o7777
+    const publication: RotationPublicationState = { currentEpochDurable: false }
+    let runtimeRollback: { expected: fs.Stats; mode: number } | undefined
+
+    const repair = (): void => {
+      try {
+        const currentRuntime = lstatIfPresent(runtimeDirectory)
+        if (!currentRuntime) fail(`Execution runtime path disappeared during repair: ${runtimeDirectory}`)
+        assertDirectory(runtimeDirectory, currentRuntime, "Execution runtime path")
+        if (!sameFileIdentity(initialRuntimeStat, currentRuntime)) {
+          fail(`Execution runtime path changed during repair: ${runtimeDirectory}`)
+        }
+
+        const runtimeExposed = !ownerOnlyMode(currentRuntime)
+        const runtimeNeedsRepair = !canonicalPrivateMode(currentRuntime, PRIVATE_RUNTIME_DIRECTORY_MODE)
+        if (runtimeExposed || runtimeNeedsRepair) {
+          runtimeRollback = { expected: currentRuntime, mode: currentRuntime.mode & 0o7777 }
+          runtimeStat = enforcePrivateMode(runtimeDirectory, currentRuntime, PRIVATE_RUNTIME_DIRECTORY_MODE, "Execution runtime path", true)
+        } else {
+          runtimeStat = currentRuntime
+        }
+
+        let currentDatabase = lstatIfPresent(databasePath)
+        if (!currentDatabase) {
+          if (initialDatabaseStat) fail(`Execution database disappeared during repair: ${databasePath}`)
+          createDatabaseFile(databasePath)
+          currentDatabase = lstatIfPresent(databasePath)
+        }
+        if (!currentDatabase) fail(`Execution database could not be created: ${databasePath}`)
+        assertRegularFile(databasePath, currentDatabase, "Execution database path")
+
+        let databaseReplaced = Boolean(initialDatabaseStat && !sameFileIdentity(initialDatabaseStat, currentDatabase))
+        let databaseExposed = !ownerOnlyMode(currentDatabase)
+        let rotationRequired = initialRuntimeExposed || initialDatabaseExposed || runtimeExposed || databaseExposed || databaseReplaced
+
+        // The database is re-statted after the parent is secured. A pathname
+        // replacement is a fresh authority exposure, even when its replacement
+        // happens to start with private permissions.
+        if (rotationRequired) {
+          createRotationMarker(markerPath, publication)
           markerStat = lstatIfPresent(markerPath)
           if (!markerStat) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
-          if (databaseExposed) {
-            databaseStat = enforcePrivateMode(databasePath, originalDatabaseStat, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false)
-          }
-        } catch (error) {
-          // Pathname visibility is not durability. Until the fresh epoch's inode
-          // and directory entry are synced, retain the original broad mode as the
-          // retry-detectable exposure signal. A durable reservation still permits
-          // owner-only repair when opening the richer temporary marker fails.
-          if (publication.currentEpochDurable && databaseExposed) {
-            try { databaseStat = enforcePrivateMode(databasePath, originalDatabaseStat, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false) } catch {}
-          }
-          if (runtimeExposed && !publication.currentEpochDurable) {
-            try { enforcePrivateMode(runtimeDirectory, originalRuntimeStat, originalRuntimeMode, "Execution runtime path", true) } catch {}
-          }
-          throw error
         }
-      })
-    } else if (markerStat) {
-      markerStat = enforcePrivateMode(markerPath, markerStat, PRIVATE_RUNTIME_FILE_MODE, "Execution rotation marker", false)
+
+        const revalidatedDatabase = lstatIfPresent(databasePath)
+        if (!revalidatedDatabase) fail(`Execution database disappeared during repair: ${databasePath}`)
+        assertRegularFile(databasePath, revalidatedDatabase, "Execution database path")
+        databaseReplaced = databaseReplaced || !sameFileIdentity(currentDatabase, revalidatedDatabase)
+        databaseExposed = !ownerOnlyMode(revalidatedDatabase)
+        if (databaseReplaced && !rotationRequired) {
+          createRotationMarker(markerPath, publication)
+          markerStat = lstatIfPresent(markerPath)
+          if (!markerStat) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
+          rotationRequired = true
+        }
+
+        if (databaseExposed || !canonicalPrivateMode(revalidatedDatabase, PRIVATE_RUNTIME_FILE_MODE)) {
+          databaseStat = enforcePrivateMode(databasePath, revalidatedDatabase, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false)
+        } else {
+          databaseStat = revalidatedDatabase
+        }
+
+        if (!rotationRequired && markerStat) {
+          markerStat = enforcePrivateMode(markerPath, markerStat, PRIVATE_RUNTIME_FILE_MODE, "Execution rotation marker", false)
+        }
+      } catch (error) {
+        // Pathname visibility is not durability. Once a reservation or fresh
+        // marker directory entry is durable, the current database inode may be
+        // repaired even if the richer marker publication cannot finish.
+        if (publication.currentEpochDurable && (initialDatabaseExposed || initialRuntimeExposed)) {
+          try {
+            const currentDatabase = lstatIfPresent(databasePath)
+            if (currentDatabase) {
+              assertRegularFile(databasePath, currentDatabase, "Execution database path")
+              databaseStat = enforcePrivateMode(databasePath, currentDatabase, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false)
+            }
+          } catch {}
+        }
+        if (!publication.currentEpochDurable) {
+          const rollback = runtimeRollback ?? (initialRuntimeExposed
+            ? { expected: initialRuntimeStat, mode: initialRuntimeMode }
+            : undefined)
+          if (rollback) {
+            try { enforcePrivateMode(runtimeDirectory, rollback.expected, rollback.mode, "Execution runtime path", true) } catch {}
+          }
+        }
+        throw error
+      }
+    }
+    const requiresEpoch = initialRuntimeExposed
+      || initialDatabaseExposed
+      || !canonicalPrivateMode(initialRuntimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE)
+      || Boolean(initialDatabaseStat && !canonicalPrivateMode(initialDatabaseStat, PRIVATE_RUNTIME_FILE_MODE))
+    if (requiresEpoch) withRotationEpochLock(planDir, repair)
+    else repair()
+  } else {
+    assertDirectory(runtimeDirectory, runtimeStat, "Execution runtime path")
+    if (!canonicalPrivateMode(runtimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE)) {
+      fail(`Execution runtime path must be owner-only with mode 0700 for read-only access: ${runtimeDirectory}`)
+    }
+    if (!databaseStat) return null
+    assertRegularFile(databasePath, databaseStat, "Execution database path")
+    if (!canonicalPrivateMode(databaseStat, PRIVATE_RUNTIME_FILE_MODE)) {
+      fail(`Execution database path must be owner-only with mode 0600 for read-only access: ${databasePath}`)
     }
   }
 
+  if (!databaseStat) fail(`Execution database could not be created: ${databasePath}`)
+  const expectedDatabase = databaseStat
   const { DatabaseSync } = sqliteApi()
   const database = new DatabaseSync(databasePath, { readOnly })
   try {
-    configureDatabase(database, { readOnly })
-    initializeSchema(database, { allowInitialize: !readOnly })
     const identity = fs.lstatSync(databasePath)
     assertRegularFile(databasePath, identity, "Execution database path")
+    if (!sameFileIdentity(expectedDatabase, identity)) {
+      fail(`Execution database changed while it was being opened: ${databasePath}`)
+    }
+    configureDatabase(database, { readOnly })
+    initializeSchema(database, { allowInitialize: !readOnly })
+    const currentIdentity = fs.lstatSync(databasePath)
+    assertRegularFile(databasePath, currentIdentity, "Execution database path")
+    if (!sameFileIdentity(expectedDatabase, currentIdentity)) {
+      fail(`Execution database changed while it was being opened: ${databasePath}`)
+    }
     const lastCheck = HEALTHY_DATABASES.get(databasePath)
     if (!lastCheck
-      || lastCheck.dev !== identity.dev
-      || lastCheck.ino !== identity.ino
+      || lastCheck.dev !== currentIdentity.dev
+      || lastCheck.ino !== currentIdentity.ino
       || Date.now() - lastCheck.checkedAt >= HEALTH_CHECK_INTERVAL_MS) {
       assertHealthy(database, databasePath)
       if (HEALTHY_DATABASES.size >= 256) HEALTHY_DATABASES.delete(HEALTHY_DATABASES.keys().next().value!)
-      HEALTHY_DATABASES.set(databasePath, { dev: identity.dev, ino: identity.ino, checkedAt: Date.now() })
+      HEALTHY_DATABASES.set(databasePath, { dev: currentIdentity.dev, ino: currentIdentity.ino, checkedAt: Date.now() })
     }
     return database
   } catch (error) {
