@@ -59,7 +59,7 @@ function mergePatterns(...groups: SecretPattern[][]): SecretPattern[] {
 
 function looksText(file: string, bytes: Buffer): boolean {
 	if (bytes.includes(0)) return false;
-	const controls = bytes.some((byte) => byte < 0x09 || (byte > 0x0d && byte < 0x20) || byte === 0x7f);
+	const controls = bytes.some((byte) => byte !== 0x1b && (byte < 0x09 || (byte > 0x0d && byte < 0x20) || byte === 0x7f));
 	if (controls) return false;
 	if (TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) return true;
 	try {
@@ -82,7 +82,7 @@ function occurrences(bytes: Buffer, value: string): number {
 }
 
 function isExecutionDatabase(file: string): boolean {
-	return path.basename(file) === EXECUTION_DATABASE_NAME;
+	return path.basename(file) === EXECUTION_DATABASE_NAME && path.basename(path.dirname(file)) === ".herder";
 }
 
 function isExecutionDatabaseSidecar(file: string): boolean {
@@ -139,7 +139,22 @@ function serviceAuthToken(database: DatabaseSync): string {
 	return row.auth_token;
 }
 
-async function sanitizeDatabase(source: string, destination: string, privateDirectory: string): Promise<SecretPattern> {
+function redactDatabaseText(database: DatabaseSync, secrets: SecretPattern[]): void {
+	if (secrets.length === 0) return;
+	for (const table of databaseTables(database)) {
+		const columns = database.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all() as Array<{ name?: unknown }>;
+		for (const column of columns) {
+			if (typeof column.name !== "string" || column.name.length === 0) continue;
+			const identifier = quoteIdentifier(column.name);
+			const statement = database.prepare(`UPDATE ${quoteIdentifier(table)} SET ${identifier} = REPLACE(${identifier}, ?, ?) WHERE typeof(${identifier}) = 'text' AND instr(${identifier}, ?) > 0`);
+			for (const secret of secrets) {
+				statement.run(secret.value, `[REDACTED:${secret.label}]`, secret.value);
+			}
+		}
+	}
+}
+
+async function sanitizeDatabase(source: string, destination: string, privateDirectory: string, providerSecrets: SecretPattern[]): Promise<SecretPattern[]> {
 	fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
 	fs.mkdirSync(privateDirectory, { recursive: true, mode: 0o700 });
 	const backupPath = path.join(privateDirectory, "backup.sqlite3");
@@ -155,11 +170,13 @@ async function sanitizeDatabase(source: string, destination: string, privateDire
 		assertQuickCheck(workingDatabase, "before sanitization");
 		const retainedRows = tableRowCounts(workingDatabase);
 		const authToken = serviceAuthToken(workingDatabase);
+		const databaseSecrets = mergePatterns(providerSecrets, [{ label: SERVICE_TOKEN_LABEL, value: authToken }]);
 
 		workingDatabase.exec("BEGIN IMMEDIATE");
 		try {
 			const replacement = workingDatabase.prepare("UPDATE manager_service SET auth_token = ? WHERE singleton = 1").run(SERVICE_TOKEN_MARKER);
 			if (Number(replacement.changes) !== 1) throw new Error("Execution database service credential replacement failed");
+			redactDatabaseText(workingDatabase, providerSecrets);
 			workingDatabase.exec("COMMIT");
 		} catch (error) {
 			try {
@@ -188,9 +205,11 @@ async function sanitizeDatabase(source: string, destination: string, privateDire
 		}
 
 		const compactedBytes = fs.readFileSync(compactPath);
-		if (occurrences(compactedBytes, authToken) !== 0) throw new Error("Execution database still contains the service credential");
+		for (const secret of databaseSecrets) {
+			if (occurrences(compactedBytes, secret.value) !== 0) throw new Error(`Execution database still contains ${secret.label}`);
+		}
 		fs.renameSync(compactPath, destination);
-		return { label: SERVICE_TOKEN_LABEL, value: authToken };
+		return databaseSecrets;
 	} finally {
 		workingDatabase?.close();
 		sourceDatabase?.close();
@@ -305,16 +324,17 @@ export async function collectLiveArtifacts(options: CollectionOptions): Promise<
 	fs.mkdirSync(stagedOutput, { recursive: true, mode: 0o700 });
 	try {
 		const databaseSources = workspacePaths.flatMap((workspace) => findDatabaseSources(workspace));
+		const configuredSecrets = patterns(options.environment || process.env);
 		const handledDatabases = new Set<string>();
 		const databaseSecrets: SecretPattern[] = [];
 		for (const [index, source] of databaseSources.entries()) {
 			const workspace = workspacePaths.find((candidate) => source === candidate || source.startsWith(`${candidate}${path.sep}`));
 			if (!workspace) throw new Error("Execution database workspace could not be determined");
 			const destination = path.join(stagedOutput, "fixtures", path.basename(workspace), path.relative(workspace, source));
-			databaseSecrets.push(await sanitizeDatabase(source, destination, path.join(stagingRoot, "databases", String(index))));
+			databaseSecrets.push(...await sanitizeDatabase(source, destination, path.join(stagingRoot, "databases", String(index)), configuredSecrets));
 			handledDatabases.add(source);
 		}
-		const redactions = mergePatterns(patterns(options.environment || process.env), databaseSecrets);
+		const redactions = mergePatterns(configuredSecrets, databaseSecrets);
 		for (const workspace of workspacePaths) {
 			await copyEntry(workspace, path.join(stagedOutput, "fixtures", path.basename(workspace)), redactions, handledDatabases, report);
 		}
