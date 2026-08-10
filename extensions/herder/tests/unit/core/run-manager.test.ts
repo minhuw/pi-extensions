@@ -686,17 +686,28 @@ test("changed-tree verification resume rejects replacement", { timeout: 30_000 }
 		}]);
 		const failed = new RunStore(fixture.planDirectory);
 		let requestId: string;
+		let originalIntegrationHead: string;
+		let originalIntegrationTree: string;
 		let integrationWorktree: string;
 		try {
 			const run = failed.getRun()!;
 			const verification = failed.getVerification(run.runId, run.currentGeneration)!;
 			assert.equal(verification.state, "failed");
 			requestId = verification.request.requestId;
+			originalIntegrationHead = verification.request.integrationHead;
+			originalIntegrationTree = verification.request.integrationTree;
 			integrationWorktree = run.integrationWorktree;
 		} finally {
 			failed.close();
 		}
-		fs.writeFileSync(path.join(integrationWorktree!, "verification-drift.txt"), "tree drift\n");
+		fs.writeFileSync(path.join(integrationWorktree, "src/other.mjs"), "export const other = 2\n");
+		git(integrationWorktree, ["add", "src/other.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "test: change integration tree"]);
+		const changedHead = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const changedTree = git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+		assert.notEqual(changedHead, originalIntegrationHead);
+		assert.notEqual(changedTree, originalIntegrationTree);
+		assert.equal(git(integrationWorktree, ["status", "--porcelain"]).stdout.trim(), "");
 		await assert.rejects(() => requestService(service, "/v1/start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
