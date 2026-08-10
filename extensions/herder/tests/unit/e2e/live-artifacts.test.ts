@@ -183,6 +183,36 @@ test("does not preserve credentials embedded in ANSI sequences", async () => {
 	}
 });
 
+test("does not reconstruct credentials from overlapping raw and ANSI spans", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-ansi-overlap-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const workspace = path.join(tmpRoot, "herder-pi-live-ansi-overlap");
+		const output = path.join(root, "output");
+		const secret = "12m34";
+		fs.mkdirSync(workspace, { recursive: true });
+		fs.writeFileSync(path.join(workspace, "pi.log"), `safe=\u001b[31mok\u001b[0m 12m\u001b[12m3434\n`);
+
+		const report = await collectLiveArtifacts({
+			host: "pi",
+			output,
+			tmpRoot,
+			environment: { CLIPROXY_API_KEY: secret },
+		});
+		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
+		const ansiStripped = copied.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "");
+		assert.equal(copied.includes(secret), false);
+		assert.equal(ansiStripped.includes(secret), false);
+		assert.equal(readFiles(output).some((bytes) => bytes.includes(Buffer.from(secret))), false);
+		assert.match(copied, /\u001b\[31m/);
+		assert.match(copied, /\u001b\[0m/);
+		assert.match(copied, /\[REDACTED:CLIPROXY_API_KEY\]/);
+		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("unrelated execution databases are omitted without aborting collection", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-unrelated-db-"));
 	try {

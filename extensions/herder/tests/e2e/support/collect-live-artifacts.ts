@@ -167,13 +167,15 @@ function mergeTextSpans(spans: TextSpan[]): TextSpan[] {
 	return merged;
 }
 
-function replaceAnsiSpan(text: string, span: TextSpan, replacement: string, secretValue: string): string {
+function replaceAnsiSpan(text: string, span: TextSpan, replacement: string, secretValue: string, rawSpans: TextSpan[]): string {
 	let result = "";
 	let inserted = false;
 	for (let index = span.start; index < span.end;) {
 		const sequenceEnd = ansiSequenceEnd(text, index);
 		if (sequenceEnd !== undefined && sequenceEnd <= span.end) {
-			if (!text.slice(index, sequenceEnd).includes(secretValue)) result += text.slice(index, sequenceEnd);
+			const sequence = { start: index, end: sequenceEnd };
+			const overlapsRawSecret = rawSpans.some((rawSpan) => rawSpan.start < sequence.end && sequence.start < rawSpan.end);
+			if (!overlapsRawSecret && !text.slice(index, sequenceEnd).includes(secretValue)) result += text.slice(index, sequenceEnd);
 			index = sequenceEnd;
 			continue;
 		}
@@ -188,8 +190,9 @@ function replaceAnsiSpan(text: string, span: TextSpan, replacement: string, secr
 }
 
 function redactText(text: string, secret: SecretPattern): { text: string; count: number } {
+	const rawSpans = textSpans(text, secret.value);
 	const spans = mergeTextSpans([
-		...textSpans(text, secret.value),
+		...rawSpans,
 		...normalizedTextSpans(text, secret.value),
 		...ansiSpansContaining(text, secret.value),
 	]);
@@ -199,7 +202,7 @@ function redactText(text: string, secret: SecretPattern): { text: string; count:
 	let offset = 0;
 	for (const span of spans) {
 		redacted += text.slice(offset, span.start);
-		redacted += replaceAnsiSpan(text, span, replacement, secret.value);
+		redacted += replaceAnsiSpan(text, span, replacement, secret.value, rawSpans);
 		offset = span.end;
 	}
 	return { text: redacted + text.slice(offset), count: spans.length };
@@ -214,6 +217,16 @@ function occurrences(bytes: Buffer, value: string): number {
 		offset += needle.length;
 	}
 	return count;
+}
+
+function assertNoSecrets(text: string, secrets: SecretPattern[]): void {
+	const bytes = Buffer.from(text);
+	const normalized = Buffer.from(normalizeAnsiText(text).value);
+	for (const secret of secrets) {
+		if (occurrences(bytes, secret.value) > 0 || occurrences(normalized, secret.value) > 0) {
+			throw new Error(`Redacted text still contains ${secret.label}`);
+		}
+	}
 }
 
 function isExecutionDatabase(file: string): boolean {
@@ -401,6 +414,7 @@ async function copyEntry(source: string, destination: string, secrets: SecretPat
 		redactedAny = true;
 		report.redactedOccurrences[secret.label] = (report.redactedOccurrences[secret.label] || 0) + redacted.count;
 	}
+	assertNoSecrets(text, secrets);
 	if (redactedAny) bytes = Buffer.from(text);
 	fs.mkdirSync(path.dirname(destination), { recursive: true });
 	fs.writeFileSync(destination, bytes, { mode: status.mode & 0o777 });
