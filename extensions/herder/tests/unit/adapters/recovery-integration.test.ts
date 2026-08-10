@@ -366,11 +366,12 @@ async function withDeadline<T>(operation: Promise<T>, label: string, timeoutMs =
 
 test("replacement Pi session interrupts and retries one lost built-in worker", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-recovery-lost-"));
-	const fixture = writeFixture(root);
+	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
 	let capturedContext: ExtensionContext | undefined;
 	let shutdown = false;
 	try {
+		fixture = writeFixture(root);
 		const started = await startFixture(fixture, "pi-worker:lost");
 		const factory = new PendingWorkerFactory();
 		const api = capturedApi = new CapturedExtensionAPI();
@@ -413,19 +414,22 @@ test("replacement Pi session interrupts and retries one lost built-in worker", {
 		if (capturedApi && capturedContext && !shutdown) {
 			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "session_shutdown recovery cleanup", 5_000).catch(() => {});
 		}
-		await stopService(fixture.planDirectory).catch(() => {});
-		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
 
 test("foreign worker handles fail closed without changing manager evidence", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-recovery-foreign-"));
-	const fixture = writeFixture(root);
+	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
 	let capturedContext: ExtensionContext | undefined;
 	let shutdown = false;
 	try {
+		fixture = writeFixture(root);
 		const started = await startFixture(fixture, "legacy-worker");
 		const factory = new PendingWorkerFactory();
 		const api = capturedApi = new CapturedExtensionAPI();
@@ -465,8 +469,10 @@ test("foreign worker handles fail closed without changing manager evidence", { t
 		if (capturedApi && capturedContext && !shutdown) {
 			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "foreign-handle cleanup", 5_000).catch(() => {});
 		}
-		await stopService(fixture.planDirectory).catch(() => {});
-		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
