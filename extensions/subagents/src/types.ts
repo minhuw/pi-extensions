@@ -149,7 +149,7 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Short effective model display name, e.g. "haiku". */
   modelName?: string;
   thinking?: ThinkingLevel;
   /** User-facing service tier when pinned for this spawn. */

@@ -76,7 +76,7 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
+  /** Short effective model name (e.g. "haiku", "sonnet"). */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
@@ -95,6 +95,33 @@ export function fgPreservingNestedStyles(theme: Theme, color: string, text: stri
   const styledEmpty = theme.fg(color, "");
   const styleStart = styledEmpty.replace(/\u001b\[(?:0|39)m/g, "");
   return theme.fg(color, text.replace(/\u001b\[(?:0|39)m/g, reset => `${reset}${styleStart}`));
+}
+
+/** Format the effective model for compact UI display. */
+export function formatModelName(model: { id: string; name?: string } | undefined): string | undefined {
+  if (!model) return undefined;
+  return (model.name ?? model.id).replace(/^Claude\s+/i, "").toLowerCase();
+}
+
+/** Build authoritative UI metadata when continuing an existing child session. */
+export function buildResumedInvocation(source: {
+  invocation?: AgentInvocation;
+  session?: { model?: { id: string; name?: string }; thinkingLevel?: AgentInvocation["thinking"] };
+  thinking?: AgentInvocation["thinking"];
+  serviceTier?: AgentInvocation["serviceTier"];
+  maxTurns?: number;
+  isBackground?: boolean;
+  worktree?: unknown;
+}): AgentInvocation {
+  return {
+    ...source.invocation,
+    modelName: formatModelName(source.session?.model) ?? source.invocation?.modelName,
+    thinking: source.invocation?.thinking ?? source.thinking ?? source.session?.thinkingLevel,
+    serviceTier: source.invocation?.serviceTier ?? source.serviceTier,
+    maxTurns: source.invocation?.maxTurns ?? source.maxTurns,
+    runInBackground: source.invocation?.runInBackground ?? source.isBackground,
+    isolation: source.invocation?.isolation ?? (source.worktree ? "worktree" : undefined),
+  };
 }
 
 /** Format a token count compactly: "33.8k token", "1.2M token". */
@@ -166,14 +193,27 @@ export function buildInvocationTags(
 ): { modelName?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
-  if (invocation.thinking) tags.push(`thinking: ${invocation.thinking}`);
   if (invocation.serviceTier) tags.push(`tier: ${invocation.serviceTier}`);
+  if (invocation.thinking) tags.push(`thinking: ${invocation.thinking}`);
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground) tags.push("background");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
   return { modelName: invocation.modelName, tags };
+}
+
+/** Ordered stats shown by the inline foreground Agent renderer. */
+export function getAgentStatsParts(details: AgentDetails): string[] {
+  const parts: string[] = [];
+  if (details.modelName) parts.push(details.modelName);
+  if (details.tags) parts.push(...details.tags);
+  if (details.turnCount != null && details.turnCount > 0) {
+    parts.push(formatTurns(details.turnCount, details.maxTurns));
+  }
+  if (details.toolUses > 0) parts.push(`${details.toolUses} tool use${details.toolUses === 1 ? "" : "s"}`);
+  if (details.tokens) parts.push(details.tokens);
+  return parts;
 }
 
 /** Truncate text to a single line, max `len` chars. */

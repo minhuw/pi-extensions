@@ -14,8 +14,9 @@
 		"compaction"
 	],
 	"scripts": {
-		"test": "npm run test:statusline && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
+		"test": "npm run test:statusline && npm run test:subagents && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
 		"test:statusline": "vitest run extensions/statusline-footer/tests/statusline-footer.test.ts",
+		"test:subagents": "vitest run extensions/subagents/tests/agent-widget.test.ts",
 		"test:herder": "node extensions/herder/tests/run-smoke.ts",
 		"test:e2e:herder": "HERDER_LIVE_E2E=1 node --experimental-strip-types --test extensions/herder/tests/e2e/live-hosts.test.ts",
 		"typecheck": "tsc -p tsconfig.json"

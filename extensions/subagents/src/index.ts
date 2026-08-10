@@ -37,12 +37,15 @@ import {
   type AgentDetails,
   AgentWidget,
   buildInvocationTags,
+  buildResumedInvocation,
   describeActivity,
   fgPreservingNestedStyles,
   formatDuration,
+  formatModelName,
   formatMs,
   formatTokens,
   formatTurns,
+  getAgentStatsParts,
   getDisplayName,
   getPromptModeLabel,
   SPINNER,
@@ -1107,18 +1110,10 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
-      const stats = (d: AgentDetails) => {
-        const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
-        if (d.tags) parts.push(...d.tags);
-        if (d.turnCount != null && d.turnCount > 0) {
-          parts.push(formatTurns(d.turnCount, d.maxTurns));
-        }
-        if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-        if (d.tokens) parts.push(d.tokens);
-        return parts.map(p => fgPreservingNestedStyles(theme, "dim", p)).join(" " + theme.fg("dim", "·") + " ");
-      };
+      // Helper: build "gpt-5.6 luna · tier: fast · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens".
+      const stats = (d: AgentDetails) => getAgentStatsParts(d)
+        .map(p => fgPreservingNestedStyles(theme, "dim", p))
+        .join(" " + theme.fg("dim", "·") + " ");
 
       // ---- While running (streaming) ----
       if (isPartial || details.status === "running") {
@@ -1297,11 +1292,7 @@ Terse command-style prompts produce shallow, generic work.
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-        : undefined;
+      const modelName = formatModelName(model);
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
@@ -1378,6 +1369,25 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
+
+        // A resumed session keeps its original runtime settings regardless of
+        // the parent's current configuration. The live session is authoritative
+        // for model/thinking; record fields cover service tier and spawn metadata
+        // for scheduled/RPC agents that have no invocation snapshot.
+        const resumedInvocation = buildResumedInvocation(existing);
+        const { modelName: resumedModelName, tags: resumedInvocationTags } = buildInvocationTags(resumedInvocation);
+        const resumedModeLabel = getPromptModeLabel(existing.type);
+        const resumedTags = resumedModeLabel
+          ? [resumedModeLabel, ...resumedInvocationTags]
+          : resumedInvocationTags;
+        const resumeDetailBase = {
+          displayName: getDisplayName(existing.type),
+          description: existing.description,
+          subagentType: existing.type,
+          modelName: resumedModelName,
+          tags: resumedTags.length > 0 ? resumedTags : undefined,
+        };
+
         const record = await manager.resume(params.resume, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
@@ -1385,11 +1395,11 @@ Terse command-style prompts produce shallow, generic work.
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(resumeDetailBase, record));
         }
         return textResult(
           record.result?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          buildDetails(resumeDetailBase, record),
         );
       }
 
