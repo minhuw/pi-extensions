@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -45,7 +46,7 @@ try {
 
   const ambientHome = path.join(root, "ambient-home-sentinel");
   const ambientXdg = path.join(root, "ambient-xdg-sentinel");
-  const ambientCredential = "herder-ambient-credential-sentinel";
+  const ambientSentinel = "herder-ambient-sentinel";
   const isolationScript = [
     'const fs = require("node:fs");',
     'const path = require("node:path");',
@@ -54,7 +55,7 @@ try {
     'for (const directory of [...new Set(Object.values(values).filter(Boolean))]) fs.accessSync(directory);',
     'const probePath = path.join(process.env.TMPDIR, "probe.txt");',
     'fs.writeFileSync(probePath, "usable");',
-    'process.stdout.write(JSON.stringify({ ...values, credential: process.env.HERDER_SYNTHETIC_CREDENTIAL ?? null, probe: fs.readFileSync(probePath, "utf8") }));',
+    'process.stdout.write(JSON.stringify({ ...values, sentinel: process.env.HERDER_SYNTHETIC_SENTINEL ?? null, probe: fs.readFileSync(probePath, "utf8") }));',
   ].join("");
   const isolation = spawnSync(process.execPath, [
     gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "isolation", "--",
@@ -69,14 +70,14 @@ try {
       XDG_DATA_HOME: path.join(ambientXdg, "data"),
       XDG_STATE_HOME: path.join(ambientXdg, "state"),
       XDG_RUNTIME_DIR: path.join(ambientXdg, "runtime"),
-      HERDER_SYNTHETIC_CREDENTIAL: ambientCredential,
+      HERDER_SYNTHETIC_SENTINEL: ambientSentinel,
     },
   });
   assert.equal(isolation.status, 0);
   const isolationEvidence = JSON.parse(isolation.stdout);
   const isolationLog = await readFile(isolationEvidence.logPath, "utf8");
   const isolationReport = JSON.parse(isolationLog);
-  assert.equal(isolationReport.credential, null);
+  assert.equal(isolationReport.sentinel, null);
   assert.equal(isolationReport.probe, "usable");
   for (const directory of [
     isolationReport.HOME,
@@ -93,11 +94,57 @@ try {
     assert.equal(isInside(gateWorktree, directory), false);
   }
   assert.notEqual(isolationReport.HOME, ambientHome);
-  assert.equal(isolationLog.includes(ambientCredential), false);
+  assert.equal(isolationLog.includes(ambientSentinel), false);
   assert.equal(isolationLog.includes(ambientHome), false);
   assert.equal(isolationLog.includes(ambientXdg), false);
   await assert.rejects(stat(isolationReport.HOME), { code: "ENOENT" });
   assert.ok((await stat(isolationEvidence.logPath)).isFile());
+
+  const cleanupScript = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const report = { home: process.env.HOME, marker: "cleanup" };',
+    'fs.writeFileSync(path.join(process.env.HOME, "created.txt"), "created");',
+    'process.stdout.write(JSON.stringify(report));',
+    'fs.chmodSync(process.env.HOME, 0o000);',
+  ].join("");
+  const cleanup = spawnSync(process.execPath, [
+    gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "cleanup", "--",
+    process.execPath, "-e", cleanupScript,
+  ], { encoding: "utf8" });
+  assert.equal(cleanup.status, 0);
+  const cleanupEvidence = JSON.parse(cleanup.stdout);
+  const cleanupLog = await readFile(cleanupEvidence.logPath, "utf8");
+  const cleanupReport = JSON.parse(cleanupLog);
+  assert.equal(cleanupReport.marker, "cleanup");
+  assert.equal(cleanupEvidence.exitCode, 0);
+  assert.equal(cleanupEvidence.signal, null);
+  assert.equal(cleanupEvidence.timedOut, false);
+  assert.equal(cleanupEvidence.logBytes, Buffer.byteLength(cleanupLog));
+  assert.equal(cleanupEvidence.logSha256, createHash("sha256").update(cleanupLog).digest("hex"));
+  await assert.rejects(stat(cleanupReport.home), { code: "ENOENT" });
+
+  if (process.platform === "darwin") {
+    const foundationScript = [
+      'ObjC.import("Foundation");',
+      'const applicationSupport = $.NSFileManager.defaultManager.URLsForDirectoryInDomains($.NSApplicationSupportDirectory, $.NSUserDomainMask).objectAtIndex(0).path.js;',
+      'JSON.stringify({ home: $.NSHomeDirectory().js, applicationSupport });',
+    ].join("");
+    const foundation = spawnSync(process.execPath, [
+      gateRunner, "--cwd", gateWorktree, "--log-dir", gateLogs, "--label", "darwin-foundation", "--",
+      "/usr/bin/osascript", "-l", "JavaScript", "-e", foundationScript,
+    ], { encoding: "utf8", env: { ...process.env, HOME: ambientHome } });
+    assert.equal(foundation.status, 0);
+    const foundationEvidence = JSON.parse(foundation.stdout);
+    const foundationReport = JSON.parse(await readFile(foundationEvidence.logPath, "utf8"));
+    assert.equal(path.isAbsolute(foundationReport.home), true);
+    assert.equal(path.isAbsolute(foundationReport.applicationSupport), true);
+    assert.equal(isInside(gateWorktree, foundationReport.home), false);
+    assert.equal(isInside(gateWorktree, foundationReport.applicationSupport), false);
+    assert.notEqual(foundationReport.home, ambientHome);
+    assert.equal(isInside(foundationReport.home, foundationReport.applicationSupport), true);
+    await assert.rejects(stat(foundationReport.home), { code: "ENOENT" });
+  }
 
   const commandName = path.basename(process.execPath);
   const discoveryPath = [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter);

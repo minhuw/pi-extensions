@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { createReadStream } from "node:fs"
-import { mkdir, mkdtemp, open, realpath, rm, stat } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, open, realpath, rm, stat } from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
 import { performance } from "node:perf_hooks"
@@ -136,6 +136,7 @@ function gateEnvironment(environmentRoot: string): NodeJS.ProcessEnv {
     TMP: temp,
     TEMP: temp,
   }
+  if (process.platform === "darwin") isolatedValues.CFFIXED_USER_HOME = environmentRoot
   if (process.platform === "win32") {
     const windowsHome = path.parse(environmentRoot)
     const homePath = path.relative(windowsHome.root, environmentRoot)
@@ -206,6 +207,25 @@ function print(result: unknown, pretty = false): void {
   process.stdout.write(`${JSON.stringify(result, null, pretty ? 2 : 0)}\n`)
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function cleanupGateEnvironmentRoot(environmentRoot: string): Promise<string | null> {
+  try {
+    await chmod(environmentRoot, 0o700)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    return errorMessage(error)
+  }
+  try {
+    await rm(environmentRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    return null
+  } catch (error) {
+    return errorMessage(error)
+  }
+}
+
 async function main(): Promise<void> {
   let parsed: GateArguments
   try {
@@ -237,10 +257,12 @@ async function main(): Promise<void> {
   const started = performance.now()
   let environmentRoot: string | null = null
   let logClosed = false
+  let cleanupError: string | null = null
   let childExitCode: number | null = null
   let childSignal: NodeJS.Signals | null = null
   let spawnError: Error | null = null
   let timedOut = false
+  let result: GateResult | null = null
 
   try {
     environmentRoot = await createGateEnvironmentRoot(logDir)
@@ -284,7 +306,7 @@ async function main(): Promise<void> {
     const durationMs = Math.round(performance.now() - started)
     const logStatus = await stat(logPath)
     const ok = !spawnError && !timedOut && childExitCode === 0
-    const result: GateResult = {
+    result = {
       ok,
       label: parsed.label,
       commandSha256: createHash("sha256").update(JSON.stringify(parsed.command)).digest("hex"),
@@ -298,13 +320,30 @@ async function main(): Promise<void> {
       timedOut,
     }
     if (timedOut) result.error = `command exceeded ${parsed.timeoutMs} ms`
-    else if (spawnError) result.error = (spawnError as Error).message
-    print(result, parsed.pretty)
-    process.exitCode = ok ? 0 : 1
+    else if (spawnError) result.error = errorMessage(spawnError)
   } finally {
-    if (!logClosed) await logHandle.close()
-    if (environmentRoot) await rm(environmentRoot, { recursive: true, force: true })
+    if (!logClosed) {
+      try {
+        await logHandle.close()
+        logClosed = true
+      } catch (error) {
+        cleanupError = errorMessage(error)
+      }
+    }
+    if (environmentRoot) {
+      const environmentError = await cleanupGateEnvironmentRoot(environmentRoot)
+      if (environmentError) cleanupError = cleanupError ? `${cleanupError}; ${environmentError}` : environmentError
+    }
   }
+
+  if (!result) throw new Error("gate evidence was not finalized")
+  if (cleanupError) {
+    result.ok = false
+    const message = `gate environment cleanup failed: ${cleanupError}`
+    result.error = result.error ? `${result.error}; ${message}` : message
+  }
+  print(result, parsed.pretty)
+  process.exitCode = result.ok ? 0 : 1
 }
 
 try {
