@@ -154,6 +154,39 @@ test("no-revision fallback uses the injected clock and remains instance-local", 
   assert.match(secondBody.body, /"instance":"second"/)
 })
 
+test("slow no-revision projections are accepted and coalesced", async () => {
+  let now = 0
+  let builds = 0
+  const dashboard = createDashboardHandler({
+    clock: () => now,
+    stateBodyProvider: () => {
+      builds += 1
+      now += 1000
+      return `{"build":${builds}}\n`
+    },
+  })
+
+  const firstResponse = response()
+  const secondResponse = response()
+  await Promise.all([
+    dashboard.handle(request("/api/state"), firstResponse),
+    dashboard.handle(request("/api/state"), secondResponse),
+  ])
+  assert.equal(builds, 1)
+  assert.equal(firstResponse.body, '{"build":1}\n')
+  assert.equal(secondResponse.body, firstResponse.body)
+
+  now = 1999
+  await dashboard.handle(request("/api/state"), response())
+  assert.equal(builds, 1)
+
+  now = 2000
+  const refreshedResponse = response()
+  await dashboard.handle(request("/api/state"), refreshedResponse)
+  assert.equal(builds, 2)
+  assert.equal(refreshedResponse.body, '{"build":2}\n')
+})
+
 test("health is served while a dashboard projection is awaiting its worker", async () => {
   const started = deferred<void>()
   const projection = deferred<string>()

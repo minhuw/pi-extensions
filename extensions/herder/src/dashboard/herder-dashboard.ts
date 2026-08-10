@@ -181,7 +181,6 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
         continue
       }
 
-      const buildStartedAt = now
       const build = Promise.resolve().then(stateBodyProvider).then((body) => {
         if (typeof body !== "string") throw new Error("Dashboard state body provider must return a string")
         return body
@@ -191,14 +190,12 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
       try {
         const body = await build
         const currentRevision = revisionProvider() ?? null
+        if (currentRevision !== revision) continue
         const currentTime = clock()
-        const stillCurrent = currentRevision === revision
-          && (revision !== null || currentTime < buildStartedAt + STATE_CACHE_MS)
-        if (!stillCurrent) continue
         cachedState = {
           revision,
           body,
-          expiresAt: revision === null ? buildStartedAt + STATE_CACHE_MS : Number.POSITIVE_INFINITY,
+          expiresAt: revision === null ? currentTime + STATE_CACHE_MS : Number.POSITIVE_INFINITY,
         }
         return body
       } finally {
