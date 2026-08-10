@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ManagerReply, TerminalEvent, VerificationManifest, VerificationRequest } from "../src/shared/protocol.ts";
 import {
@@ -23,7 +23,7 @@ import { resolvePlanDirectory } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
-import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerTerminal } from "./worker-engine.ts";
+import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerSessionFactory, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
 import {
 	createWorkerInputEntry,
@@ -52,6 +52,10 @@ interface WorkerBinding {
 	transcript?: HerderWorkerInputEntry;
 }
 
+type HerderPiWorkerFactory = PiWorkerSessionFactory & {
+	bindModelRegistry?: (registry: ModelRegistry) => void;
+};
+
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -76,8 +80,12 @@ function toolResult(text: string, isError = false) {
 }
 
 export default function registerHerderPi(pi: ExtensionAPI): void {
-	registerWorkerTranscriptRenderers(pi);
 	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT, pi);
+	registerHerderPiWithWorkerFactory(pi, sessionFactory);
+}
+
+export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFactory: HerderPiWorkerFactory): void {
+	registerWorkerTranscriptRenderers(pi);
 	const engine = new PiWorkerEngine(sessionFactory);
 	const widget = new HerderWidget();
 	const workers = new Map<string, WorkerBinding>();
@@ -163,7 +171,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	};
 
 	const preflight = async (_ctx: ExtensionContext, profile: ResolvedPiProfile) => {
-		sessionFactory.bindModelRegistry(_ctx.modelRegistry);
+		sessionFactory.bindModelRegistry?.(_ctx.modelRegistry);
 		await validateHerderRoleAgents(PI_AGENT_ROOT, profile, await engine.availableModels());
 	};
 
@@ -624,7 +632,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			lastContext = ctx;
-			sessionFactory.bindModelRegistry(ctx.modelRegistry);
+			sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 			try {
 				if (params.action === "status") return toolResult(await status(params.planDir, ctx));
 				if (params.action === "dashboard") return toolResult(await dashboard(params.planDir, ctx));
@@ -662,7 +670,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 		sessionEpoch += 1;
 		shuttingDown = false;
 		lastContext = ctx;
-		sessionFactory.bindModelRegistry(ctx.modelRegistry);
+		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
 		lastPersistedState = currentState;
 		if (currentState) {
