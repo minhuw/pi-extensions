@@ -9,6 +9,7 @@ import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
+import type { VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -166,17 +167,29 @@ function payload(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+type VerificationSubmission = {
+	reply: Record<string, unknown>;
+	manifest: Record<string, unknown>;
+};
+
 async function submitFinalVerification(
 	service: Awaited<ReturnType<typeof ensureService>>,
 	planDirectory: string,
 	reply: Record<string, unknown>,
 	prefix: string,
-): Promise<Record<string, unknown>> {
+	gates: VerificationGate[] = [{
+		gateId: `${prefix}-npm-test`,
+		label: "fixture tests",
+		cwd: ".",
+		argv: ["npm", "test"],
+		rationale: "Exercises the integrated fixture.",
+	}],
+): Promise<VerificationSubmission> {
 	const request = payload(reply.verificationRequest);
 	assert.equal(reply.status, "paused");
 	assert.equal(readManagerState(planDirectory).verification?.state, "awaiting_manifest");
 	assert.ok(request.requestId);
-	return payload(payload(await requestService(service, "/v1/verification", {
+	const manifest = {
 		schemaVersion: 1,
 		requestId: request.requestId,
 		requestSha256: request.requestSha256,
@@ -187,11 +200,13 @@ async function submitFinalVerification(
 		integrationHead: request.integrationHead,
 		integrationTree: request.integrationTree,
 		rationale: "The fixture has one complete repository test command.",
-		gates: [{ gateId: `${prefix}-npm-test`, label: "fixture tests", cwd: ".", argv: ["npm", "test"], rationale: "Exercises the integrated fixture." }],
-	})).reply);
+		gates,
+	};
+	const response = payload(await requestService(service, "/v1/verification", manifest));
+	return { reply: payload(response.reply), manifest };
 }
 
-async function completeSinglePlan(
+async function prepareSinglePlan(
 	service: Awaited<ReturnType<typeof ensureService>>,
 	fixture: { repo: string; planDirectory: string },
 	prefix: string,
@@ -226,7 +241,7 @@ async function completeSinglePlan(
 		eventId: `${prefix}-dispatch-reviewer`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: `${prefix}-reviewer` }],
 	});
-	const afterReviewer = payload(payload(await requestService(service, "/v1/event", {
+	return payload(payload(await requestService(service, "/v1/event", {
 		eventId: `${prefix}-terminal-reviewer`, kind: "terminals",
 		terminals: [{
 			actionId: reviewer.actionId,
@@ -234,8 +249,16 @@ async function completeSinglePlan(
 			response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 		}],
 	})).reply);
+}
+
+async function completeSinglePlan(
+	service: Awaited<ReturnType<typeof ensureService>>,
+	fixture: { repo: string; planDirectory: string },
+	prefix: string,
+): Promise<Record<string, unknown>> {
+	const afterReviewer = await prepareSinglePlan(service, fixture, prefix);
 	const verified = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, prefix);
-	const finalReviewer = payload((verified.actions as unknown[])[0]);
+	const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
 	await requestService(service, "/v1/event", {
 		eventId: `${prefix}-dispatch-final`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
@@ -409,7 +432,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			}],
 		}));
 		const verified = await submitFinalVerification(service, fixture.planDirectory, payload(reviewerTerminal.reply), "persistent");
-		const finalReviewer = payload((verified.actions as unknown[])[0]);
+		const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
 		assert.match(String(finalReviewer.prompt), /REVIEW_PROTOCOL_PATH: .*assets\/review\/code-review-protocol\.md/);
@@ -464,6 +487,234 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			profile: "eclipse",
 		}));
 		assert.equal(payload(resumed.reply).status, "complete");
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("nonzero final verification failure is durable and replay-safe", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-failure-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-failure");
+		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-failure", [{
+			gateId: "verification-nonzero",
+			label: "nonzero fixture gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(7)"],
+			rationale: "Proves a nonzero final gate is durable.",
+		}]);
+		assert.equal(submitted.reply.status, "failed");
+		assert.equal((submitted.reply.actions as unknown[]).length, 0);
+		const summary = readManagerState(fixture.planDirectory);
+		assert.equal(summary.run?.status, "failed");
+		assert.equal(summary.verification?.state, "failed");
+		assert.match(String(summary.verification?.terminalDetail), /Verification gate .* failed \(log .+\)/);
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const verification = store.getVerification(run.runId, run.currentGeneration)!;
+			assert.equal(verification.state, "failed");
+			const evidence = payload(verification.result);
+			assert.equal(evidence.passed, false);
+			const gates = evidence.gates as unknown[];
+			assert.equal(gates.length, 1);
+			const gate = payload(gates[0]);
+			assert.equal(gate.ok, false);
+			assert.equal(gate.exitCode, 7);
+			assert.ok(String(gate.logPath));
+			assert.equal(fs.existsSync(String(gate.logPath)), true);
+			assert.equal(store.getPlan(run.runId, "RUN"), null);
+			assert.equal(store.getActions(run.runId).some((action) => action.planId === "RUN" || action.workerMode === "FINAL_AUDIT"), false);
+			assert.notEqual(run.status, "complete");
+		} finally {
+			store.close();
+		}
+
+		const replay = payload(await requestService(service, "/v1/verification", submitted.manifest));
+		assert.equal(payload(replay.reply).status, "failed");
+		assert.equal(readManagerState(fixture.planDirectory).verification?.state, "failed");
+		await assert.rejects(() => requestService(service, "/v1/verification", {
+			...submitted.manifest,
+			rationale: "A divergent replay payload must not replace the failure evidence.",
+		}), /replayed with a different manifest/);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("minimum-timeout final verification failure preserves timeout and log evidence", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-timeout-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-timeout");
+		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-timeout", [{
+			gateId: "verification-timeout",
+			label: "minimum timeout fixture gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "setTimeout(() => {}, 10_000)"],
+			timeoutMs: 1_000,
+			rationale: "Proves the minimum accepted timeout is enforced.",
+		}]);
+		assert.equal(submitted.reply.status, "failed");
+		const summary = readManagerState(fixture.planDirectory);
+		assert.equal(summary.run?.status, "failed");
+		assert.equal(summary.verification?.state, "failed");
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const verification = store.getVerification(run.runId, run.currentGeneration)!;
+			const evidence = payload(verification.result);
+			const gate = payload((evidence.gates as unknown[])[0]);
+			assert.equal(verification.state, "failed");
+			assert.equal(evidence.passed, false);
+			assert.equal(gate.ok, false);
+			assert.equal(gate.timeoutMs, 1_000);
+			assert.ok(Number(gate.durationMs) >= 900);
+			assert.notEqual(gate.exitCode, 0);
+			assert.ok(String(gate.logPath));
+			assert.equal(fs.existsSync(String(gate.logPath)), true);
+			assert.equal("timedOut" in gate, false);
+			assert.equal(store.getPlan(run.runId, "RUN"), null);
+			assert.equal(store.getActions(run.runId).some((action) => action.planId === "RUN" || action.workerMode === "FINAL_AUDIT"), false);
+		} finally {
+			store.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("unchanged-tree verification replacement proceeds through final review", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-replacement-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-replacement");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-replacement", [{
+			gateId: "replacement-failure",
+			label: "replacement failure gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(9)"],
+			rationale: "Creates the failed verification that resume must replace.",
+		}]);
+		const before = new RunStore(fixture.planDirectory);
+		let originalRequest;
+		try {
+			const run = before.getRun()!;
+			const verification = before.getVerification(run.runId, run.currentGeneration)!;
+			originalRequest = verification.request;
+			assert.equal(verification.state, "failed");
+		} finally {
+			before.close();
+		}
+
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "paused");
+		const replacementRequest = payload(resumed.verificationRequest);
+		assert.notEqual(replacementRequest.requestId, originalRequest.requestId);
+		assert.equal(replacementRequest.integrationHead, originalRequest.integrationHead);
+		assert.equal(replacementRequest.integrationTree, originalRequest.integrationTree);
+		assert.equal(replacementRequest.runAssignmentSha256, originalRequest.runAssignmentSha256);
+		assert.equal(readManagerState(fixture.planDirectory).verification?.state, "awaiting_manifest");
+
+		const passed = await submitFinalVerification(service, fixture.planDirectory, resumed, "verification-replacement-pass", [{
+			gateId: "replacement-success",
+			label: "replacement success gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(0)"],
+			rationale: "Unchanged-tree replacement completes the final verification.",
+		}]);
+		assert.equal(passed.reply.status, "running");
+		const finalReviewer = payload((passed.reply.actions as unknown[])[0]);
+		assert.equal(finalReviewer.planId, "RUN");
+		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
+		await requestService(service, "/v1/event", {
+			eventId: "verification-replacement-dispatch-final",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "verification-replacement-final" }],
+		});
+		const complete = payload(payload(await requestService(service, "/v1/event", {
+			eventId: "verification-replacement-terminal-final",
+			kind: "terminals",
+			terminals: [{
+				actionId: finalReviewer.actionId,
+				hostHandle: "verification-replacement-final",
+				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: replacement verification is bound to the unchanged tree\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host",
+			}],
+		})).reply);
+		assert.equal(complete.status, "complete");
+		assert.equal(payload(complete.summary).done, 1);
+		const finalState = readManagerState(fixture.planDirectory);
+		assert.equal(finalState.run?.status, "complete");
+		assert.equal(finalState.verification?.state, "passed");
+		assert.equal(finalState.plans.find((plan) => plan.planId === "RUN")?.phase, "FINAL_APPROVED");
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("changed-tree verification resume rejects replacement", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-drift-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-drift");
+		await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-drift", [{
+			gateId: "drift-failure",
+			label: "drift failure gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(11)"],
+			rationale: "Creates the failed verification before tree drift.",
+		}]);
+		const failed = new RunStore(fixture.planDirectory);
+		let requestId: string;
+		let integrationWorktree: string;
+		try {
+			const run = failed.getRun()!;
+			const verification = failed.getVerification(run.runId, run.currentGeneration)!;
+			assert.equal(verification.state, "failed");
+			requestId = verification.request.requestId;
+			integrationWorktree = run.integrationWorktree;
+		} finally {
+			failed.close();
+		}
+		fs.writeFileSync(path.join(integrationWorktree!, "verification-drift.txt"), "tree drift\n");
+		await assert.rejects(() => requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		}), /Cannot retry verification because the frozen integration tree changed/);
+		const state = readManagerState(fixture.planDirectory);
+		assert.equal(state.run?.status, "failed");
+		assert.equal(state.verification?.state, "failed");
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			const run = after.getRun()!;
+			const verification = after.getVerification(run.runId, run.currentGeneration)!;
+			assert.equal(verification.request.requestId, requestId!);
+			assert.equal(after.getPlan(run.runId, "RUN"), null);
+		} finally {
+			after.close();
+		}
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
