@@ -70,6 +70,124 @@ function looksText(file: string, bytes: Buffer): boolean {
 	}
 }
 
+interface TextSpan {
+	start: number;
+	end: number;
+}
+
+interface NormalizedText {
+	value: string;
+	sourceOffsets: number[];
+}
+
+function ansiSequenceEnd(text: string, offset: number): number | undefined {
+	if (text.charCodeAt(offset) !== 0x1b) return undefined;
+	const next = text.charCodeAt(offset + 1);
+	if (next === 0x5b) {
+		for (let cursor = offset + 2; cursor < text.length; cursor += 1) {
+			const code = text.charCodeAt(cursor);
+			if (code >= 0x40 && code <= 0x7e) return cursor + 1;
+		}
+		return undefined;
+	}
+	if (next >= 0x20 && next <= 0x7e) return offset + 2;
+	return undefined;
+}
+
+function normalizeAnsiText(text: string): NormalizedText {
+	const values: string[] = [];
+	const sourceOffsets: number[] = [];
+	for (let index = 0; index < text.length;) {
+		const sequenceEnd = ansiSequenceEnd(text, index);
+		if (sequenceEnd !== undefined) {
+			index = sequenceEnd;
+			continue;
+		}
+		const codePoint = text.codePointAt(index);
+		const width = codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+		values.push(text.slice(index, index + width));
+		for (let offset = 0; offset < width; offset += 1) sourceOffsets.push(index + offset);
+		index += width;
+	}
+	return { value: values.join(""), sourceOffsets };
+}
+
+function textSpans(text: string, value: string): TextSpan[] {
+	const spans: TextSpan[] = [];
+	if (!value) return spans;
+	let offset = 0;
+	while ((offset = text.indexOf(value, offset)) !== -1) {
+		spans.push({ start: offset, end: offset + value.length });
+		offset += value.length;
+	}
+	return spans;
+}
+
+function normalizedTextSpans(text: string, value: string): TextSpan[] {
+	const normalized = normalizeAnsiText(text);
+	const spans: TextSpan[] = [];
+	if (!value) return spans;
+	let offset = 0;
+	while ((offset = normalized.value.indexOf(value, offset)) !== -1) {
+		const start = normalized.sourceOffsets[offset];
+		const endOffset = normalized.sourceOffsets[offset + value.length - 1];
+		if (start === undefined || endOffset === undefined) break;
+		spans.push({ start, end: endOffset + 1 });
+		offset += value.length;
+	}
+	return spans;
+}
+
+function mergeTextSpans(spans: TextSpan[]): TextSpan[] {
+	const merged: TextSpan[] = [];
+	for (const span of [...spans].sort((left, right) => left.start - right.start || left.end - right.end)) {
+		const previous = merged.at(-1);
+		if (!previous || span.start >= previous.end) {
+			merged.push({ ...span });
+		} else {
+			previous.end = Math.max(previous.end, span.end);
+		}
+	}
+	return merged;
+}
+
+function replaceAnsiSpan(text: string, span: TextSpan, replacement: string): string {
+	let result = "";
+	let inserted = false;
+	for (let index = span.start; index < span.end;) {
+		const sequenceEnd = ansiSequenceEnd(text, index);
+		if (sequenceEnd !== undefined && sequenceEnd <= span.end) {
+			result += text.slice(index, sequenceEnd);
+			index = sequenceEnd;
+			continue;
+		}
+		if (!inserted) {
+			result += replacement;
+			inserted = true;
+		}
+		const codePoint = text.codePointAt(index);
+		index += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+	}
+	return inserted ? result : replacement;
+}
+
+function redactText(text: string, secret: SecretPattern): { text: string; count: number } {
+	const spans = mergeTextSpans([
+		...textSpans(text, secret.value),
+		...normalizedTextSpans(text, secret.value),
+	]);
+	if (spans.length === 0) return { text, count: 0 };
+	const replacement = `[REDACTED:${secret.label}]`;
+	let redacted = "";
+	let offset = 0;
+	for (const span of spans) {
+		redacted += text.slice(offset, span.start);
+		redacted += replaceAnsiSpan(text, span, replacement);
+		offset = span.end;
+	}
+	return { text: redacted + text.slice(offset), count: spans.length };
+}
+
 function occurrences(bytes: Buffer, value: string): number {
 	const needle = Buffer.from(value);
 	let count = 0;
@@ -257,17 +375,16 @@ async function copyEntry(source: string, destination: string, secrets: SecretPat
 		report.omittedSensitiveFiles.push(source);
 		return;
 	}
-	const containsSecret = secrets.some((secret) => occurrences(bytes, secret.value) > 0);
-	if (containsSecret) {
-		let text = bytes.toString("utf8");
-		for (const secret of secrets) {
-			const count = text.split(secret.value).length - 1;
-			if (count === 0) continue;
-			text = text.split(secret.value).join(`[REDACTED:${secret.label}]`);
-			report.redactedOccurrences[secret.label] = (report.redactedOccurrences[secret.label] || 0) + count;
-		}
-		bytes = Buffer.from(text);
+	let text = bytes.toString("utf8");
+	let redactedAny = false;
+	for (const secret of secrets) {
+		const redacted = redactText(text, secret);
+		if (redacted.count === 0) continue;
+		text = redacted.text;
+		redactedAny = true;
+		report.redactedOccurrences[secret.label] = (report.redactedOccurrences[secret.label] || 0) + redacted.count;
 	}
+	if (redactedAny) bytes = Buffer.from(text);
 	fs.mkdirSync(path.dirname(destination), { recursive: true });
 	fs.writeFileSync(destination, bytes, { mode: status.mode & 0o777 });
 }

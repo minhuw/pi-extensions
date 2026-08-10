@@ -128,6 +128,36 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 	}
 });
 
+test("redacts provider secrets interrupted by ANSI sequences while preserving diagnostics", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-ansi-secret-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const workspace = path.join(tmpRoot, "herder-pi-live-ansi-secret");
+		const output = path.join(root, "output");
+		const secret = "secretvalue";
+		fs.mkdirSync(workspace, { recursive: true });
+		fs.writeFileSync(path.join(workspace, "pi.log"), `prefix=${secret.slice(0, 6)}\u001b[31m${secret.slice(6)}\u001b[0m suffix\n`);
+
+		const report = await collectLiveArtifacts({
+			host: "pi",
+			output,
+			tmpRoot,
+			environment: { CLIPROXY_API_KEY: secret },
+		});
+		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
+		const ansiStripped = copied.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "");
+		assert.equal(copied.includes(secret), false);
+		assert.equal(ansiStripped.includes(secret), false);
+		assert.match(copied, /\[REDACTED:CLIPROXY_API_KEY\]/);
+		assert.match(copied, /\u001b\[31m/);
+		assert.match(copied, /\u001b\[0m/);
+		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+		assert.equal(report.omittedSensitiveFiles.includes(path.join(workspace, "pi.log")), false);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("unrelated execution databases are omitted without aborting collection", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-unrelated-db-"));
 	try {
