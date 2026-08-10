@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
@@ -32,7 +33,18 @@ export interface RunConfiguration {
 }
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
+export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
 export const EXECUTION_SCHEMA_VERSION = 8
+
+const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
+const PRIVATE_RUNTIME_FILE_MODE = 0o600
+const NOFOLLOW_FLAG = fs.constants.O_NOFOLLOW ?? 0
+const ROTATION_EPOCH_LOCK_NAME = "rotation-epoch.lock"
+const ROTATION_EPOCH_LOCK_TIMEOUT_MS = 30_000
+const ROTATION_EPOCH_LOCK_STALE_MS = 60_000
+const ROTATION_EPOCH_LOCKS = new Map<string, { descriptor: number; depth: number; token: string }>()
+const ROTATION_PUBLICATION_EPOCHS = new Map<string, number>()
+const LOCK_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4))
 
 // Integrity checks scan the database. Running one for every short-lived reader
 // (the dashboard polls every two seconds) turns an O(1) open into O(database).
@@ -75,6 +87,459 @@ function sqliteApi(): typeof import("node:sqlite") {
 
 export function executionDatabasePath(planDir: string): string {
   return path.join(path.resolve(planDir), EXECUTION_DATABASE_RELATIVE)
+}
+
+export function executionRotationMarkerPath(planDir: string): string {
+  return path.join(path.resolve(planDir), EXECUTION_ROTATION_MARKER_RELATIVE)
+}
+
+function lstatIfPresent(candidate: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(candidate)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw error
+  }
+}
+
+function ownerOnlyMode(stat: fs.Stats): boolean {
+  return (stat.mode & 0o077) === 0
+}
+
+function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
+function assertDirectory(candidate: string, stat: fs.Stats, label: string): void {
+  if (stat.isSymbolicLink() || !stat.isDirectory()) fail(`${label} must be a real directory: ${candidate}`)
+}
+
+function assertRegularFile(candidate: string, stat: fs.Stats, label: string): void {
+  if (stat.isSymbolicLink() || !stat.isFile()) fail(`${label} must be a regular file: ${candidate}`)
+}
+
+function assertOwnerOnly(candidate: string, stat: fs.Stats, label: string): void {
+  if (!ownerOnlyMode(stat)) fail(`${label} must be owner-only: ${candidate}`)
+}
+
+function validateRotationMarker(markerPath: string, { readOnly = false }: { readOnly?: boolean } = {}): fs.Stats | null {
+  const marker = lstatIfPresent(markerPath)
+  if (!marker) return null
+  assertRegularFile(markerPath, marker, "Execution rotation marker")
+  if (readOnly) assertOwnerOnly(markerPath, marker, "Execution rotation marker")
+  return marker
+}
+
+function syncDirectory(directoryPath: string): void {
+  const directoryFlag = fs.constants.O_DIRECTORY
+  const noFollowFlag = fs.constants.O_NOFOLLOW
+  if (!directoryFlag || !noFollowFlag || typeof fs.fsyncSync !== "function") {
+    fail(`Durable rotation marker directory sync is unavailable: ${directoryPath}`)
+  }
+  let descriptor: number | undefined
+  try {
+    descriptor = fs.openSync(directoryPath, fs.constants.O_RDONLY | directoryFlag | noFollowFlag)
+    const identity = fs.fstatSync(descriptor)
+    if (!identity.isDirectory()) fail(`Rotation marker parent must be a real directory: ${directoryPath}`)
+    fs.fsyncSync(descriptor)
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+  }
+}
+
+function markerIdentity(markerPath: string, marker: fs.Stats): string {
+  const contents = fs.readFileSync(markerPath)
+  const current = lstatIfPresent(markerPath)
+  if (!current || !sameFileIdentity(marker, current)) {
+    fail(`Execution rotation marker changed while it was being inspected: ${markerPath}`)
+  }
+  assertRegularFile(markerPath, current, "Execution rotation marker")
+  return `${current.dev}:${current.ino}:${contents.toString("base64")}`
+}
+
+function canonicalPath(candidate: string): string {
+  try { return fs.realpathSync.native(candidate) }
+  catch { return path.resolve(candidate) }
+}
+
+function rotationEpochLockPath(planDir: string): string {
+  return path.join(canonicalPath(planDir), ".herder", ROTATION_EPOCH_LOCK_NAME)
+}
+
+function rotationEpochKeyFromMarker(markerPath: string): string {
+  return canonicalPath(path.dirname(markerPath))
+}
+
+function noteRotationPublication(markerPath: string): void {
+  const key = rotationEpochKeyFromMarker(markerPath)
+  ROTATION_PUBLICATION_EPOCHS.set(key, (ROTATION_PUBLICATION_EPOCHS.get(key) ?? 0) + 1)
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function waitForRotationEpochLock(): void {
+  Atomics.wait(LOCK_WAIT_BUFFER, 0, 0, 10)
+}
+
+function restoreQuarantinedLock(lockPath: string, quarantinePath: string): void {
+  try {
+    fs.linkSync(quarantinePath, lockPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+  }
+  fs.unlinkSync(quarantinePath)
+}
+
+function removeStaleRotationEpochLock(lockPath: string, observed: fs.Stats): void {
+  const quarantinePath = `${lockPath}.${randomUUID()}.stale`
+  let quarantinePresent = false
+  try {
+    try {
+      fs.renameSync(lockPath, quarantinePath)
+      quarantinePresent = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+      throw error
+    }
+    const quarantined = lstatIfPresent(quarantinePath)
+    if (!quarantined) return
+    if (!sameFileIdentity(observed, quarantined)) {
+      restoreQuarantinedLock(lockPath, quarantinePath)
+      quarantinePresent = false
+      return
+    }
+    fs.unlinkSync(quarantinePath)
+    quarantinePresent = false
+  } finally {
+    if (quarantinePresent) {
+      try { restoreQuarantinedLock(lockPath, quarantinePath) } catch {}
+    }
+  }
+}
+
+function acquireRotationEpochLock(planDir: string): { descriptor: number; lockPath: string; token: string } {
+  const lockPath = rotationEpochLockPath(planDir)
+  const deadline = Date.now() + ROTATION_EPOCH_LOCK_TIMEOUT_MS
+  for (;;) {
+    const token = randomUUID()
+    let descriptor: number | undefined
+    try {
+      descriptor = fs.openSync(
+        lockPath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW_FLAG,
+        PRIVATE_RUNTIME_FILE_MODE,
+      )
+      fs.fchmodSync(descriptor, PRIVATE_RUNTIME_FILE_MODE)
+      fs.writeFileSync(descriptor, `${process.pid}:${token}\n`)
+      const opened = fs.fstatSync(descriptor)
+      const named = fs.lstatSync(lockPath)
+      assertRegularFile(lockPath, named, "Execution rotation epoch lock")
+      assertOwnerOnly(lockPath, named, "Execution rotation epoch lock")
+      if (!sameFileIdentity(opened, named)) fail(`Execution rotation epoch lock changed while it was acquired: ${lockPath}`)
+      return { descriptor, lockPath, token }
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try {
+          const opened = fs.fstatSync(descriptor)
+          const named = lstatIfPresent(lockPath)
+          if (named && sameFileIdentity(opened, named)) fs.unlinkSync(lockPath)
+        } catch {}
+        try { fs.closeSync(descriptor) } catch {}
+      }
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    }
+
+    const observed = lstatIfPresent(lockPath)
+    if (!observed) continue
+    assertRegularFile(lockPath, observed, "Execution rotation epoch lock")
+    assertOwnerOnly(lockPath, observed, "Execution rotation epoch lock")
+    let owner = 0
+    try { owner = Number(fs.readFileSync(lockPath, "utf8").split(":", 1)[0]) } catch {}
+    if ((owner > 0 && !processAlive(owner)) || (!owner && Date.now() - observed.mtimeMs >= ROTATION_EPOCH_LOCK_STALE_MS)) {
+      removeStaleRotationEpochLock(lockPath, observed)
+      continue
+    }
+    if (Date.now() >= deadline) fail(`Timed out waiting for execution rotation epoch lock: ${lockPath}`)
+    waitForRotationEpochLock()
+  }
+}
+
+function releaseRotationEpochLock(lockPath: string, descriptor: number, token: string): void {
+  try {
+    const opened = fs.fstatSync(descriptor)
+    const named = lstatIfPresent(lockPath)
+    if (!named || !sameFileIdentity(opened, named)) fail(`Execution rotation epoch lock changed while it was held: ${lockPath}`)
+    if (fs.readFileSync(lockPath, "utf8") !== `${process.pid}:${token}\n`) {
+      fail(`Execution rotation epoch lock ownership changed while it was held: ${lockPath}`)
+    }
+    fs.unlinkSync(lockPath)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+function releaseRotationEpochEntry(lockPath: string, token: string): void {
+  const held = ROTATION_EPOCH_LOCKS.get(lockPath)
+  if (!held || held.token !== token) fail(`Execution rotation epoch lock is not held by this process: ${lockPath}`)
+  held.depth -= 1
+  if (held.depth > 0) return
+  ROTATION_EPOCH_LOCKS.delete(lockPath)
+  releaseRotationEpochLock(lockPath, held.descriptor, held.token)
+}
+
+/**
+ * Hold the same cross-process epoch used by writable exposure repair while an
+ * authority handoff performs asynchronous health and replacement checks.
+ */
+export function acquireExecutionRotationEpoch(planDir: string): () => void {
+  const lockPath = rotationEpochLockPath(planDir)
+  const held = ROTATION_EPOCH_LOCKS.get(lockPath)
+  if (held) {
+    held.depth += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      releaseRotationEpochEntry(lockPath, held.token)
+    }
+  }
+  const acquired = acquireRotationEpochLock(planDir)
+  ROTATION_EPOCH_LOCKS.set(lockPath, { descriptor: acquired.descriptor, depth: 1, token: acquired.token })
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseRotationEpochEntry(lockPath, acquired.token)
+  }
+}
+
+function withRotationEpochLock<T>(planDir: string, callback: () => T): T {
+  const release = acquireExecutionRotationEpoch(planDir)
+  try {
+    return callback()
+  } finally {
+    release()
+  }
+}
+
+interface RotationPublicationState { currentEpochDurable: boolean }
+
+function createRotationMarker(markerPath: string, publication: RotationPublicationState): void {
+  const token = randomUUID()
+  const temporaryPath = `${markerPath}.${token}.tmp`
+  let descriptor: number | undefined
+  let temporaryPresent = false
+  try {
+    // Reserve the public marker path before opening the replacement temporary
+    // file. If temporary creation fails, the empty owner-only reservation still
+    // records the pending rotation epoch for a retry.
+    let marker = lstatIfPresent(markerPath)
+    if (!marker) {
+      try {
+        descriptor = fs.openSync(
+          markerPath,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW_FLAG,
+          PRIVATE_RUNTIME_FILE_MODE,
+        )
+        noteRotationPublication(markerPath)
+        fs.fchmodSync(descriptor, PRIVATE_RUNTIME_FILE_MODE)
+        fs.fsyncSync(descriptor)
+        fs.closeSync(descriptor)
+        descriptor = undefined
+        syncDirectory(path.dirname(markerPath))
+        publication.currentEpochDurable = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      }
+      marker = lstatIfPresent(markerPath)
+    }
+    if (!marker) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
+    assertRegularFile(markerPath, marker, "Execution rotation marker")
+    marker = enforcePrivateMode(markerPath, marker, PRIVATE_RUNTIME_FILE_MODE, "Execution rotation marker", false)
+
+    descriptor = fs.openSync(
+      temporaryPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW_FLAG,
+      PRIVATE_RUNTIME_FILE_MODE,
+    )
+    temporaryPresent = true
+    fs.fchmodSync(descriptor, PRIVATE_RUNTIME_FILE_MODE)
+    const written = fs.writeSync(descriptor, token, 0, "utf8")
+    if (written !== Buffer.byteLength(token)) fail(`Execution rotation marker could not be written: ${markerPath}`)
+    fs.fsyncSync(descriptor)
+    fs.closeSync(descriptor)
+    descriptor = undefined
+    // Once rename begins, only its parent-directory sync proves that the fresh
+    // epoch (rather than a prior durable reservation) survives a crash.
+    publication.currentEpochDurable = false
+    fs.renameSync(temporaryPath, markerPath)
+    temporaryPresent = false
+    noteRotationPublication(markerPath)
+    syncDirectory(path.dirname(markerPath))
+    publication.currentEpochDurable = true
+    marker = lstatIfPresent(markerPath)
+    if (!marker) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
+    assertRegularFile(markerPath, marker, "Execution rotation marker")
+    assertOwnerOnly(markerPath, marker, "Execution rotation marker")
+    if (fs.readFileSync(markerPath, "utf8") !== token) {
+      fail(`Execution rotation marker changed during repair: ${markerPath}`)
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+    if (temporaryPresent) {
+      try { fs.unlinkSync(temporaryPath) } catch {}
+    }
+  }
+}
+
+export function hasExecutionRotationMarker(planDir: string): boolean {
+  return validateRotationMarker(executionRotationMarkerPath(planDir)) !== null
+}
+
+export function executionRotationMarkerIdentity(planDir: string): string | null {
+  const markerPath = executionRotationMarkerPath(planDir)
+  const marker = validateRotationMarker(markerPath)
+  return marker ? markerIdentity(markerPath, marker) : null
+}
+
+export function executionAuthorityHandoffReady(planDir: string): boolean {
+  const markerPath = executionRotationMarkerPath(planDir)
+  const epochKey = rotationEpochKeyFromMarker(markerPath)
+  return withRotationEpochLock(planDir, () => {
+    const observedEpoch = ROTATION_PUBLICATION_EPOCHS.get(epochKey) ?? 0
+    openExecutionDatabase(planDir, { create: true })!.close()
+    const marker = executionRotationMarkerIdentity(planDir)
+    return marker === null && (ROTATION_PUBLICATION_EPOCHS.get(epochKey) ?? 0) === observedEpoch
+  })
+}
+
+function retainQuarantinedMarker(markerPath: string, quarantinePath: string): void {
+  try {
+    // A hard link restores the proven inode without replacing a fresh marker
+    // that was published while the quarantine was in flight.
+    fs.linkSync(quarantinePath, markerPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+  }
+  try {
+    fs.unlinkSync(quarantinePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+}
+
+export function clearExecutionRotationMarker(planDir: string, expectedIdentity?: string): boolean {
+  const markerPath = executionRotationMarkerPath(planDir)
+  if (!lstatIfPresent(markerPath)) return expectedIdentity === undefined
+  return withRotationEpochLock(planDir, () => {
+    const marker = validateRotationMarker(markerPath)
+  if (!marker) return expectedIdentity === undefined
+  const observedIdentity = markerIdentity(markerPath, marker)
+  if (expectedIdentity !== undefined && observedIdentity !== expectedIdentity) return false
+  assertOwnerOnly(markerPath, marker, "Execution rotation marker")
+
+  // Rename the entry out of the public pathname before deleting it. If a
+  // publisher wins the rename race, its fresh inode is quarantined, detected,
+  // and restored without ever unlinking the replacement at markerPath.
+  const quarantinePath = `${markerPath}.${randomUUID()}.clear`
+  let quarantinePresent = false
+  try {
+    try {
+      fs.renameSync(markerPath, quarantinePath)
+      quarantinePresent = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+      throw error
+    }
+    const quarantined = lstatIfPresent(quarantinePath)
+    if (!quarantined) return false
+    const quarantinedIdentity = markerIdentity(quarantinePath, quarantined)
+    if (quarantinedIdentity !== observedIdentity) {
+      retainQuarantinedMarker(markerPath, quarantinePath)
+      quarantinePresent = false
+      syncDirectory(path.dirname(markerPath))
+      return false
+    }
+    try {
+      fs.unlinkSync(quarantinePath)
+      quarantinePresent = false
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        quarantinePresent = false
+        return false
+      }
+      throw error
+    }
+    syncDirectory(path.dirname(markerPath))
+    return executionRotationMarkerIdentity(planDir) === null
+    } finally {
+      if (quarantinePresent) {
+        try { retainQuarantinedMarker(markerPath, quarantinePath) } catch {}
+      }
+    }
+  })
+}
+
+function createDatabaseFile(databasePath: string): void {
+  let descriptor: number | undefined
+  try {
+    descriptor = fs.openSync(
+      databasePath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW_FLAG,
+      PRIVATE_RUNTIME_FILE_MODE,
+    )
+    fs.fchmodSync(descriptor, PRIVATE_RUNTIME_FILE_MODE)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+  }
+}
+
+function enforcePrivateMode(
+  candidate: string,
+  expected: fs.Stats,
+  mode: number,
+  label: string,
+  directory: boolean,
+): fs.Stats {
+  const directoryFlag = fs.constants.O_DIRECTORY
+  const descriptorSafe = NOFOLLOW_FLAG !== 0 && (!directory || directoryFlag !== undefined) && typeof fs.fchmodSync === "function"
+  if (descriptorSafe) {
+    let descriptor: number | undefined
+    try {
+      descriptor = fs.openSync(candidate, fs.constants.O_RDONLY | NOFOLLOW_FLAG | (directory ? directoryFlag! : 0))
+      const opened = fs.fstatSync(descriptor)
+      if (directory) assertDirectory(candidate, opened, label)
+      else assertRegularFile(candidate, opened, label)
+      if (!sameFileIdentity(expected, opened)) fail(`${label} changed during permission repair: ${candidate}`)
+      fs.fchmodSync(descriptor, mode)
+      const repaired = fs.fstatSync(descriptor)
+      if ((repaired.mode & 0o777) !== mode) fail(`${label} mode could not be repaired: ${candidate}`)
+      const named = lstatIfPresent(candidate)
+      if (!named || !sameFileIdentity(repaired, named)) fail(`${label} changed during permission repair: ${candidate}`)
+      if (directory) assertDirectory(candidate, named, label)
+      else assertRegularFile(candidate, named, label)
+      return repaired
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor)
+    }
+  }
+  if (process.platform !== "win32") fail(`Safe ${label.toLowerCase()} permission repair is unavailable: ${candidate}`)
+  fs.chmodSync(candidate, mode)
+  const repaired = lstatIfPresent(candidate)
+  if (!repaired || !sameFileIdentity(expected, repaired)) fail(`${label} changed during permission repair: ${candidate}`)
+  if (directory) assertDirectory(candidate, repaired, label)
+  else assertRegularFile(candidate, repaired, label)
+  if ((repaired.mode & 0o777) !== mode) fail(`${label} mode could not be repaired: ${candidate}`)
+  return repaired
 }
 
 function configureDatabase(database: Database, { readOnly = false }: { readOnly?: boolean } = {}): void {
@@ -379,29 +844,93 @@ export function openExecutionDatabase(planDir: string, options?: { create?: fals
 export function openExecutionDatabase(planDir: string, { create = false, readOnly = false }: { create?: boolean; readOnly?: boolean } = {}): Database | null {
   const databasePath = executionDatabasePath(planDir)
   const runtimeDirectory = path.dirname(databasePath)
-  const existed = fs.existsSync(databasePath)
-  if (!existed && !create) return null
-  if (!existed && readOnly) return null
-  if (fs.existsSync(runtimeDirectory)) {
-    const runtimeStat = fs.lstatSync(runtimeDirectory)
-    if (runtimeStat.isSymbolicLink() || !runtimeStat.isDirectory()) {
-      fail(`Execution runtime path must be a real directory: ${runtimeDirectory}`)
-    }
-  } else {
-    fs.mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 })
+  let databaseStat = lstatIfPresent(databasePath)
+  if (!databaseStat && !create) return null
+  if (!databaseStat && readOnly) return null
+
+  let runtimeStat = lstatIfPresent(runtimeDirectory)
+  if (!runtimeStat) {
+    // A query-only open must never create or repair runtime state. A database
+    // cannot normally outlive its parent directory, but keep this explicit for
+    // callers that point at a damaged or concurrently changing tree.
+    if (readOnly) return null
+    fs.mkdirSync(runtimeDirectory, { recursive: true, mode: PRIVATE_RUNTIME_DIRECTORY_MODE })
+    runtimeStat = lstatIfPresent(runtimeDirectory)
   }
-  if (existed) {
-    const databaseStat = fs.lstatSync(databasePath)
-    if (databaseStat.isSymbolicLink() || !databaseStat.isFile()) {
-      fail(`Execution database path must be a regular file: ${databasePath}`)
+  if (!runtimeStat) fail(`Execution runtime path could not be created: ${runtimeDirectory}`)
+  assertDirectory(runtimeDirectory, runtimeStat, "Execution runtime path")
+
+  const markerPath = executionRotationMarkerPath(planDir)
+  let markerStat = validateRotationMarker(markerPath, { readOnly })
+  const runtimeExposed = !ownerOnlyMode(runtimeStat)
+  if (readOnly && runtimeExposed) {
+    fail(`Execution runtime path must be owner-only for read-only access: ${runtimeDirectory}`)
+  }
+
+  if (!databaseStat) {
+    createDatabaseFile(databasePath)
+    databaseStat = lstatIfPresent(databasePath)
+  }
+  if (!databaseStat) fail(`Execution database could not be created: ${databasePath}`)
+  assertRegularFile(databasePath, databaseStat, "Execution database path")
+  const databaseExposed = !ownerOnlyMode(databaseStat)
+  if (readOnly && databaseExposed) {
+    fail(`Execution database must be owner-only for read-only access: ${databasePath}`)
+  }
+
+  if (!readOnly) {
+    if (runtimeExposed || databaseExposed) {
+      // Secure the marker's parent before creating or replacing the marker. This
+      // prevents another user from unlinking the marker during a writable repair.
+      // Keep any exposed database mode unchanged until the marker is durable: if
+      // marker publication fails before a temporary file exists, that mode is
+      // the retry-detectable pending-rotation state.
+      const originalRuntimeStat = runtimeStat
+      const originalRuntimeMode = runtimeStat.mode & 0o7777
+      const originalDatabaseStat = databaseStat
+      const publication: RotationPublicationState = { currentEpochDurable: false }
+      withRotationEpochLock(planDir, () => {
+        try {
+          if (runtimeExposed) {
+            runtimeStat = enforcePrivateMode(runtimeDirectory, originalRuntimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE, "Execution runtime path", true)
+          }
+          // A fresh marker identity records every new exposure while rotation is
+          // pending; the client must prove a later instance is healthy. Hold the
+          // shared epoch lock from parent repair through durable publication and
+          // database repair so authority cannot pass through the intermediate
+          // private-directory/no-marker state.
+          withRotationEpochLock(planDir, () => createRotationMarker(markerPath, publication))
+          markerStat = lstatIfPresent(markerPath)
+          if (!markerStat) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
+          if (databaseExposed) {
+            databaseStat = enforcePrivateMode(databasePath, originalDatabaseStat, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false)
+          }
+        } catch (error) {
+          // Pathname visibility is not durability. Until the fresh epoch's inode
+          // and directory entry are synced, retain the original broad mode as the
+          // retry-detectable exposure signal. A durable reservation still permits
+          // owner-only repair when opening the richer temporary marker fails.
+          if (publication.currentEpochDurable && databaseExposed) {
+            try { databaseStat = enforcePrivateMode(databasePath, originalDatabaseStat, PRIVATE_RUNTIME_FILE_MODE, "Execution database path", false) } catch {}
+          }
+          if (runtimeExposed && !publication.currentEpochDurable) {
+            try { enforcePrivateMode(runtimeDirectory, originalRuntimeStat, originalRuntimeMode, "Execution runtime path", true) } catch {}
+          }
+          throw error
+        }
+      })
+    } else if (markerStat) {
+      markerStat = enforcePrivateMode(markerPath, markerStat, PRIVATE_RUNTIME_FILE_MODE, "Execution rotation marker", false)
     }
   }
+
   const { DatabaseSync } = sqliteApi()
   const database = new DatabaseSync(databasePath, { readOnly })
   try {
     configureDatabase(database, { readOnly })
     initializeSchema(database, { allowInitialize: !readOnly })
-    const identity = fs.statSync(databasePath)
+    const identity = fs.lstatSync(databasePath)
+    assertRegularFile(databasePath, identity, "Execution database path")
     const lastCheck = HEALTHY_DATABASES.get(databasePath)
     if (!lastCheck
       || lastCheck.dev !== identity.dev
@@ -410,10 +939,6 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
       assertHealthy(database, databasePath)
       if (HEALTHY_DATABASES.size >= 256) HEALTHY_DATABASES.delete(HEALTHY_DATABASES.keys().next().value!)
       HEALTHY_DATABASES.set(databasePath, { dev: identity.dev, ino: identity.ino, checkedAt: Date.now() })
-    }
-    if (!existed) {
-      fs.chmodSync(runtimeDirectory, 0o700)
-      fs.chmodSync(databasePath, 0o600)
     }
     return database
   } catch (error) {

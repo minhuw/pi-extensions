@@ -4,7 +4,15 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "../daemon/execution-store.ts";
+import {
+	acquireExecutionRotationEpoch,
+	EXECUTION_SCHEMA_VERSION,
+	clearExecutionRotationMarker,
+	executionAuthorityHandoffReady,
+	executionRotationMarkerIdentity,
+	hasExecutionRotationMarker,
+	openExecutionDatabase,
+} from "../daemon/execution-store.ts";
 import { RunStore, type StoredService } from "../daemon/run-store.ts";
 import { MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
@@ -87,6 +95,8 @@ export async function requestService(service: StoredService, pathname: string, i
 
 const HEALTH_TIMEOUT_MS = 2_000;
 const SERVICE_WAIT_INTERVAL_MS = 500;
+const SERVICE_STARTUP_ATTEMPTS = 80;
+const SERVICE_REPLACEMENT_ATTEMPTS = 150;
 const DEFAULT_UNRESPONSIVE_GRACE_MS = 45_000;
 
 function registeredService(planDirectory: string): StoredService | null {
@@ -124,6 +134,12 @@ export async function healthyService(planDirectory: string): Promise<StoredServi
 	} catch {
 		return null;
 	}
+}
+
+async function healthyUnmarkedService(planDirectory: string): Promise<StoredService | null> {
+	if (hasExecutionRotationMarker(planDirectory)) return null;
+	const service = await healthyService(planDirectory);
+	return service && !hasExecutionRotationMarker(planDirectory) ? service : null;
 }
 
 function processAlive(pid: number): boolean {
@@ -171,25 +187,105 @@ function acquireStartLock(lockPath: string): number | null {
 	}
 }
 
+function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+function openServiceLog(logPath: string): number {
+	if (!fs.constants.O_NOFOLLOW) throw new Error(`Safe service log opening is unavailable: ${logPath}`);
+	let descriptor: number | undefined;
+	try {
+		const existing = (() => {
+			try { return fs.lstatSync(logPath); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+				throw error;
+			}
+		})();
+		if (existing && (existing.isSymbolicLink() || !existing.isFile())) {
+			throw new Error(`Service log must be a regular file: ${logPath}`);
+		}
+		descriptor = fs.openSync(
+			logPath,
+			fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
+			0o600,
+		);
+		const opened = fs.fstatSync(descriptor);
+		if (!opened.isFile()) throw new Error(`Service log must be a regular file: ${logPath}`);
+		const named = fs.lstatSync(logPath);
+		if (named.isSymbolicLink() || !named.isFile() || !sameFileIdentity(opened, named)) {
+			throw new Error(`Service log path changed while opening: ${logPath}`);
+		}
+		fs.fchmodSync(descriptor, 0o600);
+		const repaired = fs.fstatSync(descriptor);
+		const verified = fs.lstatSync(logPath);
+		if (!repaired.isFile() || (repaired.mode & 0o077) !== 0 || verified.isSymbolicLink() || !verified.isFile() || !sameFileIdentity(repaired, verified)) {
+			throw new Error(`Service log is not a private regular file: ${logPath}`);
+		}
+		return descriptor;
+	} catch (error) {
+		if (descriptor !== undefined) {
+			try { fs.closeSync(descriptor); } catch {}
+		}
+		throw error;
+	}
+}
+
+function spawnServiceProcess(planDirectory: string, options: { dashboardPort?: number }, logPath: string): void {
+	const log = openServiceLog(logPath);
+	try {
+		const child = spawn(process.execPath, [
+			"--experimental-strip-types",
+			SERVICE_ENTRY,
+			"--plan-dir", planDirectory,
+			"--dashboard-port", String(options.dashboardPort ?? 0),
+		], {
+			detached: true,
+			stdio: ["ignore", log, log],
+			env: process.env,
+		});
+		child.unref();
+	} finally {
+		fs.closeSync(log);
+	}
+}
+
 export async function ensureService(planDirectoryInput: string, options: { dashboardPort?: number; unresponsiveGraceMs?: number } = {}): Promise<StoredService> {
 	const planDirectory = fs.realpathSync(path.resolve(planDirectoryInput));
 	const readme = path.join(planDirectory, "README.md");
 	if (!fs.existsSync(readme) || fs.lstatSync(readme).isSymbolicLink() || !fs.statSync(readme).isFile()) {
 		throw new Error(`Herder plan index is missing or unsafe: ${readme}`);
 	}
-	openExecutionDatabase(planDirectory, { create: true })!.close();
-	const existing = await healthyService(planDirectory);
-	if (existing) return existing;
 	const runtimeDirectory = path.join(planDirectory, ".herder");
 	fs.mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
 	const lockPath = path.join(runtimeDirectory, "service-start.lock");
-	const lock = acquireStartLock(lockPath);
-	if (lock !== null) {
+	const runWithStartLock = async (lock: number): Promise<StoredService | null> => {
+		let releaseRotationEpoch: (() => void) | undefined;
 		try {
-			const rechecked = await healthyService(planDirectory);
-			if (rechecked) return rechecked;
+			// Keep the cross-process rotation epoch held through every asynchronous
+			// health and handoff observation. Writable publishers use this same lock,
+			// so a late marker cannot appear after the final absence observation.
+			releaseRotationEpoch = acquireExecutionRotationEpoch(planDirectory);
+			// All writable exposure repair happens under the existing start lock. A
+			// concurrent caller therefore cannot publish a new rotation epoch between
+			// the final health check and this caller's handoff.
+			openExecutionDatabase(planDirectory, { create: true })!.close();
+			let markerIdentity = executionRotationMarkerIdentity(planDirectory);
+			let rotationRequired = markerIdentity !== null;
+			const rechecked = rotationRequired ? null : await healthyUnmarkedService(planDirectory);
+			if (rechecked) {
+				if (executionAuthorityHandoffReady(planDirectory)) return rechecked;
+				const settledMarker = executionRotationMarkerIdentity(planDirectory);
+				if (settledMarker === null) throw new Error("Execution authority handoff changed without a rotation marker");
+				markerIdentity = settledMarker;
+				rotationRequired = true;
+			}
+			markerIdentity = executionRotationMarkerIdentity(planDirectory);
+			rotationRequired = markerIdentity !== null;
 			const registered = registeredService(planDirectory);
-			if (registered && serviceProcessAlive(registered.pid)) {
+			if (rotationRequired && registered && serviceProcessAlive(registered.pid)) {
+				await terminateServiceProcess(registered.pid);
+			} else if (registered && serviceProcessAlive(registered.pid)) {
 				// An authenticated daemon that explicitly reports an obsolete protocol is
 				// replaced immediately. An unresponsive owner still receives the grace period.
 				if (await incompatibleService(registered)) await terminateServiceProcess(registered.pid);
@@ -199,40 +295,136 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 					const deadline = Date.now() + (options.unresponsiveGraceMs ?? DEFAULT_UNRESPONSIVE_GRACE_MS);
 					while (Date.now() < deadline) {
 						await delay(SERVICE_WAIT_INTERVAL_MS);
-						const service = await healthyService(planDirectory);
-						if (service) return service;
+						if (executionRotationMarkerIdentity(planDirectory) !== null) {
+							rotationRequired = true;
+							break;
+						}
+						const service = await healthyUnmarkedService(planDirectory);
+						if (service) {
+							if (executionAuthorityHandoffReady(planDirectory)) return service;
+							const settledMarker = executionRotationMarkerIdentity(planDirectory);
+							if (settledMarker === null) throw new Error("Execution authority handoff changed without a rotation marker");
+							rotationRequired = true;
+							break;
+						}
+						if (executionRotationMarkerIdentity(planDirectory) !== null) {
+							rotationRequired = true;
+							break;
+						}
 						if (!serviceProcessAlive(registered.pid)) break;
 					}
-					if (serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
+					if (rotationRequired || serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
 				}
 			}
-			const logPath = path.join(runtimeDirectory, "service.log");
-			const log = fs.openSync(logPath, "a", 0o600);
-			const child = spawn(process.execPath, [
-				"--experimental-strip-types",
-				SERVICE_ENTRY,
-				"--plan-dir", planDirectory,
-				"--dashboard-port", String(options.dashboardPort ?? 0),
-			], {
-				detached: true,
-				stdio: ["ignore", log, log],
-				env: process.env,
-			});
-			child.unref();
-			fs.closeSync(log);
-			for (let attempt = 0; attempt < 80; attempt += 1) {
-				const service = await healthyService(planDirectory);
-				if (service) return service;
-				await delay(100);
+			markerIdentity = executionRotationMarkerIdentity(planDirectory);
+			rotationRequired = markerIdentity !== null;
+			let previousInstanceId = rotationRequired ? registered?.instanceId : undefined;
+			let replacementBaselinePending = rotationRequired && previousInstanceId === undefined;
+			const observeMarker = (observed: string | null): void => {
+				if (observed === markerIdentity) return;
+				if (observed === null) {
+					if (rotationRequired) throw new Error(`Execution rotation marker disappeared before authority rotation completed: ${path.join(runtimeDirectory, "rotation-required")}`);
+					markerIdentity = null;
+					return;
+				}
+				markerIdentity = observed;
+				rotationRequired = true;
+				previousInstanceId = undefined;
+				replacementBaselinePending = true;
+			};
+			const waitForService = async (attempts: number, intervalMs: number): Promise<StoredService | "restart" | null> => {
+				for (let attempt = 0; attempt < attempts; attempt += 1) {
+					observeMarker(executionRotationMarkerIdentity(planDirectory));
+					const service = await healthyService(planDirectory);
+					observeMarker(executionRotationMarkerIdentity(planDirectory));
+					if (service) {
+						if (!rotationRequired) {
+							if (executionAuthorityHandoffReady(planDirectory)) return service;
+							const publishedMarker = executionRotationMarkerIdentity(planDirectory);
+							if (publishedMarker === null) throw new Error("Execution authority handoff changed without a rotation marker");
+							markerIdentity = publishedMarker;
+							rotationRequired = true;
+							previousInstanceId = service.instanceId;
+							replacementBaselinePending = false;
+							await terminateServiceProcess(service.pid);
+							return "restart";
+						}
+						if (replacementBaselinePending || previousInstanceId === undefined || service.instanceId === previousInstanceId) {
+							previousInstanceId = service.instanceId;
+							replacementBaselinePending = false;
+							await terminateServiceProcess(service.pid);
+							return "restart";
+						}
+						const expectedMarker = markerIdentity;
+						if (expectedMarker === null) throw new Error("Execution rotation marker disappeared before authority rotation completed");
+						const cleared = clearExecutionRotationMarker(planDirectory, expectedMarker);
+						const remainingMarker = executionRotationMarkerIdentity(planDirectory);
+						if (cleared && remainingMarker === null) {
+							// Marker publication and this handoff are serialized by the shared
+							// epoch lock. The process-local epoch also detects a reentrant
+							// publication that occurs inside the final absence observation.
+							if (executionAuthorityHandoffReady(planDirectory)) {
+								markerIdentity = null;
+								rotationRequired = false;
+								return service;
+							}
+							const settledMarker = executionRotationMarkerIdentity(planDirectory);
+							if (settledMarker === null) throw new Error("Execution authority handoff changed without a rotation marker");
+							markerIdentity = settledMarker;
+							rotationRequired = true;
+							previousInstanceId = service.instanceId;
+							replacementBaselinePending = false;
+							await terminateServiceProcess(service.pid);
+							return "restart";
+						}
+						await terminateServiceProcess(service.pid);
+						if (remainingMarker === null) {
+							throw new Error("Execution rotation marker disappeared while authority rotation was being completed");
+						}
+						markerIdentity = remainingMarker;
+						rotationRequired = true;
+						previousInstanceId = service.instanceId;
+						replacementBaselinePending = true;
+						return "restart";
+					}
+					await delay(intervalMs);
+				}
+				return null;
+			};
+			for (;;) {
+				spawnServiceProcess(planDirectory, options, path.join(runtimeDirectory, "service.log"));
+				let result = await waitForService(SERVICE_STARTUP_ATTEMPTS, 100);
+				if (result === "restart") continue;
+				if (result) return result;
+				observeMarker(executionRotationMarkerIdentity(planDirectory));
+				if (rotationRequired) {
+					result = await waitForService(SERVICE_REPLACEMENT_ATTEMPTS, SERVICE_WAIT_INTERVAL_MS);
+					if (result === "restart") continue;
+					if (result) return result;
+				}
+				break;
 			}
+			return null;
 		} finally {
-			fs.closeSync(lock);
-			try { fs.unlinkSync(lockPath); } catch {}
+			try { releaseRotationEpoch?.(); }
+			finally {
+				fs.closeSync(lock);
+				try { fs.unlinkSync(lockPath); } catch {}
+			}
 		}
+	};
+
+	let lock = acquireStartLock(lockPath);
+	if (lock !== null) {
+		const result = await runWithStartLock(lock);
+		if (result) return result;
 	}
-	for (let attempt = 0; attempt < 150; attempt += 1) {
-		const service = await healthyService(planDirectory);
-		if (service) return service;
+	for (let attempt = 0; attempt < SERVICE_REPLACEMENT_ATTEMPTS; attempt += 1) {
+		lock = acquireStartLock(lockPath);
+		if (lock !== null) {
+			const result = await runWithStartLock(lock);
+			if (result) return result;
+		}
 		await delay(SERVICE_WAIT_INTERVAL_MS);
 	}
 	const logPath = path.join(planDirectory, ".herder", "service.log");
