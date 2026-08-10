@@ -13,6 +13,9 @@
 		"cliproxyapi",
 		"compaction"
 	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
 	"scripts": {
 		"test": "npm run test:statusline && npm run test:subagents && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
 		"test:statusline": "vitest run extensions/statusline-footer/tests/statusline-footer.test.ts",

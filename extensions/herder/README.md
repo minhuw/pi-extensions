@@ -14,6 +14,8 @@ pi install git:github.com/minhuw/pi-extensions
 
 For development, install this repository by absolute path. No separate subagent package is required.
 
+Node >=22.19.0 is required for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution.
+
 Each execution profile binds exact root and worker models. Start Pi with the selected profile's orchestrator model and thinking level, then fire a validated plan directory:
 
 ```text
@@ -84,6 +86,8 @@ Each plan keeps one Herder-owned branch and worktree for its entire pipeline; wo
 For the full adapter and runtime contracts, see [Herder for Pi](adapters/README.md).
 
 ## Testing
+
+Testing requires Node >=22.19.0 to exercise supported Pi integrations, built-in `node:sqlite`, and native TypeScript execution.
 
 Run Herder's deterministic suite from the repository root:
 

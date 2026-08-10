@@ -9,6 +9,13 @@ const repositoryRoot = path.resolve(extensionRoot, "../..");
 
 test("Pi package registers Herder while keeping planning skills command-owned", async () => {
 	const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+	const lock = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
+	const rootReadme = await readFile(path.join(repositoryRoot, "README.md"), "utf8");
+	const herderReadme = await readFile(path.join(extensionRoot, "README.md"), "utf8");
+	assert.deepEqual(manifest.engines, { node: ">=22.19.0" });
+	assert.deepEqual(lock.packages[""].engines, { node: ">=22.19.0" });
+	assert.match(rootReadme, /Node >=22\.19\.0/);
+	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
 	for (const skill of ["improve", "grill", "plans", "validate"]) {

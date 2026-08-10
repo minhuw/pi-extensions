@@ -23,9 +23,13 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
+Node >=22.19.0 is required for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution.
+
 Installing the package loads all registered extensions. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
 
 ## Development
+
+Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution.
 
 ```bash
 npm ci
