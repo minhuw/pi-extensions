@@ -1380,16 +1380,21 @@ export class HerderRunManager {
 					if (!integration.checkpointRef || !integration.checkpoint || !integration.onto || !integration.detachedHead) {
 						throw new Error(`Restack conflict for ${plan.planId} lacks sealed recovery evidence`);
 					}
-					this.updatePlan(plan, {
-						phase: "READY_IMPLEMENTER",
-						round: plan.round + 1,
-						repair: [`Preserved conflicted rebase: checkpoint=${integration.checkpointRef}; onto=${integration.onto}; detached=${integration.detachedHead}`],
-						rebase: {
-							checkpointRef: integration.checkpointRef,
-							checkpoint: integration.checkpoint,
-							onto: integration.onto,
-							detachedHead: integration.detachedHead,
-						},
+					const conflictRunId = run.runId;
+					const rebase = {
+						checkpointRef: integration.checkpointRef,
+						checkpoint: integration.checkpoint,
+						onto: integration.onto,
+						detachedHead: integration.detachedHead,
+					};
+					this.store.transaction(() => {
+						this.store.deleteApproval(conflictRunId, plan.planId, plan.generation);
+						this.updatePlan(plan, {
+							phase: "READY_IMPLEMENTER",
+							round: plan.round + 1,
+							repair: [`Preserved conflicted rebase: checkpoint=${rebase.checkpointRef}; onto=${rebase.onto}; detached=${rebase.detachedHead}`],
+							rebase,
+						});
 					});
 				}
 				break;
@@ -1593,6 +1598,10 @@ export class HerderRunManager {
 				plan = this.updatePlan(plan, { rebase });
 			} catch (error) {
 				driver.release(plan.worktree, leaseReason);
+				this.store.updateRun({
+					status: "paused",
+					terminalDetail: `Active rebase verification failed for ${plan.planId}: ${error instanceof Error ? error.message : String(error)}`,
+				});
 				throw error;
 			}
 		}

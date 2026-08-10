@@ -941,6 +941,11 @@ export class RunStore {
 		return (this.database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? ORDER BY plan_id, generation").all(runId) as Record<string, unknown>[]).map(rowToApproval);
 	}
 
+	deleteApproval(runId: string, planId: string, generation: number): void {
+		this.database.prepare("DELETE FROM manager_approvals WHERE run_id = ? AND plan_id = ? AND generation = ?")
+			.run(runId, planId, generation);
+	}
+
 	putApproval(input: Omit<StoredApproval, "createdAt">): StoredApproval {
 		const existing = this.getApproval(input.runId, input.planId, input.generation);
 		if (existing) {

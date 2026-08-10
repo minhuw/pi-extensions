@@ -724,6 +724,7 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
   const conflictBytes = gitBuffer(execution.root, ["diff", "--name-only", "--diff-filter=U", "-z"])
   const conflicts = conflictBytes.toString("utf8").split("\0").filter(Boolean).sort()
   if (conflicts.length === 0) throw new Error("active-rebase verification requires preserved unresolved conflicts")
+  // The current lease is verified exactly above, but its retry-specific identity is not durable Git evidence.
   const state = {
     schemaVersion: 1,
     worktree: execution.root,
@@ -734,7 +735,6 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
       branch: bundle.assignment.branch,
       workerMode: expectedWorkerMode,
     },
-    leaseReason,
     rebase: {
       backend: rebase.backend,
       headName: rebase.headName,
