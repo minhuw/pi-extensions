@@ -3,7 +3,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import {
@@ -104,6 +104,128 @@ interface PlanFileDetails {
 
 function fail(message: string): never {
   throw new Error(message)
+}
+
+interface FileIdentity {
+  dev: number
+  ino: number
+}
+
+interface RegularFileContents {
+  text: string
+  identity: FileIdentity
+  mode: number
+}
+
+function isMissingFile(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error
+    && (error as NodeJS.ErrnoException).code === "ENOENT")
+}
+
+function fileIdentity(status: fs.Stats): FileIdentity {
+  return { dev: status.dev, ino: status.ino }
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
+function optionalLstat(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file)
+  } catch (error) {
+    if (isMissingFile(error)) return null
+    throw error
+  }
+}
+
+function readRegularFile(
+  file: string,
+  options?: { allowMissing?: false; missingMessage?: string },
+): RegularFileContents
+function readRegularFile(
+  file: string,
+  options: { allowMissing: true; missingMessage?: string },
+): RegularFileContents | null
+function readRegularFile(
+  file: string,
+  options: { allowMissing?: boolean; missingMessage?: string } = {},
+): RegularFileContents | null {
+  let before: fs.Stats
+  try {
+    before = fs.lstatSync(file)
+  } catch (error) {
+    if (options.allowMissing && isMissingFile(error)) return null
+    fail(options.missingMessage ?? `${file} must be a regular file`)
+  }
+  if (!before!.isFile()) fail(`${file} must be a regular file`)
+  const noFollow = fs.constants.O_NOFOLLOW
+  if (typeof noFollow !== "number") fail(`${file} cannot be read safely on this platform`)
+
+  let descriptor: number
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow)
+  } catch {
+    fail(`${file} cannot be read safely as a regular file`)
+  }
+  try {
+    const opened = fs.fstatSync(descriptor!)
+    if (!opened.isFile() || !sameFileIdentity(fileIdentity(before!), fileIdentity(opened))) {
+      fail(`${file} changed while being read`)
+    }
+    let text: string
+    try {
+      text = fs.readFileSync(descriptor!, "utf8")
+    } catch {
+      fail(`${file} could not be read safely`)
+    }
+    return {
+      text: text!,
+      identity: fileIdentity(opened),
+      mode: opened.mode & 0o7777,
+    }
+  } finally {
+    fs.closeSync(descriptor!)
+  }
+}
+
+function atomicReplaceRegularFile(file: string, contents: string, expected: FileIdentity | null, mode?: number): void {
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.herder-tmp-${process.pid}-${randomUUID()}`)
+  let replaced = false
+  try {
+    const before = optionalLstat(file)
+    if (expected) {
+      if (!before?.isFile() || !sameFileIdentity(expected, fileIdentity(before))) {
+        fail(`${file} changed while being updated`)
+      }
+    } else if (before) {
+      fail(`${file} appeared while being created`)
+    }
+
+    fs.writeFileSync(temporary, contents, mode === undefined ? { flag: "wx" } : { flag: "wx", mode })
+    if (mode !== undefined) fs.chmodSync(temporary, mode)
+    const temporaryStatus = fs.lstatSync(temporary)
+    if (!temporaryStatus.isFile()) fail(`${temporary} must be a regular file`)
+
+    const current = optionalLstat(file)
+    if (expected) {
+      if (!current?.isFile() || !sameFileIdentity(expected, fileIdentity(current))) {
+        fail(`${file} changed while being updated`)
+      }
+    } else if (current) {
+      fail(`${file} appeared while being created`)
+    }
+    fs.renameSync(temporary, file)
+    replaced = true
+  } finally {
+    if (!replaced) {
+      try {
+        fs.unlinkSync(temporary)
+      } catch (error) {
+        if (!isMissingFile(error)) throw error
+      }
+    }
+  }
 }
 
 function parseTableRow(line: string): string[] | null {
@@ -400,9 +522,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
     fail(`Plan directory does not exist: ${planDir}`)
   }
   const readme = path.join(planDir, "README.md")
-  if (!fs.existsSync(readme) || !fs.statSync(readme).isFile()) {
-    fail(`Plan directory has no README.md: ${planDir}`)
-  }
+  const readmeFile = readRegularFile(readme, { missingMessage: `Plan directory has no README.md: ${planDir}` })
 
   const contextFile = sharedContextPath(planDir)
   const contextText = contextFile ? fs.readFileSync(contextFile, "utf8") : ""
@@ -410,7 +530,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
   const contextIssues = contextWords > MAX_SHARED_CONTEXT_WORDS
     ? [`Shared context has ${contextWords} words; keep it at or below ${MAX_SHARED_CONTEXT_WORDS}`]
     : []
-  const table = findIndexTable(fs.readFileSync(readme, "utf8"), readme)
+  const table = findIndexTable(readmeFile.text, readme)
   const column = Object.fromEntries(table.normalized.map((name, index) => [name, index])) as Record<string, number>
   const plans: PlanRecord[] = []
   const seen = new Set<string>()
@@ -592,10 +712,13 @@ function removeLocalIgnore(context: RepositoryContext): boolean {
 function ensureRuntimeIgnore(planDir: string): boolean {
   const file = path.join(planDir, ".gitignore")
   const pattern = ".herder/"
-  const lines = readLines(file)
+  const current = readRegularFile(file, { allowMissing: true })
+  const lines = current ? current.text.split(/\r?\n/) : []
   if (lines.includes(pattern)) return false
-  const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8").replace(/\s*$/, "") : ""
-  fs.writeFileSync(file, `${existing ? `${existing}\n` : ""}${pattern}\n`)
+  const existing = current?.text ?? ""
+  const separator = existing && !existing.endsWith("\n") ? "\n" : ""
+  const next = `${existing}${separator}${pattern}\n`
+  atomicReplaceRegularFile(file, next, current?.identity ?? null, current?.mode)
   return true
 }
 
@@ -626,8 +749,9 @@ export function initPlanDir(inputDir = DEFAULT_PLAN_DIR, { track = false }: { tr
   fs.mkdirSync(planDir, { recursive: true })
   const context = repoContext(planDir)
   const readme = path.join(planDir, "README.md")
-  const createdReadme = !fs.existsSync(readme)
-  if (createdReadme) fs.writeFileSync(readme, initialReadme())
+  const existingReadme = readRegularFile(readme, { allowMissing: true })
+  const createdReadme = existingReadme === null
+  if (createdReadme) atomicReplaceRegularFile(readme, initialReadme(), null)
   const ignoreChanged = track ? removeLocalIgnore(context) : addLocalIgnore(context)
   const runtimeIgnoreChanged = track ? ensureRuntimeIgnore(planDir) : false
   const execution = initializeExecutionStore(planDir)
@@ -699,7 +823,7 @@ function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, contextText: str
 
 export function snapshotPlansFromGraph(graph: PlanGraph): PlanSnapshot[] {
   const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
-  const indexText = fs.readFileSync(graph.readme, "utf8")
+  const indexText = readRegularFile(graph.readme).text
   return graph.plans.map((plan) => createPlanSnapshot(graph, plan, contextText, indexText))
 }
 
@@ -708,7 +832,7 @@ export function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanS
   const plan = graph.plans.find((candidate) => candidate.id === id)
   if (!plan) fail(`Plan ${id} is not indexed in ${graph.readme}`)
   const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
-  return createPlanSnapshot(graph, plan, contextText, fs.readFileSync(graph.readme, "utf8"))
+  return createPlanSnapshot(graph, plan, contextText, readRegularFile(graph.readme).text)
 }
 
 export function snapshotPlan(inputDir = DEFAULT_PLAN_DIR, inputId: unknown): PlanSnapshot {
@@ -755,7 +879,7 @@ function formatStatus(status: PlanStatus, detail: string): string {
 export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ id: unknown; status: unknown; detail?: unknown }> = []) {
   const planDir = path.resolve(inputDir)
   const readme = path.join(planDir, "README.md")
-  if (!fs.existsSync(readme) || !fs.statSync(readme).isFile()) fail(`Plan directory has no README.md: ${planDir}`)
+  const readmeFile = readRegularFile(readme, { missingMessage: `Plan directory has no README.md: ${planDir}` })
   const byId = new Map(projected.map((entry) => {
     const id = canonicalId(entry.id)
     const status = String(entry.status).trim().toUpperCase().replace(/\s+/g, " ") as PlanStatus
@@ -763,7 +887,7 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
     return [id, formatStatus(status, String(entry.detail ?? "").trim())]
   }))
   if (byId.size !== projected.length) fail("Projected lifecycle contains duplicate plan IDs")
-  const markdown = fs.readFileSync(readme, "utf8")
+  const markdown = readmeFile.text
   const table = findIndexTable(markdown, readme)
   const column = Object.fromEntries(table.normalized.map((name, index) => [name, index])) as Record<string, number>
   const indexed = new Set(table.rows.map((row) => canonicalId(row.cells[column.plan!], "Plan column")))
@@ -777,9 +901,7 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
   }
   const nextMarkdown = table.lines.join("\n")
   if (nextMarkdown !== markdown) {
-    const temporary = `${readme}.herder-tmp-${process.pid}`
-    fs.writeFileSync(temporary, nextMarkdown)
-    fs.renameSync(temporary, readme)
+    atomicReplaceRegularFile(readme, nextMarkdown, readmeFile.identity, readmeFile.mode)
   }
   return { planDir, projected: [...byId.keys()].sort() }
 }
