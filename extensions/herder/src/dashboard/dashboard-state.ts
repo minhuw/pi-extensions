@@ -463,3 +463,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
     plans,
   }
 }
+
+export function buildDashboardStateBody(input: DashboardInput = {}): string {
+  return `${JSON.stringify(buildDashboardState(input))}\n`
+}

@@ -33,7 +33,10 @@ export interface DashboardOptions {
 interface DashboardHandlerInput {
   planDir?: string
   planName?: string | null
-  stateProvider?: () => unknown
+  stateProvider?: () => unknown | Promise<unknown>
+  stateBodyProvider?: () => string | Promise<string>
+  revisionProvider?: () => number | null
+  clock?: () => number
 }
 interface DashboardServerInput extends DashboardHandlerInput { port?: number }
 interface DashboardServerResult {
@@ -156,20 +159,55 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
   const planDir = path.resolve(input.planDir ?? "herder-plans")
   const planName = input.planName ?? null
   const stateProvider = input.stateProvider ?? (() => buildDashboardState({ planDir, planName }))
+  const stateBodyProvider = input.stateBodyProvider ?? (async () => `${JSON.stringify(await stateProvider())}\n`)
+  const revisionProvider = input.revisionProvider ?? (() => null)
+  const clock = input.clock ?? Date.now
   const allowedHosts = new Set<string>()
   const assets = readAssets()
-  let cachedStateBody = ""
-  let stateExpiresAt = 0
-  const stateBody = (): string => {
-    const now = Date.now()
-    if (cachedStateBody && now < stateExpiresAt) return cachedStateBody
-    cachedStateBody = `${JSON.stringify(stateProvider())}\n`
-    stateExpiresAt = now + STATE_CACHE_MS
-    return cachedStateBody
-  }
-  stateBody()
+  let cachedState: { revision: number | null; body: string; expiresAt: number } | null = null
+  let inFlight: { revision: number | null; promise: Promise<string> } | null = null
 
-  const handle = (request: IncomingMessage, response: ServerResponse): void => {
+  const stateBody = async (): Promise<string> => {
+    while (true) {
+      const now = clock()
+      const revision = revisionProvider() ?? null
+      if (cachedState
+        && cachedState.revision === revision
+        && (revision !== null || now < cachedState.expiresAt)) {
+        return cachedState.body
+      }
+      if (inFlight && inFlight.revision === revision) {
+        await inFlight.promise
+        continue
+      }
+
+      const buildStartedAt = now
+      const build = Promise.resolve().then(stateBodyProvider).then((body) => {
+        if (typeof body !== "string") throw new Error("Dashboard state body provider must return a string")
+        return body
+      })
+      const pending = { revision, promise: build }
+      inFlight = pending
+      try {
+        const body = await build
+        const currentRevision = revisionProvider() ?? null
+        const currentTime = clock()
+        const stillCurrent = currentRevision === revision
+          && (revision !== null || currentTime < buildStartedAt + STATE_CACHE_MS)
+        if (!stillCurrent) continue
+        cachedState = {
+          revision,
+          body,
+          expiresAt: revision === null ? buildStartedAt + STATE_CACHE_MS : Number.POSITIVE_INFINITY,
+        }
+        return body
+      } finally {
+        if (inFlight === pending) inFlight = null
+      }
+    }
+  }
+
+  const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const method = request.method ?? "GET"
     if (!acceptsLoopbackHost(request.headers.host, allowedHosts)) {
       send(response, 421, JSON.stringify({ error: "invalid-host" }), "application/json; charset=utf-8", method)
@@ -189,7 +227,7 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
     }
     if (pathname === "/api/state") {
       try {
-        send(response, 200, stateBody(), "application/json; charset=utf-8", method)
+        send(response, 200, await stateBody(), "application/json; charset=utf-8", method)
       } catch (error) {
         send(response, 503, `${JSON.stringify({ error: "snapshot-unavailable", message: error instanceof Error ? error.message : String(error) })}\n`, "application/json; charset=utf-8", method)
       }

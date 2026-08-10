@@ -114,7 +114,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
@@ -159,7 +159,6 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		throw error;
 	}
 	const authToken = randomBytes(32).toString("base64url");
-	const dashboard = createDashboardHandler({ planDir: planDirectory });
 	let dashboardUrl = "";
 	const forwardedUrl: string | null = null;
 	let auditTimer: NodeJS.Timeout | undefined;
@@ -170,6 +169,16 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	const executor = new ManagerExecutor(planDirectory);
 	const store = new RunStore(planDirectory);
 	store.recoverRunningOperations();
+	let dashboardRevision: number | null = null;
+	const updateDashboardRevision = (reply: ManagerReply): void => {
+		const snapshot = store.getSnapshotEnvelope();
+		dashboardRevision = reply.runId && snapshot ? snapshot.revision : null;
+	};
+	const dashboard = createDashboardHandler({
+		planDir: planDirectory,
+		revisionProvider: () => dashboardRevision,
+		stateBodyProvider: async () => await executor.call("dashboardState") as string,
+	});
 
 	const enqueueBackground = <T>(task: () => Promise<T>): Promise<T> => {
 		const next = backgroundQueue.then(task, task);
@@ -193,6 +202,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				store.completeOperation(operation.operationId, result);
 				if (reply) store.putSnapshot(reply);
 			});
+			if (reply) updateDashboardRevision(reply);
 		} catch (error) {
 			store.failOperation(operation.operationId, error instanceof Error ? error.message : String(error));
 		}
@@ -310,6 +320,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			// client cannot discover the new daemon and read the previous daemon's URL.
 			store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, forwardedUrl, startedAt: now });
 		});
+		updateDashboardRevision(initialReply);
 	} catch (error) {
 		store.close();
 		fs.closeSync(ownership.descriptor);
@@ -325,7 +336,10 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				if (closing || store.countPendingOperations() > 0) return;
 				try {
 					const reply = await executor.call("auditScheduler") as ManagerReply | null;
-					if (reply) store.putSnapshot(reply);
+					if (reply) {
+						store.putSnapshot(reply);
+						updateDashboardRevision(reply);
+					}
 				} catch (error) {
 					process.stderr.write(`herder-service scheduler audit: ${error instanceof Error ? error.message : String(error)}\n`);
 				}
