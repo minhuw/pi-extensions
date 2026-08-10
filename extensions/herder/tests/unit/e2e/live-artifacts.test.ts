@@ -158,6 +158,31 @@ test("redacts provider secrets interrupted by ANSI sequences while preserving di
 	}
 });
 
+test("does not preserve credentials embedded in ANSI sequences", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-ansi-credential-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const workspace = path.join(tmpRoot, "herder-pi-live-ansi-credential");
+		const output = path.join(root, "output");
+		const secret = "12345678901234567890";
+		fs.mkdirSync(workspace, { recursive: true });
+		fs.writeFileSync(path.join(workspace, "pi.log"), `1234567890\u001b[${secret}m1234567890`);
+
+		const report = await collectLiveArtifacts({
+			host: "pi",
+			output,
+			tmpRoot,
+			environment: { CLIPROXY_API_KEY: secret },
+		});
+		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
+		assert.equal(copied, "[REDACTED:CLIPROXY_API_KEY]");
+		assert.equal(readFiles(output).some((bytes) => bytes.includes(Buffer.from(secret))), false);
+		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("unrelated execution databases are omitted without aborting collection", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-unrelated-db-"));
 	try {

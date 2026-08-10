@@ -138,6 +138,22 @@ function normalizedTextSpans(text: string, value: string): TextSpan[] {
 	return spans;
 }
 
+function ansiSpansContaining(text: string, value: string): TextSpan[] {
+	const spans: TextSpan[] = [];
+	if (!value) return spans;
+	for (let index = 0; index < text.length;) {
+		const sequenceEnd = ansiSequenceEnd(text, index);
+		if (sequenceEnd !== undefined) {
+			if (text.slice(index, sequenceEnd).includes(value)) spans.push({ start: index, end: sequenceEnd });
+			index = sequenceEnd;
+			continue;
+		}
+		const codePoint = text.codePointAt(index);
+		index += codePoint !== undefined && codePoint > 0xffff ? 2 : 1;
+	}
+	return spans;
+}
+
 function mergeTextSpans(spans: TextSpan[]): TextSpan[] {
 	const merged: TextSpan[] = [];
 	for (const span of [...spans].sort((left, right) => left.start - right.start || left.end - right.end)) {
@@ -151,13 +167,13 @@ function mergeTextSpans(spans: TextSpan[]): TextSpan[] {
 	return merged;
 }
 
-function replaceAnsiSpan(text: string, span: TextSpan, replacement: string): string {
+function replaceAnsiSpan(text: string, span: TextSpan, replacement: string, secretValue: string): string {
 	let result = "";
 	let inserted = false;
 	for (let index = span.start; index < span.end;) {
 		const sequenceEnd = ansiSequenceEnd(text, index);
 		if (sequenceEnd !== undefined && sequenceEnd <= span.end) {
-			result += text.slice(index, sequenceEnd);
+			if (!text.slice(index, sequenceEnd).includes(secretValue)) result += text.slice(index, sequenceEnd);
 			index = sequenceEnd;
 			continue;
 		}
@@ -175,6 +191,7 @@ function redactText(text: string, secret: SecretPattern): { text: string; count:
 	const spans = mergeTextSpans([
 		...textSpans(text, secret.value),
 		...normalizedTextSpans(text, secret.value),
+		...ansiSpansContaining(text, secret.value),
 	]);
 	if (spans.length === 0) return { text, count: 0 };
 	const replacement = `[REDACTED:${secret.label}]`;
@@ -182,7 +199,7 @@ function redactText(text: string, secret: SecretPattern): { text: string; count:
 	let offset = 0;
 	for (const span of spans) {
 		redacted += text.slice(offset, span.start);
-		redacted += replaceAnsiSpan(text, span, replacement);
+		redacted += replaceAnsiSpan(text, span, replacement, secret.value);
 		offset = span.end;
 	}
 	return { text: redacted + text.slice(offset), count: spans.length };
