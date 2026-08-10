@@ -1502,7 +1502,7 @@ export class HerderRunManager {
 		const drift = this.graphDrift(run);
 		if (drift.changed) {
 			this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
-			return options.includeReply === false ? null : this.reply();
+			return this.reply();
 		}
 		const plans = this.store.getPlans(run.runId);
 		const activeActionsForRun = activeActions(this.store, run.runId);

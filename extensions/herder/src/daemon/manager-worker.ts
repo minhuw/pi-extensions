@@ -40,7 +40,7 @@ async function handle(call: ManagerWorkerCall): Promise<void> {
 		else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
 		else if (call.method === "stop") result = manager.stop();
 		else if (call.method === "verification") result = await manager.verification(call.input as VerificationManifest);
-		else if (call.method === "auditScheduler") result = await manager.auditScheduler();
+		else if (call.method === "auditScheduler") result = await manager.auditScheduler({ includeReply: false });
 		else throw new Error(`Unknown Herder manager method ${JSON.stringify(call.method)}.`);
 		port.postMessage({ id: call.id, ok: true, result } satisfies ManagerWorkerResult);
 	} catch (error) {

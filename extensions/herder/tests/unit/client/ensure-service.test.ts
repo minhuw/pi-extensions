@@ -104,6 +104,38 @@ test("ensureService reuses one daemon for concurrent callers", async () => {
 	}
 });
 
+test("stable scheduler audits preserve snapshots while health stays responsive", { timeout: 10_000 }, async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	try {
+		const service = await ensureService(planDirectory);
+		const beforeStore = new RunStore(planDirectory);
+		const before = beforeStore.getSnapshotEnvelope();
+		beforeStore.close();
+		assert.ok(before);
+
+		const deadline = Date.now() + 4_000;
+		let healthChecks = 0;
+		while (Date.now() < deadline) {
+			const health = await requestService(service, "/health");
+			assert.equal(health.ok, true);
+			healthChecks += 1;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		assert.ok(healthChecks >= 2, "health was not sampled across the audit interval");
+
+		const afterStore = new RunStore(planDirectory);
+		const after = afterStore.getSnapshotEnvelope();
+		afterStore.close();
+		assert.ok(after);
+		assert.equal(after.revision, before.revision);
+		assert.deepEqual(after.reply, before.reply);
+	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("manager controls use immediate durable submission and polling", async () => {
 	const root = planRoot();
 	const planDirectory = path.join(root, "herder-plans");

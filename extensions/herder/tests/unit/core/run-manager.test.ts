@@ -850,10 +850,39 @@ test("daemon audit detects and repairs a non-work-conserving scheduler state", {
 			assert.equal(stalled.scheduler.workConserving, false);
 			assert.equal(stalled.scheduler.reason, "scheduler-stall");
 			assert.deepEqual(stalled.scheduler.runnablePlanIds, ["002"]);
-			const healed = await manager.auditScheduler();
+			const healed = await manager.auditScheduler({ includeReply: false });
+			assert.ok(healed, "scheduler repair must publish a reply");
 			assert.equal(healed.scheduler.workConserving, true);
 			assert.equal(healed.active.length, 2);
 			assert.equal(healed.actions.some((candidate) => candidate.planId === "002"), true);
+		} finally { manager.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("stable scheduler audits suppress replies while graph drift remains publishable", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-audit-publication-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestService(service, "/v1/start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		assert.equal((started.actions as unknown[]).length, 1);
+		await stopService(fixture.planDirectory);
+
+		const manager = new HerderRunManager(fixture.planDirectory);
+		try {
+			await manager.auditScheduler();
+			assert.equal(await manager.auditScheduler({ includeReply: false }), null);
+			assert.ok(await manager.auditScheduler(), "default scheduler audits must remain reply-returning");
+
+			addIndependentPlan(fixture);
+			const driftReply = await manager.auditScheduler({ includeReply: false });
+			assert.ok(driftReply, "graph-drift pause must publish a reply");
+			assert.equal(driftReply.status, "paused");
 		} finally { manager.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
