@@ -385,6 +385,7 @@ export class GitDriver {
 			const cwd = path.resolve(worktree, gate.cwd);
 			const result = runJson(gateRunner, [
 				"--cwd", cwd,
+				"--root", worktree,
 				"--label", `${String(index + 1).padStart(2, "0")}-${gate.gateId}`,
 				"--log-dir", logDir,
 				"--timeout-ms", String(gate.timeoutMs ?? 30 * 60 * 1_000),

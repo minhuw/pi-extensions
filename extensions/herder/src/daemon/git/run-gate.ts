@@ -10,6 +10,7 @@ import { performance } from "node:perf_hooks"
 
 interface GateArguments {
   cwd: string
+  root: string
   label: string
   logDir: string
   pretty: boolean
@@ -33,8 +34,9 @@ interface GateResult {
 }
 
 function parseArguments(argv: string[]): GateArguments {
-  const options: { cwd: string | null; label: string | null; logDir: string | null; pretty: boolean; timeoutMs: number } = {
+  const options: { cwd: string | null; root: string | null; label: string | null; logDir: string | null; pretty: boolean; timeoutMs: number } = {
     cwd: null,
+    root: null,
     label: null,
     logDir: null,
     pretty: false,
@@ -51,11 +53,12 @@ function parseArguments(argv: string[]): GateArguments {
       options.pretty = true
       continue
     }
-    if (["--cwd", "--label", "--log-dir", "--timeout-ms"].includes(argument)) {
+    if (["--cwd", "--root", "--label", "--log-dir", "--timeout-ms"].includes(argument)) {
       const value = argv[index + 1]
       if (!value || value === "--") throw new Error(`${argument} requires a value`)
       index += 1
       if (argument === "--cwd") options.cwd = value
+      else if (argument === "--root") options.root = value
       else if (argument === "--label") options.label = value
       else if (argument === "--log-dir") options.logDir = value
       else {
@@ -74,7 +77,15 @@ function parseArguments(argv: string[]): GateArguments {
   if (!options.logDir) throw new Error("--log-dir is required")
   if (!options.label) throw new Error("--label is required")
   if (command.length === 0) throw new Error("a command is required after --")
-  return { cwd: options.cwd, logDir: options.logDir, pretty: options.pretty, timeoutMs: options.timeoutMs, label: safeLabel(options.label), command } as GateArguments
+  return {
+    cwd: options.cwd,
+    root: options.root ?? options.cwd,
+    logDir: options.logDir,
+    pretty: options.pretty,
+    timeoutMs: options.timeoutMs,
+    label: safeLabel(options.label),
+    command,
+  }
 }
 
 function isInside(parent: string, candidate: string): boolean {
@@ -237,14 +248,17 @@ async function main(): Promise<void> {
   }
 
   const cwd = path.resolve(parsed.cwd)
+  const root = path.resolve(parsed.root)
   const logDir = path.resolve(parsed.logDir)
   try {
+    const rootStatus = await stat(root)
+    if (!rootStatus.isDirectory()) throw new Error(`expected worktree root is not a directory: ${root}`)
     const cwdStatus = await stat(cwd)
     if (!cwdStatus.isDirectory()) throw new Error(`working directory is not a directory: ${cwd}`)
-    const canonicalCwd = await realpath(cwd)
-    if (isInside(canonicalCwd, await resolveFuturePath(logDir))) throw new Error("--log-dir must be outside the command worktree")
+    const canonicalRoot = await realpath(root)
+    if (isInside(canonicalRoot, await resolveFuturePath(logDir))) throw new Error("--log-dir must be outside the command worktree")
     await mkdir(logDir, { recursive: true })
-    if (isInside(canonicalCwd, await realpath(logDir))) throw new Error("--log-dir must be outside the command worktree")
+    if (isInside(canonicalRoot, await realpath(logDir))) throw new Error("--log-dir must be outside the command worktree")
   } catch (error) {
     print({ ok: false, phase: "setup", error: error instanceof Error ? error.message : String(error) }, parsed.pretty)
     process.exitCode = 1
@@ -262,44 +276,52 @@ async function main(): Promise<void> {
   let childSignal: NodeJS.Signals | null = null
   let spawnError: Error | null = null
   let timedOut = false
+  let spawnCwd = cwd
   let result: GateResult | null = null
 
   try {
     environmentRoot = await createGateEnvironmentRoot(logDir)
-    await new Promise<void>((resolve) => {
-      const child = spawn(parsed.command[0]!, parsed.command.slice(1), {
-        cwd,
-        env: gateEnvironment(environmentRoot!),
-        detached: process.platform !== "win32",
-        stdio: ["ignore", logHandle.fd, logHandle.fd],
-      })
-      let killTimer: NodeJS.Timeout | undefined
-      const timeout = setTimeout(() => {
-        timedOut = true
-        try {
-          if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
-          else child.kill("SIGTERM")
-        } catch {}
-        killTimer = setTimeout(() => {
+    try {
+      const canonicalRoot = await realpath(root)
+      spawnCwd = await realpath(cwd)
+      if (!isInside(canonicalRoot, spawnCwd)) throw new Error(`working directory resolves outside expected worktree: ${spawnCwd}`)
+      await new Promise<void>((resolve) => {
+        const child = spawn(parsed.command[0]!, parsed.command.slice(1), {
+          cwd: spawnCwd,
+          env: gateEnvironment(environmentRoot!),
+          detached: process.platform !== "win32",
+          stdio: ["ignore", logHandle.fd, logHandle.fd],
+        })
+        let killTimer: NodeJS.Timeout | undefined
+        const timeout = setTimeout(() => {
+          timedOut = true
           try {
-            if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
-            else child.kill("SIGKILL")
+            if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
+            else child.kill("SIGTERM")
           } catch {}
-        }, 5_000)
-        killTimer.unref()
-      }, parsed.timeoutMs)
-      timeout.unref()
-      child.once("error", (error) => {
-        spawnError = error
+          killTimer = setTimeout(() => {
+            try {
+              if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
+              else child.kill("SIGKILL")
+            } catch {}
+          }, 5_000)
+          killTimer.unref()
+        }, parsed.timeoutMs)
+        timeout.unref()
+        child.once("error", (error) => {
+          spawnError = error
+        })
+        child.once("close", (code, signal) => {
+          clearTimeout(timeout)
+          if (killTimer) clearTimeout(killTimer)
+          childExitCode = code
+          childSignal = signal
+          resolve()
+        })
       })
-      child.once("close", (code, signal) => {
-        clearTimeout(timeout)
-        if (killTimer) clearTimeout(killTimer)
-        childExitCode = code
-        childSignal = signal
-        resolve()
-      })
-    })
+    } catch (error) {
+      spawnError = error instanceof Error ? error : new Error(String(error))
+    }
 
     await logHandle.close()
     logClosed = true
@@ -310,7 +332,7 @@ async function main(): Promise<void> {
       ok,
       label: parsed.label,
       commandSha256: createHash("sha256").update(JSON.stringify(parsed.command)).digest("hex"),
-      cwd,
+      cwd: spawnCwd,
       exitCode: childExitCode,
       signal: childSignal,
       durationMs,
