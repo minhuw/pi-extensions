@@ -78,19 +78,19 @@ provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$HOME/.pi/agent/npm/node_mod
 test -x "$pi_bin"
 test -f "$provider_extension"
 models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models cliproxyapi)
-for required_model in \
-  'kimi-k3:max' \
-  'deepseek-v4-flash:high' \
-  'gpt-5.6-luna:max'
+for required_model_id in \
+  'kimi-k3' \
+  'deepseek-v4-flash' \
+  'gpt-5.6-luna'
 do
-  if ! printf '%s\n' "$models" | grep -Fq -- "$required_model"; then
-    printf 'Required model is not listed: %s\n' "$required_model" >&2
+  if ! printf '%s\n' "$models" | grep -Fq -- "$required_model_id"; then
+    printf 'Required model is not listed: %s\n' "$required_model_id" >&2
     exit 1
   fi
 done
 ```
 
-`--list-models` confirms that model IDs are available through the provider, but it does not prove the exact effort mappings. Herder validates `kimi-k3` at `max`, `deepseek-v4-flash` at `high`, and `gpt-5.6-luna` at `max` before dispatch.
+`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the profile bindings `kimi-k3:max`, `deepseek-v4-flash:high`, and `gpt-5.6-luna:max` before dispatch.
 
 ## Run, limits, and artifacts
 
