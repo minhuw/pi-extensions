@@ -2,24 +2,79 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { recordUsageRecord } from "../../../src/daemon/execution-store.ts";
+import { RunStore } from "../../../src/daemon/run-store.ts";
 import { collectLiveArtifacts } from "../../e2e/support/collect-live-artifacts.ts";
 
-test("live artifacts preserve diagnostics while redacting endpoint secrets", () => {
+const SERVICE_TOKEN_MARKER = "[REDACTED:HERDER_SERVICE_AUTH_TOKEN]";
+
+function createServiceDatabase(planDirectory: string, serviceToken: string): void {
+	const store = new RunStore(planDirectory);
+	try {
+		store.putService({
+			instanceId: "fixture-instance",
+			pid: process.pid,
+			port: 43123,
+			authToken: serviceToken,
+			dashboardUrl: "http://127.0.0.1:43123",
+			forwardedUrl: null,
+			startedAt: "2026-08-10T00:00:00.000Z",
+		});
+	} finally {
+		store.close();
+	}
+	recordUsageRecord(planDirectory, {
+		attempt: "fixture-attempt",
+		plan: "014",
+		role: "plan-implementer",
+		model: "Provider/synthetic",
+		effort: "max",
+		outcome: "complete",
+		inputTokens: 12,
+		cachedInputTokens: 3,
+		outputTokens: 34,
+		reasoningTokens: 5,
+		source: "fixture-provider",
+		round: 1,
+		generation: "generation-1",
+		harness: "synthetic",
+		serviceTier: "test",
+	});
+}
+
+function readFiles(root: string): Buffer[] {
+	const files: Buffer[] = [];
+	for (const entry of fs.readdirSync(root)) {
+		const file = path.join(root, entry);
+		const status = fs.lstatSync(file);
+		if (status.isDirectory()) files.push(...readFiles(file));
+		else if (status.isFile()) files.push(fs.readFileSync(file));
+	}
+	return files;
+}
+
+test("live artifacts preserve diagnostics while structurally sanitizing execution databases", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-test-"));
 	try {
 		const tmpRoot = path.join(root, "tmp");
 		const workspace = path.join(tmpRoot, "herder-pi-live-example");
-		const runtime = path.join(workspace, "repository", "herder-plans", ".herder");
+		const planDirectory = path.join(workspace, "repository", "herder-plans");
+		const runtime = path.join(planDirectory, ".herder");
 		const output = path.join(root, "output");
+		const serviceToken = "synthetic-service-credential";
 		const key = "test-secret-key-value";
 		const base = "https://proxy.example.invalid";
-		fs.mkdirSync(runtime, { recursive: true });
-		fs.writeFileSync(path.join(workspace, "pi.log"), `key=${key} endpoint=${base}/v1 safe=1\n`);
-		fs.writeFileSync(path.join(runtime, "execution.sqlite3"), Buffer.from([0, 1, 2, 3]));
-		fs.writeFileSync(path.join(runtime, "sensitive.bin"), Buffer.concat([Buffer.from([0]), Buffer.from(key), Buffer.from([0])]));
+		fs.mkdirSync(workspace, { recursive: true });
+		createServiceDatabase(planDirectory, serviceToken);
+		fs.writeFileSync(path.join(workspace, "pi.log"), `Provider=synthetic key=${key} endpoint=${base}/v1 service=${serviceToken}\n`);
+		fs.writeFileSync(path.join(runtime, "execution.sqlite3-wal"), Buffer.from([0, 1, 2, 3]));
+		fs.writeFileSync(path.join(runtime, "execution.sqlite3-shm"), Buffer.from([4, 5, 6, 7]));
+		fs.writeFileSync(path.join(runtime, "unknown.bin"), Buffer.from([0, 255, 1, 2]));
+		fs.symlinkSync("../pi.log", path.join(runtime, "trajectory-link"));
 
-		const report = collectLiveArtifacts({
+		const report = await collectLiveArtifacts({
 			host: "pi",
 			output,
 			tmpRoot,
@@ -28,14 +83,57 @@ test("live artifacts preserve diagnostics while redacting endpoint secrets", () 
 		const copied = path.join(output, "fixtures", path.basename(workspace));
 		const trajectory = fs.readFileSync(path.join(copied, "pi.log"), "utf8");
 		assert.doesNotMatch(trajectory, new RegExp(key));
+		assert.doesNotMatch(trajectory, new RegExp(serviceToken));
 		assert.doesNotMatch(trajectory, /proxy\.example\.invalid/);
 		assert.match(trajectory, /\[REDACTED:CLIPROXY_API_KEY\]/);
 		assert.match(trajectory, /\[REDACTED:CLIPROXY_BASE_URL\]/);
-		assert.deepEqual(fs.readFileSync(path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3")), Buffer.from([0, 1, 2, 3]));
-		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "sensitive.bin")), false);
+		assert.match(trajectory, new RegExp(`\\[REDACTED:${SERVICE_TOKEN_MARKER.slice(10, -1)}\\]`));
+
+		const copiedDatabasePath = path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3");
+		const copiedDatabase = new DatabaseSync(copiedDatabasePath, { readOnly: true });
+		try {
+			assert.equal((copiedDatabase.prepare("PRAGMA quick_check").get() as Record<string, unknown>).quick_check, "ok");
+			assert.equal(copiedDatabase.prepare("SELECT auth_token FROM manager_service WHERE singleton = 1").get()?.auth_token, SERVICE_TOKEN_MARKER);
+			assert.deepEqual({ ...(copiedDatabase.prepare("SELECT plan_id, model, input_tokens, output_tokens FROM attempts").get() as Record<string, unknown>) }, {
+				plan_id: "014",
+				model: "Provider/synthetic",
+				input_tokens: 12,
+				output_tokens: 34,
+			});
+		} finally {
+			copiedDatabase.close();
+		}
+
+		const outputBytes = readFiles(output);
+		assert.equal(outputBytes.some((bytes) => bytes.includes(Buffer.from(serviceToken))), false);
+		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3-wal")), false);
+		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3-shm")), false);
+		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "unknown.bin")), false);
+		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "trajectory-link")), false);
 		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
 		assert.equal(report.redactedOccurrences.CLIPROXY_BASE_URL, 1);
-		assert.deepEqual(report.omittedSensitiveFiles, [path.join(runtime, "sensitive.bin")]);
+		assert.equal(report.redactedOccurrences.HERDER_SERVICE_AUTH_TOKEN, 1);
+		assert.ok(report.omittedSensitiveFiles.includes(path.join(runtime, "execution.sqlite3-wal")));
+		assert.ok(report.omittedSensitiveFiles.includes(path.join(runtime, "execution.sqlite3-shm")));
+		assert.ok(report.omittedSensitiveFiles.includes(path.join(runtime, "unknown.bin")));
+		assert.deepEqual(report.skippedSpecialFiles, [path.join(runtime, "trajectory-link")]);
+		assert.match(fs.readFileSync(path.join(output, "README.txt"), "utf8"), /Herder live E2E diagnostics/);
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")), report);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("malformed execution databases fail closed before output placement", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-malformed-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const runtime = path.join(tmpRoot, "herder-pi-live-malformed", "repository", "herder-plans", ".herder");
+		const output = path.join(root, "output");
+		fs.mkdirSync(runtime, { recursive: true });
+		fs.writeFileSync(path.join(runtime, "execution.sqlite3"), Buffer.from("not-a-sqlite-database"));
+		await assert.rejects(collectLiveArtifacts({ host: "pi", output, tmpRoot }));
+		assert.equal(fs.existsSync(output), false);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
