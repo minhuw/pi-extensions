@@ -325,6 +325,34 @@ test("handoff removes only the unchanged integration branch and leaves the targe
 	}
 });
 
+test("handoff target scheduled for cleanup is preview-blocked without mutation", async () => {
+	const fixture = setup();
+	try {
+		let confirmations = 0;
+		const completionRef = "refs/plan-herder/herder-plans/completed/001";
+		const result = await runCleanupCommand(`--finalize --handoff-target ${fixture.planBranch}`, {
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDir,
+			confirm: async () => {
+				confirmations += 1;
+				return true;
+			},
+		});
+		assert.equal(result.cancelled, false);
+		assert.equal(result.preview.canApply, false);
+		assert.equal(confirmations, 0);
+		assert.match(result.message, /handoff-target-overlaps-cleanup/);
+		assert.equal(git(fixture.repo, "rev-parse", `refs/heads/${fixture.planBranch}`), fixture.completedHead);
+		assert.equal(fs.existsSync(fixture.completed), true);
+		assert.equal(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
+		assert.equal(command(fixture.repo, ["show-ref", "--verify", completionRef], true).status, 0);
+		assert.notEqual(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
+		assert.equal(fs.existsSync(fixture.integration), true);
+	} finally {
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
 test("handoff target behind integration is preview-blocked without mutation", async () => {
 	const fixture = setup();
 	try {

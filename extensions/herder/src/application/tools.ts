@@ -249,6 +249,14 @@ function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
 	return [...reasons].sort();
 }
 
+function handoffTargetOverlapsPlannedAction(
+	handoffTarget: string | null,
+	outcomes: CleanupPreviewOutcome[],
+): boolean {
+	if (!handoffTarget) return false;
+	return outcomes.some((outcome) => outcome.result.actions.some((action) => action.branch === handoffTarget));
+}
+
 function cleanupGraphStatusSnapshot(graph: ReturnType<typeof buildGraph>): string {
 	return stableJson(graph.plans.map((plan) => ({ planId: plan.id, status: plan.status })));
 }
@@ -332,6 +340,7 @@ async function buildCleanupPreviewSnapshot(
 		.map((item) => String(item.plan)));
 	const failedPlanIds = [...new Set([...selection.failedPlanIds, ...failedActionPlanIds])].sort();
 	const blockers = cleanupReasons(outcomes);
+	if (finalize && handoffTargetOverlapsPlannedAction(handoffTarget, outcomes)) blockers.push("handoff-target-overlaps-cleanup");
 	if (!CLEANUP_TERMINAL_STATUSES.has(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
 	if (!includeFailed && failedPlanIds.length > 0) blockers.push("failed-evidence-requires-include-failed");
 	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0
