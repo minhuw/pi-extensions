@@ -261,6 +261,21 @@ function cleanupGraphStatusSnapshot(graph: ReturnType<typeof buildGraph>): strin
 	return stableJson(graph.plans.map((plan) => ({ planId: plan.id, status: plan.status })));
 }
 
+function cleanupExpectedPlanStatuses(
+	graph: ReturnType<typeof buildGraph>,
+	planIds: string[],
+): NonNullable<CleanupInput["expectedPlanStatuses"]> {
+	const expected: NonNullable<CleanupInput["expectedPlanStatuses"]> = {};
+	for (const planId of planIds) {
+		const status = graph.plans.find((plan) => plan.id === planId)?.status;
+		if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") {
+			throw new Error(`Cleanup plan ${planId} is no longer terminal; cleanup was not applied.`);
+		}
+		expected[planId] = status;
+	}
+	return expected;
+}
+
 interface CleanupPreviewBuild {
 	preview: CleanupPreview;
 	graphStatusSnapshot: string;
@@ -420,6 +435,10 @@ export async function applyHerderCleanup(
 		) {
 			throw new Error("Cleanup plan status or selection changed after confirmation; cleanup was not applied.");
 		}
+		const expectedPlanStatuses = cleanupExpectedPlanStatuses(
+			graph,
+			request.finalize === true ? graph.plans.map((plan) => plan.id) : fresh.selectedPlanIds,
+		);
 		const runner = dependencies.cleanupRunner ?? cleanupRun;
 		const applied: CleanupPreviewOutcome[] = [];
 		if (request.finalize === true) {
@@ -430,6 +449,7 @@ export async function applyHerderCleanup(
 				includeFailed: Boolean(request.includeFailed),
 				finalize: true,
 				handoffTarget: request.handoffTarget ?? null,
+				expectedPlanStatuses,
 				pretty: false,
 			});
 			const previewOutcome = fresh.outcomes[0];
@@ -450,6 +470,7 @@ export async function applyHerderCleanup(
 					includeFailed: fresh.failedPlanIds.includes(outcome.planId),
 					finalize: false,
 					handoffTarget: null,
+					expectedPlanStatuses,
 					pretty: false,
 				});
 				applied.push({ ...outcome, result });

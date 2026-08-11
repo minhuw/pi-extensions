@@ -20,6 +20,7 @@ export interface CleanupInput {
   includeFailed: boolean
   finalize: boolean
   handoffTarget?: string | null
+  expectedPlanStatuses?: Record<string, "DONE" | "BLOCKED" | "REJECTED">
   pretty?: boolean
 }
 
@@ -336,6 +337,23 @@ export function cleanupRun(input: CleanupInput) {
   if (input.finalize && planFilter) fail("--finalize cannot be combined with --plan")
   if (planFilter && !graph.plans.some((plan) => plan.id === planFilter)) fail(`Plan ${planFilter} is not indexed in ${graph.readme}`)
 
+  const statusSnapshot = (value: typeof graph): string => JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: plan.status })))
+  const plannedStatusSnapshot = statusSnapshot(graph)
+  const assertPlanStatusesUnchanged = (): void => {
+    const current = buildGraph(planDir)
+    if (statusSnapshot(current) !== plannedStatusSnapshot) {
+      fail("Cannot clean up because plan status changed after preflight")
+    }
+    for (const [rawPlanId, expectedStatus] of Object.entries(input.expectedPlanStatuses ?? {})) {
+      const planId = canonicalPlanId(rawPlanId)
+      const currentStatus = current.plans.find((plan) => plan.id === planId)?.status
+      if (currentStatus !== expectedStatus) {
+        fail(`Cannot clean up plan ${planId}: expected status ${expectedStatus}, found ${currentStatus ?? "missing"}`)
+      }
+    }
+  }
+  assertPlanStatusesUnchanged()
+
   const plans = new Map(graph.plans.map((plan) => [plan.id, plan]))
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
   const completionRefs = listCompletionRefs(repoRoot, planName)
@@ -384,7 +402,8 @@ export function cleanupRun(input: CleanupInput) {
         proof = "superseded-by-completion"
       }
       mode = "completed-plan"
-    } else if (input.includeFailed || (input.finalize && plan.status === "REJECTED")) {
+    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED")
+      && (input.includeFailed || (input.finalize && plan.status === "REJECTED"))) {
       mode = "failed-evidence"
     } else {
       skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, reason: "preserved-non-done-evidence" })
@@ -548,12 +567,15 @@ export function cleanupRun(input: CleanupInput) {
 
   const removed: CleanupDetail[] = []
   if (!input.dryRun) {
+    assertPlanStatusesUnchanged()
     for (const action of actions) {
+      assertPlanStatusesUnchanged()
       if (action.worktree) removeOwnedWorktree(repoRoot, action.worktree)
       deleteBranchIfPresent(repoRoot, action.branch, action.head)
       removed.push(action)
     }
     if (finalization.eligible) {
+      assertPlanStatusesUnchanged()
       const remainingBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
       if (remainingBranches.length > 0) {
         fail(`Cannot finalize while plan branches remain: ${remainingBranches.map((item) => item.branch).join(", ")}`)
@@ -574,6 +596,7 @@ export function cleanupRun(input: CleanupInput) {
       }
     }
     if (handoff.eligible) {
+      assertPlanStatusesUnchanged()
       const currentTargetHead = runGit(repoRoot, ["rev-parse", `refs/heads/${handoffTarget}`]).stdout.trim()
       if (!isAncestor(repoRoot, integrationHead, currentTargetHead)) {
         fail(`Cannot remove integration because ${handoffTarget} no longer contains ${integrationHead}`)

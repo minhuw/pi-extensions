@@ -12,7 +12,7 @@ import {
 	type CleanupApplicationRequest,
 } from "../../src/application/tools.ts";
 import { initPlanDir } from "../../src/core/plans.ts";
-import type { CleanupInput, CleanupResult } from "../../src/daemon/git/cleanup-run.ts";
+import { cleanupRun, type CleanupInput, type CleanupResult } from "../../src/daemon/git/cleanup-run.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
 import { buildCompletionProofPayload, writeCompletionProof } from "../../src/daemon/git/completion-proof.ts";
 
@@ -231,6 +231,43 @@ test("status changes after the matched fresh preview abort before cleanup mutati
 		);
 		assert.equal(dryRunCalls, 2);
 		assert.equal(applyCalls, 0);
+		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
+		assert.equal(fs.existsSync(fixture.completed), true);
+	} finally {
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("failed evidence that becomes active at the execution boundary is preserved", async () => {
+	const fixture = setup();
+	try {
+		const readme = path.join(fixture.planDir, "README.md");
+		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("| DONE |", "| BLOCKED: retained evidence |"));
+		const request: CleanupApplicationRequest = {
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDir,
+			includeFailed: true,
+		};
+		let changed = false;
+		const dependencies: CleanupApplicationDependencies = {
+			readStatus: () => "complete",
+			withExclusion: async (_planDirectory, callback) => callback(),
+			cleanupRunner: (input) => {
+				if (!input.dryRun && !changed) {
+					changed = true;
+					fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("| BLOCKED: retained evidence |", "| IN PROGRESS |"));
+				}
+				return cleanupRun(input);
+			},
+		};
+		const expected = await previewHerderCleanup(request, dependencies);
+		assert.equal(expected.canApply, true);
+		assert.deepEqual(expected.failedPlanIds, ["001"]);
+		await assert.rejects(
+			() => applyHerderCleanup(request, expected, dependencies),
+			/expected status BLOCKED, found IN PROGRESS|status changed after preflight/,
+		);
+		assert.equal(changed, true);
 		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
 		assert.equal(fs.existsSync(fixture.completed), true);
 	} finally {

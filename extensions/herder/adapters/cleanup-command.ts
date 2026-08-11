@@ -151,7 +151,7 @@ function appendTranscript(
 		skipped: skippedIds(result),
 		blockers: [...preview.blockers, ...(input.blockers ?? [])],
 	});
-	try { dependencies.appendEntry(entry); } catch { /* Transcript evidence is best effort. */ }
+	dependencies.appendEntry(entry);
 }
 
 function statusCounts(preview: CleanupPreview): { eligible: number; skipped: number; blockers: number } {
@@ -248,14 +248,19 @@ export async function runCleanupCommand(
 		return { message: "Cleanup cancelled; failed evidence was preserved.", preview, cancelled: true };
 	}
 
+	let applied: CleanupApplyResult;
 	try {
-		const applied = await orchestrator.apply(request, preview);
-		appendTranscript(request, preview, context, { applied });
-		return { message: formatCleanupApplied(preview, applied), preview, applied, cancelled: false };
+		applied = await orchestrator.apply(request, preview);
 	} catch (error) {
-		appendTranscript(request, preview, context, { blockers: ["apply-failed"] });
+		try {
+			appendTranscript(request, preview, context, { blockers: ["apply-failed"] });
+		} catch (transcriptError) {
+			throw new AggregateError([error, transcriptError], "Cleanup apply and transcript publication both failed.");
+		}
 		throw error;
 	}
+	appendTranscript(request, preview, context, { applied });
+	return { message: formatCleanupApplied(preview, applied), preview, applied, cancelled: false };
 }
 
 export const executeCleanupCommand = runCleanupCommand;

@@ -468,10 +468,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
-			appendEntry: (entry) => {
-				try { pi.appendEntry(HERDER_CLEANUP_ENTRY, entry); }
-				catch { /* Cleanup remains authoritative even if transcript rendering is unavailable. */ }
-			},
+			appendEntry: (entry) => pi.appendEntry(HERDER_CLEANUP_ENTRY, entry),
 		});
 		return result.message;
 	};

@@ -119,6 +119,25 @@ test("failed evidence requires a second confirmation and applies only after both
 	assert.deepEqual((entries[0] as Record<string, unknown>).removed, ["002"]);
 });
 
+test("transcript publication failure is surfaced instead of reporting cleanup success", async () => {
+	let applyCalls = 0;
+	await assert.rejects(
+		() => runCleanupCommand("--plan 1", {
+			repositoryRoot: "/repo",
+			planDirectory: "/repo/herder-plans",
+			preview: async () => preview(),
+			apply: async () => {
+				applyCalls += 1;
+				return { ...preview(), executed: true, outcomes: [{ ...preview().outcomes[0]!, result: cleanupResult("001", true, true) }] };
+			},
+			confirm: async () => true,
+			appendEntry: () => { throw new Error("transcript unavailable"); },
+		}),
+		/transcript unavailable/,
+	);
+	assert.equal(applyCalls, 1);
+});
+
 test("finalization presents refs and integration state in bounded transcript evidence", async () => {
 	const confirmations: string[] = [];
 	const entries: unknown[] = [];
