@@ -1009,6 +1009,22 @@ export class HerderRunManager {
 		for (const result of results) {
 			const action = this.store.getAction(result.actionId);
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown dispatch action ${result.actionId}`);
+			// Multiple durable callers can observe the same proposed action before
+			// either dispatch result is applied. Once one host wins, a stale rejection
+			// must not cancel that dispatched worker; an exact accepted replay is also
+			// idempotent, while a conflicting second handle still fails closed.
+			if (action.state === "dispatched" || action.state === "terminal") {
+				if (!result.accepted) continue;
+				if (!result.hostHandle) throw new Error(`Accepted action ${result.actionId} has no host handle`);
+				if (action.hostHandle !== result.hostHandle) {
+					throw new Error(`Action ${result.actionId} was already dispatched to a different host handle`);
+				}
+				continue;
+			}
+			if (action.state === "cancelled") {
+				if (!result.accepted) continue;
+				throw new Error(`Action ${result.actionId} cannot dispatch from cancelled`);
+			}
 			if (result.accepted) {
 				if (!result.hostHandle) throw new Error(`Accepted action ${result.actionId} has no host handle`);
 				this.store.markDispatched(result.actionId, result.hostHandle);

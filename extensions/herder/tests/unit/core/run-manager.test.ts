@@ -549,6 +549,53 @@ test("nonzero final verification failure is durable and replay-safe", { timeout:
 	}
 });
 
+test("stale verification dispatch rejection cannot cancel an accepted final reviewer", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-dispatch-replay-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-dispatch-replay");
+		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-dispatch-replay", [{
+			gateId: "verification-dispatch-replay-success",
+			label: "verification dispatch replay success gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(0)"],
+			rationale: "Creates the final Reviewer proposal used by both durable callers.",
+		}]);
+		const firstAction = payload((submitted.reply.actions as unknown[])[0]);
+		const replay = payload(await requestService(service, "/v1/verification", submitted.manifest));
+		const replayAction = payload((payload(replay.reply).actions as unknown[])[0]);
+		assert.equal(replayAction.actionId, firstAction.actionId);
+
+		await requestService(service, "/v1/event", {
+			eventId: "verification-dispatch-replay-accepted",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: firstAction.actionId, accepted: true, hostHandle: "verification-final-winner" }],
+		});
+		const stale = payload(payload(await requestService(service, "/v1/event", {
+			eventId: "verification-dispatch-replay-stale-rejection",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: replayAction.actionId, accepted: false, error: "duplicate preparation" }],
+		})).reply);
+		assert.equal(stale.status, "running");
+		assert.equal((stale.actions as unknown[]).length, 0);
+		assert.equal(payload((stale.active as unknown[])[0]).hostHandle, "verification-final-winner");
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const action = store.getAction(String(firstAction.actionId))!;
+			assert.equal(action.state, "dispatched");
+			assert.equal(action.hostHandle, "verification-final-winner");
+		} finally {
+			store.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("minimum-timeout final verification failure preserves timeout and log evidence", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-timeout-test-"));
 	const fixture = writeFixture(root);
