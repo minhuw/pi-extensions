@@ -22,6 +22,23 @@ test("session restoration uses the newest valid Herder entry", () => {
 	]), state);
 });
 
+test("session restoration accepts attach mode", () => {
+	const state: HerderRunState = {
+		version: 1,
+		mode: "attach",
+		status: "paused",
+		runId: "run-attached",
+		repoRoot: "/tmp/repo",
+		planDir: "/tmp/repo/herder-plans",
+		profile: "eclipse",
+		maxParallel: 3,
+		dashboardEnabled: true,
+		startedAt: 1,
+		updatedAt: 2,
+	};
+	assert.deepEqual(restoreLastRun([{ type: "custom", customType: HERDER_STATE_ENTRY, data: state }]), state);
+});
+
 test("state persistence ignores heartbeat-only timestamp changes", () => {
 	const state: HerderRunState = {
 		version: 1,

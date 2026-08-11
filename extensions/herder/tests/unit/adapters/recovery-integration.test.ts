@@ -8,6 +8,12 @@ import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ModelRegistry, 
 import type { PiWorkerRequest, PiWorkerSessionFactory } from "../../../adapters/worker-engine.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
+import {
+	acquireAdapterOwnership,
+	adapterOwnershipLockPath,
+	releaseAdapterOwnership,
+	type AdapterOwnership,
+} from "../../../adapters/ownership.ts";
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
@@ -15,6 +21,23 @@ import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
 const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
+
+const availableModels = [
+	{
+		provider: "fake",
+		id: "gpt-5.6-sol",
+		api: "openai-responses",
+		reasoning: true,
+		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+	},
+	{
+		provider: "fake",
+		id: "gpt-5.6-luna",
+		api: "openai-responses",
+		reasoning: true,
+		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+	},
+] as const;
 
 type JsonObject = Record<string, unknown>;
 
@@ -29,6 +52,19 @@ interface Fixture {
 interface Warning {
 	message: string;
 	level: string;
+}
+
+class Deferred<T = void> {
+	readonly promise: Promise<T>;
+	private resolvePromise!: (value: T | PromiseLike<T>) => void;
+
+	constructor() {
+		this.promise = new Promise<T>((resolve) => { this.resolvePromise = resolve; });
+	}
+
+	resolve(value: T): void {
+		this.resolvePromise(value);
+	}
 }
 
 function object(value: unknown): JsonObject {
@@ -174,6 +210,11 @@ class CapturedExtensionAPI {
 
 	registerEntryRenderer(_customType: string, _renderer: unknown): void {}
 
+	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+		const result = runCommand(command, args, { allowFailure: true });
+		return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+	}
+
 	appendEntry(customType: string, data: unknown): void {
 		this.appendedEntries.push({ customType, data });
 	}
@@ -185,6 +226,12 @@ class CapturedExtensionAPI {
 		if (!handler) throw new Error(`No captured ${event} handler`);
 		return await handler({}, ctx);
 	}
+
+	command(name: string): { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } {
+		const command = this.commands.get(name) as { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } | undefined;
+		if (!command) throw new Error(`No captured ${name} command`);
+		return command;
+	}
 }
 
 class PendingSession {
@@ -194,6 +241,7 @@ class PendingSession {
 	readonly started: Promise<void>;
 	disposed = false;
 	aborted = false;
+	prompted = false;
 	private releasePrompt!: () => void;
 	private resolveStarted!: () => void;
 	private readonly promptReleased: Promise<void>;
@@ -211,6 +259,7 @@ class PendingSession {
 	}
 
 	async prompt(_text: string): Promise<void> {
+		this.prompted = true;
 		this.resolveStarted();
 		await this.promptReleased;
 	}
@@ -245,10 +294,14 @@ class PendingWorkerFactory implements PiWorkerSessionFactory {
 	readonly sessions: PendingSession[] = [];
 
 	async availableModels() {
-		return [{ provider: "fake", id: "fake" }];
+		return [...availableModels];
 	}
 
 	async create(request: PiWorkerRequest) {
+		return this.createSession(request);
+	}
+
+	protected createSession(request: PiWorkerRequest) {
 		this.requests.push(request);
 		const session = new PendingSession(`replacement-${this.sessions.length + 1}`);
 		this.sessions.push(session);
@@ -258,6 +311,17 @@ class PendingWorkerFactory implements PiWorkerSessionFactory {
 			createSession: async () => { throw new Error("nested sessions are not used by this recovery test"); },
 		});
 		return { session, nested };
+	}
+}
+
+class GatedPrepareWorkerFactory extends PendingWorkerFactory {
+	readonly createEntered = new Deferred<void>();
+	readonly allowCreate = new Deferred<void>();
+
+	override async create(request: PiWorkerRequest) {
+		this.createEntered.resolve();
+		await this.allowCreate.promise;
+		return this.createSession(request);
 	}
 }
 
@@ -288,6 +352,34 @@ function restoredContext(fixture: Fixture, runId: string, warnings: Warning[]): 
 		sessionManager: { getEntries: () => [{ type: "custom", customType: HERDER_STATE_ENTRY, data: state }] },
 		modelRegistry: {} as ModelRegistry,
 		model: undefined,
+		scopedModels: [],
+		isIdle: () => true,
+		isProjectTrusted: () => true,
+		signal: undefined,
+		abort() {},
+		hasPendingMessages: () => false,
+		shutdown() {},
+		getContextUsage: () => undefined,
+		compact() {},
+		getSystemPrompt: () => "",
+	} as unknown as ExtensionContext;
+}
+
+function freshContext(fixture: Fixture, notifications: Warning[]): ExtensionContext {
+	const ui = {
+		notify(message: string, level: string) { notifications.push({ message, level }); },
+		setStatus() {},
+		setWidget() {},
+	};
+	return {
+		ui,
+		mode: "rpc",
+		hasUI: false,
+		cwd: fixture.repo,
+		sessionManager: { getEntries: () => [] },
+		modelRegistry: { getAvailable: () => [...availableModels] } as unknown as ModelRegistry,
+		model: availableModels[0],
+		thinkingLevel: "max",
 		scopedModels: [],
 		isIdle: () => true,
 		isProjectTrusted: () => true,
@@ -352,6 +444,28 @@ async function startFixture(fixture: Fixture, hostHandle: string) {
 	return { service, actionId, before };
 }
 
+async function pauseFixture(fixture: Fixture) {
+	const service = await ensureService(fixture.planDirectory);
+	const startedBody = await requestService(service, "/v1/start", {
+		mode: "fire",
+		repositoryRoot: fixture.repo,
+		planDirectory: fixture.planDirectory,
+		profile: "eclipse",
+		maxParallel: 1,
+		dashboardUrl: service.dashboardUrl,
+	});
+	const started = object(startedBody.reply);
+	const action = object((started.actions as unknown[])[0]);
+	await requestService(service, "/v1/event", {
+		eventId: "pause-dispatch",
+		kind: "dispatch_results",
+		dispatchResults: [{ actionId: String(action.actionId), accepted: false, error: "deterministic host rejection" }],
+	});
+	const before = evidence(fixture);
+	assert.equal(before.run!.status, "paused");
+	return { service, before };
+}
+
 async function withDeadline<T>(operation: Promise<T>, label: string, timeoutMs = 10_000): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_resolve, reject) => {
@@ -413,6 +527,356 @@ test("replacement Pi session interrupts and retries one lost built-in worker", {
 	} finally {
 		if (capturedApi && capturedContext && !shutdown) {
 			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "session_shutdown recovery cleanup", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("fresh Pi session attaches, interrupts a stale worker, and dispatches its replacement", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attach-lost-"));
+	let fixture: Fixture | undefined;
+	let capturedApi: CapturedExtensionAPI | undefined;
+	let capturedContext: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		const started = await startFixture(fixture, "pi-worker:attach-lost");
+		const factory = new PendingWorkerFactory();
+		const api = capturedApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const ctx = capturedContext = freshContext(fixture, notifications);
+
+		await withDeadline(api.invoke("session_start", ctx), "fresh attach session_start");
+		assert.equal(api.appendedEntries.some((entry) => entry.customType === HERDER_STATE_ENTRY), false);
+		await withDeadline(api.command("herder-attach").handler("herder-plans", ctx), "/herder-attach recovery");
+		assert.equal(notifications.some((notification) => notification.level === "error"), false);
+		assert.equal(factory.requests.length, 1);
+		const replacement = factory.sessions[0]!;
+		await withDeadline(replacement.started, "attached replacement worker start");
+
+		const recovered = evidence(fixture);
+		const stale = recovered.actions.find((action) => action.actionId === started.actionId);
+		assert.ok(stale);
+		assert.equal(stale.state, "terminal");
+		assert.equal(object(object(stale.result).terminal).interrupted, true);
+		const dispatched = recovered.actions.filter((action) => action.state === "dispatched");
+		assert.equal(dispatched.length, 1);
+		assert.equal(dispatched[0]!.hostHandle, `pi-worker:${replacement.sessionId}`);
+		assert.notEqual(dispatched[0]!.actionId, stale.actionId);
+
+		const states = api.appendedEntries
+			.filter((entry) => entry.customType === HERDER_STATE_ENTRY)
+			.map((entry) => object(entry.data));
+		assert.ok(states.some((state) => state.mode === "attach"
+			&& state.profile === "eclipse"
+			&& state.maxParallel === 1
+			&& state.repoRoot === fs.realpathSync(fixture!.repo)
+			&& state.runId === started.before.run!.runId));
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "attached session_shutdown cleanup");
+		shutdown = true;
+		assert.equal(replacement.aborted, true);
+		assert.equal(replacement.disposed, true);
+	} finally {
+		if (capturedApi && capturedContext && !shutdown) {
+			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "attach recovery cleanup", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("attach preserves a paused run without scheduling or changing lease evidence", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attach-paused-"));
+	let fixture: Fixture | undefined;
+	let capturedApi: CapturedExtensionAPI | undefined;
+	let capturedContext: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		const paused = await pauseFixture(fixture);
+		const factory = new PendingWorkerFactory();
+		const api = capturedApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const ctx = capturedContext = freshContext(fixture, notifications);
+
+		await withDeadline(api.invoke("session_start", ctx), "paused attach session_start");
+		await withDeadline(api.command("herder-attach").handler("herder-plans", ctx), "paused /herder-attach");
+		assert.equal(factory.requests.length, 0);
+		assert.ok(notifications.some((notification) => notification.level === "info" && /without changing its paused lifecycle state/.test(notification.message)));
+		const after = evidence(fixture);
+		assert.equal(after.run!.status, "paused");
+		assert.deepEqual(after.actions, paused.before.actions);
+		assert.equal(after.lease, paused.before.lease);
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "paused attach shutdown");
+		shutdown = true;
+	} finally {
+		if (capturedApi && capturedContext && !shutdown) {
+			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "paused attach cleanup", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("Fire publishes startup ownership before another session can attach", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-fire-owned-"));
+	let fixture: Fixture | undefined;
+	let fireApi: CapturedExtensionAPI | undefined;
+	let fireContext: ExtensionContext | undefined;
+	let observerApi: CapturedExtensionAPI | undefined;
+	let observerContext: ExtensionContext | undefined;
+	let fireShutdown = false;
+	let observerShutdown = false;
+	try {
+		fixture = writeFixture(root);
+		const fireFactory = new GatedPrepareWorkerFactory();
+		fireApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(fireApi as unknown as ExtensionAPI, fireFactory);
+		fireContext = freshContext(fixture, []);
+		await withDeadline(fireApi.invoke("session_start", fireContext), "Fire ownership session_start");
+		const firing = fireApi.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", fireContext);
+		await withDeadline(fireFactory.createEntered.promise, "Fire worker preparation");
+		const before = evidence(fixture);
+		assert.equal(before.run!.status, "running");
+		assert.equal(fs.existsSync(adapterOwnershipLockPath(fixture.planDirectory)), true);
+
+		const observerFactory = new PendingWorkerFactory();
+		observerApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(observerApi as unknown as ExtensionAPI, observerFactory);
+		const notifications: Warning[] = [];
+		observerContext = freshContext(fixture, notifications);
+		await withDeadline(observerApi.invoke("session_start", observerContext), "Fire observer session_start");
+		await withDeadline(observerApi.command("herder-attach").handler("herder-plans", observerContext), "Fire observer attach");
+		assert.equal(observerFactory.requests.length, 0);
+		assert.ok(notifications.some((notification) => notification.level === "error" && /already owned by live Pi pid/.test(notification.message)));
+		const after = evidence(fixture);
+		assert.deepEqual(after.actions, before.actions);
+		assert.equal(after.lease, before.lease);
+
+		fireFactory.allowCreate.resolve();
+		await withDeadline(firing, "Fire ownership completion");
+		await withDeadline(fireFactory.sessions[0]!.started, "Fire owned worker start");
+		await withDeadline(observerApi.invoke("session_shutdown", observerContext), "Fire observer shutdown");
+		observerShutdown = true;
+		await withDeadline(fireApi.invoke("session_shutdown", fireContext), "Fire ownership shutdown");
+		fireShutdown = true;
+	} finally {
+		if (observerApi && observerContext && !observerShutdown) {
+			await withDeadline(observerApi.invoke("session_shutdown", observerContext), "Fire observer cleanup", 5_000).catch(() => {});
+		}
+		if (fireApi && fireContext && !fireShutdown) {
+			await withDeadline(fireApi.invoke("session_shutdown", fireContext), "Fire ownership cleanup", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("live Pi ownership makes attach fail without changing manager evidence", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attach-owned-"));
+	let fixture: Fixture | undefined;
+	let held: AdapterOwnership | undefined;
+	let capturedApi: CapturedExtensionAPI | undefined;
+	let capturedContext: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		const started = await startFixture(fixture, "pi-worker:still-owned");
+		held = acquireAdapterOwnership(fixture.planDirectory, String(started.before.run!.runId), "foreign-live-session");
+		const factory = new PendingWorkerFactory();
+		const api = capturedApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const ctx = capturedContext = freshContext(fixture, notifications);
+
+		await withDeadline(api.invoke("session_start", ctx), "owned attach session_start");
+		await withDeadline(api.command("herder-attach").handler("herder-plans", ctx), "owned /herder-attach");
+		assert.equal(factory.requests.length, 0);
+		assert.ok(notifications.some((notification) => notification.level === "error" && /already owned by live Pi pid/.test(notification.message)));
+		const after = evidence(fixture);
+		assert.deepEqual(after.actions.map((action) => ({
+			actionId: action.actionId,
+			state: action.state,
+			hostHandle: action.hostHandle,
+			leaseReason: action.leaseReason,
+		})), started.before.actions.map((action) => ({
+			actionId: action.actionId,
+			state: action.state,
+			hostHandle: action.hostHandle,
+			leaseReason: action.leaseReason,
+		})));
+		assert.equal(after.lease, started.before.lease);
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "owned attach shutdown");
+		shutdown = true;
+	} finally {
+		if (capturedApi && capturedContext && !shutdown) {
+			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "owned attach cleanup", 5_000).catch(() => {});
+		}
+		if (held) releaseAdapterOwnership(held);
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("live Pi ownership blocks resume before a paused run changes manager evidence", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-resume-owned-"));
+	let fixture: Fixture | undefined;
+	let held: AdapterOwnership | undefined;
+	let capturedApi: CapturedExtensionAPI | undefined;
+	let capturedContext: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		const paused = await pauseFixture(fixture);
+		held = acquireAdapterOwnership(fixture.planDirectory, String(paused.before.run!.runId), "foreign-resume-session");
+		const factory = new PendingWorkerFactory();
+		const api = capturedApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const ctx = capturedContext = freshContext(fixture, notifications);
+
+		await withDeadline(api.invoke("session_start", ctx), "owned resume session_start");
+		await withDeadline(api.command("herder-resume").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "owned /herder-resume");
+		assert.equal(factory.requests.length, 0);
+		assert.ok(notifications.some((notification) => notification.level === "error" && /already owned by live Pi pid/.test(notification.message)));
+		const after = evidence(fixture);
+		assert.equal(after.run!.status, "paused");
+		assert.deepEqual(after.actions.map((action) => ({
+			actionId: action.actionId,
+			state: action.state,
+			hostHandle: action.hostHandle,
+			leaseReason: action.leaseReason,
+		})), paused.before.actions.map((action) => ({
+			actionId: action.actionId,
+			state: action.state,
+			hostHandle: action.hostHandle,
+			leaseReason: action.leaseReason,
+		})));
+		assert.equal(after.lease, paused.before.lease);
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "owned resume shutdown");
+		shutdown = true;
+	} finally {
+		if (capturedApi && capturedContext && !shutdown) {
+			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "owned resume cleanup", 5_000).catch(() => {});
+		}
+		if (held) releaseAdapterOwnership(held);
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("shutdown during attach dispatch drains ownership and never accepts or starts the stale worker", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attach-shutdown-"));
+	let fixture: Fixture | undefined;
+	try {
+		fixture = writeFixture(root);
+		await startFixture(fixture, "pi-worker:shutdown-lost");
+		const factory = new GatedPrepareWorkerFactory();
+		const api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const ctx = freshContext(fixture, notifications);
+
+		await withDeadline(api.invoke("session_start", ctx), "shutdown attach session_start");
+		const attaching = api.command("herder-attach").handler("herder-plans", ctx);
+		await withDeadline(factory.createEntered.promise, "attach worker preparation");
+		const lockPath = adapterOwnershipLockPath(fixture.planDirectory);
+		assert.equal(fs.existsSync(lockPath), true);
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "shutdown during attach dispatch", 2_000);
+		assert.equal(fs.existsSync(lockPath), true, "ownership released before the admitted manager task drained");
+		factory.allowCreate.resolve();
+		await withDeadline(attaching, "stale attach completion");
+		assert.equal(fs.existsSync(lockPath), false);
+		assert.equal(factory.sessions.length, 1);
+		assert.equal(factory.sessions[0]!.prompted, false);
+		assert.equal(factory.sessions[0]!.disposed, true);
+		const after = evidence(fixture);
+		const proposed = after.actions.filter((action) => action.state === "proposed");
+		assert.equal(proposed.length, 1);
+		assert.equal(proposed[0]!.hostHandle, null);
+		assert.equal(after.actions.some((action) => action.state === "dispatched"), false);
+	} finally {
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a fresh adapter instance waits for same-process ownership retirement before attaching", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attach-handoff-"));
+	let fixture: Fixture | undefined;
+	let replacementApi: CapturedExtensionAPI | undefined;
+	let replacementContext: ExtensionContext | undefined;
+	let replacementShutdown = false;
+	try {
+		fixture = writeFixture(root);
+		await startFixture(fixture, "pi-worker:handoff-lost");
+
+		const retiringFactory = new GatedPrepareWorkerFactory();
+		const retiringApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(retiringApi as unknown as ExtensionAPI, retiringFactory);
+		const retiringContext = freshContext(fixture, []);
+		await withDeadline(retiringApi.invoke("session_start", retiringContext), "retiring attach session_start");
+		const retiringAttach = retiringApi.command("herder-attach").handler("herder-plans", retiringContext);
+		await withDeadline(retiringFactory.createEntered.promise, "retiring worker preparation");
+		const lockPath = adapterOwnershipLockPath(fixture.planDirectory);
+		assert.equal(fs.existsSync(lockPath), true);
+		await withDeadline(retiringApi.invoke("session_shutdown", retiringContext), "retiring adapter shutdown", 2_000);
+		assert.equal(fs.existsSync(lockPath), true);
+
+		const replacementFactory = new PendingWorkerFactory();
+		const nextApi = replacementApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(nextApi as unknown as ExtensionAPI, replacementFactory);
+		const notifications: Warning[] = [];
+		const nextContext = replacementContext = freshContext(fixture, notifications);
+		await withDeadline(nextApi.invoke("session_start", nextContext), "replacement adapter session_start");
+		const replacementAttach = nextApi.command("herder-attach").handler("herder-plans", nextContext);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(replacementFactory.requests.length, 0);
+		assert.equal(notifications.some((notification) => /already owned by live Pi pid/.test(notification.message)), false);
+
+		retiringFactory.allowCreate.resolve();
+		await withDeadline(retiringAttach, "retiring attach drain");
+		await withDeadline(replacementAttach, "replacement attach handoff");
+		assert.equal(notifications.some((notification) => notification.level === "error"), false);
+		assert.equal(replacementFactory.requests.length, 1);
+		await withDeadline(replacementFactory.sessions[0]!.started, "replacement handoff worker start");
+		assert.equal(fs.existsSync(lockPath), true);
+
+		await withDeadline(nextApi.invoke("session_shutdown", nextContext), "replacement handoff shutdown");
+		replacementShutdown = true;
+		assert.equal(fs.existsSync(lockPath), false);
+	} finally {
+		if (replacementApi && replacementContext && !replacementShutdown) {
+			await withDeadline(replacementApi.invoke("session_shutdown", replacementContext), "replacement handoff cleanup", 5_000).catch(() => {});
 		}
 		if (fixture) {
 			await stopService(fixture.planDirectory).catch(() => {});

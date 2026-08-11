@@ -586,6 +586,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 
 		assert.deepEqual([...api.commands.keys()].sort(), [
+			"herder-attach",
 			"herder-cleanup",
 			"herder-dashboard",
 			"herder-fire",

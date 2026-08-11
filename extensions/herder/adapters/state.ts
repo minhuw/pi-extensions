@@ -2,7 +2,7 @@ export const HERDER_STATE_ENTRY = "herder-pi-run-v1";
 
 export interface HerderRunState {
 	version: 1;
-	mode: "fire" | "resume" | "revise";
+	mode: "fire" | "resume" | "revise" | "attach";
 	status: "initializing" | "running" | "paused" | "needs_input" | "complete" | "failed" | "stopped";
 	runId: string;
 	asyncDir?: string;
@@ -43,7 +43,7 @@ function isRunState(value: unknown): value is HerderRunState {
 		&& typeof state.dashboardEnabled === "boolean"
 		&& typeof state.startedAt === "number"
 		&& typeof state.updatedAt === "number"
-		&& ["fire", "resume", "revise"].includes(state.mode || "")
+		&& ["fire", "resume", "revise", "attach"].includes(state.mode || "")
 		&& ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"].includes(state.status || "");
 }
 

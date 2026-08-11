@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
+import { parseAttachArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../adapters/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
@@ -42,6 +42,15 @@ test("fire defaults to a five-worker pool and an ephemeral dashboard port", () =
 		maxParallel: 7,
 		dashboardPort: 4312,
 	});
+});
+
+test("attach accepts only a plan directory and dashboard port", () => {
+	assert.deepEqual(parseAttachArguments(""), { planDir: "herder-plans", dashboardPort: 0 });
+	assert.deepEqual(parseAttachArguments('"plans with spaces" --dashboard-port 4312'), { planDir: "plans with spaces", dashboardPort: 4312 });
+	assert.throws(() => parseAttachArguments("--profile eclipse"), /Unknown option: --profile/);
+	assert.throws(() => parseAttachArguments("--max-parallel 2"), /Unknown option: --max-parallel/);
+	assert.throws(() => parseAttachArguments("--dashboard-port 65536"), /0 through 65535/);
+	assert.throws(() => parseAttachArguments("one two"), /Unexpected argument/);
 });
 
 test("argument validation is fail-closed", () => {

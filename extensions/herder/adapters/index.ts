@@ -12,10 +12,12 @@ import {
 	waitHerderOperation,
 } from "../src/application/tools.ts";
 import {
+	parseAttachArguments,
 	parseCleanupArguments,
 	parseFireArguments,
 	parseGrillPlanTarget,
 	parsePlanDirArguments,
+	type AttachOptions,
 	type FireOptions,
 } from "./arguments.ts";
 import { runCleanupCommand } from "./cleanup-command.ts";
@@ -31,6 +33,15 @@ import { resolvePlanDirectory } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
+import {
+	acquireAdapterOwnership,
+	adapterOwnershipLockPath,
+	bindAdapterOwnershipRun,
+	registerAdapterOwnershipRetirement,
+	releaseAdapterOwnership,
+	waitForAdapterOwnershipRetirement,
+	type AdapterOwnership,
+} from "./ownership.ts";
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerSessionFactory, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
 import {
@@ -57,6 +68,7 @@ interface WorkerBinding {
 	handle: string;
 	managerRunId: string;
 	planDir: string;
+	sessionEpoch: number;
 	transcript?: HerderWorkerInputEntry;
 }
 
@@ -99,11 +111,16 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let lastContext: ExtensionContext | undefined;
 	let lastSummary: PlanSummary | undefined;
 	let managerQueue = Promise.resolve();
+	let admittedManagerTasks = 0;
+	let releaseOwnershipAfterManagerDrain = false;
 	let sessionEpoch = 0;
 	let shuttingDown = false;
+	let ownership: AdapterOwnership | undefined;
+	let ownershipEpoch = 0;
+	const fallbackPiSessionId = `fallback-${randomUUID()}`;
 	const verificationRequests = new Map<string, VerificationRequest>();
 	const promptedVerifications = new Set<string>();
-	const verificationMonitors = new Set<string>();
+	const verificationMonitors = new Map<string, number>();
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -165,6 +182,64 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return path.resolve(result.stdout.trim());
 	};
 
+	const piSessionId = (ctx: ExtensionContext): string => {
+		try {
+			const getter = (ctx.sessionManager as { getSessionId?: () => unknown }).getSessionId;
+			const value = typeof getter === "function" ? getter.call(ctx.sessionManager) : undefined;
+			if (typeof value === "string" && value.length > 0 && value.length <= 512) return value;
+		} catch {}
+		return fallbackPiSessionId;
+	};
+
+	const ownsRun = (planDir: string, runId: string): boolean => Boolean(
+		ownership
+		&& ownership.lockPath === adapterOwnershipLockPath(planDir)
+		&& ownership.record.runId === runId,
+	);
+
+	const claimOwnership = async (planDir: string, runId: string, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
+		assertSessionActive(epoch);
+		if (ownership) {
+			if (ownsRun(planDir, runId)) {
+				const inherited = ownershipEpoch !== epoch;
+				ownershipEpoch = epoch;
+				releaseOwnershipAfterManagerDrain = false;
+				return inherited ? ownership : undefined;
+			}
+			throw new Error(`This Pi session already owns Herder run ${ownership.record.runId}; stop it before controlling ${runId}.`);
+		}
+		await waitForAdapterOwnershipRetirement(planDir);
+		assertSessionActive(epoch);
+		ownership = acquireAdapterOwnership(planDir, runId, piSessionId(ctx));
+		ownershipEpoch = epoch;
+		releaseOwnershipAfterManagerDrain = false;
+		return ownership;
+	};
+
+	const assertOwnership = (planDir: string, runId: string): void => {
+		if (!ownsRun(planDir, runId)) {
+			throw new Error(`This Pi session does not own Herder run ${runId}; attach or resume it before making changes.`);
+		}
+	};
+
+	const releaseOwnership = (): void => {
+		if (!ownership) return;
+		const held = ownership;
+		ownership = undefined;
+		ownershipEpoch = 0;
+		releaseAdapterOwnership(held);
+	};
+
+	const releaseNewOwnership = (acquired: AdapterOwnership | undefined, epoch: number): void => {
+		if (acquired && ownership === acquired && epoch === sessionEpoch) releaseOwnership();
+	};
+
+	const sessionActive = (epoch: number): boolean => epoch === sessionEpoch && !shuttingDown;
+
+	const assertSessionActive = (epoch: number): void => {
+		if (!sessionActive(epoch)) throw new Error("Herder operation was cancelled because the Pi session changed or shut down.");
+	};
+
 	const resolveProfile = async (ctx: ExtensionContext, requested?: string): Promise<ResolvedPiProfile> => {
 		const profile = await loadPiProfile(PROFILE_CATALOG, requested);
 		const unavailable = unavailableProfileModels(profile, ctx.modelRegistry.getAvailable());
@@ -181,7 +256,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const delegateVerification = (reply: ManagerReply, retryDetail?: string) => {
-		if (shuttingDown) return;
+		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId)) return;
 		const request = reply.verificationRequest;
 		if (!request) return;
 		verificationRequests.set(request.requestId, request);
@@ -220,7 +295,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 	};
 
-	const updateFromReply = (reply: ManagerReply, profile?: string, mode?: "fire" | "resume" | "revise", verificationRetryDetail?: string) => {
+	const updateFromReply = (
+		reply: ManagerReply,
+		profile?: string,
+		mode?: "fire" | "resume" | "revise" | "attach",
+		verificationRetryDetail?: string,
+		repoRoot?: string,
+	) => {
 		if (reply.status === "idle") {
 			currentState = undefined;
 			lastSummary = undefined;
@@ -236,9 +317,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			mode: mode ?? previous?.mode ?? "resume",
 			status: reply.status,
 			runId: reply.runId,
-			repoRoot: previous?.repoRoot ?? "",
+			repoRoot: repoRoot ?? previous?.repoRoot ?? "",
 			planDir: reply.planDirectory,
-			profile: profile ?? previous?.profile ?? "unknown",
+			profile: profile ?? reply.profileName ?? previous?.profile ?? "unknown",
 			maxParallel: reply.maxParallel,
 			dashboardEnabled: true,
 			startedAt: previous?.startedAt ?? now,
@@ -249,14 +330,22 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
 			inProgress: reply.summary.inProgress,
 		};
-		for (const operation of reply.operations ?? []) {
-			if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
-			const operationRequestId = operation.operationId.match(/^verification:([^:]+):/)?.[1];
-			monitorVerification(operation.operationId, { planDirectory: reply.planDirectory, operationId: operation.operationId }, reply.verificationRequest?.requestId ?? operationRequestId);
+		if (ownsRun(reply.planDirectory, reply.runId)) {
+			for (const operation of reply.operations ?? []) {
+				if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
+				const operationRequestId = operation.operationId.match(/^verification:([^:]+):/)?.[1];
+				monitorVerification(operation.operationId, { planDirectory: reply.planDirectory, operationId: operation.operationId }, reply.verificationRequest?.requestId ?? operationRequestId);
+			}
 		}
 		for (const active of reply.active) {
 			if (!active.hostHandle || !engine.has(active.hostHandle) || workers.has(active.hostHandle)) continue;
-			workers.set(active.hostHandle, { actionId: active.actionId, handle: active.hostHandle, managerRunId: reply.runId, planDir: reply.planDirectory });
+			workers.set(active.hostHandle, {
+				actionId: active.actionId,
+				handle: active.hostHandle,
+				managerRunId: reply.runId,
+				planDir: reply.planDirectory,
+				sessionEpoch,
+			});
 		}
 		render();
 		delegateVerification(reply, verificationRetryDetail);
@@ -290,15 +379,34 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		throw lastError;
 	};
 
-	const enqueueManager = <T>(task: () => Promise<T>): Promise<T> => {
-		const next = managerQueue.then(task, task);
-		managerQueue = next.then(() => undefined, () => undefined);
-		return next;
+	const releaseOwnershipIfManagerIdle = (): void => {
+		if (!releaseOwnershipAfterManagerDrain || admittedManagerTasks !== 0) return;
+		releaseOwnershipAfterManagerDrain = false;
+		releaseOwnership();
 	};
 
-	const dispatchReply = async (initial: ManagerReply): Promise<ManagerReply> => {
+	const enqueueManager = <T>(task: () => Promise<T>): Promise<T> => {
+		admittedManagerTasks += 1;
+		const next = managerQueue.then(task, task);
+		const tracked = next.finally(() => {
+			admittedManagerTasks -= 1;
+			releaseOwnershipIfManagerIdle();
+		});
+		managerQueue = tracked.then(() => undefined, () => undefined);
+		return tracked;
+	};
+
+	const discardPrepared = async (handles: readonly string[]): Promise<void> => {
+		for (const handle of handles) {
+			workers.delete(handle);
+			await engine.discard(handle).catch(() => {});
+		}
+	};
+
+	const dispatchReply = async (initial: ManagerReply, epoch: number): Promise<ManagerReply> => {
 		let reply = initial;
-		while (!shuttingDown && reply.actions.length > 0 && reply.status === "running") {
+		assertOwnership(reply.planDirectory, reply.runId);
+		while (sessionActive(epoch) && reply.actions.length > 0 && reply.status === "running") {
 			const results = [];
 			const prepared: string[] = [];
 			for (const action of reply.actions) {
@@ -310,6 +418,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						handle,
 						managerRunId: reply.runId,
 						planDir: reply.planDirectory,
+						sessionEpoch: epoch,
 						transcript: createWorkerInputEntry(action, handle),
 					});
 					results.push({ actionId: action.actionId, accepted: true, hostHandle: handle });
@@ -317,16 +426,18 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					results.push({ actionId: action.actionId, accepted: false, error: message(error) });
 				}
 			}
+			if (!sessionActive(epoch)) {
+				await discardPrepared(prepared);
+				throw new Error("Herder dispatch was cancelled before worker handles were accepted because the Pi session changed or shut down.");
+			}
+			assertOwnership(reply.planDirectory, reply.runId);
 			try {
 				reply = await postEventReliable(reply.planDirectory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: results });
 			} catch (error) {
-				for (const handle of prepared) {
-					workers.delete(handle);
-					await engine.discard(handle);
-				}
+				await discardPrepared(prepared);
 				throw error;
 			}
-			if (shuttingDown) {
+			if (!sessionActive(epoch)) {
 				for (const handle of prepared) {
 					const binding = workers.get(handle);
 					if (binding?.transcript) {
@@ -335,15 +446,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 							actionId: binding.actionId,
 							hostHandle: handle,
 							interrupted: true,
-							error: "Pi session shut down before worker start",
+							error: "Pi session changed or shut down before worker start",
 						}));
 					}
-					workers.delete(handle);
-					await engine.discard(handle);
 				}
-				// Leave the accepted handles for the replacement session's deterministic
-				// recovery pass. Holding shutdown open for reconciliation would recreate
-				// the long blocking control path that durable manager operations removed.
+				await discardPrepared(prepared);
+				// Leave accepted handles for the replacement session's deterministic
+				// recovery pass without holding shutdown open for manager reconciliation.
 				return reply;
 			}
 			for (const handle of prepared) {
@@ -356,85 +465,215 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return reply;
 	};
 
+	const recoverInterruptedWorkers = async (initial: ManagerReply, epoch: number): Promise<ManagerReply> => {
+		assertSessionActive(epoch);
+		assertOwnership(initial.planDirectory, initial.runId);
+		let reply = initial;
+		const interrupted = interruptedPiWorkers(reply.active, (handle) => engine.has(handle));
+		if (interrupted.length > 0) {
+			reply = await postEventReliable(reply.planDirectory, {
+				eventId: randomUUID(),
+				kind: "terminals",
+				terminals: interrupted,
+			});
+			assertSessionActive(epoch);
+			assertOwnership(reply.planDirectory, reply.runId);
+			updateFromReply(reply);
+		}
+		return dispatchReply(reply, epoch);
+	};
+
 	function monitorVerification(
 		operationId: string,
 		pending: Awaited<ReturnType<typeof submitHerderVerification>>,
 		requestId?: string,
 	): void {
-		if (verificationMonitors.has(operationId)) return;
-		verificationMonitors.add(operationId);
 		const epoch = sessionEpoch;
+		if (verificationMonitors.get(operationId) === epoch) return;
+		verificationMonitors.set(operationId, epoch);
 		void waitHerderOperation(pending).then((value) => {
-			if (epoch !== sessionEpoch) return;
+			if (!sessionActive(epoch)) return;
 			return enqueueManager(async () => {
+				assertSessionActive(epoch);
 				if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Verification operation returned no manager reply");
 				const reply = value as ManagerReply;
+				assertOwnership(reply.planDirectory, reply.runId);
 				updateFromReply(reply);
-				await dispatchReply(reply);
+				await dispatchReply(reply, epoch);
 			});
 		}).catch(async (error) => {
+			if (!sessionActive(epoch)) return;
 			const detail = message(error);
 			lastContext?.ui.notify(`Herder verification handling failed: ${detail}`, "error");
-			if (!requestId || epoch !== sessionEpoch) return;
+			if (!requestId) return;
 			promptedVerifications.delete(requestId);
 			try {
 				await enqueueManager(async () => {
+					assertSessionActive(epoch);
 					const reply = unwrapReply(await invokeHerderTool("herder_run", {
 						operation: "status",
 						planDirectory: pending.planDirectory,
 					}) as Record<string, unknown>);
+					assertSessionActive(epoch);
+					assertOwnership(reply.planDirectory, reply.runId);
 					updateFromReply(reply, undefined, undefined, detail);
 				});
 			} catch (refreshError) {
-				lastContext?.ui.notify(`Herder could not re-request verification: ${message(refreshError)}`, "error");
+				if (sessionActive(epoch)) lastContext?.ui.notify(`Herder could not re-request verification: ${message(refreshError)}`, "error");
 			}
-		}).finally(() => verificationMonitors.delete(operationId));
+		}).finally(() => {
+			if (verificationMonitors.get(operationId) === epoch) verificationMonitors.delete(operationId);
+		});
 	}
 
 	const launch = async (options: FireOptions, ctx: ExtensionContext): Promise<string> => {
+		const epoch = sessionEpoch;
+		assertSessionActive(epoch);
 		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before starting Herder.");
+		if (options.mode === "fire" && ownership) {
+			throw new Error(`This Pi session already owns Herder run ${ownership.record.runId}; stop it before starting a different run.`);
+		}
 		const repoRoot = await repositoryRoot(ctx);
+		assertSessionActive(epoch);
 		const planDir = resolvePlanDirectory(repoRoot, options.planDir);
 		if (!existsSync(path.join(planDir, "README.md"))) throw new Error(`Herder plan index is missing: ${path.join(planDir, "README.md")}`);
-		const profile = await resolveProfile(ctx, options.profile || (options.mode === "resume" ? currentState?.profile : undefined));
-		renderLaunching(ctx, planDir, profile.profile, options.maxParallel ?? currentState?.maxParallel ?? 5);
+		let acquired: AdapterOwnership | undefined;
+		let before: ManagerReply | undefined;
 		try {
+			if (options.mode !== "fire") {
+				before = await enqueueManager(async () => {
+					assertSessionActive(epoch);
+					const reply = unwrapReply(await invokeHerderTool("herder_run", {
+						operation: "status",
+						planDirectory: planDir,
+					}) as Record<string, unknown>);
+					assertSessionActive(epoch);
+					if (reply.status === "idle" || !reply.runId) throw new Error(`No deterministic Herder run exists in ${planDir}.`);
+					acquired = await claimOwnership(planDir, reply.runId, ctx, epoch);
+					return reply;
+				});
+			}
+			const profile = await resolveProfile(ctx, options.profile || before?.profileName || (options.mode === "resume" ? currentState?.profile : undefined));
+			assertSessionActive(epoch);
+			renderLaunching(ctx, planDir, profile.profile, options.maxParallel ?? before?.maxParallel ?? currentState?.maxParallel ?? 5);
 			await preflight(ctx, profile);
-			const reply = unwrapReply(await invokeHerderTool("herder_run", {
-				operation: options.mode,
-				repositoryRoot: repoRoot,
-				planDirectory: planDir,
-				profile: profile.profile,
-				...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
-				dashboardPort: options.dashboardPort,
-			}) as Record<string, unknown>);
-			if (reply.status === "idle") throw new Error("Herder manager did not create a run.");
-			const now = Date.now();
-			persist({
-				version: 1,
-				mode: options.mode,
-				status: reply.status,
-				runId: reply.runId,
-				repoRoot,
-				planDir,
-				profile: profile.profile,
-				maxParallel: reply.maxParallel,
-				dashboardEnabled: true,
-				startedAt: now,
-				updatedAt: now,
-				...(reply.dashboardUrl ? { dashboardUrl: reply.dashboardUrl } : {}),
+			assertSessionActive(epoch);
+			if (!before) acquired = await claimOwnership(planDir, `pending-fire:${randomUUID()}`, ctx, epoch);
+			const reply = await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				if (before) {
+					assertOwnership(planDir, before.runId);
+					const fresh = unwrapReply(await invokeHerderTool("herder_run", {
+						operation: "status",
+						planDirectory: planDir,
+					}) as Record<string, unknown>);
+					assertSessionActive(epoch);
+					if (fresh.runId !== before.runId) throw new Error(`Herder run changed from ${before.runId} to ${fresh.runId || "idle"} before ${options.mode}; refusing to mutate it.`);
+					if (!fresh.profileName || fresh.profileName !== before.profileName) throw new Error(`Herder run ${before.runId} changed its immutable profile before ${options.mode}; refusing to mutate it.`);
+				}
+				const started = unwrapReply(await invokeHerderTool("herder_run", {
+					operation: options.mode,
+					repositoryRoot: repoRoot,
+					planDirectory: planDir,
+					profile: profile.profile,
+					...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
+					dashboardPort: options.dashboardPort,
+				}) as Record<string, unknown>);
+				assertSessionActive(epoch);
+				if (started.status === "idle") throw new Error("Herder manager did not create a run.");
+				if (before && started.runId !== before.runId) throw new Error(`Herder ${options.mode} returned unexpected run ${started.runId}; expected ${before.runId}.`);
+				if (!before) {
+					if (!ownership || ownership !== acquired) throw new Error("Herder Fire lost its startup ownership before manager creation completed.");
+					bindAdapterOwnershipRun(ownership, started.runId);
+				}
+				assertOwnership(planDir, started.runId);
+				const now = Date.now();
+				persist({
+					version: 1,
+					mode: options.mode,
+					status: started.status,
+					runId: started.runId,
+					repoRoot,
+					planDir,
+					profile: profile.profile,
+					maxParallel: started.maxParallel,
+					dashboardEnabled: true,
+					startedAt: now,
+					updatedAt: now,
+					...(started.dashboardUrl ? { dashboardUrl: started.dashboardUrl } : {}),
+				});
+				lastSummary = {
+					counts: { total: started.summary.total, done: started.summary.done, rejected: started.summary.rejected },
+					inProgress: started.summary.inProgress,
+				};
+				// Paint the authoritative run state before preparing the first worker batch;
+				// creating several clean Pi sessions can take long enough to look unresponsive.
+				render(ctx);
+				await dispatchReply(started, epoch);
+				assertSessionActive(epoch);
+				return started;
 			});
-			lastSummary = {
-				counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
-				inProgress: reply.summary.inProgress,
-			};
-			// Paint the authoritative run state before preparing the first worker batch;
-			// creating several clean Pi sessions can take long enough to look unresponsive.
-			render(ctx);
-			await enqueueManager(() => dispatchReply(reply));
 			return `Herder ${options.mode} started with deterministic manager ${reply.runId}, profile ${profile.profile}, and max parallel ${reply.maxParallel}. Dashboard: ${reply.dashboardUrl || "unavailable"}`;
 		} catch (error) {
+			releaseNewOwnership(acquired, epoch);
 			render(ctx);
+			throw error;
+		}
+	};
+
+	const attach = async (options: AttachOptions, ctx: ExtensionContext): Promise<string> => {
+		const epoch = sessionEpoch;
+		assertSessionActive(epoch);
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before attaching to Herder.");
+		const repoRoot = await repositoryRoot(ctx);
+		assertSessionActive(epoch);
+		const planDir = resolvePlanDirectory(repoRoot, options.planDir);
+		if (!existsSync(path.join(planDir, "README.md"))) throw new Error(`Herder plan index is missing: ${path.join(planDir, "README.md")}`);
+		const snapshot = unwrapReply(await invokeHerderTool("herder_run", {
+			operation: "status",
+			planDirectory: planDir,
+			dashboardPort: options.dashboardPort,
+		}) as Record<string, unknown>);
+		assertSessionActive(epoch);
+		if (snapshot.status === "idle") {
+			throw new Error(`No Herder run is recorded in ${planDir}. Use /herder-fire ${options.planDir} to start one.`);
+		}
+		if (snapshot.status === "complete") {
+			throw new Error(`Herder run ${snapshot.runId} is complete and cannot be attached. Finalize or clean up the completed run, then use /herder-fire for new work.`);
+		}
+		if (["failed", "stopped", "initializing"].includes(snapshot.status)) {
+			throw new Error(`Herder run ${snapshot.runId} is ${snapshot.status}. Use /herder-resume ${options.planDir} to recover it before attaching.`);
+		}
+		if (!["running", "paused", "needs_input"].includes(snapshot.status)) {
+			throw new Error(`Herder run ${snapshot.runId} has unsupported attach status ${snapshot.status}.`);
+		}
+		if (!snapshot.profileName) throw new Error(`Herder run ${snapshot.runId} did not report its immutable profile; restart the manager and retry.`);
+		const profile = await resolveProfile(ctx, snapshot.profileName);
+		await preflight(ctx, profile);
+		assertSessionActive(epoch);
+		let acquired: AdapterOwnership | undefined;
+		try {
+			const fresh = await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				acquired = await claimOwnership(planDir, snapshot.runId, ctx, epoch);
+				const reply = unwrapReply(await invokeHerderTool("herder_run", {
+					operation: "status",
+					planDirectory: planDir,
+					dashboardPort: options.dashboardPort,
+				}) as Record<string, unknown>);
+				assertSessionActive(epoch);
+				if (reply.runId !== snapshot.runId) throw new Error(`Herder run changed from ${snapshot.runId} to ${reply.runId || "idle"} while attaching.`);
+				if (!reply.profileName || reply.profileName !== snapshot.profileName) throw new Error(`Herder run ${snapshot.runId} changed its immutable profile while attaching.`);
+				if (!["running", "paused", "needs_input"].includes(reply.status)) throw new Error(`Herder run ${reply.runId} changed to ${reply.status} while attaching.`);
+				assertOwnership(reply.planDirectory, reply.runId);
+				updateFromReply(reply, profile.profile, "attach", undefined, repoRoot);
+				await recoverInterruptedWorkers(reply, epoch);
+				assertSessionActive(epoch);
+				return reply;
+			});
+			return `Attached to Herder run ${fresh.runId} without changing its ${fresh.status} lifecycle state, profile ${profile.profile}, and max parallel ${fresh.maxParallel}. Dashboard: ${fresh.dashboardUrl || "unavailable"}`;
+		} catch (error) {
+			releaseNewOwnership(acquired, epoch);
 			throw error;
 		}
 	};
@@ -475,9 +714,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const stop = async (): Promise<string> => {
 		if (!currentState) return "No active Herder run.";
+		const epoch = sessionEpoch;
+		const state = currentState;
 		return enqueueManager(async () => {
-			let reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "stop", planDirectory: currentState!.planDir }) as Record<string, unknown>);
-			const active = [...workers.values()];
+			assertSessionActive(epoch);
+			assertOwnership(state.planDir, state.runId);
+			let reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "stop", planDirectory: state.planDir }) as Record<string, unknown>);
+			assertSessionActive(epoch);
+			const active = [...workers.values()].filter((worker) => worker.sessionEpoch === epoch);
 			for (const worker of active) {
 				if (worker.transcript) appendWorkerEntry(HERDER_WORKER_OUTPUT_ENTRY, createWorkerOutputEntry(worker.transcript, {
 					actionId: worker.actionId,
@@ -486,7 +730,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					error: "Pi user requested Herder stop",
 				}));
 			}
-			workers.clear();
+			for (const worker of active) workers.delete(worker.handle);
 			await Promise.all(active.map((worker) => engine.stop(worker.handle).catch(() => {})));
 			const interrupted: TerminalEvent[] = active.map((worker) => ({
 				actionId: worker.actionId,
@@ -495,9 +739,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				error: "Pi user requested Herder stop",
 			}));
 			if (interrupted.length > 0) {
-				reply = await postEventReliable(currentState!.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
+				reply = await postEventReliable(state.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
 			}
+			assertSessionActive(epoch);
 			updateFromReply(reply);
+			releaseOwnership();
 			return `Stop requested for Herder run ${reply.runId}. Repository state was preserved.`;
 		});
 	};
@@ -509,6 +755,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	pi.registerCommand("herder-fire", { description: "Start a deterministic background Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "fire"), ctx)) });
+	pi.registerCommand("herder-attach", { description: "Attach this Pi session to an active Herder run after its former session died.", handler: command((args, ctx) => attach(parseAttachArguments(args), ctx)) });
 	pi.registerCommand("herder-resume", { description: "Resume a deterministic Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "resume"), ctx)) });
 	pi.registerCommand("herder-revise", { description: "Adopt a validated new plan-graph generation.", handler: command((args, ctx) => launch(parseFireArguments(args, "revise"), ctx)) });
 	pi.registerCommand("herder-status", { description: "Show Herder manager and plan status.", handler: command((args, ctx) => status(parsePlanDirArguments(args).planDir, ctx)) });
@@ -530,6 +777,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 		prepareWorkflow: async (skill, args, ctx) => {
 			if (!activeFire()) return {};
+			const epoch = sessionEpoch;
+			assertSessionActive(epoch);
 			if (skill !== "grill") throw new Error("Only /herder-grill --plan <unstarted-plan> may run while Herder Fire is active.");
 			const target = parseGrillPlanTarget(args);
 			if (!target) throw new Error("Active Herder Fire requires /herder-grill --plan <unstarted-plan>.");
@@ -538,16 +787,27 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (currentState?.planDir && path.resolve(currentState.planDir) !== planDir) {
 				throw new Error(`Active Herder Fire owns ${currentState.planDir}; Grill cannot edit ${planDir}.`);
 			}
-			const reserved = await invokeHerderTool("herder_plan", {
-				operation: "begin_edit",
-				planDirectory: planDir,
-				planId: target.planId,
-			}) as Record<string, unknown>;
+			if (!currentState) throw new Error("Active Herder state is unavailable for Grill ownership validation.");
+			assertOwnership(planDir, currentState.runId);
+			const reserved = await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				assertOwnership(planDir, currentState!.runId);
+				return await invokeHerderTool("herder_plan", {
+					operation: "begin_edit",
+					planDirectory: planDir,
+					planId: target.planId,
+				}) as Record<string, unknown>;
+			});
+			assertSessionActive(epoch);
 			const edit = reserved.edit as Record<string, unknown> | undefined;
 			const editToken = typeof edit?.editToken === "string" ? edit.editToken : "";
 			const planId = typeof edit?.planId === "string" ? edit.planId : target.planId;
 			if (!editToken) throw new Error("Herder manager did not return a plan edit token.");
-			if (reserved.reply && typeof reserved.reply === "object") updateFromReply(reserved.reply as ManagerReply);
+			if (reserved.reply && typeof reserved.reply === "object") {
+				const reply = reserved.reply as ManagerReply;
+				assertOwnership(reply.planDirectory, reply.runId);
+				updateFromReply(reply);
+			}
 			return {
 				runtimeContext: [
 					"HERDER_ACTIVE_PLAN_EDIT_V1",
@@ -560,21 +820,33 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					"If no files were changed, call herder_plan with operation cancel_edit instead.",
 				].join("\n"),
 				rollback: async () => {
-					const cancelled = await invokeHerderTool("herder_plan", {
-						operation: "cancel_edit",
-						planDirectory: planDir,
-						editToken,
-					}) as Record<string, unknown>;
-					if (cancelled.reply && typeof cancelled.reply === "object") updateFromReply(cancelled.reply as ManagerReply);
+					if (!sessionActive(epoch) || !currentState || !ownsRun(planDir, currentState.runId)) return;
+					const cancelled = await enqueueManager(async () => {
+						assertSessionActive(epoch);
+						assertOwnership(planDir, currentState!.runId);
+						return await invokeHerderTool("herder_plan", {
+							operation: "cancel_edit",
+							planDirectory: planDir,
+							editToken,
+						}) as Record<string, unknown>;
+					});
+					if (cancelled.reply && typeof cancelled.reply === "object") {
+						const reply = cancelled.reply as ManagerReply;
+						assertOwnership(reply.planDirectory, reply.runId);
+						updateFromReply(reply);
+					}
 				},
 			};
 		},
 		handleManagerReply: async (value) => {
 			if (!value || typeof value !== "object" || Array.isArray(value)) return;
+			const epoch = sessionEpoch;
 			await enqueueManager(async () => {
+				assertSessionActive(epoch);
 				const reply = value as ManagerReply;
+				assertOwnership(reply.planDirectory, reply.runId);
 				updateFromReply(reply);
-				await dispatchReply(reply);
+				await dispatchReply(reply, epoch);
 			});
 		},
 	});
@@ -597,20 +869,30 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}), { maxItems: 32 }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const epoch = sessionEpoch;
+			assertSessionActive(epoch);
 			lastContext = ctx;
 			if (!ctx.isProjectTrusted()) throw new Error("Trust this project before submitting Herder verification.");
 			const repoRoot = await repositoryRoot(ctx);
+			assertSessionActive(epoch);
 			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
 			let request = verificationRequests.get(params.requestId);
 			if (!request) {
-				const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
+				const reply = await enqueueManager(async () => {
+					assertSessionActive(epoch);
+					return unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
+				});
+				assertSessionActive(epoch);
+				assertOwnership(reply.planDirectory, reply.runId);
 				updateFromReply(reply);
 				request = verificationRequests.get(params.requestId);
 			}
 			if (!request || request.requestId !== params.requestId || currentState?.runId !== request.runId || currentState.profile === "unknown") {
 				throw new Error(`Herder verification request ${params.requestId} is not bound to this main session`);
 			}
+			assertOwnership(planDirectory, request.runId);
 			await resolveProfile(ctx, currentState.profile);
+			assertSessionActive(epoch);
 			const manifest = prepareHerderVerificationManifest(request, {
 				schemaVersion: 1,
 				requestId: request.requestId,
@@ -626,11 +908,17 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				selector: {
 					...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
 					...(ctx.thinkingLevel ? { thinkingLevel: ctx.thinkingLevel } : {}),
-					sessionId: ctx.sessionManager.getSessionId(),
+					sessionId: piSessionId(ctx),
 				},
 			} satisfies VerificationManifest);
 			const operationId = `verification:${request.requestId}:${randomUUID()}`;
-			const pending = await submitHerderVerification({ planDirectory, operationId, manifest });
+			const pending = await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				assertOwnership(planDirectory, request!.runId);
+				const submitted = await submitHerderVerification({ planDirectory, operationId, manifest });
+				assertSessionActive(epoch);
+				return submitted;
+			});
 			monitorVerification(operationId, pending, request.requestId);
 			return {
 				content: [{ type: "text" as const, text: `Verification manifest accepted as ${operationId}. Herder is executing ${params.gates.length} gate(s) in the background.` }],
@@ -649,8 +937,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			createWorkerOutputEntry(binding.transcript, completed),
 		);
 		workers.delete(completed.handle);
-		if (shuttingDown) return;
+		const epoch = binding.sessionEpoch;
+		if (!sessionActive(epoch)) return;
 		await enqueueManager(async () => {
+			assertSessionActive(epoch);
+			assertOwnership(binding.planDir, binding.managerRunId);
 			const terminal: TerminalEvent = {
 				actionId: binding.actionId,
 				hostHandle: completed.handle,
@@ -660,37 +951,60 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				usage: completed.usage,
 			};
 			const reply = await postEventReliable(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
+			assertSessionActive(epoch);
+			assertOwnership(reply.planDirectory, reply.runId);
 			updateFromReply(reply);
-			if (!shuttingDown) await dispatchReply(reply);
-		}).catch((error) => lastContext?.ui.notify(`Herder completion handling failed: ${message(error)}`, "error"));
+			await dispatchReply(reply, epoch);
+		}).catch((error) => {
+			if (sessionActive(epoch)) lastContext?.ui.notify(`Herder completion handling failed: ${message(error)}`, "error");
+		});
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEpoch += 1;
+		const epoch = sessionEpoch;
 		shuttingDown = false;
+		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
 		lastPersistedState = currentState;
 		if (currentState) {
+			const restored = currentState;
+			let acquired: AdapterOwnership | undefined;
 			try {
 				await enqueueManager(async () => {
-					let reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: currentState!.planDir }) as Record<string, unknown>);
-					updateFromReply(reply);
-					const interrupted = interruptedPiWorkers(reply.active, (handle) => engine.has(handle));
-					if (interrupted.length > 0) {
-						reply = await postEventReliable(reply.planDirectory, {
-							eventId: randomUUID(),
-							kind: "terminals",
-							terminals: interrupted,
-						});
-						updateFromReply(reply);
+					assertSessionActive(epoch);
+					const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: restored.planDir }) as Record<string, unknown>);
+					assertSessionActive(epoch);
+					if (reply.runId !== restored.runId) {
+						throw new Error(`Persisted Herder run ${restored.runId} does not match manager run ${reply.runId || "idle"}; refusing recovery.`);
 					}
-					await dispatchReply(reply);
+					if (["initializing", "running", "paused", "needs_input"].includes(reply.status)) {
+						if (!reply.profileName || (restored.profile !== "unknown" && reply.profileName !== restored.profile)) {
+							throw new Error(`Persisted Herder profile ${restored.profile} does not match manager profile ${reply.profileName || "missing"}; refusing recovery.`);
+						}
+						acquired = await claimOwnership(reply.planDirectory, reply.runId, ctx, epoch);
+						assertSessionActive(epoch);
+						assertOwnership(reply.planDirectory, reply.runId);
+						updateFromReply(reply);
+						if (reply.status !== "initializing") await recoverInterruptedWorkers(reply, epoch);
+						return;
+					}
+					updateFromReply(reply);
+					if (ownership) releaseOwnershipAfterManagerDrain = true;
 				});
 			} catch (error) {
-				ctx.ui.notify(`Herder manager recovery failed: ${message(error)}`, "warning");
+				releaseNewOwnership(acquired, epoch);
+				if (ownership && ownershipEpoch !== epoch) {
+					if (admittedManagerTasks === 0) releaseOwnership();
+					else releaseOwnershipAfterManagerDrain = true;
+				}
+				if (sessionActive(epoch)) ctx.ui.notify(`Herder manager recovery failed: ${message(error)}`, "warning");
 			}
+		} else if (ownership) {
+			if (admittedManagerTasks === 0) releaseOwnership();
+			else releaseOwnershipAfterManagerDrain = true;
 		}
 		render(ctx);
 	});
@@ -701,6 +1015,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const handles = engine.snapshots().map((worker) => worker.handle);
 		await Promise.all(handles.map((handle) => engine.stop(handle).catch(() => {})));
 		workers.clear();
+		if (admittedManagerTasks === 0) releaseOwnership();
+		else {
+			releaseOwnershipAfterManagerDrain = true;
+			if (ownership) registerAdapterOwnershipRetirement(ownership, managerQueue);
+		}
 		widget.dispose();
 		verificationRequests.clear();
 		promptedVerifications.clear();

@@ -6,6 +6,11 @@ export interface FireOptions {
 	dashboardPort: number;
 }
 
+export interface AttachOptions {
+	planDir: string;
+	dashboardPort: number;
+}
+
 export interface PlanDirOptions {
 	planDir?: string;
 }
@@ -141,6 +146,26 @@ export function parseFireArguments(input: string, mode: "fire" | "resume" | "rev
 	}
 
 	return { mode, planDir, ...(profile ? { profile } : {}), ...(maxParallel === undefined && mode !== "fire" ? {} : { maxParallel: maxParallel ?? 5 }), dashboardPort };
+}
+
+export function parseAttachArguments(input: string): AttachOptions {
+	const tokens = tokenizeArguments(input);
+	let planDir = "herder-plans";
+	let dashboardPort = 0;
+	let positional = false;
+	for (let index = 0; index < tokens.length; index += 1) {
+		const argument = tokens[index]!;
+		if (argument === "--dashboard-port") {
+			dashboardPort = port(valueAfter(tokens, index, argument));
+			index += 1;
+		} else if (argument.startsWith("--")) throw new Error(`Unknown option: ${argument}`);
+		else if (positional) throw new Error(`Unexpected argument: ${argument}`);
+		else {
+			planDir = argument;
+			positional = true;
+		}
+	}
+	return { planDir, dashboardPort };
 }
 
 export function parsePlanDirArguments(input: string): PlanDirOptions {

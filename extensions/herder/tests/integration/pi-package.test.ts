@@ -58,7 +58,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(extension, /appendWorkerEntry\(HERDER_WORKER_INPUT_ENTRY, binding\.transcript\)/);
 	assert.match(extension, /createWorkerOutputEntry\(binding\.transcript, completed\)/);
 	assert.match(extension, /session_shutdown[\s\S]*engine\.stop\(handle\)/);
-	assert.match(extension, /if \(!shuttingDown\) await dispatchReply\(reply\)/);
+	assert.match(extension, /if \(!sessionActive\(epoch\)\) return/);
+	assert.match(extension, /await dispatchReply\(reply, epoch\)/);
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
 	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
