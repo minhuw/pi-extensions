@@ -5,7 +5,14 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { runCleanupCommand } from "../../adapters/cleanup-command.ts";
+import {
+	applyHerderCleanup,
+	previewHerderCleanup,
+	type CleanupApplicationDependencies,
+	type CleanupApplicationRequest,
+} from "../../src/application/tools.ts";
 import { initPlanDir } from "../../src/core/plans.ts";
+import type { CleanupInput, CleanupResult } from "../../src/daemon/git/cleanup-run.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
 import { buildCompletionProofPayload, writeCompletionProof } from "../../src/daemon/git/completion-proof.ts";
 
@@ -77,6 +84,29 @@ Stop if the user checkout or integration worktree would be removed.
 
 Keep the fixture small.
 `;
+}
+
+function mockedCleanupResult(input: CleanupInput): CleanupResult {
+	const planName = path.basename(input.planDir);
+	const plan = input.plan ?? null;
+	return {
+		repoRoot: input.repo,
+		planDir: input.planDir,
+		planName,
+		integrationBranch: `herder/${planName}/integration`,
+		integrationHead: "head",
+		plan,
+		dryRun: input.dryRun,
+		includeFailed: input.includeFailed,
+		finalize: input.finalize,
+		handoffTarget: input.handoffTarget ?? null,
+		actions: plan ? [{ plan, branch: `herder/${planName}/${plan}`, mode: input.includeFailed ? "failed-evidence" : "completed-plan" }] : [],
+		removed: !input.dryRun && plan ? [{ plan }] : [],
+		skipped: [],
+		finalization: { requested: false, eligible: false, blockers: [], refsPlanned: [], refsRemoved: [] },
+		handoff: { requested: false, targetBranch: null, targetHead: null, eligible: false, blockers: [], integrationWorktree: null, removed: false },
+		preserved: { integrationBranch: `herder/${planName}/integration`, integrationWorktree: null, coordinationRefs: `refs/plan-herder/${planName}/`, logs: true },
+	};
 }
 
 function setup(): { root: string; repo: string; planDir: string; integration: string; completed: string; planBranch: string; initial: string; completedHead: string } {
@@ -165,6 +195,48 @@ None.
 	store.close();
 	return { root, repo, planDir, integration, completed, planBranch, initial, completedHead };
 }
+
+test("status changes after the matched fresh preview abort before cleanup mutation", async () => {
+	const fixture = setup();
+	try {
+		const request: CleanupApplicationRequest = {
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDir,
+		};
+		let dryRunCalls = 0;
+		let applyCalls = 0;
+		const dependencies: CleanupApplicationDependencies = {
+			readStatus: () => "complete",
+			withExclusion: async (_planDirectory, callback) => callback(),
+			cleanupRunner: async (input) => {
+				if (input.dryRun) {
+					dryRunCalls += 1;
+					const result = mockedCleanupResult(input);
+					if (dryRunCalls === 2) {
+						const readme = path.join(fixture.planDir, "README.md");
+						fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("| DONE |", "| BLOCKED: status changed |"));
+					}
+					return result;
+				}
+				applyCalls += 1;
+				return mockedCleanupResult(input);
+			},
+		};
+		const expected = await previewHerderCleanup(request, dependencies);
+		assert.deepEqual(expected.selectedPlanIds, ["001"]);
+		assert.deepEqual(expected.failedPlanIds, []);
+		await assert.rejects(
+			() => applyHerderCleanup(request, expected, dependencies),
+			/status or selection changed after confirmation/,
+		);
+		assert.equal(dryRunCalls, 2);
+		assert.equal(applyCalls, 0);
+		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
+		assert.equal(fs.existsSync(fixture.completed), true);
+	} finally {
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
 
 test("confirmed cleanup removes only the eligible completed plan and records bounded evidence", async () => {
 	const fixture = setup();

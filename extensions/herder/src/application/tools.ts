@@ -238,10 +238,19 @@ function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
 	return [...reasons].sort();
 }
 
-async function buildCleanupPreview(
+function cleanupGraphStatusSnapshot(graph: ReturnType<typeof buildGraph>): string {
+	return stableJson(graph.plans.map((plan) => ({ planId: plan.id, status: plan.status })));
+}
+
+interface CleanupPreviewBuild {
+	preview: CleanupPreview;
+	graphStatusSnapshot: string;
+}
+
+async function buildCleanupPreviewSnapshot(
 	request: CleanupApplicationRequest,
 	dependencies: CleanupApplicationDependencies,
-): Promise<CleanupPreview> {
+): Promise<CleanupPreviewBuild> {
 	const runner = dependencies.cleanupRunner ?? cleanupRun;
 	const durableStatus = await (dependencies.readStatus ?? readCleanupDurableStatus)(request.planDirectory);
 	const graph = buildGraph(request.planDirectory);
@@ -292,17 +301,27 @@ async function buildCleanupPreview(
 		outcomes: outcomes.map((outcome) => ({ planId: outcome.planId, status: outcome.status, result: outcome.result })),
 	});
 	return {
-		version: 1,
-		durableStatus,
-		terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
-		canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions,
-		selectedPlanIds: selection.selectedPlanIds,
-		failedPlanIds: selection.failedPlanIds,
-		skippedPlanIds,
-		outcomes,
-		blockers: [...new Set(blockers)],
-		normalizedPreview,
+		preview: {
+			version: 1,
+			durableStatus,
+			terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
+			canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions,
+			selectedPlanIds: selection.selectedPlanIds,
+			failedPlanIds: selection.failedPlanIds,
+			skippedPlanIds,
+			outcomes,
+			blockers: [...new Set(blockers)],
+			normalizedPreview,
+		},
+		graphStatusSnapshot: cleanupGraphStatusSnapshot(graph),
 	};
+}
+
+async function buildCleanupPreview(
+	request: CleanupApplicationRequest,
+	dependencies: CleanupApplicationDependencies,
+): Promise<CleanupPreview> {
+	return (await buildCleanupPreviewSnapshot(request, dependencies)).preview;
 }
 
 export async function previewHerderCleanup(
@@ -320,25 +339,41 @@ export async function applyHerderCleanup(
 	if (!expectedPreview.canApply) return { ...expectedPreview, executed: false };
 	const runExclusion = dependencies.withExclusion ?? withServiceExclusion;
 	return runExclusion(request.planDirectory, async () => {
-		const fresh = await buildCleanupPreview(request, dependencies);
+		const freshBuild = await buildCleanupPreviewSnapshot(request, dependencies);
+		const fresh = freshBuild.preview;
 		if (!fresh.terminal || fresh.durableStatus !== expectedPreview.durableStatus) {
 			throw new Error("Cleanup run status changed after confirmation; cleanup was not applied.");
 		}
 		if (fresh.normalizedPreview !== expectedPreview.normalizedPreview) {
 			throw new Error("Cleanup preview changed after confirmation; cleanup was not applied.");
 		}
-		const runner = dependencies.cleanupRunner ?? cleanupRun;
 		const graph = buildGraph(request.planDirectory);
+		let currentSelection: ReturnType<typeof selectCleanupPlanIds>;
+		try {
+			currentSelection = selectCleanupPlanIds(graph, request);
+		} catch {
+			throw new Error("Cleanup plan status or selection changed after confirmation; cleanup was not applied.");
+		}
+		if (
+			freshBuild.graphStatusSnapshot !== cleanupGraphStatusSnapshot(graph)
+			|| stableJson(currentSelection) !== stableJson({
+				selectedPlanIds: fresh.selectedPlanIds,
+				failedPlanIds: fresh.failedPlanIds,
+			})
+		) {
+			throw new Error("Cleanup plan status or selection changed after confirmation; cleanup was not applied.");
+		}
+		const runner = dependencies.cleanupRunner ?? cleanupRun;
 		const applied: CleanupPreviewOutcome[] = [];
 		for (const outcome of fresh.outcomes.filter((candidate) => fresh.selectedPlanIds.includes(candidate.planId))) {
-			const status = graph.plans.find((plan) => plan.id === outcome.planId)?.status;
+			const status = outcome.status;
 			if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") continue;
 			const result = await runner({
 				repo: request.repositoryRoot,
 				planDir: request.planDirectory,
 				plan: outcome.planId,
 				dryRun: false,
-				includeFailed: status === "BLOCKED" || status === "REJECTED",
+				includeFailed: fresh.failedPlanIds.includes(outcome.planId),
 				finalize: false,
 				handoffTarget: null,
 				pretty: false,
