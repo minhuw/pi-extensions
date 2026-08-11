@@ -123,6 +123,53 @@ test("authority handoff is locked out between runtime privacy repair and marker 
 	}
 });
 
+test("private database replacement publishes only inside the shared authority epoch", { skip: process.platform === "win32" }, () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-private-swap-"));
+	const originalLstat = fs.lstatSync;
+	const originalOpen = fs.openSync;
+	const mutableFs = fs as unknown as { lstatSync: typeof fs.lstatSync };
+	const templatePath = path.join(os.tmpdir(), `herder-execution-private-template-${process.pid}-${Date.now()}.sqlite3`);
+	try {
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		const databasePath = executionDatabasePath(planDirectory);
+		const markerPath = executionRotationMarkerPath(planDirectory);
+		const lockPath = path.join(planDirectory, ".rotation-epoch.lock");
+		fs.copyFileSync(databasePath, templatePath);
+		let databaseObservations = 0;
+		let replaced = false;
+		let markerPublishedInsideEpoch = false;
+		mutableFs.lstatSync = ((candidate: fs.PathLike) => {
+			if (String(candidate) === databasePath) {
+				databaseObservations += 1;
+				if (!replaced && databaseObservations === 2) {
+					fs.unlinkSync(databasePath);
+					fs.copyFileSync(templatePath, databasePath);
+					fs.chmodSync(databasePath, 0o600);
+					replaced = true;
+				}
+			}
+			return originalLstat(candidate);
+		}) as typeof fs.lstatSync;
+		fs.openSync = ((candidate, flags, mode) => {
+			if (String(candidate) === markerPath) {
+				assert.equal(fs.existsSync(lockPath), true, "rotation marker publication escaped the shared epoch");
+				markerPublishedInsideEpoch = true;
+			}
+			return originalOpen(candidate, flags, mode);
+		}) as typeof fs.openSync;
+		openExecutionDatabase(planDirectory, { create: true }).close();
+		assert.equal(replaced, true);
+		assert.equal(markerPublishedInsideEpoch, true);
+		assert.equal(fs.existsSync(markerPath), true);
+		assert.equal(fs.statSync(markerPath).mode & 0o777, 0o600);
+	} finally {
+		mutableFs.lstatSync = originalLstat;
+		fs.openSync = originalOpen;
+		fs.rmSync(templatePath, { force: true });
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("marker creation secures its parent before a writable repair can unlink it", { skip: process.platform === "win32" }, () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-marker-race-"));
 	try {

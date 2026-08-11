@@ -338,6 +338,8 @@ function withRotationEpochLock<T>(planDir: string, callback: () => T): T {
 
 interface RotationPublicationState { currentEpochDurable: boolean }
 
+class RotationEpochRequired extends Error {}
+
 function createRotationMarker(markerPath: string, publication: RotationPublicationState): void {
   const token = randomUUID()
   const temporaryPath = `${markerPath}.${token}.tmp`
@@ -881,7 +883,7 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
     const publication: RotationPublicationState = { currentEpochDurable: false }
     let runtimeRollback: { expected: fs.Stats; mode: number } | undefined
 
-    const repair = (): void => {
+    const repair = (epochHeld: boolean): void => {
       try {
         const currentRuntime = lstatIfPresent(runtimeDirectory)
         if (!currentRuntime) fail(`Execution runtime path disappeared during repair: ${runtimeDirectory}`)
@@ -892,6 +894,9 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
 
         const runtimeExposed = !ownerOnlyMode(currentRuntime)
         const runtimeNeedsRepair = !canonicalPrivateMode(currentRuntime, PRIVATE_RUNTIME_DIRECTORY_MODE)
+        if (!epochHeld && (initialRuntimeExposed || initialDatabaseExposed || runtimeExposed)) {
+          throw new RotationEpochRequired()
+        }
         if (runtimeExposed || runtimeNeedsRepair) {
           runtimeRollback = { expected: currentRuntime, mode: currentRuntime.mode & 0o7777 }
           runtimeStat = enforcePrivateMode(runtimeDirectory, currentRuntime, PRIVATE_RUNTIME_DIRECTORY_MODE, "Execution runtime path", true)
@@ -916,6 +921,7 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
         // replacement is a fresh authority exposure, even when its replacement
         // happens to start with private permissions.
         if (rotationRequired) {
+          if (!epochHeld) throw new RotationEpochRequired()
           createRotationMarker(markerPath, publication)
           markerStat = lstatIfPresent(markerPath)
           if (!markerStat) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
@@ -926,7 +932,8 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
         assertRegularFile(databasePath, revalidatedDatabase, "Execution database path")
         databaseReplaced = databaseReplaced || !sameFileIdentity(currentDatabase, revalidatedDatabase)
         databaseExposed = !ownerOnlyMode(revalidatedDatabase)
-        if (databaseReplaced && !rotationRequired) {
+        if ((databaseReplaced || databaseExposed) && !rotationRequired) {
+          if (!epochHeld) throw new RotationEpochRequired()
           createRotationMarker(markerPath, publication)
           markerStat = lstatIfPresent(markerPath)
           if (!markerStat) fail(`Execution rotation marker disappeared during repair: ${markerPath}`)
@@ -970,8 +977,19 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
       || initialDatabaseExposed
       || !canonicalPrivateMode(initialRuntimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE)
       || Boolean(initialDatabaseStat && !canonicalPrivateMode(initialDatabaseStat, PRIVATE_RUNTIME_FILE_MODE))
-    if (requiresEpoch) withRotationEpochLock(planDir, repair)
-    else repair()
+    if (requiresEpoch) {
+      withRotationEpochLock(planDir, () => repair(true))
+    } else {
+      try {
+        repair(false)
+      } catch (error) {
+        if (!(error instanceof RotationEpochRequired)) throw error
+        // Initial private modes are only a snapshot. If revalidation discovers
+        // exposure or inode replacement, restart the untouched fast path under
+        // the same cross-process epoch used by authority handoff.
+        withRotationEpochLock(planDir, () => repair(true))
+      }
+    }
   } else {
     assertDirectory(runtimeDirectory, runtimeStat, "Execution runtime path")
     if (!canonicalPrivateMode(runtimeStat, PRIVATE_RUNTIME_DIRECTORY_MODE)) {
