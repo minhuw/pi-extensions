@@ -56,11 +56,12 @@ The deterministic Run Manager owns plan state, Git coordination, verification ex
 | `/herder-revise [plan-dir] [options]` | Adopt a newly validated immutable graph generation after active workers settle. |
 | `/herder-status [plan-dir]` | Show current run status in Pi. |
 | `/herder-dashboard [plan-dir]` | Open or report the read-only dashboard. |
+| `/herder-cleanup [plan-dir]` | Preview and confirm safe cleanup of completed plan worktrees. |
 | `/herder-stop` | Stop the active run owned by the current Pi session. |
 
 Fire, resume, and revise accept `--profile <name>` and `--dashboard-port <port>`; fire and resume also accept `--max-parallel <count>`.
 
-The agentic planning commands inject the exact package-owned instructions and supplied arguments into the current Pi conversation, preserving the user's context. The instruction files remain private implementation assets, so each workflow has one public `/herder-*` command. `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the native `herder_plan` application tool without spending a model turn. Mechanical `/herder-plans validate` and semantic `/herder-validate` are intentionally separate.
+All run control is user-invoked through the slash commands above. `/herder-cleanup` remains command-only, and the active model has no run-control tool. The model-facing Herder surfaces are planning-only `herder_plan` and request-bound `herder_verification`; the adapter uses internal `herder_run` dispatch for manager operations and does not expose it as a model tool. The agentic planning commands inject the exact package-owned instructions and supplied arguments into the current Pi conversation, preserving the user's context. The instruction files remain private implementation assets, so each workflow has one public `/herder-*` command. `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the native `herder_plan` application tool without spending a model turn. Mechanical `/herder-plans validate` and semantic `/herder-validate` are intentionally separate.
 
 During an active Fire run, Improve and graph-wide planning mutations remain blocked. `/herder-grill --plan <id>` is allowed only when SQLite proves the target has never started. The manager reserves that plan so unrelated work continues, then stops new dispatches after the confirmed edit, lets current workers settle, adopts a new immutable graph generation, and resumes automatically. Manual or externally authored graph changes still use `/herder-revise`.
 

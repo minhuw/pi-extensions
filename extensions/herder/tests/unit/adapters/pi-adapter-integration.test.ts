@@ -598,7 +598,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"herder-stop",
 			"herder-validate",
 		].sort());
-		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder", "herder_plan", "herder_verification"]);
+		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_plan", "herder_verification"]);
 		assert.deepEqual([...api.handlers.keys()].sort(), ["session_shutdown", "session_start"]);
 		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
 
@@ -621,12 +621,6 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.equal(implementer.messages.length, 0, "worker session inherited root history");
 		assert.equal(factory.providerCalls, 0);
 
-		const herderStatus = await withDeadline(
-			api.tool("herder").execute("status", { action: "status", planDir: "herder-plans" }, undefined, undefined, context),
-			"herder status tool",
-		);
-		assert.equal(object(herderStatus).isError, undefined);
-		assert.match(toolText(herderStatus), /^RUNNING · /);
 		await withDeadline(
 			api.command("herder-status").handler("herder-plans", context),
 			"herder status command",

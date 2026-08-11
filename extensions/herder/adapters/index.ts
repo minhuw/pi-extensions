@@ -83,10 +83,6 @@ function unwrapReply(value: Record<string, unknown>): ManagerReply {
 	return reply as unknown as ManagerReply;
 }
 
-function toolResult(text: string, isError = false) {
-	return { content: [{ type: "text" as const, text }], ...(isError ? { isError: true } : {}), details: {} };
-}
-
 export default function registerHerderPi(pi: ExtensionAPI): void {
 	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT, pi);
 	registerHerderPiWithWorkerFactory(pi, sessionFactory);
@@ -644,27 +640,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				details: { operationId, requestId: request.requestId, gates: params.gates.length },
 				terminate: true,
 			};
-		},
-	});
-
-	pi.registerTool({
-		name: "herder",
-		label: "Herder",
-		description: "Start, resume, revise, inspect, or open the dashboard for a deterministic Herder plan run.",
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("fire"), Type.Literal("resume"), Type.Literal("revise"), Type.Literal("status"), Type.Literal("dashboard")]),
-			planDir: Type.Optional(Type.String()),
-			profile: Type.Optional(Type.String()),
-			maxParallel: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			lastContext = ctx;
-			sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
-			try {
-				if (params.action === "status") return toolResult(await status(params.planDir, ctx));
-				if (params.action === "dashboard") return toolResult(await dashboard(params.planDir, ctx));
-				return toolResult(await launch({ mode: params.action, planDir: params.planDir || "herder-plans", ...(params.profile ? { profile: params.profile } : {}), ...(params.maxParallel === undefined && params.action !== "fire" ? {} : { maxParallel: params.maxParallel ?? 5 }), dashboardPort: 0 }, ctx));
-			} catch (error) { return toolResult(message(error), true); }
 		},
 	});
 
