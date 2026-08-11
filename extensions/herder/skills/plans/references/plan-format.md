@@ -15,11 +15,11 @@ herder-plans/
     execution.sqlite3      # manager-owned immutable attempt accounting
 ```
 
-Do not require YAML execution configuration, another database, or `.herder/state.json`. The one manager-owned SQLite file records execution attempts and statistics only; README owns lifecycle and plan-graph truth, while Git refs/worktrees own completion and integration truth. Plans owns format, parsing, validation, and transitions; Grill and Improve produce the same format; Fire owns execution, branches, and worktrees. Plans must use the canonical Fire-assigned branch instruction and never name a concrete execution branch. Provenance must not alter what Fire receives or require hidden session context.
+Do not require YAML execution configuration, another database, or `.herder/state.json`. The one manager-owned SQLite file records execution attempts and statistics only; README owns lifecycle and plan-graph truth, while Git refs/worktrees own completion and integration truth. Plans owns format, parsing, validation, and transitions; Grill, Improve, and Simplify produce the same format; Fire owns execution, branches, and worktrees. Plans must use the canonical Fire-assigned branch instruction and never name a concrete execution branch. Provenance must not alter what Fire receives or require hidden session context.
 
 The zero-context invariant applies to the immutable snapshot Fire dispatches. A plan may remain file-self-contained, or a producer may put facts reused by multiple plans in `CONTEXT.md`. `snapshot` deterministically composes the exact shared context followed by the local plan and returns hashes for both inputs and the compiled text. A plan must never rely on a sibling plan file or conversation history. Dependency guarantees belong in its local `## Dependency contract`.
 
-`leak/` contains non-executable findings that Judge found valid but outside the original task. They are never indexed, scheduled, or treated as accepted intent. Fire deduplicates them by recorded key; Grill or Improve must confirm, promote, number, and validate them before Fire can execute them.
+`leak/` contains non-executable findings that Judge found valid but outside the original task. They are never indexed, scheduled, or treated as accepted intent. Fire deduplicates them by recorded key; Grill, Improve, or Simplify must confirm, promote, number, and validate them before Fire can execute them.
 
 Before manager validation, reread every draft and complete [plan-template.md](plan-template.md)'s semantic Producer self-review. Validation checks structure, graph integrity, and write-scope overlap; producers and Validate still own semantic evidence quality.
 
@@ -65,7 +65,7 @@ File count and line count must never stop, block, repair, reject, authorize, or 
 
 When terminology or architecture decisions change, schedule the relevant repository `CONTEXT.md`, `CONTEXT-MAP.md`, or ADR update in scope, steps, and done criteria; keep implementation details out of glossaries. Do not confuse a repository domain `CONTEXT.md` with `herder-plans/CONTEXT.md`, which is only shared snapshot input.
 
-The executor receives the repository and the compiled snapshot, not the Grill interview, Improve audit, or sibling plan files. Inline every plan-local fact and durable decision; place only genuinely reused, verified facts in shared context.
+The executor receives the repository and the compiled snapshot, not the Grill interview, an Improve or Simplify audit, or sibling plan files. Inline every plan-local fact and durable decision; place only genuinely reused, verified facts in shared context.
 
 ## 4. Plan Shaping
 

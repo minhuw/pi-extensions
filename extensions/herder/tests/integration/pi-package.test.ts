@@ -18,12 +18,20 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
-	for (const skill of ["improve", "grill", "plans", "validate"]) {
+	for (const skill of ["improve", "simplify", "grill", "plans", "validate"]) {
 		const contents = await readFile(path.join(extensionRoot, "skills", skill, "SKILL.md"), "utf8");
 		assert.match(contents, new RegExp(`^name: herder-${skill}$`, "m"));
 	}
 	const improve = await readFile(path.join(extensionRoot, "skills/improve/SKILL.md"), "utf8");
+	const simplify = await readFile(path.join(extensionRoot, "skills/simplify/SKILL.md"), "utf8");
+	const simplificationPlaybook = await readFile(path.join(extensionRoot, "skills/simplify/references/simplification-playbook.md"), "utf8");
 	assert.doesNotMatch(improve, /closing-the-loop|`plan <description>`|`review-plan <file>`|`execute(?: \[<plan>\])?`|`reconcile`|`--issues`/);
+	assert.match(simplify, /references\/simplification-playbook\.md/);
+	assert.match(simplify, /plans\/references\/plan-format\.md/);
+	assert.match(simplify, /If `herder-plans\/README\.md` exists, do not call `init`/);
+	assert.match(simplify, /operation: "snapshot"/);
+	assert.match(simplify, /operation: "shape"/);
+	assert.match(simplificationPlaybook, /^## Finding format$/m);
 	await assert.rejects(() => readFile(path.join(extensionRoot, "skills/improve/references/closing-the-loop.md"), "utf8"), /ENOENT/);
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);
 });
@@ -125,7 +133,7 @@ test("Pi exposes current-session agentic workflows, direct plan commands, and th
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
 	const workflows = await readFile(path.join(extensionRoot, "adapters/planning-workflows.ts"), "utf8");
 	assert.match(extension, /registerPiPlanningWorkflows\(pi, PACKAGE_ROOT/);
-	for (const command of ["herder-improve", "herder-grill", "herder-validate", "herder-plans"]) {
+	for (const command of ["herder-improve", "herder-simplify", "herder-grill", "herder-validate", "herder-plans"]) {
 		assert.match(workflows, new RegExp(`command: "${command}"`));
 	}
 	assert.match(workflows, /pi\.sendUserMessage\(prompt\)/);

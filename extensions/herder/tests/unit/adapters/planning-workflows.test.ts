@@ -14,17 +14,22 @@ import {
 
 async function fixture(): Promise<string> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-planning-"));
-	const directory = path.join(root, "skills", "improve");
-	await mkdir(directory, { recursive: true });
-	await writeFile(path.join(directory, "SKILL.md"), `---
-name: herder-improve
+	for (const skill of [
+		{ directory: "improve", name: "herder-improve", title: "Improve", instruction: "Read [the playbook](references/playbook.md), then audit." },
+		{ directory: "simplify", name: "herder-simplify", title: "Simplify", instruction: "Read [the simplification playbook](references/simplification-playbook.md), then reduce." },
+	]) {
+		const directory = path.join(root, "skills", skill.directory);
+		await mkdir(directory, { recursive: true });
+		await writeFile(path.join(directory, "SKILL.md"), `---
+name: ${skill.name}
 description: Audit a repository.
 ---
 
-# Improve
+# ${skill.title}
 
-Read [the playbook](references/playbook.md), then audit.
+${skill.instruction}
 `);
+	}
 	return root;
 }
 
@@ -43,6 +48,21 @@ test("Pi planning prompt preserves the exact packaged skill and arguments", asyn
 	}
 });
 
+test("Pi simplification prompt preserves the exact packaged skill and arguments", async () => {
+	const root = await fixture();
+	try {
+		const prompt = await buildPlanningSkillPrompt(root, "simplify", "deep duplication");
+		assert.match(prompt, /^<skill name="herder-simplify" location=".*SKILL\.md">/);
+		assert.match(prompt, /References are relative to .*skills\/simplify\./);
+		assert.match(prompt, /# Simplify/);
+		assert.match(prompt, /references\/simplification-playbook\.md/);
+		assert.doesNotMatch(prompt, /description: Audit/);
+		assert.match(prompt, /\n\ndeep duplication$/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("Pi agentic planning commands inject the packaged skill into the current session", async () => {
 	const root = await fixture();
 	let waited = false;
@@ -55,11 +75,11 @@ test("Pi agentic planning commands inject the packaged skill into the current se
 		waitForIdle: async () => { waited = true; },
 	} as unknown as ExtensionCommandContext;
 	try {
-		const result = await launchPlanningWorkflow(pi, context, root, "improve", "quick");
+		const result = await launchPlanningWorkflow(pi, context, root, "simplify", "quick deletion");
 		assert.deepEqual(result, { submitted: true });
 		assert.equal(waited, true);
-		assert.match(submitted, /^<skill name="herder-improve"/);
-		assert.match(submitted, /\n\nquick$/);
+		assert.match(submitted, /^<skill name="herder-simplify"/);
+		assert.match(submitted, /\n\nquick deletion$/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -113,7 +133,7 @@ test("active Fire protection runs before current-session prompt injection", asyn
 	} as unknown as ExtensionCommandContext;
 	try {
 		await assert.rejects(
-			() => launchPlanningWorkflow(pi, context, root, "improve", "", async () => { throw new Error("Fire is active"); }),
+			() => launchPlanningWorkflow(pi, context, root, "simplify", "", async () => { throw new Error("Fire is active"); }),
 			/Fire is active/,
 		);
 		assert.equal(submitted, false);

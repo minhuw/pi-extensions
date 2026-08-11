@@ -13,6 +13,7 @@ import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 
 export const PI_PLANNING_WORKFLOWS = [
 	{ command: "herder-improve", skill: "improve", skillName: "herder-improve", mode: "session", description: "Audit this repository and shape verified findings into Herder plans." },
+	{ command: "herder-simplify", skill: "simplify", skillName: "herder-simplify", mode: "session", description: "Find evidence-backed codebase reductions and shape them into Herder plans." },
 	{ command: "herder-grill", skill: "grill", skillName: "herder-grill", mode: "session", description: "Clarify one objective and write a confirmed Herder plan graph." },
 	{ command: "herder-validate", skill: "validate", skillName: "herder-validate", mode: "session", description: "Cold-review a Herder plan graph for Fire readiness." },
 	{ command: "herder-plans", skill: "plans", skillName: "herder-plans", mode: "direct", description: "Run deterministic Herder plan graph operations." },
