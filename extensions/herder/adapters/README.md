@@ -20,6 +20,7 @@ pi --model <provider>/kimi-k3 --thinking max
 Available commands:
 
 - `/herder-improve [quick|standard|deep] [focus]`
+- `/herder-simplify [quick|standard|deep] [focus-or-path]`
 - `/herder-grill <change-description>`
 - `/herder-plans init [plan-dir] [--track]`
 - `/herder-plans validate|shape|status|ready [plan-dir]`
@@ -35,7 +36,7 @@ Available commands:
 - `/herder-cleanup [plan-dir]`
 - `/herder-stop`
 
-The agentic planning commands—`/herder-improve`, `/herder-grill`, and `/herder-validate`—inject the exact package-owned instructions plus the supplied arguments into the current Pi session. The skill files are command-owned implementation assets rather than separately exposed `/skill:` commands.
+The agentic planning commands—`/herder-improve`, `/herder-simplify`, `/herder-grill`, and `/herder-validate`—inject the exact package-owned instructions plus the supplied arguments into the current Pi session. The skill files are command-owned implementation assets rather than separately exposed `/skill:` commands.
 
 `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the shared plan application directly without spending a model turn. `validate` there is mechanical graph validation; `/herder-validate` is the repository-aware semantic audit and optional repair workflow. Mutating plan-configuration operations refuse to run while the current Pi session owns an active Fire run. The active model receives the planning-only `herder_plan` tool for canonical plan operations.
 
