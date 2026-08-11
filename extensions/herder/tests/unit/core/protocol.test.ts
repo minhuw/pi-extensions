@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attentionRequestSha256, canonicalEventPayload, parseWorkerResult, sha256, validateAttentionRequest } from "../../../src/shared/protocol.ts";
+import {
+	ATTENTION_PATH_LIMIT,
+	attentionRequestSha256,
+	canonicalEventPayload,
+	parseWorkerResult,
+	sha256,
+	stableJson,
+	validateAttentionRequest,
+} from "../../../src/shared/protocol.ts";
 
 test("worker envelopes become typed deterministic results", () => {
 	const implementer = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: abcdef1\nADDRESSED: none\nCHECKS: npm test — passed\nFILES CHANGED: src/a.ts, test/a.test.ts\nDISCOVERED_PATHS: none\nNOTES: done\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=host");
@@ -54,6 +62,31 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	};
 	const request = { ...requestBody, requestSha256: attentionRequestSha256(requestBody) };
 	assert.doesNotThrow(() => validateAttentionRequest(request));
+	const completeInScopePaths = Array.from({ length: ATTENTION_PATH_LIMIT + 1 }, (_, index) => `src/path-${index}.mjs`);
+	const boundedRecovery = {
+		...requestBody.recovery,
+		inScopePaths: completeInScopePaths.slice(0, ATTENTION_PATH_LIMIT),
+		inScopePathCount: completeInScopePaths.length,
+		inScopePathsSha256: sha256(stableJson(completeInScopePaths)),
+	};
+	const boundedBody = { ...requestBody, recovery: boundedRecovery };
+	const boundedRequest = { ...boundedBody, requestSha256: attentionRequestSha256(boundedBody) };
+	assert.doesNotThrow(() => validateAttentionRequest(boundedRequest), "omitted paths remain cryptographically bound by count and hash");
+	const mismatchedBoundedRecovery = {
+		...boundedRecovery,
+		inScopePathCount: ATTENTION_PATH_LIMIT,
+		inScopePathsSha256: "0".repeat(64),
+	};
+	const mismatchedBoundedBody = { ...requestBody, recovery: mismatchedBoundedRecovery };
+	assert.throws(() => validateAttentionRequest({
+		...mismatchedBoundedBody,
+		requestSha256: attentionRequestSha256(mismatchedBoundedBody),
+	}), /evidence hash/);
+	assert.throws(() => validateAttentionRequest({
+		...requestBody,
+		recovery: { ...requestBody.recovery, inScopePaths: completeInScopePaths },
+		requestSha256: attentionRequestSha256({ ...requestBody, recovery: { ...requestBody.recovery, inScopePaths: completeInScopePaths } }),
+	}), /paths are invalid/);
 	assert.throws(() => validateAttentionRequest({ ...request, detailSha256: "0".repeat(64) }), /detail hash/);
 	assert.throws(() => validateAttentionRequest({ ...request, recovery: undefined }), /request hash|recovery evidence/);
 	assert.throws(() => validateAttentionRequest({ ...request, continuation: { role: "plan-judge", phase: "UNKNOWN" } }), /request hash|continuation/);

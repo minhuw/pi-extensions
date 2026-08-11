@@ -5,7 +5,15 @@ import path from "node:path";
 import test from "node:test";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
-import { attentionRequestSha256, sha256, type AttentionRequestInput } from "../../../src/shared/protocol.ts";
+import {
+	ATTENTION_PATH_LIMIT,
+	attentionRequestSha256,
+	sha256,
+	stableJson,
+	type AttentionCause,
+	type AttentionContinuation,
+	type AttentionRequestInput,
+} from "../../../src/shared/protocol.ts";
 
 function insertRun(store: RunStore, planDirectory: string): void {
 	store.database.prepare(`
@@ -74,7 +82,13 @@ function applyUserInput(manager: HerderRunManager, value: string, eventId: strin
 		.applyUserInput(value, eventId, attentionRequestId);
 }
 
-function recoveryRequest(planId: string, requestId: string, detail = "The target plan is blocked"): AttentionRequestInput {
+function recoveryRequest(
+	planId: string,
+	requestId: string,
+	detail = "The target plan is blocked",
+	cause: AttentionCause = "reviewer_blocked",
+	continuation: AttentionContinuation = { role: "plan-reviewer", phase: "READY_REVIEWER" },
+): AttentionRequestInput {
 	const request = {
 		schemaVersion: 1,
 		requestId,
@@ -85,10 +99,10 @@ function recoveryRequest(planId: string, requestId: string, detail = "The target
 		actionId: `${requestId}:action`,
 		kind: "plan_recovery",
 		state: "pending",
-		cause: "reviewer_blocked",
+		cause,
 		detail,
 		detailSha256: sha256(detail),
-		continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+		continuation,
 		recommendedAction: "Review the target plan",
 		recovery: {
 			planFingerprint: "f".repeat(64),
@@ -121,6 +135,17 @@ test("attention CRUD preserves immutable evidence, deduplicates unresolved cause
 		const earlier = store.putAttention(recoveryRequest("001", "attention-001"));
 		assert.equal(store.getNextAttention("run-1")?.requestId, earlier.requestId);
 		assert.equal(store.getAttentionRequests("run-1", { unresolvedOnly: true }).length, 2);
+		const conflict = store.putAttention(recoveryRequest(
+			"003",
+			"attention-conflict",
+			"Integration conflict recovery is exhausted",
+			"integration_conflict_exhausted",
+			{ role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+		));
+		assert.equal(conflict.kind, "plan_recovery");
+		assert.equal(conflict.cause, "integration_conflict_exhausted");
+		assert.deepEqual(conflict.continuation, { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+		assert.equal(store.getAttentionRequests("run-1", { unresolvedOnly: true }).filter((candidate) => candidate.cause === "integration_conflict_exhausted").length, 1);
 
 		const replay = store.putAttention(recoveryRequest("001", "attention-replayed", "A different duplicate detail"));
 		assert.equal(replay.requestId, earlier.requestId, "one unresolved request is retained for a cause generation");
@@ -130,10 +155,42 @@ test("attention CRUD preserves immutable evidence, deduplicates unresolved cause
 		assert.equal(store.getNextAttention("run-1")?.requestId, first.requestId);
 		const replacement = store.putAttention(recoveryRequest("001", "attention-001-replacement"));
 		assert.equal(store.getAttention(replacement.requestId)?.state, "pending");
-		assert.equal(store.getAttentionRequests("run-1").length, 3, "resolved history is retained");
+		assert.equal(store.getAttentionRequests("run-1").length, 4, "resolved history is retained");
 
 		assert.throws(() => store.putAttention({ ...recoveryRequest("003", "bad"), detailSha256: "0".repeat(64) }), /detail hash/);
 		assert.throws(() => store.putAttention({ ...recoveryRequest("003", "bad-hash"), requestSha256: "0".repeat(64) }), /request hash/);
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("oversized recovery path evidence persists as a bounded hashed dossier", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-path-evidence-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		const base = recoveryRequest("001", "attention-oversized") as Extract<AttentionRequestInput, { kind: "plan_recovery" }>;
+		const completeInScopePaths = Array.from({ length: ATTENTION_PATH_LIMIT + 1 }, (_, index) => `src/path-${index}.mjs`);
+		const completeChangedPaths = Array.from({ length: ATTENTION_PATH_LIMIT + 1 }, (_, index) => `test/path-${index}.mjs`);
+		const recovery = {
+			...base.recovery,
+			inScopePaths: completeInScopePaths.slice(0, ATTENTION_PATH_LIMIT),
+			inScopePathCount: completeInScopePaths.length,
+			inScopePathsSha256: sha256(stableJson(completeInScopePaths)),
+			changedPaths: completeChangedPaths.slice(0, ATTENTION_PATH_LIMIT),
+			changedPathCount: completeChangedPaths.length,
+			changedPathsSha256: sha256(stableJson(completeChangedPaths)),
+		};
+		const body = { ...base, recovery } as AttentionRequestInput;
+		const stored = store.putAttention({ ...body, requestSha256: attentionRequestSha256(body) } as AttentionRequestInput);
+		if (stored.kind !== "plan_recovery") throw new Error("expected a plan-recovery request");
+		assert.equal(stored.recovery.inScopePaths.length, ATTENTION_PATH_LIMIT);
+		assert.equal(stored.recovery?.inScopePathCount, completeInScopePaths.length);
+		assert.equal(stored.recovery?.changedPaths.length, ATTENTION_PATH_LIMIT);
+		assert.equal(stored.recovery?.changedPathCount, completeChangedPaths.length);
+		assert.equal(stored.recovery?.inScopePathsSha256, sha256(stableJson(completeInScopePaths)));
+		assert.equal(stored.recovery?.changedPathsSha256, sha256(stableJson(completeChangedPaths)));
 	} finally {
 		store.close();
 		fs.rmSync(planDirectory, { recursive: true, force: true });
@@ -182,6 +239,33 @@ test("missing attention IDs remain backward compatible while exact IDs stay boun
 			applyUserInput(manager, "Answer without a binding", "compat-answer");
 			assert.equal(manager.store.getAttention(decision.requestId)?.state, "resolved");
 			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [compat-answer]: Answer without a binding"]);
+		} finally {
+			manager.close();
+		}
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("an unbound repeated public answer cannot advance the next attention request", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-unbound-replay-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		store.updateRun({ status: "needs_input", terminalDetail: "Two Judges need input" });
+		store.putPlan(inputPlan("run-1", "001"));
+		store.putPlan(inputPlan("run-1", "002"));
+		const first = store.putAttention(userDecisionRequest("001", "attention-unbound-first"));
+		const second = store.putAttention(userDecisionRequest("002", "attention-unbound-second"));
+		const manager = new HerderRunManager(planDirectory);
+		try {
+			applyUserInput(manager, "Answer request one", "fresh-event-a");
+			applyUserInput(manager, "Answer request one", "fresh-event-b");
+			assert.equal(manager.store.getAttention(first.requestId)?.state, "resolved");
+			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
+			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [fresh-event-a]: Answer request one"]);
+			assert.deepEqual(manager.store.getPlan("run-1", "002")?.repair, []);
 		} finally {
 			manager.close();
 		}

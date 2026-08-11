@@ -95,6 +95,7 @@ export interface ManagerPlanEdit {
 
 export const ATTENTION_KINDS = ["plan_recovery", "user_decision", "operator_attention"] as const;
 export const ATTENTION_STATES = ["pending", "delegated", "awaiting_input", "editing", "resolved"] as const;
+export const ATTENTION_PATH_LIMIT = 128;
 export const ATTENTION_CAUSES = [
 	"initial_decision_blocked",
 	"implementer_exhausted",
@@ -121,6 +122,9 @@ export interface AttentionRecoveryEvidence {
 	fingerprintVersion: 1 | 2;
 	planFile: string;
 	inScopePaths: string[];
+	/** Full path evidence is bounded to ATTENTION_PATH_LIMIT; these bind omitted paths. */
+	inScopePathCount?: number;
+	inScopePathsSha256?: string;
 	assignmentPath: string;
 	assignmentSha256: string;
 	snapshotSha256: string;
@@ -130,6 +134,8 @@ export interface AttentionRecoveryEvidence {
 	worktreeHead: string | null;
 	worktreeTree: string | null;
 	changedPaths: string[];
+	changedPathCount?: number;
+	changedPathsSha256?: string;
 }
 
 interface AttentionRequestCore {
@@ -286,16 +292,36 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.planFingerprint)
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.assignmentSha256)
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.snapshotSha256)
-			|| !/^[0-9a-f]{40,64}$/i.test(recovery.generationBase)
-			|| !Array.isArray(recovery.inScopePaths) || !Array.isArray(recovery.changedPaths)
-			|| recovery.inScopePaths.length > 128 || recovery.changedPaths.length > 128) {
-			throw new Error("Attention recovery paths or fingerprint version are invalid");
+			|| !/^[0-9a-f]{40,64}$/i.test(recovery.generationBase)) {
+			throw new Error("Attention recovery fingerprint version is invalid");
 		}
-		for (const candidate of [...recovery.inScopePaths, ...recovery.changedPaths]) {
-			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)) {
-				throw new Error("Attention recovery path is invalid");
+		const validatePathEvidence = (
+			name: string,
+			paths: unknown,
+			count: unknown,
+			pathsSha256: unknown,
+		): void => {
+			if (!Array.isArray(paths) || paths.length > ATTENTION_PATH_LIMIT) throw new Error("Attention recovery paths are invalid");
+			for (const candidate of paths) {
+				if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)) {
+					throw new Error("Attention recovery path is invalid");
+				}
 			}
-		}
+			const hasCount = count !== undefined;
+			const hasHash = pathsSha256 !== undefined;
+			if (hasCount !== hasHash) throw new Error(`Attention recovery ${name} evidence is incomplete`);
+			if (!hasCount) return;
+			if (!Number.isSafeInteger(count) || Number(count) < paths.length
+				|| typeof pathsSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(pathsSha256)) {
+				throw new Error(`Attention recovery ${name} evidence is invalid`);
+			}
+			if (Number(count) <= ATTENTION_PATH_LIMIT
+				&& (Number(count) !== paths.length || sha256(stableJson(paths)) !== pathsSha256)) {
+				throw new Error(`Attention recovery ${name} evidence hash does not match its paths`);
+			}
+		};
+		validatePathEvidence("in-scope", recovery.inScopePaths, recovery.inScopePathCount, recovery.inScopePathsSha256);
+		validatePathEvidence("changed", recovery.changedPaths, recovery.changedPathCount, recovery.changedPathsSha256);
 		for (const [name, candidate] of [["worktreeHead", recovery.worktreeHead], ["worktreeTree", recovery.worktreeTree]] as const) {
 			if (candidate !== null && (typeof candidate !== "string" || !/^[0-9a-f]{40,64}$/i.test(candidate))) {
 				throw new Error(`Attention recovery ${name} is invalid`);

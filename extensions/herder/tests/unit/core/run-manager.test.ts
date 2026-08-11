@@ -338,6 +338,11 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 		assert.equal(attention.kind, "operator_attention");
 		assert.equal(attention.cause, "transport_exhausted");
 		assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "transport_exhausted").length, 1);
+		} finally { store.close(); }
 		const resumed = payload(payload(await requestService(service, "/v1/start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
@@ -527,6 +532,7 @@ test("nonzero final verification failure is durable and replay-safe", { timeout:
 		}]);
 		assert.equal(submitted.reply.status, "failed");
 		assert.equal((submitted.reply.actions as unknown[]).length, 0);
+		assert.equal(submitted.reply.attention, undefined, "verification failure must not create plan attention");
 		const summary = readManagerState(fixture.planDirectory);
 		assert.equal(summary.run?.status, "failed");
 		assert.equal(summary.verification?.state, "failed");
@@ -736,6 +742,47 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 	}
 });
 
+test("final Reviewer input creates a bounded user-decision attention request", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-input-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "final-reviewer-input");
+		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "final-reviewer-input");
+		const finalReviewer = payload((submitted.reply.actions as unknown[])[0]);
+		await requestService(service, "/v1/event", {
+			eventId: "final-reviewer-input-dispatch",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "final-reviewer-input-host" }],
+		});
+		const paused = payload(payload(await requestService(service, "/v1/event", {
+			eventId: "final-reviewer-input-terminal",
+			kind: "terminals",
+			terminals: [{
+				actionId: finalReviewer.actionId,
+				hostHandle: "final-reviewer-input-host",
+				response: "VERDICT: REVISE\nFINDINGS: [BLOCKING][P1] aggregate review needs input\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The final Reviewer needs a main-session decision.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+			}],
+		})).reply);
+		assert.equal(paused.status, "needs_input");
+		assert.equal((paused.actions as unknown[]).length, 0);
+		const attention = payload(paused.attention);
+		assert.equal(attention.kind, "user_decision");
+		assert.equal(attention.cause, "final_reviewer_needs_input");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-reviewer", phase: "READY_REVIEWER" });
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 1);
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("changed-tree verification resume rejects replacement", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-drift-test-"));
 	const fixture = writeFixture(root);
@@ -831,6 +878,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 		assert.equal((constrained.actions as unknown[]).length, 0, "capacity rejection was retried before a worker completed");
 		assert.equal((constrained.active as unknown[]).length, 1);
 		assert.equal(payload(constrained.scheduler).reason, "host-backpressure");
+		assert.equal(constrained.attention, undefined, "capacity backpressure must not create attention");
 		assert.equal(git(fixture.repo, ["rev-parse", "HEAD"]).stdout.trim(), fixture.originalHead);
 
 		const firstWorktree = String(actions[0].worktree);
@@ -887,6 +935,29 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 	}
 });
 
+test("stop preserves evidence without creating attention", { timeout: 10_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-stop-attention-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await requestService(service, "/v1/start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		});
+		const stopped = payload(await requestService(service, "/v1/stop", {}));
+		const reply = payload(stopped.reply);
+		assert.equal(reply.status, "stopped");
+		assert.equal(reply.attention, undefined, "stop must not create attention");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(store.getAttentionRequests(store.getRun()!.runId).length, 0);
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("pending initial recovery attention does not block unrelated scheduling", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-attention-scheduling-test-"));
 	const fixture = writeFixture(root);
@@ -902,6 +973,12 @@ test("pending initial recovery attention does not block unrelated scheduling", {
 		assert.equal(attention.kind, "plan_recovery");
 		assert.equal(attention.cause, "initial_decision_blocked");
 		assert.equal(attention.planId, "001");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "initial_decision_blocked").length, 1);
+		} finally { store.close(); }
 		const actions = (started.actions as unknown[]).map(payload);
 		assert.deepEqual(actions.map((candidate) => candidate.planId), ["002"]);
 		assert.equal(payload(started.scheduler).reason, "saturated");
@@ -940,11 +1017,13 @@ test("daemon audit detects and repairs a non-work-conserving scheduler state", {
 			assert.equal(stalled.scheduler.workConserving, false);
 			assert.equal(stalled.scheduler.reason, "scheduler-stall");
 			assert.deepEqual(stalled.scheduler.runnablePlanIds, ["002"]);
+			assert.equal(stalled.attention, undefined, "scheduler stalls must not create attention");
 			const healed = await manager.auditScheduler({ includeReply: false });
 			assert.ok(healed, "scheduler repair must publish a reply");
 			assert.equal(healed.scheduler.workConserving, true);
 			assert.equal(healed.active.length, 2);
 			assert.equal(healed.actions.some((candidate) => candidate.planId === "002"), true);
+			assert.equal(healed.attention, undefined, "scheduler repair must not create attention");
 		} finally { manager.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});

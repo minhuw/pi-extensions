@@ -22,6 +22,7 @@ import {
 	type GateResult,
 } from "../daemon/git-driver.ts";
 import {
+	ATTENTION_PATH_LIMIT,
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
 	attentionRequestSha256,
@@ -468,6 +469,9 @@ export class HerderRunManager {
 			try { worktreeTree = driver.worktreeTree(plan.worktree); } catch { worktreeTree = null; }
 			try { changedPaths = driver.changedPaths(plan.worktree, plan.generationBase).sort(); } catch { changedPaths = []; }
 		}
+		const inScopePaths = [...spec.assignment.plan.inScopePaths].sort();
+		const changedPathCount = changedPaths.length;
+		const changedPathsSha256 = sha256(stableJson(changedPaths));
 		let generationBase = plan?.generationBase ?? run.baseCommit;
 		if (!plan) {
 			try { generationBase = this.driver(run).branchHead(run.integrationBranch); } catch { /* preserve the recorded base commit */ }
@@ -476,7 +480,9 @@ export class HerderRunManager {
 			planFingerprint: spec.planFingerprint,
 			fingerprintVersion: spec.fingerprintVersion,
 			planFile: spec.planFile,
-			inScopePaths: [...spec.assignment.plan.inScopePaths].sort(),
+			inScopePaths: inScopePaths.slice(0, ATTENTION_PATH_LIMIT),
+			inScopePathCount: inScopePaths.length,
+			inScopePathsSha256: sha256(stableJson(inScopePaths)),
 			assignmentPath,
 			assignmentSha256,
 			snapshotSha256: plan?.snapshotSha256 ?? spec.assignment.snapshotSha256,
@@ -485,7 +491,9 @@ export class HerderRunManager {
 			worktree,
 			worktreeHead,
 			worktreeTree,
-			changedPaths,
+			changedPaths: changedPaths.slice(0, ATTENTION_PATH_LIMIT),
+			changedPathCount,
+			changedPathsSha256,
 		};
 	}
 
@@ -1504,10 +1512,20 @@ export class HerderRunManager {
 	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
 		const run = this.store.getRun()!;
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
+		const plans = this.store.getPlans(run.runId);
 		// The event may have committed its plan/attention transaction before the
 		// process was replaced and before the event journal write. Recognize that
 		// durable marker before routing against whatever request is current now.
-		if (this.store.getPlans(run.runId).some((plan) => plan.repair.includes(marker))) return;
+		if (plans.some((plan) => plan.repair.includes(marker))) return;
+		// Older public callers may omit an attention ID. Treat a repeated answer
+		// value as a replay rather than allowing a fresh event ID to advance the
+		// next request after the original request was resolved. New callers should
+		// always provide the durable attention ID for unambiguous binding.
+		if (!attentionRequestId && plans.some((plan) => plan.repair.some((entry) => {
+			if (!entry.startsWith("USER_INPUT [")) return false;
+			const separator = entry.indexOf("]: ");
+			return separator >= 0 && entry.slice(separator + 3) === value;
+		}))) return;
 		if (run.status !== "needs_input") throw new Error("Run is not waiting for user input");
 
 		// Recovery dossiers are record-only in this phase. They retain the

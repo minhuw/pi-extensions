@@ -21,7 +21,7 @@ import {
 	withServiceExclusion,
 } from "../client/index.ts";
 import { RunStore } from "../daemon/run-store.ts";
-import { stableJson } from "../shared/protocol.ts";
+import { sha256, stableJson } from "../shared/protocol.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -97,13 +97,19 @@ async function submitTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const kind = requiredString(args, "kind");
 	if (!["dispatch_results", "terminals", "user_input"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
-	const eventId = String(args.eventId || randomUUID());
+	const attentionRequestId = kind === "user_input" && typeof args.attentionRequestId === "string" && args.attentionRequestId.length > 0
+		? args.attentionRequestId
+		: undefined;
+	const eventId = String(args.eventId || (attentionRequestId ? `attention:${sha256(attentionRequestId)}` : randomUUID()));
 	return { ok: true, reply: await executeManagerOperation(directory, "event", {
 		eventId,
 		kind,
 		...(kind === "dispatch_results" ? { dispatchResults: args.dispatchResults } : {}),
 		...(kind === "terminals" ? { terminals: args.terminals } : {}),
-		...(kind === "user_input" ? { userInput: args.userInput } : {}),
+		...(kind === "user_input" ? {
+			userInput: args.userInput,
+			...(attentionRequestId ? { attentionRequestId } : {}),
+		} : {}),
 	}, `event:${eventId}`) };
 }
 
