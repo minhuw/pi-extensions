@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { RunStore } from "../../../src/daemon/run-store.ts";
+import { HerderRunManager } from "../../../src/core/run-manager.ts";
+import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
 import { attentionRequestSha256, sha256, type AttentionRequestInput } from "../../../src/shared/protocol.ts";
 
 function insertRun(store: RunStore, planDirectory: string): void {
@@ -19,6 +20,58 @@ function insertRun(store: RunStore, planDirectory: string): void {
 		"checkout", "b".repeat(40), "herder/plans/integration", path.join(planDirectory, "integration"),
 		"2026-08-11T00:00:00.000Z", "2026-08-11T00:00:00.000Z",
 	);
+}
+
+function inputPlan(runId: string, planId: string): Omit<StoredPlan, "updatedAt"> {
+	return {
+		runId,
+		planId,
+		generation: 1,
+		round: 2,
+		phase: "NEEDS_INPUT",
+		branch: `herder/plans/${planId}`,
+		worktree: `/tmp/worktree/${planId}`,
+		assignmentPath: "/tmp/assignment.json",
+		assignmentSha256: "a".repeat(64),
+		snapshotSha256: "b".repeat(64),
+		generationBase: "c".repeat(40),
+		reviewPass: 0,
+		findings: [],
+		repair: [],
+		gates: [],
+		approvedBase: null,
+		approvedHead: null,
+		approvedTree: null,
+		rebase: null,
+	};
+}
+
+function userDecisionRequest(planId: string, requestId: string, detail = "The Judge needs a decision"): AttentionRequestInput {
+	const request = {
+		schemaVersion: 1,
+		requestId,
+		runId: "run-1",
+		planId,
+		generation: 1,
+		round: 2,
+		actionId: `${requestId}:action`,
+		kind: "user_decision",
+		state: "awaiting_input",
+		cause: "judge_needs_input",
+		detail,
+		detailSha256: sha256(detail),
+		continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+		question: "Which recorded decision should the Judge use?",
+		recommendedAction: "Answer the Judge question.",
+		createdAt: "2026-08-11T00:00:00.000Z",
+		updatedAt: "2026-08-11T00:00:00.000Z",
+	} as AttentionRequestInput;
+	return { ...request, requestSha256: attentionRequestSha256(request) } as AttentionRequestInput;
+}
+
+function applyUserInput(manager: HerderRunManager, value: string, eventId: string, attentionRequestId?: string): void {
+	(manager as unknown as { applyUserInput: (value: string, eventId: string, attentionRequestId?: string) => void })
+		.applyUserInput(value, eventId, attentionRequestId);
 }
 
 function recoveryRequest(planId: string, requestId: string, detail = "The target plan is blocked"): AttentionRequestInput {
@@ -81,6 +134,95 @@ test("attention CRUD preserves immutable evidence, deduplicates unresolved cause
 
 		assert.throws(() => store.putAttention({ ...recoveryRequest("003", "bad"), detailSha256: "0".repeat(64) }), /detail hash/);
 		assert.throws(() => store.putAttention({ ...recoveryRequest("003", "bad-hash"), requestSha256: "0".repeat(64) }), /request hash/);
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("input routing skips record-only recovery dossiers and preserves public answer compatibility", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-input-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		store.updateRun({ status: "needs_input", terminalDetail: "A Judge needs input" });
+		store.putPlan(inputPlan("run-1", "002"));
+		const recovery = store.putAttention(recoveryRequest("001", "attention-recovery"));
+		const decision = store.putAttention(userDecisionRequest("002", "attention-decision"));
+		assert.equal(store.getNextAttention("run-1")?.requestId, recovery.requestId);
+		assert.equal(store.getNextInputAttention("run-1")?.requestId, decision.requestId);
+
+		const manager = new HerderRunManager(planDirectory);
+		try {
+			assert.throws(() => applyUserInput(manager, "not a recovery answer", "recovery-answer", recovery.requestId), /does not accept user input/);
+			applyUserInput(manager, "Use the recorded decision", "decision-answer", decision.requestId);
+			assert.equal(manager.store.getPlan("run-1", "002")?.phase, "READY_JUDGE");
+			assert.equal(manager.store.getAttention(decision.requestId)?.state, "resolved");
+			assert.equal(manager.store.getAttention(recovery.requestId)?.state, "pending");
+			assert.equal(manager.store.getRun()?.status, "running");
+		} finally {
+			manager.close();
+		}
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("missing attention IDs remain backward compatible while exact IDs stay bound", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-compat-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		store.updateRun({ status: "needs_input", terminalDetail: "A Judge needs input" });
+		store.putPlan(inputPlan("run-1", "001"));
+		const decision = store.putAttention(userDecisionRequest("001", "attention-compat"));
+		const manager = new HerderRunManager(planDirectory);
+		try {
+			applyUserInput(manager, "Answer without a binding", "compat-answer");
+			assert.equal(manager.store.getAttention(decision.requestId)?.state, "resolved");
+			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [compat-answer]: Answer without a binding"]);
+		} finally {
+			manager.close();
+		}
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("a committed answer replays idempotently after a later request becomes current", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-replay-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		store.updateRun({ status: "needs_input", terminalDetail: "Two Judges need input" });
+		store.putPlan(inputPlan("run-1", "001"));
+		store.putPlan(inputPlan("run-1", "002"));
+		const first = store.putAttention(userDecisionRequest("001", "attention-first"));
+		const second = store.putAttention(userDecisionRequest("002", "attention-second"));
+		const manager = new HerderRunManager(planDirectory);
+		try {
+			applyUserInput(manager, "Answer request one", "answer-one", first.requestId);
+			assert.equal(manager.store.getAttention(first.requestId)?.state, "resolved");
+			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
+			assert.equal(manager.store.getRun()?.status, "needs_input");
+		} finally {
+			manager.close();
+		}
+
+		// The first transaction is durable, but its event journal write is absent;
+		// a replacement service must accept the identical event without routing it
+		// against the now-current second request.
+		const replacement = new HerderRunManager(planDirectory);
+		try {
+			applyUserInput(replacement, "Answer request one", "answer-one", first.requestId);
+			assert.deepEqual(replacement.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [answer-one]: Answer request one"]);
+			assert.equal(replacement.store.getPlan("run-1", "002")?.phase, "NEEDS_INPUT");
+			assert.equal(replacement.store.getAttention(second.requestId)?.state, "awaiting_input");
+		} finally {
+			replacement.close();
+		}
 	} finally {
 		store.close();
 		fs.rmSync(planDirectory, { recursive: true, force: true });

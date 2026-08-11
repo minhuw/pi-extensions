@@ -650,6 +650,17 @@ export class RunStore {
 		return row ? rowToAttention(row) : null;
 	}
 
+	getNextInputAttention(runId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND state <> 'resolved'
+				AND kind IN ('user_decision', 'operator_attention')
+			ORDER BY plan_id COLLATE BINARY, sequence
+			LIMIT 1
+		`).get(runId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
 	putAttention(input: AttentionRequestInput): StoredAttentionRequest {
 		validateAttentionRequest(input);
 		const existingById = this.getAttention(input.requestId);

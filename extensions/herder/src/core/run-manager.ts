@@ -129,9 +129,6 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
 	}
-	if (input.kind === "user_input" && input.attentionRequestId === undefined) {
-		throw new Error("user_input requires attentionRequestId");
-	}
 	if (input.attentionRequestId !== undefined
 		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
 		throw new Error("attentionRequestId must be a bounded single-line identifier");
@@ -1507,31 +1504,42 @@ export class HerderRunManager {
 	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
 		const run = this.store.getRun()!;
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
-		const nextAttention = this.store.getNextAttention(run.runId);
-		if (run.status !== "needs_input") {
-			if (this.store.getPlans(run.runId).some((plan) => plan.repair.includes(marker))) return;
-			throw new Error("Run is not waiting for user input");
+		// The event may have committed its plan/attention transaction before the
+		// process was replaced and before the event journal write. Recognize that
+		// durable marker before routing against whatever request is current now.
+		if (this.store.getPlans(run.runId).some((plan) => plan.repair.includes(marker))) return;
+		if (run.status !== "needs_input") throw new Error("Run is not waiting for user input");
+
+		// Recovery dossiers are record-only in this phase. They retain the
+		// deterministic global attention order, but must not mask an input-bearing
+		// dossier when selecting a user answer.
+		const nextInputAttention = this.store.getNextInputAttention(run.runId);
+		if (!nextInputAttention) throw new Error("No durable attention request is waiting for user input");
+		const attention = attentionRequestId
+			? this.store.getAttention(attentionRequestId)
+			: nextInputAttention;
+		if (!attention || attention.runId !== run.runId || attention.state === "resolved") {
+			throw new Error(`Attention request ${attentionRequestId || "missing"} is not an unresolved request for this run`);
 		}
-		if (!nextAttention) throw new Error("No durable attention request is waiting for user input");
-		if (!attentionRequestId || attentionRequestId !== nextAttention.requestId) {
-			throw new Error(`Attention request ${attentionRequestId || "missing"} is not the next eligible request`);
+		if (!["user_decision", "operator_attention"].includes(attention.kind)) {
+			throw new Error(`Attention request ${attention.requestId} does not accept user input`);
 		}
-		if (!["user_decision", "operator_attention"].includes(nextAttention.kind)) {
-			throw new Error(`Attention request ${nextAttention.requestId} does not accept user input`);
+		if (attention.requestId !== nextInputAttention.requestId) {
+			throw new Error(`Attention request ${attention.requestId} is not the next eligible input request`);
 		}
-		const plan = this.store.getPlan(run.runId, nextAttention.planId);
-		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${nextAttention.requestId} has no matching input-waiting plan`);
-		if (this.store.getPlans(run.runId).some((candidate) => candidate.repair.includes(marker))) return;
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${attention.requestId} has no matching input-waiting plan`);
 		this.store.transaction(() => {
 			this.updatePlan(plan, {
-				phase: nextAttention.continuation.phase,
+				phase: attention.continuation.phase,
 				repair: [...plan.repair, marker],
 			});
-			this.store.resolveAttention(nextAttention.requestId);
+			this.store.resolveAttention(attention.requestId);
+			const remainingInput = this.store.getNextInputAttention(run.runId);
 			const remaining = this.store.getNextAttention(run.runId);
 			this.store.updateRun({
-				status: remaining && remaining.kind !== "plan_recovery" ? "needs_input" : "running",
-				terminalDetail: remaining?.detail ?? null,
+				status: remainingInput ? "needs_input" : "running",
+				terminalDetail: remainingInput?.detail ?? remaining?.detail ?? null,
 			});
 		});
 	}
