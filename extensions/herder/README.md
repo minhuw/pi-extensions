@@ -53,6 +53,7 @@ The deterministic Run Manager owns plan state, Git coordination, verification ex
 | `/herder-plans report <plan-id\|RUN> [plan-dir]` | Report plan or run state. |
 | `/herder-plans track\|untrack [plan-dir]` | Change plan-directory tracking policy. |
 | `/herder-fire [plan-dir] [options]` | Validate and start a new run. |
+| `/herder-attach [plan-dir] [--dashboard-port n]` | Safely take over an active run after its former Pi session died, without resuming paused lifecycle state. |
 | `/herder-resume [plan-dir] [options]` | Recover and continue an existing run. |
 | `/herder-revise [plan-dir] [options]` | Adopt a newly validated immutable graph generation after active workers settle. |
 | `/herder-status [plan-dir]` | Show current run status in Pi. |
@@ -60,7 +61,7 @@ The deterministic Run Manager owns plan state, Git coordination, verification ex
 | `/herder-cleanup [plan-dir]` | Preview and confirm safe cleanup of completed plan worktrees. |
 | `/herder-stop` | Stop the active run owned by the current Pi session. |
 
-Fire, resume, and revise accept `--profile <name>` and `--dashboard-port <port>`; fire and resume also accept `--max-parallel <count>`.
+Fire, resume, and revise accept `--profile <name>` and `--dashboard-port <port>`; fire and resume also accept `--max-parallel <count>`. Attach accepts only `--dashboard-port`, derives the immutable profile and parallelism from manager status, and refuses takeover while another live Pi process owns the run.
 
 All run control is user-invoked through the slash commands above. `/herder-cleanup` remains command-only, and the active model has no run-control tool. The model-facing Herder surfaces are planning-only `herder_plan` and request-bound `herder_verification`; the adapter uses internal `herder_run` dispatch for manager operations and does not expose it as a model tool. The agentic planning commands inject the exact package-owned instructions and supplied arguments into the current Pi conversation, preserving the user's context. The instruction files remain private implementation assets, so each workflow has one public `/herder-*` command. `/herder-plans` is the fast deterministic surface: it parses typed subcommands and calls the native `herder_plan` application tool without spending a model turn. Mechanical `/herder-plans validate` and semantic `/herder-validate` are intentionally separate.
 
@@ -77,7 +78,7 @@ Profiles configure three generic package roles: `herder.plan-implementer`, `herd
 
 ## Runtime model
 
-Fire and resume start or reuse Herder's persistent local Run Manager, launch the read-only dashboard, dispatch the first eligible worker batch, and return control to the root session. In an Orca-managed terminal, Herder automatically opens the loopback dashboard through Orca's workspace browser; other terminals receive the local URL without host-specific forwarding. All mutating manager calls use durable submit-and-poll operations: loopback requests only accept or read persisted state and never wait for reconciliation, Git integration, or verification commands. As workers finish, the manager backfills the global pool, advances review rounds, and integrates approved plans in dependency order. Pi journals each admitted worker prompt in a blue expandable card and each returned response in a green card (red on interruption); these custom entries are display-only and do not enlarge the root model context.
+Fire and resume start or reuse Herder's persistent local Run Manager, launch the read-only dashboard, dispatch the first eligible worker batch, and return control to the root session. Attach claims an unowned or stale-owned active run, preserves `running`, `paused`, or `needs_input`, and deterministically replaces vanished built-in Pi workers. In an Orca-managed terminal, Herder automatically opens the loopback dashboard through Orca's workspace browser; other terminals receive the local URL without host-specific forwarding. All mutating manager calls use durable submit-and-poll operations: loopback requests only accept or read persisted state and never wait for reconciliation, Git integration, or verification commands. As workers finish, the manager backfills the global pool, advances review rounds, and integrates approved plans in dependency order. Pi journals each admitted worker prompt in a blue expandable card and each returned response in a green card (red on interruption); these custom entries are display-only and do not enlarge the root model context.
 
 Reviewer actions follow a package-owned high-signal review protocol: four parallel fresh `recon` probes detect candidates from distinct angles, then up to four fresh `recon` probes independently validate and confidence-filter those candidates before the parent Reviewer applies Herder's existing verdict rules. Later review passes inspect only open findings and the repair delta. The optional `searcher` child is reserved for narrow external-documentation questions.
 
