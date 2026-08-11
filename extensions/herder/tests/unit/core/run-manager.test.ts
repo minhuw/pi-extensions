@@ -148,6 +148,15 @@ function addIndependentPlan(fixture: { planDirectory: string }): void {
 	fs.writeFileSync(path.join(fixture.planDirectory, "002-update-other.md"), second);
 }
 
+function markFirstPlanBlocked(fixture: { planDirectory: string }): void {
+	const readmePath = path.join(fixture.planDirectory, "README.md");
+	const readme = fs.readFileSync(readmePath, "utf8").replace(
+		"| [001](001-update-value.md) | Update the fixture value | P1 | S | — | TODO |",
+		"| [001](001-update-value.md) | Update the fixture value | P1 | S | — | BLOCKED — requires product decision |",
+	);
+	fs.writeFileSync(readmePath, readme);
+}
+
 function appendIndependentPlan(fixture: { planDirectory: string }): void {
 	const readmePath = path.join(fixture.planDirectory, "README.md");
 	const readme = fs.readFileSync(readmePath, "utf8").replace(
@@ -325,6 +334,15 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 		assert.equal(reply.status, "needs_input");
 		assert.equal((reply.actions as unknown[]).length, 0);
 		assert.match(String(reply.message), /transport failed 3 times/);
+		const attention = payload(reply.attention);
+		assert.equal(attention.kind, "operator_attention");
+		assert.equal(attention.cause, "transport_exhausted");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		assert.equal(resumed.status, "needs_input");
+		assert.equal(payload(resumed.attention).requestId, attention.requestId);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -866,6 +884,31 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("pending initial recovery attention does not block unrelated scheduling", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-attention-scheduling-test-"));
+	const fixture = writeFixture(root);
+	addIndependentPlan(fixture);
+	markFirstPlanBlocked(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestService(service, "/v1/start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		assert.equal(started.status, "running");
+		const attention = payload(started.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.cause, "initial_decision_blocked");
+		assert.equal(attention.planId, "001");
+		const actions = (started.actions as unknown[]).map(payload);
+		assert.deepEqual(actions.map((candidate) => candidate.planId), ["002"]);
+		assert.equal(payload(started.scheduler).reason, "saturated");
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
 });
 

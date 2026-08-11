@@ -569,6 +569,11 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 		});
 		assert.equal(paused.status, "needs_input");
 		assert.equal(records(paused.actions).length, 0);
+		const attention = payload(paused.attention);
+		assert.equal(attention.kind, "user_decision");
+		assert.equal(attention.cause, "judge_needs_input");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
+		assert.equal(attention.question, question);
 		const before = inspectPlan(fixture);
 		try {
 			assert.equal(before.run!.status, "needs_input");
@@ -582,10 +587,12 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 		const response = payload(await requestService(service, "/v1/event", {
 			eventId: "judge-input-user-response",
 			kind: "user_input",
+			attentionRequestId: attention.requestId,
 			userInput: "Use only the declared repair contract.",
 		}));
 		const resumed = payload(response.reply);
 		assert.equal(resumed.status, "running");
+		assert.equal(resumed.attention, undefined);
 		const judge = action(resumed, "plan-judge");
 		assert.equal(judge.round, 3);
 		assert.equal(judge.workerMode, "ADJUDICATE");

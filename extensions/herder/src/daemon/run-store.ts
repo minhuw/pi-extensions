@@ -7,7 +7,13 @@ import {
 import {
 	MANAGER_PROTOCOL_VERSION,
 	canonicalEventPayload,
+	stableJson,
+	validateAttentionRequest,
+	type AttentionRequest,
+	type AttentionRequestInput,
+	type AttentionState,
 	type ManagerAction,
+	type ManagerAttentionRequest,
 	type ManagerOperationKind,
 	type ManagerOperationReceipt,
 	type ManagerOperationState,
@@ -209,6 +215,8 @@ export interface StoredVerification {
 	updatedAt: string;
 }
 
+export type StoredAttentionRequest = AttentionRequest & { sequence: number };
+
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
 	return JSON.parse(value) as T;
@@ -403,6 +411,55 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 	};
 }
 
+function rowToAttention(row: Record<string, unknown>): StoredAttentionRequest {
+	const request = {
+		schemaVersion: 1,
+		requestId: String(row.request_id),
+		runId: String(row.run_id),
+		planId: String(row.plan_id),
+		generation: Number(row.generation),
+		round: Number(row.round_number),
+		actionId: row.action_id === null ? null : String(row.action_id),
+		requestSha256: String(row.request_sha256),
+		kind: String(row.kind) as AttentionRequest["kind"],
+		state: String(row.state) as AttentionState,
+		cause: String(row.cause) as AttentionRequest["cause"],
+		detail: String(row.detail),
+		detailSha256: String(row.detail_sha256),
+		continuation: {
+			role: String(row.continuation_role) as AttentionRequest["continuation"]["role"],
+			phase: String(row.continuation_phase) as AttentionRequest["continuation"]["phase"],
+		},
+		...(row.question === null ? {} : { question: String(row.question) }),
+		...(row.recommended_action === null ? {} : { recommendedAction: String(row.recommended_action) }),
+		...(row.recovery_json === null ? {} : { recovery: JSON.parse(String(row.recovery_json)) }),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+		...(row.resolved_at === null ? {} : { resolvedAt: String(row.resolved_at) }),
+	} as unknown as ManagerAttentionRequest;
+	validateAttentionRequest(request);
+	return { ...request, sequence: Number(row.sequence) };
+}
+
+function attentionIdentity(request: AttentionRequest): string {
+	return stableJson({
+		runId: request.runId,
+		planId: request.planId,
+		generation: request.generation,
+		round: request.round,
+		actionId: request.actionId,
+		kind: request.kind,
+		cause: request.cause,
+		detail: request.detail,
+		detailSha256: request.detailSha256,
+		requestSha256: request.requestSha256,
+		continuation: request.continuation,
+		question: request.question ?? null,
+		recommendedAction: request.recommendedAction ?? null,
+		recovery: request.kind === "plan_recovery" ? request.recovery : null,
+	});
+}
+
 function operationReceipt(operation: StoredManagerOperation): ManagerOperationReceipt {
 	return {
 		protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -567,6 +624,75 @@ export class RunStore {
 	getSnapshotEnvelope(): { revision: number; updatedAt: string; reply: ManagerReply } | null {
 		const row = this.database.prepare("SELECT revision, reply_json, updated_at FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number; reply_json?: string; updated_at?: string } | undefined;
 		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: JSON.parse(row.reply_json) as ManagerReply } : null;
+	}
+
+	getAttention(requestId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare("SELECT * FROM manager_attention_requests WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
+	getAttentionRequests(runId: string, options: { unresolvedOnly?: boolean } = {}): StoredAttentionRequest[] {
+		const rows = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? ${options.unresolvedOnly ? "AND state <> 'resolved'" : ""}
+			ORDER BY plan_id COLLATE BINARY, sequence
+		`).all(runId) as Record<string, unknown>[];
+		return rows.map(rowToAttention);
+	}
+
+	getNextAttention(runId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND state <> 'resolved'
+			ORDER BY plan_id COLLATE BINARY, sequence
+			LIMIT 1
+		`).get(runId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
+	putAttention(input: AttentionRequestInput): StoredAttentionRequest {
+		validateAttentionRequest(input);
+		const existingById = this.getAttention(input.requestId);
+		if (existingById) {
+			if (attentionIdentity(existingById) !== attentionIdentity(input)) throw new Error(`Attention request ${input.requestId} was replayed with different evidence`);
+			return existingById;
+		}
+		const existingUnresolved = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND plan_id = ? AND generation = ? AND cause = ? AND state <> 'resolved'
+			ORDER BY sequence LIMIT 1
+		`).get(input.runId, input.planId, input.generation, input.cause) as Record<string, unknown> | undefined;
+		if (existingUnresolved) return rowToAttention(existingUnresolved);
+		this.database.prepare(`
+			INSERT INTO manager_attention_requests (
+			request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
+			kind, state, cause, detail, detail_sha256, continuation_role,
+			continuation_phase, question, recommended_action, recovery_json,
+			created_at, updated_at, resolved_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			input.requestId, input.runId, input.planId, input.generation, input.round, input.actionId, input.requestSha256,
+			input.kind, input.state, input.cause, input.detail, input.detailSha256,
+			input.continuation.role, input.continuation.phase, input.question ?? null,
+			input.recommendedAction ?? null, input.kind === "plan_recovery" ? JSON.stringify(input.recovery) : null,
+			input.createdAt, input.updatedAt, input.resolvedAt ?? null,
+		);
+		return this.getAttention(input.requestId)!;
+	}
+
+	updateAttentionState(requestId: string, state: AttentionState): StoredAttentionRequest {
+		const existing = this.getAttention(requestId);
+		if (!existing) throw new Error(`Unknown attention request ${requestId}`);
+		if (existing.state === state) return existing;
+		if (existing.state === "resolved") throw new Error(`Attention request ${requestId} is already resolved`);
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_attention_requests SET state = ?, updated_at = ?, resolved_at = ? WHERE request_id = ?")
+			.run(state, now, state === "resolved" ? now : null, requestId);
+		return this.getAttention(requestId)!;
+	}
+
+	resolveAttention(requestId: string): StoredAttentionRequest {
+		return this.updateAttentionState(requestId, "resolved");
 	}
 
 	getVerification(runId: string, generation?: number): StoredVerification | null {

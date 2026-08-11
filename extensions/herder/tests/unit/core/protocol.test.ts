@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canonicalEventPayload, parseWorkerResult } from "../../../src/shared/protocol.ts";
+import { attentionRequestSha256, canonicalEventPayload, parseWorkerResult, sha256, validateAttentionRequest } from "../../../src/shared/protocol.ts";
 
 test("worker envelopes become typed deterministic results", () => {
 	const implementer = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: abcdef1\nADDRESSED: none\nCHECKS: npm test — passed\nFILES CHANGED: src/a.ts, test/a.test.ts\nDISCOVERED_PATHS: none\nNOTES: done\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=host");
@@ -15,6 +15,48 @@ test("worker envelopes become typed deterministic results", () => {
 	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
 	assert.equal(judge.kind, "judge");
 	assert.deepEqual(judge.authorizedBlockers, ["F001"]);
+});
+
+test("typed attention requests require bounded evidence, continuation, and recovery bindings", () => {
+	const detail = "Reviewer evidence is blocked";
+	const requestBody = {
+		schemaVersion: 1 as const,
+		requestId: "attention-1",
+		runId: "run-1",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		actionId: "run-1:action-1",
+		kind: "plan_recovery" as const,
+		state: "pending" as const,
+		cause: "reviewer_blocked" as const,
+		detail,
+		detailSha256: sha256(detail),
+		continuation: { role: "plan-reviewer" as const, phase: "READY_REVIEWER" as const },
+		recommendedAction: "Review the target plan",
+		recovery: {
+			planFingerprint: "f".repeat(64),
+			fingerprintVersion: 2 as const,
+			planFile: "001-plan.md",
+			inScopePaths: ["src/value.mjs"],
+			assignmentPath: "/tmp/assignment.json",
+			assignmentSha256: "a".repeat(64),
+			snapshotSha256: "b".repeat(64),
+			generationBase: "c".repeat(40),
+			branch: "herder/plans/001",
+			worktree: "/tmp/worktree",
+			worktreeHead: "d".repeat(40),
+			worktreeTree: "e".repeat(40),
+			changedPaths: ["src/value.mjs"],
+		},
+		createdAt: "2026-08-11T00:00:00.000Z",
+		updatedAt: "2026-08-11T00:00:00.000Z",
+	};
+	const request = { ...requestBody, requestSha256: attentionRequestSha256(requestBody) };
+	assert.doesNotThrow(() => validateAttentionRequest(request));
+	assert.throws(() => validateAttentionRequest({ ...request, detailSha256: "0".repeat(64) }), /detail hash/);
+	assert.throws(() => validateAttentionRequest({ ...request, recovery: undefined }), /request hash|recovery evidence/);
+	assert.throws(() => validateAttentionRequest({ ...request, continuation: { role: "plan-judge", phase: "UNKNOWN" } }), /request hash|continuation/);
 });
 
 test("malformed envelopes and payload-changing replay identities fail closed", () => {

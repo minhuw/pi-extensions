@@ -93,6 +93,225 @@ export interface ManagerPlanEdit {
 	state: "reserved" | "barrier";
 }
 
+export const ATTENTION_KINDS = ["plan_recovery", "user_decision", "operator_attention"] as const;
+export const ATTENTION_STATES = ["pending", "delegated", "awaiting_input", "editing", "resolved"] as const;
+export const ATTENTION_CAUSES = [
+	"initial_decision_blocked",
+	"implementer_exhausted",
+	"reviewer_blocked",
+	"judge_blocked",
+	"round_limit",
+	"integration_conflict_exhausted",
+	"judge_needs_input",
+	"final_reviewer_needs_input",
+	"transport_exhausted",
+] as const;
+
+export type AttentionKind = typeof ATTENTION_KINDS[number];
+export type AttentionState = typeof ATTENTION_STATES[number];
+export type AttentionCause = typeof ATTENTION_CAUSES[number];
+
+export interface AttentionContinuation {
+	role: WorkerRole;
+	phase: PlanPhase;
+}
+
+export interface AttentionRecoveryEvidence {
+	planFingerprint: string;
+	fingerprintVersion: 1 | 2;
+	planFile: string;
+	inScopePaths: string[];
+	assignmentPath: string;
+	assignmentSha256: string;
+	snapshotSha256: string;
+	generationBase: string;
+	branch: string;
+	worktree: string;
+	worktreeHead: string | null;
+	worktreeTree: string | null;
+	changedPaths: string[];
+}
+
+interface AttentionRequestCore {
+	schemaVersion: 1;
+	requestId: string;
+	runId: string;
+	planId: string;
+	generation: number;
+	round: number;
+	actionId: string | null;
+	requestSha256: string;
+	state: AttentionState;
+	cause: AttentionCause;
+	/** The exact bounded transition evidence; complete prompts, responses, and logs are not retained here. */
+	detail: string;
+	detailSha256: string;
+	continuation: AttentionContinuation;
+	createdAt: string;
+	updatedAt: string;
+	resolvedAt?: string;
+}
+
+export interface PlanRecoveryAttentionRequest extends AttentionRequestCore {
+	kind: "plan_recovery";
+	question?: string;
+	recommendedAction?: string;
+	recovery: AttentionRecoveryEvidence;
+}
+
+export interface UserDecisionAttentionRequest extends AttentionRequestCore {
+	kind: "user_decision";
+	question: string;
+	recommendedAction?: string;
+}
+
+export interface OperatorAttentionRequest extends AttentionRequestCore {
+	kind: "operator_attention";
+	question?: string;
+	recommendedAction?: string;
+}
+
+export type ManagerAttentionRequest = PlanRecoveryAttentionRequest | UserDecisionAttentionRequest | OperatorAttentionRequest;
+export type AttentionRequest = ManagerAttentionRequest;
+export type AttentionRequestInput =
+	| Omit<PlanRecoveryAttentionRequest, "resolvedAt">
+	| Omit<UserDecisionAttentionRequest, "resolvedAt">
+	| Omit<OperatorAttentionRequest, "resolvedAt">;
+
+type AttentionHashInput = {
+	runId: string;
+	planId: string;
+	generation: number;
+	round: number;
+	actionId: string | null;
+	kind: AttentionKind;
+	cause: AttentionCause;
+	detail: string;
+	detailSha256: string;
+	continuation: AttentionContinuation;
+	question?: string;
+	recommendedAction?: string;
+	recovery?: AttentionRecoveryEvidence;
+};
+
+export function attentionRequestSha256(value: AttentionHashInput): string {
+	return sha256(stableJson({
+		runId: value.runId,
+		planId: value.planId,
+		generation: value.generation,
+		round: value.round,
+		actionId: value.actionId,
+		kind: value.kind,
+		cause: value.cause,
+		detail: value.detail,
+		detailSha256: value.detailSha256,
+		continuation: value.continuation,
+		question: value.question ?? null,
+		recommendedAction: value.recommendedAction ?? null,
+		recovery: value.recovery ?? null,
+	}));
+}
+
+export function validateAttentionRequest(value: unknown): asserts value is ManagerAttentionRequest {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Attention request must be an object");
+	const request = value as Partial<AttentionRequestCore> & {
+		kind?: AttentionKind;
+		question?: unknown;
+		recommendedAction?: unknown;
+		recovery?: unknown;
+	};
+	if (request.schemaVersion !== 1) throw new Error("Attention request schemaVersion must be 1");
+	for (const [name, candidate, limit] of [
+		["requestId", request.requestId, 200],
+		["runId", request.runId, 200],
+		["planId", request.planId, 200],
+		["createdAt", request.createdAt, 100],
+		["updatedAt", request.updatedAt, 100],
+	] as const) {
+		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) {
+			throw new Error(`Attention request ${name} must be a bounded single-line string`);
+		}
+	}
+	if (typeof request.detail !== "string" || request.detail.length === 0 || request.detail.length > 16_384 || /\0/.test(request.detail)) {
+		throw new Error("Attention request detail must be bounded evidence without NUL bytes");
+	}
+	if (!ATTENTION_KINDS.includes(request.kind as AttentionKind)) throw new Error(`Unsupported attention kind: ${String(request.kind)}`);
+	if (!ATTENTION_STATES.includes(request.state as AttentionState)) throw new Error(`Unsupported attention state: ${String(request.state)}`);
+	if (!ATTENTION_CAUSES.includes(request.cause as AttentionCause)) throw new Error(`Unsupported attention cause: ${String(request.cause)}`);
+	if (!Number.isSafeInteger(request.generation) || Number(request.generation) < 1) throw new Error("Attention generation must be positive");
+	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > 6) throw new Error("Attention round must be between 1 and 6");
+	if (request.actionId !== null
+		&& (typeof request.actionId !== "string" || request.actionId.length === 0 || request.actionId.length > 300 || /[\0\r\n]/.test(request.actionId))) {
+		throw new Error("Attention actionId must be null or a bounded single-line string");
+	}
+	if (!request.continuation || typeof request.continuation !== "object" || Array.isArray(request.continuation)
+		|| !WORKER_ROLES.includes(request.continuation.role as WorkerRole)
+		|| !PLAN_PHASES.includes(request.continuation.phase as PlanPhase)) {
+		throw new Error("Attention continuation must name a supported worker role and plan phase");
+	}
+	if (!/^[0-9a-f]{64}$/i.test(String(request.detailSha256)) || sha256(request.detail!) !== request.detailSha256) {
+		throw new Error("Attention detail hash does not match its evidence");
+	}
+	if (!/^[0-9a-f]{64}$/i.test(String(request.requestSha256))
+		|| attentionRequestSha256(request as AttentionHashInput) !== request.requestSha256) {
+		throw new Error("Attention request hash does not match its immutable evidence");
+	}
+	for (const [name, candidate, limit] of [
+		["question", request.question, 4_096],
+		["recommendedAction", request.recommendedAction, 4_096],
+	] as const) {
+		if (candidate !== undefined && (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /\0/.test(candidate))) {
+			throw new Error(`Attention ${name} must be bounded evidence without NUL bytes`);
+		}
+	}
+	if (request.kind === "user_decision" && !request.question) throw new Error("User-decision attention requires a question");
+	if (request.kind === "plan_recovery") {
+		const recovery = request.recovery as AttentionRecoveryEvidence | undefined;
+		if (!recovery || typeof recovery !== "object" || Array.isArray(recovery)) throw new Error("Plan-recovery attention requires recovery evidence");
+		for (const [name, candidate, limit] of [
+			["planFingerprint", recovery.planFingerprint, 128],
+			["planFile", recovery.planFile, 512],
+			["assignmentPath", recovery.assignmentPath, 2_048],
+			["assignmentSha256", recovery.assignmentSha256, 128],
+			["snapshotSha256", recovery.snapshotSha256, 128],
+			["generationBase", recovery.generationBase, 128],
+			["branch", recovery.branch, 512],
+			["worktree", recovery.worktree, 2_048],
+		] as const) {
+			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) {
+				throw new Error(`Attention recovery ${name} is invalid`);
+			}
+		}
+		if (![1, 2].includes(recovery.fingerprintVersion)
+			|| !/^[0-9a-f]{40,64}$/i.test(recovery.planFingerprint)
+			|| !/^[0-9a-f]{40,64}$/i.test(recovery.assignmentSha256)
+			|| !/^[0-9a-f]{40,64}$/i.test(recovery.snapshotSha256)
+			|| !/^[0-9a-f]{40,64}$/i.test(recovery.generationBase)
+			|| !Array.isArray(recovery.inScopePaths) || !Array.isArray(recovery.changedPaths)
+			|| recovery.inScopePaths.length > 128 || recovery.changedPaths.length > 128) {
+			throw new Error("Attention recovery paths or fingerprint version are invalid");
+		}
+		for (const candidate of [...recovery.inScopePaths, ...recovery.changedPaths]) {
+			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)) {
+				throw new Error("Attention recovery path is invalid");
+			}
+		}
+		for (const [name, candidate] of [["worktreeHead", recovery.worktreeHead], ["worktreeTree", recovery.worktreeTree]] as const) {
+			if (candidate !== null && (typeof candidate !== "string" || !/^[0-9a-f]{40,64}$/i.test(candidate))) {
+				throw new Error(`Attention recovery ${name} is invalid`);
+			}
+		}
+	} else if (request.recovery !== undefined) {
+		throw new Error("Only plan-recovery attention may contain recovery evidence");
+	}
+	if (request.state === "resolved" && request.resolvedAt === undefined) throw new Error("Resolved attention requires a resolution timestamp");
+	if (request.state !== "resolved" && request.resolvedAt !== undefined) throw new Error("Unresolved attention cannot have a resolution timestamp");
+	if (request.resolvedAt !== undefined
+		&& (typeof request.resolvedAt !== "string" || request.resolvedAt.length === 0 || /[\0\r\n]/.test(request.resolvedAt))) {
+		throw new Error("Resolved attention timestamp is invalid");
+	}
+}
+
 export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification"] as const;
 export const MANAGER_OPERATION_STATES = ["accepted", "running", "succeeded", "failed"] as const;
 export type ManagerOperationKind = typeof MANAGER_OPERATION_KINDS[number];
@@ -186,6 +405,7 @@ export interface ManagerReply {
 	};
 	message: string;
 	question?: string;
+	attention?: ManagerAttentionRequest;
 	planEdit?: ManagerPlanEdit;
 	verificationRequest?: VerificationRequest;
 	operations?: ManagerOperationReceipt[];

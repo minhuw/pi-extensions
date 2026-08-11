@@ -17,7 +17,7 @@ function tableNames(database: ReturnType<typeof openExecutionDatabase> & {}) {
 	return new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 }
 
-test("execution schema migrates version 6 through durable operations and verification", () => {
+test("execution schema migrates version 6 through durable operations, verification, and attention", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-"));
 	try {
 		const current = openExecutionDatabase(planDirectory, { create: true });
@@ -26,9 +26,9 @@ test("execution schema migrates version 6 through durable operations and verific
 		current.close();
 
 		const migrated = openExecutionDatabase(planDirectory, { create: true });
-		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 8);
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
 		const tables = tableNames(migrated);
-		for (const name of ["manager_plan_edits", "manager_operations", "manager_snapshots", "manager_verifications"]) assert.ok(tables.has(name), name);
+		for (const name of ["manager_plan_edits", "manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests"]) assert.ok(tables.has(name), name);
 		migrated.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
@@ -42,10 +42,29 @@ test("execution schema migrates version 7 without rebuilding existing run tables
 		current.exec("DROP TABLE manager_verifications; DROP TABLE manager_snapshots; DROP TABLE manager_operations; PRAGMA user_version = 7;");
 		current.close();
 		const migrated = openExecutionDatabase(planDirectory, { create: true });
-		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 8);
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
 		const tables = tableNames(migrated);
-		for (const name of ["manager_operations", "manager_snapshots", "manager_verifications"]) assert.ok(tables.has(name), name);
+		for (const name of ["manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests"]) assert.ok(tables.has(name), name);
 		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("execution schema migrates version 8 idempotently and creates attention storage", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v8-"));
+	try {
+		const current = openExecutionDatabase(planDirectory, { create: true });
+		current.exec("DROP TABLE manager_attention_requests; PRAGMA user_version = 8;");
+		current.close();
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		assert.ok(tableNames(migrated).has("manager_attention_requests"));
+		migrated.close();
+		const repeated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((repeated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		assert.ok(tableNames(repeated).has("manager_attention_requests"));
+		repeated.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}

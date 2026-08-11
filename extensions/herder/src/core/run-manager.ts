@@ -24,11 +24,16 @@ import {
 import {
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
+	attentionRequestSha256,
 	canonicalEventPayload,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
 	stableJson,
+	type AttentionCause,
+	type AttentionRecoveryEvidence,
+	type AttentionRequestInput,
+	type ManagerAttentionRequest,
 	type DispatchResult,
 	type ManagerAction,
 	type ManagerReply,
@@ -71,6 +76,7 @@ interface EventInput {
 	dispatchResults?: DispatchResult[];
 	terminals?: TerminalEvent[];
 	userInput?: string;
+	attentionRequestId?: string;
 }
 
 interface PlanEditInput {
@@ -122,6 +128,16 @@ function validateEventInput(input: EventInput): void {
 	}
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
+	}
+	if (input.kind === "user_input" && input.attentionRequestId === undefined) {
+		throw new Error("user_input requires attentionRequestId");
+	}
+	if (input.attentionRequestId !== undefined
+		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
+		throw new Error("attentionRequestId must be a bounded single-line identifier");
+	}
+	if (input.kind !== "user_input" && input.attentionRequestId !== undefined) {
+		throw new Error("attentionRequestId is only valid for user_input");
 	}
 }
 
@@ -324,6 +340,7 @@ interface TerminalTransition {
 	plan: StoredPlan;
 	runUpdate?: { status: "needs_input" | "paused"; terminalDetail: string };
 	approval?: Omit<StoredApproval, "createdAt">;
+	attention?: AttentionRequestInput;
 }
 
 function terminalRecord(result: WorkerResult | null, terminal: TerminalEvent, usage: ReturnType<typeof normalizeUsage>): StoredTerminalRecord {
@@ -436,6 +453,86 @@ export class HerderRunManager {
 
 	private updatePlan(plan: StoredPlan, changes: Partial<Omit<StoredPlan, "runId" | "planId" | "updatedAt">>): StoredPlan {
 		return this.store.putPlan({ ...plan, ...changes });
+	}
+
+	private recoveryEvidence(run: StoredRun, plan: StoredPlan | null, spec: StoredPlanSpec): AttentionRecoveryEvidence {
+		const generation = this.store.getGeneration(run.runId, spec.graphGeneration);
+		if (!generation) throw new Error(`Run generation ${spec.graphGeneration} has no assignment evidence`);
+		const assignmentPath = plan?.assignmentPath ?? generation.runAssignmentPath;
+		const assignmentSha256 = plan?.assignmentSha256 ?? generation.runAssignmentSha256;
+		const branch = plan?.branch ?? `herder/${run.planName}/${spec.planId}`;
+		const worktree = plan?.worktree ?? path.join(path.dirname(run.integrationWorktree), spec.planId);
+		let worktreeHead: string | null = null;
+		let worktreeTree: string | null = null;
+		let changedPaths: string[] = [];
+		if (plan) {
+			const driver = this.driver(run);
+			try { worktreeHead = driver.worktreeHead(plan.worktree); } catch { worktreeHead = null; }
+			try { worktreeTree = driver.worktreeTree(plan.worktree); } catch { worktreeTree = null; }
+			try { changedPaths = driver.changedPaths(plan.worktree, plan.generationBase).sort(); } catch { changedPaths = []; }
+		}
+		let generationBase = plan?.generationBase ?? run.baseCommit;
+		if (!plan) {
+			try { generationBase = this.driver(run).branchHead(run.integrationBranch); } catch { /* preserve the recorded base commit */ }
+		}
+		return {
+			planFingerprint: spec.planFingerprint,
+			fingerprintVersion: spec.fingerprintVersion,
+			planFile: spec.planFile,
+			inScopePaths: [...spec.assignment.plan.inScopePaths].sort(),
+			assignmentPath,
+			assignmentSha256,
+			snapshotSha256: plan?.snapshotSha256 ?? spec.assignment.snapshotSha256,
+			generationBase,
+			branch,
+			worktree,
+			worktreeHead,
+			worktreeTree,
+			changedPaths,
+		};
+	}
+
+	private attention(input: {
+		run: StoredRun;
+		plan: StoredPlan | null;
+		spec?: StoredPlanSpec;
+		planId?: string;
+		kind: ManagerAttentionRequest["kind"];
+		cause: AttentionCause;
+		actionId: string | null;
+		continuation: ManagerAttentionRequest["continuation"];
+		state: ManagerAttentionRequest["state"];
+		detail: string;
+		question?: string;
+		recommendedAction?: string;
+	}): AttentionRequestInput {
+		const detail = input.detail.slice(0, 16_384);
+		const now = new Date().toISOString();
+		const request = {
+			schemaVersion: 1,
+			requestId: randomUUID(),
+			runId: input.run.runId,
+			planId: input.plan?.planId ?? input.spec?.planId ?? input.planId ?? "",
+			generation: input.plan?.generation ?? input.spec?.graphGeneration ?? input.run.currentGeneration,
+			round: input.plan?.round ?? 1,
+			actionId: input.actionId,
+			kind: input.kind,
+			state: input.state,
+			cause: input.cause,
+			detail,
+			detailSha256: sha256(detail),
+			continuation: input.continuation,
+			...(input.question ? { question: input.question.slice(0, 4_096) } : {}),
+			...(input.recommendedAction ? { recommendedAction: input.recommendedAction.slice(0, 4_096) } : {}),
+			...(input.kind === "plan_recovery"
+				? input.spec
+					? { recovery: this.recoveryEvidence(input.run, input.plan, input.spec) }
+					: (() => { throw new Error("Plan-recovery attention requires a compiled plan specification"); })()
+				: {}),
+			createdAt: now,
+			updatedAt: now,
+		} as AttentionRequestInput;
+		return { ...request, requestSha256: attentionRequestSha256(request) } as AttentionRequestInput;
 	}
 
 	private cacheSpecs(specs: StoredPlanSpec[]): void {
@@ -556,6 +653,24 @@ export class HerderRunManager {
 		if (lease && active.some((action) => action.leaseReason === lease)) driver.release(finalPlan.worktree, lease);
 		this.store.deletePlan(run.runId, "RUN");
 		this.pauseForFinalVerification(this.store.getRun()!, driver);
+	}
+
+	private ensureInitialAttention(run: StoredRun): void {
+		for (const spec of this.specs(run).filter((candidate) => candidate.initialStatus === "BLOCKED")) {
+			if (this.store.getPlan(run.runId, spec.planId)) continue;
+			this.store.putAttention(this.attention({
+				run,
+				plan: null,
+				spec,
+				kind: "plan_recovery",
+				cause: "initial_decision_blocked",
+				actionId: null,
+				state: "pending",
+				continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+				detail: spec.initialStatusDetail,
+				recommendedAction: "Review the target plan's decision blockage before resuming its recorded Implementer continuation.",
+			}));
+		}
 	}
 
 	private projectLifecycle(run: StoredRun): void {
@@ -707,6 +822,8 @@ export class HerderRunManager {
 			});
 			return this.reply();
 		}
+		const pendingAttention = this.store.getNextAttention(run.runId);
+		if (pendingAttention && run.status === "failed") return this.reply();
 		if (["failed", "stopped", "paused"].includes(run.status)) this.store.updateRun({ status: "running", terminalDetail: null });
 		run = this.store.getRun()!;
 		return this.reconcile(profile);
@@ -990,7 +1107,7 @@ export class HerderRunManager {
 		let schedule = true;
 		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults ?? []));
 		else if (input.kind === "terminals") await this.applyTerminals(input.terminals ?? []);
-		else this.applyUserInput(input.userInput!, input.eventId);
+		else this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
 		const current = this.store.getRun()!;
 		const drift = this.graphDrift(current);
 		if (drift.changed) {
@@ -1094,7 +1211,7 @@ export class HerderRunManager {
 				transition = action.role === "plan-implementer"
 					? this.retryImplementerTransport(run, plan, action, detail)
 					: this.retryTransportOrPause(run, plan, action, detail);
-			} else if (parsed.kind === "implementer") transition = this.finishImplementer(run, plan, parsed);
+			} else if (parsed.kind === "implementer") transition = this.finishImplementer(run, plan, action, parsed);
 			else if (parsed.kind === "reviewer") transition = this.finishReviewer(run, plan, action, parsed);
 			else transition = this.finishJudge(run, plan, action, parsed);
 			const record = terminalRecord(parsed, terminal, usage);
@@ -1102,6 +1219,7 @@ export class HerderRunManager {
 			this.store.transaction(() => {
 				action = this.store.markTerminal(actionId, record);
 				if (transition.approval) this.store.putApproval(transition.approval);
+				if (transition.attention) this.store.putAttention(transition.attention);
 				this.store.putPlan(transition.plan);
 				if (transition.runUpdate) this.store.updateRun(transition.runUpdate);
 				this.recordTerminalUsage(run, action, record, true);
@@ -1143,7 +1261,23 @@ export class HerderRunManager {
 		const mutationMayHaveOccurred = driver.worktreeHead(plan.worktree) !== plan.generationBase || Boolean(driver.worktreeStatus(plan.worktree));
 		if (!mutationMayHaveOccurred) return this.retryTransportOrPause(run, plan, action, detail);
 		if (plan.round >= 6) {
-			return { plan: { ...plan, phase: "BLOCKED", repair: [detail] } };
+			const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
+			return {
+				plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
+				runUpdate: { status: "needs_input", terminalDetail },
+				attention: this.attention({
+					run,
+					plan,
+					spec: this.spec(run, plan.planId),
+					kind: "operator_attention",
+					cause: "transport_exhausted",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+					detail: terminalDetail,
+					recommendedAction: "Choose whether to retry the recorded Implementer role; transport exhaustion never authorizes plan rewriting.",
+				}),
+			};
 		}
 		return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [detail] } };
 	}
@@ -1162,10 +1296,22 @@ export class HerderRunManager {
 		return {
 			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
 			runUpdate: { status: "needs_input", terminalDetail },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "operator_attention",
+				cause: "transport_exhausted",
+				actionId: action.actionId,
+				state: "awaiting_input",
+				continuation: { role: action.role as WorkerRole, phase: readyPhaseForRole(action.role) },
+				detail: terminalDetail,
+				recommendedAction: `Choose whether to retry the recorded ${action.role} role; transport exhaustion never authorizes plan rewriting.`,
+			}),
 		};
 	}
 
-	private finishImplementer(run: StoredRun, plan: StoredPlan, result: Extract<WorkerResult, { kind: "implementer" }>): TerminalTransition {
+	private finishImplementer(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "implementer" }>): TerminalTransition {
 		const driver = this.driver(run);
 		let failure: string | null = null;
 		if (result.status !== "COMPLETE") failure = result.stoppedBecause || result.notes || `Implementer returned ${result.status}`;
@@ -1185,7 +1331,21 @@ export class HerderRunManager {
 		const gates: GateResult[] = [];
 		if (failure) {
 			if (plan.round >= 6) {
-				return { plan: { ...plan, phase: "BLOCKED", repair: [failure], gates } };
+				return {
+					plan: { ...plan, phase: "BLOCKED", repair: [failure], gates },
+					attention: this.attention({
+						run,
+						plan,
+						spec: this.spec(run, plan.planId),
+						kind: "plan_recovery",
+						cause: "implementer_exhausted",
+						actionId: action.actionId,
+						state: "pending",
+						continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+						detail: failure,
+						recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Implementer continuation.",
+					}),
+				};
 			}
 			return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [failure], gates } };
 		}
@@ -1225,6 +1385,19 @@ export class HerderRunManager {
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [detail] },
 				runUpdate: { status: "needs_input", terminalDetail: detail },
+				attention: this.attention({
+					run,
+					plan,
+					planId: "RUN",
+					kind: "user_decision",
+					cause: "final_reviewer_needs_input",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+					detail,
+					question: detail,
+					recommendedAction: "Provide the decision needed by the final Reviewer without changing the frozen integration tree.",
+				}),
 			};
 		}
 		const decision = decideReview({ round: plan.round, verdict, scope: result.scope, openBlockers: blockers });
@@ -1245,7 +1418,22 @@ export class HerderRunManager {
 		} else if (decision.action === "JUDGE") {
 			return { plan: { ...reviewed, phase: "READY_JUDGE", repair: result.fixGuidance } };
 		}
-		return { plan: { ...reviewed, phase: "BLOCKED" } };
+		const detail = result.rationale || result.findings[0] || "Reviewer blocked the plan";
+		return {
+			plan: { ...reviewed, phase: "BLOCKED" },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "plan_recovery",
+				cause: "reviewer_blocked",
+				actionId: action.actionId,
+				state: "pending",
+				continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+				detail,
+				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Reviewer continuation.",
+			}),
+		};
 	}
 
 	private finishJudge(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "judge" }>): TerminalTransition {
@@ -1282,25 +1470,70 @@ export class HerderRunManager {
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: result.question ? [result.question] : [] },
 				runUpdate: { status: "needs_input", terminalDetail },
+				attention: this.attention({
+					run,
+					plan,
+					spec: this.spec(run, plan.planId),
+					kind: "user_decision",
+					cause: "judge_needs_input",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+					detail: terminalDetail,
+					question: result.question || terminalDetail,
+					recommendedAction: "Answer the Judge question while preserving the recorded plan and review evidence.",
+				}),
 			};
 		}
-		return { plan: { ...plan, phase: "BLOCKED", findings: result.findings } };
+		const terminalDetail = result.rationale || result.findings[0] || (decision.action === "BLOCKED_ROUND_LIMIT" ? "Judge round limit exhausted" : "Judge blocked the plan");
+		const cause: AttentionCause = decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "judge_blocked";
+		return {
+			plan: { ...plan, phase: "BLOCKED", findings: result.findings },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "plan_recovery",
+				cause,
+				actionId: action.actionId,
+				state: "pending",
+				continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+				detail: terminalDetail,
+				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Judge continuation.",
+			}),
+		};
 	}
 
-	private applyUserInput(value: string, eventId: string): void {
+	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
 		const run = this.store.getRun()!;
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
+		const nextAttention = this.store.getNextAttention(run.runId);
 		if (run.status !== "needs_input") {
 			if (this.store.getPlans(run.runId).some((plan) => plan.repair.includes(marker))) return;
 			throw new Error("Run is not waiting for user input");
 		}
-		const plan = this.store.getPlans(run.runId).find((candidate) => candidate.phase === "NEEDS_INPUT");
-		if (!plan) throw new Error("No plan is waiting for user input");
-		this.updatePlan(plan, {
-			phase: plan.planId === "RUN" ? "READY_REVIEWER" : "READY_JUDGE",
-			repair: [...plan.repair, marker],
+		if (!nextAttention) throw new Error("No durable attention request is waiting for user input");
+		if (!attentionRequestId || attentionRequestId !== nextAttention.requestId) {
+			throw new Error(`Attention request ${attentionRequestId || "missing"} is not the next eligible request`);
+		}
+		if (!["user_decision", "operator_attention"].includes(nextAttention.kind)) {
+			throw new Error(`Attention request ${nextAttention.requestId} does not accept user input`);
+		}
+		const plan = this.store.getPlan(run.runId, nextAttention.planId);
+		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${nextAttention.requestId} has no matching input-waiting plan`);
+		if (this.store.getPlans(run.runId).some((candidate) => candidate.repair.includes(marker))) return;
+		this.store.transaction(() => {
+			this.updatePlan(plan, {
+				phase: nextAttention.continuation.phase,
+				repair: [...plan.repair, marker],
+			});
+			this.store.resolveAttention(nextAttention.requestId);
+			const remaining = this.store.getNextAttention(run.runId);
+			this.store.updateRun({
+				status: remaining && remaining.kind !== "plan_recovery" ? "needs_input" : "running",
+				terminalDetail: remaining?.detail ?? null,
+			});
 		});
-		this.store.updateRun({ status: "running", terminalDetail: null });
 	}
 
 	private validateApproval(run: StoredRun, plan: StoredPlan, approval: StoredApproval): CompletionApprovalProof {
@@ -1362,10 +1595,11 @@ export class HerderRunManager {
 	private async reconcile(profile: ResolvedProfile, options: { schedule?: boolean } = {}): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
-		if (run.status !== "running") return this.reply();
+		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		this.recoverTerminalSideEffects(run, driver);
+		this.ensureInitialAttention(run);
 
 		for (const plan of this.store.getPlans(run.runId).filter((candidate) => candidate.phase === "READY_TO_INTEGRATE").sort((a, b) => a.planId.localeCompare(b.planId))) {
 			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree) throw new Error(`Plan ${plan.planId} has no approved integration surface`);
@@ -1391,7 +1625,25 @@ export class HerderRunManager {
 			});
 			if (integration.status === "conflict") {
 				if (plan.round >= 6) {
-					this.updatePlan(plan, { phase: "BLOCKED" });
+					const latestAction = this.store.getActions(run.runId)
+						.filter((candidate) => candidate.planId === plan.planId && candidate.generation === plan.generation && candidate.round === plan.round && candidate.state === "terminal")
+						.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.actionId.localeCompare(left.actionId))[0];
+					const detail = `Integration conflict recovery exhausted for ${plan.planId} at generation ${plan.generation} round ${plan.round}.`;
+					this.store.transaction(() => {
+						this.updatePlan(plan, { phase: "BLOCKED", repair: [detail] });
+						this.store.putAttention(this.attention({
+							run: run!,
+							plan,
+							spec: this.spec(run!, plan.planId),
+							kind: "plan_recovery",
+							cause: "integration_conflict_exhausted",
+							actionId: latestAction?.actionId ?? null,
+							state: "pending",
+							continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+							detail,
+							recommendedAction: "Repair or explicitly revise only the target plan, then resume its recorded Implementer continuation.",
+						}));
+					});
 				} else {
 					if (!integration.checkpointRef || !integration.checkpoint || !integration.onto || !integration.detachedHead) {
 						throw new Error(`Restack conflict for ${plan.planId} lacks sealed recovery evidence`);
@@ -1507,7 +1759,7 @@ export class HerderRunManager {
 			}
 		}
 		const settled = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
-		if (activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
+		if (run.status === "running" && activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
 			this.store.updateRun({ status: "failed", terminalDetail: `Blocked plans require recovery: ${settled.blocked.join(", ")}` });
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
@@ -1519,7 +1771,7 @@ export class HerderRunManager {
 	async auditScheduler(options: { includeReply: false }): Promise<ManagerReply | null>;
 	async auditScheduler(options: { includeReply?: boolean } = {}): Promise<ManagerReply | null> {
 		const run = this.store.getRun();
-		if (!run || run.status !== "running") return options.includeReply === false ? null : this.reply();
+		if (!run || (run.status !== "running" && run.status !== "needs_input")) return options.includeReply === false ? null : this.reply();
 		const drift = this.graphDrift(run);
 		if (drift.changed) {
 			this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
@@ -1698,7 +1950,7 @@ export class HerderRunManager {
 		].sort();
 		const freeSlots = Math.max(0, run.maxParallel - active.length);
 		const expectedNewActions = suppression === "revision-barrier" ? 0 : Math.min(freeSlots, runnablePlanIds.length);
-		const inactive = run.status !== "running";
+		const inactive = run.status !== "running" && run.status !== "needs_input";
 		const workConserving = inactive || suppression === "host-backpressure" || suppression === "revision-barrier" || expectedNewActions === 0;
 		const reason = inactive ? "inactive"
 			: suppression === "host-backpressure" ? "host-backpressure"
@@ -1733,7 +1985,8 @@ export class HerderRunManager {
 		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
 		const proposed = active.filter((action) => action.state === "proposed");
-		const questionPlan = plans.find((plan) => plan.phase === "NEEDS_INPUT");
+		const nextAttention = this.store.getNextAttention(run.runId);
+		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
@@ -1761,8 +2014,9 @@ export class HerderRunManager {
 			scheduler,
 			message: planEdit
 				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
-				: run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
-			...(questionPlan?.repair[0] ? { question: questionPlan.repair[0] } : {}),
+				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
+			...(nextAttention?.question ? { question: nextAttention.question } : {}),
+			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
 		};

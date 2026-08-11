@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
+import { validateAttentionRequest } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -34,7 +35,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 8
+export const EXECUTION_SCHEMA_VERSION = 9
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -562,7 +563,7 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
   database.exec("PRAGMA synchronous = FULL")
 }
 
-const SCHEMA_8_TABLES = `
+const SCHEMA_9_TABLES = `
   CREATE TABLE IF NOT EXISTS manager_operations (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     operation_id TEXT NOT NULL UNIQUE,
@@ -608,6 +609,35 @@ const SCHEMA_8_TABLES = `
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS manager_verifications_run_generation ON manager_verifications(run_id, generation, created_at);
+
+  CREATE TABLE IF NOT EXISTS manager_attention_requests (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+    plan_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+    action_id TEXT,
+    request_sha256 TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'delegated', 'awaiting_input', 'editing', 'resolved')),
+    cause TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    detail_sha256 TEXT NOT NULL,
+    continuation_role TEXT NOT NULL,
+    continuation_phase TEXT NOT NULL,
+    question TEXT,
+    recommended_action TEXT,
+    recovery_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS manager_attention_requests_run_state
+    ON manager_attention_requests(run_id, state, plan_id, sequence);
+  CREATE UNIQUE INDEX IF NOT EXISTS manager_attention_requests_unresolved_identity
+    ON manager_attention_requests(run_id, plan_id, generation, cause)
+    WHERE state <> 'resolved';
 `
 
 function ensureLegacyFingerprintVersion(database: Database): void {
@@ -636,14 +666,18 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-      ${SCHEMA_8_TABLES}
-      PRAGMA user_version = 8;
+      ${SCHEMA_9_TABLES}
+      PRAGMA user_version = 9;
     `)
     return
   }
   if (version === 7 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
-    database.exec(`${SCHEMA_8_TABLES}\nPRAGMA user_version = 8;`)
+    database.exec(`${SCHEMA_9_TABLES}\nPRAGMA user_version = 9;`)
+    return
+  }
+  if (version === 8 && allowInitialize) {
+    database.exec(`${SCHEMA_9_TABLES}\nPRAGMA user_version = 9;`)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -837,8 +871,8 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         PRIMARY KEY (run_id, plan_id, generation)
       );
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
-      ${SCHEMA_8_TABLES}
-      PRAGMA user_version = 8;
+      ${SCHEMA_9_TABLES}
+      PRAGMA user_version = 9;
   `)
 }
 
@@ -1236,10 +1270,10 @@ function parseJsonColumn<T>(value: unknown, fallback: T): T {
 
 export function readManagerState(planDir: string) {
   const database = openDatabase(planDir, { readOnly: true })
-  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, service: null }
+  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, attention: null, service: null }
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
-    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, service: null }
+    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, attention: null, service: null }
     const run = (database.prepare(`
       SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel,
         current_generation, graph_sha256, status, integration_branch,
@@ -1275,6 +1309,43 @@ export function readManagerState(planDir: string) {
       WHERE run_id = ? AND generation = ?
       ORDER BY created_at DESC LIMIT 1
     `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
+    const attentionTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_attention_requests'").get()
+    const attention = run && attentionTable ? database.prepare(`
+      SELECT sequence, request_id, plan_id, generation, round_number, action_id, request_sha256,
+        kind, state, cause, detail, detail_sha256, continuation_role,
+        continuation_phase, question, recommended_action, recovery_json,
+        created_at, updated_at, resolved_at
+      FROM manager_attention_requests
+      WHERE run_id = ? AND state <> 'resolved'
+      ORDER BY plan_id COLLATE BINARY, sequence
+      LIMIT 1
+    `).get(run.run_id) as SqlRow | undefined : undefined
+    let projectedAttention: Record<string, unknown> | null = null
+    if (attention) {
+      projectedAttention = {
+        schemaVersion: 1,
+        requestId: attention.request_id,
+        runId: run!.run_id,
+        planId: attention.plan_id,
+        generation: attention.generation,
+        round: attention.round_number,
+        actionId: attention.action_id,
+        requestSha256: attention.request_sha256,
+        kind: attention.kind,
+        state: attention.state,
+        cause: attention.cause,
+        detail: attention.detail,
+        detailSha256: attention.detail_sha256,
+        continuation: { role: attention.continuation_role, phase: attention.continuation_phase },
+        ...(attention.question === null ? {} : { question: attention.question }),
+        ...(attention.recommended_action === null ? {} : { recommendedAction: attention.recommended_action }),
+        ...(attention.recovery_json === null ? {} : { recovery: parseJsonColumn<unknown>(attention.recovery_json, null) }),
+        createdAt: attention.created_at,
+        updatedAt: attention.updated_at,
+        ...(attention.resolved_at === null ? {} : { resolvedAt: attention.resolved_at }),
+      }
+      validateAttentionRequest(projectedAttention)
+    }
     const service = database.prepare(`
       SELECT instance_id, pid, port, dashboard_url, forwarded_url, started_at
       FROM manager_service WHERE singleton = 1
@@ -1383,6 +1454,7 @@ export function readManagerState(planDir: string) {
         terminalDetail: verification.terminal_detail,
         updatedAt: verification.updated_at,
       } : null,
+      attention: projectedAttention,
       service: service ? {
         instanceId: service.instance_id,
         pid: service.pid,
