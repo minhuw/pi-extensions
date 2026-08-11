@@ -14,11 +14,13 @@ export interface CleanupCommandOptions {
 	planDir: string;
 	planId?: string;
 	includeFailed: boolean;
+	finalize: boolean;
+	handoffTarget?: string;
 }
 
 export const HERDER_CLEANUP_COMMAND_USAGE = [
 	"Usage:",
-	"  /herder-cleanup [plan-dir] [--plan <id>] [--include-failed]",
+	"  /herder-cleanup [plan-dir] [--plan <id>] [--finalize] [--handoff-target <branch>] [--include-failed]",
 ].join("\n");
 
 export interface GrillPlanTarget {
@@ -153,12 +155,25 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 	let planDir = "herder-plans";
 	let planId: string | undefined;
 	let includeFailed = false;
+	let finalize = false;
+	let handoffTarget: string | undefined;
 	let positional = false;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
 		if (argument === "--include-failed") {
 			if (includeFailed) throw new Error("--include-failed was provided more than once.");
 			includeFailed = true;
+			continue;
+		}
+		if (argument === "--finalize") {
+			if (finalize) throw new Error("--finalize was provided more than once.");
+			finalize = true;
+			continue;
+		}
+		if (argument === "--handoff-target") {
+			if (handoffTarget !== undefined) throw new Error("--handoff-target was provided more than once.");
+			handoffTarget = valueAfter(tokens, index, argument);
+			index += 1;
 			continue;
 		}
 		if (argument === "--plan") {
@@ -174,7 +189,15 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 		planDir = argument;
 		positional = true;
 	}
-	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed };
+	if (finalize && planId !== undefined) throw new Error("--finalize cannot be combined with --plan.");
+	if (handoffTarget !== undefined && !finalize) throw new Error("--handoff-target requires --finalize.");
+	return {
+		planDir,
+		...(planId === undefined ? {} : { planId }),
+		includeFailed,
+		finalize,
+		...(handoffTarget === undefined ? {} : { handoffTarget }),
+	};
 }
 
 export const parseCleanupCommandArguments = parseCleanupArguments;

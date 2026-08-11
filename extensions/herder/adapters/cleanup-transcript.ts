@@ -8,12 +8,18 @@ const MAX_ITEM_LENGTH = 64;
 
 export type CleanupTranscriptMode = "standard" | "include-failed";
 export type CleanupTranscriptPreview = "eligible" | "preview-only" | "blocked" | "cancelled";
+export type CleanupTranscriptIntegration = "preserved" | "removed" | "blocked" | "unknown";
 
 export interface CleanupTranscriptEntry {
 	version: 1;
 	mode: CleanupTranscriptMode;
+	finalize: boolean;
+	handoffTarget: string | null;
 	preview: CleanupTranscriptPreview;
 	executed: boolean;
+	plannedRefs: string[];
+	removedRefs: string[];
+	integration: CleanupTranscriptIntegration;
 	removed: string[];
 	skipped: string[];
 	blockers: string[];
@@ -27,10 +33,22 @@ function boundedItems(values: readonly string[] | undefined): string[] {
 		.slice(0, MAX_ITEMS);
 }
 
+function boundedHandoffTarget(value: string | null | undefined): string | null {
+	if (!value) return null;
+	const target = String(value).trim();
+	if (target.length > MAX_ITEM_LENGTH || /[\\/]/.test(target) || /^[0-9a-f]{7,64}$/i.test(target)) return null;
+	return /^[a-z0-9][a-z0-9._-]*$/i.test(target) ? target : null;
+}
+
 export function createCleanupTranscriptEntry(input: {
 	mode: CleanupTranscriptMode;
+	finalize?: boolean;
+	handoffTarget?: string | null;
 	preview: CleanupTranscriptPreview;
 	executed: boolean;
+	plannedRefs?: readonly string[];
+	removedRefs?: readonly string[];
+	integration?: CleanupTranscriptIntegration;
 	removed?: readonly string[];
 	skipped?: readonly string[];
 	blockers?: readonly string[];
@@ -38,8 +56,13 @@ export function createCleanupTranscriptEntry(input: {
 	return {
 		version: 1,
 		mode: input.mode,
+		finalize: Boolean(input.finalize),
+		handoffTarget: boundedHandoffTarget(input.handoffTarget),
 		preview: input.preview,
 		executed: Boolean(input.executed),
+		plannedRefs: boundedItems(input.plannedRefs),
+		removedRefs: boundedItems(input.removedRefs),
+		integration: input.integration ?? "unknown",
 		removed: boundedItems(input.removed),
 		skipped: boundedItems(input.skipped),
 		blockers: boundedItems(input.blockers),
@@ -52,9 +75,22 @@ function renderList(values: readonly string[]): string {
 
 export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry, theme: Theme): string {
 	const state = entry.executed ? theme.fg("success", "executed") : theme.fg("warning", entry.preview);
+	if (!entry.finalize) {
+		return [
+			theme.bold("Herder cleanup"),
+			theme.fg("dim", `  ${entry.mode} · ${state}`),
+			`  removed: ${renderList(entry.removed)}`,
+			`  skipped: ${renderList(entry.skipped)}`,
+			`  blockers: ${renderList(entry.blockers)}`,
+		].join("\n");
+	}
+	const handoff = entry.handoffTarget ? `\n  handoff target: ${entry.handoffTarget}` : "";
 	return [
 		theme.bold("Herder cleanup"),
-		theme.fg("dim", `  ${entry.mode} · ${state}`),
+		theme.fg("dim", `  finalize · ${state}`),
+		`  planned refs: ${renderList(entry.plannedRefs)}`,
+		`  removed refs: ${renderList(entry.removedRefs)}`,
+		`  integration: ${entry.integration}${handoff}`,
 		`  removed: ${renderList(entry.removed)}`,
 		`  skipped: ${renderList(entry.skipped)}`,
 		`  blockers: ${renderList(entry.blockers)}`,

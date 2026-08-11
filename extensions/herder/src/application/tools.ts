@@ -146,6 +146,8 @@ export interface CleanupApplicationRequest {
 	planDirectory: string;
 	planId?: string;
 	includeFailed?: boolean;
+	finalize?: boolean;
+	handoffTarget?: string | null;
 }
 
 export interface CleanupPreviewOutcome {
@@ -204,11 +206,20 @@ function cleanupPlanId(value: string): string {
 
 export function selectCleanupPlanIds(
 	graph: ReturnType<typeof buildGraph>,
-	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed">,
+	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed" | "finalize">,
 ): { selectedPlanIds: string[]; failedPlanIds: string[] } {
+	if (request.finalize && request.planId !== undefined) throw new Error("--finalize cannot be combined with --plan");
 	const requested = request.planId === undefined ? undefined : cleanupPlanId(request.planId);
 	if (requested && !graph.plans.some((plan) => plan.id === requested)) {
 		throw new Error(`Plan ${requested} is not indexed in ${graph.readme}`);
+	}
+	if (request.finalize) {
+		return {
+			selectedPlanIds: graph.plans.map((plan) => plan.id),
+			failedPlanIds: graph.plans
+				.filter((plan) => plan.status === "BLOCKED" || plan.status === "REJECTED")
+				.map((plan) => plan.id),
+		};
 	}
 	const selected = graph.plans.filter((plan) => {
 		if (requested && plan.id !== requested) return false;
@@ -230,7 +241,7 @@ function cleanupResultStatus(result: CleanupResult, graph: ReturnType<typeof bui
 function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
 	const reasons = new Set<string>();
 	for (const outcome of preview) {
-		for (const item of outcome.result.finalization.blockers) {
+		for (const item of [...outcome.result.finalization.blockers, ...outcome.result.handoff.blockers]) {
 			const reason = typeof item.reason === "string" ? item.reason : "cleanup-blocked";
 			if (/^[a-z0-9][a-z0-9-]{0,48}$/i.test(reason)) reasons.add(reason.toLowerCase());
 		}
@@ -254,31 +265,24 @@ async function buildCleanupPreviewSnapshot(
 	const runner = dependencies.cleanupRunner ?? cleanupRun;
 	const durableStatus = await (dependencies.readStatus ?? readCleanupDurableStatus)(request.planDirectory);
 	const graph = buildGraph(request.planDirectory);
+	const finalize = request.finalize === true;
+	if (finalize && request.planId !== undefined) throw new Error("--finalize cannot be combined with --plan");
+	if (request.handoffTarget !== undefined && request.handoffTarget !== null && !finalize) {
+		throw new Error("--handoff-target requires --finalize");
+	}
 	const selection = selectCleanupPlanIds(graph, request);
 	const outcomes: CleanupPreviewOutcome[] = [];
-	for (const planId of selection.selectedPlanIds) {
-		const status = graph.plans.find((plan) => plan.id === planId)?.status;
+	const includeFailed = Boolean(request.includeFailed);
+	const handoffTarget = finalize ? request.handoffTarget ?? null : null;
+
+	if (finalize) {
 		const result = await runner({
 			repo: request.repositoryRoot,
 			planDir: request.planDirectory,
-			plan: planId,
 			dryRun: true,
-			includeFailed: status === "BLOCKED" || status === "REJECTED",
-			finalize: false,
-			handoffTarget: null,
-			pretty: false,
-		});
-		outcomes.push({ planId, status: status === "DONE" || status === "BLOCKED" || status === "REJECTED" ? status : "UNKNOWN", result });
-	}
-	if (outcomes.length === 0) {
-		const result = await runner({
-			repo: request.repositoryRoot,
-			planDir: request.planDirectory,
-			...(request.planId === undefined ? {} : { plan: cleanupPlanId(request.planId) }),
-			dryRun: true,
-			includeFailed: false,
-			finalize: false,
-			handoffTarget: null,
+			includeFailed,
+			finalize: true,
+			handoffTarget,
 			pretty: false,
 		});
 		outcomes.push({
@@ -286,18 +290,62 @@ async function buildCleanupPreviewSnapshot(
 			status: result.plan ? cleanupResultStatus(result, graph) : "UNKNOWN",
 			result,
 		});
+	} else {
+		for (const planId of selection.selectedPlanIds) {
+			const status = graph.plans.find((plan) => plan.id === planId)?.status;
+			const result = await runner({
+				repo: request.repositoryRoot,
+				planDir: request.planDirectory,
+				plan: planId,
+				dryRun: true,
+				includeFailed: includeFailed && (status === "BLOCKED" || status === "REJECTED"),
+				finalize: false,
+				handoffTarget: null,
+				pretty: false,
+			});
+			outcomes.push({ planId, status: status === "DONE" || status === "BLOCKED" || status === "REJECTED" ? status : "UNKNOWN", result });
+		}
+		if (outcomes.length === 0) {
+			const result = await runner({
+				repo: request.repositoryRoot,
+				planDir: request.planDirectory,
+				...(request.planId === undefined ? {} : { plan: cleanupPlanId(request.planId) }),
+				dryRun: true,
+				includeFailed: false,
+				finalize: false,
+				handoffTarget: null,
+				pretty: false,
+			});
+			outcomes.push({
+				planId: result.plan ?? "RUN",
+				status: result.plan ? cleanupResultStatus(result, graph) : "UNKNOWN",
+				result,
+			});
+		}
 	}
+
 	const skippedPlanIds = [...new Set(outcomes.flatMap((outcome) => outcome.result.skipped
 		.map((item) => typeof item.plan === "string" ? item.plan : "")
 		.filter(Boolean)))].sort();
+	const failedActionPlanIds = outcomes.flatMap((outcome) => outcome.result.actions
+		.filter((item) => item.mode === "failed-evidence" && typeof item.plan === "string")
+		.map((item) => String(item.plan)));
+	const failedPlanIds = [...new Set([...selection.failedPlanIds, ...failedActionPlanIds])].sort();
 	const blockers = cleanupReasons(outcomes);
 	if (!CLEANUP_TERMINAL_STATUSES.has(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
-	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0);
+	if (!includeFailed && failedPlanIds.length > 0) blockers.push("failed-evidence-requires-include-failed");
+	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0
+		|| (finalize && (outcome.result.finalization.refsPlanned.length > 0 || outcome.result.handoff.eligible)));
 	if (selection.selectedPlanIds.length > 0 && !hasActions) blockers.push("no-eligible-actions");
+	const uniqueBlockers = [...new Set(blockers)];
 	const normalizedPreview = stableJson({
 		durableStatus,
+		finalize,
+		handoffTarget,
+		includeFailed,
 		selectedPlanIds: selection.selectedPlanIds,
-		failedPlanIds: selection.failedPlanIds,
+		failedPlanIds,
+		blockers: uniqueBlockers,
 		outcomes: outcomes.map((outcome) => ({ planId: outcome.planId, status: outcome.status, result: outcome.result })),
 	});
 	return {
@@ -305,12 +353,12 @@ async function buildCleanupPreviewSnapshot(
 			version: 1,
 			durableStatus,
 			terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
-			canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions,
+			canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions && uniqueBlockers.length === 0,
 			selectedPlanIds: selection.selectedPlanIds,
-			failedPlanIds: selection.failedPlanIds,
+			failedPlanIds,
 			skippedPlanIds,
 			outcomes,
-			blockers: [...new Set(blockers)],
+			blockers: uniqueBlockers,
 			normalizedPreview,
 		},
 		graphStatusSnapshot: cleanupGraphStatusSnapshot(graph),
@@ -365,22 +413,43 @@ export async function applyHerderCleanup(
 		}
 		const runner = dependencies.cleanupRunner ?? cleanupRun;
 		const applied: CleanupPreviewOutcome[] = [];
-		for (const outcome of fresh.outcomes.filter((candidate) => fresh.selectedPlanIds.includes(candidate.planId))) {
-			const status = outcome.status;
-			if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") continue;
+		if (request.finalize === true) {
 			const result = await runner({
 				repo: request.repositoryRoot,
 				planDir: request.planDirectory,
-				plan: outcome.planId,
 				dryRun: false,
-				includeFailed: fresh.failedPlanIds.includes(outcome.planId),
-				finalize: false,
-				handoffTarget: null,
+				includeFailed: Boolean(request.includeFailed),
+				finalize: true,
+				handoffTarget: request.handoffTarget ?? null,
 				pretty: false,
 			});
-			applied.push({ ...outcome, result });
+			const previewOutcome = fresh.outcomes[0];
+			applied.push({
+				planId: result.plan ?? previewOutcome?.planId ?? "RUN",
+				status: previewOutcome?.status ?? "UNKNOWN",
+				result,
+			});
+		} else {
+			for (const outcome of fresh.outcomes.filter((candidate) => fresh.selectedPlanIds.includes(candidate.planId))) {
+				const status = outcome.status;
+				if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") continue;
+				const result = await runner({
+					repo: request.repositoryRoot,
+					planDir: request.planDirectory,
+					plan: outcome.planId,
+					dryRun: false,
+					includeFailed: fresh.failedPlanIds.includes(outcome.planId),
+					finalize: false,
+					handoffTarget: null,
+					pretty: false,
+				});
+				applied.push({ ...outcome, result });
+			}
 		}
-		return { ...fresh, outcomes: applied, executed: applied.some((outcome) => outcome.result.removed.length > 0) };
+		const executed = applied.some((outcome) => outcome.result.removed.length > 0
+			|| outcome.result.finalization.refsRemoved.length > 0
+			|| outcome.result.handoff.removed);
+		return { ...fresh, outcomes: applied, executed };
 	});
 }
 

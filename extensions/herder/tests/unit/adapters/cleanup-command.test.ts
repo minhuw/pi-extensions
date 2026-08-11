@@ -42,14 +42,48 @@ function preview(input: Partial<CleanupPreview> = {}): CleanupPreview {
 	};
 }
 
+function finalizeCleanupResult(removed = false): CleanupResult {
+	const result = cleanupResult("001", true, removed);
+	return {
+		...result,
+		finalize: true,
+		finalization: {
+			requested: true,
+			eligible: true,
+			blockers: [],
+			refsPlanned: [
+				{ ref: "refs/plan-herder/herder-plans/base", target: "head", kind: "base" },
+				{ ref: "refs/plan-herder/herder-plans/completed/001", target: "head", kind: "completed", plan: "001" },
+			],
+			refsRemoved: removed
+				? [
+					{ ref: "refs/plan-herder/herder-plans/base", target: "head", kind: "base" },
+					{ ref: "refs/plan-herder/herder-plans/completed/001", target: "head", kind: "completed", plan: "001" },
+				]
+				: [],
+		},
+	};
+}
+
 test("cleanup parser is fail-closed and preserves the exact command shape", () => {
 	assert.deepEqual(parseCleanupArguments("custom-plans --plan 7 --include-failed"), {
 		planDir: "custom-plans",
 		planId: "7",
 		includeFailed: true,
+		finalize: false,
 	});
-	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false });
+	assert.deepEqual(parseCleanupArguments("--finalize --handoff-target release --include-failed"), {
+		planDir: "herder-plans",
+		includeFailed: true,
+		finalize: true,
+		handoffTarget: "release",
+	});
+	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false, finalize: false });
 	assert.throws(() => parseCleanupArguments("--plan 7 --plan 8"), /more than once/);
+	assert.throws(() => parseCleanupArguments("--finalize --finalize"), /more than once/);
+	assert.throws(() => parseCleanupArguments("--handoff-target"), /requires a value/);
+	assert.throws(() => parseCleanupArguments("--handoff-target release"), /requires --finalize/);
+	assert.throws(() => parseCleanupArguments("--finalize --plan 7"), /cannot be combined/);
 	assert.throws(() => parseCleanupArguments("--include-failed --unknown"), /Unknown option/);
 	assert.throws(() => parseCleanupArguments("--plan TODO"), /numeric/);
 });
@@ -83,6 +117,40 @@ test("failed evidence requires a second confirmation and applies only after both
 	assert.equal(result.applied?.executed, true);
 	assert.equal(entries.length, 1);
 	assert.deepEqual((entries[0] as Record<string, unknown>).removed, ["002"]);
+});
+
+test("finalization presents refs and integration state in bounded transcript evidence", async () => {
+	const confirmations: string[] = [];
+	const entries: unknown[] = [];
+	const finalizePreview = preview({
+		selectedPlanIds: ["001"],
+		outcomes: [{ planId: "RUN", status: "UNKNOWN", result: finalizeCleanupResult() }],
+	});
+	const result = await runCleanupCommand("--finalize", {
+		repositoryRoot: "/repo",
+		planDirectory: "/repo/herder-plans",
+		preview: async () => finalizePreview,
+		apply: async () => ({
+			...finalizePreview,
+			outcomes: [{ planId: "RUN", status: "UNKNOWN", result: finalizeCleanupResult(true) }],
+			executed: true,
+		}),
+		confirm: async (title) => {
+			confirmations.push(title);
+			return true;
+		},
+		appendEntry: (entry) => entries.push(entry),
+	});
+	assert.equal(result.cancelled, false);
+	assert.deepEqual(confirmations, ["Finalize Herder cleanup?"]);
+	assert.equal(entries.length, 1);
+	const entry = entries[0] as Record<string, unknown>;
+	assert.equal(entry.finalize, true);
+	assert.deepEqual(entry.plannedRefs, ["base", "completed:001"]);
+	assert.deepEqual(entry.removedRefs, ["base", "completed:001"]);
+	assert.equal(entry.integration, "preserved");
+	assert.equal(Object.hasOwn(entry, "paths"), false);
+	assert.equal(Object.hasOwn(entry, "hashes"), false);
 });
 
 test("cancellation is mutation-free and records bounded transcript evidence", async () => {
