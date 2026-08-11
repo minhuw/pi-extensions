@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -14,6 +14,16 @@ import {
 	openExecutionDatabase,
 } from "../daemon/execution-store.ts";
 import { RunStore, type StoredService } from "../daemon/run-store.ts";
+import {
+	acquireStartExclusion,
+	acquireServiceOwnership,
+	releaseServiceOwnership,
+	releaseStartExclusion,
+	serviceOwnershipLockPath,
+	serviceProcessAlive,
+	type ServiceOwnership,
+	type StartExclusion,
+} from "../daemon/service-ownership.ts";
 import { MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
 const CLIENT_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -143,49 +153,14 @@ async function healthyUnmarkedService(planDirectory: string): Promise<StoredServ
 	return service && !hasExecutionRotationMarker(planDirectory) ? service : null;
 }
 
-function processAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** Pid liveness plus a best-effort guard against pid reuse by an unrelated process. */
-function serviceProcessAlive(pid: number): boolean {
-	if (!processAlive(pid)) return false;
-	try {
-		const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-		return command.includes("service.ts") || command.includes("herder");
-	} catch {
-		return true;
-	}
-}
-
 async function terminateServiceProcess(pid: number): Promise<void> {
 	try { process.kill(pid, "SIGTERM"); } catch { return; }
 	const deadline = Date.now() + 2_000;
 	while (Date.now() < deadline) {
-		if (!processAlive(pid)) return;
+		if (!serviceProcessAlive(pid)) return;
 		await delay(100);
 	}
 	try { process.kill(pid, "SIGKILL"); } catch {}
-}
-
-function acquireStartLock(lockPath: string): number | null {
-	try {
-		const descriptor = fs.openSync(lockPath, "wx", 0o600);
-		fs.writeFileSync(descriptor, `${process.pid}\n`);
-		return descriptor;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		let owner = 0;
-		try { owner = Number(fs.readFileSync(lockPath, "utf8").trim()); } catch {}
-		if (owner > 0 && processAlive(owner)) return null;
-		try { fs.unlinkSync(lockPath); } catch {}
-		return acquireStartLock(lockPath);
-	}
 }
 
 function ensureRuntimeDirectory(directoryPath: string): fs.Stats {
@@ -312,7 +287,7 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 	ensureRuntimeDirectory(runtimeDirectory);
 	const lockPath = path.join(runtimeDirectory, "service-start.lock");
 	const logPath = path.join(runtimeDirectory, "service.log");
-	const runWithStartLock = async (lock: number): Promise<StoredService | null> => {
+	const runWithStartLock = async (lock: StartExclusion): Promise<StoredService | null> => {
 		let releaseRotationEpoch: (() => void) | undefined;
 		try {
 			// Keep the cross-process rotation epoch held through every asynchronous
@@ -471,15 +446,14 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 		} finally {
 			try { releaseRotationEpoch?.(); }
 			finally {
-				fs.closeSync(lock);
-				try { fs.unlinkSync(lockPath); } catch {}
+				releaseStartExclusion(lock);
 			}
 		}
 	};
 
 	let launchAttempted = false;
 	ensureRuntimeDirectory(runtimeDirectory);
-	let lock = acquireStartLock(lockPath);
+	let lock = acquireStartExclusion(lockPath);
 	if (lock !== null) {
 		launchAttempted = true;
 		const result = await runWithStartLock(lock);
@@ -490,7 +464,7 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 		if (service) return service;
 		if (!launchAttempted) {
 			ensureRuntimeDirectory(runtimeDirectory);
-			lock = acquireStartLock(lockPath);
+			lock = acquireStartExclusion(lockPath);
 			if (lock !== null) {
 				launchAttempted = true;
 				const result = await runWithStartLock(lock);
@@ -508,6 +482,72 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 	} catch {}
 	throw new Error(`Herder service did not become healthy${detail ? `: ${detail}` : ""}`);
 }
+
+const CLEANUP_TERMINAL_STATUSES = new Set(["complete", "failed", "stopped"]);
+const CLEANUP_EXCLUSION_WAIT_MS = 5_000;
+
+function ownerLockIsPresent(planDirectory: string): boolean {
+	try { fs.lstatSync(serviceOwnershipLockPath(planDirectory)); return true; }
+	catch { return false; }
+}
+
+async function waitForServiceShutdown(planDirectory: string, pid: number, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (serviceProcessAlive(pid) || ownerLockIsPresent(planDirectory)) {
+		if (Date.now() >= deadline) throw new Error("Cannot quiesce the Herder service before cleanup.");
+		await delay(50);
+	}
+}
+
+function managerReplyFromStatus(value: Record<string, unknown>): Record<string, unknown> {
+	const reply = value.reply;
+	if (!reply || typeof reply !== "object" || Array.isArray(reply)) throw new Error("Herder service returned no manager status.");
+	return reply as Record<string, unknown>;
+}
+
+/**
+ * Exclude daemon startup and hold the daemon-owner lock while a cleanup callback
+ * performs its final preview and Git mutation. This path intentionally never
+ * starts a replacement while cleanup owns the namespace, which would defeat
+ * quiescence.
+ */
+export async function withServiceExclusion<T>(
+	planDirectoryInput: string,
+	callback: () => Promise<T> | T,
+	options: { waitMs?: number } = {},
+): Promise<T> {
+	const planDirectory = fs.realpathSync(path.resolve(planDirectoryInput));
+	const runtimeDirectory = path.join(planDirectory, ".herder");
+	ensureRuntimeDirectory(runtimeDirectory);
+	const startLock = acquireStartExclusion(path.join(runtimeDirectory, "service-start.lock"));
+	if (!startLock) throw new Error("Herder service startup is already in progress; cleanup was not applied.");
+	let ownership: ServiceOwnership | undefined;
+	try {
+		const registered = registeredService(planDirectory);
+		if (registered && serviceProcessAlive(registered.pid)) {
+			const service = await healthyService(planDirectory);
+			if (!service) throw new Error("A live Herder service owner is unresponsive; cleanup was not applied.");
+			let status: Record<string, unknown>;
+			try { status = managerReplyFromStatus(await requestService(service, "/v1/status", undefined, HEALTH_TIMEOUT_MS)); }
+			catch { throw new Error("A live Herder service owner is unresponsive; cleanup was not applied."); }
+			const serviceStatus = String(status.status || "");
+			if (!CLEANUP_TERMINAL_STATUSES.has(serviceStatus)) {
+				throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run.`);
+			}
+			try { await requestService(service, "/shutdown", {}); }
+			catch { throw new Error("A terminal Herder service could not be stopped; cleanup was not applied."); }
+			await waitForServiceShutdown(planDirectory, registered.pid, options.waitMs ?? CLEANUP_EXCLUSION_WAIT_MS);
+		}
+		ownership = acquireServiceOwnership(planDirectory, `cleanup-${randomUUID()}`);
+		return await callback();
+	} finally {
+		if (ownership) releaseServiceOwnership(ownership);
+		releaseStartExclusion(startLock);
+	}
+}
+
+export const withDaemonExclusion = withServiceExclusion;
+export const withCleanupExclusion = withServiceExclusion;
 
 function transportFailure(error: unknown): boolean {
 	const text = error instanceof Error ? error.message : String(error);

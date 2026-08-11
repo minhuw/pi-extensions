@@ -22,6 +22,48 @@ export interface CleanupInput {
   handoffTarget?: string | null
   pretty?: boolean
 }
+
+export interface CleanupDetail {
+  [key: string]: any
+}
+
+export interface CleanupResult {
+  repoRoot: string
+  planDir: string
+  planName: string
+  integrationBranch: string
+  integrationHead: string
+  plan: string | null
+  dryRun: boolean
+  includeFailed: boolean
+  finalize: boolean
+  handoffTarget: string | null
+  actions: CleanupDetail[]
+  removed: CleanupDetail[]
+  skipped: CleanupDetail[]
+  finalization: {
+    requested: boolean
+    eligible: boolean
+    blockers: CleanupDetail[]
+    refsPlanned: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
+    refsRemoved: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
+  }
+  handoff: {
+    requested: boolean
+    targetBranch: string | null
+    targetHead: string | null
+    eligible: boolean
+    blockers: CleanupDetail[]
+    integrationWorktree: string | null
+    removed: boolean
+  }
+  preserved: {
+    integrationBranch: string | null
+    integrationWorktree: string | null
+    coordinationRefs: string | null
+    logs: boolean
+  }
+}
 interface WorktreeRecord { path: string; branch: string; locked: boolean }
 interface BranchRecord { branch: string; head: string; relative: string }
 interface CoordinationRefRecord {
@@ -32,7 +74,6 @@ interface CoordinationRefRecord {
   plan: string | null
 }
 type CompletionRefRecord = ReturnType<typeof listCompletionRefs>[number]
-type CleanupDetail = Record<string, any>
 
 function fail(message: string): never {
   throw new Error(message)
@@ -103,7 +144,19 @@ function refTarget(repoRoot: string, ref: string): string | null {
   return result.status === 0 ? result.stdout.trim() : null
 }
 
+function realpathIfPresent(candidate: string): string {
+  try { return fs.realpathSync(candidate) }
+  catch { return path.resolve(candidate) }
+}
+
+function assertNotUserCheckout(repoRoot: string, worktreePath: string): void {
+  if (realpathIfPresent(worktreePath) === repoRoot) {
+    fail(`Refusing to remove the user checkout: ${repoRoot}`)
+  }
+}
+
 function removeOwnedWorktree(repoRoot: string, worktreePath: string): void {
+  assertNotUserCheckout(repoRoot, worktreePath)
   runGit(repoRoot, ["worktree", "remove", "--", worktreePath])
 }
 
@@ -338,7 +391,9 @@ export function cleanupRun(input: CleanupInput) {
       continue
     }
 
-    const state = worktreeStatus(repoRoot, worktrees.get(item.branch))
+    const candidateWorktree = worktrees.get(item.branch)
+    if (candidateWorktree) assertNotUserCheckout(repoRoot, candidateWorktree.path)
+    const state = worktreeStatus(repoRoot, candidateWorktree)
     if (state.locked) {
       skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, worktree: state.path, reason: "worktree-locked" })
       continue
@@ -523,7 +578,10 @@ export function cleanupRun(input: CleanupInput) {
       if (!isAncestor(repoRoot, integrationHead, currentTargetHead)) {
         fail(`Cannot remove integration because ${handoffTarget} no longer contains ${integrationHead}`)
       }
-      if (integrationWorktree) removeOwnedWorktree(repoRoot, integrationWorktree.path)
+      if (integrationWorktree) {
+        assertNotUserCheckout(repoRoot, integrationWorktree.path)
+        removeOwnedWorktree(repoRoot, integrationWorktree.path)
+      }
       deleteBranchIfPresent(repoRoot, integrationBranch, integrationHead)
       handoff.targetHead = currentTargetHead
       handoff.removed = true

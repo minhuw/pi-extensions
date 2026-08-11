@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
 import {
+	acquireServiceOwnership,
+	releaseServiceOwnership,
+	type ServiceOwnership,
+} from "./service-ownership.ts";
+import {
 	MANAGER_OPERATION_KINDS,
 	MANAGER_PROTOCOL_VERSION,
 	type ManagerOperationKind,
@@ -49,26 +54,6 @@ function send(response: http.ServerResponse, status: number, value: unknown): vo
 	response.end(bytes);
 }
 
-function processAlive(pid: number): boolean {
-	try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function acquireServiceOwnership(planDirectory: string, instanceId: string): { descriptor: number; lockPath: string } {
-	const lockPath = path.join(planDirectory, ".herder", "service-owner.lock");
-	fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-	try {
-		const descriptor = fs.openSync(lockPath, "wx", 0o600);
-		fs.writeFileSync(descriptor, `${process.pid} ${instanceId}\n`);
-		return { descriptor, lockPath };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		let owner = 0;
-		try { owner = Number(fs.readFileSync(lockPath, "utf8").trim().split(/\s+/)[0]); } catch {}
-		if (owner > 0 && processAlive(owner)) throw new Error(`Herder service ownership is already held by pid ${owner}`);
-		try { fs.unlinkSync(lockPath); } catch {}
-		return acquireServiceOwnership(planDirectory, instanceId);
-	}
-}
 
 async function readBody(request: http.IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
@@ -151,11 +136,10 @@ function operationReply(kind: ManagerOperationKind, result: unknown): ManagerRep
 export async function startHerderService(input: { planDirectory: string; dashboardPort?: number }) {
 	const planDirectory = fs.realpathSync(input.planDirectory);
 	const instanceId = randomUUID();
-	const ownership = acquireServiceOwnership(planDirectory, instanceId);
+	const ownership: ServiceOwnership = acquireServiceOwnership(planDirectory, instanceId);
 	try { openExecutionDatabase(planDirectory, { create: true })!.close(); }
 	catch (error) {
-		fs.closeSync(ownership.descriptor);
-		try { fs.unlinkSync(ownership.lockPath); } catch {}
+		releaseServiceOwnership(ownership);
 		throw error;
 	}
 	const authToken = randomBytes(32).toString("base64url");
@@ -323,8 +307,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		updateDashboardRevision(initialReply);
 	} catch (error) {
 		store.close();
-		fs.closeSync(ownership.descriptor);
-		try { fs.unlinkSync(ownership.lockPath); } catch {}
+		releaseServiceOwnership(ownership);
 		await close();
 		throw error;
 	}
@@ -358,8 +341,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		await backgroundQueue.catch(() => {});
 		await executor.close();
 		store.close();
-		fs.closeSync(ownership.descriptor);
-		try { fs.unlinkSync(ownership.lockPath); } catch {}
+		releaseServiceOwnership(ownership);
 	};
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());

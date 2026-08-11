@@ -10,6 +10,17 @@ export interface PlanDirOptions {
 	planDir?: string;
 }
 
+export interface CleanupCommandOptions {
+	planDir: string;
+	planId?: string;
+	includeFailed: boolean;
+}
+
+export const HERDER_CLEANUP_COMMAND_USAGE = [
+	"Usage:",
+	"  /herder-cleanup [plan-dir] [--plan <id>] [--include-failed]",
+].join("\n");
+
 export interface GrillPlanTarget {
 	planId: string;
 	planDir?: string;
@@ -136,6 +147,37 @@ export function parsePlanDirArguments(input: string): PlanDirOptions {
 	if (tokens[0]?.startsWith("--")) throw new Error(`Unknown option: ${tokens[0]}`);
 	return tokens[0] ? { planDir: tokens[0] } : {};
 }
+
+export function parseCleanupArguments(input: string): CleanupCommandOptions {
+	const tokens = tokenizeArguments(input);
+	let planDir = "herder-plans";
+	let planId: string | undefined;
+	let includeFailed = false;
+	let positional = false;
+	for (let index = 0; index < tokens.length; index += 1) {
+		const argument = tokens[index]!;
+		if (argument === "--include-failed") {
+			if (includeFailed) throw new Error("--include-failed was provided more than once.");
+			includeFailed = true;
+			continue;
+		}
+		if (argument === "--plan") {
+			if (planId !== undefined) throw new Error("--plan was provided more than once.");
+			const value = valueAfter(tokens, index, argument);
+			if (!/^\d+$/.test(value)) throw new Error("--plan must be a numeric plan ID.");
+			planId = value;
+			index += 1;
+			continue;
+		}
+		if (argument.startsWith("--")) throw new Error(`Unknown option: ${argument}\n${HERDER_CLEANUP_COMMAND_USAGE}`);
+		if (positional) throw new Error(`Unexpected argument: ${argument}\n${HERDER_CLEANUP_COMMAND_USAGE}`);
+		planDir = argument;
+		positional = true;
+	}
+	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed };
+}
+
+export const parseCleanupCommandArguments = parseCleanupArguments;
 
 export function parseGrillPlanTarget(input: string): GrillPlanTarget | null {
 	const tokens = tokenizeArguments(input);

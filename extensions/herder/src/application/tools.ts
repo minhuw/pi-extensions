@@ -8,6 +8,7 @@ import {
 	setTracking,
 	snapshotPlan,
 } from "../core/plans.ts";
+import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import type { VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
@@ -17,7 +18,10 @@ import {
 	requestService,
 	submitManagerOperationReliable,
 	waitManagerOperation,
+	withServiceExclusion,
 } from "../client/index.ts";
+import { RunStore } from "../daemon/run-store.ts";
+import { stableJson } from "../shared/protocol.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -134,6 +138,219 @@ export async function waitHerderOperation(pending: PendingHerderOperation): Prom
 		}
 	}
 }
+
+export type CleanupDurableStatus = "complete" | "failed" | "stopped" | "active" | "missing";
+
+export interface CleanupApplicationRequest {
+	repositoryRoot: string;
+	planDirectory: string;
+	planId?: string;
+	includeFailed?: boolean;
+}
+
+export interface CleanupPreviewOutcome {
+	planId: string;
+	status: "DONE" | "BLOCKED" | "REJECTED" | "UNKNOWN";
+	result: CleanupResult;
+}
+
+export interface CleanupPreview {
+	version: 1;
+	durableStatus: CleanupDurableStatus;
+	terminal: boolean;
+	canApply: boolean;
+	selectedPlanIds: string[];
+	failedPlanIds: string[];
+	skippedPlanIds: string[];
+	outcomes: CleanupPreviewOutcome[];
+	blockers: string[];
+	normalizedPreview: string;
+}
+
+export interface CleanupApplyResult extends CleanupPreview {
+	executed: boolean;
+}
+
+export interface CleanupApplicationDependencies {
+	cleanupRunner?: (input: CleanupInput) => CleanupResult | Promise<CleanupResult>;
+	readStatus?: (planDirectory: string) => CleanupDurableStatus | Promise<CleanupDurableStatus>;
+	withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T>;
+}
+
+const CLEANUP_TERMINAL_STATUSES = new Set<CleanupDurableStatus>(["complete", "failed", "stopped"]);
+
+export function readCleanupDurableStatus(planDirectory: string): CleanupDurableStatus {
+	let store: RunStore | undefined;
+	try {
+		store = new RunStore(planDirectory, { readOnly: true });
+		const run = store.getRun();
+		if (!run) return "missing";
+		return CLEANUP_TERMINAL_STATUSES.has(run.status as CleanupDurableStatus)
+			? run.status as CleanupDurableStatus
+			: "active";
+	} catch {
+		return "missing";
+	} finally {
+		store?.close();
+	}
+}
+
+function cleanupPlanId(value: string): string {
+	if (!/^\d+$/.test(value)) throw new Error(`Invalid cleanup plan ID: ${value}`);
+	const number = Number.parseInt(value, 10);
+	if (!Number.isSafeInteger(number)) throw new Error(`Invalid cleanup plan ID: ${value}`);
+	return String(number).padStart(3, "0");
+}
+
+export function selectCleanupPlanIds(
+	graph: ReturnType<typeof buildGraph>,
+	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed">,
+): { selectedPlanIds: string[]; failedPlanIds: string[] } {
+	const requested = request.planId === undefined ? undefined : cleanupPlanId(request.planId);
+	if (requested && !graph.plans.some((plan) => plan.id === requested)) {
+		throw new Error(`Plan ${requested} is not indexed in ${graph.readme}`);
+	}
+	const selected = graph.plans.filter((plan) => {
+		if (requested && plan.id !== requested) return false;
+		if (plan.status === "DONE") return true;
+		return Boolean(request.includeFailed) && (plan.status === "BLOCKED" || plan.status === "REJECTED");
+	});
+	return {
+		selectedPlanIds: selected.map((plan) => plan.id),
+		failedPlanIds: selected.filter((plan) => plan.status === "BLOCKED" || plan.status === "REJECTED").map((plan) => plan.id),
+	};
+}
+
+function cleanupResultStatus(result: CleanupResult, graph: ReturnType<typeof buildGraph>): CleanupPreviewOutcome["status"] {
+	const plan = result.plan ? graph.plans.find((candidate) => candidate.id === result.plan) : undefined;
+	if (plan?.status === "DONE" || plan?.status === "BLOCKED" || plan?.status === "REJECTED") return plan.status;
+	return "UNKNOWN";
+}
+
+function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
+	const reasons = new Set<string>();
+	for (const outcome of preview) {
+		for (const item of outcome.result.finalization.blockers) {
+			const reason = typeof item.reason === "string" ? item.reason : "cleanup-blocked";
+			if (/^[a-z0-9][a-z0-9-]{0,48}$/i.test(reason)) reasons.add(reason.toLowerCase());
+		}
+	}
+	return [...reasons].sort();
+}
+
+async function buildCleanupPreview(
+	request: CleanupApplicationRequest,
+	dependencies: CleanupApplicationDependencies,
+): Promise<CleanupPreview> {
+	const runner = dependencies.cleanupRunner ?? cleanupRun;
+	const durableStatus = await (dependencies.readStatus ?? readCleanupDurableStatus)(request.planDirectory);
+	const graph = buildGraph(request.planDirectory);
+	const selection = selectCleanupPlanIds(graph, request);
+	const outcomes: CleanupPreviewOutcome[] = [];
+	for (const planId of selection.selectedPlanIds) {
+		const status = graph.plans.find((plan) => plan.id === planId)?.status;
+		const result = await runner({
+			repo: request.repositoryRoot,
+			planDir: request.planDirectory,
+			plan: planId,
+			dryRun: true,
+			includeFailed: status === "BLOCKED" || status === "REJECTED",
+			finalize: false,
+			handoffTarget: null,
+			pretty: false,
+		});
+		outcomes.push({ planId, status: status === "DONE" || status === "BLOCKED" || status === "REJECTED" ? status : "UNKNOWN", result });
+	}
+	if (outcomes.length === 0) {
+		const result = await runner({
+			repo: request.repositoryRoot,
+			planDir: request.planDirectory,
+			...(request.planId === undefined ? {} : { plan: cleanupPlanId(request.planId) }),
+			dryRun: true,
+			includeFailed: false,
+			finalize: false,
+			handoffTarget: null,
+			pretty: false,
+		});
+		outcomes.push({
+			planId: result.plan ?? "RUN",
+			status: result.plan ? cleanupResultStatus(result, graph) : "UNKNOWN",
+			result,
+		});
+	}
+	const skippedPlanIds = [...new Set(outcomes.flatMap((outcome) => outcome.result.skipped
+		.map((item) => typeof item.plan === "string" ? item.plan : "")
+		.filter(Boolean)))].sort();
+	const blockers = cleanupReasons(outcomes);
+	if (!CLEANUP_TERMINAL_STATUSES.has(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
+	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0);
+	if (selection.selectedPlanIds.length > 0 && !hasActions) blockers.push("no-eligible-actions");
+	const normalizedPreview = stableJson({
+		durableStatus,
+		selectedPlanIds: selection.selectedPlanIds,
+		failedPlanIds: selection.failedPlanIds,
+		outcomes: outcomes.map((outcome) => ({ planId: outcome.planId, status: outcome.status, result: outcome.result })),
+	});
+	return {
+		version: 1,
+		durableStatus,
+		terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
+		canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions,
+		selectedPlanIds: selection.selectedPlanIds,
+		failedPlanIds: selection.failedPlanIds,
+		skippedPlanIds,
+		outcomes,
+		blockers: [...new Set(blockers)],
+		normalizedPreview,
+	};
+}
+
+export async function previewHerderCleanup(
+	request: CleanupApplicationRequest,
+	dependencies: CleanupApplicationDependencies = {},
+): Promise<CleanupPreview> {
+	return buildCleanupPreview(request, dependencies);
+}
+
+export async function applyHerderCleanup(
+	request: CleanupApplicationRequest,
+	expectedPreview: CleanupPreview,
+	dependencies: CleanupApplicationDependencies = {},
+): Promise<CleanupApplyResult> {
+	if (!expectedPreview.canApply) return { ...expectedPreview, executed: false };
+	const runExclusion = dependencies.withExclusion ?? withServiceExclusion;
+	return runExclusion(request.planDirectory, async () => {
+		const fresh = await buildCleanupPreview(request, dependencies);
+		if (!fresh.terminal || fresh.durableStatus !== expectedPreview.durableStatus) {
+			throw new Error("Cleanup run status changed after confirmation; cleanup was not applied.");
+		}
+		if (fresh.normalizedPreview !== expectedPreview.normalizedPreview) {
+			throw new Error("Cleanup preview changed after confirmation; cleanup was not applied.");
+		}
+		const runner = dependencies.cleanupRunner ?? cleanupRun;
+		const graph = buildGraph(request.planDirectory);
+		const applied: CleanupPreviewOutcome[] = [];
+		for (const outcome of fresh.outcomes.filter((candidate) => fresh.selectedPlanIds.includes(candidate.planId))) {
+			const status = graph.plans.find((plan) => plan.id === outcome.planId)?.status;
+			if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") continue;
+			const result = await runner({
+				repo: request.repositoryRoot,
+				planDir: request.planDirectory,
+				plan: outcome.planId,
+				dryRun: false,
+				includeFailed: status === "BLOCKED" || status === "REJECTED",
+				finalize: false,
+				handoffTarget: null,
+				pretty: false,
+			});
+			applied.push({ ...outcome, result });
+		}
+		return { ...fresh, outcomes: applied, executed: applied.some((outcome) => outcome.result.removed.length > 0) };
+	});
+}
+
+export const previewCleanup = previewHerderCleanup;
+export const applyCleanup = applyHerderCleanup;
 
 export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);

@@ -11,7 +11,15 @@ import {
 	submitHerderVerification,
 	waitHerderOperation,
 } from "../src/application/tools.ts";
-import { parseFireArguments, parseGrillPlanTarget, parsePlanDirArguments, type FireOptions } from "./arguments.ts";
+import {
+	parseCleanupArguments,
+	parseFireArguments,
+	parseGrillPlanTarget,
+	parsePlanDirArguments,
+	type FireOptions,
+} from "./arguments.ts";
+import { runCleanupCommand } from "./cleanup-command.ts";
+import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
 import {
 	activeModelMatches,
 	loadPiProfile,
@@ -86,6 +94,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 
 export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFactory: HerderPiWorkerFactory): void {
 	registerWorkerTranscriptRenderers(pi);
+	registerCleanupTranscriptRenderer(pi);
 	const engine = new PiWorkerEngine(sessionFactory);
 	const widget = new HerderWidget();
 	const workers = new Map<string, WorkerBinding>();
@@ -454,6 +463,23 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return `Herder dashboard: ${reply.dashboardUrl || "unavailable"}`;
 	};
 
+	const cleanup = async (args: string, ctx: ExtensionContext): Promise<string> => {
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder cleanup.");
+		const parsed = parseCleanupArguments(args);
+		const repoRoot = await repositoryRoot(ctx);
+		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
+		const result = await runCleanupCommand(parsed, {
+			repositoryRoot: repoRoot,
+			planDirectory: planDir,
+			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
+			appendEntry: (entry) => {
+				try { pi.appendEntry(HERDER_CLEANUP_ENTRY, entry); }
+				catch { /* Cleanup remains authoritative even if transcript rendering is unavailable. */ }
+			},
+		});
+		return result.message;
+	};
+
 	const stop = async (): Promise<string> => {
 		if (!currentState) return "No active Herder run.";
 		return enqueueManager(async () => {
@@ -494,6 +520,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerCommand("herder-revise", { description: "Adopt a validated new plan-graph generation.", handler: command((args, ctx) => launch(parseFireArguments(args, "revise"), ctx)) });
 	pi.registerCommand("herder-status", { description: "Show Herder manager and plan status.", handler: command((args, ctx) => status(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-dashboard", { description: "Open the manager-hosted Herder dashboard.", handler: command((args, ctx) => dashboard(parsePlanDirArguments(args).planDir, ctx)) });
+	pi.registerCommand("herder-cleanup", { description: "Preview and confirm safe cleanup of completed Herder plan worktrees.", handler: command(cleanup) });
 	pi.registerCommand("herder-stop", {
 		description: "Stop active Herder workers and preserve repository state.",
 		handler: async (_args, ctx) => {
