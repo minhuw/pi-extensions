@@ -39,6 +39,15 @@ test("Pi resolves profile models into three generic package agents", async () =>
 	assert.equal(comet.roles["plan-reviewer"].model, "kimi-k3");
 	assert.equal(comet.roles["plan-judge"].model, "kimi-k3");
 
+	const maxi = await loadPiProfile(catalog, "maxi");
+	assert.deepEqual(maxi.orchestrator, { model: "claude-fable-5", effort: "high" });
+	assert.equal(maxi.roles["plan-implementer"].model, "claude-opus-5");
+	assert.equal(maxi.roles["plan-implementer"].effort, "high");
+	assert.equal(maxi.roles["plan-reviewer"].model, "gpt-5.6-sol");
+	assert.equal(maxi.roles["plan-reviewer"].effort, "xhigh");
+	assert.equal(maxi.roles["plan-judge"].model, "claude-fable-5");
+	assert.equal(maxi.roles["plan-judge"].effort, "high");
+
 	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
 	assert.deepEqual(profile.roles, registryProfile.roles);

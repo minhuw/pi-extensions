@@ -36,8 +36,8 @@ function run(...args: string[]): unknown {
 }
 
 test("profile registry exposes the supported Pi profiles", () => {
-	assert.deepEqual(run("check"), { ok: true, profiles: 3 });
-	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "comet"]);
+	assert.deepEqual(run("check"), { ok: true, profiles: 4 });
+	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "comet", "maxi"]);
 
 	const eclipse = run("resolve");
 	assert.equal(eclipse.profile, "eclipse");
@@ -62,6 +62,24 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.equal(comet.roles["plan-implementer"].model, "grok-4.5");
 	assert.equal(comet.roles["plan-reviewer"].model, "kimi-k3");
 	assert.equal(comet.roles["plan-judge"].model, "kimi-k3");
+
+	const maxi = run("resolve", "--host", "pi", "--profile", "maxi");
+	assert.deepEqual(maxi.orchestrator, { model: "claude-fable-5", effort: "high" });
+	assert.deepEqual(maxi.roles["plan-implementer"], {
+		agent_type: "herder.plan-implementer",
+		model: "claude-opus-5",
+		effort: "high",
+	});
+	assert.deepEqual(maxi.roles["plan-reviewer"], {
+		agent_type: "herder.plan-reviewer",
+		model: "gpt-5.6-sol",
+		effort: "xhigh",
+	});
+	assert.deepEqual(maxi.roles["plan-judge"], {
+		agent_type: "herder.plan-judge",
+		model: "claude-fable-5",
+		effort: "high",
+	});
 
 	const unsupported = spawnSync(process.execPath, [registry, "resolve", "--host", "codex"], { encoding: "utf8" });
 	assert.equal(unsupported.status, 2);
