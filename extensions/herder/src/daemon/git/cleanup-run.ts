@@ -18,8 +18,7 @@ export interface CleanupInput {
   plan?: string | null
   dryRun: boolean
   includeFailed: boolean
-  finalize: boolean
-  handoffTarget?: string | null
+  deep: boolean
   expectedPlanStatuses?: Record<string, "DONE" | "BLOCKED" | "REJECTED">
   pretty?: boolean
 }
@@ -37,32 +36,25 @@ export interface CleanupResult {
   plan: string | null
   dryRun: boolean
   includeFailed: boolean
-  finalize: boolean
-  handoffTarget: string | null
+  deep: boolean
   actions: CleanupDetail[]
   removed: CleanupDetail[]
   skipped: CleanupDetail[]
-  finalization: {
+  destruction: {
     requested: boolean
     eligible: boolean
     blockers: CleanupDetail[]
     refsPlanned: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
     refsRemoved: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
-  }
-  handoff: {
-    requested: boolean
-    targetBranch: string | null
-    targetHead: string | null
-    eligible: boolean
-    blockers: CleanupDetail[]
     integrationWorktree: string | null
-    removed: boolean
+    integrationRemoved: boolean
+    planDirectoryRemoved: boolean
   }
   preserved: {
     integrationBranch: string | null
     integrationWorktree: string | null
     coordinationRefs: string | null
-    logs: boolean
+    planDirectory: boolean
   }
 }
 interface WorktreeRecord { path: string; branch: string; locked: boolean }
@@ -99,32 +91,33 @@ function takeValue(args: string[], index: number, name: string): string {
 }
 
 function parseArguments(argv: string[]): CleanupInput {
-  const options: Partial<CleanupInput> & Pick<CleanupInput, "dryRun" | "includeFailed" | "finalize" | "pretty"> = {
+  const options: Partial<CleanupInput> & Pick<CleanupInput, "dryRun" | "includeFailed" | "deep" | "pretty"> = {
     planName: null,
     plan: null,
     dryRun: false,
     includeFailed: false,
-    finalize: false,
-    handoffTarget: null,
+    deep: false,
     pretty: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (["--dry-run", "--include-failed", "--finalize", "--pretty"].includes(argument)) {
+    if (["--dry-run", "--include-failed", "--deep", "--pretty"].includes(argument)) {
       if (argument === "--dry-run") options.dryRun = true
       else if (argument === "--include-failed") options.includeFailed = true
-      else if (argument === "--finalize") options.finalize = true
+      else if (argument === "--deep") options.deep = true
       else options.pretty = true
       continue
     }
-    if (["--repo", "--plan-dir", "--plan-name", "--plan", "--handoff-target"].includes(argument)) {
+    if (argument === "--finalize" || argument === "--handoff-target") {
+      fail(`${argument} was removed; use --deep for destructive plan-set cleanup`)
+    }
+    if (["--repo", "--plan-dir", "--plan-name", "--plan"].includes(argument)) {
       const value = takeValue(argv, index, argument)
       index += 1
       if (argument === "--repo") options.repo = value
       else if (argument === "--plan-dir") options.planDir = value
       else if (argument === "--plan-name") options.planName = value
-      else if (argument === "--plan") options.plan = value
-      else options.handoffTarget = value
+      else options.plan = value
       continue
     }
     fail(`Unknown argument: ${argument}`)
@@ -135,8 +128,7 @@ function parseArguments(argv: string[]): CleanupInput {
   ]) {
     if (!value) fail(`${name} is required`)
   }
-  if (options.finalize && options.plan) fail("--finalize cannot be combined with --plan")
-  if (options.handoffTarget && !options.finalize) fail("--handoff-target requires --finalize")
+  if (options.deep && options.plan) fail("--deep is plan-set-level and cannot be combined with --plan")
   return options as CleanupInput
 }
 
@@ -330,11 +322,12 @@ export function cleanupRun(input: CleanupInput) {
   const integrationBranch = `herder/${planName}/integration`
   runGit(repoRoot, ["check-ref-format", "--branch", integrationBranch])
   const integrationRef = `refs/heads/${integrationBranch}`
-  runGit(repoRoot, ["show-ref", "--verify", integrationRef])
-  const integrationHead = runGit(repoRoot, ["rev-parse", integrationRef]).stdout.trim()
+  const integrationRefResult = runGit(repoRoot, ["show-ref", "--verify", integrationRef], { allowFailure: true })
+  if (integrationRefResult.status !== 0 && !input.deep) fail(`Integration branch does not exist: ${integrationBranch}`)
+  const integrationHead = integrationRefResult.status === 0 ? runGit(repoRoot, ["rev-parse", integrationRef]).stdout.trim() : ""
   const graph = buildGraph(planDir)
   const planFilter = input.plan ? canonicalPlanId(input.plan) : null
-  if (input.finalize && planFilter) fail("--finalize cannot be combined with --plan")
+  if (input.deep && planFilter) fail("--deep is plan-set-level and cannot be combined with --plan")
   if (planFilter && !graph.plans.some((plan) => plan.id === planFilter)) fail(`Plan ${planFilter} is not indexed in ${graph.readme}`)
 
   const statusSnapshot = (value: typeof graph): string => JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: plan.status })))
@@ -357,22 +350,11 @@ export function cleanupRun(input: CleanupInput) {
   const plans = new Map(graph.plans.map((plan) => [plan.id, plan]))
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
   const completionRefs = listCompletionRefs(repoRoot, planName)
-  const completionProofsForRun = completionProofs(repoRoot, integrationHead, completionRefs)
+  const completionProofsForRun = integrationHead ? completionProofs(repoRoot, integrationHead, completionRefs) : new Set<string>()
   const worktrees = new Map(parseWorktrees(repoRoot).filter((item) => item.branch).map((item) => [item.branch, item]))
   const actions: CleanupDetail[] = []
   const skipped: CleanupDetail[] = []
   const planBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
-
-  let handoffTarget: string | null = null
-  let handoffTargetHead: string | null = null
-  if (input.handoffTarget) {
-    if (input.handoffTarget === integrationBranch) fail("--handoff-target must differ from the integration branch")
-    runGit(repoRoot, ["check-ref-format", "--branch", input.handoffTarget])
-    const handoffRef = `refs/heads/${input.handoffTarget}`
-    runGit(repoRoot, ["show-ref", "--verify", handoffRef])
-    handoffTarget = input.handoffTarget
-    handoffTargetHead = runGit(repoRoot, ["rev-parse", handoffRef]).stdout.trim()
-  }
 
   for (const item of planBranches) {
     const identity = planBranchIdentity(item.relative)
@@ -402,8 +384,7 @@ export function cleanupRun(input: CleanupInput) {
         proof = "superseded-by-completion"
       }
       mode = "completed-plan"
-    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED")
-      && (input.includeFailed || (input.finalize && plan.status === "REJECTED"))) {
+    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED") && input.includeFailed) {
       mode = "failed-evidence"
     } else {
       skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, reason: "preserved-non-done-evidence" })
@@ -438,176 +419,99 @@ export function cleanupRun(input: CleanupInput) {
     })
   }
 
-  const finalization: {
+  const integrationWorktree = worktrees.get(integrationBranch)
+  const destruction: {
     requested: boolean
     eligible: boolean
     blockers: CleanupDetail[]
     refsPlanned: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
     refsRemoved: Array<{ ref: string; target: string; kind: CoordinationRef["kind"]; plan?: string }>
+    integrationWorktree: string | null
+    integrationRemoved: boolean
+    planDirectoryRemoved: boolean
   } = {
-    requested: Boolean(input.finalize),
-    eligible: false,
-    blockers: [],
-    refsPlanned: [],
-    refsRemoved: [],
+    requested: Boolean(input.deep), eligible: false, blockers: [], refsPlanned: [], refsRemoved: [],
+    integrationWorktree: integrationWorktree?.path ?? null, integrationRemoved: false, planDirectoryRemoved: false,
   }
-  if (input.finalize) {
-    const terminal = new Set(["DONE", "REJECTED"])
-    const allPlansTerminal = graph.plans.every((plan) => terminal.has(plan.status))
-    const alreadyFinalized = allPlansTerminal && planBranches.length === 0 && coordinationRefs.length === 0
-    if (!alreadyFinalized && !coordinationRefs.some((item) => item.kind === "base")) {
-      finalization.blockers.push({ reason: "base-ref-missing", ref: `refs/plan-herder/${planName}/base` })
-    }
-    for (const plan of graph.plans) {
-      if (!terminal.has(plan.status)) {
-        finalization.blockers.push({ reason: "plan-not-terminal", plan: plan.id, status: plan.status })
-      } else if (!alreadyFinalized && plan.status === "DONE" && !completionProofsForRun.has(plan.id)) {
-        finalization.blockers.push({ reason: "completion-proof-missing", plan: plan.id, status: plan.status })
+  if (input.deep) {
+    const terminal = new Set(["DONE", "BLOCKED", "REJECTED"])
+    if (!graph.plans.every((plan) => terminal.has(plan.status))) {
+      for (const plan of graph.plans.filter((item) => !terminal.has(item.status))) {
+        destruction.blockers.push({ reason: "plan-not-terminal", plan: plan.id, status: plan.status })
       }
     }
-
+    if (!integrationHead) destruction.blockers.push({ reason: "integration-branch-missing", branch: integrationBranch })
+    const currentHeadResult = runGit(repoRoot, ["rev-parse", "HEAD"], { allowFailure: true })
+    const currentBranchResult = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+    if (currentBranchResult.status !== 0) destruction.blockers.push({ reason: "detached-head" })
+    else if (integrationHead && currentHeadResult.status === 0 && !isAncestor(repoRoot, integrationHead, currentHeadResult.stdout.trim())) {
+      destruction.blockers.push({ reason: "integration-not-ancestor-of-current", integrationHead, currentHead: currentHeadResult.stdout.trim() })
+    }
+    if (!integrationWorktree) destruction.blockers.push({ reason: "integration-worktree-missing" })
+    else {
+      const integrationPath = realpathIfPresent(integrationWorktree.path)
+      if (integrationPath === repoRoot) destruction.blockers.push({ reason: "integration-is-user-checkout", worktree: integrationWorktree.path })
+      else {
+        const state = worktreeStatus(repoRoot, integrationWorktree)
+        if (state.locked) destruction.blockers.push({ reason: "integration-worktree-locked", worktree: state.path })
+        else if (state.missing) destruction.blockers.push({ reason: "integration-worktree-missing", worktree: state.path })
+        else if (!state.clean) destruction.blockers.push({ reason: "integration-worktree-dirty", worktree: state.path })
+      }
+    }
     const removableBranches = new Set(actions.map((action) => action.branch))
     for (const item of planBranches) {
       if (!removableBranches.has(item.branch)) {
         const skip = skipped.find((candidate) => candidate.branch === item.branch)
-        finalization.blockers.push({
-          reason: "plan-branch-would-remain",
-          branch: item.branch,
-          detail: skip?.reason ?? "not-eligible",
-        })
+        destruction.blockers.push({ reason: "plan-branch-would-remain", branch: item.branch, detail: skip?.reason ?? "not-eligible" })
       }
     }
-
     for (const item of coordinationRefs) {
-      if (!item.kind) {
-        finalization.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
-        continue
-      }
-      if (item.kind === "base") {
-        if (!isAncestor(repoRoot, item.target, integrationHead)) {
-          finalization.blockers.push({ reason: "base-ref-not-reachable", ref: item.ref, target: item.target })
-          continue
-        }
-      } else if (item.plan) {
-        const plan = plans.get(item.plan)
-        if (!plan) {
-          finalization.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.plan })
-          continue
-        }
-        if (item.kind === "completed") {
-          if (plan.status !== "DONE") {
-            finalization.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan })
-            continue
-          }
-          const proof = inspectCompletionProof(repoRoot, item.ref)
-          if (!proof.ok || proof.payload.planId !== item.plan) {
-            finalization.blockers.push({
-              reason: "completion-approval-proof-invalid",
-              ref: item.ref,
-              detail: proof.ok === false ? proof.error : "plan identity mismatch",
-            })
-            continue
-          }
-          if (!isAncestor(repoRoot, proof.object, integrationHead)) {
-            finalization.blockers.push({ reason: "completion-ref-not-reachable", ref: item.ref, target: proof.object })
-            continue
-          }
-        }
-      }
-      finalization.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
+      if (!item.kind) destruction.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
+      else destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
     }
-    finalization.eligible = finalization.blockers.length === 0
-  }
-
-  const integrationWorktree = worktrees.get(integrationBranch)
-  const handoff: {
-    requested: boolean
-    targetBranch: string | null
-    targetHead: string | null
-    eligible: boolean
-    blockers: CleanupDetail[]
-    integrationWorktree: string | null
-    removed: boolean
-  } = {
-    requested: Boolean(handoffTarget),
-    targetBranch: handoffTarget,
-    targetHead: handoffTargetHead,
-    eligible: false,
-    blockers: [],
-    integrationWorktree: integrationWorktree?.path ?? null,
-    removed: false,
-  }
-  if (handoffTarget) {
-    if (!finalization.eligible) {
-      handoff.blockers.push({ reason: "finalization-ineligible" })
+    if (!coordinationRefs.some((item) => item.kind === "base")) {
+      destruction.blockers.push({ reason: "base-ref-missing", ref: `refs/plan-herder/${planName}/base` })
     }
-    if (!isAncestor(repoRoot, integrationHead, handoffTargetHead!)) {
-      handoff.blockers.push({
-        reason: "handoff-target-does-not-contain-integration",
-        targetBranch: handoffTarget,
-        targetHead: handoffTargetHead,
-        integrationHead,
-      })
-    }
-    if (integrationWorktree) {
-      const integrationPath = fs.existsSync(integrationWorktree.path)
-        ? fs.realpathSync(integrationWorktree.path)
-        : integrationWorktree.path
-      if (integrationPath === repoRoot) {
-        handoff.blockers.push({ reason: "integration-is-user-checkout", worktree: integrationWorktree.path })
-      } else {
-        const state = worktreeStatus(repoRoot, integrationWorktree)
-        if (state.locked) handoff.blockers.push({ reason: "integration-worktree-locked", worktree: state.path })
-        else if (state.missing) handoff.blockers.push({ reason: "integration-worktree-missing", worktree: state.path })
-        else if (!state.clean) handoff.blockers.push({ reason: "integration-worktree-dirty", worktree: state.path })
+    if (graph.plans.some((plan) => plan.status === "DONE" && !completionProofsForRun.has(plan.id))) {
+      for (const plan of graph.plans.filter((item) => item.status === "DONE" && !completionProofsForRun.has(item.id))) {
+        destruction.blockers.push({ reason: "completion-proof-missing", plan: plan.id })
       }
     }
-    handoff.eligible = handoff.blockers.length === 0
+    destruction.eligible = destruction.blockers.length === 0
   }
 
   const removed: CleanupDetail[] = []
   if (!input.dryRun) {
     assertPlanStatusesUnchanged()
+    if (input.deep) {
+      if (!destruction.eligible) fail(`Deep cleanup preflight failed: ${destruction.blockers.map((item) => item.reason).join(", ")}`)
+      // Revalidate all deep preconditions before the first mutation.
+      const fresh = cleanupRun({ ...input, dryRun: true })
+      if (!fresh.destruction.eligible) fail(`Deep cleanup preflight changed: ${fresh.destruction.blockers.map((item) => item.reason).join(", ")}`)
+    }
     for (const action of actions) {
       assertPlanStatusesUnchanged()
       if (action.worktree) removeOwnedWorktree(repoRoot, action.worktree)
       deleteBranchIfPresent(repoRoot, action.branch, action.head)
       removed.push(action)
     }
-    if (finalization.eligible) {
-      assertPlanStatusesUnchanged()
-      const remainingBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
-      if (remainingBranches.length > 0) {
-        fail(`Cannot finalize while plan branches remain: ${remainingBranches.map((item) => item.branch).join(", ")}`)
+    if (input.deep) {
+      const currentRefs = listCoordinationRefs(repoRoot, planName)
+      if (JSON.stringify(currentRefs.map((item) => `${item.ref}\t${item.target}`).sort()) !== JSON.stringify(destruction.refsPlanned.map((item) => `${item.ref}\t${item.target}`).sort())) {
+        fail("Deep cleanup coordination refs changed after preflight")
       }
-      const currentCoordinationRefs = listCoordinationRefs(repoRoot, planName)
-      const expectedRefs = finalization.refsPlanned.map((item) => `${item.ref}\t${item.target}`).sort()
-      const currentRefs = currentCoordinationRefs.map((item) => `${item.ref}\t${item.target}`).sort()
-      if (JSON.stringify(currentRefs) !== JSON.stringify(expectedRefs)) {
-        fail("Cannot finalize because coordination refs changed after preflight")
-      }
-      for (const item of finalization.refsPlanned) {
+      for (const item of destruction.refsPlanned) {
         runGit(repoRoot, ["update-ref", "-d", item.ref, item.target])
-        finalization.refsRemoved.push(item)
-      }
-      const remainingCoordinationRefs = listCoordinationRefs(repoRoot, planName)
-      if (remainingCoordinationRefs.length > 0) {
-        fail(`Cannot finalize while coordination refs remain: ${remainingCoordinationRefs.map((item) => item.ref).join(", ")}`)
-      }
-    }
-    if (handoff.eligible) {
-      assertPlanStatusesUnchanged()
-      const currentTargetHead = runGit(repoRoot, ["rev-parse", `refs/heads/${handoffTarget}`]).stdout.trim()
-      if (!isAncestor(repoRoot, integrationHead, currentTargetHead)) {
-        fail(`Cannot remove integration because ${handoffTarget} no longer contains ${integrationHead}`)
+        destruction.refsRemoved.push(item)
       }
       if (integrationWorktree) {
         assertNotUserCheckout(repoRoot, integrationWorktree.path)
         removeOwnedWorktree(repoRoot, integrationWorktree.path)
       }
       deleteBranchIfPresent(repoRoot, integrationBranch, integrationHead)
-      handoff.targetHead = currentTargetHead
-      handoff.removed = true
+      destruction.integrationRemoved = true
+      fs.rmSync(planDir, { recursive: true, force: true })
+      destruction.planDirectoryRemoved = true
     }
   }
 
@@ -620,20 +524,16 @@ export function cleanupRun(input: CleanupInput) {
     plan: planFilter,
     dryRun: Boolean(input.dryRun),
     includeFailed: Boolean(input.includeFailed),
-    finalize: Boolean(input.finalize),
-    handoffTarget,
+    deep: Boolean(input.deep),
     actions,
     removed,
     skipped,
-    finalization,
-    handoff,
+    destruction,
     preserved: {
-      integrationBranch: handoff.removed ? null : integrationBranch,
-      integrationWorktree: handoff.removed ? null : integrationWorktree?.path ?? null,
-      coordinationRefs: input.finalize && finalization.eligible && !input.dryRun
-        ? null
-        : `refs/plan-herder/${planName}/`,
-      logs: true,
+      integrationBranch: destruction.integrationRemoved ? null : integrationBranch,
+      integrationWorktree: destruction.integrationRemoved ? null : integrationWorktree?.path ?? null,
+      coordinationRefs: destruction.requested && destruction.eligible && !input.dryRun ? null : `refs/plan-herder/${planName}/`,
+      planDirectory: !destruction.planDirectoryRemoved,
     },
   }
 }

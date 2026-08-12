@@ -19,13 +19,13 @@ export interface CleanupCommandOptions {
 	planDir: string;
 	planId?: string;
 	includeFailed: boolean;
-	finalize: boolean;
-	handoffTarget?: string;
+	deep: boolean;
 }
 
 export const HERDER_CLEANUP_COMMAND_USAGE = [
 	"Usage:",
-	"  /herder-cleanup [plan-dir] [--plan <id>] [--finalize] [--handoff-target <branch>] [--include-failed]",
+	"  /herder-cleanup [plan-dir] [--plan <id>] [--include-failed]",
+	"  /herder-cleanup [plan-dir] --deep [--include-failed]",
 ].join("\n");
 
 export interface GrillPlanTarget {
@@ -180,8 +180,7 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 	let planDir = "herder-plans";
 	let planId: string | undefined;
 	let includeFailed = false;
-	let finalize = false;
-	let handoffTarget: string | undefined;
+	let deep = false;
 	let positional = false;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
@@ -190,16 +189,13 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 			includeFailed = true;
 			continue;
 		}
-		if (argument === "--finalize") {
-			if (finalize) throw new Error("--finalize was provided more than once.");
-			finalize = true;
+		if (argument === "--deep") {
+			if (deep) throw new Error("--deep was provided more than once.");
+			deep = true;
 			continue;
 		}
-		if (argument === "--handoff-target") {
-			if (handoffTarget !== undefined) throw new Error("--handoff-target was provided more than once.");
-			handoffTarget = valueAfter(tokens, index, argument);
-			index += 1;
-			continue;
+		if (argument === "--finalize" || argument === "--handoff-target") {
+			throw new Error(`${argument} was removed; use --deep for destructive plan-set cleanup.\n${HERDER_CLEANUP_COMMAND_USAGE}`);
 		}
 		if (argument === "--plan") {
 			if (planId !== undefined) throw new Error("--plan was provided more than once.");
@@ -214,15 +210,8 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 		planDir = argument;
 		positional = true;
 	}
-	if (finalize && planId !== undefined) throw new Error("--finalize cannot be combined with --plan.");
-	if (handoffTarget !== undefined && !finalize) throw new Error("--handoff-target requires --finalize.");
-	return {
-		planDir,
-		...(planId === undefined ? {} : { planId }),
-		includeFailed,
-		finalize,
-		...(handoffTarget === undefined ? {} : { handoffTarget }),
-	};
+	if (deep && planId !== undefined) throw new Error("--deep is plan-set-level and cannot be combined with --plan.");
+	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed, deep };
 }
 
 

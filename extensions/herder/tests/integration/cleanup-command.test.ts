@@ -98,14 +98,12 @@ function mockedCleanupResult(input: CleanupInput): CleanupResult {
 		plan,
 		dryRun: input.dryRun,
 		includeFailed: input.includeFailed,
-		finalize: input.finalize,
-		handoffTarget: input.handoffTarget ?? null,
+		deep: input.deep,
 		actions: plan ? [{ plan, branch: `herder/${planName}/${plan}`, mode: input.includeFailed ? "failed-evidence" : "completed-plan" }] : [],
 		removed: !input.dryRun && plan ? [{ plan }] : [],
 		skipped: [],
-		finalization: { requested: false, eligible: false, blockers: [], refsPlanned: [], refsRemoved: [] },
-		handoff: { requested: false, targetBranch: null, targetHead: null, eligible: false, blockers: [], integrationWorktree: null, removed: false },
-		preserved: { integrationBranch: `herder/${planName}/integration`, integrationWorktree: null, coordinationRefs: `refs/plan-herder/${planName}/`, logs: true },
+		destruction: { requested: input.deep, eligible: false, blockers: [], refsPlanned: [], refsRemoved: [], integrationWorktree: null, integrationRemoved: false, planDirectoryRemoved: false },
+		preserved: { integrationBranch: `herder/${planName}/integration`, integrationWorktree: null, coordinationRefs: `refs/plan-herder/${planName}/`, planDirectory: true },
 	};
 }
 
@@ -302,114 +300,42 @@ test("confirmed cleanup removes only the eligible completed plan and records bou
 	}
 });
 
-test("confirmed finalize removes coordination refs while preserving integration", async () => {
+test("confirmed deep cleanup removes the complete plan set after integration reaches the current branch", async () => {
 	const fixture = setup();
 	try {
+		command(fixture.repo, ["merge", "-q", "--no-edit", "herder/herder-plans/integration"]);
 		const entries: unknown[] = [];
 		const confirmations: string[] = [];
-		const result = await runCleanupCommand("--finalize", {
+		const result = await runCleanupCommand("--deep", {
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDir,
-			confirm: async (title) => {
-				confirmations.push(title);
-				return true;
-			},
+			confirm: async (title) => { confirmations.push(title); return true; },
 			appendEntry: (entry) => entries.push(entry),
 		});
-		assert.equal(result.cancelled, false);
 		assert.equal(result.applied?.executed, true);
-		assert.match(result.message, /Cleanup finalized/);
-		assert.deepEqual(confirmations, ["Finalize Herder cleanup?"]);
+		assert.deepEqual(confirmations, ["Deep-clean Herder plan set?"]);
 		assert.equal(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
-		assert.equal(fs.existsSync(fixture.completed), false);
-		assert.notEqual(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
-		assert.equal(fs.existsSync(fixture.integration), true);
-		assert.notEqual(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
-		assert.notEqual(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/completed/001"], true).status, 0);
-		assert.equal(entries.length, 1);
-		const entry = entries[0] as Record<string, unknown>;
-		assert.equal(entry.finalize, true);
-		assert.deepEqual(entry.plannedRefs, ["base", "completed:001"]);
-		assert.deepEqual(entry.removedRefs, ["base", "completed:001"]);
-		assert.equal(entry.integration, "preserved");
-		assert.equal(Object.hasOwn(entry, "paths"), false);
-		assert.equal(Object.hasOwn(entry, "hashes"), false);
-	} finally {
-		fs.rmSync(fixture.root, { recursive: true, force: true });
-	}
-});
-
-test("handoff removes only the unchanged integration branch and leaves the target untouched", async () => {
-	const fixture = setup();
-	try {
-		const target = "handoff-target";
-		const integrationBranch = "herder/herder-plans/integration";
-		command(fixture.repo, ["branch", target, integrationBranch]);
-		const targetHead = git(fixture.repo, "rev-parse", `refs/heads/${target}`);
-		const result = await runCleanupCommand(`--finalize --handoff-target ${target}`, {
-			repositoryRoot: fixture.repo,
-			planDirectory: fixture.planDir,
-			confirm: async () => true,
-		});
-		assert.equal(result.applied?.executed, true);
-		assert.equal(result.applied?.outcomes[0]?.result.handoff.removed, true);
-		assert.equal(git(fixture.repo, "rev-parse", `refs/heads/${target}`), targetHead);
-		assert.equal(git(fixture.repo, "branch", "--list", integrationBranch), "");
+		assert.equal(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
 		assert.equal(fs.existsSync(fixture.integration), false);
-		assert.notEqual(git(fixture.repo, "branch", "--list", target), "");
-	} finally {
-		fs.rmSync(fixture.root, { recursive: true, force: true });
-	}
+		assert.equal(fs.existsSync(fixture.planDir), false);
+		assert.notEqual(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
+		assert.equal((entries[0] as Record<string, unknown>).deep, true);
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
-test("handoff target scheduled for cleanup is preview-blocked without mutation", async () => {
+test("deep cleanup blocks when integration is not merged into the current branch", async () => {
 	const fixture = setup();
 	try {
 		let confirmations = 0;
-		const completionRef = "refs/plan-herder/herder-plans/completed/001";
-		const result = await runCleanupCommand(`--finalize --handoff-target ${fixture.planBranch}`, {
+		const result = await runCleanupCommand("--deep", {
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDir,
-			confirm: async () => {
-				confirmations += 1;
-				return true;
-			},
+			confirm: async () => { confirmations += 1; return true; },
 		});
-		assert.equal(result.cancelled, false);
 		assert.equal(result.preview.canApply, false);
 		assert.equal(confirmations, 0);
-		assert.match(result.message, /handoff-target-overlaps-cleanup/);
-		assert.equal(git(fixture.repo, "rev-parse", `refs/heads/${fixture.planBranch}`), fixture.completedHead);
-		assert.equal(fs.existsSync(fixture.completed), true);
-		assert.equal(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
-		assert.equal(command(fixture.repo, ["show-ref", "--verify", completionRef], true).status, 0);
-		assert.notEqual(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
-		assert.equal(fs.existsSync(fixture.integration), true);
-	} finally {
-		fs.rmSync(fixture.root, { recursive: true, force: true });
-	}
-});
-
-test("handoff target behind integration is preview-blocked without mutation", async () => {
-	const fixture = setup();
-	try {
-		let confirmations = 0;
-		const result = await runCleanupCommand("--finalize --handoff-target main", {
-			repositoryRoot: fixture.repo,
-			planDirectory: fixture.planDir,
-			confirm: async () => {
-				confirmations += 1;
-				return true;
-			},
-		});
-		assert.equal(result.cancelled, false);
-		assert.equal(result.preview.canApply, false);
-		assert.equal(confirmations, 0);
-		assert.match(result.message, /handoff-target-does-not-contain-integration/);
+		assert.match(result.message, /integration-not-ancestor-of-current/);
+		assert.equal(fs.existsSync(fixture.planDir), true);
 		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
-		assert.equal(fs.existsSync(fixture.completed), true);
-		assert.notEqual(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
-	} finally {
-		fs.rmSync(fixture.root, { recursive: true, force: true });
-	}
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
 });

@@ -6,15 +6,14 @@ export const HERDER_CLEANUP_ENTRY = "herder-cleanup-v1";
 const MAX_ITEMS = 32;
 const MAX_ITEM_LENGTH = 64;
 
-export type CleanupTranscriptMode = "standard" | "include-failed";
+export type CleanupTranscriptMode = "standard" | "include-failed" | "deep";
 export type CleanupTranscriptPreview = "eligible" | "preview-only" | "blocked" | "cancelled";
 export type CleanupTranscriptIntegration = "preserved" | "removed" | "blocked" | "unknown";
 
 export interface CleanupTranscriptEntry {
 	version: 1;
 	mode: CleanupTranscriptMode;
-	finalize: boolean;
-	handoffTarget: string | null;
+	deep: boolean;
 	preview: CleanupTranscriptPreview;
 	executed: boolean;
 	plannedRefs: string[];
@@ -42,8 +41,7 @@ function boundedHandoffTarget(value: string | null | undefined): string | null {
 
 export function createCleanupTranscriptEntry(input: {
 	mode: CleanupTranscriptMode;
-	finalize?: boolean;
-	handoffTarget?: string | null;
+	deep?: boolean;
 	preview: CleanupTranscriptPreview;
 	executed: boolean;
 	plannedRefs?: readonly string[];
@@ -56,8 +54,7 @@ export function createCleanupTranscriptEntry(input: {
 	return {
 		version: 1,
 		mode: input.mode,
-		finalize: Boolean(input.finalize),
-		handoffTarget: boundedHandoffTarget(input.handoffTarget),
+		deep: Boolean(input.deep),
 		preview: input.preview,
 		executed: Boolean(input.executed),
 		plannedRefs: boundedItems(input.plannedRefs),
@@ -75,7 +72,7 @@ function renderList(values: readonly string[]): string {
 
 export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry, theme: Theme): string {
 	const state = entry.executed ? theme.fg("success", "executed") : theme.fg("warning", entry.preview);
-	if (!entry.finalize) {
+	if (!entry.deep) {
 		return [
 			theme.bold("Herder cleanup"),
 			theme.fg("dim", `  ${entry.mode} · ${state}`),
@@ -84,13 +81,12 @@ export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry, theme: T
 			`  blockers: ${renderList(entry.blockers)}`,
 		].join("\n");
 	}
-	const handoff = entry.handoffTarget ? `\n  handoff target: ${entry.handoffTarget}` : "";
 	return [
 		theme.bold("Herder cleanup"),
-		theme.fg("dim", `  finalize · ${state}`),
+		theme.fg("dim", `  deep · ${state}`),
 		`  planned refs: ${renderList(entry.plannedRefs)}`,
 		`  removed refs: ${renderList(entry.removedRefs)}`,
-		`  integration: ${entry.integration}${handoff}`,
+		`  integration: ${entry.integration}`,
 		`  removed: ${renderList(entry.removed)}`,
 		`  skipped: ${renderList(entry.skipped)}`,
 		`  blockers: ${renderList(entry.blockers)}`,

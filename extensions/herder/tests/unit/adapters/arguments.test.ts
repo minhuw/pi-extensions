@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseAttachArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
+import { parseAttachArguments, parseCleanupArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../adapters/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
@@ -59,6 +59,14 @@ test("argument validation is fail-closed", () => {
 	assert.throws(() => parseFireArguments("--unknown", "fire"), /Unknown option/);
 	assert.throws(() => parseFireArguments("one two", "fire"), /Unexpected argument/);
 	assert.deepEqual(parsePlanDirArguments(""), {});
+});
+
+test("cleanup accepts ordinary and deep modes and rejects removed destructive options", () => {
+	assert.deepEqual(parseCleanupArguments("plans --plan 7 --include-failed"), { planDir: "plans", planId: "7", includeFailed: true, deep: false });
+	assert.deepEqual(parseCleanupArguments("plans --deep"), { planDir: "plans", includeFailed: false, deep: true });
+	assert.throws(() => parseCleanupArguments("--deep --plan 7"), /plan-set-level/);
+	assert.throws(() => parseCleanupArguments("--finalize"), /use --deep/);
+	assert.throws(() => parseCleanupArguments("--handoff-target main"), /use --deep/);
 });
 
 test("parses Pi-native deterministic plan commands", () => {

@@ -41,6 +41,7 @@ export interface CleanupCommandResult {
 }
 
 function modeFor(request: CleanupCommandRequest): CleanupTranscriptMode {
+	if (request.deep) return "deep";
 	return request.includeFailed ? "include-failed" : "standard";
 }
 
@@ -84,42 +85,31 @@ function safeRefLabel(item: Record<string, unknown>): string | null {
 
 function refLabels(result: CleanupPreview | CleanupApplyResult, field: "refsPlanned" | "refsRemoved"): string[] {
 	const values = resultItems(result).flatMap((item) => {
-		const refs = item.finalization[field];
+		const refs = item.destruction[field];
 		return refs.map((ref) => safeRefLabel(ref as unknown as Record<string, unknown>)).filter((value): value is string => Boolean(value));
 	});
 	return [...new Set(values)];
 }
 
-function handoffDetails(result: CleanupPreview | CleanupApplyResult): {
-	target: string | null;
-	requested: boolean;
-	eligible: boolean;
-	removed: boolean;
-	blocked: boolean;
-} {
-	const handoffs = resultItems(result).map((item) => item.handoff);
-	const requested = handoffs.some((handoff) => handoff.requested);
-	const target = handoffs.find((handoff) => typeof handoff.targetBranch === "string")?.targetBranch ?? null;
+function destructionDetails(result: CleanupPreview | CleanupApplyResult) {
+	const items = resultItems(result).map((item) => item.destruction);
 	return {
-		target,
-		requested,
-		eligible: requested && handoffs.every((handoff) => !handoff.requested || handoff.eligible),
-		removed: handoffs.some((handoff) => handoff.removed),
-		blocked: handoffs.some((handoff) => handoff.requested && handoff.blockers.length > 0),
+		requested: items.some((item) => item.requested),
+		eligible: items.every((item) => !item.requested || item.eligible),
+		removed: items.some((item) => item.integrationRemoved),
 	};
 }
 
 function integrationState(result: CleanupPreview | CleanupApplyResult): CleanupTranscriptIntegration {
-	const handoff = handoffDetails(result);
-	if (handoff.removed) return "removed";
-	if (handoff.blocked) return "blocked";
+	const destruction = destructionDetails(result);
+	if (destruction.removed) return "removed";
+	if (destruction.requested && !destruction.eligible) return "blocked";
 	if (resultItems(result).some((item) => Boolean(item.preserved.integrationBranch || item.preserved.integrationWorktree))) return "preserved";
 	return "unknown";
 }
 
 function modeLabel(preview: CleanupPreview): string {
-	const finalize = resultItems(preview).some((item) => item.finalization.requested);
-	return finalize ? "finalize" : "cleanup";
+	return destructionDetails(preview).requested ? "deep" : "cleanup";
 }
 
 function transcriptPreview(result: CleanupPreview, cancelled = false): CleanupTranscriptPreview {
@@ -137,11 +127,10 @@ function appendTranscript(
 ): void {
 	if (!dependencies.appendEntry) return;
 	const result = input.applied ?? preview;
-	const handoff = handoffDetails(result);
+	const handoff = destructionDetails(result);
 	const entry = createCleanupTranscriptEntry({
 		mode: modeFor(request),
-		finalize: Boolean(request.finalize),
-		handoffTarget: handoff.target,
+		deep: Boolean(request.deep),
 		preview: transcriptPreview(preview, input.cancelled === true),
 		executed: Boolean(input.applied?.executed),
 		plannedRefs: refLabels(result, "refsPlanned"),
@@ -168,17 +157,9 @@ function branchLabels(preview: CleanupPreview): string[] {
 		.filter((value): value is string => Boolean(value))))];
 }
 
-function finalizationSummary(preview: CleanupPreview): string {
-	const results = resultItems(preview);
-	if (!results.some((item) => item.finalization.requested)) return "not requested";
-	return results.every((item) => !item.finalization.requested || item.finalization.eligible) ? "eligible" : "blocked";
-}
-
-function handoffSummary(preview: CleanupPreview): string {
-	const handoff = handoffDetails(preview);
-	if (!handoff.requested) return "not requested";
-	if (handoff.eligible) return `${handoff.target ?? "configured"} contains integration; removal requires confirmation`;
-	return `${handoff.target ?? "configured"} blocked`;
+function deepSummary(preview: CleanupPreview): string {
+		const details = destructionDetails(preview);
+		return details.eligible ? "eligible" : "blocked";
 }
 
 export function formatCleanupPreview(preview: CleanupPreview): string {
@@ -189,24 +170,24 @@ export function formatCleanupPreview(preview: CleanupPreview): string {
 	const skippedText = skipped.length ? skipped.join(", ") : "none";
 	const blockers = preview.blockers.length ? preview.blockers.join(", ") : "none";
 	const state = preview.terminal ? "terminal" : `preview-only (${preview.durableStatus})`;
-	if (modeLabel(preview) !== "finalize") {
+	if (modeLabel(preview) !== "deep") {
 		return `Cleanup preview · ${state} · selected: ${selected}${failed} · eligible actions: ${counts.eligible} · skipped: ${skippedText} · blockers: ${blockers}.`;
 	}
 	const branches = branchLabels(preview);
 	const refs = refLabels(preview, "refsPlanned");
-	return `Cleanup preview · ${state} · mode: finalize · selected: ${selected}${failed} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · finalization: ${finalizationSummary(preview)} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: preserved until handoff · handoff: ${handoffSummary(preview)} · skipped: ${skippedText} · blockers: ${blockers}.`;
+	return `Cleanup preview · ${state} · mode: deep · selected: ${selected}${failed} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · deep cleanup: ${deepSummary(preview)} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed only by deep cleanup · skipped: ${skippedText} · blockers: ${blockers}.`;
 }
 
 export function formatCleanupApplied(preview: CleanupPreview, applied: CleanupApplyResult): string {
 	const removed = removedIds(applied);
 	const skipped = skippedIds(applied);
-	if (modeLabel(preview) !== "finalize") {
+	if (modeLabel(preview) !== "deep") {
 		return `Cleanup executed · removed: ${removed.length ? removed.join(", ") : "none"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
 	}
 	const refs = refLabels(applied, "refsRemoved");
-	const handoff = handoffDetails(applied);
+	const handoff = destructionDetails(applied);
 	const integration = integrationState(applied);
-	return `Cleanup finalized · removed: ${removed.length ? removed.join(", ") : "none"} · refs removed: ${refs.length ? refs.join(", ") : "none"} · integration: ${integration} · handoff: ${handoff.removed ? "removed" : handoff.requested ? "preserved" : "not requested"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
+	return `Deep cleanup executed · removed: ${removed.length ? removed.join(", ") : "none"} · refs removed: ${refs.length ? refs.join(", ") : "none"} · integration: ${integration} · plan directory: ${handoff.removed ? "removed" : "preserved"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
 }
 
 export function createCleanupOrchestrator(dependencies: CleanupCommandDependencies = {}): CleanupCommandOrchestrator {
@@ -226,8 +207,7 @@ export async function runCleanupCommand(
 		planDirectory: context.planDirectory,
 		...(parsed.planId === undefined ? {} : { planId: parsed.planId }),
 		includeFailed: parsed.includeFailed,
-		finalize: Boolean(parsed.finalize),
-		...(parsed.handoffTarget === undefined ? {} : { handoffTarget: parsed.handoffTarget }),
+		deep: Boolean(parsed.deep),
 	};
 	const orchestrator = createCleanupOrchestrator(context);
 	const preview = await orchestrator.preview(request);
@@ -237,7 +217,7 @@ export async function runCleanupCommand(
 	}
 
 	const confirm = context.confirm ?? (async () => false);
-	const confirmationTitle = request.finalize ? "Finalize Herder cleanup?" : "Clean up completed Herder plans?";
+	const confirmationTitle = request.deep ? "Deep-clean Herder plan set?" : "Clean up completed Herder plans?";
 	if (!(await confirm(confirmationTitle, formatCleanupPreview(preview)))) {
 		appendTranscript(request, preview, context, { cancelled: true });
 		return { message: "Cleanup cancelled; no Git mutation was applied.", preview, cancelled: true };
