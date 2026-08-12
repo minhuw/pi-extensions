@@ -115,6 +115,9 @@ function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
 	}
+	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:")) {
+		throw new Error("Manager cleanup evidence event IDs are private");
+	}
 	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
 	if (input.kind === "dispatch_results") {
 		if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
@@ -1846,15 +1849,34 @@ export class HerderRunManager {
 			const driver = this.driver(run);
 			await driver.verifyCheckout(run.checkoutStateToken);
 			const validation = this.validateRecoveryTarget(run, attention, recoveryAction, resolution);
-			const recordedCleanupStep = this.store.getAttentionCleanupStep(attention.requestId);
+			const cleanupIdentity = {
+				runId: run.runId,
+				requestId: attention.requestId,
+				requestSha256: attention.requestSha256,
+				planId: attention.planId,
+				generation: attention.generation,
+				round: attention.round,
+				assignmentPath: attention.recovery.assignmentPath,
+				assignmentSha256: attention.recovery.assignmentSha256,
+				snapshotSha256: attention.recovery.snapshotSha256,
+				generationBase: attention.recovery.generationBase,
+				branch: attention.recovery.branch,
+				worktree: attention.recovery.worktree,
+				expectedHead: attention.recovery.worktreeHead,
+				expectedTree: attention.recovery.worktreeTree,
+			};
+			const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
 			this.store.updateAttentionState(attention.requestId, "editing");
 			driver.resetPlanExecution({
 				branch: attention.recovery.branch,
 				worktree: attention.recovery.worktree,
 				expectedHead: attention.recovery.worktreeHead,
 				expectedTree: attention.recovery.worktreeTree,
-				recordedCleanupStep: recordedCleanupStep ?? undefined,
-				onProgress: (step) => this.store.recordAttentionCleanupStep(run.runId, attention.requestId, step),
+				cleanupIdentity,
+				recordedCleanup: recordedCleanup ?? undefined,
+				onPrepare: (step) => this.store.recordAttentionCleanupStep(cleanupIdentity, step),
+				onProgress: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
+				onComplete: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
 			});
 			const nextGeneration = run.currentGeneration + 1;
 			const integrationHead = driver.branchHead(run.integrationBranch);

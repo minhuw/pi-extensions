@@ -14,7 +14,7 @@ import {
 	inspectCompletionProof,
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
-import { resetPlanExecution, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
+import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
 import { stableJson, type VerificationGate } from "../shared/protocol.ts";
 
@@ -381,8 +381,11 @@ export class GitDriver {
 		worktree: string;
 		expectedHead: string | null;
 		expectedTree: string | null;
-		recordedCleanupStep?: ResetPlanCleanupStep;
+		cleanupIdentity?: ResetPlanCleanupIdentity;
+		recordedCleanup?: ResetPlanCleanupEvidence;
+		onPrepare?: (step: ResetPlanCleanupStep) => void;
 		onProgress?: (step: ResetPlanCleanupStep) => void;
+		onComplete?: (step: ResetPlanCleanupStep) => void;
 	}): ResetPlanExecutionResult {
 		return resetPlanExecution({
 			repoRoot: this.repoRoot,

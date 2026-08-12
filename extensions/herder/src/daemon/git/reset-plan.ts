@@ -4,6 +4,29 @@ import path from "node:path";
 
 export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";
 
+/** Opaque, request-bound evidence returned by the manager store before replaying a cleanup step. */
+export interface ResetPlanCleanupEvidence {
+	evidenceId: string;
+	runId: string;
+	requestId: string;
+	requestSha256: string;
+	planId: string;
+	generation: number;
+	round: number;
+	assignmentPath: string;
+	assignmentSha256: string;
+	snapshotSha256: string;
+	generationBase: string;
+	branch: string;
+	worktree: string;
+	expectedHead: string | null;
+	expectedTree: string | null;
+	step: ResetPlanCleanupStep;
+	state: "prepared" | "completed";
+}
+
+export type ResetPlanCleanupIdentity = Omit<ResetPlanCleanupEvidence, "evidenceId" | "step" | "state">;
+
 export interface ResetPlanExecutionInput {
 	repoRoot: string;
 	worktreeRoot: string;
@@ -12,10 +35,16 @@ export interface ResetPlanExecutionInput {
 	worktree: string;
 	expectedHead: string | null;
 	expectedTree: string | null;
-	/** Durable manager-owned progress from an earlier interrupted apply. */
-	recordedCleanupStep?: ResetPlanCleanupStep;
-	/** Persist each destructive step before the next Git mutation. */
+	/** Exact request/run identity expected for any replay evidence. */
+	cleanupIdentity?: ResetPlanCleanupIdentity;
+	/** Typed manager-owned progress from an earlier interrupted apply. */
+	recordedCleanup?: ResetPlanCleanupEvidence;
+	/** Persist manager-owned step intent before the next Git mutation. */
+	onPrepare?: (step: ResetPlanCleanupStep) => void;
+	/** Observe a successful Git mutation; replay never depends on this callback. */
 	onProgress?: (step: ResetPlanCleanupStep) => void;
+	/** Persist successful completion after a Git mutation when supplied by the manager. */
+	onComplete?: (step: ResetPlanCleanupStep) => void;
 }
 
 export interface ResetPlanExecutionResult {
@@ -85,6 +114,33 @@ function verifyExpectedNamespace(input: ResetPlanExecutionInput, repoRoot: strin
 	}
 }
 
+function validateRecordedCleanup(input: ResetPlanExecutionInput, evidence: ResetPlanCleanupEvidence | undefined): void {
+	if (!evidence) return;
+	if (!input.cleanupIdentity) fail("Recovery cleanup evidence has no expected manager identity");
+	for (const key of ["runId", "requestId", "requestSha256", "planId", "generation", "round", "assignmentPath", "assignmentSha256", "snapshotSha256", "generationBase", "branch", "worktree", "expectedHead", "expectedTree"] as const) {
+		if (evidence[key] !== input.cleanupIdentity[key]) fail(`Recovery cleanup evidence does not match ${key}`);
+	}
+	if (!/^manager-attention-cleanup:[0-9a-f-]{36}$/i.test(evidence.evidenceId)) {
+		fail("Recovery cleanup evidence is not a manager-owned token");
+	}
+	if (evidence.state !== "prepared" && evidence.state !== "completed") {
+		fail("Recovery cleanup evidence has an invalid transition state");
+	}
+	if (evidence.step !== "worktree_removed" && evidence.step !== "branch_deleted") {
+		fail("Recovery cleanup evidence has an invalid step");
+	}
+	if (evidence.branch !== input.branch || evidence.worktree !== input.worktree
+		|| evidence.expectedHead !== input.expectedHead || evidence.expectedTree !== input.expectedTree) {
+		fail("Recovery cleanup evidence does not match the recorded Git identity");
+	}
+	if (!evidence.runId || !evidence.requestId || !evidence.requestSha256 || !evidence.planId
+		|| !evidence.assignmentPath || !evidence.assignmentSha256 || !evidence.snapshotSha256 || !evidence.generationBase
+		|| !Number.isSafeInteger(evidence.generation) || evidence.generation < 1
+		|| !Number.isSafeInteger(evidence.round) || evidence.round < 1) {
+		fail("Recovery cleanup evidence is incomplete");
+	}
+}
+
 function removeWorktree(repoRoot: string, worktree: string): void {
 	const result = git(repoRoot, ["worktree", "remove", "--force", "--", worktree], true);
 	if (result.status !== 0) fail(`Cannot force-remove the recorded recovery worktree: ${(result.stderr || result.stdout).trim()}`);
@@ -105,6 +161,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 	const worktreeRoot = path.resolve(input.worktreeRoot);
 	const worktree = path.resolve(input.worktree);
 	const integrationWorktree = path.resolve(input.integrationWorktree);
+	validateRecordedCleanup(input, input.recordedCleanup);
 	if (realpathIfPresent(repoRoot) !== repoRoot) fail(`Recovery repository root is not canonical: ${repoRoot}`);
 	verifyExpectedNamespace({ ...input, worktree, integrationWorktree }, repoRoot, worktreeRoot, worktree);
 
@@ -147,35 +204,49 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		}
 	}
 
+	const recordedStep = input.recordedCleanup?.step;
 	const fullyMissing = currentHead === null && !record && !fs.existsSync(worktree);
 	if (fullyMissing) {
 		if (input.expectedHead === null) {
 			return { branch: input.branch, worktree, removedWorktree: false, deletedBranch: false, alreadyMissing: true };
 		}
-		if (input.recordedCleanupStep !== "branch_deleted") {
+		if (recordedStep !== "branch_deleted") {
 			fail(`Recorded recovery Git state is missing before its destructive apply: ${input.branch}`);
 		}
+		if (input.recordedCleanup?.state === "prepared") input.onComplete?.("branch_deleted");
 		return { branch: input.branch, worktree, removedWorktree: false, deletedBranch: false, alreadyMissing: true };
 	}
-	if (input.recordedCleanupStep === "branch_deleted" && currentHead !== null) {
+	if (recordedStep === "branch_deleted" && input.recordedCleanup?.state === "completed" && currentHead !== null) {
 		fail(`Recovery branch ${input.branch} reappeared after manager cleanup`);
 	}
 	if (currentHead === null && (record || fs.existsSync(worktree))) {
 		fail(`Recovery branch ${input.branch} is missing while its worktree still exists`);
 	}
-	if (!record && !fs.existsSync(worktree) && input.recordedCleanupStep === undefined) {
+	if (!record && !fs.existsSync(worktree) && recordedStep === undefined) {
 		fail(`Recovery worktree is missing before its manager cleanup was recorded: ${worktree}`);
 	}
 	if (record) {
+		if (recordedStep === "branch_deleted") {
+			fail(`Recovery worktree reappeared before branch cleanup: ${worktree}`);
+		}
+		if (recordedStep === "worktree_removed" && input.recordedCleanup?.state === "completed") {
+			fail(`Recovery worktree reappeared after manager cleanup: ${worktree}`);
+		}
+		if (recordedStep !== "worktree_removed" && recordedStep !== "branch_deleted") input.onPrepare?.("worktree_removed");
 		removeWorktree(repoRoot, worktree);
 		const afterRemoval = parseWorktrees(repoRoot).find((candidate) => realpathIfPresent(candidate.path) === canonicalWorktree);
 		if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);
 		input.onProgress?.("worktree_removed");
-	} else if (input.recordedCleanupStep !== "worktree_removed" && input.recordedCleanupStep !== "branch_deleted") {
+		input.onComplete?.("worktree_removed");
+	} else if (recordedStep !== "worktree_removed" && recordedStep !== "branch_deleted") {
 		fail(`Recovery worktree is not a manager-recorded cleanup continuation: ${worktree}`);
+	} else if (recordedStep === "worktree_removed" && input.recordedCleanup?.state === "prepared") {
+		input.onComplete?.("worktree_removed");
 	}
+	if (recordedStep !== "branch_deleted") input.onPrepare?.("branch_deleted");
 	deleteBranch(repoRoot, input.branch, expectedHead);
 	if (branchHead(repoRoot, input.branch) !== null) fail(`Recovery branch remains after CAS deletion: ${input.branch}`);
 	input.onProgress?.("branch_deleted");
+	input.onComplete?.("branch_deleted");
 	return { branch: input.branch, worktree, removedWorktree: Boolean(record), deletedBranch: true, alreadyMissing: false };
 }

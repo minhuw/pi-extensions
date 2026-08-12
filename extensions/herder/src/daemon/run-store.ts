@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import type { ResetPlanCleanupEvidence } from "./git/reset-plan.ts";
 import {
 	executionDatabasePath,
 	openExecutionDatabase,
@@ -218,7 +220,22 @@ export interface StoredVerification {
 }
 
 export type StoredAttentionRequest = AttentionRequest & { sequence: number };
-export type AttentionCleanupStep = "worktree_removed" | "branch_deleted";
+export type AttentionCleanupStep = ResetPlanCleanupEvidence["step"];
+export type AttentionCleanupIdentity = Omit<ResetPlanCleanupEvidence, "evidenceId" | "step" | "state">;
+
+const ATTENTION_CLEANUP_INTENT_KIND = "manager_attention_cleanup_intent";
+const ATTENTION_CLEANUP_COMPLETE_KIND = "manager_attention_cleanup_complete";
+const ATTENTION_CLEANUP_EVENT_PREFIX = "manager-attention-cleanup:";
+
+function attentionCleanupPayload(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): Record<string, unknown> {
+	return {
+		schemaVersion: 1,
+		kind: state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND,
+		...identity,
+		step,
+		state,
+	};
+}
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
@@ -657,15 +674,60 @@ export class RunStore {
 		return null;
 	}
 
-	getAttentionCleanupStep(requestId: string): AttentionCleanupStep | null {
-		if (this.readEvent(`attention-cleanup:${requestId}:branch_deleted`)) return "branch_deleted";
-		if (this.readEvent(`attention-cleanup:${requestId}:worktree_removed`)) return "worktree_removed";
-		return null;
+	getAttentionCleanupEvidence(identity: AttentionCleanupIdentity): ResetPlanCleanupEvidence | null {
+		const worktreeIntent = this.findAttentionCleanupEvidence(identity, "worktree_removed", "prepared");
+		const worktreeComplete = this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed");
+		const branchIntent = this.findAttentionCleanupEvidence(identity, "branch_deleted", "prepared");
+		const branchComplete = this.findAttentionCleanupEvidence(identity, "branch_deleted", "completed");
+		// Branch deletion is a successor transition. It is never sufficient on its
+		// own: the manager must have durably completed worktree removal first.
+		if (worktreeComplete && branchIntent) return branchComplete ?? branchIntent;
+		return worktreeComplete ?? worktreeIntent;
 	}
 
-	recordAttentionCleanupStep(runId: string, requestId: string, step: AttentionCleanupStep): void {
-		const eventId = `attention-cleanup:${requestId}:${step}`;
-		this.recordEvent(runId, eventId, "attention_cleanup", { requestId, step });
+	/** Persist a manager-owned cleanup intent before the corresponding Git mutation. */
+	recordAttentionCleanupStep(identity: AttentionCleanupIdentity, step: AttentionCleanupStep): ResetPlanCleanupEvidence {
+		if (step === "branch_deleted" && !this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed")) {
+			throw new Error("Branch cleanup requires completed manager-owned worktree cleanup evidence");
+		}
+		return this.recordAttentionCleanupEvidence(identity, step, "prepared");
+	}
+
+	/** Persist successful completion without making replay depend on a post-mutation callback. */
+	recordAttentionCleanupCompletion(identity: AttentionCleanupIdentity, step: AttentionCleanupStep): ResetPlanCleanupEvidence {
+		if (!this.findAttentionCleanupEvidence(identity, step, "prepared")) {
+			throw new Error(`Cleanup step ${step} has no manager-owned preparation evidence`);
+		}
+		if (step === "branch_deleted" && !this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed")) {
+			throw new Error("Branch cleanup requires completed manager-owned worktree cleanup evidence");
+		}
+		return this.recordAttentionCleanupEvidence(identity, step, "completed");
+	}
+
+	private findAttentionCleanupEvidence(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): ResetPlanCleanupEvidence | null {
+		const kind = state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND;
+		const canonical = canonicalEventPayload(attentionCleanupPayload(identity, step, state));
+		const row = this.database.prepare(`
+			SELECT event_id
+			FROM manager_events
+			WHERE run_id = ? AND kind = ? AND payload_sha256 = ? AND event_id LIKE ?
+			LIMIT 1
+		`).get(identity.runId, kind, canonical.sha256, `${ATTENTION_CLEANUP_EVENT_PREFIX}%`) as Record<string, unknown> | undefined;
+		return row ? { ...identity, evidenceId: String(row.event_id), step, state } : null;
+	}
+
+	private recordAttentionCleanupEvidence(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): ResetPlanCleanupEvidence {
+		const existing = this.findAttentionCleanupEvidence(identity, step, state);
+		if (existing) return existing;
+		const canonical = canonicalEventPayload(attentionCleanupPayload(identity, step, state));
+		const eventId = `${ATTENTION_CLEANUP_EVENT_PREFIX}${randomUUID()}`;
+		const colliding = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		if (colliding) throw new Error(`Cleanup evidence token ${eventId} is already in use`);
+		this.database.prepare(`
+			INSERT INTO manager_events (event_id, run_id, kind, payload_sha256, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`).run(eventId, identity.runId, state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND, canonical.sha256, new Date().toISOString());
+		return { ...identity, evidenceId: eventId, step, state };
 	}
 
 	getAttentionRequests(runId: string, options: { unresolvedOnly?: boolean } = {}): StoredAttentionRequest[] {
@@ -1149,6 +1211,9 @@ export class RunStore {
 	}
 
 	recordEvent(runId: string, eventId: string, kind: string, payload: unknown): void {
+		if (eventId.startsWith(ATTENTION_CLEANUP_EVENT_PREFIX) || eventId.startsWith("attention-cleanup:") || kind === ATTENTION_CLEANUP_INTENT_KIND || kind === ATTENTION_CLEANUP_COMPLETE_KIND) {
+			throw new Error("Manager cleanup evidence is private and cannot be submitted as a public event");
+		}
 		const canonical = canonicalEventPayload(payload);
 		const existing = this.readEvent(eventId);
 		if (existing) {

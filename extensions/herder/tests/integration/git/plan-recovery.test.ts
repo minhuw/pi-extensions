@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
-import { resetPlanExecution } from "../../../src/daemon/git/reset-plan.ts";
+import { resetPlanExecution, type ResetPlanCleanupStep } from "../../../src/daemon/git/reset-plan.ts";
+import { RunStore } from "../../../src/daemon/run-store.ts";
+import { canonicalEventPayload } from "../../../src/shared/protocol.ts";
 
 function fixture(prefix: string): { root: string; repo: string; worktreeRoot: string; branch: string; worktree: string; head: string; tree: string } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -82,16 +84,128 @@ test("manager reset fails closed for locked and moved Git state", () => {
 	}
 });
 
-test("manager reset refuses the user checkout and distinguishes recorded partial absence", () => {
+test("manager reset refuses the user checkout and caller-collidable cleanup evidence", () => {
 	const value = fixture("herder-plan-reset-safety-");
+	const planDirectory = path.join(value.root, "plan-store");
+	fs.mkdirSync(planDirectory, { recursive: true });
+	const store = new RunStore(planDirectory);
 	try {
+		store.createRun({
+			runId: "reset-run",
+			repositoryRoot: value.repo,
+			planDirectory,
+			planName: "plan-store",
+			host: "pi",
+			profileName: "eclipse",
+			profileSha256: "a".repeat(64),
+			maxParallel: 1,
+			currentGeneration: 1,
+			graphSha256: "b".repeat(64),
+			status: "running",
+			checkoutStateToken: "checkout-token",
+			baseCommit: value.head,
+			integrationBranch: "herder/plan-store/integration",
+			integrationWorktree: path.join(value.worktreeRoot, "integration"),
+		});
 		assert.throws(() => resetPlanExecution({ ...resetInput(value), worktree: value.repo }), /user checkout|worktree root/);
+		assert.throws(() => store.recordEvent("reset-run", "manager-attention-cleanup:request-1:branch_deleted", "attention", { requestId: "request-1", action: "defer" }), /private/);
+		const forgedPayload = { requestId: "request-1", action: "defer" };
+		const forgedCanonical = canonicalEventPayload(forgedPayload);
+		store.database.prepare(`
+			INSERT INTO manager_events (event_id, run_id, kind, payload_sha256, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`).run("attention-cleanup:request-1:branch_deleted", "reset-run", "attention", forgedCanonical.sha256, new Date().toISOString());
 		git(value.repo, ["worktree", "remove", "--force", value.worktree]);
 		git(value.repo, ["update-ref", "-d", `refs/heads/${value.branch}`, value.head]);
+		assert.equal(store.getAttentionCleanupEvidence({
+			runId: "reset-run",
+			requestId: "request-1",
+			requestSha256: "c".repeat(64),
+			planId: "001",
+			generation: 1,
+			round: 1,
+			assignmentPath: "assignment.json",
+			assignmentSha256: "d".repeat(64),
+			snapshotSha256: "e".repeat(64),
+			generationBase: value.head,
+			branch: value.branch,
+			worktree: value.worktree,
+			expectedHead: value.head,
+			expectedTree: value.tree,
+		}), null);
 		assert.throws(() => resetPlanExecution(resetInput(value)), /missing before its destructive apply/);
-		const replay = resetPlanExecution(resetInput(value, { recordedCleanupStep: "branch_deleted" }));
-		assert.equal(replay.alreadyMissing, true);
 	} finally {
+		store.close();
+		cleanup(value);
+	}
+});
+
+test("manager cleanup replays a partial apply from typed pre-mutation evidence", () => {
+	const value = fixture("herder-plan-reset-replay-");
+	const planDirectory = path.join(value.root, "plan-store");
+	fs.mkdirSync(planDirectory, { recursive: true });
+	const store = new RunStore(planDirectory);
+	const identity = {
+		runId: "reset-replay-run",
+		requestId: "request-replay",
+		requestSha256: "a".repeat(64),
+		planId: "001",
+		generation: 1,
+		round: 1,
+		assignmentPath: "assignment.json",
+		assignmentSha256: "b".repeat(64),
+		snapshotSha256: "c".repeat(64),
+		generationBase: value.head,
+		branch: value.branch,
+		worktree: value.worktree,
+		expectedHead: value.head,
+		expectedTree: value.tree,
+	};
+	try {
+		store.createRun({
+			runId: identity.runId,
+			repositoryRoot: value.repo,
+			planDirectory,
+			planName: "plan-store",
+			host: "pi",
+			profileName: "eclipse",
+			profileSha256: "d".repeat(64),
+			maxParallel: 1,
+			currentGeneration: 1,
+			graphSha256: "e".repeat(64),
+			status: "running",
+			checkoutStateToken: "checkout-token",
+			baseCommit: value.head,
+			integrationBranch: "herder/plan-store/integration",
+			integrationWorktree: path.join(value.worktreeRoot, "integration"),
+		});
+		let crash = true;
+		assert.throws(() => resetPlanExecution(resetInput(value, {
+			onPrepare: (step: ResetPlanCleanupStep) => store.recordAttentionCleanupStep(identity, step),
+			onProgress: (step: ResetPlanCleanupStep) => {
+				if (step === "branch_deleted" && crash) throw new Error("simulated callback stop");
+				store.recordAttentionCleanupCompletion(identity, step);
+			},
+			onComplete: (step: ResetPlanCleanupStep) => store.recordAttentionCleanupCompletion(identity, step),
+		})), /simulated callback stop/);
+		assert.equal(fs.existsSync(value.worktree), false);
+		assert.notEqual(git(value.repo, ["rev-parse", `refs/heads/${value.branch}`], true).status, 0);
+		const evidence = store.getAttentionCleanupEvidence(identity);
+		assert.equal(evidence?.step, "branch_deleted");
+		assert.equal(evidence?.state, "prepared");
+		crash = false;
+		const replay = resetPlanExecution(resetInput(value, {
+			cleanupIdentity: identity,
+			recordedCleanup: evidence ?? undefined,
+			onPrepare: (step: ResetPlanCleanupStep) => store.recordAttentionCleanupStep(identity, step),
+			onProgress: (step: ResetPlanCleanupStep) => store.recordAttentionCleanupCompletion(identity, step),
+			onComplete: (step: ResetPlanCleanupStep) => store.recordAttentionCleanupCompletion(identity, step),
+		}));
+		assert.equal(replay.alreadyMissing, true);
+		assert.equal(replay.deletedBranch, false);
+		assert.equal(store.getAttentionCleanupEvidence(identity)?.state, "completed");
+	} finally {
+		store.close();
 		cleanup(value);
 	}
 });
