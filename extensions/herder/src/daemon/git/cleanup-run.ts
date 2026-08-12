@@ -497,35 +497,34 @@ export function cleanupRun(input: CleanupInput) {
         destruction.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
         continue
       }
+      // Every plan-owned coordination ref must be tied to an indexed plan.
+      if (item.plan && !plans.has(item.plan)) {
+        destruction.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.plan })
+        continue
+      }
       if (item.kind === "base") {
-        if (!integrationHead || !isAncestor(repoRoot, item.target, integrationHead)) {
+        if (!isAncestor(repoRoot, item.target, integrationHead)) {
           destruction.blockers.push({ reason: "base-ref-not-reachable", ref: item.ref, target: item.target })
           continue
         }
-      } else if (item.plan) {
-        const plan = plans.get(item.plan)
-        if (!plan) {
-          destruction.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.plan })
+      } else if (item.kind === "completed") {
+        const plan = item.plan ? plans.get(item.plan) : undefined
+        if (!plan || plan.status !== "DONE") {
+          destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan ?? "" })
           continue
         }
-        if (item.kind === "completed") {
-          if (plan.status !== "DONE") {
-            destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan })
-            continue
-          }
-          const proof = inspectCompletionProof(repoRoot, item.ref)
-          if (!proof.ok || proof.payload.planId !== item.plan) {
-            destruction.blockers.push({
-              reason: "completion-approval-proof-invalid",
-              ref: item.ref,
-              detail: proof.ok === false ? proof.error : "plan identity mismatch",
-            })
-            continue
-          }
-          if (!integrationHead || !isAncestor(repoRoot, proof.object, integrationHead)) {
-            destruction.blockers.push({ reason: "completion-ref-not-reachable", ref: item.ref, target: proof.object })
-            continue
-          }
+        const proof = inspectCompletionProof(repoRoot, item.ref)
+        if (!proof.ok || proof.payload.planId !== item.plan) {
+          destruction.blockers.push({
+            reason: "completion-approval-proof-invalid",
+            ref: item.ref,
+            detail: proof.ok === false ? proof.error : "plan identity mismatch",
+          })
+          continue
+        }
+        if (!isAncestor(repoRoot, proof.object, integrationHead)) {
+          destruction.blockers.push({ reason: "completion-ref-not-reachable", ref: item.ref, target: proof.object })
+          continue
         }
       }
       destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
@@ -597,7 +596,8 @@ export function cleanupRun(input: CleanupInput) {
       }
       input.testHooks?.beforeIntegrationDeletion?.()
       const checkout = currentCheckout(repoRoot)
-      if (!checkout.branch || checkout.branch !== expectedCheckout.branch || checkout.head !== expectedCheckout.head) {
+      const checkoutHead = checkout.head
+      if (!checkout.branch || !checkoutHead || checkout.branch !== expectedCheckout.branch || checkoutHead !== expectedCheckout.head) {
         fail("Cannot remove integration because the current branch or HEAD changed after preflight")
       }
       const currentIntegrationHead = refTarget(repoRoot, integrationRef)
@@ -605,7 +605,7 @@ export function cleanupRun(input: CleanupInput) {
       if (currentIntegrationHead !== integrationHead) {
         fail(`Cannot delete moved branch ${integrationBranch}: expected ${integrationHead}, found ${currentIntegrationHead}`)
       }
-      if (!isAncestor(repoRoot, integrationHead, checkout.head)) {
+      if (!isAncestor(repoRoot, integrationHead, checkoutHead)) {
         fail(`Cannot remove integration because ${checkout.branch} no longer contains ${integrationHead}`)
       }
       if (integrationWorktree) {

@@ -47,7 +47,7 @@ Cleanup fixture.
 
 ## Git workflow
 
-Use the assigned branch.
+- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
 
 ## Steps
 
@@ -187,6 +187,68 @@ for (const blocker of ["dirty", "locked", "missing"] as const) {
   })
 }
 
+test("plain deep cleanup removes mixed DONE, BLOCKED, and REJECTED plan branches", () => {
+  const fixture = setup()
+  const extraBranches = ["herder/plans/002", "herder/plans/003"]
+  try {
+    const readme = path.join(fixture.planDir, "README.md")
+    fs.writeFileSync(readme, fs.readFileSync(readme, "utf8")
+      .replace("| [001](001-cleanup-fixture.md) | Cleanup fixture | P1 | S | — | DONE |", [
+        "| [001](001-cleanup-fixture.md) | Cleanup fixture | P1 | S | — | DONE |",
+        "| [002](002-cleanup-fixture.md) | Blocked fixture | P1 | S | — | BLOCKED: blocked by fixture coverage |",
+        "| [003](003-cleanup-fixture.md) | Rejected fixture | P1 | S | — | REJECTED: rejected by fixture coverage |",
+      ].join("\n")))
+    fs.writeFileSync(path.join(fixture.planDir, "002-cleanup-fixture.md"), planBody().replaceAll("001", "002").replace("## Status\n", "## Status\n\nBlocked by fixture coverage.\n").replace("| DONE |", "| BLOCKED: blocked by fixture coverage |"))
+    fs.writeFileSync(path.join(fixture.planDir, "003-cleanup-fixture.md"), planBody().replaceAll("001", "003").replace("## Status\n", "## Status\n\nRejected by fixture coverage.\n").replace("| DONE |", "| REJECTED: rejected by fixture coverage |"))
+    git(fixture.repo, "add", "plans")
+    git(fixture.repo, "commit", "-q", "-m", "test: add mixed terminal cleanup plans")
+    for (const [index, branch] of extraBranches.entries()) {
+      git(fixture.repo, "worktree", "add", "-q", "-b", branch, path.join(fixture.root, `mixed-${index}`), fixture.integrationBranch)
+    }
+    const result = runCleanup(fixture, { deep: true, dryRun: false })
+    assert.equal(result.destruction.integrationRemoved, true)
+    assert.deepEqual(result.removed.map((item) => item.branch).sort(), [fixture.planBranch, ...extraBranches].sort())
+    for (const branch of [fixture.planBranch, ...extraBranches]) assert.equal(git(fixture.repo, "branch", "--list", branch), "")
+    assert.equal(fs.existsSync(fixture.planDir), false)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+for (const invalidRef of ["base", "unindexed", "malformed-completion", "mismatched-completion", "unreachable-completion"] as const) {
+  test(`deep cleanup rejects ${invalidRef} coordination evidence without mutation`, () => {
+    const fixture = setup()
+    const completionRef = "refs/plan-herder/plans/completed/001"
+    const baseRef = "refs/plan-herder/plans/base"
+    try {
+      if (invalidRef === "base") {
+        const invalid = git(fixture.repo, "commit-tree", git(fixture.repo, "rev-parse", "HEAD^{tree}"), "-m", "unrelated base")
+        git(fixture.repo, "update-ref", baseRef, invalid, git(fixture.repo, "rev-parse", baseRef))
+      } else if (invalidRef === "unindexed") {
+        git(fixture.repo, "update-ref", "refs/plan-herder/plans/completed/999", git(fixture.repo, "rev-parse", "HEAD"))
+      } else if (invalidRef === "malformed-completion") {
+        git(fixture.repo, "update-ref", completionRef, git(fixture.repo, "rev-parse", "HEAD"))
+      } else {
+        git(fixture.repo, "update-ref", "-d", completionRef)
+        const tree = git(fixture.repo, "rev-parse", "HEAD^{tree}")
+        const object = invalidRef === "unreachable-completion"
+          ? git(fixture.repo, "commit-tree", tree, "-m", "unreachable proof")
+          : git(fixture.repo, "rev-parse", "HEAD")
+        const proof = buildCompletionProofPayload({
+          runId: "invalid-proof", planId: invalidRef === "mismatched-completion" ? "002" : "001", generation: 1, round: 1,
+          reviewerActionId: "reviewer-001", decisionActionId: "reviewer-001", decisionRole: "plan-reviewer",
+          assignmentSha256: "a".repeat(64), approvedBase: git(fixture.repo, "rev-parse", baseRef), approvedHead: object,
+          approvedTree: tree, reviewResultSha256: "b".repeat(64), decisionResultSha256: "b".repeat(64), integratedHead: object,
+        })
+        writeCompletionProof(fixture.repo, completionRef, proof, "invalid-proof")
+      }
+      const beforeBranch = git(fixture.repo, "rev-parse", fixture.planBranch)
+      assert.throws(() => runCleanup(fixture, { deep: true, dryRun: false }), /base-ref-not-reachable|coordination-ref-plan-not-indexed|completion-approval-proof-invalid|completion-ref-not-reachable/)
+      assert.equal(git(fixture.repo, "rev-parse", fixture.planBranch), beforeBranch)
+      assert.equal(fs.existsSync(fixture.planWorktree), true)
+      assert.equal(fs.existsSync(fixture.planDir), true)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+}
+
 test("deep cleanup rejects detached HEAD without mutation", () => {
   const fixture = setup()
   try {
@@ -194,6 +256,80 @@ test("deep cleanup rejects detached HEAD without mutation", () => {
     const result = runCleanup(fixture, { deep: true })
     assert.equal(result.destruction.blockers.some((item) => item.reason === "detached-head"), true)
     assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("deep cleanup rejects a current branch that does not contain integration", () => {
+  const fixture = setup()
+  try {
+    git(fixture.repo, "reset", "-q", "--hard", "refs/plan-herder/plans/base")
+    const result = runCleanup(fixture, { deep: true })
+    assert.equal(result.destruction.blockers.some((item) => item.reason === "integration-not-ancestor-of-current"), true)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("deep cleanup reports a missing integration branch clearly", () => {
+  const fixture = setup()
+  try {
+    git(fixture.repo, "worktree", "remove", fixture.integrationWorktree)
+    git(fixture.repo, "update-ref", "-d", `refs/heads/${fixture.integrationBranch}`)
+    assert.throws(() => runCleanup(fixture, { deep: true }), /Integration branch does not exist/)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("deep cleanup rejects plan targeting", () => {
+  const fixture = setup()
+  try {
+    assert.throws(() => runCleanup(fixture, { deep: true, plan: "001" }), /cannot be combined with --plan/)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+for (const race of ["checkout", "namespace", "coordination-ref"] as const) {
+  test(`deep cleanup detects apply-time ${race} drift before mutation`, () => {
+    const fixture = setup()
+    try {
+      const planHead = git(fixture.repo, "rev-parse", fixture.planBranch)
+      const completionTarget = git(fixture.repo, "rev-parse", "refs/plan-herder/plans/completed/001")
+      assert.throws(() => runCleanup(fixture, {
+        deep: true,
+        dryRun: false,
+        testHooks: {
+          beforeMutation: () => {
+            if (race === "checkout") git(fixture.repo, "checkout", "-q", "-b", "race-checkout")
+            else if (race === "namespace") git(fixture.repo, "branch", "herder/plans/999", "HEAD")
+            else git(fixture.repo, "update-ref", "refs/plan-herder/plans/checkpoints/RUN/999", "HEAD")
+          },
+        },
+      }), /current branch or HEAD changed|plan branch namespace changed|coordination refs changed/)
+      assert.equal(git(fixture.repo, "rev-parse", fixture.planBranch), planHead)
+      assert.equal(git(fixture.repo, "rev-parse", "refs/plan-herder/plans/completed/001"), completionTarget)
+      assert.equal(fs.existsSync(fixture.planWorktree), true)
+      assert.equal(fs.existsSync(fixture.planDir), true)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+}
+
+test("deep cleanup revalidates checkout immediately before integration deletion and removes the plan directory last", () => {
+  const fixture = setup()
+  try {
+    assert.throws(() => runCleanup(fixture, {
+      deep: true,
+      dryRun: false,
+      testHooks: {
+        beforeIntegrationDeletion: () => {
+          assert.equal(fs.existsSync(fixture.planDir), true)
+          git(fixture.repo, "checkout", "-q", "-b", "late-race")
+        },
+      },
+    }), /current branch or HEAD changed/)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.integrationBranch), "")
+    assert.equal(fs.existsSync(fixture.integrationWorktree), true)
     assert.equal(fs.existsSync(fixture.planDir), true)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })

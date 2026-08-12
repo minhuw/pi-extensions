@@ -35,7 +35,17 @@ test("cleanup exclusion holds startup and daemon ownership through the callback"
 	}
 });
 
-test("cleanup rejects a healthy nonterminal service owner without calling the callback", async () => {
+test("cleanup exclusion releases safely when deep cleanup deletes the plan directory", async () => {
+	const planDir = planDirectory();
+	const root = path.dirname(planDir);
+	await withServiceExclusion(planDir, () => {
+		rmSync(planDir, { recursive: true, force: true });
+	});
+	assert.equal(existsSync(planDir), false);
+	rmSync(root, { recursive: true, force: true });
+});
+
+
 	const planDir = planDirectory();
 	try {
 		await ensureService(planDir);
