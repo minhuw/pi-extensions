@@ -5,6 +5,8 @@ export interface HerderRunState {
 	mode: "fire" | "resume" | "revise" | "attach";
 	status: "initializing" | "running" | "paused" | "needs_input" | "complete" | "failed" | "stopped";
 	runId: string;
+	/** Session-local hint only; SQLite remains authoritative for attention state. */
+	attentionRequestId?: string;
 	asyncDir?: string;
 	repoRoot: string;
 	planDir: string;
@@ -21,6 +23,7 @@ export function sameHerderRunState(left: HerderRunState, right: HerderRunState):
 		&& left.mode === right.mode
 		&& left.status === right.status
 		&& left.runId === right.runId
+		&& left.attentionRequestId === right.attentionRequestId
 		&& left.asyncDir === right.asyncDir
 		&& left.repoRoot === right.repoRoot
 		&& left.planDir === right.planDir
@@ -35,6 +38,7 @@ function isRunState(value: unknown): value is HerderRunState {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const state = value as Partial<HerderRunState>;
 	return state.version === 1
+		&& (state.attentionRequestId === undefined || (typeof state.attentionRequestId === "string" && state.attentionRequestId.length > 0 && state.attentionRequestId.length <= 200 && !/[\0\r\n]/.test(state.attentionRequestId)))
 		&& typeof state.runId === "string"
 		&& typeof state.repoRoot === "string"
 		&& typeof state.planDir === "string"

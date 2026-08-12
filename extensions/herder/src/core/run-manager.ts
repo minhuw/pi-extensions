@@ -22,13 +22,24 @@ import {
 	type GateResult,
 } from "../daemon/git-driver.ts";
 import {
+	ATTENTION_PATH_LIMIT,
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
+	attentionCapabilityToken,
+	attentionRequestSha256,
 	canonicalEventPayload,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
 	stableJson,
+	validateAttentionResolution,
+	type AttentionCause,
+	type AttentionGitIdentity,
+	type AttentionRecoveryEvidence,
+	type AttentionRequestInput,
+	type AttentionResolutionAction,
+	type AttentionResolutionInput,
+	type ManagerAttentionRequest,
 	type DispatchResult,
 	type ManagerAction,
 	type ManagerReply,
@@ -67,10 +78,14 @@ interface StartInput {
 
 interface EventInput {
 	eventId: string;
-	kind: "dispatch_results" | "terminals" | "user_input";
+	kind: "dispatch_results" | "terminals" | "user_input" | "attention" | "attention_resolution";
 	dispatchResults?: DispatchResult[];
 	terminals?: TerminalEvent[];
 	userInput?: string;
+	attentionRequestId?: string;
+	attention?: AttentionResolutionInput;
+	/** Alias used by older application callers. */
+	resolution?: AttentionResolutionInput;
 }
 
 interface PlanEditInput {
@@ -100,7 +115,10 @@ function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
 	}
-	if (!["dispatch_results", "terminals", "user_input"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
+	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:")) {
+		throw new Error("Manager cleanup evidence event IDs are private");
+	}
+	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
 	if (input.kind === "dispatch_results") {
 		if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
 		const seen = new Set<string>();
@@ -123,6 +141,24 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
 	}
+	if (input.kind === "user_input" && !input.attentionRequestId) {
+		throw new Error("user_input requires attentionRequestId");
+	}
+	if (input.kind === "attention" || input.kind === "attention_resolution") {
+		const resolution = input.attention ?? input.resolution;
+		if (!resolution) throw new Error("attention requires a resolution payload");
+		validateAttentionResolution(resolution);
+	}
+	if (input.attentionRequestId !== undefined
+		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
+		throw new Error("attentionRequestId must be a bounded single-line identifier");
+	}
+	if (input.kind !== "user_input" && input.attentionRequestId !== undefined) {
+		throw new Error("attentionRequestId is only valid for user_input");
+	}
+	if (input.kind !== "attention" && input.kind !== "attention_resolution" && (input.attention !== undefined || input.resolution !== undefined)) {
+		throw new Error("attention resolution is only valid for attention events");
+	}
 }
 
 function normalizePlanId(value: string | undefined): string {
@@ -136,6 +172,71 @@ function validatePlanEditInput(input: PlanEditInput): void {
 	if (!input || !["begin", "finish", "cancel"].includes(input.operation)) throw new Error("Plan edit operation must be begin, finish, or cancel");
 	if (input.operation === "begin") normalizePlanId(input.planId);
 	else if (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken)) throw new Error("Plan edit token is required");
+}
+
+function normalizeAttentionAction(value: string): AttentionResolutionAction {
+	const normalized = value.trim().toLowerCase().replace(/[- ]+/g, "_");
+	const aliases: Record<string, AttentionResolutionAction> = {
+		answer: "answer",
+		defer: "defer",
+		retry: "retry",
+		cancel: "cancel",
+		unchanged: "unchanged_retry",
+		unchanged_retry: "unchanged_retry",
+		retry_unchanged: "unchanged_retry",
+		revise: "revise",
+		replace: "revise",
+		reject: "reject",
+		reject_revision: "reject",
+	};
+	const action = aliases[normalized];
+	if (!action) throw new Error(`Unsupported attention resolution action: ${value}`);
+	return action;
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameRecoveryGraphIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
+	return left.planId === right.planId
+		&& left.ordinal === right.ordinal
+		&& left.planFile === right.planFile
+		&& sameStringArray(left.dependencies, right.dependencies)
+		&& left.assignment.plan.id === right.assignment.plan.id
+		&& sameStringArray(left.assignment.plan.dependencies, right.assignment.plan.dependencies);
+}
+
+function sameRecoverySpecIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
+	return sameRecoveryGraphIdentity(left, right)
+		&& left.planFingerprint === right.planFingerprint
+		&& left.fingerprintVersion === right.fingerprintVersion
+		&& stableJson(left.assignment) === stableJson(right.assignment);
+}
+
+function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
+	if (request.kind !== "plan_recovery") return null;
+	return {
+		assignmentPath: request.recovery.assignmentPath,
+		assignmentSha256: request.recovery.assignmentSha256,
+		snapshotSha256: request.recovery.snapshotSha256,
+		generationBase: request.recovery.generationBase,
+		branch: request.recovery.branch,
+		worktree: request.recovery.worktree,
+		worktreeHead: request.recovery.worktreeHead,
+		worktreeTree: request.recovery.worktreeTree,
+	};
+}
+
+function sameRecoveryIdentity(left: AttentionGitIdentity, right: AttentionGitIdentity): boolean {
+	return left.assignmentPath === right.assignmentPath
+		&& left.assignmentSha256 === right.assignmentSha256
+		&& left.snapshotSha256 === right.snapshotSha256
+		&& left.generationBase === right.generationBase
+		&& left.branch === right.branch
+		&& left.worktree === right.worktree
+		&& left.worktreeHead === right.worktreeHead
+		&& left.worktreeTree === right.worktreeTree;
 }
 
 function resolveProfile(requested?: string): ResolvedProfile {
@@ -324,6 +425,7 @@ interface TerminalTransition {
 	plan: StoredPlan;
 	runUpdate?: { status: "needs_input" | "paused"; terminalDetail: string };
 	approval?: Omit<StoredApproval, "createdAt">;
+	attention?: AttentionRequestInput;
 }
 
 function terminalRecord(result: WorkerResult | null, terminal: TerminalEvent, usage: ReturnType<typeof normalizeUsage>): StoredTerminalRecord {
@@ -436,6 +538,95 @@ export class HerderRunManager {
 
 	private updatePlan(plan: StoredPlan, changes: Partial<Omit<StoredPlan, "runId" | "planId" | "updatedAt">>): StoredPlan {
 		return this.store.putPlan({ ...plan, ...changes });
+	}
+
+	private recoveryEvidence(run: StoredRun, plan: StoredPlan | null, spec: StoredPlanSpec): AttentionRecoveryEvidence {
+		const generation = this.store.getGeneration(run.runId, spec.graphGeneration);
+		if (!generation) throw new Error(`Run generation ${spec.graphGeneration} has no assignment evidence`);
+		const assignmentPath = plan?.assignmentPath ?? generation.runAssignmentPath;
+		const assignmentSha256 = plan?.assignmentSha256 ?? generation.runAssignmentSha256;
+		const branch = plan?.branch ?? `herder/${run.planName}/${spec.planId}`;
+		const worktree = plan?.worktree ?? path.join(path.dirname(run.integrationWorktree), spec.planId);
+		let worktreeHead: string | null = null;
+		let worktreeTree: string | null = null;
+		let changedPaths: string[] = [];
+		if (plan) {
+			const driver = this.driver(run);
+			try { worktreeHead = driver.worktreeHead(plan.worktree); } catch { worktreeHead = null; }
+			try { worktreeTree = driver.worktreeTree(plan.worktree); } catch { worktreeTree = null; }
+			try { changedPaths = driver.changedPaths(plan.worktree, plan.generationBase).sort(); } catch { changedPaths = []; }
+		}
+		const inScopePaths = [...spec.assignment.plan.inScopePaths].sort();
+		const changedPathCount = changedPaths.length;
+		const changedPathsSha256 = sha256(stableJson(changedPaths));
+		let generationBase = plan?.generationBase ?? run.baseCommit;
+		if (!plan) {
+			try { generationBase = this.driver(run).branchHead(run.integrationBranch); } catch { /* preserve the recorded base commit */ }
+		}
+		return {
+			planFingerprint: spec.planFingerprint,
+			fingerprintVersion: spec.fingerprintVersion,
+			planFile: spec.planFile,
+			inScopePaths: inScopePaths.slice(0, ATTENTION_PATH_LIMIT),
+			inScopePathCount: inScopePaths.length,
+			inScopePathsSha256: sha256(stableJson(inScopePaths)),
+			assignmentPath,
+			assignmentSha256,
+			snapshotSha256: plan?.snapshotSha256 ?? spec.assignment.snapshotSha256,
+			generationBase,
+			branch,
+			worktree,
+			worktreeHead,
+			worktreeTree,
+			changedPaths: changedPaths.slice(0, ATTENTION_PATH_LIMIT),
+			changedPathCount,
+			changedPathsSha256,
+		};
+	}
+
+	private attention(input: {
+		run: StoredRun;
+		plan: StoredPlan | null;
+		spec?: StoredPlanSpec;
+		planId?: string;
+		kind: ManagerAttentionRequest["kind"];
+		cause: AttentionCause;
+		actionId: string | null;
+		continuation: ManagerAttentionRequest["continuation"];
+		state: ManagerAttentionRequest["state"];
+		detail: string;
+		question?: string;
+		recommendedAction?: string;
+	}): AttentionRequestInput {
+		const detail = input.detail.slice(0, 16_384);
+		const now = new Date().toISOString();
+		const requestId = randomUUID();
+		const request = {
+			schemaVersion: 1,
+			requestId,
+			capabilityToken: attentionCapabilityToken(requestId),
+			runId: input.run.runId,
+			planId: input.plan?.planId ?? input.spec?.planId ?? input.planId ?? "",
+			generation: input.plan?.generation ?? input.spec?.graphGeneration ?? input.run.currentGeneration,
+			round: input.plan?.round ?? 1,
+			actionId: input.actionId,
+			kind: input.kind,
+			state: input.state,
+			cause: input.cause,
+			detail,
+			detailSha256: sha256(detail),
+			continuation: input.continuation,
+			...(input.question ? { question: input.question.slice(0, 4_096) } : {}),
+			...(input.recommendedAction ? { recommendedAction: input.recommendedAction.slice(0, 4_096) } : {}),
+			...(input.kind === "plan_recovery"
+				? input.spec
+					? { recovery: this.recoveryEvidence(input.run, input.plan, input.spec) }
+					: (() => { throw new Error("Plan-recovery attention requires a compiled plan specification"); })()
+				: {}),
+			createdAt: now,
+			updatedAt: now,
+		} as AttentionRequestInput;
+		return { ...request, requestSha256: attentionRequestSha256(request) } as AttentionRequestInput;
 	}
 
 	private cacheSpecs(specs: StoredPlanSpec[]): void {
@@ -556,6 +747,24 @@ export class HerderRunManager {
 		if (lease && active.some((action) => action.leaseReason === lease)) driver.release(finalPlan.worktree, lease);
 		this.store.deletePlan(run.runId, "RUN");
 		this.pauseForFinalVerification(this.store.getRun()!, driver);
+	}
+
+	private ensureInitialAttention(run: StoredRun): void {
+		for (const spec of this.specs(run).filter((candidate) => candidate.initialStatus === "BLOCKED")) {
+			if (this.store.getPlan(run.runId, spec.planId)) continue;
+			this.store.putAttention(this.attention({
+				run,
+				plan: null,
+				spec,
+				kind: "plan_recovery",
+				cause: "initial_decision_blocked",
+				actionId: null,
+				state: "pending",
+				continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+				detail: spec.initialStatusDetail,
+				recommendedAction: "Review the target plan's decision blockage before resuming its recorded Implementer continuation.",
+			}));
+		}
 	}
 
 	private projectLifecycle(run: StoredRun): void {
@@ -976,6 +1185,12 @@ export class HerderRunManager {
 		}
 	}
 
+	async resolveAttention(input: AttentionResolutionInput): Promise<ManagerReply> {
+		validateAttentionResolution(input);
+		const eventId = `attention:${input.requestId}:${sha256(stableJson(input))}`;
+		return this.event({ eventId, kind: "attention", attention: input });
+	}
+
 	async event(input: EventInput): Promise<ManagerReply> {
 		validateEventInput(input);
 		const run = this.store.getRun();
@@ -990,7 +1205,8 @@ export class HerderRunManager {
 		let schedule = true;
 		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults ?? []));
 		else if (input.kind === "terminals") await this.applyTerminals(input.terminals ?? []);
-		else this.applyUserInput(input.userInput!, input.eventId);
+		else if (input.kind === "user_input") this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
+		else await this.applyAttentionResolution(input.attention ?? input.resolution!);
 		const current = this.store.getRun()!;
 		const drift = this.graphDrift(current);
 		if (drift.changed) {
@@ -1094,7 +1310,7 @@ export class HerderRunManager {
 				transition = action.role === "plan-implementer"
 					? this.retryImplementerTransport(run, plan, action, detail)
 					: this.retryTransportOrPause(run, plan, action, detail);
-			} else if (parsed.kind === "implementer") transition = this.finishImplementer(run, plan, parsed);
+			} else if (parsed.kind === "implementer") transition = this.finishImplementer(run, plan, action, parsed);
 			else if (parsed.kind === "reviewer") transition = this.finishReviewer(run, plan, action, parsed);
 			else transition = this.finishJudge(run, plan, action, parsed);
 			const record = terminalRecord(parsed, terminal, usage);
@@ -1102,6 +1318,7 @@ export class HerderRunManager {
 			this.store.transaction(() => {
 				action = this.store.markTerminal(actionId, record);
 				if (transition.approval) this.store.putApproval(transition.approval);
+				if (transition.attention) this.store.putAttention(transition.attention);
 				this.store.putPlan(transition.plan);
 				if (transition.runUpdate) this.store.updateRun(transition.runUpdate);
 				this.recordTerminalUsage(run, action, record, true);
@@ -1143,7 +1360,23 @@ export class HerderRunManager {
 		const mutationMayHaveOccurred = driver.worktreeHead(plan.worktree) !== plan.generationBase || Boolean(driver.worktreeStatus(plan.worktree));
 		if (!mutationMayHaveOccurred) return this.retryTransportOrPause(run, plan, action, detail);
 		if (plan.round >= 6) {
-			return { plan: { ...plan, phase: "BLOCKED", repair: [detail] } };
+			const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
+			return {
+				plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
+				runUpdate: { status: "needs_input", terminalDetail },
+				attention: this.attention({
+					run,
+					plan,
+					spec: this.spec(run, plan.planId),
+					kind: "operator_attention",
+					cause: "transport_exhausted",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+					detail: terminalDetail,
+					recommendedAction: "Choose whether to retry the recorded Implementer role; transport exhaustion never authorizes plan rewriting.",
+				}),
+			};
 		}
 		return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [detail] } };
 	}
@@ -1162,10 +1395,22 @@ export class HerderRunManager {
 		return {
 			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
 			runUpdate: { status: "needs_input", terminalDetail },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "operator_attention",
+				cause: "transport_exhausted",
+				actionId: action.actionId,
+				state: "awaiting_input",
+				continuation: { role: action.role as WorkerRole, phase: readyPhaseForRole(action.role) },
+				detail: terminalDetail,
+				recommendedAction: `Choose whether to retry the recorded ${action.role} role; transport exhaustion never authorizes plan rewriting.`,
+			}),
 		};
 	}
 
-	private finishImplementer(run: StoredRun, plan: StoredPlan, result: Extract<WorkerResult, { kind: "implementer" }>): TerminalTransition {
+	private finishImplementer(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "implementer" }>): TerminalTransition {
 		const driver = this.driver(run);
 		let failure: string | null = null;
 		if (result.status !== "COMPLETE") failure = result.stoppedBecause || result.notes || `Implementer returned ${result.status}`;
@@ -1185,7 +1430,21 @@ export class HerderRunManager {
 		const gates: GateResult[] = [];
 		if (failure) {
 			if (plan.round >= 6) {
-				return { plan: { ...plan, phase: "BLOCKED", repair: [failure], gates } };
+				return {
+					plan: { ...plan, phase: "BLOCKED", repair: [failure], gates },
+					attention: this.attention({
+						run,
+						plan,
+						spec: this.spec(run, plan.planId),
+						kind: "plan_recovery",
+						cause: "implementer_exhausted",
+						actionId: action.actionId,
+						state: "pending",
+						continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+						detail: failure,
+						recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Implementer continuation.",
+					}),
+				};
 			}
 			return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [failure], gates } };
 		}
@@ -1225,6 +1484,19 @@ export class HerderRunManager {
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [detail] },
 				runUpdate: { status: "needs_input", terminalDetail: detail },
+				attention: this.attention({
+					run,
+					plan,
+					planId: "RUN",
+					kind: "user_decision",
+					cause: "final_reviewer_needs_input",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+					detail,
+					question: detail,
+					recommendedAction: "Provide the decision needed by the final Reviewer without changing the frozen integration tree.",
+				}),
 			};
 		}
 		const decision = decideReview({ round: plan.round, verdict, scope: result.scope, openBlockers: blockers });
@@ -1245,7 +1517,22 @@ export class HerderRunManager {
 		} else if (decision.action === "JUDGE") {
 			return { plan: { ...reviewed, phase: "READY_JUDGE", repair: result.fixGuidance } };
 		}
-		return { plan: { ...reviewed, phase: "BLOCKED" } };
+		const detail = result.rationale || result.findings[0] || "Reviewer blocked the plan";
+		return {
+			plan: { ...reviewed, phase: "BLOCKED" },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "plan_recovery",
+				cause: "reviewer_blocked",
+				actionId: action.actionId,
+				state: "pending",
+				continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+				detail,
+				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Reviewer continuation.",
+			}),
+		};
 	}
 
 	private finishJudge(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "judge" }>): TerminalTransition {
@@ -1282,25 +1569,361 @@ export class HerderRunManager {
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: result.question ? [result.question] : [] },
 				runUpdate: { status: "needs_input", terminalDetail },
+				attention: this.attention({
+					run,
+					plan,
+					spec: this.spec(run, plan.planId),
+					kind: "user_decision",
+					cause: "judge_needs_input",
+					actionId: action.actionId,
+					state: "awaiting_input",
+					continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+					detail: terminalDetail,
+					question: result.question || terminalDetail,
+					recommendedAction: "Answer the Judge question while preserving the recorded plan and review evidence.",
+				}),
 			};
 		}
-		return { plan: { ...plan, phase: "BLOCKED", findings: result.findings } };
+		const terminalDetail = result.rationale || result.findings[0] || (decision.action === "BLOCKED_ROUND_LIMIT" ? "Judge round limit exhausted" : "Judge blocked the plan");
+		const cause: AttentionCause = decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "judge_blocked";
+		return {
+			plan: { ...plan, phase: "BLOCKED", findings: result.findings },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "plan_recovery",
+				cause,
+				actionId: action.actionId,
+				state: "pending",
+				continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+				detail: terminalDetail,
+				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Judge continuation.",
+			}),
+		};
 	}
 
-	private applyUserInput(value: string, eventId: string): void {
+	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
+		if (!attentionRequestId) throw new Error("User input requires an attention request ID");
 		const run = this.store.getRun()!;
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
-		if (run.status !== "needs_input") {
-			if (this.store.getPlans(run.runId).some((plan) => plan.repair.includes(marker))) return;
-			throw new Error("Run is not waiting for user input");
+		const plans = this.store.getPlans(run.runId);
+		const suppliedAttention = this.store.getAttention(attentionRequestId);
+		// The event may have committed its plan/attention transaction before the
+		// process was replaced and before the event journal write. Recognize that
+		// durable marker only on the explicitly bound request's plan.
+		if (suppliedAttention?.runId === run.runId && plans.some((plan) => plan.planId === suppliedAttention.planId && plan.repair.includes(marker))) return;
+		if (run.status !== "needs_input") throw new Error("Run is not waiting for user input");
+
+		// Recovery dossiers are record-only in this phase. They retain the
+		// deterministic global attention order, but must not mask an input-bearing
+		// dossier when selecting a user answer.
+		const nextInputAttention = this.store.getNextInputAttention(run.runId);
+		if (!nextInputAttention) throw new Error("No durable attention request is waiting for user input");
+		const attention = suppliedAttention;
+		if (!attention || attention.runId !== run.runId || attention.state === "resolved") {
+			throw new Error(`Attention request ${attentionRequestId} is not an unresolved request for this run`);
 		}
-		const plan = this.store.getPlans(run.runId).find((candidate) => candidate.phase === "NEEDS_INPUT");
-		if (!plan) throw new Error("No plan is waiting for user input");
-		this.updatePlan(plan, {
-			phase: plan.planId === "RUN" ? "READY_REVIEWER" : "READY_JUDGE",
-			repair: [...plan.repair, marker],
+		if (!["user_decision", "operator_attention"].includes(attention.kind)) {
+			throw new Error(`Attention request ${attention.requestId} does not accept user input`);
+		}
+		if (attention.requestId !== nextInputAttention.requestId) {
+			throw new Error(`Attention request ${attention.requestId} is not the next eligible input request`);
+		}
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${attention.requestId} has no matching input-waiting plan`);
+		if (plan.generation !== attention.generation || plan.round !== attention.round) {
+			throw new Error(`Attention request ${attention.requestId} does not match the input-waiting generation and round`);
+		}
+		if (readyPhaseForRole(attention.continuation.role) !== attention.continuation.phase) {
+			throw new Error(`Attention request ${attention.requestId} has an invalid continuation phase`);
+		}
+		this.store.transaction(() => {
+			this.updatePlan(plan, {
+				phase: attention.continuation.phase,
+				repair: [...plan.repair, marker],
+			});
+			this.store.resolveAttention(attention.requestId);
+			const remainingInput = this.store.getNextInputAttention(run.runId);
+			const remaining = this.store.getNextAttention(run.runId);
+			this.store.updateRun({
+				status: remainingInput ? "needs_input" : "running",
+				terminalDetail: remainingInput?.detail ?? remaining?.detail ?? null,
+			});
 		});
-		this.store.updateRun({ status: "running", terminalDetail: null });
+	}
+
+	private attentionResolutionRequest(run: StoredRun, resolution: AttentionResolutionInput) {
+		validateAttentionResolution(resolution);
+		const attention = this.store.getAttention(resolution.requestId);
+		if (!attention || attention.runId !== run.runId) throw new Error(`Attention request ${resolution.requestId} is not recorded for this run`);
+		if (resolution.requestSha256 !== attention.requestSha256) {
+			throw new Error(`Attention request ${resolution.requestId} hash does not match its immutable evidence`);
+		}
+		const expectedCapability = attention.capabilityToken || attentionCapabilityToken(attention.requestId);
+		if (resolution.capabilityToken !== expectedCapability) {
+			throw new Error(`Attention request ${resolution.requestId} capability token does not match`);
+		}
+		if (resolution.runId !== attention.runId || resolution.planId !== attention.planId
+			|| resolution.generation !== attention.generation || resolution.round !== attention.round) {
+			throw new Error(`Attention resolution identity does not match request ${attention.requestId}`);
+		}
+		if (resolution.continuation && stableJson(resolution.continuation) !== stableJson(attention.continuation)) {
+			throw new Error(`Attention resolution continuation does not match request ${attention.requestId}`);
+		}
+		const next = this.store.getNextAttention(run.runId);
+		if (attention.state === "resolved") {
+			const priorResolution = this.store.getAttentionResolutionHash(attention.requestId);
+			if (priorResolution && priorResolution !== sha256(stableJson(resolution))) {
+				throw new Error(`Attention request ${attention.requestId} was replayed with a different resolution`);
+			}
+			return attention;
+		}
+		if (next && next.requestId !== attention.requestId) {
+			throw new Error(`Attention request ${attention.requestId} is not the next eligible request`);
+		}
+		return attention;
+	}
+
+	private attentionStatusAfterResolution(runId: string): void {
+		const nextInput = this.store.getNextInputAttention(runId);
+		const next = this.store.getNextAttention(runId);
+		this.store.updateRun({
+			status: nextInput ? "needs_input" : "running",
+			terminalDetail: nextInput?.detail ?? next?.detail ?? null,
+		});
+	}
+
+	private validateRecoveryTarget(
+		run: StoredRun,
+		attention: Extract<ManagerAttentionRequest, { kind: "plan_recovery" }>,
+		action: AttentionResolutionAction,
+		resolution: AttentionResolutionInput,
+	): {
+		plan: StoredPlan | null;
+		prior: StoredPlanSpec;
+		compiled: { specs: StoredPlanSpec[]; graphSha256: string };
+		nextSpecs: StoredPlanSpec[];
+		targetChanged: boolean;
+	} {
+		const recordedSpecs = this.store.getPlanSpecs(run.runId, attention.generation);
+		const recorded = recordedSpecs.find((spec) => spec.planId === attention.planId);
+		if (!recorded) throw new Error(`Recovery request ${attention.requestId} has no recorded target specification`);
+		if (attention.recovery.planFingerprint !== recorded.planFingerprint
+			|| attention.recovery.fingerprintVersion !== recorded.fingerprintVersion
+			|| attention.recovery.planFile !== recorded.planFile) {
+			throw new Error(`Recovery request ${attention.requestId} does not match its recorded target evidence`);
+		}
+		const currentSpecs = this.store.getPlanSpecs(run.runId, run.currentGeneration);
+		if (recordedSpecs.length !== currentSpecs.length) {
+			throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
+		}
+		for (const recordedSpec of recordedSpecs) {
+			const currentSpec = currentSpecs.find((spec) => spec.planId === recordedSpec.planId);
+			if (!currentSpec || !sameRecoveryGraphIdentity(recordedSpec, currentSpec)) {
+				throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
+			}
+		}
+		const currentTarget = currentSpecs.find((spec) => spec.planId === attention.planId);
+		if (!currentTarget) throw new Error(`Recovery request ${attention.requestId} has no current target specification`);
+		if (!sameRecoverySpecIdentity(recorded, currentTarget)) {
+			throw new Error(`Recovery request ${attention.requestId} no longer matches its immutable target specification`);
+		}
+		const priorSpecs = run.currentGeneration === attention.generation ? recordedSpecs : currentSpecs;
+		const prior = priorSpecs.find((spec) => spec.planId === attention.planId)!;
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (plan && (plan.generation !== attention.generation || plan.round !== attention.round)) {
+			throw new Error(`Recovery request ${attention.requestId} does not match the target runtime generation and round`);
+		}
+		if (plan && plan.phase !== "BLOCKED" && plan.phase !== "NEEDS_INPUT") {
+			throw new Error(`Recovery target ${attention.planId} is no longer blocked`);
+		}
+		if (!plan && attention.cause !== "initial_decision_blocked") {
+			throw new Error(`Recovery target ${attention.planId} has no blocked runtime record`);
+		}
+		const expected = recoveryIdentityFromRequest(attention);
+		const supplied = resolution.git ?? resolution.gitIdentity ?? resolution.recovery;
+		if (!expected || !supplied || !sameRecoveryIdentity(expected, supplied)) {
+			throw new Error(`Recovery request ${attention.requestId} is not bound to its recorded Git identity`);
+		}
+		if (plan) {
+			if (plan.branch !== expected.branch || plan.worktree !== expected.worktree
+				|| plan.assignmentPath !== expected.assignmentPath || plan.assignmentSha256 !== expected.assignmentSha256
+				|| plan.snapshotSha256 !== expected.snapshotSha256 || plan.generationBase !== expected.generationBase) {
+				throw new Error(`Recovery target ${attention.planId} runtime evidence changed`);
+			}
+			const driver = this.driver(run);
+			try {
+				driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
+			} catch (error) {
+				if (attention.state !== "editing" || !/not a regular file|missing|cannot change (?:directory|to)|no such file/i.test(error instanceof Error ? error.message : String(error))) throw error;
+			}
+			if (expected.worktreeHead !== null) {
+				try {
+					if (driver.worktreeHead(plan.worktree) !== expected.worktreeHead) throw new Error(`Recovery target ${attention.planId} worktree HEAD changed`);
+					if (expected.worktreeTree !== null && driver.worktreeTree(plan.worktree) !== expected.worktreeTree) {
+						throw new Error(`Recovery target ${attention.planId} worktree tree changed`);
+					}
+				} catch (error) {
+					if (attention.state !== "editing" || !/not a git repository|no such file|does not exist|cannot change (?:directory|to)/i.test(error instanceof Error ? error.message : String(error))) throw error;
+				}
+			}
+			try {
+				const lease = driver.leaseReason(plan.worktree);
+				if (lease) throw new Error(`Recovery target ${attention.planId} is still leased`);
+			} catch (error) {
+				if (!/not registered/i.test(error instanceof Error ? error.message : String(error)) || attention.state !== "editing") throw error;
+			}
+		} else {
+			this.driver(run).verifyAssignment(run.integrationWorktree, expected.assignmentPath, expected.assignmentSha256);
+		}
+		const activeTargetActions = this.store.getActions(run.runId, ["proposed", "dispatched"])
+			.filter((candidate) => candidate.planId === attention.planId);
+		if (activeTargetActions.length > 0) throw new Error(`Recovery target ${attention.planId} still owns active worker actions`);
+
+		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
+		const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
+		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
+		if (current.size !== next.size || [...current.keys()].some((planId) => !next.has(planId))) {
+			throw new Error("Recovery revision cannot change the plan graph topology");
+		}
+		const target = next.get(attention.planId);
+		if (!target) throw new Error(`Recovery target ${attention.planId} is missing from the revised graph`);
+		for (const oldSpec of priorSpecs) {
+			const newSpec = next.get(oldSpec.planId)!;
+			if (oldSpec.planId === attention.planId) {
+				if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFile !== newSpec.planFile || !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+					|| newSpec.assignment.plan.id !== oldSpec.assignment.plan.id
+					|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+					throw new Error(`Recovery target ${attention.planId} cannot change its identity, filename, or dependencies`);
+				}
+				continue;
+			}
+			if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFingerprint !== newSpec.planFingerprint || oldSpec.planFile !== newSpec.planFile
+				|| !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+				|| oldSpec.assignment.plan.id !== newSpec.assignment.plan.id
+				|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+				throw new Error(`Recovery revision changed sibling plan ${oldSpec.planId}`);
+			}
+		}
+		const targetChanged = target.planFingerprint !== prior.planFingerprint;
+		if (action === "unchanged_retry" && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
+		if (action === "revise" && !targetChanged) throw new Error("Target revision did not change the compiled target content");
+		if (["unchanged_retry", "reject"].includes(action) && !(resolution.rationale || "").trim()) {
+			throw new Error(`${action === "reject" ? "Recovery rejection" : "Unchanged recovery"} requires a non-empty rationale`);
+		}
+		const activePaths = this.store.getActions(run.runId, ["proposed", "dispatched"])
+			.map((candidate) => priorSpecs.find((spec) => spec.planId === candidate.planId)?.assignment.plan.inScopePaths ?? [])
+			.flat();
+		if (activePaths.length > 0) {
+			const activePathSet = new Set(activePaths);
+			const oldTargetPaths = new Set(prior.assignment.plan.inScopePaths);
+			const newOverlap = target.assignment.plan.inScopePaths.filter((candidate) => activePathSet.has(candidate));
+			const priorOverlap = [...oldTargetPaths].filter((candidate) => activePathSet.has(candidate));
+			if (newOverlap.some((candidate) => !oldTargetPaths.has(candidate)) || (targetChanged && priorOverlap.length === 0 && newOverlap.length > 0)) {
+				throw new Error(`Recovery target ${attention.planId} introduces an unordered overlap with active work: ${newOverlap.join(", ")}`);
+			}
+		}
+		const rejected = action === "reject" || action === "cancel";
+		const nextSpecs: StoredPlanSpec[] = compiled.specs.map((spec) => spec.planId === attention.planId
+			? { ...spec, initialStatus: (rejected ? "REJECTED" : "TODO") as StoredPlanSpec["initialStatus"], initialStatusDetail: resolution.rationale?.trim() || (rejected ? "Recovery was rejected by the main session." : "") }
+			: spec);
+		return { plan, prior, compiled, nextSpecs, targetChanged };
+	}
+
+	private async applyAttentionResolution(resolution: AttentionResolutionInput): Promise<void> {
+		const run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		const attention = this.attentionResolutionRequest(run, resolution);
+		if (attention.state === "resolved") return;
+		const action = normalizeAttentionAction(String(resolution.action));
+		if (action === "defer") return;
+		if (attention.kind === "plan_recovery") {
+			if (!["unchanged_retry", "revise", "reject", "retry", "cancel"].includes(action)) {
+				throw new Error(`Action ${action} cannot resolve plan-recovery attention`);
+			}
+			const recoveryAction = action === "retry" ? "unchanged_retry" : action === "cancel" ? "reject" : action;
+			if (recoveryAction === "revise" && !(resolution.rationale || "").trim()) {
+				throw new Error("Target revision requires a non-empty rationale");
+			}
+			const driver = this.driver(run);
+			await driver.verifyCheckout(run.checkoutStateToken);
+			const validation = this.validateRecoveryTarget(run, attention, recoveryAction, resolution);
+			const cleanupIdentity = {
+				runId: run.runId,
+				requestId: attention.requestId,
+				requestSha256: attention.requestSha256,
+				planId: attention.planId,
+				generation: attention.generation,
+				round: attention.round,
+				assignmentPath: attention.recovery.assignmentPath,
+				assignmentSha256: attention.recovery.assignmentSha256,
+				snapshotSha256: attention.recovery.snapshotSha256,
+				generationBase: attention.recovery.generationBase,
+				branch: attention.recovery.branch,
+				worktree: attention.recovery.worktree,
+				expectedHead: attention.recovery.worktreeHead,
+				expectedTree: attention.recovery.worktreeTree,
+			};
+			const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
+			this.store.updateAttentionState(attention.requestId, "editing");
+			driver.resetPlanExecution({
+				branch: attention.recovery.branch,
+				worktree: attention.recovery.worktree,
+				expectedHead: attention.recovery.worktreeHead,
+				expectedTree: attention.recovery.worktreeTree,
+				cleanupIdentity,
+				recordedCleanup: recordedCleanup ?? undefined,
+				onPrepare: (step) => this.store.recordAttentionCleanupStep(cleanupIdentity, step),
+				onProgress: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
+				onComplete: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
+			});
+			const nextGeneration = run.currentGeneration + 1;
+			const integrationHead = driver.branchHead(run.integrationBranch);
+			const assignment = driver.materializeRunAssignment(integrationHead, validation.nextSpecs.map((spec) => spec.assignment), nextGeneration);
+			this.store.transaction(() => {
+				this.store.putPlanSpecs(validation.nextSpecs);
+				this.store.putGeneration({
+					runId: run.runId,
+					generation: nextGeneration,
+					graphSha256: validation.compiled.graphSha256,
+					parentGeneration: run.currentGeneration,
+					runAssignmentPath: assignment.bundlePath,
+					runAssignmentSha256: assignment.bundleSha256,
+					runSnapshotSha256: assignment.snapshotSha256,
+				});
+				this.store.deletePlan(run.runId, attention.planId);
+				this.store.resolveAttention(attention.requestId);
+				this.store.updateRun({
+					currentGeneration: nextGeneration,
+					graphSha256: validation.compiled.graphSha256,
+					status: this.store.getNextInputAttention(run.runId) ? "needs_input" : "running",
+					terminalDetail: resolution.rationale?.trim() || `Recovery applied for plan ${attention.planId}.`,
+				});
+			});
+			this.cacheSpecs(validation.nextSpecs);
+			return;
+		}
+		if (!["answer", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
+		if (attention.kind === "user_decision" && action === "answer" && !(resolution.answer || "").trim()) {
+			throw new Error(`Attention request ${attention.requestId} requires an answer`);
+		}
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (!plan || plan.generation !== attention.generation || plan.round !== attention.round || plan.phase !== "NEEDS_INPUT") {
+			throw new Error(`Attention request ${attention.requestId} has no matching input-waiting continuation`);
+		}
+		const continuationPhase = attention.continuation.phase;
+		const marker = action === "cancel"
+			? `ATTENTION_CANCEL [${attention.requestId}]: ${(resolution.rationale || resolution.answer || "operator cancelled").trim()}`
+			: `ATTENTION_ANSWER [${attention.requestId}]: ${(resolution.answer || resolution.rationale || "retry").trim()}`;
+		this.store.transaction(() => {
+			this.updatePlan(plan, {
+				phase: action === "cancel" ? "BLOCKED" : continuationPhase,
+				repair: [...plan.repair, marker],
+			});
+			this.store.resolveAttention(attention.requestId);
+			this.attentionStatusAfterResolution(run.runId);
+		});
 	}
 
 	private validateApproval(run: StoredRun, plan: StoredPlan, approval: StoredApproval): CompletionApprovalProof {
@@ -1362,10 +1985,11 @@ export class HerderRunManager {
 	private async reconcile(profile: ResolvedProfile, options: { schedule?: boolean } = {}): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
-		if (run.status !== "running") return this.reply();
+		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		this.recoverTerminalSideEffects(run, driver);
+		this.ensureInitialAttention(run);
 
 		for (const plan of this.store.getPlans(run.runId).filter((candidate) => candidate.phase === "READY_TO_INTEGRATE").sort((a, b) => a.planId.localeCompare(b.planId))) {
 			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree) throw new Error(`Plan ${plan.planId} has no approved integration surface`);
@@ -1391,7 +2015,25 @@ export class HerderRunManager {
 			});
 			if (integration.status === "conflict") {
 				if (plan.round >= 6) {
-					this.updatePlan(plan, { phase: "BLOCKED" });
+					const latestAction = this.store.getActions(run.runId)
+						.filter((candidate) => candidate.planId === plan.planId && candidate.generation === plan.generation && candidate.round === plan.round && candidate.state === "terminal")
+						.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.actionId.localeCompare(left.actionId))[0];
+					const detail = `Integration conflict recovery exhausted for ${plan.planId} at generation ${plan.generation} round ${plan.round}.`;
+					this.store.transaction(() => {
+						this.updatePlan(plan, { phase: "BLOCKED", repair: [detail] });
+						this.store.putAttention(this.attention({
+							run: run!,
+							plan,
+							spec: this.spec(run!, plan.planId),
+							kind: "plan_recovery",
+							cause: "integration_conflict_exhausted",
+							actionId: latestAction?.actionId ?? null,
+							state: "pending",
+							continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+							detail,
+							recommendedAction: "Repair or explicitly revise only the target plan, then resume its recorded Implementer continuation.",
+						}));
+					});
 				} else {
 					if (!integration.checkpointRef || !integration.checkpoint || !integration.onto || !integration.detachedHead) {
 						throw new Error(`Restack conflict for ${plan.planId} lacks sealed recovery evidence`);
@@ -1419,7 +2061,7 @@ export class HerderRunManager {
 		}
 
 		run = this.store.getRun()!;
-		if (run.status !== "running") return this.reply();
+		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
 			if (activeActionCount(this.store, run.runId) > 0) {
@@ -1507,7 +2149,7 @@ export class HerderRunManager {
 			}
 		}
 		const settled = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
-		if (activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
+		if (run.status === "running" && activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
 			this.store.updateRun({ status: "failed", terminalDetail: `Blocked plans require recovery: ${settled.blocked.join(", ")}` });
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
@@ -1519,7 +2161,7 @@ export class HerderRunManager {
 	async auditScheduler(options: { includeReply: false }): Promise<ManagerReply | null>;
 	async auditScheduler(options: { includeReply?: boolean } = {}): Promise<ManagerReply | null> {
 		const run = this.store.getRun();
-		if (!run || run.status !== "running") return options.includeReply === false ? null : this.reply();
+		if (!run || (run.status !== "running" && run.status !== "needs_input")) return options.includeReply === false ? null : this.reply();
 		const drift = this.graphDrift(run);
 		if (drift.changed) {
 			this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
@@ -1698,7 +2340,7 @@ export class HerderRunManager {
 		].sort();
 		const freeSlots = Math.max(0, run.maxParallel - active.length);
 		const expectedNewActions = suppression === "revision-barrier" ? 0 : Math.min(freeSlots, runnablePlanIds.length);
-		const inactive = run.status !== "running";
+		const inactive = run.status !== "running" && run.status !== "needs_input";
 		const workConserving = inactive || suppression === "host-backpressure" || suppression === "revision-barrier" || expectedNewActions === 0;
 		const reason = inactive ? "inactive"
 			: suppression === "host-backpressure" ? "host-backpressure"
@@ -1734,7 +2376,8 @@ export class HerderRunManager {
 		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
 		const proposed = active.filter((action) => action.state === "proposed");
-		const questionPlan = plans.find((plan) => plan.phase === "NEEDS_INPUT");
+		const nextAttention = this.store.getNextAttention(run.runId);
+		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
@@ -1763,8 +2406,9 @@ export class HerderRunManager {
 			scheduler,
 			message: planEdit
 				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
-				: run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
-			...(questionPlan?.repair[0] ? { question: questionPlan.repair[0] } : {}),
+				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
+			...(nextAttention?.question ? { question: nextAttention.question } : {}),
+			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
 		};

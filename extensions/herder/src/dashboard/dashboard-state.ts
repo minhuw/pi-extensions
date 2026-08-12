@@ -376,6 +376,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
       phase: "coordination",
       rounds: attemptsByRound(attempts),
       report: planReport(attempts),
+      ...(manager.attention?.planId === plan.id ? { attention: manager.attention } : {}),
     }
     const runtime = runtimeById.get(plan.id) ?? null
     planView.phase = manager.run
@@ -443,6 +444,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
       byHarness: runReport.byHarness,
     },
     manager,
+    attention: manager.attention ?? null,
     forecast,
     integration: {
       branch: integrationBranch ? {

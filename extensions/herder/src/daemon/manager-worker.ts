@@ -5,7 +5,7 @@ import type { VerificationManifest } from "../shared/protocol.ts";
 
 export interface ManagerWorkerCall {
 	id: number;
-	method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState";
+	method: "reply" | "start" | "event" | "attention" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState";
 	input?: unknown;
 }
 
@@ -38,6 +38,7 @@ async function handle(call: ManagerWorkerCall): Promise<void> {
 		if (call.method === "reply") result = manager.reply();
 		else if (call.method === "start") result = await manager.start(call.input as StartInput);
 		else if (call.method === "event") result = await manager.event(call.input as EventInput);
+		else if (call.method === "attention") result = await manager.resolveAttention(call.input as Parameters<HerderRunManager["resolveAttention"]>[0]);
 		else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
 		else if (call.method === "stop") result = manager.stop();
 		else if (call.method === "verification") result = await manager.verification(call.input as VerificationManifest);

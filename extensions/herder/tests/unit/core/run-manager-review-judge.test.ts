@@ -3,8 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
+import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
@@ -247,6 +249,18 @@ async function finishImplementer(service: Service, candidate: JsonRecord, prefix
 	return terminal(service, candidate, prefix, implementerResponse(commit, discoveredPaths));
 }
 
+function failedImplementerResponse(reason: string): string {
+	return [
+		"STATUS: FAILED",
+		"COMMITS: none",
+		"CHECKS: none",
+		"FILES CHANGED: none",
+		"DISCOVERED_PATHS: none",
+		`NOTES: ${reason}`,
+		"USAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test-host",
+	].join("\n");
+}
+
 function reviewerResponse(result: ReviewerEnvelope): string {
 	return [
 		`VERDICT: ${result.verdict}`,
@@ -469,12 +483,17 @@ test("blocking Reviewer outcomes repair directly, block early, or escalate to a 
 		});
 		assert.equal(reply.status, "failed");
 		assert.equal(records(reply.actions).length, 0);
+		const attention = payload(reply.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.cause, "reviewer_blocked");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-reviewer", phase: "READY_REVIEWER" });
 		const inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.run!.status, "failed");
 			assert.equal(inspected.plan.phase, "BLOCKED");
 			assert.equal(inspected.plan.round, 2);
 			assert.deepEqual(inspected.plan.repair, ["src/value.mjs"]);
+			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "reviewer_blocked").length, 1);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally {
 			inspected.store.close();
@@ -493,6 +512,77 @@ test("blocking Reviewer outcomes repair directly, block early, or escalate to a 
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally {
 			inspected.store.close();
+		}
+	});
+});
+
+test("exhausted Implementer failure creates one plan-recovery attention request", { timeout: 60_000 }, async () => {
+	await withFixture("implementer-exhausted", async (service, fixture) => {
+		let reply = await startRun(service, fixture, "implementer-exhausted");
+		for (let round = 1; round <= 6; round += 1) {
+			const implementer = action(reply, "plan-implementer");
+			assert.equal(implementer.round, round);
+			await dispatch(service, implementer, "implementer-exhausted");
+			reply = await terminal(service, implementer, "implementer-exhausted", failedImplementerResponse(`round ${round} implementation failed`));
+			if (round < 6) {
+				assert.equal(reply.status, "running");
+				assert.equal(action(reply, "plan-implementer").round, round + 1);
+			}
+		}
+		assert.equal(reply.status, "failed");
+		assert.equal(records(reply.actions).length, 0);
+		const attention = payload(reply.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.cause, "implementer_exhausted");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+		const inspected = inspectPlan(fixture);
+		try {
+			assert.equal(inspected.plan.phase, "BLOCKED");
+			assert.equal(inspected.plan.round, 6);
+			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "implementer_exhausted").length, 1);
+		} finally {
+			inspected.store.close();
+		}
+	});
+});
+
+test("exhausted integration conflict creates one Implementer recovery request", { timeout: 45_000 }, async () => {
+	await withFixture("integration-conflict-exhausted", async (service, fixture) => {
+		let reply = await startRun(service, fixture, "integration-conflict-exhausted");
+		const implementer = action(reply, "plan-implementer");
+		reply = await finishImplementer(service, implementer, "integration-conflict-exhausted");
+		const reviewer = action(reply, "plan-reviewer");
+		await dispatch(service, reviewer, "integration-conflict-exhausted");
+		await stopService(fixture.planDirectory);
+
+		const manager = new HerderRunManager(fixture.planDirectory);
+		const originalIntegrate = GitDriver.prototype.integrate;
+		try {
+			const run = manager.store.getRun()!;
+			const plan = manager.store.getPlan(run.runId, "001")!;
+			manager.store.putPlan({ ...plan, round: 6 });
+			manager.store.database.prepare("UPDATE manager_actions SET round_number = 6 WHERE action_id = ?").run(String(reviewer.actionId));
+			GitDriver.prototype.integrate = (() => ({ status: "conflict" })) as typeof GitDriver.prototype.integrate;
+			const exhausted = await manager.event({
+				eventId: "integration-conflict-exhausted-terminal",
+				kind: "terminals",
+				terminals: [{
+					actionId: String(reviewer.actionId),
+					hostHandle: "integration-conflict-exhausted-" + String(reviewer.attemptId) + "-host",
+					response: reviewerResponse({ verdict: "APPROVE", findings: [], fixGuidance: [] }),
+				}],
+			});
+			assert.equal(exhausted.status, "failed");
+			assert.equal(exhausted.actions.length, 0);
+			const attention = payload(exhausted.attention);
+			assert.equal(attention.kind, "plan_recovery");
+			assert.equal(attention.cause, "integration_conflict_exhausted");
+			assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
+			assert.equal(manager.store.getPlan(run.runId, "001")?.phase, "BLOCKED");
+			assert.equal(manager.store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "integration_conflict_exhausted").length, 1);
+		} finally {
+			GitDriver.prototype.integrate = originalIntegrate;
+			manager.close();
 		}
 	});
 });
@@ -569,6 +659,11 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 		});
 		assert.equal(paused.status, "needs_input");
 		assert.equal(records(paused.actions).length, 0);
+		const attention = payload(paused.attention);
+		assert.equal(attention.kind, "user_decision");
+		assert.equal(attention.cause, "judge_needs_input");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
+		assert.equal(attention.question, question);
 		const before = inspectPlan(fixture);
 		try {
 			assert.equal(before.run!.status, "needs_input");
@@ -579,13 +674,22 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 			before.store.close();
 		}
 
-		const response = payload(await requestService(service, "/v1/event", {
-			eventId: "judge-input-user-response",
+		const publicSubmission = payload(await invokeHerderTool("herder_submit", {
+			planDirectory: fixture.planDirectory,
 			kind: "user_input",
+			attentionRequestId: attention.requestId,
 			userInput: "Use only the declared repair contract.",
 		}));
-		const resumed = payload(response.reply);
+		const resumed = payload(publicSubmission.reply);
+		const publicReplay = payload(await invokeHerderTool("herder_submit", {
+			planDirectory: fixture.planDirectory,
+			kind: "user_input",
+			attentionRequestId: attention.requestId,
+			userInput: "Use only the declared repair contract.",
+		}));
+		assert.equal(payload(publicReplay.reply).status, "running", "a public replay must remain bound to the resolved request");
 		assert.equal(resumed.status, "running");
+		assert.equal(resumed.attention, undefined);
 		const judge = action(resumed, "plan-judge");
 		assert.equal(judge.round, 3);
 		assert.equal(judge.workerMode, "ADJUDICATE");
@@ -595,7 +699,9 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 			assert.equal(after.run!.status, "running");
 			assert.equal(after.plan.phase, "JUDGING");
 			assert.equal(after.plan.round, 3);
-			assert.deepEqual(after.plan.repair, [question, "USER_INPUT [judge-input-user-response]: Use only the declared repair contract."]);
+			assert.equal(after.plan.repair.length, 2);
+			assert.equal(after.plan.repair[0], question);
+			assert.match(after.plan.repair[1]!, /^USER_INPUT \[attention:[0-9a-f]{64}\]: Use only the declared repair contract\.$/);
 			assertNoApproval(after.store, after.run!.runId);
 		} finally {
 			after.store.close();
@@ -614,12 +720,17 @@ test("Judge BLOCKED ends the run without approval", { timeout: 45_000 }, async (
 		});
 		assert.equal(reply.status, "failed");
 		assert.equal(records(reply.actions).length, 0);
+		const attention = payload(reply.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.cause, "judge_blocked");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
 
 		const inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.run!.status, "failed");
 			assert.equal(inspected.plan.phase, "BLOCKED");
 			assert.equal(inspected.plan.round, 3);
+			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "judge_blocked").length, 1);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally {
 			inspected.store.close();
@@ -639,6 +750,10 @@ test("round-6 Judge REPAIR is blocked by the round limit and never schedules rou
 		});
 		assert.equal(reply.status, "failed");
 		assert.equal(records(reply.actions).length, 0);
+		const attention = payload(reply.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.cause, "round_limit");
+		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
 
 		const inspected = inspectPlan(fixture);
 		try {
@@ -647,6 +762,7 @@ test("round-6 Judge REPAIR is blocked by the round limit and never schedules rou
 			assert.equal(inspected.plan.round, 6);
 			assert.equal(inspected.store.getActions(inspected.run!.runId).some((candidate) => candidate.round > 6), false);
 			assert.equal(inspected.store.getActions(inspected.run!.runId, ["proposed", "dispatched"]).length, 0);
+			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "round_limit").length, 1);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally {
 			inspected.store.close();

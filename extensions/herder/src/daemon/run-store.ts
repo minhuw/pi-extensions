@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import type { ResetPlanCleanupEvidence } from "./git/reset-plan.ts";
 import {
 	executionDatabasePath,
 	openExecutionDatabase,
@@ -6,8 +8,16 @@ import {
 } from "./execution-store.ts";
 import {
 	MANAGER_PROTOCOL_VERSION,
+	attentionCapabilityToken,
 	canonicalEventPayload,
+	sha256,
+	stableJson,
+	validateAttentionRequest,
+	type AttentionRequest,
+	type AttentionRequestInput,
+	type AttentionState,
 	type ManagerAction,
+	type ManagerAttentionRequest,
 	type ManagerOperationKind,
 	type ManagerOperationReceipt,
 	type ManagerOperationState,
@@ -209,6 +219,24 @@ export interface StoredVerification {
 	updatedAt: string;
 }
 
+export type StoredAttentionRequest = AttentionRequest & { sequence: number };
+export type AttentionCleanupStep = ResetPlanCleanupEvidence["step"];
+export type AttentionCleanupIdentity = Omit<ResetPlanCleanupEvidence, "evidenceId" | "step" | "state">;
+
+const ATTENTION_CLEANUP_INTENT_KIND = "manager_attention_cleanup_intent";
+const ATTENTION_CLEANUP_COMPLETE_KIND = "manager_attention_cleanup_complete";
+const ATTENTION_CLEANUP_EVENT_PREFIX = "manager-attention-cleanup:";
+
+function attentionCleanupPayload(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): Record<string, unknown> {
+	return {
+		schemaVersion: 1,
+		kind: state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND,
+		...identity,
+		step,
+		state,
+	};
+}
+
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
 	return JSON.parse(value) as T;
@@ -403,6 +431,56 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 	};
 }
 
+function rowToAttention(row: Record<string, unknown>): StoredAttentionRequest {
+	const request = {
+		schemaVersion: 1,
+		requestId: String(row.request_id),
+		capabilityToken: attentionCapabilityToken(String(row.request_id)),
+		runId: String(row.run_id),
+		planId: String(row.plan_id),
+		generation: Number(row.generation),
+		round: Number(row.round_number),
+		actionId: row.action_id === null ? null : String(row.action_id),
+		requestSha256: String(row.request_sha256),
+		kind: String(row.kind) as AttentionRequest["kind"],
+		state: String(row.state) as AttentionState,
+		cause: String(row.cause) as AttentionRequest["cause"],
+		detail: String(row.detail),
+		detailSha256: String(row.detail_sha256),
+		continuation: {
+			role: String(row.continuation_role) as AttentionRequest["continuation"]["role"],
+			phase: String(row.continuation_phase) as AttentionRequest["continuation"]["phase"],
+		},
+		...(row.question === null ? {} : { question: String(row.question) }),
+		...(row.recommended_action === null ? {} : { recommendedAction: String(row.recommended_action) }),
+		...(row.recovery_json === null ? {} : { recovery: JSON.parse(String(row.recovery_json)) }),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+		...(row.resolved_at === null ? {} : { resolvedAt: String(row.resolved_at) }),
+	} as unknown as ManagerAttentionRequest;
+	validateAttentionRequest(request);
+	return { ...request, sequence: Number(row.sequence) };
+}
+
+function attentionIdentity(request: AttentionRequest): string {
+	return stableJson({
+		runId: request.runId,
+		planId: request.planId,
+		generation: request.generation,
+		round: request.round,
+		actionId: request.actionId,
+		kind: request.kind,
+		cause: request.cause,
+		detail: request.detail,
+		detailSha256: request.detailSha256,
+		requestSha256: request.requestSha256,
+		continuation: request.continuation,
+		question: request.question ?? null,
+		recommendedAction: request.recommendedAction ?? null,
+		recovery: request.kind === "plan_recovery" ? request.recovery : null,
+	});
+}
+
 function operationReceipt(operation: StoredManagerOperation): ManagerOperationReceipt {
 	return {
 		protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -567,6 +645,164 @@ export class RunStore {
 	getSnapshotEnvelope(): { revision: number; updatedAt: string; reply: ManagerReply } | null {
 		const row = this.database.prepare("SELECT revision, reply_json, updated_at FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number; reply_json?: string; updated_at?: string } | undefined;
 		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: JSON.parse(row.reply_json) as ManagerReply } : null;
+	}
+
+	getAttention(requestId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare("SELECT * FROM manager_attention_requests WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
+	/** Return the immutable payload hash for the first resolution that actually committed. */
+	getAttentionResolutionHash(requestId: string): string | null {
+		const rows = this.database.prepare("SELECT payload_json, state FROM manager_operations WHERE kind = 'event' AND state IN ('running', 'succeeded') ORDER BY sequence").all() as Array<{ payload_json: string; state: string }>;
+		for (const row of rows) {
+			try {
+				const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+				if (payload.kind !== "attention" && payload.kind !== "attention_resolution") continue;
+				const resolution = payload.attention ?? payload.resolution;
+				if (!resolution || typeof resolution !== "object" || Array.isArray(resolution)) continue;
+				if (String((resolution as { requestId?: unknown }).requestId || "") !== requestId) continue;
+				const action = String((resolution as { action?: unknown }).action || "").trim().toLowerCase().replace(/[- ]+/g, "_");
+				// Defer is durable input, but it does not commit a resolution. A later
+				// answer/retry/recovery action is the payload bound to the resolved row.
+				if (action === "defer") continue;
+				return sha256(stableJson(resolution));
+			} catch {
+				// A malformed historical operation remains evidence, but cannot bind a new replay.
+			}
+		}
+		return null;
+	}
+
+	getAttentionCleanupEvidence(identity: AttentionCleanupIdentity): ResetPlanCleanupEvidence | null {
+		const worktreeIntent = this.findAttentionCleanupEvidence(identity, "worktree_removed", "prepared");
+		const worktreeComplete = this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed");
+		const branchIntent = this.findAttentionCleanupEvidence(identity, "branch_deleted", "prepared");
+		const branchComplete = this.findAttentionCleanupEvidence(identity, "branch_deleted", "completed");
+		// Branch deletion is a successor transition. It is never sufficient on its
+		// own: the manager must have durably completed worktree removal first.
+		if (worktreeComplete && branchIntent) return branchComplete ?? branchIntent;
+		return worktreeComplete ?? worktreeIntent;
+	}
+
+	/** Persist a manager-owned cleanup intent before the corresponding Git mutation. */
+	recordAttentionCleanupStep(identity: AttentionCleanupIdentity, step: AttentionCleanupStep): ResetPlanCleanupEvidence {
+		if (step === "branch_deleted" && !this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed")) {
+			throw new Error("Branch cleanup requires completed manager-owned worktree cleanup evidence");
+		}
+		return this.recordAttentionCleanupEvidence(identity, step, "prepared");
+	}
+
+	/** Persist successful completion without making replay depend on a post-mutation callback. */
+	recordAttentionCleanupCompletion(identity: AttentionCleanupIdentity, step: AttentionCleanupStep): ResetPlanCleanupEvidence {
+		if (!this.findAttentionCleanupEvidence(identity, step, "prepared")) {
+			throw new Error(`Cleanup step ${step} has no manager-owned preparation evidence`);
+		}
+		if (step === "branch_deleted" && !this.findAttentionCleanupEvidence(identity, "worktree_removed", "completed")) {
+			throw new Error("Branch cleanup requires completed manager-owned worktree cleanup evidence");
+		}
+		return this.recordAttentionCleanupEvidence(identity, step, "completed");
+	}
+
+	private findAttentionCleanupEvidence(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): ResetPlanCleanupEvidence | null {
+		const kind = state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND;
+		const canonical = canonicalEventPayload(attentionCleanupPayload(identity, step, state));
+		const row = this.database.prepare(`
+			SELECT event_id
+			FROM manager_events
+			WHERE run_id = ? AND kind = ? AND payload_sha256 = ? AND event_id LIKE ?
+			LIMIT 1
+		`).get(identity.runId, kind, canonical.sha256, `${ATTENTION_CLEANUP_EVENT_PREFIX}%`) as Record<string, unknown> | undefined;
+		return row ? { ...identity, evidenceId: String(row.event_id), step, state } : null;
+	}
+
+	private recordAttentionCleanupEvidence(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): ResetPlanCleanupEvidence {
+		const existing = this.findAttentionCleanupEvidence(identity, step, state);
+		if (existing) return existing;
+		const canonical = canonicalEventPayload(attentionCleanupPayload(identity, step, state));
+		const eventId = `${ATTENTION_CLEANUP_EVENT_PREFIX}${randomUUID()}`;
+		const colliding = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		if (colliding) throw new Error(`Cleanup evidence token ${eventId} is already in use`);
+		this.database.prepare(`
+			INSERT INTO manager_events (event_id, run_id, kind, payload_sha256, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`).run(eventId, identity.runId, state === "prepared" ? ATTENTION_CLEANUP_INTENT_KIND : ATTENTION_CLEANUP_COMPLETE_KIND, canonical.sha256, new Date().toISOString());
+		return { ...identity, evidenceId: eventId, step, state };
+	}
+
+	getAttentionRequests(runId: string, options: { unresolvedOnly?: boolean } = {}): StoredAttentionRequest[] {
+		const rows = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? ${options.unresolvedOnly ? "AND state <> 'resolved'" : ""}
+			ORDER BY plan_id COLLATE BINARY, sequence
+		`).all(runId) as Record<string, unknown>[];
+		return rows.map(rowToAttention);
+	}
+
+	getNextAttention(runId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND state <> 'resolved'
+			ORDER BY plan_id COLLATE BINARY, sequence
+			LIMIT 1
+		`).get(runId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
+	getNextInputAttention(runId: string): StoredAttentionRequest | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND state <> 'resolved'
+				AND kind IN ('user_decision', 'operator_attention')
+			ORDER BY plan_id COLLATE BINARY, sequence
+			LIMIT 1
+		`).get(runId) as Record<string, unknown> | undefined;
+		return row ? rowToAttention(row) : null;
+	}
+
+	putAttention(input: AttentionRequestInput): StoredAttentionRequest {
+		validateAttentionRequest(input);
+		const existingById = this.getAttention(input.requestId);
+		if (existingById) {
+			if (attentionIdentity(existingById) !== attentionIdentity(input)) throw new Error(`Attention request ${input.requestId} was replayed with different evidence`);
+			return existingById;
+		}
+		const existingUnresolved = this.database.prepare(`
+			SELECT * FROM manager_attention_requests
+			WHERE run_id = ? AND plan_id = ? AND cause = ? AND state <> 'resolved'
+			ORDER BY sequence LIMIT 1
+		`).get(input.runId, input.planId, input.cause) as Record<string, unknown> | undefined;
+		if (existingUnresolved) return rowToAttention(existingUnresolved);
+		this.database.prepare(`
+			INSERT INTO manager_attention_requests (
+			request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
+			kind, state, cause, detail, detail_sha256, continuation_role,
+			continuation_phase, question, recommended_action, recovery_json,
+			created_at, updated_at, resolved_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			input.requestId, input.runId, input.planId, input.generation, input.round, input.actionId, input.requestSha256,
+			input.kind, input.state, input.cause, input.detail, input.detailSha256,
+			input.continuation.role, input.continuation.phase, input.question ?? null,
+			input.recommendedAction ?? null, input.kind === "plan_recovery" ? JSON.stringify(input.recovery) : null,
+			input.createdAt, input.updatedAt, input.resolvedAt ?? null,
+		);
+		return this.getAttention(input.requestId)!;
+	}
+
+	updateAttentionState(requestId: string, state: AttentionState): StoredAttentionRequest {
+		const existing = this.getAttention(requestId);
+		if (!existing) throw new Error(`Unknown attention request ${requestId}`);
+		if (existing.state === state) return existing;
+		if (existing.state === "resolved") throw new Error(`Attention request ${requestId} is already resolved`);
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_attention_requests SET state = ?, updated_at = ?, resolved_at = ? WHERE request_id = ?")
+			.run(state, now, state === "resolved" ? now : null, requestId);
+		return this.getAttention(requestId)!;
+	}
+
+	resolveAttention(requestId: string): StoredAttentionRequest {
+		return this.updateAttentionState(requestId, "resolved");
 	}
 
 	getVerification(runId: string, generation?: number): StoredVerification | null {
@@ -975,6 +1211,9 @@ export class RunStore {
 	}
 
 	recordEvent(runId: string, eventId: string, kind: string, payload: unknown): void {
+		if (eventId.startsWith(ATTENTION_CLEANUP_EVENT_PREFIX) || eventId.startsWith("attention-cleanup:") || kind === ATTENTION_CLEANUP_INTENT_KIND || kind === ATTENTION_CLEANUP_COMPLETE_KIND) {
+			throw new Error("Manager cleanup evidence is private and cannot be submitted as a public event");
+		}
 		const canonical = canonicalEventPayload(payload);
 		const existing = this.readEvent(eventId);
 		if (existing) {

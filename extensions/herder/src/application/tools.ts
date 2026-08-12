@@ -11,7 +11,7 @@ import {
 import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
-import type { VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
+import type { AttentionResolutionInput, VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
 import {
 	ensureService,
 	executeManagerOperation,
@@ -21,7 +21,7 @@ import {
 	withServiceExclusion,
 } from "../client/index.ts";
 import { RunStore } from "../daemon/run-store.ts";
-import { stableJson } from "../shared/protocol.ts";
+import { sha256, stableJson } from "../shared/protocol.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -38,6 +38,10 @@ function planDirectory(args: JsonObject): string {
 async function planTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);
+	if (operation === "attention") {
+		const { operation: _operation, planDirectory: _planDirectory, ...resolution } = args;
+		return submitTool({ planDirectory: directory, kind: "attention", ...resolution, schemaVersion: 1 });
+	}
 	if (["begin_edit", "finish_edit", "cancel_edit"].includes(operation)) {
 		return executeManagerOperation(directory, "edit", {
 			operation: operation === "begin_edit" ? "begin" : operation === "finish_edit" ? "finish" : "cancel",
@@ -93,18 +97,50 @@ async function runTool(args: JsonObject): Promise<unknown> {
 	return requestService(currentService, "/v1/status");
 }
 
+export function attentionResolutionFromArgs(args: JsonObject): AttentionResolutionInput {
+	const nested = args.resolution ?? args.attention;
+	if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+		return { ...nested, schemaVersion: 1 } as AttentionResolutionInput;
+	}
+	const { planDirectory: _planDirectory, kind: _kind, eventId: _eventId, operation: _operation, ...resolution } = args;
+	return { ...resolution, schemaVersion: 1 } as unknown as AttentionResolutionInput;
+}
+
 async function submitTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const kind = requiredString(args, "kind");
-	if (!["dispatch_results", "terminals", "user_input"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
-	const eventId = String(args.eventId || randomUUID());
+	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
+	const attentionKind = kind === "attention" || kind === "attention_resolution";
+	const attentionRequestId = kind === "user_input"
+		? requiredString(args, "attentionRequestId")
+		: attentionKind ? String((attentionResolutionFromArgs(args) as { requestId?: unknown }).requestId || "") : undefined;
+	const resolution = attentionKind ? attentionResolutionFromArgs(args) : undefined;
+	const eventId = String(args.eventId || (attentionRequestId ? `attention:${sha256(stableJson(resolution ?? attentionRequestId))}` : randomUUID()));
 	return { ok: true, reply: await executeManagerOperation(directory, "event", {
 		eventId,
 		kind,
 		...(kind === "dispatch_results" ? { dispatchResults: args.dispatchResults } : {}),
 		...(kind === "terminals" ? { terminals: args.terminals } : {}),
-		...(kind === "user_input" ? { userInput: args.userInput } : {}),
+		...(kind === "user_input" ? {
+			userInput: args.userInput,
+			...(attentionRequestId ? { attentionRequestId } : {}),
+		} : {}),
+		...(attentionKind ? { attention: resolution } : {}),
 	}, `event:${eventId}`) };
+}
+
+export async function submitHerderAttention(args: JsonObject): Promise<PendingHerderOperation> {
+	const directory = planDirectory(args);
+	const resolution = attentionResolutionFromArgs(args);
+	const requestId = String(resolution.requestId || "");
+	if (!requestId) throw new Error("Attention resolution requestId is required");
+	const eventId = String(args.eventId || `attention:${sha256(stableJson(resolution))}`);
+	const receipt = await submitManagerOperationReliable(directory, "event", {
+		eventId,
+		kind: "attention",
+		attention: resolution,
+	}, `event:${eventId}`);
+	return { planDirectory: directory, operationId: receipt.operationId };
 }
 
 async function verificationTool(args: JsonObject): Promise<unknown> {
@@ -486,10 +522,11 @@ export async function applyHerderCleanup(
 export const previewCleanup = previewHerderCleanup;
 export const applyCleanup = applyHerderCleanup;
 
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_attention", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
 	if (name === "herder_verification") return verificationTool(args);
+	if (name === "herder_attention") return submitTool({ ...args, kind: "attention" });
 	return submitTool(args);
 }

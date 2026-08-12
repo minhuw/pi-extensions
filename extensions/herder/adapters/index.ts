@@ -4,7 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ManagerReply, TerminalEvent, VerificationManifest, VerificationRequest } from "../src/shared/protocol.ts";
+import {
+	attentionCapabilityToken,
+	type ManagerAttentionRequest,
+	type ManagerReply,
+	type TerminalEvent,
+	type VerificationManifest,
+	type VerificationRequest,
+} from "../src/shared/protocol.ts";
 import {
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
@@ -28,6 +35,7 @@ import {
 	unavailableProfileModels,
 	type ResolvedPiProfile,
 } from "./profile.ts";
+import { HERDER_ATTENTION_MESSAGE, attentionMessageDetails, buildAttentionPrompt } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
@@ -110,6 +118,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let lastPersistedState: HerderRunState | undefined;
 	let lastContext: ExtensionContext | undefined;
 	let lastSummary: PlanSummary | undefined;
+	let lastManagerMessage: string | undefined;
+	let currentAttention: ManagerAttentionRequest | undefined;
+	let attentionHint: string | undefined;
+	let attentionDrain = Promise.resolve();
+	const deferredAttention = new Set<string>();
 	let managerQueue = Promise.resolve();
 	let admittedManagerTasks = 0;
 	let releaseOwnershipAfterManagerDrain = false;
@@ -160,6 +173,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planName: path.basename(currentState.planDir),
 			...(summary ? { summaryLine: summary } : {}),
 			...(currentState.dashboardUrl ? { dashboardUrl: currentState.dashboardUrl } : {}),
+			...(lastManagerMessage ? { idleDetail: lastManagerMessage } : {}),
 			workers: engine.snapshots(),
 		});
 	};
@@ -287,12 +301,42 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			`INTEGRATION_TREE: ${request.integrationTree}`,
 		].join("\n");
 		try {
-			if (lastContext.isIdle()) pi.sendUserMessage(prompt);
-			else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 		} catch (error) {
 			promptedVerifications.delete(request.requestId);
 			lastContext.ui.notify(`Herder could not delegate final verification: ${message(error)}`, "warning");
 		}
+	};
+
+	const drainAttention = async (): Promise<void> => {
+		if (shuttingDown || !lastContext || !currentAttention || !currentState) return;
+		const request = currentAttention;
+		if (request.state === "resolved" || deferredAttention.has(request.requestId) || attentionHint === request.requestId) return;
+		const requestId = request.requestId;
+		const epoch = sessionEpoch;
+		try {
+			const prompt = await buildAttentionPrompt(PACKAGE_ROOT, currentState.planDir, request);
+			if (!sessionActive(epoch) || !lastContext || !currentAttention || currentAttention.requestId !== requestId) return;
+			pi.sendMessage({
+				customType: HERDER_ATTENTION_MESSAGE,
+				content: prompt,
+				display: true,
+				details: attentionMessageDetails(request),
+			}, { deliverAs: "followUp", triggerTurn: true });
+			// A successful injection is the only acknowledgement held by the adapter.
+			// SQLite remains authoritative, so a replacement session can re-expose the
+			// request when this hint was not persisted before shutdown.
+			attentionHint = requestId;
+			persist({ ...currentState, attentionRequestId: requestId, updatedAt: Date.now() });
+		} catch (error) {
+			lastContext?.ui.notify(`Herder could not delegate attention request ${requestId}: ${message(error)}`, "warning");
+		}
+	};
+
+	const requestAttentionDrain = (): Promise<void> => {
+		const next = attentionDrain.then(drainAttention, drainAttention);
+		attentionDrain = next.then(() => undefined, () => undefined);
+		return next;
 	};
 
 	const updateFromReply = (
@@ -304,12 +348,18 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	) => {
 		if (reply.status === "idle") {
 			currentState = undefined;
+			currentAttention = undefined;
+			attentionHint = undefined;
+			deferredAttention.clear();
 			lastSummary = undefined;
+			lastManagerMessage = undefined;
 			verificationRequests.clear();
 			promptedVerifications.clear();
 			render();
 			return;
 		}
+		currentAttention = ownsRun(reply.planDirectory, reply.runId) ? reply.attention : undefined;
+		if (!currentAttention || attentionHint !== currentAttention.requestId) attentionHint = undefined;
 		const previous = currentState;
 		const now = Date.now();
 		persist({
@@ -324,12 +374,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			dashboardEnabled: true,
 			startedAt: previous?.startedAt ?? now,
 			updatedAt: now,
+			...(attentionHint ? { attentionRequestId: attentionHint } : {}),
 			...(reply.dashboardUrl ? { dashboardUrl: reply.dashboardUrl } : {}),
 		});
 		lastSummary = {
 			counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
 			inProgress: reply.summary.inProgress,
 		};
+		lastManagerMessage = reply.message;
 		if (ownsRun(reply.planDirectory, reply.runId)) {
 			for (const operation of reply.operations ?? []) {
 				if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
@@ -349,6 +401,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		render();
 		delegateVerification(reply, verificationRetryDetail);
+		void requestAttentionDrain();
 	};
 
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
@@ -506,7 +559,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const detail = message(error);
 			lastContext?.ui.notify(`Herder verification handling failed: ${detail}`, "error");
 			if (!requestId) return;
-			promptedVerifications.delete(requestId);
 			try {
 				await enqueueManager(async () => {
 					assertSessionActive(epoch);
@@ -516,10 +568,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					}) as Record<string, unknown>);
 					assertSessionActive(epoch);
 					assertOwnership(reply.planDirectory, reply.runId);
+					if (reply.verificationRequest?.requestId === requestId) promptedVerifications.delete(requestId);
 					updateFromReply(reply, undefined, undefined, detail);
 				});
 			} catch (refreshError) {
-				if (sessionActive(epoch)) lastContext?.ui.notify(`Herder could not re-request verification: ${message(refreshError)}`, "error");
+				if (sessionActive(epoch)) lastContext?.ui.notify(`Herder could not refresh verification state: ${message(refreshError)}`, "error");
 			}
 		}).finally(() => {
 			if (verificationMonitors.get(operationId) === epoch) verificationMonitors.delete(operationId);
@@ -537,6 +590,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		assertSessionActive(epoch);
 		const planDir = resolvePlanDirectory(repoRoot, options.planDir);
 		if (!existsSync(path.join(planDir, "README.md"))) throw new Error(`Herder plan index is missing: ${path.join(planDir, "README.md")}`);
+		if (options.mode === "resume") {
+			// Resume is an explicit re-exposure point for durable attention. The hint
+			// is not authority and must not suppress the manager's next request.
+			attentionHint = undefined;
+			currentAttention = undefined;
+			deferredAttention.clear();
+		}
 		let acquired: AdapterOwnership | undefined;
 		let before: ManagerReply | undefined;
 		try {
@@ -606,9 +666,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					counts: { total: started.summary.total, done: started.summary.done, rejected: started.summary.rejected },
 					inProgress: started.summary.inProgress,
 				};
-				// Paint the authoritative run state before preparing the first worker batch;
-				// creating several clean Pi sessions can take long enough to look unresponsive.
-				render(ctx);
+				// Process every start/resume reply before dispatch. A paused verification
+				// request has no worker actions, so dispatch alone cannot delegate it.
+				updateFromReply(started, profile.profile, options.mode, undefined, repoRoot);
 				await dispatchReply(started, epoch);
 				assertSessionActive(epoch);
 				return started;
@@ -684,7 +744,17 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			? resolvePlanDirectory(repoRoot, planDirInput)
 			: currentState?.planDir ?? resolvePlanDirectory(repoRoot, "herder-plans");
 		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
+		const statusAttentionId = reply.attention?.requestId;
+		const reexposeAttention = Boolean(statusAttentionId
+			&& ownsRun(reply.planDirectory, reply.runId)
+			&& statusAttentionId === attentionHint);
 		updateFromReply(reply);
+		if (reexposeAttention && statusAttentionId) {
+			attentionHint = undefined;
+			deferredAttention.delete(statusAttentionId);
+			if (currentState) persist({ ...currentState, attentionRequestId: undefined, updatedAt: Date.now() });
+			await requestAttentionDrain();
+		}
 		render(ctx);
 		return `${reply.status.toUpperCase()} · ${reply.message}${reply.dashboardUrl ? `\nDashboard: ${reply.dashboardUrl}` : ""}`;
 	};
@@ -770,10 +840,28 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 	});
 
-	const activeFire = () => Boolean(currentState && !["complete", "failed", "stopped"].includes(currentState.status)) || workers.size > 0 || engine.snapshots().length > 0;
+	const activeFire = () => Boolean(currentState && !["complete", "failed", "stopped"].includes(currentState.status))
+		|| Boolean(currentAttention && currentAttention.state !== "resolved")
+		|| workers.size > 0
+		|| engine.snapshots().length > 0;
 	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, {
 		assertMutationAllowed: () => {
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
+		},
+		assertAttentionAllowed: (input) => {
+			const request = currentAttention;
+			if (!request || request.state === "resolved") throw new Error("No unresolved Herder attention request is bound to this Pi session.");
+			assertOwnership(input.planDirectory, request.runId);
+			const capabilityToken = request.capabilityToken || attentionCapabilityToken(request.requestId);
+			if (input.requestId !== request.requestId
+				|| input.requestSha256 !== request.requestSha256
+				|| input.capabilityToken !== capabilityToken
+				|| input.runId !== request.runId
+				|| input.planId !== request.planId
+				|| input.generation !== request.generation
+				|| input.round !== request.round) {
+				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
+			}
 		},
 		prepareWorkflow: async (skill, args, ctx) => {
 			if (!activeFire()) return {};
@@ -838,9 +926,16 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				},
 			};
 		},
-		handleManagerReply: async (value) => {
+		handleManagerReply: async (value, context) => {
 			if (!value || typeof value !== "object" || Array.isArray(value)) return;
 			const epoch = sessionEpoch;
+			const action = context?.attentionAction?.trim().toLowerCase().replace(/[- ]+/g, "_");
+			if (action === "defer") {
+				const reply = value as ManagerReply;
+				if (reply.attention) deferredAttention.add(reply.attention.requestId);
+			} else if (action && currentAttention) {
+				deferredAttention.delete(currentAttention.requestId);
+			}
 			await enqueueManager(async () => {
 				assertSessionActive(epoch);
 				const reply = value as ManagerReply;
@@ -960,14 +1055,26 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		});
 	});
 
+	pi.on("agent_settled", async (_event, ctx) => {
+		if (shuttingDown) return;
+		lastContext = ctx;
+		await requestAttentionDrain();
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEpoch += 1;
 		const epoch = sessionEpoch;
 		shuttingDown = false;
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
+		currentAttention = undefined;
+		deferredAttention.clear();
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
+		// A persisted hint only records that an earlier session injected a request;
+		// it is never an acknowledgement authority across replacement. Re-expose
+		// the manager's next durable request after the replacement status read.
+		attentionHint = undefined;
 		lastPersistedState = currentState;
 		if (currentState) {
 			const restored = currentState;
@@ -980,7 +1087,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					if (reply.runId !== restored.runId) {
 						throw new Error(`Persisted Herder run ${restored.runId} does not match manager run ${reply.runId || "idle"}; refusing recovery.`);
 					}
-					if (["initializing", "running", "paused", "needs_input"].includes(reply.status)) {
+					const shouldOwn = ["initializing", "running", "paused", "needs_input"].includes(reply.status)
+						|| (reply.status === "failed" && Boolean(reply.attention && reply.attention.state !== "resolved"));
+					if (shouldOwn) {
 						if (!reply.profileName || (restored.profile !== "unknown" && reply.profileName !== restored.profile)) {
 							throw new Error(`Persisted Herder profile ${restored.profile} does not match manager profile ${reply.profileName || "missing"}; refusing recovery.`);
 						}
@@ -988,7 +1097,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						assertSessionActive(epoch);
 						assertOwnership(reply.planDirectory, reply.runId);
 						updateFromReply(reply);
-						if (reply.status !== "initializing") await recoverInterruptedWorkers(reply, epoch);
+						if (["running", "paused", "needs_input"].includes(reply.status)) await recoverInterruptedWorkers(reply, epoch);
 						return;
 					}
 					updateFromReply(reply);
@@ -1023,6 +1132,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		widget.dispose();
 		verificationRequests.clear();
 		promptedVerifications.clear();
+		currentAttention = undefined;
+		deferredAttention.clear();
 		lastContext = undefined;
 	});
 }

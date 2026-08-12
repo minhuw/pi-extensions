@@ -5,12 +5,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { validateAttentionResolution } from "../../../src/shared/protocol.ts";
+import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
+import {
+	buildAttentionPrompt,
+} from "../../../adapters/attention.ts";
 import {
 	buildPlanningSkillPrompt,
 	executePiPlanCommand,
 	formatPlanCommandResult,
 	launchPlanningWorkflow,
+	registerPiPlanningWorkflows,
 } from "../../../adapters/planning-workflows.ts";
+import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
 
 async function fixture(): Promise<string> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-planning-"));
@@ -32,6 +39,151 @@ ${skill.instruction}
 	}
 	return root;
 }
+
+test("typed attention prompts preserve request bindings and route each variant", async () => {
+	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
+	const common = {
+		schemaVersion: 1 as const,
+		requestId: "request-001",
+		runId: "run-001",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		actionId: "action-001",
+		requestSha256: "a".repeat(64),
+		state: "awaiting_input" as const,
+		cause: "judge_needs_input" as const,
+		detail: "A bounded decision is required.",
+		detailSha256: "b".repeat(64),
+		continuation: { role: "plan-judge" as const, phase: "READY_JUDGE" as const },
+		createdAt: "2026-08-12T00:00:00.000Z",
+		updatedAt: "2026-08-12T00:00:00.000Z",
+		capabilityToken: "c".repeat(64),
+	};
+	const userPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
+		...common,
+		kind: "user_decision",
+		question: "Which recorded decision should the Judge use?",
+	} as ManagerAttentionRequest);
+	assert.match(userPrompt, /^HERDER_MAIN_SESSION_USER_DECISION_V1/m);
+	assert.match(userPrompt, /QUESTION: Which recorded decision should the Judge use\?/);
+	assert.match(userPrompt, /SCHEMA_VERSION: 1/);
+	assert.match(userPrompt, /schemaVersion: 1/);
+	assert.match(userPrompt, /PLAN_DIRECTORY: \/repo\/herder-plans/);
+	assert.match(userPrompt, /CAPABILITY_TOKEN: c{64}/);
+	assert.doesNotMatch(userPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
+
+	const operatorPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
+		...common,
+		requestId: "request-002",
+		kind: "operator_attention",
+		cause: "transport_exhausted",
+		question: "Retry the recorded role or stop it?",
+	} as ManagerAttentionRequest);
+	assert.match(operatorPrompt, /^HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1/m);
+	assert.match(operatorPrompt, /schemaVersion: 1/);
+	assert.match(operatorPrompt, /action "retry"/);
+	assert.doesNotMatch(operatorPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
+
+	const recoveryPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
+		...common,
+		requestId: "request-003",
+		kind: "plan_recovery",
+		cause: "reviewer_blocked",
+		state: "pending",
+		recovery: {
+			planFingerprint: "d".repeat(64),
+			fingerprintVersion: 1,
+			planFile: "001-plan.md",
+			inScopePaths: ["src/value.mjs"],
+			inScopePathCount: 1,
+			inScopePathsSha256: "e".repeat(64),
+			assignmentPath: "/repo/herder-plans/.herder/assignment.json",
+			assignmentSha256: "f".repeat(64),
+			snapshotSha256: "1".repeat(64),
+			generationBase: "2".repeat(40),
+			branch: "herder/herder-plans/001",
+			worktree: "/repo/herder-worktrees/001",
+			worktreeHead: "3".repeat(40),
+			worktreeTree: "4".repeat(40),
+			changedPaths: ["src/value.mjs"],
+			changedPathCount: 1,
+			changedPathsSha256: "5".repeat(64),
+		},
+	} as ManagerAttentionRequest);
+	assert.match(recoveryPrompt, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
+	assert.match(recoveryPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
+	assert.match(recoveryPrompt, /RECOVERY_GIT_IDENTITY:/);
+	assert.match(recoveryPrompt, /ALLOWED_OPERATIONS: defer, unchanged_retry, revise, reject/);
+	assert.match(recoveryPrompt, /schemaVersion: 1/);
+	assert.match(recoveryPrompt, /001-plan\.md/);
+});
+
+test("attention tool inputs round-trip with the fixed resolution schema", () => {
+	const resolution = attentionResolutionFromArgs({
+		planDirectory: "/repo/herder-plans",
+		operation: "attention",
+		kind: "attention",
+		requestId: "request-001",
+		requestSha256: "a".repeat(64),
+		capabilityToken: "c".repeat(64),
+		runId: "run-001",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		action: "answer",
+		answer: "Use the recorded evidence.",
+	});
+	validateAttentionResolution(resolution);
+	assert.equal(resolution.schemaVersion, 1);
+	assert.equal(resolution.requestId, "request-001");
+	assert.equal(resolution.action, "answer");
+});
+
+test("attention authorization runs before the deterministic manager mutation", async () => {
+	const root = await fixture();
+	const tools: Array<{ name?: string; execute?: (...args: any[]) => Promise<unknown> }> = [];
+	const pi = {
+		registerCommand: () => {},
+		registerTool: (tool: { name?: string; execute?: (...args: any[]) => Promise<unknown> }) => { tools.push(tool); },
+	} as unknown as ExtensionAPI;
+	let authorizationChecks = 0;
+	try {
+		registerPiPlanningWorkflows(pi, root, async () => path.dirname(root), {
+			assertMutationAllowed: () => {},
+			assertAttentionAllowed: () => {
+				authorizationChecks += 1;
+				throw new Error("This Pi session does not own the attention request.");
+			},
+		});
+		const tool = tools.find((candidate) => candidate.name === "herder_plan");
+		assert.ok(tool?.execute);
+		const result = await tool.execute(
+			"attention",
+			{
+				operation: "attention",
+				planDirectory: root,
+				schemaVersion: 1,
+				requestId: "request-001",
+				requestSha256: "a".repeat(64),
+				capabilityToken: "c".repeat(64),
+				runId: "run-001",
+				planId: "001",
+				generation: 1,
+				round: 1,
+				action: "defer",
+			},
+			undefined,
+			undefined,
+			{ isProjectTrusted: () => true } as ExtensionCommandContext,
+		);
+		assert.equal(authorizationChecks, 1);
+		assert.equal((result as { isError?: boolean }).isError, true);
+		assert.match(String((result as { content?: Array<{ text?: string }> }).content?.[0]?.text), /does not own/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("Pi planning prompt preserves the exact packaged skill and arguments", async () => {
 	const root = await fixture();

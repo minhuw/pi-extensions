@@ -14,6 +14,7 @@ import {
 	inspectCompletionProof,
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
+import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
 import { stableJson, type VerificationGate } from "../shared/protocol.ts";
 
@@ -373,6 +374,25 @@ export class GitDriver {
 
 	changedPaths(worktree: string, base: string): string[] {
 		return git(worktree, ["diff", "--name-only", "-z", `${base}..HEAD`, "--"]).stdout.split("\0").filter(Boolean).sort();
+	}
+
+	resetPlanExecution(input: {
+		branch: string;
+		worktree: string;
+		expectedHead: string | null;
+		expectedTree: string | null;
+		cleanupIdentity?: ResetPlanCleanupIdentity;
+		recordedCleanup?: ResetPlanCleanupEvidence;
+		onPrepare?: (step: ResetPlanCleanupStep) => void;
+		onProgress?: (step: ResetPlanCleanupStep) => void;
+		onComplete?: (step: ResetPlanCleanupStep) => void;
+	}): ResetPlanExecutionResult {
+		return resetPlanExecution({
+			repoRoot: this.repoRoot,
+			worktreeRoot: this.worktreeRoot,
+			integrationWorktree: this.integrationWorktree,
+			...input,
+		});
 	}
 
 	runVerificationGates(requestId: string, worktree: string, gates: VerificationGate[]): GateResult[] {

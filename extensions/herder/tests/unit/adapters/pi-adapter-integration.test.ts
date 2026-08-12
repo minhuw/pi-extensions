@@ -223,6 +223,14 @@ interface CapturedUserMessage {
 	options?: unknown;
 }
 
+interface CapturedCustomMessage {
+	customType: string;
+	content: string;
+	display: boolean;
+	details?: unknown;
+	options?: unknown;
+}
+
 class CapturedExtensionAPI {
 	readonly commands = new Map<string, unknown>();
 	readonly tools: unknown[] = [];
@@ -230,8 +238,10 @@ class CapturedExtensionAPI {
 	readonly renderers: string[] = [];
 	readonly appendedEntries: CapturedEntry[] = [];
 	readonly userMessages: CapturedUserMessage[] = [];
+	readonly customMessages: CapturedCustomMessage[] = [];
 	readonly execCalls: Array<{ command: string; args: string[] }> = [];
 	private readonly userMessageWaiters: Array<Deferred<CapturedUserMessage>> = [];
+	private readonly customMessageWaiters: Array<Deferred<CapturedCustomMessage>> = [];
 
 	on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown): void {
 		this.handlers.set(event, handler);
@@ -257,6 +267,12 @@ class CapturedExtensionAPI {
 		const message = { content, ...(options === undefined ? {} : { options }) };
 		this.userMessages.push(message);
 		while (this.userMessageWaiters.length) this.userMessageWaiters.shift()!.resolve(message);
+	}
+
+	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
+		const captured = { ...message, ...(options === undefined ? {} : { options }) };
+		this.customMessages.push(captured);
+		while (this.customMessageWaiters.length) this.customMessageWaiters.shift()!.resolve(captured);
 	}
 
 	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -288,6 +304,14 @@ class CapturedExtensionAPI {
 		if (existing) return existing;
 		const deferred = new Deferred<CapturedUserMessage>();
 		this.userMessageWaiters.push(deferred);
+		return deferred.promise;
+	}
+
+	async waitForAttentionMessage(): Promise<CapturedCustomMessage> {
+		const existing = this.customMessages.find((message) => message.customType === "herder-attention-v1");
+		if (existing) return existing;
+		const deferred = new Deferred<CapturedCustomMessage>();
+		this.customMessageWaiters.push(deferred);
 		return deferred.promise;
 	}
 }
@@ -601,7 +625,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"herder-validate",
 		].sort());
 		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_plan", "herder_verification"]);
-		assert.deepEqual([...api.handlers.keys()].sort(), ["session_shutdown", "session_start"]);
+		assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
 		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
 
 		const ui = new CapturedUI();
