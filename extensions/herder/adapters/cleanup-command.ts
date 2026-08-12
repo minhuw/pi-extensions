@@ -262,6 +262,3 @@ export async function runCleanupCommand(
 	appendTranscript(request, preview, context, { applied });
 	return { message: formatCleanupApplied(preview, applied), preview, applied, cancelled: false };
 }
-
-export const executeCleanupCommand = runCleanupCommand;
-export const orchestrateCleanupCommand = runCleanupCommand;

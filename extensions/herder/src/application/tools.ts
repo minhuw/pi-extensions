@@ -519,8 +519,6 @@ export async function applyHerderCleanup(
 	});
 }
 
-export const previewCleanup = previewHerderCleanup;
-export const applyCleanup = applyHerderCleanup;
 
 export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_attention", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);

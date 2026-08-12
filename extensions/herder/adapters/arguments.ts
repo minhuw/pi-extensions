@@ -225,7 +225,6 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 	};
 }
 
-export const parseCleanupCommandArguments = parseCleanupArguments;
 
 export function parseGrillPlanTarget(input: string): GrillPlanTarget | null {
 	const tokens = tokenizeArguments(input);

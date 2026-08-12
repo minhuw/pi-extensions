@@ -568,8 +568,6 @@ export async function withServiceExclusion<T>(
 	}
 }
 
-export const withDaemonExclusion = withServiceExclusion;
-export const withCleanupExclusion = withServiceExclusion;
 
 function transportFailure(error: unknown): boolean {
 	const text = error instanceof Error ? error.message : String(error);
