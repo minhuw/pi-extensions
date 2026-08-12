@@ -2,11 +2,12 @@
 
 import { spawnSync } from "node:child_process"
 import type { SpawnSyncReturns } from "node:child_process"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { sha256 } from "../../shared/protocol.ts"
 import { buildGraph, snapshotPlan, snapshotPlansFromGraph } from "../../core/plans.ts"
 import type { PlanSnapshot } from "../../core/plans.ts"
 import { parseCheckpointRefRelative } from "./coordination-ref.ts"
@@ -73,10 +74,6 @@ interface MaterializeConfiguration {
 export function runAssignmentRelativeSuffix(generation = 1): string {
   if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("run assignment generation must be a positive integer")
   return path.join(".herder", `run-assignment-generation-${generation}.json`)
-}
-
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex")
 }
 
 function isSha256(value: unknown): value is string {

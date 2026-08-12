@@ -8,14 +8,57 @@ import {
 	EXECUTION_SCHEMA_VERSION,
 	executionAuthorityHandoffReady,
 	executionDatabasePath,
+	readManagerState,
 	executionRotationMarkerIdentity,
 	executionRotationMarkerPath,
 	openExecutionDatabase,
 } from "../../../src/daemon/execution-store.ts";
+import { RunStore } from "../../../src/daemon/run-store.ts";
 
 function tableNames(database: ReturnType<typeof openExecutionDatabase> & {}) {
 	return new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 }
+
+test("legacy forwarded_url is ignored by service projections and cleared on write", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-service-"));
+	try {
+		const seeded = openExecutionDatabase(planDirectory, { create: true });
+		seeded.prepare(`
+			INSERT INTO manager_service (
+				singleton, instance_id, pid, port, auth_token, dashboard_url, forwarded_url, started_at
+			) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			"legacy-instance", process.pid, 43123, "legacy-token", "http://127.0.0.1:43123/",
+			"https://legacy-forwarded.example.invalid/", "2026-08-10T00:00:00.000Z",
+		);
+		assert.equal(Number((seeded.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		seeded.close();
+
+		const legacyStore = new RunStore(planDirectory);
+		const service = legacyStore.getService();
+		legacyStore.close();
+		assert.ok(service);
+		assert.equal(Object.hasOwn(service, "forwardedUrl"), false);
+		assert.equal(service.dashboardUrl, "http://127.0.0.1:43123/");
+
+		const projection = readManagerState(planDirectory).service;
+		assert.ok(projection);
+		assert.equal(Object.hasOwn(projection, "forwardedUrl"), false);
+		assert.equal(projection.dashboardUrl, "http://127.0.0.1:43123/");
+
+		const replacementStore = new RunStore(planDirectory);
+		replacementStore.putService({ ...service, instanceId: "replacement-instance" });
+		replacementStore.close();
+
+		const written = openExecutionDatabase(planDirectory, { create: true });
+		const row = written.prepare("SELECT forwarded_url FROM manager_service WHERE singleton = 1").get() as Record<string, unknown>;
+		assert.equal(row.forwarded_url, null);
+		assert.equal(Number((written.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		written.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
 
 test("execution schema migrates version 6 through durable operations, verification, and attention", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-"));

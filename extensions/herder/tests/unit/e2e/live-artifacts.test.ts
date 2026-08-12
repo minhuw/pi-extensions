@@ -19,7 +19,6 @@ function createServiceDatabase(planDirectory: string, serviceToken: string, prov
 			port: 43123,
 			authToken: serviceToken,
 			dashboardUrl: "http://127.0.0.1:43123",
-			forwardedUrl: null,
 			startedAt: "2026-08-10T00:00:00.000Z",
 		});
 	} finally {

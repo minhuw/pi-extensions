@@ -57,7 +57,6 @@ function registerService(planDirectory: string, pid: number): void {
 			port: 1,
 			authToken: "stale",
 			dashboardUrl: "http://127.0.0.1:1/",
-			forwardedUrl: null,
 			startedAt: new Date().toISOString(),
 		});
 	} finally { store.close(); }
@@ -98,6 +97,9 @@ test("ensureService reuses one daemon for concurrent callers", async () => {
 		const [first, second] = await Promise.all([ensureService(planDirectory), ensureService(planDirectory)]);
 		assert.equal(second.instanceId, first.instanceId);
 		assert.equal(second.pid, first.pid);
+		const health = await requestService(first, "/health");
+		assert.equal(health.dashboardUrl, first.dashboardUrl);
+		assert.equal(Object.hasOwn(health, "forwardedUrl"), false);
 	} finally {
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });

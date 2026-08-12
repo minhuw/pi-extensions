@@ -398,7 +398,6 @@ function contextFor(fixture: Fixture, ui: CapturedUI): ExtensionContext {
 
 class ControlledSession {
 	readonly sessionId: string;
-	readonly sessionFile = "/tmp/pi-adapter-integration-session.jsonl";
 	readonly messages: unknown[] = [];
 	readonly started = new Deferred<void>();
 	readonly settled = new Deferred<void>();
@@ -451,7 +450,7 @@ class ControlledSession {
 
 	getSessionStats(): SessionStats {
 		return {
-			sessionFile: this.sessionFile,
+			sessionFile: undefined,
 			sessionId: this.sessionId,
 			userMessages: this.prompted ? 1 : 0,
 			assistantMessages: this.messages.length ? 1 : 0,

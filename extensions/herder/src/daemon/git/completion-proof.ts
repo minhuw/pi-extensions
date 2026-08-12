@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
+import { sha256, stableJson } from "../../shared/protocol.ts"
 
 export interface ApprovalCore {
   runId: string
@@ -26,19 +26,6 @@ export interface CompletionProofPayload extends ApprovalCore {
 export type CompletionProofInput = ApprovalCore & {
   approvalProofSha256?: string
   integratedHead: string
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`
-  }
-  return JSON.stringify(value)
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex")
 }
 
 function approvalCore(payload: ApprovalCore): ApprovalCore {

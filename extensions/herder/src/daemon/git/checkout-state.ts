@@ -8,6 +8,7 @@ import type { BigIntStats } from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { sha256 } from "../../shared/protocol.ts"
 
 const TOKEN_VERSION = 1
 
@@ -100,10 +101,6 @@ function runGit(repoRoot: string, args: string[], { allowStatus = [] }: { allowS
     fail(`git ${args.join(" ")} failed: ${Buffer.from(details).toString("utf8").trim()}`)
   }
   return result
-}
-
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex")
 }
 
 function splitNul(buffer: Buffer): string[] {

@@ -46,7 +46,6 @@ function action(id = "action-1", planId = "001"): ManagerAction {
 class FakeSession {
 	readonly sessionId: string;
 	readonly messages: unknown[];
-	readonly sessionFile = "/tmp/session.jsonl";
 	private listeners = new Set<(event: AgentSessionEvent) => void>();
 	disposed = false;
 	aborted = false;
@@ -87,7 +86,7 @@ class FakeSession {
 	dispose(): void { this.disposed = true; }
 	getSessionStats(): SessionStats {
 		return {
-			sessionFile: this.sessionFile,
+			sessionFile: undefined,
 			sessionId: this.sessionId,
 			userMessages: this.prompted ? 1 : 0,
 			assistantMessages: this.prompted ? 1 : 0,

@@ -3,7 +3,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { createHash, randomUUID } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import {
@@ -17,6 +17,7 @@ import {
   type RunConfigurationInput,
   type UsageRecordInput,
 } from "../daemon/execution-store.ts"
+import { sha256 } from "../shared/protocol.ts"
 
 const DEFAULT_PLAN_DIR = "herder-plans"
 const TERMINAL = new Set(["DONE", "REJECTED"])
@@ -284,10 +285,6 @@ function extractLink(value: unknown): string | null {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
-function sha256(value: string | Buffer): string {
-  return createHash("sha256").update(value).digest("hex")
 }
 
 function wordCount(value: unknown): number {

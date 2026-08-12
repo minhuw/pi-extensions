@@ -1347,7 +1347,7 @@ export function readManagerState(planDir: string) {
       validateAttentionRequest(projectedAttention)
     }
     const service = database.prepare(`
-      SELECT instance_id, pid, port, dashboard_url, forwarded_url, started_at
+      SELECT instance_id, pid, port, dashboard_url, started_at
       FROM manager_service WHERE singleton = 1
     `).get() as SqlRow | undefined ?? null
     return {
@@ -1460,7 +1460,6 @@ export function readManagerState(planDir: string) {
         pid: service.pid,
         port: service.port,
         dashboardUrl: service.dashboard_url,
-        forwardedUrl: service.forwarded_url,
         startedAt: service.started_at,
       } : null,
     }
