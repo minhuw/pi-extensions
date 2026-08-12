@@ -52,12 +52,13 @@ describe("foreground agent metadata", () => {
     });
   });
 
-  it("keeps an inherited model visible and places service tier before thinking", () => {
+  it("keeps an inherited model visible, places tier before thinking, and avoids duplicating max turns", () => {
     const parentModel = { provider: "openai", id: "gpt-5.6-luna", name: "GPT-5.6 Luna" };
     const invocation = buildInvocationTags({
       modelName: formatModelName(parentModel),
       serviceTier: "fast",
       thinking: "xhigh",
+      maxTurns: 30,
     });
 
     expect(getAgentStatsParts({
@@ -71,13 +72,14 @@ describe("foreground agent metadata", () => {
       durationMs: 0,
       status: "running",
       turnCount: 13,
+      maxTurns: 30,
     })).toEqual([
       "openai/gpt-5.6-luna",
-      "tier: fast",
-      "thinking: xhigh",
-      "↻13",
-      "54 tool uses",
-      "146.1k token",
+      "fast",
+      "xhigh",
+      "↻13≤30",
+      " 54",
+      " 146.1k",
     ]);
   });
 });

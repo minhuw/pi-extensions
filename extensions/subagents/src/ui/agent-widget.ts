@@ -78,7 +78,7 @@ export interface AgentDetails {
   spinnerFrame?: number;
   /** Exact effective model name, preferably provider/modelId. */
   modelName?: string;
-  /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
+  /** Compact config tags (e.g. ["high", "isolated"]). */
   tags?: string[];
   /** Current turn count. */
   turnCount?: number;
@@ -141,11 +141,33 @@ export function buildRecordInvocation(record: Pick<AgentRecord,
   });
 }
 
-/** Format a token count compactly: "33.8k token", "1.2M token". */
+const TOOL_USES_ICON = "\uF0AD"; // Nerd Font wrench
+const TOKEN_USAGE_ICON = "\uF1C0"; // Nerd Font database
+
+/** Compact token magnitude without a label: "33.8k", "1.2M". */
+function formatTokenCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return `${count}`;
+}
+
+/** Human-readable token count for tool result text. */
 export function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M token`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k token`;
-  return `${count} token`;
+  return `${formatTokenCount(count)} token`;
+}
+
+/** Compact UI counters, matching the existing `↻5` turn counter. */
+export function formatToolUses(count: number): string {
+  return `${TOOL_USES_ICON} ${count}`;
+}
+
+export function formatTokenUsage(count: number): string {
+  return `${TOKEN_USAGE_ICON} ${formatTokenCount(count)}`;
+}
+
+function formatTokenUsageText(text: string): string {
+  if (text.startsWith(TOKEN_USAGE_ICON)) return text;
+  return `${TOKEN_USAGE_ICON} ${text.replace(/\s+tokens?$/, "")}`;
 }
 
 /**
@@ -153,10 +175,10 @@ export function formatTokens(count: number): string {
  * Thresholds for percent: <70% dim, 70–85% warning, ≥85% error.
  * Compaction count rendered as `⇊N` in dim.
  *
- *   "12.3k token"               — no annotations
- *   "12.3k token (45%)"         — percent only
- *   "12.3k token (⇊2)"          — compactions only (e.g. right after compact)
- *   "12.3k token (45% · ⇊2)"    — both
+ *   " 12.3k"               — no annotations
+ *   " 12.3k (45%)"         — percent only
+ *   " 12.3k (⇊2)"          — compactions only (e.g. right after compact)
+ *   " 12.3k (45% · ⇊2)"    — both
  */
 export function formatSessionTokens(
   tokens: number,
@@ -164,7 +186,7 @@ export function formatSessionTokens(
   theme: Theme,
   compactions = 0,
 ): string {
-  const tokenStr = formatTokens(tokens);
+  const tokenStr = formatTokenUsage(tokens);
   const annot: string[] = [];
   if (percent !== null) {
     const color = percent >= 85 ? "error" : percent >= 70 ? "warning" : "dim";
@@ -210,14 +232,13 @@ export function buildInvocationTags(
 ): { modelName?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
-  if (invocation.serviceTier) tags.push(`tier: ${invocation.serviceTier}`);
-  if (invocation.thinking) tags.push(`thinking: ${invocation.thinking}`);
+  if (invocation.serviceTier) tags.push(invocation.serviceTier);
+  if (invocation.thinking) tags.push(invocation.thinking);
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground === true) tags.push("background");
   else if (invocation.runInBackground === false) tags.push("foreground");
-  if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
   return { modelName: invocation.modelName, tags };
 }
 
@@ -229,8 +250,8 @@ export function getAgentStatsParts(details: AgentDetails): string[] {
   if (details.turnCount != null && details.turnCount > 0) {
     parts.push(formatTurns(details.turnCount, details.maxTurns));
   }
-  if (details.toolUses > 0) parts.push(`${details.toolUses} tool use${details.toolUses === 1 ? "" : "s"}`);
-  if (details.tokens) parts.push(details.tokens);
+  if (details.toolUses > 0) parts.push(formatToolUses(details.toolUses));
+  if (details.tokens) parts.push(formatTokenUsageText(details.tokens));
   return parts;
 }
 
@@ -398,7 +419,7 @@ export class AgentWidget {
     const turnCount = activity?.turnCount ?? a.turnCount;
     const maxTurns = activity?.maxTurns ?? a.maxTurns;
     if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
-    if (a.toolUses > 0) parts.push(`${a.toolUses} tool use${a.toolUses === 1 ? "" : "s"}`);
+    if (a.toolUses > 0) parts.push(formatToolUses(a.toolUses));
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
@@ -457,7 +478,7 @@ export class AgentWidget {
       const turnCount = bg?.turnCount ?? a.turnCount;
       const maxTurns = bg?.maxTurns ?? a.maxTurns;
       if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
-      if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
+      if (toolUses > 0) parts.push(formatToolUses(toolUses));
       if (tokenText) parts.push(tokenText);
       parts.push(elapsed);
       const statsText = parts.join(" · ");

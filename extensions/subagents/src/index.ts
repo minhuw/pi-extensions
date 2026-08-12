@@ -45,6 +45,8 @@ import {
   formatModelName,
   formatMs,
   formatTokens,
+  formatTokenUsage,
+  formatToolUses,
   formatTurns,
   getAgentStatsParts,
   getDisplayName,
@@ -305,8 +307,8 @@ export default function (pi: ExtensionAPI) {
         if (d.modelName) parts.push(d.modelName);
         if (d.invocationTags) parts.push(...d.invocationTags);
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
-        if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-        if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
+        if (d.toolUses > 0) parts.push(formatToolUses(d.toolUses));
+        if (d.totalTokens > 0) parts.push(formatTokenUsage(d.totalTokens));
         if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
         if (parts.length) {
           line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
@@ -1139,7 +1141,7 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "gpt-5.6 luna · tier: fast · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens".
+      // Helper: build "gpt-5.6 luna · fast · high · ↻5≤30 ·  3 ·  33.8k".
       const stats = (d: AgentDetails) => getAgentStatsParts(d)
         .map(p => fgPreservingNestedStyles(theme, "dim", p))
         .join(" " + theme.fg("dim", "·") + " ");
@@ -1333,8 +1335,7 @@ Terse command-style prompts produce shallow, generic work.
         modelName,
         thinking,
         serviceTier,
-        // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
+        // Retained for structured invocation metadata and the compact ↻N≤max counter.
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
         inheritContext,
