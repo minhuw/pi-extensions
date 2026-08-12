@@ -104,7 +104,7 @@ function unwrapReply(value: Record<string, unknown>): ManagerReply {
 }
 
 export default function registerHerderPi(pi: ExtensionAPI): void {
-	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT, pi);
+	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT);
 	registerHerderPiWithWorkerFactory(pi, sessionFactory);
 }
 

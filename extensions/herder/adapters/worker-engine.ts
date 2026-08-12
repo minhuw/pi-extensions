@@ -14,7 +14,6 @@ import {
 	SettingsManager,
 	type AgentSession,
 	type AgentSessionEvent,
-	type ExtensionAPI,
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
@@ -77,7 +76,6 @@ export interface PiWorkerRequest {
 
 interface WorkerSession {
 	readonly sessionId: string;
-	readonly sessionFile: string | undefined;
 	readonly messages: readonly unknown[];
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 	prompt(text: string, options?: { expandPromptTemplates?: boolean; source?: "extension" }): Promise<void>;
@@ -260,13 +258,11 @@ function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: nu
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
 	private readonly agentDir: string;
-	private readonly pi: ExtensionAPI;
 	private readonly nestedExtensionPaths = new Map<string, string>();
 	private modelRuntime?: ModelRuntime;
 
-	constructor(agentRoot: string, pi: ExtensionAPI, agentDir = getAgentDir()) {
+	constructor(agentRoot: string, agentDir = getAgentDir()) {
 		this.agentRoot = agentRoot;
-		this.pi = pi;
 		this.agentDir = agentDir;
 	}
 

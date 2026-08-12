@@ -254,7 +254,6 @@ class CapturedExtensionAPI {
 
 class PendingSession {
 	readonly sessionId: string;
-	readonly sessionFile = "/tmp/herder-recovery-session.jsonl";
 	readonly messages: unknown[] = [];
 	readonly started: Promise<void>;
 	disposed = false;
@@ -293,7 +292,7 @@ class PendingSession {
 
 	getSessionStats(): SessionStats {
 		return {
-			sessionFile: this.sessionFile,
+			sessionFile: undefined,
 			sessionId: this.sessionId,
 			userMessages: 1,
 			assistantMessages: 0,
