@@ -45,7 +45,7 @@ test("cleanup exclusion releases safely when deep cleanup deletes the plan direc
 	rmSync(root, { recursive: true, force: true });
 });
 
-
+test("cleanup rejects a healthy nonterminal service owner without calling the callback", async () => {
 	const planDir = planDirectory();
 	try {
 		await ensureService(planDir);

@@ -102,7 +102,7 @@ test("cleanup transcripts retain legacy finalize rendering and use v2 deep entri
 	assert.match(cleanupTranscriptDisplay(current, transcriptTheme), /deep · executed/);
 });
 
-
+test("cleanup parser is fail-closed and preserves the exact command shape", () => {
 	assert.deepEqual(parseCleanupArguments("custom-plans --plan 7 --include-failed"), {
 		planDir: "custom-plans",
 		planId: "7",

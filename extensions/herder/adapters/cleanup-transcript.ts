@@ -81,7 +81,7 @@ function renderList(values: readonly string[]): string {
 
 export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry | LegacyCleanupTranscriptEntry, theme: Theme): string {
 	const legacy = entry.version === 1 ? entry : null;
-	const deep = legacy ? legacy.finalize : entry.deep;
+	const deep = entry.version === 1 ? entry.finalize : entry.deep;
 	const state = entry.executed ? theme.fg("success", "executed") : theme.fg("warning", entry.preview);
 	if (!deep) {
 		return [
