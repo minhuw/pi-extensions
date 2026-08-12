@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ensureService, stopService } from "../../../src/client/index.ts";
+import { serviceProcessAlive, serviceOwnershipLockPath } from "../../../src/daemon/service-ownership.ts";
 import {
 	executionDatabasePath,
 	executionRotationMarkerPath,
@@ -48,6 +49,25 @@ function mode(candidate: string): number {
 function planDirectory(root: string): string {
 	return path.join(root, "herder-plans");
 }
+
+test("daemon exits when its ownership lock is replaced", { skip: !POSIX, timeout: 10_000 }, async () => {
+	const root = planRoot();
+	const directory = planDirectory(root);
+	try {
+		const service = await ensureService(directory, { runtimeIdentityCheckMs: 25 });
+		fs.unlinkSync(serviceOwnershipLockPath(directory));
+		const deadline = Date.now() + 5_000;
+		while (serviceProcessAlive(service.pid) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		assert.equal(serviceProcessAlive(service.pid), false, "daemon survived loss of its ownership lock");
+		const replacement = await ensureService(directory, { runtimeIdentityCheckMs: 25 });
+		assert.notEqual(replacement.pid, service.pid);
+	} finally {
+		await stopService(directory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("broadened execution storage rotates one active daemon for concurrent callers", { skip: !POSIX }, async () => {
 	const root = planRoot();

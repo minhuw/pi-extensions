@@ -72,7 +72,7 @@ function runtimeDatabaseIdentityIsCurrent(candidate: string, expected: FileIdent
 	}
 }
 
-
+function send(response: http.ServerResponse, status: number, value: unknown): void {
 	if (response.destroyed || response.writableEnded) return;
 	const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
 	response.writeHead(status, {
@@ -227,7 +227,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		terminalIdleTimer.unref();
 	};
 
-
+	const executeOperation = async (operation: StoredManagerOperation): Promise<void> => {
 		try {
 			const recoveredPayload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
 				&& operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
@@ -403,10 +403,6 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		runtimeIdentityTimer.unref();
 	};
 
-	scheduleDrain();
-	scheduleAudit();
-	scheduleRuntimeIdentityWatchdog();
-
 	closeService = async () => {
 		if (closePromise) return closePromise;
 		closePromise = (async () => {
@@ -426,6 +422,10 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		})();
 		return closePromise;
 	};
+	scheduleDrain();
+	scheduleAudit();
+	scheduleRuntimeIdentityWatchdog();
+	scheduleTerminalIdleShutdown();
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());
 	return { instanceId, port: address.port, dashboardUrl, server, close: closeService };
