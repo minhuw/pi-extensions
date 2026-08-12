@@ -52,6 +52,32 @@ function roleLabel(role: PiWorkerSnapshot["role"]): string {
 	return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+/**
+ * Compact model/thinking/tier identity shown next to agent names everywhere.
+ * Order is always: model · thinking · service tier (omit missing fields).
+ * Kept local to Herder so the two tree implementations stay independent while
+ * showing the same identity information shape as subagents.
+ */
+export function formatAgentIdentity(source?: {
+	model?: string | null;
+	effort?: string | null;
+	serviceTier?: string | null;
+} | null): string | undefined {
+	if (!source) return undefined;
+	const parts = [source.model, source.effort, source.serviceTier]
+		.map((value) => (typeof value === "string" ? value.trim() : ""))
+		.filter(Boolean);
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function formatAgentNameIdentity(
+	theme: Theme,
+	source: { model?: string | null; effort?: string | null; serviceTier?: string | null },
+): string {
+	const identity = formatAgentIdentity(source);
+	return identity ? ` ${theme.fg("dim", `· ${identity}`)}` : "";
+}
+
 function formatTokens(tokens: number): string {
 	if (tokens < 1_000) return `${tokens}t`;
 	if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(tokens < 100_000 ? 1 : 0)}k`;
@@ -185,11 +211,13 @@ function agentRows(workers: readonly PiWorkerSnapshot[]): RenderRow[] {
 function renderRow(row: RenderRow, width: number, theme: Theme, now: number, frame: number): string {
 	if (row.kind === "top") {
 		const worker = row.worker!;
-		const left = `${theme.fg("dim", row.connector)} ${theme.fg("muted", `Plan ${worker.planId}`)} ${theme.fg("dim", "·")} ${workerIcon(worker, frame, theme)} ${theme.bold(roleLabel(worker.role))}  ${theme.fg("dim", workerActivity(worker))}`;
+		const identityTag = formatAgentNameIdentity(theme, worker);
+		const left = `${theme.fg("dim", row.connector)} ${theme.fg("muted", `Plan ${worker.planId}`)} ${theme.fg("dim", "·")} ${workerIcon(worker, frame, theme)} ${theme.bold(roleLabel(worker.role))}${identityTag}  ${theme.fg("dim", workerActivity(worker))}`;
 		return rightAlign(left, theme.fg("dim", topStats(worker, now)), width);
 	}
 	const agent = row.agent!;
-	const left = `${row.prefix}${theme.fg("dim", row.connector)} ${nestedIcon(agent, frame, theme)} ${theme.bold(agent.displayName)}  ${theme.fg("dim", nestedActivity(agent))}`;
+	const identityTag = formatAgentNameIdentity(theme, agent);
+	const left = `${row.prefix}${theme.fg("dim", row.connector)} ${nestedIcon(agent, frame, theme)} ${theme.bold(agent.displayName)}${identityTag}  ${theme.fg("dim", nestedActivity(agent))}`;
 	return rightAlign(left, theme.fg("dim", nestedStats(agent, now)), width);
 }
 

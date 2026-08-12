@@ -15,7 +15,7 @@ import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } 
 import type { AgentManager } from "../agent-manager.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
-import { buildInvocationTags, buildRecordInvocation, type AgentActivity, formatTokenUsage, getDisplayName, type Theme } from "./agent-widget.js";
+import { buildInvocationTags, buildRecordInvocation, type AgentActivity, formatAgentNameIdentity, formatTokenUsage, getDisplayName, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -77,7 +77,7 @@ export class FleetList {
   private widgetRegistered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
 
-  private enabled = true;
+  private enabled = false;
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
@@ -368,10 +368,11 @@ export class FleetList {
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    const { modelName, tags } = buildInvocationTags(buildRecordInvocation(record));
-    const metadata = modelName ? [modelName, ...tags] : tags;
-    const suffix = metadata.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", metadata.join(" · "))}` : "";
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", getDisplayName(record.type))}  ${record.description}${suffix}`;
+    const invocation = buildRecordInvocation(record);
+    const { tags } = buildInvocationTags(invocation);
+    const identityTag = formatAgentNameIdentity(theme, invocation);
+    const suffix = tags.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", tags.join(" · "))}` : "";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", getDisplayName(record.type))}${identityTag}  ${record.description}${suffix}`;
     const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const right = theme.fg("dim", `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`);

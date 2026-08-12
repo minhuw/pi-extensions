@@ -11,7 +11,7 @@ import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, buildInvocationTags, buildRecordInvocation, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, formatToolUses, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { type AgentActivity, buildInvocationTags, buildRecordInvocation, describeActivity, fgPreservingNestedStyles, formatAgentNameIdentity, formatDuration, formatSessionTokens, formatToolUses, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
@@ -158,8 +158,9 @@ export class ConversationViewer implements Component {
       headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
     }
 
+    const identityTag = formatAgentNameIdentity(th, buildRecordInvocation(this.record));
     lines.push(row(
-      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${th.bold(name)}${modeTag}${identityTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));
@@ -274,10 +275,10 @@ export class ConversationViewer implements Component {
   }
 
   private invocationLine(): string | undefined {
-    const { modelName, tags } = buildInvocationTags(buildRecordInvocation(this.record));
-    const parts = modelName ? [modelName, ...tags] : tags;
-    if (parts.length === 0) return undefined;
-    return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
+    // Identity is already next to the agent name; only show remaining spawn flags here.
+    const { tags } = buildInvocationTags(buildRecordInvocation(this.record));
+    if (tags.length === 0) return undefined;
+    return this.theme.fg("dim", `  ↳ ${tags.join(" · ")}`);
   }
 
   private buildContentLines(width: number): string[] {

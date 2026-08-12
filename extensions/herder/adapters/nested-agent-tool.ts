@@ -67,8 +67,17 @@ function resultText(result: NestedAgentResult, details: NestedAgentToolDetails):
 	return `Agent completed (${stats}).\n\n${result.output.trim() || "No output."}`;
 }
 
+function agentIdentity(snapshot: Pick<PiNestedAgentSnapshot, "model" | "effort" | "serviceTier">): string {
+	return [snapshot.model, snapshot.effort, snapshot.serviceTier]
+		.map((value) => (typeof value === "string" ? value.trim() : ""))
+		.filter(Boolean)
+		.join(" · ");
+}
+
 function snapshotLine(snapshot: PiNestedAgentSnapshot): string {
-	return `${snapshot.agentId} · ${snapshot.displayName} · ${snapshot.status} · ↻${snapshot.turns} · ${snapshot.description}`;
+	const identity = agentIdentity(snapshot);
+	const name = identity ? `${snapshot.displayName} · ${identity}` : snapshot.displayName;
+	return `${snapshot.agentId} · ${name} · ${snapshot.status} · ↻${snapshot.turns} · ${snapshot.description}`;
 }
 
 /** Create the one-level Agent and result tools scoped to a single Herder action. */

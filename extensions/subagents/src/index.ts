@@ -41,6 +41,7 @@ import {
   buildResumedInvocation,
   describeActivity,
   fgPreservingNestedStyles,
+  formatAgentIdentity,
   formatDuration,
   formatModelName,
   formatMs,
@@ -237,7 +238,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
-  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
+  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "thinking" | "serviceTier" | "identity" | "tags">,
   record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
@@ -259,7 +260,7 @@ function buildDetails(
 /** Build notification details for the custom message renderer. */
 function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-  const { modelName, tags } = buildInvocationTags(buildRecordInvocation(record));
+  const { modelName, identity, tags } = buildInvocationTags(buildRecordInvocation(record));
 
   return {
     id: record.id,
@@ -267,6 +268,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     displayName: getDisplayName(record.type),
     description: record.description,
     modelName,
+    identity,
     invocationTags: tags.length > 0 ? tags : undefined,
     status: record.status,
     toolUses: record.toolUses,
@@ -299,12 +301,13 @@ export default function (pi: ExtensionAPI) {
           : d.status === "steered" ? "completed (steered)"
           : "completed";
 
-        // Line 1: icon + agent name/description + status
-        let line = `${icon} ${theme.bold(d.displayName)}  ${theme.fg("muted", d.description)} ${theme.fg("dim", statusText)}`;
+        // Line 1: icon + agent name/identity/description + status
+        const identity = d.identity ?? formatAgentIdentity({ modelName: d.modelName });
+        const identityTag = identity ? ` ${theme.fg("dim", `· ${identity}`)}` : "";
+        let line = `${icon} ${theme.bold(d.displayName)}${identityTag}  ${theme.fg("muted", d.description)} ${theme.fg("dim", statusText)}`;
 
-        // Line 2: invocation + stats
+        // Line 2: remaining spawn flags + runtime stats
         const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
         if (d.invocationTags) parts.push(...d.invocationTags);
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
         if (d.toolUses > 0) parts.push(formatToolUses(d.toolUses));
@@ -731,18 +734,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Live widget: show running agents above editor.
-  // widgetMode (default "background") selects what the widget shows: "all" =
+  // widgetMode (default "all") selects what the widget shows: "all" =
   // every agent; "background" = hide foreground (they already render inline as
   // the Agent tool result, so showing them here too is a duplicate, #118), keep
   // everything else; "off" = hide the widget entirely. Read live at render time.
-  let widgetMode: WidgetMode = "background";
+  let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   const fleet = new FleetList(manager, agentActivity);
-  let fleetViewEnabled = true;
+  let fleetViewEnabled = false;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
@@ -1120,15 +1123,16 @@ Terse command-style prompts produce shallow, generic work.
       const model = config?.model ?? args.model;
       const thinking = config?.thinking ?? args.thinking;
       const serviceTier = config?.serviceTier ?? args.service_tier;
-      const requested: string[] = [];
-      if (model) requested.push(`model request: ${model}`);
-      if (thinking) requested.push(`thinking request: ${thinking}`);
-      if (serviceTier) requested.push(`tier request: ${serviceTier}`);
-      const metadata = requested.length > 0 ? requested.join(" · ") : "effective runtime metadata resolves after launch";
+      const identity = formatAgentIdentity({
+        modelName: typeof model === "string" ? model : undefined,
+        thinking: typeof thinking === "string" ? thinking : undefined,
+        serviceTier: typeof serviceTier === "string" ? serviceTier : undefined,
+      });
+      const identityTag = identity ? ` ${theme.fg("dim", `· ${identity}`)}` : "";
       return new Text(
         "▸ " + theme.fg("toolTitle", theme.bold(displayName))
-        + (desc ? "  " + theme.fg("muted", desc) : "")
-        + " " + theme.fg("dim", "·") + " " + theme.fg("dim", metadata),
+        + identityTag
+        + (desc ? "  " + theme.fg("muted", desc) : ""),
         0,
         0,
       );
@@ -1344,13 +1348,16 @@ Terse command-style prompts produce shallow, generic work.
       };
       // Tool-result render shows the mode label too; viewer's header already does.
       const modeLabel = getPromptModeLabel(subagentType);
-      const { tags: invocationTags } = buildInvocationTags(agentInvocation);
+      const { identity, tags: invocationTags } = buildInvocationTags(agentInvocation);
       const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
       const detailBase = {
         displayName,
         description: params.description,
         subagentType,
         modelName,
+        thinking,
+        serviceTier,
+        identity,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
@@ -1411,7 +1418,11 @@ Terse command-style prompts produce shallow, generic work.
         // for model/thinking; record fields cover service tier and spawn metadata
         // for scheduled/RPC agents that have no invocation snapshot.
         const resumedInvocation = buildResumedInvocation(existing);
-        const { modelName: resumedModelName, tags: resumedInvocationTags } = buildInvocationTags(resumedInvocation);
+        const {
+          modelName: resumedModelName,
+          identity: resumedIdentity,
+          tags: resumedInvocationTags,
+        } = buildInvocationTags(resumedInvocation);
         const resumedModeLabel = getPromptModeLabel(existing.type);
         const resumedTags = resumedModeLabel
           ? [resumedModeLabel, ...resumedInvocationTags]
@@ -1421,6 +1432,9 @@ Terse command-style prompts produce shallow, generic work.
           description: existing.description,
           subagentType: existing.type,
           modelName: resumedModelName,
+          thinking: resumedInvocation.thinking,
+          serviceTier: resumedInvocation.serviceTier,
+          identity: resumedIdentity,
           tags: resumedTags.length > 0 ? resumedTags : undefined,
         };
 
@@ -1695,8 +1709,11 @@ Terse command-style prompts produce shallow, generic work.
       const duration = formatDuration(record.startedAt, record.completedAt);
       const tokens = formatLifetimeTokens(record);
       const contextPercent = getSessionContextPercent(record.session);
-      const { modelName: resultModelName, tags: resultInvocationTags } = buildInvocationTags(buildRecordInvocation(record));
-      const invocationParts = resultModelName ? [resultModelName, ...resultInvocationTags] : resultInvocationTags;
+      const {
+        identity: resultIdentity,
+        tags: resultInvocationTags,
+      } = buildInvocationTags(buildRecordInvocation(record));
+      const invocationParts = [resultIdentity, ...resultInvocationTags].filter((part): part is string => Boolean(part));
       const statsParts = [`Tool uses: ${record.toolUses}`];
       if (tokens) statsParts.push(tokens);
       if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
@@ -1965,9 +1982,9 @@ Terse command-style prompts produce shallow, generic work.
     const options = agents.map(a => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      const { modelName, tags } = buildInvocationTags(buildRecordInvocation(a));
-      const invocation = modelName ? [modelName, ...tags] : tags;
-      const invocationText = invocation.length > 0 ? ` · ${invocation.join(" · ")}` : "";
+      const { identity, tags } = buildInvocationTags(buildRecordInvocation(a));
+      const metadata = [identity, ...tags].filter(Boolean);
+      const invocationText = metadata.length > 0 ? ` · ${metadata.join(" · ")}` : "";
       return `${dn} (${a.description})${invocationText} · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
 

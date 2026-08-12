@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
-import { formatWorkerElapsed, HerderWidget, workerFleetTreeLines, type HerderWidgetModel } from "../../../adapters/worker-fleet.ts";
+import { formatAgentIdentity, formatWorkerElapsed, HerderWidget, workerFleetTreeLines, type HerderWidgetModel } from "../../../adapters/worker-fleet.ts";
 import type { PiNestedAgentSnapshot, PiWorkerSnapshot } from "../../../adapters/worker-engine.ts";
 
 const theme = {
@@ -19,6 +19,7 @@ function nested(overrides: Partial<PiNestedAgentSnapshot> = {}): PiNestedAgentSn
 		status: "running",
 		model: "gpt-5.6-sol",
 		effort: "xhigh",
+		serviceTier: "fast",
 		startedAt: 6_000,
 		turns: 1,
 		toolUses: 2,
@@ -39,6 +40,7 @@ function worker(overrides: Partial<PiWorkerSnapshot> = {}): PiWorkerSnapshot {
 		role: "plan-reviewer",
 		model: "gpt-5.6-sol",
 		effort: "xhigh",
+		serviceTier: "fast",
 		status: "running",
 		startedAt: 1_000,
 		turns: 2,
@@ -80,10 +82,17 @@ test("Pi worker fleet flattens Plan and Role and renders direct child stats on o
 	]), theme, 160, 66_000, 0);
 
 	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
-	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
-	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
-	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
+	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer · gpt-5\.6-sol · xhigh · fast  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
+	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon · gpt-5\.6-sol · xhigh · fast  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
+	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer · gpt-5\.6-sol · xhigh · fast  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
+});
+
+test("agent identity is model · thinking · service tier and omits missing fields", () => {
+	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast" }), "gpt-5.6-sol · xhigh · fast");
+	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol", effort: "max" }), "gpt-5.6-sol · max");
+	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol" }), "gpt-5.6-sol");
+	assert.equal(formatAgentIdentity({}), undefined);
 });
 
 test("nested connector alignment retains the outer plan sibling stem", () => {
@@ -100,7 +109,7 @@ test("aborted nested agents render as failures", () => {
 	const lines = workerFleetTreeLines(model([
 		worker({ children: [nested({ status: "aborted", activeTools: [], activity: "aborted" })] }),
 	]), theme, 120, 66_000, 0);
-	assert.match(lines[2]!, /✗ Recon  aborted\s+↻1/);
+	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  aborted\s+↻1/);
 });
 
 test("worker fleet overflow counts direct nested rows and respects narrow widths", () => {

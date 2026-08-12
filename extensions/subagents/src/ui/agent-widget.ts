@@ -78,7 +78,13 @@ export interface AgentDetails {
   spinnerFrame?: number;
   /** Exact effective model name, preferably provider/modelId. */
   modelName?: string;
-  /** Compact config tags (e.g. ["high", "isolated"]). */
+  /** Effective thinking level for this spawn, when known. */
+  thinking?: AgentInvocation["thinking"];
+  /** User-facing service tier when pinned for this spawn. */
+  serviceTier?: AgentInvocation["serviceTier"];
+  /** Compact model · thinking · tier shown next to agent names. */
+  identity?: string;
+  /** Non-identity spawn flags (e.g. ["worktree", "background"]). */
   tags?: string[];
   /** Current turn count. */
   turnCount?: number;
@@ -226,26 +232,58 @@ export function getPromptModeLabel(type: SubagentType): string | undefined {
   return config.promptMode === "append" ? "twin" : undefined;
 }
 
+/**
+ * Compact model/thinking/tier identity shown next to agent names everywhere.
+ * Order is always: model · thinking · service tier (omit missing fields).
+ */
+export function formatAgentIdentity(source?: {
+  modelName?: string | null;
+  thinking?: string | null;
+  serviceTier?: string | null;
+} | null): string | undefined {
+  if (!source) return undefined;
+  const parts = [source.modelName, source.thinking, source.serviceTier]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
 /** Mode label is not included — callers add it where they want it. */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelName?: string; tags: string[] } {
+): { modelName?: string; identity?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
-  if (invocation.serviceTier) tags.push(invocation.serviceTier);
-  if (invocation.thinking) tags.push(invocation.thinking);
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground === true) tags.push("background");
   else if (invocation.runInBackground === false) tags.push("foreground");
-  return { modelName: invocation.modelName, tags };
+  return {
+    modelName: invocation.modelName,
+    identity: formatAgentIdentity(invocation),
+    tags,
+  };
+}
+
+/** Dim suffix for agent names: ` · model · thinking · tier`. */
+export function formatAgentNameIdentity(
+  theme: Pick<Theme, "fg">,
+  invocation: AgentInvocation | undefined,
+): string {
+  const identity = formatAgentIdentity(invocation);
+  return identity ? ` ${theme.fg("dim", `· ${identity}`)}` : "";
 }
 
 /** Ordered stats shown by the inline foreground Agent renderer. */
 export function getAgentStatsParts(details: AgentDetails): string[] {
   const parts: string[] = [];
-  if (details.modelName) parts.push(details.modelName);
+  const identity = details.identity ?? formatAgentIdentity({
+    modelName: details.modelName,
+    thinking: details.thinking,
+    serviceTier: details.serviceTier,
+  });
+  if (identity) parts.push(identity);
   if (details.tags) parts.push(...details.tags);
   if (details.turnCount != null && details.turnCount > 0) {
     parts.push(formatTurns(details.turnCount, details.maxTurns));
@@ -314,7 +352,7 @@ export class AgentWidget {
     /**
      * Read live at render time. Selects which agents the widget shows — see
      * `WidgetMode`. Defaults to `"all"` when a caller supplies no policy; the
-     * extension supplies one defaulting to `"background"`.
+     * extension also defaults to `"all"`.
      */
     private mode: () => WidgetMode = () => "all",
   ) {}
@@ -413,8 +451,8 @@ export class AgentWidget {
     }
 
     const invocation = buildRecordInvocation(a);
-    const { modelName, tags } = buildInvocationTags(invocation);
-    const parts: string[] = modelName ? [modelName, ...tags] : [...tags];
+    const { tags } = buildInvocationTags(invocation);
+    const parts: string[] = [...tags];
     const activity = this.agentActivity.get(a.id);
     const turnCount = activity?.turnCount ?? a.turnCount;
     const maxTurns = activity?.maxTurns ?? a.maxTurns;
@@ -423,7 +461,8 @@ export class AgentWidget {
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-    return `${icon} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
+    const identityTag = formatAgentNameIdentity(theme, invocation);
+    return `${icon} ${theme.fg("dim", name)}${modeTag}${identityTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
   /**
@@ -473,8 +512,8 @@ export class AgentWidget {
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
       const invocation = buildRecordInvocation(a);
-      const { modelName, tags } = buildInvocationTags(invocation);
-      const parts: string[] = modelName ? [modelName, ...tags] : [...tags];
+      const { tags } = buildInvocationTags(invocation);
+      const parts: string[] = [...tags];
       const turnCount = bg?.turnCount ?? a.turnCount;
       const maxTurns = bg?.maxTurns ?? a.maxTurns;
       if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
@@ -484,9 +523,10 @@ export class AgentWidget {
       const statsText = parts.join(" · ");
 
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const identityTag = formatAgentNameIdentity(theme, invocation);
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}${identityTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
@@ -494,10 +534,10 @@ export class AgentWidget {
     const queuedLines = queued.map((a) => {
       const name = getDisplayName(a.type);
       const invocation = buildRecordInvocation(a);
-      const { modelName, tags } = buildInvocationTags(invocation);
-      const metadata = modelName ? [modelName, ...tags] : tags;
-      const suffix = metadata.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", metadata.join(" · "))}` : "";
-      return truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.bold(name)}  ${theme.fg("muted", a.description)}${suffix}`);
+      const { tags } = buildInvocationTags(invocation);
+      const identityTag = formatAgentNameIdentity(theme, invocation);
+      const suffix = tags.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", tags.join(" · "))}` : "";
+      return truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.bold(name)}${identityTag}  ${theme.fg("muted", a.description)}${suffix}`);
     });
 
     // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).

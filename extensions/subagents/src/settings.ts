@@ -68,7 +68,7 @@ export interface SubagentsSettings {
   toolDescriptionMode?: ToolDescriptionMode;
   /**
    * Whether the Claude Code-style FleetView (the navigable main+subagents list
-   * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
+   * rendered below the editor) is shown. Defaults to `false`. Pure-UI: when off,
    * the list never registers and the global key handler never captures input.
    */
   fleetView?: boolean;
@@ -79,7 +79,7 @@ export interface SubagentsSettings {
    *     Agent tool result, so the widget would otherwise double-render them
    *     (#118); everything else (background, queued, scheduled, RPC) stays.
    *   - `off`: hide the widget entirely.
-   * Defaults to `background`. Pure-UI and applied live (toggling refreshes the
+   * Defaults to `all`. Pure-UI and applied live (toggling refreshes the
    * widget).
    */
   widgetMode?: WidgetMode;

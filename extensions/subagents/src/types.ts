@@ -168,6 +168,8 @@ export interface NotificationDetails {
   displayName: string;
   description: string;
   modelName?: string;
+  /** Compact model · thinking · tier shown next to the agent name. */
+  identity?: string;
   invocationTags?: string[];
   status: string;
   toolUses: number;
