@@ -33,6 +33,10 @@ export interface PreparedPlanningWorkflow {
 	rollback?: () => Promise<void>;
 }
 
+export interface PiPlanningManagerReplyContext {
+	attentionAction?: string;
+}
+
 export interface PiPlanningRuntime {
 	assertMutationAllowed: () => void;
 	prepareWorkflow?: (
@@ -40,7 +44,7 @@ export interface PiPlanningRuntime {
 		argumentsText: string,
 		ctx: ExtensionCommandContext,
 	) => Promise<PreparedPlanningWorkflow>;
-	handleManagerReply?: (reply: unknown) => Promise<void>;
+	handleManagerReply?: (reply: unknown, context?: PiPlanningManagerReplyContext) => Promise<void>;
 }
 
 function message(error: unknown): string {
@@ -197,18 +201,32 @@ export function registerPiPlanningWorkflows(
 	pi.registerTool({
 		name: "herder_plan",
 		label: "Herder Plan",
-		description: "Initialize, validate, shape, inspect, snapshot, report, or coordinate a reserved Herder plan edit.",
+		description: "Initialize, validate, shape, inspect, snapshot, report, coordinate a reserved Herder plan edit, or resolve one request-bound attention item.",
 		parameters: Type.Object({
 			operation: Type.Union([
 				Type.Literal("init"), Type.Literal("validate"), Type.Literal("shape"),
 				Type.Literal("status"), Type.Literal("ready"), Type.Literal("snapshot"),
 				Type.Literal("report"), Type.Literal("track"), Type.Literal("untrack"),
 				Type.Literal("begin_edit"), Type.Literal("finish_edit"), Type.Literal("cancel_edit"),
+				Type.Literal("attention"),
 			]),
 			planDirectory: Type.String(),
 			planId: Type.Optional(Type.String()),
 			editToken: Type.Optional(Type.String()),
 			track: Type.Optional(Type.Boolean()),
+			requestId: Type.Optional(Type.String()),
+			requestSha256: Type.Optional(Type.String()),
+			capabilityToken: Type.Optional(Type.String()),
+			runId: Type.Optional(Type.String()),
+			generation: Type.Optional(Type.Integer({ minimum: 1 })),
+			round: Type.Optional(Type.Integer({ minimum: 1, maximum: 6 })),
+			action: Type.Optional(Type.String()),
+			answer: Type.Optional(Type.String()),
+			rationale: Type.Optional(Type.String()),
+			continuation: Type.Optional(Type.Object({ role: Type.String(), phase: Type.String() })),
+			git: Type.Optional(Type.Any()),
+			gitIdentity: Type.Optional(Type.Any()),
+			recovery: Type.Optional(Type.Any()),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
@@ -221,8 +239,14 @@ export function registerPiPlanningWorkflows(
 					? resolvePlanDirectoryTarget(repoRoot, params.planDirectory)
 					: resolvePlanDirectory(repoRoot, params.planDirectory);
 				const result = await invokeHerderTool("herder_plan", { ...params, planDirectory });
-				if (params.operation === "finish_edit" && result && typeof result === "object" && !Array.isArray(result)) {
-					await runtime.handleManagerReply?.((result as JsonObject).reply);
+				if (result && typeof result === "object" && !Array.isArray(result)) {
+					const reply = (result as JsonObject).reply;
+					if (params.operation === "finish_edit") await runtime.handleManagerReply?.(reply);
+					if (params.operation === "attention") {
+						await runtime.handleManagerReply?.(reply, {
+							attentionAction: typeof params.action === "string" ? params.action : undefined,
+						});
+					}
 				}
 				return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { result } };
 			} catch (error) {

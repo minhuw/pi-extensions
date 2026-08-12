@@ -153,10 +153,18 @@ Keep the recovery fixture small and provider-free.
 	return { root, repo, planDirectory };
 }
 
+function writeBlockedAttentionFixture(root: string): Fixture {
+	const fixture = writeFixture(root);
+	const index = fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8");
+	fs.writeFileSync(path.join(fixture.planDirectory, "README.md"), index.replace("| TODO |", "| BLOCKED — needs attention |"));
+	return fixture;
+}
+
 class CapturedExtensionAPI {
 	readonly handlers = new Map<string, CapturedHandler>();
 	readonly warnings: Warning[] = [];
 	readonly appendedEntries: Array<{ customType: string; data: unknown }> = [];
+	readonly messages: Array<{ customType: string; content: string; display: boolean; details?: unknown; options?: unknown }> = [];
 	readonly tools: unknown[] = [];
 	readonly commands = new Map<string, unknown>();
 
@@ -179,6 +187,21 @@ class CapturedExtensionAPI {
 	}
 
 	sendUserMessage(_content: unknown, _options?: unknown): void {}
+
+	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
+		this.messages.push({ ...message, ...(options === undefined ? {} : { options }) });
+	}
+
+	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+		const result = runCommand(command, args, { allowFailure: true });
+		return { code: result.status, stdout: result.stdout, stderr: result.stderr };
+	}
+
+	command(name: string): { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } {
+		const command = this.commands.get(name) as { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } | undefined;
+		if (!command) throw new Error(`No captured ${name} command`);
+		return command;
+	}
 
 	async invoke(event: string, ctx: ExtensionContext): Promise<unknown> {
 		const handler = this.handlers.get(event);
@@ -363,6 +386,61 @@ async function withDeadline<T>(operation: Promise<T>, label: string, timeoutMs =
 		if (timer) clearTimeout(timer);
 	}
 }
+
+test("main-session attention is delivered once and re-exposed after status", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
+	let fixture: Fixture | undefined;
+	let capturedApi: CapturedExtensionAPI | undefined;
+	let capturedContext: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeBlockedAttentionFixture(root);
+		const service = await ensureService(fixture.planDirectory);
+		const started = object((await requestService(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		})).reply);
+		const attention = object(started.attention);
+		assert.equal(attention.kind, "plan_recovery");
+		assert.equal(attention.planId, "001");
+
+		const factory = new PendingWorkerFactory();
+		const api = capturedApi = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const ctx = capturedContext = restoredContext(fixture, String(started.runId), warnings);
+		await withDeadline(api.invoke("session_start", ctx), "attention session_start");
+		await withDeadline((async () => {
+			while (api.messages.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+		})(), "attention delivery");
+		assert.equal(api.messages.length, 1);
+		assert.equal(api.messages[0]!.customType, "herder-attention-v1");
+		assert.match(api.messages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
+		assert.match(api.messages[0]!.content, /REQUEST_ID:/);
+		assert.deepEqual(api.messages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
+
+		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
+		await withDeadline(api.command("herder-status").handler("herder-plans", ctx), "attention status refresh");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(api.messages.length, 1, "duplicate settled/status events created another capability");
+		assert.equal(warnings.some((warning) => warning.level === "error"), false);
+
+		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
+		shutdown = true;
+	} finally {
+		if (capturedApi && capturedContext && !shutdown) {
+			await withDeadline(capturedApi.invoke("session_shutdown", capturedContext), "attention cleanup", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("replacement Pi session interrupts and retries one lost built-in worker", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-recovery-lost-"));

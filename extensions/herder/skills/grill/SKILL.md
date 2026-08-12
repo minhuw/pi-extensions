@@ -26,6 +26,14 @@ If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_EDIT_V1`, 
 - If the interview is cancelled or produces no file changes, call `herder_plan` with `operation: "cancel_edit"`. Cancellation fails closed if the graph changed.
 - Never call `/herder-revise` for this reserved path; explicit revise remains for manual or externally authored graph changes.
 
+If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_RECOVERY_V1`, the manager has presented one durable recovery request for a blocked or input-waiting plan. This is target-local recovery, not the never-started active-Fire edit path:
+
+- Treat `REQUEST_ID`, `REQUEST_SHA256`, `CAPABILITY_TOKEN`, `RUN_ID`, `PLAN_ID`, `GENERATION`, `ROUND`, the continuation, and the `RECOVERY_GIT_IDENTITY` object as immutable request-bound evidence. Never invent or derive a replacement token.
+- Inspect the supplied dossier and the target plan. Ask exactly one question at a time, recommend an evidence-backed answer, and require final confirmation before editing. An unresolved graph-affecting discovery must stop and direct the operator to `/herder-revise`.
+- Edit only the confirmed target plan's compiled content in `PLAN_DIRECTORY`. Do not edit source, README lifecycle status, dependencies, sibling plans, Git refs, worktrees, leases, SQLite, or run-control state. Preserve the target ID, filename, dependencies, and graph topology.
+- `defer` leaves the durable request active. An unchanged retry is allowed only with a non-empty rationale explaining why the existing plan remains valid. A replacement is allowed only after target-only edits pass `herder_plan` `shape` and `validate`, followed by final confirmation. Rejection/cancellation requires a non-empty rationale.
+- As the final action, call `herder_plan` with `operation: "attention"`, the exact request binding, one allowed action (`defer`, `unchanged_retry`, `revise`, or `reject`), and the exact `git` identity. Do not call `/herder-revise` for a target-local recovery.
+
 ## Prepare
 
 Resolve the Herder extension root as two directories above this skill. Before planning, read:
