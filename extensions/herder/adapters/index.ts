@@ -136,8 +136,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const verificationMonitors = new Map<string, number>();
 	const notifiedVerificationFailures = new Set<string>();
 	const deliveredVerificationFailureFollowUps = new Set<string>();
-	let pendingVerificationFailure: { key: string; runId: string; planDirectory: string; detail: string; requestId?: string; sessionId?: string } | undefined;
-	let verificationFailureDrain = Promise.resolve();
+	let pendingVerificationFailure: { key: string; runId: string; detail: string; sessionId?: string } | undefined;
+	let sendingVerificationFailure = false;
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -344,40 +344,37 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const drainVerificationFailure = (): void => {
-		if (shuttingDown || !lastContext || !pendingVerificationFailure) return;
+		if (shuttingDown || sendingVerificationFailure || !lastContext || !pendingVerificationFailure) return;
 		const failure = pendingVerificationFailure;
-		if (deliveredVerificationFailureFollowUps.has(failure.key)) {
+		const deliveryKey = `${sessionEpoch}:${failure.key}`;
+		if (deliveredVerificationFailureFollowUps.has(deliveryKey)) {
 			pendingVerificationFailure = undefined;
 			return;
 		}
-		const logPath = failure.detail.match(/\\(log ([^)]+)\\)/)?.[1] || "the verification failure detail";
+		const logPath = failure.detail.match(/\(log ([^)]+)\)/)?.[1] || "the verification failure detail";
 		const prompt = [
 			"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
 			"Herder final verification failed in the active main Pi session.",
 			`RUN_ID: ${failure.runId}`,
-			...(failure.requestId ? [`REQUEST_ID: ${failure.requestId}`] : []),
 			...(failure.sessionId ? [`MAIN_SESSION_ID: ${failure.sessionId}`] : []),
 			`FAILURE_DETAIL: ${failure.detail}`,
 			`LOG_PATH: ${logPath}`,
-			"Next steps: inspect the verification log, report or ask the user what failed, correct the gate, then use /herder-resume to create a fresh verification request.",
-			"Do not claim success. The final verification tree remains frozen; do not edit it or run the gate yourself.",
-		].join("\\n");
-		const next = verificationFailureDrain.then(() => {
-			if (shuttingDown || !lastContext || !pendingVerificationFailure) return;
-			const current = pendingVerificationFailure;
-			if (deliveredVerificationFailureFollowUps.has(current.key)) {
-				pendingVerificationFailure = undefined;
-				return;
-			}
-			try {
-				pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-				deliveredVerificationFailureFollowUps.add(current.key);
-				pendingVerificationFailure = undefined;
-			} catch (error) {
-				lastContext?.ui.notify(`Herder could not deliver final verification failure to the main session: ${message(error)}`, "warning");
-			}
-		}, () => undefined);
-		verificationFailureDrain = next.then(() => undefined, () => undefined);
+			"Inspect the log using read-only commands and explain the concrete failure to the user. Do not claim success, silently retry, or execute verification commands yourself.",
+			"Classify the recovery: if the manifest or gate command was wrong or transient, tell the user to use /herder-resume for a fresh verification request; if the integrated code is defective or incomplete, tell the user that the frozen integration tree cannot be edited in place and propose a corrective plan followed by /herder-revise.",
+			"Do not edit the frozen integration worktree, move Git refs, or mutate manager state. You may notify the user and, with their agreement, use the normal planning workflow in the user checkout for a corrective plan.",
+		].join("\n");
+		sendingVerificationFailure = true;
+		try {
+			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			deliveredVerificationFailureFollowUps.add(deliveryKey);
+			pendingVerificationFailure = undefined;
+		} catch (error) {
+			// Keep the pending failure so agent_settled or the next durable status
+			// refresh retries delivery to this session.
+			lastContext.ui.notify(`Herder could not deliver final verification failure to the main session: ${message(error)}`, "warning");
+		} finally {
+			sendingVerificationFailure = false;
+		}
 	};
 
 	const activeVerificationOperation = (reply: ManagerReply) => (reply.operations ?? []).find(
@@ -439,7 +436,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastManagerMessage = displayed.message;
 		if (displayed.status === "failed" && /verification/i.test(displayed.message)) {
 			const failureKey = `${reply.runId}:${displayed.message}`;
-			pendingVerificationFailure = { key: failureKey, runId: reply.runId, planDirectory: reply.planDirectory, detail: displayed.message, requestId: reply.verificationRequest?.requestId, sessionId: lastContext ? piSessionId(lastContext) : undefined };
+			pendingVerificationFailure = {
+				key: failureKey,
+				runId: reply.runId,
+				detail: displayed.message,
+				sessionId: lastContext ? piSessionId(lastContext) : undefined,
+			};
 			if (!notifiedVerificationFailures.has(failureKey)) {
 				notifiedVerificationFailures.add(failureKey);
 				lastContext?.ui.notify(
@@ -1148,6 +1150,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastContext = ctx;
 		currentAttention = undefined;
 		pendingVerificationFailure = undefined;
+		sendingVerificationFailure = false;
+		deliveredVerificationFailureFollowUps.clear();
 		deferredAttention.clear();
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
@@ -1168,7 +1172,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						throw new Error(`Persisted Herder run ${restored.runId} does not match manager run ${reply.runId || "idle"}; refusing recovery.`);
 					}
 					const shouldOwn = ["initializing", "running", "paused", "needs_input"].includes(reply.status)
-						|| (reply.status === "failed" && Boolean(reply.attention && reply.attention.state !== "resolved"));
+						|| (reply.status === "failed" && (Boolean(reply.attention && reply.attention.state !== "resolved") || /verification/i.test(reply.message)));
 					if (shouldOwn) {
 						if (!reply.profileName || (restored.profile !== "unknown" && reply.profileName !== restored.profile)) {
 							throw new Error(`Persisted Herder profile ${restored.profile} does not match manager profile ${reply.profileName || "missing"}; refusing recovery.`);
@@ -1212,6 +1216,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		widget.dispose();
 		verificationRequests.clear();
 		pendingVerificationFailure = undefined;
+		sendingVerificationFailure = false;
 		promptedVerifications.clear();
 		currentAttention = undefined;
 		deferredAttention.clear();

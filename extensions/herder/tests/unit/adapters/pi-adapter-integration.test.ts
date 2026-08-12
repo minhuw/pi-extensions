@@ -240,7 +240,7 @@ class CapturedExtensionAPI {
 	readonly userMessages: CapturedUserMessage[] = [];
 	readonly customMessages: CapturedCustomMessage[] = [];
 	readonly execCalls: Array<{ command: string; args: string[] }> = [];
-	private readonly userMessageWaiters: Array<Deferred<CapturedUserMessage>> = [];
+	private readonly userMessageWaiters: Array<{ marker: string; after: number; deferred: Deferred<CapturedUserMessage> }> = [];
 	private readonly customMessageWaiters: Array<Deferred<CapturedCustomMessage>> = [];
 
 	on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown): void {
@@ -266,7 +266,12 @@ class CapturedExtensionAPI {
 	sendUserMessage(content: string, options?: unknown): void {
 		const message = { content, ...(options === undefined ? {} : { options }) };
 		this.userMessages.push(message);
-		while (this.userMessageWaiters.length) this.userMessageWaiters.shift()!.resolve(message);
+		for (let index = this.userMessageWaiters.length - 1; index >= 0; index -= 1) {
+			const waiter = this.userMessageWaiters[index]!;
+			if (this.userMessages.length <= waiter.after || !content.includes(waiter.marker)) continue;
+			this.userMessageWaiters.splice(index, 1);
+			waiter.deferred.resolve(message);
+		}
 	}
 
 	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
@@ -299,11 +304,11 @@ class CapturedExtensionAPI {
 		return tool;
 	}
 
-	async waitForUserMessage(after = 0): Promise<CapturedUserMessage> {
-		const existing = this.userMessages.slice(after).find((message) => message.content.includes("HERDER_MAIN_SESSION_VERIFICATION_V1"));
+	async waitForUserMessage(after = 0, marker = "HERDER_MAIN_SESSION_VERIFICATION_V1"): Promise<CapturedUserMessage> {
+		const existing = this.userMessages.slice(after).find((message) => message.content.includes(marker));
 		if (existing) return existing;
 		const deferred = new Deferred<CapturedUserMessage>();
-		this.userMessageWaiters.push(deferred);
+		this.userMessageWaiters.push({ marker, after, deferred });
 		return deferred.promise;
 	}
 
@@ -711,6 +716,28 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			}
 		})(), "durable verification failure");
 		assert.ok(ui.notifications.some((notification) => notification.level === "error" && notification.message.includes("Use /herder-resume")));
+		const failurePrompt = (await withDeadline(
+			api.waitForUserMessage(0, "HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1"),
+			"verification failure handoff",
+		)).content;
+		assert.match(failurePrompt, /^HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/m);
+		assert.match(failurePrompt, /intentional-failure/);
+		assert.match(failurePrompt, /LOG_PATH: .*intentional-failure/);
+		assert.match(failurePrompt, /explain the concrete failure to the user/);
+		assert.match(failurePrompt, /\/herder-resume/);
+		assert.match(failurePrompt, /corrective plan followed by \/herder-revise/);
+		assert.match(failurePrompt, /Do not edit the frozen integration worktree/);
+		const failureFollowUpCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1")).length;
+		await withDeadline(
+			api.command("herder-status").handler("herder-plans", context),
+			"failed verification status refresh",
+		);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(
+			api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1")).length,
+			failureFollowUpCount,
+			"durable failure refresh injected a duplicate main-session handoff",
+		);
 		assert.equal(factory.sessions.some((session) => session.action.workerMode === "FINAL_AUDIT"), false);
 		const messageCountBeforeResume = api.userMessages.length;
 		await withDeadline(

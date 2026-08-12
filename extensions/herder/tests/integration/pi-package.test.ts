@@ -50,6 +50,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(extension, /engine\.prepare\(\{ action, planDirectory: reply\.planDirectory \}\)/);
 	assert.match(extension, /name: "herder_verification"/);
 	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_V1/);
+	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/);
 	assert.match(extension, /PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/);
 	assert.match(extension, /Tree-relative path inside the integration worktree/);
 	assert.match(extension, /EXAMPLE_GATE: \{"gateId":"unit"/);
