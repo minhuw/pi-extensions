@@ -229,6 +229,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				ok: true,
 				instanceId,
 				pid: process.pid,
+				runtimeExecutable: process.execPath,
 				planDirectory,
 				dashboardUrl,
 				forwardedUrl,

@@ -114,12 +114,26 @@ export function gitValue(repo: string, ...args: string[]): string {
 	return git(repo, args).stdout.trim();
 }
 
+function currentNodeExecutable(): string {
+	try {
+		if (fs.statSync(process.execPath).isFile()) return process.execPath;
+	} catch {}
+	const discovered = runCommand(process.platform === "win32" ? "where" : "which", ["node"], { allowFailure: true }).stdout
+		.split(/\r?\n/)
+		.map((candidate) => candidate.trim())
+		.find(Boolean);
+	if (!discovered) throw new Error(`Node executable is unavailable: ${process.execPath}`);
+	const executable = fs.realpathSync(discovered);
+	if (!fs.statSync(executable).isFile()) throw new Error(`Discovered Node executable is not a file: ${executable}`);
+	return executable;
+}
+
 function runJson(script: string, args: string[], options: { allowFailure?: boolean; allowNotOk?: boolean } = {}): Record<string, unknown> {
 	const normalized = [...args];
 	const delimiter = normalized.indexOf("--");
 	if (delimiter === -1) normalized.push("--pretty");
 	else normalized.splice(delimiter, 0, "--pretty");
-	const result = runCommand(process.execPath, [script, ...normalized], { allowFailure: options.allowFailure });
+	const result = runCommand(currentNodeExecutable(), [script, ...normalized], { allowFailure: options.allowFailure });
 	let parsed: Record<string, unknown>;
 	try {
 		parsed = JSON.parse(result.stdout) as Record<string, unknown>;
@@ -402,30 +416,80 @@ export class GitDriver {
 			if (!gate.cwd || path.isAbsolute(gate.cwd)) {
 				throw new Error(`Verification gate ${gate.gateId} cwd must be relative to the integration worktree`);
 			}
-			const cwd = path.resolve(worktree, gate.cwd);
-			const result = runJson(gateRunner, [
-				"--cwd", cwd,
-				"--root", worktree,
-				"--label", `${String(index + 1).padStart(2, "0")}-${gate.gateId}`,
-				"--log-dir", logDir,
-				"--timeout-ms", String(gate.timeoutMs ?? 30 * 60 * 1_000),
-				"--", ...gate.argv,
-			], { allowFailure: true, allowNotOk: true });
-			return {
-				gateId: gate.gateId,
-				label: gate.label,
-				cwd: gate.cwd,
-				argv: gate.argv,
-				timeoutMs: gate.timeoutMs ?? 30 * 60 * 1_000,
-				rationale: gate.rationale,
-				command: gate.argv.join(" "),
-				ok: Boolean(result.ok),
-				exitCode: result.exitCode === null ? null : Number(result.exitCode),
-				durationMs: Number(result.durationMs),
-				logPath: String(result.logPath),
-				logBytes: Number(result.logBytes),
-				logSha256: String(result.logSha256),
-			};
+			const canonicalWorktree = fs.realpathSync(worktree);
+			const requestedCwd = path.resolve(worktree, gate.cwd);
+			if (requestedCwd !== canonicalWorktree && !isInside(canonicalWorktree, requestedCwd)) {
+				throw new Error(`Verification gate ${gate.gateId} cwd escapes the integration worktree`);
+			}
+			const cwd = fs.realpathSync(requestedCwd);
+			if (cwd !== canonicalWorktree && !isInside(canonicalWorktree, cwd)) {
+				throw new Error(`Verification gate ${gate.gateId} cwd resolves outside the integration worktree`);
+			}
+			const command = path.basename(gate.argv[0] || "").toLowerCase();
+			const needsNpmDependencies = command === "npm" || command === "npm.cmd" || command === "npx" || command === "npx.cmd";
+			let preparedModules: string | null = null;
+			if (needsNpmDependencies) {
+				const manifestPath = path.join(cwd, "package.json");
+				if (fs.existsSync(manifestPath)) {
+					let manifest: Record<string, unknown>;
+					try {
+						manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+					} catch (error) {
+						throw new Error(`Cannot prepare final verification dependencies from invalid package.json in ${gate.cwd}: ${(error as Error).message}`);
+					}
+					const declaresDependencies = ["dependencies", "devDependencies", "optionalDependencies"].some((field) => {
+						const value = manifest[field];
+						return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length > 0);
+					});
+					const modules = path.join(cwd, "node_modules");
+					if (declaresDependencies && !fs.existsSync(modules)) {
+						const lockfile = ["npm-shrinkwrap.json", "package-lock.json"].find((candidate) => fs.existsSync(path.join(cwd, candidate)));
+						if (!lockfile) throw new Error(`Final verification gate ${gate.gateId} requires npm dependencies, but ${gate.cwd} has no npm lockfile`);
+						preparedModules = modules;
+						try {
+							const installed = runCommand("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], {
+								cwd,
+								allowFailure: true,
+								maxBuffer: 64 * 1024 * 1024,
+							});
+							if (installed.status !== 0) {
+								throw new Error(`Failed to prepare final verification dependencies for gate ${gate.gateId}: ${compact(installed.stderr || installed.stdout || "npm ci failed")}`);
+							}
+							if (!fs.existsSync(modules)) throw new Error(`Final verification dependency preparation for gate ${gate.gateId} completed without creating node_modules`);
+						} catch (error) {
+							fs.rmSync(modules, { recursive: true, force: true });
+							throw error;
+						}
+					}
+				}
+			}
+			try {
+				const result = runJson(gateRunner, [
+					"--cwd", cwd,
+					"--root", worktree,
+					"--label", `${String(index + 1).padStart(2, "0")}-${gate.gateId}`,
+					"--log-dir", logDir,
+					"--timeout-ms", String(gate.timeoutMs ?? 30 * 60 * 1_000),
+					"--", ...gate.argv,
+				], { allowFailure: true, allowNotOk: true });
+				return {
+					gateId: gate.gateId,
+					label: gate.label,
+					cwd: gate.cwd,
+					argv: gate.argv,
+					timeoutMs: gate.timeoutMs ?? 30 * 60 * 1_000,
+					rationale: gate.rationale,
+					command: gate.argv.join(" "),
+					ok: Boolean(result.ok),
+					exitCode: result.exitCode === null ? null : Number(result.exitCode),
+					durationMs: Number(result.durationMs),
+					logPath: String(result.logPath),
+					logBytes: Number(result.logBytes),
+					logSha256: String(result.logSha256),
+				};
+			} finally {
+				if (preparedModules) fs.rmSync(preparedModules, { recursive: true, force: true });
+			}
 		});
 	}
 

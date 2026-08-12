@@ -40,6 +40,7 @@ export interface HerderWidgetModel {
 	planName: string;
 	summaryLine?: string;
 	dashboardUrl?: string;
+	idleDetail?: string;
 	workers: readonly PiWorkerSnapshot[];
 }
 
@@ -216,7 +217,8 @@ export function workerFleetTreeLines(
 	const lines = [truncateToWidth(headerParts.join(separator), width)];
 	const rows = agentRows(model.workers);
 	if (rows.length === 0 && ["initializing", "running", "paused"].includes(model.status)) {
-		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", "Waiting for manager dispatch…")}`, width));
+		const idleDetail = model.idleDetail || (model.status === "paused" ? "Paused." : "Waiting for manager dispatch…");
+		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", idleDetail)}`, width));
 		return lines;
 	}
 	const visible = rows.slice(0, Math.max(0, limit));

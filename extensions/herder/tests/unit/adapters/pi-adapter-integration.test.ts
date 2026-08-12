@@ -299,8 +299,8 @@ class CapturedExtensionAPI {
 		return tool;
 	}
 
-	async waitForUserMessage(): Promise<CapturedUserMessage> {
-		const existing = this.userMessages.find((message) => message.content.includes("HERDER_MAIN_SESSION_VERIFICATION_V1"));
+	async waitForUserMessage(after = 0): Promise<CapturedUserMessage> {
+		const existing = this.userMessages.slice(after).find((message) => message.content.includes("HERDER_MAIN_SESSION_VERIFICATION_V1"));
 		if (existing) return existing;
 		const deferred = new Deferred<CapturedUserMessage>();
 		this.userMessageWaiters.push(deferred);
@@ -670,12 +670,50 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.match(verificationPrompt, /REQUEST_ID: /);
 		assert.equal(factory.providerCalls, 0);
 
+		const firstRequestId = verificationRequestId(verificationPrompt);
+		const failedVerification = await withDeadline(
+			api.tool("herder_verification").execute(
+				"verification",
+				{
+					planDirectory: "herder-plans",
+					requestId: firstRequestId,
+					rationale: "Exercise durable failure and resume before selecting the passing fixture gate.",
+					gates: [{
+						gateId: "intentional-failure",
+						label: "intentional failure",
+						cwd: ".",
+						argv: [process.execPath, "-e", "process.exit(7)"],
+						rationale: "Creates terminal evidence for the replacement-manifest recovery path.",
+					}],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+			"failing herder_verification submission",
+		);
+		assert.equal(object(failedVerification).terminate, true);
+		assert.match(toolText(failedVerification), /Verification manifest accepted/);
+		await withDeadline((async () => {
+			while (readVerification(fixture!).state !== "failed") await new Promise((resolve) => setTimeout(resolve, 50));
+		})(), "durable verification failure");
+		assert.equal(factory.sessions.some((session) => session.action.workerMode === "FINAL_AUDIT"), false);
+		const messageCountBeforeResume = api.userMessages.length;
+		await withDeadline(
+			api.command("herder-resume").handler("herder-plans", context),
+			"/herder-resume verification replacement",
+		);
+		const replacementPrompt = (await withDeadline(api.waitForUserMessage(messageCountBeforeResume), "replacement verification delegation")).content;
+		const replacementRequestId = verificationRequestId(replacementPrompt);
+		assert.notEqual(replacementRequestId, firstRequestId);
+		assert.equal(readVerification(fixture).state, "awaiting_manifest");
+
 		const verification = await withDeadline(
 			api.tool("herder_verification").execute(
 				"verification",
 				{
 					planDirectory: "herder-plans",
-					requestId: verificationRequestId(verificationPrompt),
+					requestId: replacementRequestId,
 					rationale: "The dependency-free fixture test is the smallest complete local proof.",
 					gates: [{
 						gateId: "local-npm-test",
@@ -689,7 +727,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 				undefined,
 				context,
 			),
-			"herder_verification submission",
+			"replacement herder_verification submission",
 		);
 		assert.equal(object(verification).terminate, true);
 		assert.match(toolText(verification), /Verification manifest accepted/);

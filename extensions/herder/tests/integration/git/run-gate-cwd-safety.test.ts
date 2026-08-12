@@ -80,6 +80,77 @@ function normalizedGate(fixtureData: Fixture, cwd: string, argv: string[], gateI
 	}).manifest.gates[0]!;
 }
 
+test("prepares locked npm dependencies transiently in the gate cwd", () => {
+	const fixtureData = fixture();
+	try {
+		const packageRoot = path.join(fixtureData.worktree, "packages", "fixture");
+		const dependency = path.join(packageRoot, "vendor", "fixture-dependency");
+		fs.mkdirSync(dependency, { recursive: true });
+		fs.writeFileSync(path.join(dependency, "package.json"), `${JSON.stringify({
+			name: "fixture-dependency",
+			version: "1.0.0",
+			main: "index.js",
+		}, null, 2)}\n`);
+		fs.writeFileSync(path.join(dependency, "index.js"), "module.exports = 42;\n");
+		fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({
+			name: "verification-dependency-fixture",
+			private: true,
+			dependencies: { "fixture-dependency": "file:vendor/fixture-dependency" },
+			scripts: { test: "node -e \"if (require('fixture-dependency') !== 42) process.exit(1)\"" },
+		}, null, 2)}\n`);
+		runCommand("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: packageRoot });
+		const gate = normalizedGate(fixtureData, "packages/fixture", ["npm", "test"], "npm-dependencies");
+		const [result] = fixtureData.driver.runVerificationGates("npm-dependencies", fixtureData.worktree, [gate]);
+		assert.equal(result?.ok, true);
+		assert.equal(fs.existsSync(path.join(packageRoot, "node_modules")), false, "Herder left transient dependencies in the frozen worktree");
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("dependency-free npm verification does not require node_modules", () => {
+	const fixtureData = fixture();
+	try {
+		fs.writeFileSync(path.join(fixtureData.worktree, "package.json"), `${JSON.stringify({
+			name: "verification-no-dependencies-fixture",
+			private: true,
+			scripts: { test: "node -e \"process.exit(0)\"" },
+		}, null, 2)}\n`);
+		const gate = normalizedGate(fixtureData, ".", ["npm", "test"], "npm-no-dependencies");
+		const [result] = fixtureData.driver.runVerificationGates("npm-no-dependencies", fixtureData.worktree, [gate]);
+		assert.equal(result?.ok, true);
+		assert.equal(fs.existsSync(path.join(fixtureData.worktree, "node_modules")), false);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("failed dependency preparation removes partial node_modules", () => {
+	const fixtureData = fixture();
+	try {
+		fs.writeFileSync(path.join(fixtureData.worktree, "package.json"), `${JSON.stringify({
+			name: "verification-broken-lock-fixture",
+			private: true,
+			dependencies: { missing: "file:vendor/missing" },
+			scripts: { test: "node -e \"process.exit(0)\"" },
+		}, null, 2)}\n`);
+		fs.writeFileSync(path.join(fixtureData.worktree, "package-lock.json"), `${JSON.stringify({
+			name: "verification-broken-lock-fixture",
+			lockfileVersion: 3,
+			requires: true,
+			packages: {
+				"": { name: "verification-broken-lock-fixture", dependencies: { missing: "file:vendor/missing" } },
+				"node_modules/missing": { resolved: "vendor/missing", link: true },
+			},
+		}, null, 2)}\n`);
+		const gate = normalizedGate(fixtureData, ".", ["npm", "test"], "npm-broken-dependencies");
+		assert.throws(() => fixtureData.driver.runVerificationGates("npm-broken-dependencies", fixtureData.worktree, [gate]), /Failed to prepare final verification dependencies/);
+		assert.equal(fs.existsSync(path.join(fixtureData.worktree, "node_modules")), false);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
 test("rejects cwd replaced by an external symlink after manifest normalization", () => {
 	const fixtureData = fixture();
 	try {
@@ -98,11 +169,55 @@ test("rejects cwd replaced by an external symlink after manifest normalization",
 
 		fs.renameSync(nested, moved);
 		fs.symlinkSync(external, nested, linkType);
-		const [result] = fixtureData.driver.runVerificationGates("external-replacement", fixtureData.worktree, [gate]);
-
-		assert.equal(result?.ok, false);
-		assert.equal(result?.exitCode, null);
+		assert.throws(
+			() => fixtureData.driver.runVerificationGates("external-replacement", fixtureData.worktree, [gate]),
+			/cwd resolves outside the integration worktree/,
+		);
 		assert.equal(fs.existsSync(marker), false);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("runVerificationGates rejects lexical cwd escape", () => {
+	const fixtureData = fixture();
+	try {
+		const gate = normalizedGate(fixtureData, ".", [process.execPath, "-e", "process.exit(0)"], "lexical-escape");
+		gate.cwd = "../../external";
+		assert.throws(() => fixtureData.driver.runVerificationGates("lexical-escape", fixtureData.worktree, [gate]), /cwd escapes the integration worktree/);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("npm dependency preparation rejects cwd replaced by an external symlink", () => {
+	const fixtureData = fixture();
+	try {
+		const nested = path.join(fixtureData.worktree, "nested");
+		const moved = path.join(fixtureData.worktree, "nested-original");
+		const external = path.join(fixtureData.root, "external");
+		fs.mkdirSync(nested, { recursive: true });
+		fs.mkdirSync(external, { recursive: true });
+		fs.writeFileSync(path.join(external, "package.json"), `${JSON.stringify({
+			name: "external-package",
+			private: true,
+			dependencies: { missing: "file:vendor/missing" },
+			scripts: { test: "node -e \"process.exit(0)\"" },
+		}, null, 2)}\n`);
+		fs.writeFileSync(path.join(external, "package-lock.json"), `${JSON.stringify({
+			name: "external-package",
+			lockfileVersion: 3,
+			requires: true,
+			packages: {
+				"": { name: "external-package", dependencies: { missing: "file:vendor/missing" } },
+				"node_modules/missing": { resolved: "vendor/missing", link: true },
+			},
+		}, null, 2)}\n`);
+		const gate = normalizedGate(fixtureData, "nested", ["npm", "test"], "external-npm-cwd");
+		fs.renameSync(nested, moved);
+		fs.symlinkSync(external, nested, linkType);
+		assert.throws(() => fixtureData.driver.runVerificationGates("external-npm-cwd", fixtureData.worktree, [gate]), /cwd resolves outside the integration worktree/);
+		assert.equal(fs.existsSync(path.join(external, "node_modules")), false);
 	} finally {
 		fs.rmSync(fixtureData.root, { recursive: true, force: true });
 	}

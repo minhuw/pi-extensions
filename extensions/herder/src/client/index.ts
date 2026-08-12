@@ -141,7 +141,8 @@ async function incompatibleService(service: StoredService): Promise<boolean> {
 	try {
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
 		return health.instanceId === service.instanceId && Number(health.pid) === service.pid
-			&& (Number(health.managerProtocolVersion) !== MANAGER_PROTOCOL_VERSION
+			&& (health.runtimeExecutable !== process.execPath
+				|| Number(health.managerProtocolVersion) !== MANAGER_PROTOCOL_VERSION
 				|| Number(health.executionSchemaVersion) !== EXECUTION_SCHEMA_VERSION
 				|| !Array.isArray(health.capabilities)
 				|| !health.capabilities.includes("durable-operations"));
@@ -155,6 +156,7 @@ export async function healthyService(planDirectory: string): Promise<StoredServi
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
 		const compatible = health.instanceId === service.instanceId
 			&& Number(health.pid) === service.pid
+			&& health.runtimeExecutable === process.execPath
 			&& Number(health.managerProtocolVersion) === MANAGER_PROTOCOL_VERSION
 			&& Number(health.executionSchemaVersion) === EXECUTION_SCHEMA_VERSION
 			&& Array.isArray(health.capabilities)

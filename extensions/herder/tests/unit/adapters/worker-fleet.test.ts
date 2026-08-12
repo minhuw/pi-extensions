@@ -125,6 +125,12 @@ test("worker fleet overflow counts direct nested rows and respects narrow widths
 	}
 });
 
+test("paused worker fleet renders the manager reason instead of a dispatch wait", () => {
+	const paused = { ...model([]), status: "paused" as const, idleDetail: "Waiting for the main Pi session to submit a replacement verification manifest." };
+	const lines = workerFleetTreeLines(paused, theme, 160);
+	assert.equal(lines[1], "└─ Waiting for the main Pi session to submit a replacement verification manifest.");
+});
+
 test("worker elapsed time uses compact whole-second formatting", () => {
 	assert.equal(formatWorkerElapsed(1_000, 1_050), "0s");
 	assert.equal(formatWorkerElapsed(1_000, 2_250), "1s");

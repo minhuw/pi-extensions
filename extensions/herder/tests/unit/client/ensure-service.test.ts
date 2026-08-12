@@ -119,6 +119,7 @@ test("stable scheduler audits preserve snapshots while health stays responsive",
 		while (Date.now() < deadline) {
 			const health = await requestService(service, "/health");
 			assert.equal(health.ok, true);
+			assert.equal(health.runtimeExecutable, process.execPath);
 			healthChecks += 1;
 			await new Promise((resolve) => setTimeout(resolve, 250));
 		}
