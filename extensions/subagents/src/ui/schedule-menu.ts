@@ -9,6 +9,7 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { getAgentConfig } from "../agent-types.js";
 import type { SubagentScheduler } from "../schedule.js";
 import type { ScheduledSubagent } from "../types.js";
 
@@ -37,14 +38,25 @@ function statusIcon(j: ScheduledSubagent): string {
   return "✓";
 }
 
+function invocation(j: ScheduledSubagent): { model: string; thinking: string; tier: string } {
+  const config = getAgentConfig(j.subagent_type);
+  return {
+    model: config?.model ?? j.model ?? "inherit",
+    thinking: config?.thinking ?? j.thinking ?? "inherit",
+    tier: config?.serviceTier ?? j.service_tier ?? "unpinned",
+  };
+}
+
 /** Compact selectable row — name, schedule, agent type, next/last run, count. */
 function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id);
+  const effective = invocation(j);
   return [
     statusIcon(j),
     j.name.padEnd(18).slice(0, 18),
     j.schedule.padEnd(14).slice(0, 14),
     `[${j.subagent_type}]`,
+    `${effective.model}/${effective.thinking}/${effective.tier}`,
     `next ${relTime(next)}`,
     `last ${relTime(j.lastRun)}`,
     `runs ${j.runCount}`,
@@ -54,10 +66,14 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
 /** Multi-line details block for the cancel confirm. */
 function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id) ?? "—";
+  const effective = invocation(j);
   return [
     `name:      ${j.name}`,
     `schedule:  ${j.schedule} (${j.scheduleType})`,
     `agent:     ${j.subagent_type}`,
+    `model:     ${effective.model}`,
+    `thinking:  ${effective.thinking}`,
+    `tier:      ${effective.tier}`,
     `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
     `created:   ${j.createdAt}`,
     `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,

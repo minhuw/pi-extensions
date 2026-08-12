@@ -149,7 +149,7 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short effective model display name, e.g. "haiku". */
+  /** Exact effective model display name, preferably provider/modelId. */
   modelName?: string;
   thinking?: ThinkingLevel;
   /** User-facing service tier when pinned for this spawn. */
@@ -164,7 +164,11 @@ export interface AgentInvocation {
 /** Details attached to custom notification messages for visual rendering. */
 export interface NotificationDetails {
   id: string;
+  type: string;
+  displayName: string;
   description: string;
+  modelName?: string;
+  invocationTags?: string[];
   status: string;
   toolUses: number;
   turnCount: number;

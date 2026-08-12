@@ -37,6 +37,7 @@ import {
   type AgentDetails,
   AgentWidget,
   buildInvocationTags,
+  buildRecordInvocation,
   buildResumedInvocation,
   describeActivity,
   fgPreservingNestedStyles,
@@ -199,6 +200,13 @@ function escapeXml(s: string): string {
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
   const status = getStatusLabel(record.status, record.error);
+  const invocation = buildRecordInvocation(record);
+  const { modelName } = buildInvocationTags(invocation);
+  const invocationXml = [
+    modelName ? `<model>${escapeXml(modelName)}</model>` : null,
+    invocation.thinking ? `<thinking>${escapeXml(invocation.thinking)}</thinking>` : null,
+    invocation.serviceTier ? `<service_tier>${escapeXml(invocation.serviceTier)}</service_tier>` : null,
+  ].filter(Boolean).join("");
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
   const contextPercent = getSessionContextPercent(record.session);
@@ -217,7 +225,8 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>${escapeXml(getDisplayName(record.type))} agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    invocationXml ? `<invocation>${invocationXml}</invocation>` : null,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -248,10 +257,15 @@ function buildDetails(
 /** Build notification details for the custom message renderer. */
 function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
+  const { modelName, tags } = buildInvocationTags(buildRecordInvocation(record));
 
   return {
     id: record.id,
+    type: record.type,
+    displayName: getDisplayName(record.type),
     description: record.description,
+    modelName,
+    invocationTags: tags.length > 0 ? tags : undefined,
     status: record.status,
     toolUses: record.toolUses,
     turnCount: activity?.turnCount ?? 0,
@@ -283,11 +297,13 @@ export default function (pi: ExtensionAPI) {
           : d.status === "steered" ? "completed (steered)"
           : "completed";
 
-        // Line 1: icon + agent description + status
-        let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
+        // Line 1: icon + agent name/description + status
+        let line = `${icon} ${theme.bold(d.displayName)}  ${theme.fg("muted", d.description)} ${theme.fg("dim", statusText)}`;
 
-        // Line 2: stats
+        // Line 2: invocation + stats
         const parts: string[] = [];
+        if (d.modelName) parts.push(d.modelName);
+        if (d.invocationTags) parts.push(...d.invocationTags);
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
@@ -604,7 +620,7 @@ export default function (pi: ExtensionAPI) {
         signal: request.signal,
         metadata: request.metadata,
         invocation: {
-          modelName: effectiveModel?.name ?? effectiveModel?.id,
+          modelName: formatModelName(effectiveModel),
           thinking: effectiveThinking,
           serviceTier: effectiveServiceTier,
           maxTurns: effectiveMaxTurns,
@@ -866,12 +882,9 @@ export default function (pi: ExtensionAPI) {
       return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
     }).join("\n");
 
-  /** Derive a short model label from a model string. */
+  /** Preserve the configured model selector for full-information UI. */
   function getModelLabelFromConfig(model: string): string {
-    // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
-    const name = model.includes("/") ? model.split("/").pop()! : model;
-    // Strip trailing date suffix (e.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5")
-    return name.replace(/-\d{8}$/, "");
+    return model;
   }
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
@@ -1098,9 +1111,25 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Custom rendering: Claude Code style ----
 
     renderCall(args, theme) {
-      const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
+      const subagentType = args.subagent_type as string | undefined;
+      const displayName = subagentType ? getDisplayName(subagentType) : "Agent";
+      const config = subagentType ? getAgentConfig(subagentType) : undefined;
       const desc = args.description ?? "";
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
+      const model = config?.model ?? args.model;
+      const thinking = config?.thinking ?? args.thinking;
+      const serviceTier = config?.serviceTier ?? args.service_tier;
+      const requested: string[] = [];
+      if (model) requested.push(`model request: ${model}`);
+      if (thinking) requested.push(`thinking request: ${thinking}`);
+      if (serviceTier) requested.push(`tier request: ${serviceTier}`);
+      const metadata = requested.length > 0 ? requested.join(" · ") : "effective runtime metadata resolves after launch";
+      return new Text(
+        "▸ " + theme.fg("toolTitle", theme.bold(displayName))
+        + (desc ? "  " + theme.fg("muted", desc) : "")
+        + " " + theme.fg("dim", "·") + " " + theme.fg("dim", metadata),
+        0,
+        0,
+      );
     },
 
     renderResult(result, { expanded, isPartial }, theme) {
@@ -1124,7 +1153,13 @@ Terse command-style prompts produce shallow, generic work.
 
       // ---- Background agent launched ----
       if (details.status === "background") {
-        return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`), 0, 0);
+        const s = stats(details);
+        return new Text(
+          (s ? theme.fg("dim", s) + "\n" : "")
+          + theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`),
+          0,
+          0,
+        );
       }
 
       // ---- Completed / Steered ----
@@ -1478,6 +1513,9 @@ Terse command-style prompts produce shallow, generic work.
           `Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
+          `Model: ${modelName ?? "inherit"}\n` +
+          `Thinking: ${thinking ?? "inherit"}\n` +
+          `Service tier: ${serviceTier ?? "unpinned"}\n` +
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
@@ -1656,6 +1694,8 @@ Terse command-style prompts produce shallow, generic work.
       const duration = formatDuration(record.startedAt, record.completedAt);
       const tokens = formatLifetimeTokens(record);
       const contextPercent = getSessionContextPercent(record.session);
+      const { modelName: resultModelName, tags: resultInvocationTags } = buildInvocationTags(buildRecordInvocation(record));
+      const invocationParts = resultModelName ? [resultModelName, ...resultInvocationTags] : resultInvocationTags;
       const statsParts = [`Tool uses: ${record.toolUses}`];
       if (tokens) statsParts.push(tokens);
       if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
@@ -1664,7 +1704,8 @@ Terse command-style prompts produce shallow, generic work.
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+        `Type: ${displayName} | ${invocationParts.join(" | ")}\n` +
+        `Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
@@ -1776,9 +1817,8 @@ Terse command-style prompts produce shallow, generic work.
     // e.g. a provider fallback or a looser version pin. Cosmetic separator/date
     // differences are normalized away so an effectively-identical match stays quiet.
     const resolvedFull = `${resolved.provider}/${resolved.id}`;
-    const norm = (s: string) => s.toLowerCase().replace(/\./g, "-").replace(/-\d{8}$/, "");
-    if (norm(cfg.model) === norm(resolvedFull)) return label;
-    return `${label} (→ ${resolvedFull.replace(/-\d{8}$/, "")})`;
+    if (cfg.model.toLowerCase() === resolvedFull.toLowerCase()) return resolvedFull;
+    return `${label} (→ ${resolvedFull})`;
   }
 
   async function showAgentsMenu(ctx: ExtensionCommandContext) {
@@ -1865,14 +1905,19 @@ Terse command-style prompts produce shallow, generic work.
       const cfg = getAgentConfig(name);
       const disabled = cfg?.enabled === false;
       const model = getModelLabel(name, ctx.modelRegistry);
+      const invocation = [
+        model,
+        `thinking: ${cfg?.thinking ?? "inherit"}`,
+        `tier: ${cfg?.serviceTier ?? "unpinned"}`,
+      ].join(" · ");
       return {
         id: name,
         label: `${sourceIndicator(cfg)}${name}`,
-        currentValue: model,
+        currentValue: invocation,
         description: disabled ? "(disabled)" : (cfg?.description ?? name),
         // Single-value list so Enter "activates" the row (fires onChange with the
         // agent's id) without offering anything to actually cycle.
-        values: [model],
+        values: [invocation],
       };
     });
 
@@ -1919,7 +1964,10 @@ Terse command-style prompts produce shallow, generic work.
     const options = agents.map(a => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      const { modelName, tags } = buildInvocationTags(buildRecordInvocation(a));
+      const invocation = modelName ? [modelName, ...tags] : tags;
+      const invocationText = invocation.length > 0 ? ` · ${invocation.join(" · ")}` : "";
+      return `${dn} (${a.description})${invocationText} · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);

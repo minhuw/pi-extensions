@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
+import type { AgentInvocation, AgentRecord, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -76,7 +76,7 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Short effective model name (e.g. "haiku", "sonnet"). */
+  /** Exact effective model name, preferably provider/modelId. */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
@@ -97,16 +97,17 @@ export function fgPreservingNestedStyles(theme: Theme, color: string, text: stri
   return theme.fg(color, text.replace(/\u001b\[(?:0|39)m/g, reset => `${reset}${styleStart}`));
 }
 
-/** Format the effective model for compact UI display. */
-export function formatModelName(model: { id: string; name?: string } | undefined): string | undefined {
+/** Format the exact effective model, including provider whenever available. */
+export function formatModelName(model: { provider?: string; id: string; name?: string } | undefined): string | undefined {
   if (!model) return undefined;
-  return (model.name ?? model.id).replace(/^Claude\s+/i, "").toLowerCase();
+  return model.provider ? `${model.provider}/${model.id}` : model.id || model.name;
 }
 
 /** Build authoritative UI metadata when continuing an existing child session. */
 export function buildResumedInvocation(source: {
   invocation?: AgentInvocation;
-  session?: { model?: { id: string; name?: string }; thinkingLevel?: AgentInvocation["thinking"] };
+  session?: { model?: { provider?: string; id: string; name?: string }; thinkingLevel?: AgentInvocation["thinking"] };
+  model?: string;
   thinking?: AgentInvocation["thinking"];
   serviceTier?: AgentInvocation["serviceTier"];
   maxTurns?: number;
@@ -115,13 +116,29 @@ export function buildResumedInvocation(source: {
 }): AgentInvocation {
   return {
     ...source.invocation,
-    modelName: formatModelName(source.session?.model) ?? source.invocation?.modelName,
-    thinking: source.invocation?.thinking ?? source.thinking ?? source.session?.thinkingLevel,
-    serviceTier: source.invocation?.serviceTier ?? source.serviceTier,
-    maxTurns: source.invocation?.maxTurns ?? source.maxTurns,
-    runInBackground: source.invocation?.runInBackground ?? source.isBackground,
+    modelName: formatModelName(source.session?.model) ?? source.model ?? source.invocation?.modelName,
+    thinking: source.session?.thinkingLevel ?? source.thinking ?? source.invocation?.thinking,
+    serviceTier: source.serviceTier ?? source.invocation?.serviceTier,
+    maxTurns: source.maxTurns ?? source.invocation?.maxTurns,
+    runInBackground: source.isBackground ?? source.invocation?.runInBackground,
     isolation: source.invocation?.isolation ?? (source.worktree ? "worktree" : undefined),
   };
+}
+
+/** Resolve the effective invocation metadata for every spawn path. */
+export function buildRecordInvocation(record: Pick<AgentRecord,
+  "invocation" | "session" | "model" | "thinking" | "serviceTier" | "maxTurns" | "isBackground" | "worktree"
+>): AgentInvocation {
+  return buildResumedInvocation({
+    invocation: record.invocation,
+    session: record.session,
+    model: record.model,
+    thinking: record.thinking,
+    serviceTier: record.serviceTier,
+    maxTurns: record.maxTurns,
+    isBackground: record.isBackground,
+    worktree: record.worktree,
+  });
 }
 
 /** Format a token count compactly: "33.8k token", "1.2M token". */
@@ -198,7 +215,8 @@ export function buildInvocationTags(
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
-  if (invocation.runInBackground) tags.push("background");
+  if (invocation.runInBackground === true) tags.push("background");
+  else if (invocation.runInBackground === false) tags.push("foreground");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
   return { modelName: invocation.modelName, tags };
 }
@@ -347,7 +365,7 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
+  private renderFinishedLine(a: AgentRecord, theme: Theme): string {
     const name = getDisplayName(a.type);
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
@@ -373,9 +391,13 @@ export class AgentWidget {
       statusText = theme.fg("warning", " aborted");
     }
 
-    const parts: string[] = [];
+    const invocation = buildRecordInvocation(a);
+    const { modelName, tags } = buildInvocationTags(invocation);
+    const parts: string[] = modelName ? [modelName, ...tags] : [...tags];
     const activity = this.agentActivity.get(a.id);
-    if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
+    const turnCount = activity?.turnCount ?? a.turnCount;
+    const maxTurns = activity?.maxTurns ?? a.maxTurns;
+    if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
     if (a.toolUses > 0) parts.push(`${a.toolUses} tool use${a.toolUses === 1 ? "" : "s"}`);
     parts.push(duration);
 
@@ -429,8 +451,12 @@ export class AgentWidget {
       const contextPercent = getSessionContextPercent(bg?.session);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
-      const parts: string[] = [];
-      if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
+      const invocation = buildRecordInvocation(a);
+      const { modelName, tags } = buildInvocationTags(invocation);
+      const parts: string[] = modelName ? [modelName, ...tags] : [...tags];
+      const turnCount = bg?.turnCount ?? a.turnCount;
+      const maxTurns = bg?.maxTurns ?? a.maxTurns;
+      if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
       parts.push(elapsed);
@@ -444,13 +470,18 @@ export class AgentWidget {
       ]);
     }
 
-    const queuedLine = queued.length > 0
-      ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${queued.length} queued`)}`)
-      : undefined;
+    const queuedLines = queued.map((a) => {
+      const name = getDisplayName(a.type);
+      const invocation = buildRecordInvocation(a);
+      const { modelName, tags } = buildInvocationTags(invocation);
+      const metadata = modelName ? [modelName, ...tags] : tags;
+      const suffix = metadata.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", metadata.join(" · "))}` : "";
+      return truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.bold(name)}  ${theme.fg("muted", a.description)}${suffix}`);
+    });
 
     // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).
     const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
-    const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
+    const totalBody = finishedLines.length + runningLines.length * 2 + queuedLines.length;
 
     const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
 
@@ -458,7 +489,7 @@ export class AgentWidget {
       // Everything fits — add all lines and fix up connectors for the last item.
       lines.push(...finishedLines);
       for (const pair of runningLines) lines.push(...pair);
-      if (queuedLine) lines.push(queuedLine);
+      lines.push(...queuedLines);
 
       // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
       if (lines.length > 1) {
@@ -466,7 +497,7 @@ export class AgentWidget {
         lines[last] = lines[last].replace("├─", "└─");
         // If last item is a running agent activity line, fix indent of that line
         // and fix the header line above it.
-        if (runningLines.length > 0 && !queuedLine) {
+        if (runningLines.length > 0 && queuedLines.length === 0) {
           // The last two lines are the last running agent's header + activity.
           if (last >= 2) {
             lines[last - 1] = lines[last - 1].replace("├─", "└─");
@@ -491,10 +522,15 @@ export class AgentWidget {
         }
       }
 
-      // 2. Queued line
-      if (queuedLine && budget >= 1) {
-        lines.push(queuedLine);
-        budget--;
+      // 2. Queued agents
+      let hiddenQueued = 0;
+      for (const queuedLine of queuedLines) {
+        if (budget >= 1) {
+          lines.push(queuedLine);
+          budget--;
+        } else {
+          hiddenQueued++;
+        }
       }
 
       // 3. Finished agents
@@ -510,9 +546,10 @@ export class AgentWidget {
       // Overflow summary
       const overflowParts: string[] = [];
       if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
+      if (hiddenQueued > 0) overflowParts.push(`${hiddenQueued} queued`);
       if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
       const overflowText = overflowParts.join(", ");
-      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
+      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenQueued + hiddenFinished} more (${overflowText})`)}`)
       );
     }
 

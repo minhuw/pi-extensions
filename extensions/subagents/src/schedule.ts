@@ -19,7 +19,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
+import { getAgentConfig } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
+import { modelSupportsServiceTier } from "./service-tier.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, ServiceTierInput, SubagentType, ThinkingLevel } from "./types.js";
 
@@ -232,11 +234,16 @@ export class SubagentScheduler {
     // Resolve model at fire time — registry contents may have changed since the
     // job was created (auth added/removed). Fall back silently to spawn-default
     // if resolution fails; the spawn path handles undefined model gracefully.
+    const config = getAgentConfig(job.subagent_type);
+    const configuredModel = config?.model ?? job.model;
     let resolvedModel: any | undefined;
-    if (job.model) {
-      const r = resolveModel(job.model, ctx.modelRegistry);
+    if (configuredModel) {
+      const r = resolveModel(configuredModel, ctx.modelRegistry);
       if (typeof r !== "string") resolvedModel = r;
     }
+    const effectiveThinking = config?.thinking ?? job.thinking;
+    let effectiveServiceTier = config?.serviceTier ?? job.service_tier;
+    if (effectiveServiceTier && resolvedModel && !modelSupportsServiceTier(resolvedModel)) effectiveServiceTier = undefined;
 
     let agentId: string;
     try {
@@ -247,9 +254,18 @@ export class SubagentScheduler {
         model: resolvedModel,
         maxTurns: job.max_turns,
         isolated: job.isolated,
-        thinkingLevel: job.thinking,
-        serviceTier: job.service_tier,
+        thinkingLevel: effectiveThinking,
+        serviceTier: effectiveServiceTier,
         isolation: job.isolation,
+        invocation: {
+          modelName: resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined,
+          thinking: effectiveThinking,
+          serviceTier: effectiveServiceTier,
+          maxTurns: job.max_turns,
+          isolated: job.isolated,
+          runInBackground: true,
+          isolation: job.isolation,
+        },
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);

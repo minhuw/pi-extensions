@@ -12,6 +12,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { modelSupportsServiceTier } from "./service-tier.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, ServiceTierInput, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -323,6 +324,18 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
+        record.model = session.model ? `${session.model.provider}/${session.model.id}` : record.model;
+        record.thinking = session.thinkingLevel ?? record.thinking;
+        if (record.serviceTier && !modelSupportsServiceTier(session.model)) record.serviceTier = undefined;
+        record.invocation = {
+          ...record.invocation,
+          modelName: record.model ?? record.invocation?.modelName,
+          thinking: record.thinking,
+          serviceTier: record.serviceTier,
+          maxTurns: record.maxTurns,
+          runInBackground: record.isBackground,
+          isolation: record.invocation?.isolation ?? (record.worktree ? "worktree" : undefined),
+        };
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {

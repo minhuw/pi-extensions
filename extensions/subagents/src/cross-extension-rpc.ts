@@ -108,6 +108,21 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
         normalizedOptions = { ...normalizedOptions, model: resolved };
       }
 
+      if (normalizedOptions.model && !normalizedOptions.invocation) {
+        normalizedOptions = {
+          ...normalizedOptions,
+          invocation: {
+            modelName: `${normalizedOptions.model.provider}/${normalizedOptions.model.id}`,
+            thinking: normalizedOptions.thinkingLevel,
+            serviceTier: normalizedOptions.serviceTier,
+            maxTurns: normalizedOptions.maxTurns,
+            isolated: normalizedOptions.isolated,
+            runInBackground: normalizedOptions.isBackground,
+            isolation: normalizedOptions.isolation,
+          },
+        };
+      }
+
       return { id: manager.spawn(pi, ctx, type, prompt, normalizedOptions) };
     },
   );
