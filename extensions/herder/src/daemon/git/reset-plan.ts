@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";
+
 export interface ResetPlanExecutionInput {
 	repoRoot: string;
 	worktreeRoot: string;
@@ -10,8 +12,10 @@ export interface ResetPlanExecutionInput {
 	worktree: string;
 	expectedHead: string | null;
 	expectedTree: string | null;
-	/** A retry after the manager recorded the editing state may observe both entries gone. */
-	allowRecordedMissing?: boolean;
+	/** Durable manager-owned progress from an earlier interrupted apply. */
+	recordedCleanupStep?: ResetPlanCleanupStep;
+	/** Persist each destructive step before the next Git mutation. */
+	onProgress?: (step: ResetPlanCleanupStep) => void;
 }
 
 export interface ResetPlanExecutionResult {
@@ -145,16 +149,33 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 
 	const fullyMissing = currentHead === null && !record && !fs.existsSync(worktree);
 	if (fullyMissing) {
-		if (!input.allowRecordedMissing) fail(`Recorded recovery Git state is missing before its destructive apply: ${input.branch}`);
+		if (input.expectedHead === null) {
+			return { branch: input.branch, worktree, removedWorktree: false, deletedBranch: false, alreadyMissing: true };
+		}
+		if (input.recordedCleanupStep !== "branch_deleted") {
+			fail(`Recorded recovery Git state is missing before its destructive apply: ${input.branch}`);
+		}
 		return { branch: input.branch, worktree, removedWorktree: false, deletedBranch: false, alreadyMissing: true };
+	}
+	if (input.recordedCleanupStep === "branch_deleted" && currentHead !== null) {
+		fail(`Recovery branch ${input.branch} reappeared after manager cleanup`);
 	}
 	if (currentHead === null && (record || fs.existsSync(worktree))) {
 		fail(`Recovery branch ${input.branch} is missing while its worktree still exists`);
 	}
-	if (record) removeWorktree(repoRoot, worktree);
-	const afterRemoval = parseWorktrees(repoRoot).find((candidate) => realpathIfPresent(candidate.path) === canonicalWorktree);
-	if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);
+	if (!record && !fs.existsSync(worktree) && input.recordedCleanupStep === undefined) {
+		fail(`Recovery worktree is missing before its manager cleanup was recorded: ${worktree}`);
+	}
+	if (record) {
+		removeWorktree(repoRoot, worktree);
+		const afterRemoval = parseWorktrees(repoRoot).find((candidate) => realpathIfPresent(candidate.path) === canonicalWorktree);
+		if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);
+		input.onProgress?.("worktree_removed");
+	} else if (input.recordedCleanupStep !== "worktree_removed" && input.recordedCleanupStep !== "branch_deleted") {
+		fail(`Recovery worktree is not a manager-recorded cleanup continuation: ${worktree}`);
+	}
 	deleteBranch(repoRoot, input.branch, expectedHead);
 	if (branchHead(repoRoot, input.branch) !== null) fail(`Recovery branch remains after CAS deletion: ${input.branch}`);
+	input.onProgress?.("branch_deleted");
 	return { branch: input.branch, worktree, removedWorktree: Boolean(record), deletedBranch: true, alreadyMissing: false };
 }

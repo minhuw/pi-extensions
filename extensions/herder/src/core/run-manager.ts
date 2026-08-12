@@ -138,6 +138,9 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
 	}
+	if (input.kind === "user_input" && !input.attentionRequestId) {
+		throw new Error("user_input requires attentionRequestId");
+	}
 	if (input.kind === "attention" || input.kind === "attention_resolution") {
 		const resolution = input.attention ?? input.resolution;
 		if (!resolution) throw new Error("attention requires a resolution payload");
@@ -190,6 +193,22 @@ function normalizeAttentionAction(value: string): AttentionResolutionAction {
 
 function sameStringArray(left: string[], right: string[]): boolean {
 	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameRecoveryGraphIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
+	return left.planId === right.planId
+		&& left.ordinal === right.ordinal
+		&& left.planFile === right.planFile
+		&& sameStringArray(left.dependencies, right.dependencies)
+		&& left.assignment.plan.id === right.assignment.plan.id
+		&& sameStringArray(left.assignment.plan.dependencies, right.assignment.plan.dependencies);
+}
+
+function sameRecoverySpecIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
+	return sameRecoveryGraphIdentity(left, right)
+		&& left.planFingerprint === right.planFingerprint
+		&& left.fingerprintVersion === right.fingerprintVersion
+		&& stableJson(left.assignment) === stableJson(right.assignment);
 }
 
 function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
@@ -1582,22 +1601,15 @@ export class HerderRunManager {
 	}
 
 	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
+		if (!attentionRequestId) throw new Error("User input requires an attention request ID");
 		const run = this.store.getRun()!;
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
 		const plans = this.store.getPlans(run.runId);
+		const suppliedAttention = this.store.getAttention(attentionRequestId);
 		// The event may have committed its plan/attention transaction before the
 		// process was replaced and before the event journal write. Recognize that
-		// durable marker before routing against whatever request is current now.
-		if (plans.some((plan) => plan.repair.includes(marker))) return;
-		// Older public callers may omit an attention ID. Treat a repeated answer
-		// value as a replay rather than allowing a fresh event ID to advance the
-		// next request after the original request was resolved. New callers should
-		// always provide the durable attention ID for unambiguous binding.
-		if (!attentionRequestId && plans.some((plan) => plan.repair.some((entry) => {
-			if (!entry.startsWith("USER_INPUT [")) return false;
-			const separator = entry.indexOf("]: ");
-			return separator >= 0 && entry.slice(separator + 3) === value;
-		}))) return;
+		// durable marker only on the explicitly bound request's plan.
+		if (suppliedAttention?.runId === run.runId && plans.some((plan) => plan.planId === suppliedAttention.planId && plan.repair.includes(marker))) return;
 		if (run.status !== "needs_input") throw new Error("Run is not waiting for user input");
 
 		// Recovery dossiers are record-only in this phase. They retain the
@@ -1605,11 +1617,9 @@ export class HerderRunManager {
 		// dossier when selecting a user answer.
 		const nextInputAttention = this.store.getNextInputAttention(run.runId);
 		if (!nextInputAttention) throw new Error("No durable attention request is waiting for user input");
-		const attention = attentionRequestId
-			? this.store.getAttention(attentionRequestId)
-			: nextInputAttention;
+		const attention = suppliedAttention;
 		if (!attention || attention.runId !== run.runId || attention.state === "resolved") {
-			throw new Error(`Attention request ${attentionRequestId || "missing"} is not an unresolved request for this run`);
+			throw new Error(`Attention request ${attentionRequestId} is not an unresolved request for this run`);
 		}
 		if (!["user_decision", "operator_attention"].includes(attention.kind)) {
 			throw new Error(`Attention request ${attention.requestId} does not accept user input`);
@@ -1693,12 +1703,31 @@ export class HerderRunManager {
 		nextSpecs: StoredPlanSpec[];
 		targetChanged: boolean;
 	} {
-		if (run.currentGeneration !== attention.generation) {
-			throw new Error(`Recovery request ${attention.requestId} does not match the current run generation`);
+		const recordedSpecs = this.store.getPlanSpecs(run.runId, attention.generation);
+		const recorded = recordedSpecs.find((spec) => spec.planId === attention.planId);
+		if (!recorded) throw new Error(`Recovery request ${attention.requestId} has no recorded target specification`);
+		if (attention.recovery.planFingerprint !== recorded.planFingerprint
+			|| attention.recovery.fingerprintVersion !== recorded.fingerprintVersion
+			|| attention.recovery.planFile !== recorded.planFile) {
+			throw new Error(`Recovery request ${attention.requestId} does not match its recorded target evidence`);
 		}
-		const priorSpecs = this.store.getPlanSpecs(run.runId, attention.generation);
-		const prior = priorSpecs.find((spec) => spec.planId === attention.planId);
-		if (!prior) throw new Error(`Recovery request ${attention.requestId} has no recorded target specification`);
+		const currentSpecs = this.store.getPlanSpecs(run.runId, run.currentGeneration);
+		if (recordedSpecs.length !== currentSpecs.length) {
+			throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
+		}
+		for (const recordedSpec of recordedSpecs) {
+			const currentSpec = currentSpecs.find((spec) => spec.planId === recordedSpec.planId);
+			if (!currentSpec || !sameRecoveryGraphIdentity(recordedSpec, currentSpec)) {
+				throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
+			}
+		}
+		const currentTarget = currentSpecs.find((spec) => spec.planId === attention.planId);
+		if (!currentTarget) throw new Error(`Recovery request ${attention.requestId} has no current target specification`);
+		if (!sameRecoverySpecIdentity(recorded, currentTarget)) {
+			throw new Error(`Recovery request ${attention.requestId} no longer matches its immutable target specification`);
+		}
+		const priorSpecs = run.currentGeneration === attention.generation ? recordedSpecs : currentSpecs;
+		const prior = priorSpecs.find((spec) => spec.planId === attention.planId)!;
 		const plan = this.store.getPlan(run.runId, attention.planId);
 		if (plan && (plan.generation !== attention.generation || plan.round !== attention.round)) {
 			throw new Error(`Recovery request ${attention.requestId} does not match the target runtime generation and round`);
@@ -1816,22 +1845,16 @@ export class HerderRunManager {
 			}
 			const driver = this.driver(run);
 			await driver.verifyCheckout(run.checkoutStateToken);
-			if (attention.state === "editing" && run.currentGeneration > attention.generation) {
-				this.store.transaction(() => {
-					this.store.resolveAttention(attention.requestId);
-					this.attentionStatusAfterResolution(run.runId);
-				});
-				return;
-			}
 			const validation = this.validateRecoveryTarget(run, attention, recoveryAction, resolution);
-			const replayingEditingApply = attention.state === "editing";
+			const recordedCleanupStep = this.store.getAttentionCleanupStep(attention.requestId);
 			this.store.updateAttentionState(attention.requestId, "editing");
 			driver.resetPlanExecution({
 				branch: attention.recovery.branch,
 				worktree: attention.recovery.worktree,
 				expectedHead: attention.recovery.worktreeHead,
 				expectedTree: attention.recovery.worktreeTree,
-				allowRecordedMissing: replayingEditingApply,
+				recordedCleanupStep: recordedCleanupStep ?? undefined,
+				onProgress: (step) => this.store.recordAttentionCleanupStep(run.runId, attention.requestId, step),
 			});
 			const nextGeneration = run.currentGeneration + 1;
 			const integrationHead = driver.branchHead(run.integrationBranch);
@@ -2016,7 +2039,7 @@ export class HerderRunManager {
 		}
 
 		run = this.store.getRun()!;
-		if (run.status !== "running") return this.reply();
+		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
 			if (activeActionCount(this.store, run.runId) > 0) {

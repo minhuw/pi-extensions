@@ -89,7 +89,7 @@ test("manager reset refuses the user checkout and distinguishes recorded partial
 		git(value.repo, ["worktree", "remove", "--force", value.worktree]);
 		git(value.repo, ["update-ref", "-d", `refs/heads/${value.branch}`, value.head]);
 		assert.throws(() => resetPlanExecution(resetInput(value)), /missing before its destructive apply/);
-		const replay = resetPlanExecution(resetInput(value, { allowRecordedMissing: true }));
+		const replay = resetPlanExecution(resetInput(value, { recordedCleanupStep: "branch_deleted" }));
 		assert.equal(replay.alreadyMissing, true);
 	} finally {
 		cleanup(value);

@@ -104,7 +104,7 @@ function writeUnrelatedPlan(): string {
 	return writePlan("Unrelated ready plan", "TODO").replace("# Plan 001:", "# Plan 002:");
 }
 
-function fixture(root: string): Fixture {
+function fixture(root: string, options: { secondBlocked?: boolean } = {}): Fixture {
 	const repo = path.join(root, "repo");
 	fs.mkdirSync(repo, { recursive: true });
 	runCommand("git", ["init", "-q", repo]);
@@ -116,6 +116,7 @@ function fixture(root: string): Fixture {
 	git(repo, ["commit", "-q", "-m", "test: add recovery fixture"]);
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
+	const secondStatus = options.secondBlocked ? "BLOCKED — needs attention" : "TODO";
 	fs.writeFileSync(path.join(planDirectory, "README.md"), `# Recovery plans
 
 ## Execution order & status
@@ -123,7 +124,7 @@ function fixture(root: string): Fixture {
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
 | [001](001-blocked.md) | Blocked target | P1 | S | — | BLOCKED — needs attention |
-| [002](002-ready.md) | Unrelated ready plan | P1 | S | — | TODO |
+| [002](002-ready.md) | Unrelated ready plan | P1 | S | — | ${secondStatus} |
 
 ## Dependency notes
 
@@ -204,6 +205,68 @@ test("target recovery advances a fresh generation while unrelated work remains s
 			store.close();
 		}
 		assert.ok((resolved.actions as unknown[]).map(object).some((action) => action.planId === "001"), "the recovered target is backfillable");
+	} finally {
+		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
+		cleanup(fixtureValue);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("remaining generation-one recovery requests survive an earlier recovery", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-multiple-"));
+	const fixtureValue = fixture(root, { secondBlocked: true });
+	let service: Service | undefined;
+	try {
+		service = await ensureService(fixtureValue.planDirectory);
+		const started = await managerReply(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: fixtureValue.repo,
+			planDirectory: fixtureValue.planDirectory,
+			profile: "eclipse",
+			maxParallel: 2,
+		});
+		const first = object(started.attention);
+		assert.equal(first.planId, "001");
+		const store = new RunStore(fixtureValue.planDirectory);
+		let second: JsonRecord;
+		try {
+			const requests = store.getAttentionRequests(String(started.runId), { unresolvedOnly: true });
+			second = object(requests.find((request) => request.planId === "002"));
+			assert.equal(second.generation, 1);
+		} finally {
+			store.close();
+		}
+
+		const firstResolved = await managerReply(service, "/v1/event", {
+			eventId: "multiple-recovery-first",
+			kind: "attention",
+			attention: attentionResolution(first, String(started.runId), "unchanged_retry", "The first blocked target remains valid."),
+		});
+		assert.equal(firstResolved.status, "running");
+		const afterFirst = new RunStore(fixtureValue.planDirectory);
+		try {
+			assert.equal(afterFirst.getRun()?.currentGeneration, 2);
+			assert.equal(afterFirst.getAttention(String(second.requestId))?.state, "pending");
+		} finally {
+			afterFirst.close();
+		}
+
+		const secondResolved = await managerReply(service, "/v1/event", {
+			eventId: "multiple-recovery-second",
+			kind: "attention",
+			attention: attentionResolution(second, String(started.runId), "unchanged_retry", "The second blocked target remains valid."),
+		});
+		assert.equal(secondResolved.status, "running");
+		const afterSecond = new RunStore(fixtureValue.planDirectory);
+		try {
+			const run = afterSecond.getRun();
+			assert.ok(run);
+			assert.equal(run.currentGeneration, 3);
+			assert.equal(afterSecond.getAttention(String(second.requestId))?.state, "resolved");
+			assert.ok(afterSecond.getActions(run.runId, ["proposed", "dispatched"]).some((action) => action.planId === "002"));
+		} finally {
+			afterSecond.close();
+		}
 	} finally {
 		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
 		cleanup(fixtureValue);

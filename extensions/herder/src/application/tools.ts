@@ -105,8 +105,8 @@ async function submitTool(args: JsonObject): Promise<unknown> {
 	const kind = requiredString(args, "kind");
 	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
 	const attentionKind = kind === "attention" || kind === "attention_resolution";
-	const attentionRequestId = kind === "user_input" && typeof args.attentionRequestId === "string" && args.attentionRequestId.length > 0
-		? args.attentionRequestId
+	const attentionRequestId = kind === "user_input"
+		? requiredString(args, "attentionRequestId")
 		: attentionKind ? String((attentionResolutionFromArgs(args) as { requestId?: unknown }).requestId || "") : undefined;
 	const resolution = attentionKind ? attentionResolutionFromArgs(args) : undefined;
 	const eventId = String(args.eventId || (attentionRequestId ? `attention:${sha256(stableJson(resolution ?? attentionRequestId))}` : randomUUID()));

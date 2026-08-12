@@ -218,6 +218,7 @@ export interface StoredVerification {
 }
 
 export type StoredAttentionRequest = AttentionRequest & { sequence: number };
+export type AttentionCleanupStep = "worktree_removed" | "branch_deleted";
 
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
@@ -634,21 +635,37 @@ export class RunStore {
 		return row ? rowToAttention(row) : null;
 	}
 
-	/** Return the immutable resolution payload hash retained by durable event operations. */
+	/** Return the immutable payload hash for the first resolution that actually committed. */
 	getAttentionResolutionHash(requestId: string): string | null {
-		const rows = this.database.prepare("SELECT payload_json FROM manager_operations WHERE kind = 'event' ORDER BY sequence").all() as Array<{ payload_json: string }>;
+		const rows = this.database.prepare("SELECT payload_json, state FROM manager_operations WHERE kind = 'event' AND state IN ('running', 'succeeded') ORDER BY sequence").all() as Array<{ payload_json: string; state: string }>;
 		for (const row of rows) {
 			try {
 				const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
 				if (payload.kind !== "attention" && payload.kind !== "attention_resolution") continue;
 				const resolution = payload.attention ?? payload.resolution;
 				if (!resolution || typeof resolution !== "object" || Array.isArray(resolution)) continue;
-				if (String((resolution as { requestId?: unknown }).requestId || "") === requestId) return sha256(stableJson(resolution));
+				if (String((resolution as { requestId?: unknown }).requestId || "") !== requestId) continue;
+				const action = String((resolution as { action?: unknown }).action || "").trim().toLowerCase().replace(/[- ]+/g, "_");
+				// Defer is durable input, but it does not commit a resolution. A later
+				// answer/retry/recovery action is the payload bound to the resolved row.
+				if (action === "defer") continue;
+				return sha256(stableJson(resolution));
 			} catch {
 				// A malformed historical operation remains evidence, but cannot bind a new replay.
 			}
 		}
 		return null;
+	}
+
+	getAttentionCleanupStep(requestId: string): AttentionCleanupStep | null {
+		if (this.readEvent(`attention-cleanup:${requestId}:branch_deleted`)) return "branch_deleted";
+		if (this.readEvent(`attention-cleanup:${requestId}:worktree_removed`)) return "worktree_removed";
+		return null;
+	}
+
+	recordAttentionCleanupStep(runId: string, requestId: string, step: AttentionCleanupStep): void {
+		const eventId = `attention-cleanup:${requestId}:${step}`;
+		this.recordEvent(runId, eventId, "attention_cleanup", { requestId, step });
 	}
 
 	getAttentionRequests(runId: string, options: { unresolvedOnly?: boolean } = {}): StoredAttentionRequest[] {
@@ -690,9 +707,9 @@ export class RunStore {
 		}
 		const existingUnresolved = this.database.prepare(`
 			SELECT * FROM manager_attention_requests
-			WHERE run_id = ? AND plan_id = ? AND generation = ? AND cause = ? AND state <> 'resolved'
+			WHERE run_id = ? AND plan_id = ? AND cause = ? AND state <> 'resolved'
 			ORDER BY sequence LIMIT 1
-		`).get(input.runId, input.planId, input.generation, input.cause) as Record<string, unknown> | undefined;
+		`).get(input.runId, input.planId, input.cause) as Record<string, unknown> | undefined;
 		if (existingUnresolved) return rowToAttention(existingUnresolved);
 		this.database.prepare(`
 			INSERT INTO manager_attention_requests (

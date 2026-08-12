@@ -125,6 +125,33 @@ function recoveryRequest(
 	return { ...request, requestSha256: attentionRequestSha256(request) } as AttentionRequestInput;
 }
 
+test("resolution replay hashes the action that committed after an earlier defer", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-resolution-hash-"));
+	const store = new RunStore(planDirectory);
+	try {
+		const defer = {
+			eventId: "attention-defer",
+			kind: "attention",
+			attention: { requestId: "request-1", action: "defer" },
+		};
+		const answer = {
+			eventId: "attention-answer",
+			kind: "attention",
+			attention: { requestId: "request-1", action: "answer", answer: "Use the recorded evidence." },
+		};
+		store.submitOperation("operation-defer", "event", defer);
+		store.submitOperation("operation-answer", "event", answer);
+		assert.equal(store.claimNextOperation()?.operationId, "operation-defer");
+		store.completeOperation("operation-defer", {});
+		assert.equal(store.claimNextOperation()?.operationId, "operation-answer");
+		store.completeOperation("operation-answer", {});
+		assert.equal(store.getAttentionResolutionHash("request-1"), sha256(stableJson(answer.attention)));
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("attention CRUD preserves immutable evidence, deduplicates unresolved causes, and orders by plan", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-store-"));
 	const store = new RunStore(planDirectory);
@@ -226,7 +253,7 @@ test("input routing skips record-only recovery dossiers and preserves public ans
 	}
 });
 
-test("missing attention IDs remain backward compatible while exact IDs stay bound", () => {
+test("missing attention IDs are rejected before any request can be selected", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-compat-"));
 	const store = new RunStore(planDirectory);
 	try {
@@ -236,9 +263,9 @@ test("missing attention IDs remain backward compatible while exact IDs stay boun
 		const decision = store.putAttention(userDecisionRequest("001", "attention-compat"));
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			applyUserInput(manager, "Answer without a binding", "compat-answer");
-			assert.equal(manager.store.getAttention(decision.requestId)?.state, "resolved");
-			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [compat-answer]: Answer without a binding"]);
+			assert.throws(() => applyUserInput(manager, "Answer without a binding", "compat-answer"), /requires an attention request ID/);
+			assert.equal(manager.store.getAttention(decision.requestId)?.state, "awaiting_input");
+			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
 		} finally {
 			manager.close();
 		}
@@ -248,7 +275,7 @@ test("missing attention IDs remain backward compatible while exact IDs stay boun
 	}
 });
 
-test("an unbound repeated public answer cannot advance the next attention request", () => {
+test("unbound answers with different text cannot advance either attention request", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-unbound-replay-"));
 	const store = new RunStore(planDirectory);
 	try {
@@ -260,11 +287,11 @@ test("an unbound repeated public answer cannot advance the next attention reques
 		const second = store.putAttention(userDecisionRequest("002", "attention-unbound-second"));
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			applyUserInput(manager, "Answer request one", "fresh-event-a");
-			applyUserInput(manager, "Answer request one", "fresh-event-b");
-			assert.equal(manager.store.getAttention(first.requestId)?.state, "resolved");
+			assert.throws(() => applyUserInput(manager, "Answer request one", "fresh-event-a"), /requires an attention request ID/);
+			assert.throws(() => applyUserInput(manager, "Answer request two", "fresh-event-b"), /requires an attention request ID/);
+			assert.equal(manager.store.getAttention(first.requestId)?.state, "awaiting_input");
 			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
-			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [fresh-event-a]: Answer request one"]);
+			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
 			assert.deepEqual(manager.store.getPlan("run-1", "002")?.repair, []);
 		} finally {
 			manager.close();
