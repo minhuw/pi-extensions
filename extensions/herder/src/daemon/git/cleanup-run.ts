@@ -20,6 +20,11 @@ export interface CleanupInput {
   includeFailed: boolean
   deep: boolean
   expectedPlanStatuses?: Record<string, "DONE" | "BLOCKED" | "REJECTED">
+  /** Deterministic race injection for integration tests. Not populated by CLI callers. */
+  testHooks?: {
+    beforeMutation?: () => void
+    beforeIntegrationDeletion?: () => void
+  }
   pretty?: boolean
 }
 
@@ -226,6 +231,23 @@ function listPlanBranches(repoRoot: string, planName: string): BranchRecord[] {
   })
 }
 
+function planBranchSnapshot(items: BranchRecord[]): string {
+  return JSON.stringify(items.map((item) => `${item.branch}\t${item.head}`).sort())
+}
+
+function coordinationRefSnapshot(items: CoordinationRefRecord[]): string {
+  return JSON.stringify(items.map((item) => `${item.ref}\t${item.target}`).sort())
+}
+
+function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
+  const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+  const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true })
+  return {
+    branch: branch.status === 0 ? branch.stdout.trim() : null,
+    head: head.status === 0 ? head.stdout.trim() : null,
+  }
+}
+
 function planBranchIdentity(relative: string): { plan: string; kind: "plan" } | null {
   const match = relative.match(/^(\d{3,})$/)
   if (!match) return null
@@ -323,8 +345,8 @@ export function cleanupRun(input: CleanupInput) {
   runGit(repoRoot, ["check-ref-format", "--branch", integrationBranch])
   const integrationRef = `refs/heads/${integrationBranch}`
   const integrationRefResult = runGit(repoRoot, ["show-ref", "--verify", integrationRef], { allowFailure: true })
-  if (integrationRefResult.status !== 0 && !input.deep) fail(`Integration branch does not exist: ${integrationBranch}`)
-  const integrationHead = integrationRefResult.status === 0 ? runGit(repoRoot, ["rev-parse", integrationRef]).stdout.trim() : ""
+  if (integrationRefResult.status !== 0) fail(`Integration branch does not exist: ${integrationBranch}`)
+  const integrationHead = runGit(repoRoot, ["rev-parse", integrationRef]).stdout.trim()
   const graph = buildGraph(planDir)
   const planFilter = input.plan ? canonicalPlanId(input.plan) : null
   if (input.deep && planFilter) fail("--deep is plan-set-level and cannot be combined with --plan")
@@ -351,10 +373,14 @@ export function cleanupRun(input: CleanupInput) {
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
   const completionRefs = listCompletionRefs(repoRoot, planName)
   const completionProofsForRun = integrationHead ? completionProofs(repoRoot, integrationHead, completionRefs) : new Set<string>()
+  const allPlanBranches = listPlanBranches(repoRoot, planName)
+  const expectedPlanBranchSnapshot = planBranchSnapshot(allPlanBranches)
+  const expectedCoordinationRefSnapshot = coordinationRefSnapshot(coordinationRefs)
+  const expectedCheckout = currentCheckout(repoRoot)
   const worktrees = new Map(parseWorktrees(repoRoot).filter((item) => item.branch).map((item) => [item.branch, item]))
   const actions: CleanupDetail[] = []
   const skipped: CleanupDetail[] = []
-  const planBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
+  const planBranches = allPlanBranches.filter((item) => item.relative !== "integration")
 
   for (const item of planBranches) {
     const identity = planBranchIdentity(item.relative)
@@ -384,7 +410,7 @@ export function cleanupRun(input: CleanupInput) {
         proof = "superseded-by-completion"
       }
       mode = "completed-plan"
-    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED") && input.includeFailed) {
+    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED") && (input.deep || input.includeFailed)) {
       mode = "failed-evidence"
     } else {
       skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, reason: "preserved-non-done-evidence" })
@@ -444,7 +470,8 @@ export function cleanupRun(input: CleanupInput) {
     const currentHeadResult = runGit(repoRoot, ["rev-parse", "HEAD"], { allowFailure: true })
     const currentBranchResult = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
     if (currentBranchResult.status !== 0) destruction.blockers.push({ reason: "detached-head" })
-    else if (integrationHead && currentHeadResult.status === 0 && !isAncestor(repoRoot, integrationHead, currentHeadResult.stdout.trim())) {
+    else if (currentHeadResult.status !== 0) destruction.blockers.push({ reason: "current-head-missing" })
+    else if (integrationHead && !isAncestor(repoRoot, integrationHead, currentHeadResult.stdout.trim())) {
       destruction.blockers.push({ reason: "integration-not-ancestor-of-current", integrationHead, currentHead: currentHeadResult.stdout.trim() })
     }
     if (!integrationWorktree) destruction.blockers.push({ reason: "integration-worktree-missing" })
@@ -466,8 +493,42 @@ export function cleanupRun(input: CleanupInput) {
       }
     }
     for (const item of coordinationRefs) {
-      if (!item.kind) destruction.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
-      else destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
+      if (!item.kind) {
+        destruction.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
+        continue
+      }
+      if (item.kind === "base") {
+        if (!integrationHead || !isAncestor(repoRoot, item.target, integrationHead)) {
+          destruction.blockers.push({ reason: "base-ref-not-reachable", ref: item.ref, target: item.target })
+          continue
+        }
+      } else if (item.plan) {
+        const plan = plans.get(item.plan)
+        if (!plan) {
+          destruction.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.plan })
+          continue
+        }
+        if (item.kind === "completed") {
+          if (plan.status !== "DONE") {
+            destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan })
+            continue
+          }
+          const proof = inspectCompletionProof(repoRoot, item.ref)
+          if (!proof.ok || proof.payload.planId !== item.plan) {
+            destruction.blockers.push({
+              reason: "completion-approval-proof-invalid",
+              ref: item.ref,
+              detail: proof.ok === false ? proof.error : "plan identity mismatch",
+            })
+            continue
+          }
+          if (!integrationHead || !isAncestor(repoRoot, proof.object, integrationHead)) {
+            destruction.blockers.push({ reason: "completion-ref-not-reachable", ref: item.ref, target: proof.object })
+            continue
+          }
+        }
+      }
+      destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
     }
     if (!coordinationRefs.some((item) => item.kind === "base")) {
       destruction.blockers.push({ reason: "base-ref-missing", ref: `refs/plan-herder/${planName}/base` })
@@ -485,8 +546,26 @@ export function cleanupRun(input: CleanupInput) {
     assertPlanStatusesUnchanged()
     if (input.deep) {
       if (!destruction.eligible) fail(`Deep cleanup preflight failed: ${destruction.blockers.map((item) => item.reason).join(", ")}`)
-      // Revalidate all deep preconditions before the first mutation.
-      const fresh = cleanupRun({ ...input, dryRun: true })
+      input.testHooks?.beforeMutation?.()
+      assertPlanStatusesUnchanged()
+      if (planBranchSnapshot(listPlanBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
+        fail("Deep cleanup plan branch namespace changed after preflight")
+      }
+      if (coordinationRefSnapshot(listCoordinationRefs(repoRoot, planName)) !== expectedCoordinationRefSnapshot) {
+        fail("Deep cleanup coordination refs changed after preflight")
+      }
+      const checkout = currentCheckout(repoRoot)
+      if (checkout.branch !== expectedCheckout.branch || checkout.head !== expectedCheckout.head) {
+        fail("Deep cleanup current branch or HEAD changed after preflight")
+      }
+      const currentIntegrationHead = refTarget(repoRoot, integrationRef)
+      if (!currentIntegrationHead) fail(`Integration branch does not exist: ${integrationBranch}`)
+      if (currentIntegrationHead !== integrationHead) {
+        fail(`Cannot delete moved branch ${integrationBranch}: expected ${integrationHead}, found ${currentIntegrationHead}`)
+      }
+      // Revalidate every worktree, graph, proof, and reachability precondition after
+      // deterministic race injection and immediately before the first mutation.
+      const fresh = cleanupRun({ ...input, dryRun: true, testHooks: undefined })
       if (!fresh.destruction.eligible) fail(`Deep cleanup preflight changed: ${fresh.destruction.blockers.map((item) => item.reason).join(", ")}`)
     }
     for (const action of actions) {
@@ -496,13 +575,38 @@ export function cleanupRun(input: CleanupInput) {
       removed.push(action)
     }
     if (input.deep) {
+      const remainingBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
+      const remainingWorktrees = parseWorktrees(repoRoot).filter((item) => item.branch.startsWith(`herder/${planName}/`) && item.branch !== integrationBranch)
+      if (remainingBranches.length > 0 || remainingWorktrees.length > 0) {
+        fail(`Cannot deep-clean while plan namespace artifacts remain: ${[
+          ...remainingBranches.map((item) => item.branch),
+          ...remainingWorktrees.map((item) => item.path),
+        ].join(", ")}`)
+      }
       const currentRefs = listCoordinationRefs(repoRoot, planName)
-      if (JSON.stringify(currentRefs.map((item) => `${item.ref}\t${item.target}`).sort()) !== JSON.stringify(destruction.refsPlanned.map((item) => `${item.ref}\t${item.target}`).sort())) {
+      if (coordinationRefSnapshot(currentRefs) !== expectedCoordinationRefSnapshot) {
         fail("Deep cleanup coordination refs changed after preflight")
       }
       for (const item of destruction.refsPlanned) {
         runGit(repoRoot, ["update-ref", "-d", item.ref, item.target])
         destruction.refsRemoved.push(item)
+      }
+      const remainingCoordinationRefs = listCoordinationRefs(repoRoot, planName)
+      if (remainingCoordinationRefs.length > 0) {
+        fail(`Cannot deep-clean while coordination refs remain: ${remainingCoordinationRefs.map((item) => item.ref).join(", ")}`)
+      }
+      input.testHooks?.beforeIntegrationDeletion?.()
+      const checkout = currentCheckout(repoRoot)
+      if (!checkout.branch || checkout.branch !== expectedCheckout.branch || checkout.head !== expectedCheckout.head) {
+        fail("Cannot remove integration because the current branch or HEAD changed after preflight")
+      }
+      const currentIntegrationHead = refTarget(repoRoot, integrationRef)
+      if (!currentIntegrationHead) fail(`Integration branch does not exist: ${integrationBranch}`)
+      if (currentIntegrationHead !== integrationHead) {
+        fail(`Cannot delete moved branch ${integrationBranch}: expected ${integrationHead}, found ${currentIntegrationHead}`)
+      }
+      if (!isAncestor(repoRoot, integrationHead, checkout.head)) {
+        fail(`Cannot remove integration because ${checkout.branch} no longer contains ${integrationHead}`)
       }
       if (integrationWorktree) {
         assertNotUserCheckout(repoRoot, integrationWorktree.path)

@@ -362,7 +362,7 @@ async function buildCleanupPreviewSnapshot(
 	const blockers = cleanupReasons(outcomes);
 	if (deep) blockers.push(...outcomes.flatMap((outcome) => outcome.result.destruction.blockers.map((item) => String(item.reason ?? "deep-cleanup-blocked"))));
 	if (!CLEANUP_TERMINAL_STATUSES.has(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
-	if (!includeFailed && failedPlanIds.length > 0) blockers.push("failed-evidence-requires-include-failed");
+	if (!deep && !includeFailed && failedPlanIds.length > 0) blockers.push("failed-evidence-requires-include-failed");
 	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0
 		|| (deep && (outcome.result.destruction.eligible)));
 	if (selection.selectedPlanIds.length > 0 && !hasActions) blockers.push("no-eligible-actions");
@@ -450,7 +450,7 @@ export async function applyHerderCleanup(
 				repo: request.repositoryRoot,
 				planDir: request.planDirectory,
 				dryRun: false,
-				includeFailed: Boolean(request.includeFailed),
+				includeFailed: request.deep === true || Boolean(request.includeFailed),
 				deep: true,
 				expectedPlanStatuses,
 				pretty: false,
