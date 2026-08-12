@@ -19,7 +19,7 @@ Node >=22.19.0 is required for supported Pi versions, built-in `node:sqlite`, an
 Each execution profile binds exact root and worker models. Start Pi with the selected profile's orchestrator model and thinking level, then fire a validated plan directory:
 
 ```text
-pi --model <provider>/gpt-5.6-sol --thinking max
+pi --model <provider>/gpt-5.6-sol --thinking xhigh
 /herder-fire herder-plans --profile eclipse
 ```
 
@@ -73,7 +73,7 @@ Blocked-plan recovery and input waits are durable main-session attention request
 
 | Profile | Orchestrator | Implementer | Reviewer and Judge |
 | --- | --- | --- | --- |
-| `eclipse` (default) | `gpt-5.6-sol` at `max` | `gpt-5.6-luna` at `max` on the fast tier | `gpt-5.6-sol` at `xhigh` |
+| `eclipse` (default) | `gpt-5.6-sol` at `xhigh` | `gpt-5.6-luna` at `max` on the fast tier | `gpt-5.6-sol` at `xhigh` |
 | `poorman` | `kimi-k3` at `max` | `deepseek-v4-flash` at `high` | `gpt-5.6-luna` at `max` |
 
 Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`.

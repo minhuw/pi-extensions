@@ -5,7 +5,7 @@
     {
       "name": "eclipse",
       "description": "Sol orchestrates and reviews while Luna implements.",
-      "orchestrator": { "model": "gpt-5.6-sol", "effort": "max" },
+      "orchestrator": { "model": "gpt-5.6-sol", "effort": "xhigh" },
       "roles": {
         "plan-implementer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
         "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },

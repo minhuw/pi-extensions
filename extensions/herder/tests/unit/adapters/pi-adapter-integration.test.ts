@@ -376,7 +376,7 @@ function contextFor(fixture: Fixture, ui: CapturedUI): ExtensionContext {
 		sessionManager,
 		modelRegistry,
 		model: availableModels[0],
-		thinkingLevel: "max",
+		thinkingLevel: "xhigh",
 		scopedModels: [],
 		isIdle: () => true,
 		isProjectTrusted: () => true,
@@ -743,7 +743,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.ok(manifest);
 		assert.deepEqual(manifest.selector, {
 			model: "fake/gpt-5.6-sol",
-			thinkingLevel: "max",
+			thinkingLevel: "xhigh",
 			sessionId: "main-session-011",
 		});
 		assert.deepEqual(manifest.gates, [{

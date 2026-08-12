@@ -397,7 +397,7 @@ function freshContext(fixture: Fixture, notifications: Warning[]): ExtensionCont
 		sessionManager: { getEntries: () => [] },
 		modelRegistry: { getAvailable: () => [...availableModels] } as unknown as ModelRegistry,
 		model: availableModels[0],
-		thinkingLevel: "max",
+		thinkingLevel: "xhigh",
 		scopedModels: [],
 		isIdle: () => true,
 		isProjectTrusted: () => true,

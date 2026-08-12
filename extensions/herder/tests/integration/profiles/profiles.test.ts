@@ -42,6 +42,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 const eclipse = run("resolve");
 assert.equal(eclipse.profile, "eclipse");
 assert.equal(eclipse.host, "pi");
+assert.deepEqual(eclipse.orchestrator, { model: "gpt-5.6-sol", effort: "xhigh" });
 assert.deepEqual(Object.keys(eclipse.roles), roles);
 assert.deepEqual(eclipse.roles["plan-implementer"], {
   agent_type: "herder.plan-implementer",

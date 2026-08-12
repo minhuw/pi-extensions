@@ -21,6 +21,9 @@ const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 const registry = path.join(packageRoot, "src/core/profile-registry.ts");
 
 test("Pi resolves profile models into three generic package agents", async () => {
+	const eclipse = await loadPiProfile(catalog, "eclipse");
+	assert.deepEqual(eclipse.orchestrator, { model: "gpt-5.6-sol", effort: "xhigh" });
+
 	const profile = await loadPiProfile(catalog, "poorman");
 	assert.equal(profile.host, "pi");
 	assert.deepEqual(profile.orchestrator, { model: "kimi-k3", effort: "max" });
