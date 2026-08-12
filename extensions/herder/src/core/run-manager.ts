@@ -770,13 +770,16 @@ export class HerderRunManager {
 	private projectLifecycle(run: StoredRun): void {
 		const plans = this.store.getPlans(run.runId);
 		const runtime = new Map(plans.map((plan) => [plan.planId, plan]));
+		const attentionDetails = new Map(this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })
+			.map((request) => [request.planId, request.detail]));
 		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
 		projectStatuses(this.planDirectory, this.specs(run).filter((spec) => spec.planId !== reservedPlanId).map((spec) => {
 			const plan = runtime.get(spec.planId) ?? null;
 			const status = lifecycleStatus(spec, plan);
-			const detail = plan?.phase === "BLOCKED" || plan?.phase === "NEEDS_INPUT"
-				? plan.repair[0] || spec.initialStatusDetail
+			const rawDetail = plan?.phase === "BLOCKED" || plan?.phase === "NEEDS_INPUT"
+				? plan.repair[0] || attentionDetails.get(spec.planId) || spec.initialStatusDetail
 				: status === spec.initialStatus ? spec.initialStatusDetail : "";
+			const detail = rawDetail.replace(/[\r\n]+/g, " ").replaceAll("|", ";").replace(/\s+/g, " ").trim();
 			return { id: spec.planId, status, detail };
 		}));
 	}
@@ -1519,7 +1522,7 @@ export class HerderRunManager {
 		}
 		const detail = result.rationale || result.findings[0] || "Reviewer blocked the plan";
 		return {
-			plan: { ...reviewed, phase: "BLOCKED" },
+			plan: { ...reviewed, phase: "BLOCKED", repair: [detail] },
 			attention: this.attention({
 				run,
 				plan,
@@ -1567,7 +1570,7 @@ export class HerderRunManager {
 		} else if (decision.action === "NEEDS_INPUT") {
 			const terminalDetail = result.question || result.rationale;
 			return {
-				plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: result.question ? [result.question] : [] },
+				plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: [terminalDetail] },
 				runUpdate: { status: "needs_input", terminalDetail },
 				attention: this.attention({
 					run,
@@ -1587,7 +1590,7 @@ export class HerderRunManager {
 		const terminalDetail = result.rationale || result.findings[0] || (decision.action === "BLOCKED_ROUND_LIMIT" ? "Judge round limit exhausted" : "Judge blocked the plan");
 		const cause: AttentionCause = decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "judge_blocked";
 		return {
-			plan: { ...plan, phase: "BLOCKED", findings: result.findings },
+			plan: { ...plan, phase: "BLOCKED", findings: result.findings, repair: [terminalDetail] },
 			attention: this.attention({
 				run,
 				plan,

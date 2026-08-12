@@ -19,6 +19,7 @@ type ReviewerEnvelope = {
 	findings?: string[];
 	fixGuidance?: string[];
 	scope?: "PASS" | "FAIL";
+	rationale?: string;
 };
 
 type JudgeEnvelope = {
@@ -27,6 +28,7 @@ type JudgeEnvelope = {
 	authorizedBlockers?: string[];
 	repairContracts?: string[];
 	question?: string;
+	rationale?: string;
 };
 
 const FIXTURE_PLAN = (originalHead: string) => `# Plan 001: Update the fixture value
@@ -269,7 +271,7 @@ function reviewerResponse(result: ReviewerEnvelope): string {
 		"DISCOVERED_PATHS: none",
 		`SCOPE: ${result.scope ?? "PASS"}`,
 		"CHECKS: fixture test — passed",
-		"RATIONALE: transition envelope is intentionally characterized",
+		`RATIONALE: ${result.rationale ?? "transition envelope is intentionally characterized"}`,
 		"USAGE: input_tokens=2; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=test-host",
 	].join("\n");
 }
@@ -289,7 +291,7 @@ function judgeResponse(result: JudgeEnvelope): string {
 		"LEAKS: none",
 		...(result.question ? [`QUESTION: ${result.question}`] : []),
 		"CHECKS: fixture test — passed",
-		"RATIONALE: transition envelope is intentionally characterized",
+		`RATIONALE: ${result.rationale ?? "transition envelope is intentionally characterized"}`,
 		"USAGE: input_tokens=3; cached_input_tokens=0; output_tokens=3; reasoning_tokens=0; source=test-host",
 	].join("\n");
 }
@@ -468,18 +470,17 @@ test("blocking Reviewer outcomes repair directly, block early, or escalate to a 
 	});
 
 	await withFixture("review-block", async (service, fixture) => {
+		const blockedRationale = "Fresh review children exhausted their budgets.\nIndependent validation | could not complete.";
+		const projectedDetail = "Fresh review children exhausted their budgets. Independent validation ; could not complete.";
 		let reply = await startRun(service, fixture, "early-block");
-		let implementer = action(reply, "plan-implementer");
+		const implementer = action(reply, "plan-implementer");
 		reply = await finishImplementer(service, implementer, "early-block");
-		let reviewer = action(reply, "plan-reviewer");
-		reply = await finishReviewer(service, reviewer, "early-block", blocker(1));
-		implementer = action(reply, "plan-implementer");
-		reply = await finishImplementer(service, implementer, "early-block", ["src/value.mjs"]);
-		reviewer = action(reply, "plan-reviewer");
+		const reviewer = action(reply, "plan-reviewer");
 		reply = await finishReviewer(service, reviewer, "early-block", {
 			verdict: "BLOCK",
-			findings: ["[BLOCKING][P1] unrecoverable early review"],
+			findings: [],
 			fixGuidance: [],
+			rationale: blockedRationale,
 		});
 		assert.equal(reply.status, "failed");
 		assert.equal(records(reply.actions).length, 0);
@@ -487,14 +488,35 @@ test("blocking Reviewer outcomes repair directly, block early, or escalate to a 
 		assert.equal(attention.kind, "plan_recovery");
 		assert.equal(attention.cause, "reviewer_blocked");
 		assert.deepEqual(payload(attention.continuation), { role: "plan-reviewer", phase: "READY_REVIEWER" });
-		const inspected = inspectPlan(fixture);
+		let inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.run!.status, "failed");
 			assert.equal(inspected.plan.phase, "BLOCKED");
-			assert.equal(inspected.plan.round, 2);
-			assert.deepEqual(inspected.plan.repair, ["src/value.mjs"]);
+			assert.equal(inspected.plan.round, 1);
+			assert.deepEqual(inspected.plan.repair, [blockedRationale]);
 			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "reviewer_blocked").length, 1);
 			assertNoApproval(inspected.store, inspected.run!.runId);
+			inspected.store.putPlan({ ...inspected.plan, repair: [] });
+		} finally {
+			inspected.store.close();
+		}
+		const readme = path.join(fixture.planDirectory, "README.md");
+		assert.match(fs.readFileSync(readme, "utf8"), new RegExp(`BLOCKED — ${projectedDetail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(`BLOCKED — ${projectedDetail}`, "IN PROGRESS"));
+
+		const resumedResponse = payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+			dashboardUrl: service.dashboardUrl,
+		}));
+		assert.equal(payload(resumedResponse.reply).status, "failed");
+		assert.match(fs.readFileSync(readme, "utf8"), new RegExp(`BLOCKED — ${projectedDetail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		inspected = inspectPlan(fixture);
+		try {
+			assert.deepEqual(inspected.plan.repair, [], "legacy empty repair evidence remains recoverable from the attention request");
 		} finally {
 			inspected.store.close();
 		}
@@ -649,7 +671,7 @@ test("Judge REPAIR advances to the next guided Implementer without approval", { 
 test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round", { timeout: 45_000 }, async () => {
 	await withFixture("judge-input", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-input");
-		const question = "Which approved repair boundary should the Judge apply?";
+		const question = "Which approved repair boundary | should the Judge apply?";
 		const paused = await finishJudge(service, state.judge, "judge-input", {
 			decision: "NEEDS_INPUT",
 			findings: ["[BLOCKING][P1] adjudication needs a product decision"],
@@ -664,6 +686,7 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 		assert.equal(attention.cause, "judge_needs_input");
 		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
 		assert.equal(attention.question, question);
+		assert.match(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /BLOCKED — Which approved repair boundary ; should the Judge apply\?/);
 		const before = inspectPlan(fixture);
 		try {
 			assert.equal(before.run!.status, "needs_input");
@@ -730,6 +753,7 @@ test("Judge BLOCKED ends the run without approval", { timeout: 45_000 }, async (
 			assert.equal(inspected.run!.status, "failed");
 			assert.equal(inspected.plan.phase, "BLOCKED");
 			assert.equal(inspected.plan.round, 3);
+			assert.deepEqual(inspected.plan.repair, ["transition envelope is intentionally characterized"]);
 			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "judge_blocked").length, 1);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally {
@@ -760,6 +784,7 @@ test("round-6 Judge REPAIR is blocked by the round limit and never schedules rou
 			assert.equal(inspected.run!.status, "failed");
 			assert.equal(inspected.plan.phase, "BLOCKED");
 			assert.equal(inspected.plan.round, 6);
+			assert.deepEqual(inspected.plan.repair, ["transition envelope is intentionally characterized"]);
 			assert.equal(inspected.store.getActions(inspected.run!.runId).some((candidate) => candidate.round > 6), false);
 			assert.equal(inspected.store.getActions(inspected.run!.runId, ["proposed", "dispatched"]).length, 0);
 			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "round_limit").length, 1);
