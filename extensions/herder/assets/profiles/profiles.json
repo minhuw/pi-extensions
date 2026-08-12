@@ -14,12 +14,22 @@
     },
     {
       "name": "poorman",
-      "description": "Kimi orchestrates, DeepSeek implements, and Luna reviews and judges.",
-      "orchestrator": { "model": "kimi-k3", "effort": "max" },
+      "description": "Luna orchestrates, reviews, and judges while DeepSeek implements.",
+      "orchestrator": { "model": "gpt-5.6-luna", "effort": "max" },
       "roles": {
         "plan-implementer": { "model": "deepseek-v4-flash", "effort": "high" },
         "plan-reviewer": { "model": "gpt-5.6-luna", "effort": "max" },
         "plan-judge": { "model": "gpt-5.6-luna", "effort": "max" }
+      }
+    },
+    {
+      "name": "comet",
+      "description": "Kimi orchestrates, reviews, and judges while Grok implements.",
+      "orchestrator": { "model": "kimi-k3", "effort": "max" },
+      "roles": {
+        "plan-implementer": { "model": "grok-4.5", "effort": "max" },
+        "plan-reviewer": { "model": "kimi-k3", "effort": "max" },
+        "plan-judge": { "model": "kimi-k3", "effort": "max" }
       }
     }
   ]

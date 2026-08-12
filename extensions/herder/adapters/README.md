@@ -13,7 +13,7 @@ Use `pi install /absolute/path/to/pi-extensions` while developing this checkout.
 Start Pi with the root model and thinking level required by the chosen profile:
 
 ```text
-pi --model <provider>/kimi-k3 --thinking max
+pi --model <provider>/gpt-5.6-luna --thinking max
 /herder-fire herder-plans --profile poorman
 ```
 

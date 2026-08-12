@@ -27,7 +27,7 @@ function liveEnvironment(): NodeJS.ProcessEnv {
 async function invokePi(repository: string, planDirectory: string, logFile: string): Promise<void> {
 	writeFileSync(logFile, "");
 	const child = spawn(process.env.HERDER_PI_BIN || "pi", [
-		"--mode", "rpc", "--provider", "cliproxyapi", "--model", "kimi-k3", "--thinking", "max", "--approve",
+		"--mode", "rpc", "--provider", "cliproxyapi", "--model", "gpt-5.6-luna", "--thinking", "max", "--approve",
 		"--no-extensions", "--extension", providerExtension, "--extension", extensionEntry,
 	], { cwd: repository, env: liveEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
 	child.stdout.on("data", (chunk) => appendFileSync(logFile, chunk));

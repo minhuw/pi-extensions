@@ -79,9 +79,8 @@ test -x "$pi_bin"
 test -f "$provider_extension"
 models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models cliproxyapi)
 for required_model_id in \
-  'kimi-k3' \
-  'deepseek-v4-flash' \
-  'gpt-5.6-luna'
+  'gpt-5.6-luna' \
+  'deepseek-v4-flash'
 do
   if ! printf '%s\n' "$models" | grep -Fq -- "$required_model_id"; then
     printf 'Required model is not listed: %s\n' "$required_model_id" >&2
@@ -90,7 +89,7 @@ do
 done
 ```
 
-`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the profile bindings `kimi-k3:max`, `deepseek-v4-flash:high`, and `gpt-5.6-luna:max` before dispatch.
+`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the profile bindings `gpt-5.6-luna:max` and `deepseek-v4-flash:high` before dispatch.
 
 ## Run, limits, and artifacts
 

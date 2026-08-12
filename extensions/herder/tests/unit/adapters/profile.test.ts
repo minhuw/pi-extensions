@@ -26,11 +26,18 @@ test("Pi resolves profile models into three generic package agents", async () =>
 
 	const profile = await loadPiProfile(catalog, "poorman");
 	assert.equal(profile.host, "pi");
-	assert.deepEqual(profile.orchestrator, { model: "kimi-k3", effort: "max" });
+	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max" });
 	assert.equal(profile.roles["plan-implementer"].agent_type, "herder.plan-implementer");
 	assert.equal(profile.roles["plan-implementer"].model, "deepseek-v4-flash");
 	assert.equal(profile.roles["plan-implementer"].effort, "high");
 	assert.equal(profile.roles["plan-reviewer"].agent_type, "herder.plan-reviewer");
+
+	const comet = await loadPiProfile(catalog, "comet");
+	assert.deepEqual(comet.orchestrator, { model: "kimi-k3", effort: "max" });
+	assert.equal(comet.roles["plan-implementer"].model, "grok-4.5");
+	assert.equal(comet.roles["plan-implementer"].effort, "max");
+	assert.equal(comet.roles["plan-reviewer"].model, "kimi-k3");
+	assert.equal(comet.roles["plan-judge"].model, "kimi-k3");
 
 	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
@@ -71,7 +78,7 @@ test("model checks accept provider-qualified catalog entries without substitutio
 		{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna" },
 	];
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
-	assert.equal(activeModelMatches(profile, available[0]), true);
+	assert.equal(activeModelMatches(profile, available[2]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
 	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
 });
