@@ -18,6 +18,7 @@ function list(values: readonly string[] | undefined): string {
 function requestBinding(request: ManagerAttentionRequest, planDirectory?: string): string[] {
 	return [
 		...(planDirectory ? [`PLAN_DIRECTORY: ${planDirectory}`] : []),
+		"SCHEMA_VERSION: 1",
 		`REQUEST_ID: ${request.requestId}`,
 		`REQUEST_SHA256: ${request.requestSha256}`,
 		`CAPABILITY_TOKEN: ${request.capabilityToken || attentionCapabilityToken(request.requestId)}`,
@@ -92,6 +93,7 @@ export async function buildAttentionPrompt(
 			"For unchanged retry, preserve the target plan content, record a non-empty rationale, and submit action \"unchanged_retry\".",
 			"For a replacement, edit only the confirmed target plan content, run shape and validate, then submit action \"revise\" with a non-empty rationale.",
 			"For a rejected recovery, submit action \"reject\" with a non-empty rationale.",
+			"Every resolution payload must include the fixed field schemaVersion: 1.",
 			"Submit every recovery decision with herder_plan operation \"attention\", the exact request binding above, and the exact RECOVERY_GIT_IDENTITY object. Never invent a new capability token.",
 		].join("\n");
 		const grill = await buildPlanningSkillPrompt(packageRoot, "grill", "", runtimeContext);
@@ -111,7 +113,7 @@ export async function buildAttentionPrompt(
 			`QUESTION: ${question}`,
 			`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 			binding,
-			"After the user answers, call herder_plan exactly once with operation \"attention\", action \"answer\", the exact answer text, and every request binding field above. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.",
+			"After the user answers, call herder_plan exactly once with operation \"attention\", schemaVersion: 1, action \"answer\", the exact answer text, and every request binding field above. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.",
 		].join("\n");
 	}
 
@@ -121,6 +123,6 @@ export async function buildAttentionPrompt(
 		`DETAIL: ${question}`,
 		`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 		binding,
-		"The user may defer. After a choice, call herder_plan exactly once with operation \"attention\", action \"retry\" for the recorded role or \"cancel\" to stop, with the exact request binding fields above. Use action \"defer\" only when no decision is made.",
+		"The user may defer. After a choice, call herder_plan exactly once with operation \"attention\", schemaVersion: 1, action \"retry\" for the recorded role or \"cancel\" to stop, with the exact request binding fields above. Use action \"defer\" only when no decision is made.",
 	].join("\n");
 }

@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { validateAttentionResolution } from "../../../src/shared/protocol.ts";
+import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
 import {
 	buildAttentionPrompt,
 } from "../../../adapters/attention.ts";
@@ -64,6 +66,8 @@ test("typed attention prompts preserve request bindings and route each variant",
 	} as ManagerAttentionRequest);
 	assert.match(userPrompt, /^HERDER_MAIN_SESSION_USER_DECISION_V1/m);
 	assert.match(userPrompt, /QUESTION: Which recorded decision should the Judge use\?/);
+	assert.match(userPrompt, /SCHEMA_VERSION: 1/);
+	assert.match(userPrompt, /schemaVersion: 1/);
 	assert.match(userPrompt, /PLAN_DIRECTORY: \/repo\/herder-plans/);
 	assert.match(userPrompt, /CAPABILITY_TOKEN: c{64}/);
 	assert.doesNotMatch(userPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
@@ -76,6 +80,7 @@ test("typed attention prompts preserve request bindings and route each variant",
 		question: "Retry the recorded role or stop it?",
 	} as ManagerAttentionRequest);
 	assert.match(operatorPrompt, /^HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1/m);
+	assert.match(operatorPrompt, /schemaVersion: 1/);
 	assert.match(operatorPrompt, /action "retry"/);
 	assert.doesNotMatch(operatorPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
@@ -109,7 +114,29 @@ test("typed attention prompts preserve request bindings and route each variant",
 	assert.match(recoveryPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 	assert.match(recoveryPrompt, /RECOVERY_GIT_IDENTITY:/);
 	assert.match(recoveryPrompt, /ALLOWED_OPERATIONS: defer, unchanged_retry, revise, reject/);
+	assert.match(recoveryPrompt, /schemaVersion: 1/);
 	assert.match(recoveryPrompt, /001-plan\.md/);
+});
+
+test("attention tool inputs round-trip with the fixed resolution schema", () => {
+	const resolution = attentionResolutionFromArgs({
+		planDirectory: "/repo/herder-plans",
+		operation: "attention",
+		kind: "attention",
+		requestId: "request-001",
+		requestSha256: "a".repeat(64),
+		capabilityToken: "c".repeat(64),
+		runId: "run-001",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		action: "answer",
+		answer: "Use the recorded evidence.",
+	});
+	validateAttentionResolution(resolution);
+	assert.equal(resolution.schemaVersion, 1);
+	assert.equal(resolution.requestId, "request-001");
+	assert.equal(resolution.action, "answer");
 });
 
 test("Pi planning prompt preserves the exact packaged skill and arguments", async () => {

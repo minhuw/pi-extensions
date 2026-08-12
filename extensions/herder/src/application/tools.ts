@@ -40,7 +40,7 @@ async function planTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	if (operation === "attention") {
 		const { operation: _operation, planDirectory: _planDirectory, ...resolution } = args;
-		return submitTool({ planDirectory: directory, kind: "attention", ...resolution });
+		return submitTool({ planDirectory: directory, kind: "attention", ...resolution, schemaVersion: 1 });
 	}
 	if (["begin_edit", "finish_edit", "cancel_edit"].includes(operation)) {
 		return executeManagerOperation(directory, "edit", {
@@ -97,11 +97,13 @@ async function runTool(args: JsonObject): Promise<unknown> {
 	return requestService(currentService, "/v1/status");
 }
 
-function attentionResolutionFromArgs(args: JsonObject): AttentionResolutionInput {
+export function attentionResolutionFromArgs(args: JsonObject): AttentionResolutionInput {
 	const nested = args.resolution ?? args.attention;
-	if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested as AttentionResolutionInput;
+	if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+		return { ...nested, schemaVersion: 1 } as AttentionResolutionInput;
+	}
 	const { planDirectory: _planDirectory, kind: _kind, eventId: _eventId, operation: _operation, ...resolution } = args;
-	return resolution as unknown as AttentionResolutionInput;
+	return { ...resolution, schemaVersion: 1 } as unknown as AttentionResolutionInput;
 }
 
 async function submitTool(args: JsonObject): Promise<unknown> {

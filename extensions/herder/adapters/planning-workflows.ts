@@ -211,6 +211,7 @@ export function registerPiPlanningWorkflows(
 				Type.Literal("attention"),
 			]),
 			planDirectory: Type.String(),
+			schemaVersion: Type.Optional(Type.Literal(1)),
 			planId: Type.Optional(Type.String()),
 			editToken: Type.Optional(Type.String()),
 			track: Type.Optional(Type.Boolean()),
