@@ -135,6 +135,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const promptedVerifications = new Set<string>();
 	const verificationMonitors = new Map<string, number>();
 	const notifiedVerificationFailures = new Set<string>();
+	const deliveredVerificationFailureFollowUps = new Set<string>();
+	let pendingVerificationFailure: { key: string; runId: string; planDirectory: string; detail: string; requestId?: string; sessionId?: string } | undefined;
+	let verificationFailureDrain = Promise.resolve();
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -340,6 +343,43 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return next;
 	};
 
+	const drainVerificationFailure = (): void => {
+		if (shuttingDown || !lastContext || !pendingVerificationFailure) return;
+		const failure = pendingVerificationFailure;
+		if (deliveredVerificationFailureFollowUps.has(failure.key)) {
+			pendingVerificationFailure = undefined;
+			return;
+		}
+		const logPath = failure.detail.match(/\\(log ([^)]+)\\)/)?.[1] || "the verification failure detail";
+		const prompt = [
+			"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
+			"Herder final verification failed in the active main Pi session.",
+			`RUN_ID: ${failure.runId}`,
+			...(failure.requestId ? [`REQUEST_ID: ${failure.requestId}`] : []),
+			...(failure.sessionId ? [`MAIN_SESSION_ID: ${failure.sessionId}`] : []),
+			`FAILURE_DETAIL: ${failure.detail}`,
+			`LOG_PATH: ${logPath}`,
+			"Next steps: inspect the verification log, report or ask the user what failed, correct the gate, then use /herder-resume to create a fresh verification request.",
+			"Do not claim success. The final verification tree remains frozen; do not edit it or run the gate yourself.",
+		].join("\\n");
+		const next = verificationFailureDrain.then(() => {
+			if (shuttingDown || !lastContext || !pendingVerificationFailure) return;
+			const current = pendingVerificationFailure;
+			if (deliveredVerificationFailureFollowUps.has(current.key)) {
+				pendingVerificationFailure = undefined;
+				return;
+			}
+			try {
+				pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+				deliveredVerificationFailureFollowUps.add(current.key);
+				pendingVerificationFailure = undefined;
+			} catch (error) {
+				lastContext?.ui.notify(`Herder could not deliver final verification failure to the main session: ${message(error)}`, "warning");
+			}
+		}, () => undefined);
+		verificationFailureDrain = next.then(() => undefined, () => undefined);
+	};
+
 	const activeVerificationOperation = (reply: ManagerReply) => (reply.operations ?? []).find(
 		(operation) => operation.kind === "verification" && ["accepted", "running"].includes(operation.state),
 	);
@@ -360,6 +400,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	) => {
 		if (reply.status === "idle") {
 			currentState = undefined;
+			pendingVerificationFailure = undefined;
 			currentAttention = undefined;
 			attentionHint = undefined;
 			deferredAttention.clear();
@@ -398,6 +439,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastManagerMessage = displayed.message;
 		if (displayed.status === "failed" && /verification/i.test(displayed.message)) {
 			const failureKey = `${reply.runId}:${displayed.message}`;
+			pendingVerificationFailure = { key: failureKey, runId: reply.runId, planDirectory: reply.planDirectory, detail: displayed.message, requestId: reply.verificationRequest?.requestId, sessionId: lastContext ? piSessionId(lastContext) : undefined };
 			if (!notifiedVerificationFailures.has(failureKey)) {
 				notifiedVerificationFailures.add(failureKey);
 				lastContext?.ui.notify(
@@ -405,6 +447,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					"error",
 				);
 			}
+		} else {
+			pendingVerificationFailure = undefined;
 		}
 		if (ownsRun(reply.planDirectory, reply.runId)) {
 			for (const operation of reply.operations ?? []) {
@@ -425,6 +469,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		render();
 		delegateVerification(reply, verificationRetryDetail);
+		drainVerificationFailure();
 		void requestAttentionDrain();
 	};
 
@@ -1091,6 +1136,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (shuttingDown) return;
 		lastContext = ctx;
+		drainVerificationFailure();
 		await requestAttentionDrain();
 	});
 
@@ -1101,6 +1147,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		currentAttention = undefined;
+		pendingVerificationFailure = undefined;
 		deferredAttention.clear();
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
@@ -1164,6 +1211,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		widget.dispose();
 		verificationRequests.clear();
+		pendingVerificationFailure = undefined;
 		promptedVerifications.clear();
 		currentAttention = undefined;
 		deferredAttention.clear();
