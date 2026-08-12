@@ -42,8 +42,10 @@ test("only explicit user-facing dashboard actions open Orca", async () => {
 	chmodSync(command, 0o755);
 	const previousOwned = process.env.ORCA_PI_STATUS_OWNED;
 	const previousCommand = process.env.ORCA_CLI_COMMAND;
+	const previousTestDashboardOpen = process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN;
 	process.env.ORCA_PI_STATUS_OWNED = "test-owned";
 	process.env.ORCA_CLI_COMMAND = command;
+	process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN = "1";
 	try {
 		await invokeHerderTool("herder_run", { operation: "status", planDirectory: fixture.planDirectory });
 		assert.equal(existsSync(calls), false, "status or daemon startup opened an Orca tab");
@@ -60,6 +62,8 @@ test("only explicit user-facing dashboard actions open Orca", async () => {
 		else process.env.ORCA_PI_STATUS_OWNED = previousOwned;
 		if (previousCommand === undefined) delete process.env.ORCA_CLI_COMMAND;
 		else process.env.ORCA_CLI_COMMAND = previousCommand;
+		if (previousTestDashboardOpen === undefined) delete process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN;
+		else process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN = previousTestDashboardOpen;
 		await stopService(fixture.planDirectory).catch(() => {});
 		rmSync(fixture.root, { recursive: true, force: true });
 	}

@@ -323,9 +323,16 @@ async function runTests(): Promise<void> {
     assert.equal(unsupportedAccess.attempted, false)
     assert.equal(unsupportedAccess.forwardedUrl, null)
     assert.deepEqual(hostCalls, [])
+    const suppressedTestAccess = await enableDashboardHostAccess({
+      url: "http://127.0.0.1:4321/",
+      env: { NODE_TEST_CONTEXT: "child-v8", ORCA_PI_STATUS_OWNED: "30011", ORCA_CLI_COMMAND: "/opt/orca-cli" },
+      runCommand: fakeRunCommand,
+    })
+    assert.equal(suppressedTestAccess.attempted, false)
+    assert.deepEqual(hostCalls, [])
     const orcaAccess = await enableDashboardHostAccess({
       url: "http://127.0.0.1:4321/",
-      env: { TERM_PROGRAM: "vscode", ORCA_PI_STATUS_OWNED: "30011", ORCA_CLI_COMMAND: "/opt/orca-cli" },
+      env: { TERM_PROGRAM: "vscode", ORCA_PI_STATUS_OWNED: "30011", ORCA_CLI_COMMAND: "/opt/orca-cli", HERDER_ALLOW_TEST_DASHBOARD_OPEN: "1" },
       platform: "linux",
       runCommand: fakeRunCommand,
     })

@@ -32,6 +32,10 @@ function present(value: unknown): value is string {
   return typeof value === "string" && value.length > 0
 }
 
+function dashboardOpeningDisabled(env: Environment): boolean {
+  return present(env.NODE_TEST_CONTEXT) && env.HERDER_ALLOW_TEST_DASHBOARD_OPEN !== "1"
+}
+
 export function detectDashboardEnvironment(env: Environment = process.env): DashboardEnvironment {
   const terminal = String(env.TERM_PROGRAM ?? "").toLowerCase()
   const orca = terminal === "orca"
@@ -112,7 +116,7 @@ export async function enableDashboardHostAccess(input: {
 }): Promise<DashboardHostAccess> {
   const env = input.env ?? process.env
   const environment = detectDashboardEnvironment(env)
-  if (environment.kind === "terminal") {
+  if (dashboardOpeningDisabled(env) || environment.kind === "terminal") {
     return { environment, attempted: false, opened: false, targetUrl: input.url, forwardedUrl: null, error: null }
   }
 
