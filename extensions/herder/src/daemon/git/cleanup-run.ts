@@ -239,6 +239,13 @@ function coordinationRefSnapshot(items: CoordinationRefRecord[]): string {
   return JSON.stringify(items.map((item) => `${item.ref}\t${item.target}`).sort())
 }
 
+function worktreeSnapshot(items: WorktreeRecord[], namespace: string, includeIntegration: boolean): string {
+  return JSON.stringify(items
+    .filter((item) => item.branch.startsWith(`${namespace}/`) && (includeIntegration || item.branch !== `${namespace}/integration`))
+    .map((item) => `${item.branch}\t${item.path}\t${item.locked}`)
+    .sort())
+}
+
 function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
   const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
   const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true })
@@ -337,7 +344,9 @@ export function cleanupRun(input: CleanupInput) {
 
   const planCandidate = path.resolve(repoRoot, input.planDir)
   if (!fs.existsSync(planCandidate) || !fs.statSync(planCandidate).isDirectory()) fail(`Plan directory does not exist: ${planCandidate}`)
+  if (fs.lstatSync(planCandidate).isSymbolicLink()) fail(`Plan directory must not be a symlink: ${planCandidate}`)
   const planDir = fs.realpathSync(planCandidate)
+  if (planDir === repoRoot) fail(`Refusing to remove the repository root: ${repoRoot}`)
   if (!isInside(repoRoot, planDir)) fail(`Plan directory must be inside the repository: ${planDir}`)
 
   const planName = resolvePlanName(planCandidate, input.planName)
@@ -377,7 +386,10 @@ export function cleanupRun(input: CleanupInput) {
   const expectedPlanBranchSnapshot = planBranchSnapshot(allPlanBranches)
   const expectedCoordinationRefSnapshot = coordinationRefSnapshot(coordinationRefs)
   const expectedCheckout = currentCheckout(repoRoot)
-  const worktrees = new Map(parseWorktrees(repoRoot).filter((item) => item.branch).map((item) => [item.branch, item]))
+  const initialWorktrees = parseWorktrees(repoRoot)
+  const expectedWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, false)
+  const expectedIntegrationWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, true)
+  const worktrees = new Map(initialWorktrees.filter((item) => item.branch).map((item) => [item.branch, item]))
   const actions: CleanupDetail[] = []
   const skipped: CleanupDetail[] = []
   const planBranches = allPlanBranches.filter((item) => item.relative !== "integration")
@@ -545,10 +557,20 @@ export function cleanupRun(input: CleanupInput) {
     assertPlanStatusesUnchanged()
     if (input.deep) {
       if (!destruction.eligible) fail(`Deep cleanup preflight failed: ${destruction.blockers.map((item) => item.reason).join(", ")}`)
+      // All deterministic race hooks run before the first mutation. External Git
+      // changes after this final preflight cannot be made transactionally atomic.
       input.testHooks?.beforeMutation?.()
+      input.testHooks?.beforeIntegrationDeletion?.()
       assertPlanStatusesUnchanged()
       if (planBranchSnapshot(listPlanBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
         fail("Deep cleanup plan branch namespace changed after preflight")
+      }
+      const currentWorktrees = parseWorktrees(repoRoot)
+      if (worktreeSnapshot(currentWorktrees, `herder/${planName}`, false) !== expectedWorktreeSnapshot) {
+        fail("Deep cleanup plan worktree namespace changed after preflight")
+      }
+      if (worktreeSnapshot(currentWorktrees, `herder/${planName}`, true) !== expectedIntegrationWorktreeSnapshot) {
+        fail("Deep cleanup worktree namespace changed after preflight")
       }
       if (coordinationRefSnapshot(listCoordinationRefs(repoRoot, planName)) !== expectedCoordinationRefSnapshot) {
         fail("Deep cleanup coordination refs changed after preflight")
@@ -561,6 +583,9 @@ export function cleanupRun(input: CleanupInput) {
       if (!currentIntegrationHead) fail(`Integration branch does not exist: ${integrationBranch}`)
       if (currentIntegrationHead !== integrationHead) {
         fail(`Cannot delete moved branch ${integrationBranch}: expected ${integrationHead}, found ${currentIntegrationHead}`)
+      }
+      if (!checkout.branch || !checkout.head || !isAncestor(repoRoot, integrationHead, checkout.head)) {
+        fail(`Cannot remove integration because ${checkout.branch ?? "current branch"} no longer contains ${integrationHead}`)
       }
       // Revalidate every worktree, graph, proof, and reachability precondition after
       // deterministic race injection and immediately before the first mutation.
@@ -594,7 +619,6 @@ export function cleanupRun(input: CleanupInput) {
       if (remainingCoordinationRefs.length > 0) {
         fail(`Cannot deep-clean while coordination refs remain: ${remainingCoordinationRefs.map((item) => item.ref).join(", ")}`)
       }
-      input.testHooks?.beforeIntegrationDeletion?.()
       const checkout = currentCheckout(repoRoot)
       const checkoutHead = checkout.head
       if (!checkout.branch || !checkoutHead || checkout.branch !== expectedCheckout.branch || checkoutHead !== expectedCheckout.head) {
@@ -614,6 +638,13 @@ export function cleanupRun(input: CleanupInput) {
       }
       deleteBranchIfPresent(repoRoot, integrationBranch, integrationHead)
       destruction.integrationRemoved = true
+      const deletionTarget = realpathIfPresent(planDir)
+      if (fs.lstatSync(planDir).isSymbolicLink() || deletionTarget !== planDir || deletionTarget === repoRoot || !isInside(repoRoot, deletionTarget)) {
+        fail(`Refusing to remove changed or unsafe plan directory: ${planDir}`)
+      }
+      if (!fs.existsSync(planDir) || !fs.statSync(planDir).isDirectory()) {
+        fail(`Refusing to remove changed or missing plan directory: ${planDir}`)
+      }
       fs.rmSync(planDir, { recursive: true, force: true })
       destruction.planDirectoryRemoved = true
     }

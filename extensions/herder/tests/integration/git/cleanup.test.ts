@@ -156,6 +156,16 @@ test("ordinary cleanup removes only eligible plan artifacts and preserves the pl
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
+test("cleanup refuses to treat the repository root as the plan directory", () => {
+  const fixture = setup()
+  try {
+    const before = git(fixture.repo, "status", "--porcelain=v1")
+    assert.throws(() => cleanupRun({ repo: fixture.repo, planDir: ".", planName: "plans", dryRun: false, includeFailed: false, deep: true }), /repository root/)
+    assert.equal(git(fixture.repo, "status", "--porcelain=v1"), before)
+    assert.equal(fs.existsSync(fixture.repo), true)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
 test("deep cleanup removes refs, all owned branches/worktrees, and the plan directory last", () => {
   const fixture = setup()
   try {

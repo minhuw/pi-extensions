@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import {
+	cleanupTranscriptDisplay,
+	createCleanupTranscriptEntry,
+	type LegacyCleanupTranscriptEntry,
+} from "../../../adapters/cleanup-transcript.ts";
 import { parseCleanupArguments } from "../../../adapters/arguments.ts";
 import { runCleanupCommand } from "../../../adapters/cleanup-command.ts";
 import type { CleanupApplyResult, CleanupPreview } from "../../../src/application/tools.ts";
@@ -66,7 +72,37 @@ function deepCleanupResult(removed = false): CleanupResult {
 	};
 }
 
-test("cleanup parser is fail-closed and preserves the exact command shape", () => {
+const transcriptTheme = {
+	fg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+} as unknown as Theme;
+
+test("cleanup transcripts retain legacy finalize rendering and use v2 deep entries", () => {
+	const legacy: LegacyCleanupTranscriptEntry = {
+		version: 1,
+		mode: "standard",
+		finalize: true,
+		handoffTarget: "release",
+		preview: "eligible",
+		executed: true,
+		plannedRefs: ["base"],
+		removedRefs: ["base"],
+		integration: "removed",
+		removed: ["001"],
+		skipped: [],
+		blockers: [],
+	};
+	const legacyDisplay = cleanupTranscriptDisplay(legacy, transcriptTheme);
+	assert.match(legacyDisplay, /finalize · executed/);
+	assert.match(legacyDisplay, /handoff target: release/);
+	assert.doesNotMatch(legacyDisplay, /deep ·/);
+
+	const current = createCleanupTranscriptEntry({ mode: "deep", deep: true, preview: "eligible", executed: true });
+	assert.equal(current.version, 2);
+	assert.match(cleanupTranscriptDisplay(current, transcriptTheme), /deep · executed/);
+});
+
+
 	assert.deepEqual(parseCleanupArguments("custom-plans --plan 7 --include-failed"), {
 		planDir: "custom-plans",
 		planId: "7",
