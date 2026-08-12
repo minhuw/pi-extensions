@@ -134,6 +134,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const verificationRequests = new Map<string, VerificationRequest>();
 	const promptedVerifications = new Set<string>();
 	const verificationMonitors = new Map<string, number>();
+	const notifiedVerificationFailures = new Set<string>();
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -282,7 +283,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			"Herder has finished integrating the ordinary plans and needs this main Pi session to select final verification semantically.",
 			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
 			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
-			"Represent every command as direct argv. Use [\"/bin/sh\", \"-lc\", \"...\"] only when shell syntax is genuinely required.",
+			"Represent every command as direct argv. Every argv element must be one non-empty line: never put literal newlines inside a shell script argument. Use [\"/bin/sh\", \"-lc\", \"single-line script\"] only when shell syntax is genuinely required; join multiple shell statements with && or semicolons.",
 			"PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot for inspection only. Each gate cwd is TreeRelative: use '.' for the worktree root or a relative path such as 'pkg'. Absolute paths in cwd are invalid; never copy INTEGRATION_WORKTREE into cwd.",
 			'EXAMPLE_GATE: {"gateId":"unit","label":"unit tests","cwd":".","argv":["npm","test"],"rationale":"Covers the integrated change."}',
 			...(retryDetail ? [`PREVIOUS_MANIFEST_ERROR: ${retryDetail.replace(/\s+/g, " ").slice(0, 1_000)}`, "Correct the rejected manifest and submit it again."] : []),
@@ -339,6 +340,17 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return next;
 	};
 
+	const activeVerificationOperation = (reply: ManagerReply) => (reply.operations ?? []).find(
+		(operation) => operation.kind === "verification" && ["accepted", "running"].includes(operation.state),
+	);
+
+	const displayedReply = (reply: ManagerReply): { status: Exclude<ManagerReply["status"], "idle">; message: string } => {
+		if (activeVerificationOperation(reply)) {
+			return { status: "running", message: "Executing final verification gates in the background." };
+		}
+		return { status: reply.status as Exclude<ManagerReply["status"], "idle">, message: reply.message };
+	};
+
 	const updateFromReply = (
 		reply: ManagerReply,
 		profile?: string,
@@ -355,6 +367,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			lastManagerMessage = undefined;
 			verificationRequests.clear();
 			promptedVerifications.clear();
+			notifiedVerificationFailures.clear();
 			render();
 			return;
 		}
@@ -362,10 +375,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (!currentAttention || attentionHint !== currentAttention.requestId) attentionHint = undefined;
 		const previous = currentState;
 		const now = Date.now();
+		const displayed = displayedReply(reply);
 		persist({
 			version: 1,
 			mode: mode ?? previous?.mode ?? "resume",
-			status: reply.status,
+			status: displayed.status,
 			runId: reply.runId,
 			repoRoot: repoRoot ?? previous?.repoRoot ?? "",
 			planDir: reply.planDirectory,
@@ -381,7 +395,17 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			counts: { total: reply.summary.total, done: reply.summary.done, rejected: reply.summary.rejected },
 			inProgress: reply.summary.inProgress,
 		};
-		lastManagerMessage = reply.message;
+		lastManagerMessage = displayed.message;
+		if (displayed.status === "failed" && /verification/i.test(displayed.message)) {
+			const failureKey = `${reply.runId}:${displayed.message}`;
+			if (!notifiedVerificationFailures.has(failureKey)) {
+				notifiedVerificationFailures.add(failureKey);
+				lastContext?.ui.notify(
+					`Herder final verification failed: ${displayed.message}\nUse /herder-resume to create a fresh verification request after correcting the gate.`,
+					"error",
+				);
+			}
+		}
 		if (ownsRun(reply.planDirectory, reply.runId)) {
 			for (const operation of reply.operations ?? []) {
 				if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
@@ -756,7 +780,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			await requestAttentionDrain();
 		}
 		render(ctx);
-		return `${reply.status.toUpperCase()} · ${reply.message}${reply.dashboardUrl ? `\nDashboard: ${reply.dashboardUrl}` : ""}`;
+		const displayed = displayedReply(reply);
+		return `${displayed.status.toUpperCase()} · ${displayed.message}${reply.dashboardUrl ? `\nDashboard: ${reply.dashboardUrl}` : ""}`;
 	};
 
 	const dashboard = async (planDirInput: string | undefined, ctx: ExtensionContext): Promise<string> => {
@@ -1014,6 +1039,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				return submitted;
 			});
+			// Submission is durable, so immediately reflect the background execution
+			// instead of leaving the last awaiting-manifest snapshot on screen.
+			if (currentState?.runId === request.runId) {
+				persist({ ...currentState, status: "running", updatedAt: Date.now() });
+				lastManagerMessage = `Executing ${params.gates.length} final verification gate(s) in the background.`;
+				verificationRequests.delete(request.requestId);
+				render(ctx);
+			}
 			monitorVerification(operationId, pending, request.requestId);
 			return {
 				content: [{ type: "text" as const, text: `Verification manifest accepted as ${operationId}. Herder is executing ${params.gates.length} gate(s) in the background.` }],

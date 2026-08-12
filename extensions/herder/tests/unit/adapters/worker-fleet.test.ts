@@ -123,6 +123,12 @@ test("paused worker fleet renders the manager reason instead of a dispatch wait"
 	assert.equal(lines[1], "└─ Waiting for the main Pi session to submit a replacement verification manifest.");
 });
 
+test("failed worker fleet renders the terminal manager detail", () => {
+	const failed = { ...model([]), status: "failed" as const, idleDetail: "Verification gate dashboard-ci failed (log /tmp/dashboard-ci.log)." };
+	const lines = workerFleetTreeLines(failed, theme, 160);
+	assert.equal(lines[1], "└─ Verification gate dashboard-ci failed (log /tmp/dashboard-ci.log).");
+});
+
 test("worker elapsed time uses compact whole-second formatting", () => {
 	assert.equal(formatWorkerElapsed(1_000, 1_050), "0s");
 	assert.equal(formatWorkerElapsed(1_000, 2_250), "1s");

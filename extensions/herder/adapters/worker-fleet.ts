@@ -213,8 +213,17 @@ export function workerFleetTreeLines(
 	];
 	const lines = [truncateToWidth(headerParts.join(separator), width)];
 	const rows = agentRows(model.workers);
-	if (rows.length === 0 && ["initializing", "running", "paused"].includes(model.status)) {
-		const idleDetail = model.idleDetail || (model.status === "paused" ? "Paused." : "Waiting for manager dispatch…");
+	if (rows.length === 0) {
+		const fallbackDetail: Record<HerderWidgetModel["status"], string> = {
+			initializing: "Initializing…",
+			running: "Waiting for manager dispatch…",
+			paused: "Paused.",
+			needs_input: "Waiting for input.",
+			complete: "Complete.",
+			failed: "Failed.",
+			stopped: "Stopped.",
+		};
+		const idleDetail = model.idleDetail || fallbackDetail[model.status];
 		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", idleDetail)}`, width));
 		return lines;
 	}

@@ -667,6 +667,8 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const verificationPrompt = (await withDeadline(api.waitForUserMessage(), "verification delegation")).content;
 		assert.match(verificationPrompt, /^HERDER_MAIN_SESSION_VERIFICATION_V1/m);
 		assert.match(verificationPrompt, /PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/);
+		assert.match(verificationPrompt, /never put literal newlines inside a shell script argument/);
+		assert.match(verificationPrompt, /join multiple shell statements with && or semicolons/);
 		assert.match(verificationPrompt, /REQUEST_ID: /);
 		assert.equal(factory.providerCalls, 0);
 
@@ -694,9 +696,21 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		);
 		assert.equal(object(failedVerification).terminate, true);
 		assert.match(toolText(failedVerification), /Verification manifest accepted/);
+		assert.match(String(ui.statuses.at(-1)?.value), /Herder running/i);
+		await withDeadline(
+			api.command("herder-status").handler("herder-plans", context),
+			"verification status refresh",
+		);
+		assert.ok(ui.notifications.some((notification) => notification.level === "info"
+			&& notification.message.startsWith("RUNNING · Executing final verification gates in the background.")));
+		assert.match(String(ui.statuses.at(-1)?.value), /Herder running/i);
 		await withDeadline((async () => {
 			while (readVerification(fixture!).state !== "failed") await new Promise((resolve) => setTimeout(resolve, 50));
+			while (!ui.notifications.some((notification) => notification.message.startsWith("Herder final verification failed:"))) {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
 		})(), "durable verification failure");
+		assert.ok(ui.notifications.some((notification) => notification.level === "error" && notification.message.includes("Use /herder-resume")));
 		assert.equal(factory.sessions.some((session) => session.action.workerMode === "FINAL_AUDIT"), false);
 		const messageCountBeforeResume = api.userMessages.length;
 		await withDeadline(
