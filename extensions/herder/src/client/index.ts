@@ -24,6 +24,7 @@ import {
 	type ServiceOwnership,
 	type StartExclusion,
 } from "../daemon/service-ownership.ts";
+import { resolveNodeExecutable } from "../shared/node-executable.ts";
 import { MANAGER_PROTOCOL_VERSION, stableJson, sha256, type AttentionResolutionInput, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
 const CLIENT_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -282,7 +283,7 @@ function openServiceLog(logPath: string): number {
 function spawnServiceProcess(planDirectory: string, options: { dashboardPort?: number }, logPath: string): void {
 	const log = openServiceLog(logPath);
 	try {
-		const child = spawn(process.execPath, [
+		const child = spawn(resolveNodeExecutable(), [
 			"--experimental-strip-types",
 			SERVICE_ENTRY,
 			"--plan-dir", planDirectory,

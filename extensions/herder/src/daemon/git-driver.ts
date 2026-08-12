@@ -16,6 +16,7 @@ import {
 } from "./git/completion-proof.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
+import { resolveNodeExecutable } from "../shared/node-executable.ts";
 import { stableJson, type VerificationGate } from "../shared/protocol.ts";
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
@@ -114,26 +115,12 @@ export function gitValue(repo: string, ...args: string[]): string {
 	return git(repo, args).stdout.trim();
 }
 
-function currentNodeExecutable(): string {
-	try {
-		if (fs.statSync(process.execPath).isFile()) return process.execPath;
-	} catch {}
-	const discovered = runCommand(process.platform === "win32" ? "where" : "which", ["node"], { allowFailure: true }).stdout
-		.split(/\r?\n/)
-		.map((candidate) => candidate.trim())
-		.find(Boolean);
-	if (!discovered) throw new Error(`Node executable is unavailable: ${process.execPath}`);
-	const executable = fs.realpathSync(discovered);
-	if (!fs.statSync(executable).isFile()) throw new Error(`Discovered Node executable is not a file: ${executable}`);
-	return executable;
-}
-
 function runJson(script: string, args: string[], options: { allowFailure?: boolean; allowNotOk?: boolean } = {}): Record<string, unknown> {
 	const normalized = [...args];
 	const delimiter = normalized.indexOf("--");
 	if (delimiter === -1) normalized.push("--pretty");
 	else normalized.splice(delimiter, 0, "--pretty");
-	const result = runCommand(currentNodeExecutable(), [script, ...normalized], { allowFailure: options.allowFailure });
+	const result = runCommand(resolveNodeExecutable(), [script, ...normalized], { allowFailure: options.allowFailure });
 	let parsed: Record<string, unknown>;
 	try {
 		parsed = JSON.parse(result.stdout) as Record<string, unknown>;
