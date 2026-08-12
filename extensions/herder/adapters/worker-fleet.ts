@@ -93,7 +93,6 @@ function workerIcon(worker: PiWorkerSnapshot, frame: number, theme: Theme): stri
 
 function nestedIcon(agent: PiNestedAgentSnapshot, frame: number, theme: Theme): string {
 	if (agent.status === "completed") return theme.fg("success", "✓");
-	if (agent.status === "limited") return theme.fg("warning", "!");
 	if (["error", "aborted"].includes(agent.status)) return theme.fg("error", "✗");
 	if (agent.status === "stopped") return theme.fg("warning", "■");
 	return theme.fg("accent", SPINNER[frame % SPINNER.length]!);
@@ -118,7 +117,6 @@ function workerActivity(worker: PiWorkerSnapshot): string {
 
 function nestedActivity(agent: PiNestedAgentSnapshot): string {
 	if (agent.status === "completed") return "done";
-	if (agent.status === "limited") return "turn limit";
 	if (["error", "aborted", "stopped"].includes(agent.status)) return agent.status;
 	const active = activityLabel(agent.activeTools[0]);
 	const live = active ?? activityLabel(agent.activity) ?? responseActivity(agent.responseText);
@@ -147,9 +145,8 @@ function topStats(worker: PiWorkerSnapshot, now: number): string {
 }
 
 function nestedStats(agent: PiNestedAgentSnapshot, now: number): string {
-	const turns = agent.maxTurns == null ? `↻${agent.turns}` : `↻${agent.turns}≤${agent.maxTurns}`;
 	return [
-		turns,
+		`↻${agent.turns}`,
 		`${agent.toolUses} tool${agent.toolUses === 1 ? "" : "s"}`,
 		tokenStats(agent.lifetimeTokens, agent.contextPercent, agent.compactionCount),
 		formatWorkerElapsed(agent.startedAt, agent.completedAt ?? now),

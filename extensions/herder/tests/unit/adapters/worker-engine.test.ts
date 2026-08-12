@@ -10,7 +10,6 @@ import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.
 import {
 	applySearcherToolPolicy,
 	applyServiceTier,
-	applyTurnLimit,
 	finalAssistantResult,
 	PiWorkerEngine,
 	trustedNestedExtensionPath,
@@ -206,23 +205,6 @@ test("nested extensions resolve only inside the trusted user package store", asy
 	}
 });
 
-test("applyTurnLimit gracefully stops before a provider request exceeds the child turn bound", async () => {
-	const session = { agent: { shouldStopAfterTurn: async (_context?: unknown, _signal?: AbortSignal) => false } };
-	const state = applyTurnLimit(session as never, 2);
-	const toolTurn = { message: { content: [{ type: "toolCall" }] } };
-	const finalTurn = { message: { content: [{ type: "text" }] } };
-	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), false);
-	assert.equal(state.reached, false);
-	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), true);
-	assert.equal(state.reached, true);
-	assert.equal(await session.agent.shouldStopAfterTurn(toolTurn, undefined), true);
-	const naturalSession = { agent: { shouldStopAfterTurn: async (_context?: unknown, _signal?: AbortSignal) => false } };
-	const naturalState = applyTurnLimit(naturalSession as never, 1);
-	assert.equal(await naturalSession.agent.shouldStopAfterTurn(finalTurn, undefined), false);
-	assert.equal(naturalState.reached, false);
-	assert.throws(() => applyTurnLimit(session as never, 0), /positive integer/);
-});
-
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
 	const factory = new FakeFactory();
 	const engine = new PiWorkerEngine(factory);
@@ -375,7 +357,6 @@ test("worker snapshots receive flat child state directly from the internal neste
 		type: "recon",
 		prompt: "Inspect code",
 		description: "inspect code",
-		maxTurns: 4,
 	});
 	assert.equal(child.status, "completed");
 	const snapshot = engine.snapshots()[0]!.children[0]!;

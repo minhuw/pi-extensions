@@ -83,8 +83,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(engine, /noContextFiles: true/);
 	assert.match(engine, /customTools: \[\.\.\.nestedTools\]/);
 	assert.match(engine, /createNestedAgentTools/);
-	assert.match(engine, /shouldStopAfterTurn/);
-	assert.match(engine, /turnLimitReached/);
+	assert.doesNotMatch(engine + nestedExecutor + nestedTool, /shouldStopAfterTurn|turnLimitReached|max_turns|maxTurns/);
 	assert.match(engine, /session\.messages\.length !== 0/);
 	assert.doesNotMatch(engine, /forkFrom|parentSession:/);
 	assert.match(nestedTool, /executionMode: "parallel"/);

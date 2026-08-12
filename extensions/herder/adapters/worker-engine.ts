@@ -140,26 +140,6 @@ export function applyServiceTier(session: AgentSession, tier: string): void {
 	};
 }
 
-export interface TurnLimitState {
-	reached: boolean;
-}
-
-/** Gracefully stop a child after its final allowed turn, before another provider request starts. */
-export function applyTurnLimit(session: AgentSession, maxTurns: number): TurnLimitState {
-	if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("Herder nested maxTurns must be a positive integer.");
-	const state: TurnLimitState = { reached: false };
-	let completedTurns = 0;
-	const previous = session.agent.shouldStopAfterTurn;
-	session.agent.shouldStopAfterTurn = async (context, signal) => {
-		completedTurns += 1;
-		const previousStop = await previous?.(context, signal);
-		const wouldContinue = context.message.content.some((item) => item.type === "toolCall");
-		if (completedTurns >= maxTurns && wouldContinue) state.reached = true;
-		return state.reached || previousStop === true;
-	};
-	return state;
-}
-
 function roleFromAgentType(agentType: string): ManagerAction["role"] {
 	const role = agentType.startsWith("herder.") ? agentType.slice("herder.".length) : agentType;
 	if (!new Set(["plan-implementer", "plan-reviewer", "plan-judge"]).has(role)) {
@@ -348,7 +328,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot: this.agentRoot,
-			createSession: async ({ id, definition: childDefinition, maxTurns, signal }) => {
+			createSession: async ({ id, definition: childDefinition, signal }) => {
 				signal.throwIfAborted();
 				const extensionPaths = this.resolveNestedExtensionPaths(childDefinition.extensions, request.action.worktree);
 				const childRoot = path.join(nestedRoot, id);
@@ -406,7 +386,6 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					throw new Error(`Herder nested agent ${childDefinition.name} is missing required tools: ${missingChildTools.join(", ")}.`);
 				}
 				if (request.action.serviceTier) applyServiceTier(child, request.action.serviceTier);
-				const turnLimit = applyTurnLimit(child, maxTurns);
 				return {
 					get sessionId() { return child.sessionId; },
 					get messages() { return child.messages; },
@@ -415,7 +394,6 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					abort: () => child.abort(),
 					dispose: () => child.dispose(),
 					getSessionStats: () => child.getSessionStats(),
-					turnLimitReached: () => turnLimit.reached,
 				} satisfies NestedWorkerSession;
 			},
 		});

@@ -17,7 +17,6 @@ export interface NestedAgentToolDetails {
 	type: string;
 	displayName: string;
 	turnCount: number;
-	maxTurns: number;
 	toolUses: number;
 	lifetimeTokens: number;
 	contextPercent: number | null;
@@ -50,7 +49,6 @@ function resultDetails(result: NestedAgentResult, type: string): NestedAgentTool
 		type,
 		displayName: displayName(type),
 		turnCount: result.turnCount,
-		maxTurns: result.maxTurns,
 		toolUses: result.toolUses,
 		lifetimeTokens: result.lifetimeTokens,
 		contextPercent: result.contextPercent,
@@ -61,11 +59,8 @@ function resultDetails(result: NestedAgentResult, type: string): NestedAgentTool
 }
 
 function resultText(result: NestedAgentResult, details: NestedAgentToolDetails): string {
-	const turns = `↻${details.turnCount}≤${details.maxTurns}`;
+	const turns = `↻${details.turnCount}`;
 	const stats = [turns, `${details.toolUses} tool${details.toolUses === 1 ? "" : "s"}`, compactTokens(details.lifetimeTokens), `${(details.durationMs / 1_000).toFixed(1)}s`].join(" · ");
-	if (details.status === "limited") {
-		return `Agent reached the turn limit; output may be partial (${stats}).\n\n${result.output.trim() || "No output."}`;
-	}
 	if (details.status !== "completed") {
 		return `Agent ${details.status}: ${details.error ?? "child did not complete"}\n${stats}${result.output.trim() ? `\n\nPartial output:\n${result.output.trim()}` : ""}`;
 	}
@@ -73,7 +68,7 @@ function resultText(result: NestedAgentResult, details: NestedAgentToolDetails):
 }
 
 function snapshotLine(snapshot: PiNestedAgentSnapshot): string {
-	return `${snapshot.agentId} · ${snapshot.displayName} · ${snapshot.status} · ↻${snapshot.turns}≤${snapshot.maxTurns} · ${snapshot.description}`;
+	return `${snapshot.agentId} · ${snapshot.displayName} · ${snapshot.status} · ↻${snapshot.turns} · ${snapshot.description}`;
 }
 
 /** Create the one-level Agent and result tools scoped to a single Herder action. */
@@ -102,7 +97,6 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 			prompt: Type.String({ description: "Complete self-contained task for the child agent." }),
 			description: Type.String({ description: "Short 3–5 word UI description." }),
 			subagent_type: Type.String({ description: `Package-owned nested type: ${HERDER_NESTED_AGENT_TYPES.join(", ")}.` }),
-			max_turns: Type.Optional(Type.Integer({ minimum: 1, maximum: 64, description: "Maximum child agentic turns. Default: 8." })),
 			run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately with an agent ID. Retrieve it later with get_subagent_result." })),
 		}),
 		executionMode: "parallel",
@@ -116,7 +110,6 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 				type: params.subagent_type as HerderNestedAgentType,
 				prompt: params.prompt,
 				description: params.description,
-				maxTurns: params.max_turns,
 			};
 			if (params.run_in_background === true) {
 				const launch = await scope.spawnBackground(request, signal);
@@ -126,7 +119,6 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 					type: launch.snapshot.type,
 					displayName: launch.snapshot.displayName,
 					turnCount: launch.snapshot.turns,
-					maxTurns: launch.snapshot.maxTurns,
 					toolUses: launch.snapshot.toolUses,
 					lifetimeTokens: launch.snapshot.lifetimeTokens,
 					contextPercent: launch.snapshot.contextPercent,

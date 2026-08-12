@@ -7,7 +7,7 @@ import {
 	type HerderNestedAgentType,
 } from "./role-config.ts";
 
-export type HerderNestedAgentStatus = "running" | "completed" | "limited" | "aborted" | "stopped" | "error";
+export type HerderNestedAgentStatus = "running" | "completed" | "aborted" | "stopped" | "error";
 
 export interface PiNestedAgentSnapshot {
 	agentId: string;
@@ -21,7 +21,6 @@ export interface PiNestedAgentSnapshot {
 	startedAt: number;
 	completedAt?: number;
 	turns: number;
-	maxTurns: number;
 	toolUses: number;
 	lifetimeTokens: number;
 	contextPercent: number | null;
@@ -48,7 +47,6 @@ export interface NestedAgentResult {
 	startedAt: number;
 	completedAt: number;
 	turnCount: number;
-	maxTurns: number;
 	toolUses: number;
 	lifetimeTokens: number;
 	contextPercent: number | null;
@@ -61,7 +59,6 @@ export interface NestedAgentRunRequest {
 	type: HerderNestedAgentType;
 	prompt: string;
 	description: string;
-	maxTurns?: number;
 }
 
 export interface NestedAgentLaunch {
@@ -82,13 +79,11 @@ export interface NestedWorkerSession {
 	abort(): Promise<void>;
 	dispose(): void;
 	getSessionStats(): SessionStats;
-	turnLimitReached?(): boolean;
 }
 
 export interface NestedSessionCreateRequest {
 	id: string;
 	definition: HerderNestedAgentDefinition;
-	maxTurns: number;
 	signal: AbortSignal;
 }
 
@@ -107,7 +102,6 @@ interface NestedRecord {
 }
 
 export const MAX_NESTED_CONCURRENCY_PER_ACTION = 4;
-const DEFAULT_MAX_TURNS = 8;
 
 function finiteCount(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
@@ -384,8 +378,6 @@ export class HerderNestedAgentScope {
 			if (this.action.role !== "plan-implementer" && !definition.readOnly) {
 				throw new Error(`${this.action.role} may delegate only to package-owned read-only nested agent types; ${request.type} is mutation-capable.`);
 			}
-			const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
-			if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) throw new Error("Nested Agent max_turns must be a positive integer.");
 			const id = randomUUID();
 			const startedAt = Date.now();
 			const snapshot: PiNestedAgentSnapshot = {
@@ -399,7 +391,6 @@ export class HerderNestedAgentScope {
 				serviceTier: this.action.serviceTier,
 				startedAt,
 				turns: 0,
-				maxTurns,
 				toolUses: 0,
 				lifetimeTokens: 0,
 				contextPercent: null,
@@ -415,7 +406,7 @@ export class HerderNestedAgentScope {
 			};
 			this.records.set(id, item);
 			this.emitUpdate();
-			item.promise = this.execute(item, { ...request, maxTurns }, definition, signal)
+			item.promise = this.execute(item, request, definition, signal)
 				.finally(releaseConcurrency);
 			void item.promise.catch(() => {});
 			return { id, snapshot: cloneSnapshot(snapshot) };
@@ -427,7 +418,7 @@ export class HerderNestedAgentScope {
 
 	private async execute(
 		item: NestedRecord,
-		request: NestedAgentRunRequest & { maxTurns: number },
+		request: NestedAgentRunRequest,
 		definition: HerderNestedAgentDefinition,
 		signal?: AbortSignal,
 	): Promise<NestedAgentResult> {
@@ -439,7 +430,7 @@ export class HerderNestedAgentScope {
 		let failure: string | undefined;
 		try {
 			childController.signal.throwIfAborted();
-			const session = await this.createSession({ id: item.snapshot.agentId, definition, maxTurns: request.maxTurns, signal: childController.signal });
+			const session = await this.createSession({ id: item.snapshot.agentId, definition, signal: childController.signal });
 			item.session = session;
 			item.snapshot.sessionId = session.sessionId;
 			if (session.messages.length !== 0) throw new Error("Herder nested agents require a session with zero inherited messages.");
@@ -460,10 +451,9 @@ export class HerderNestedAgentScope {
 			const final = item.session ? finalAssistantResult(item.session.messages) : { failed: true, error: failure || "Nested session was not created." };
 			const aborted = childController.signal.aborted || this.scopeController.signal.aborted;
 			const errors = [...new Set([failure, final.error].filter((value): value is string => Boolean(value)))];
-			const turnLimited = item.session?.turnLimitReached?.() === true;
 			item.snapshot.status = aborted
 				? (this.stopped ? "stopped" : "aborted")
-				: errors.length || final.failed ? "error" : turnLimited ? "limited" : "completed";
+				: errors.length || final.failed ? "error" : "completed";
 			item.snapshot.completedAt = completedAt;
 			item.snapshot.activeTools = [];
 			item.snapshot.activity = item.snapshot.status === "completed" ? "done" : item.snapshot.status;
@@ -485,7 +475,6 @@ export class HerderNestedAgentScope {
 				startedAt: item.snapshot.startedAt,
 				completedAt,
 				turnCount: item.snapshot.turns,
-				maxTurns: request.maxTurns,
 				toolUses: item.snapshot.toolUses,
 				lifetimeTokens: item.snapshot.lifetimeTokens,
 				contextPercent: item.snapshot.contextPercent,

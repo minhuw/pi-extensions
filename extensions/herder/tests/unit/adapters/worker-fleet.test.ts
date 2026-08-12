@@ -21,7 +21,6 @@ function nested(overrides: Partial<PiNestedAgentSnapshot> = {}): PiNestedAgentSn
 		effort: "xhigh",
 		startedAt: 6_000,
 		turns: 1,
-		maxTurns: 4,
 		toolUses: 2,
 		lifetimeTokens: 2_500,
 		contextPercent: 34.4,
@@ -82,7 +81,7 @@ test("Pi worker fleet flattens Plan and Role and renders direct child stats on o
 
 	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
 	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
-	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon  reading…\s+↻1≤4 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
+	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
 	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
 });
@@ -97,18 +96,11 @@ test("nested connector alignment retains the outer plan sibling stem", () => {
 	assert.equal(lines[3]![0], "└");
 });
 
-test("turn-limited nested agents render as warnings", () => {
-	const lines = workerFleetTreeLines(model([
-		worker({ children: [nested({ status: "limited", activeTools: [], activity: "turn limit" })] }),
-	]), theme, 120, 66_000, 0);
-	assert.match(lines[2]!, /! Recon  turn limit\s+↻1≤4/);
-});
-
 test("aborted nested agents render as failures", () => {
 	const lines = workerFleetTreeLines(model([
 		worker({ children: [nested({ status: "aborted", activeTools: [], activity: "aborted" })] }),
 	]), theme, 120, 66_000, 0);
-	assert.match(lines[2]!, /✗ Recon  aborted\s+↻1≤4/);
+	assert.match(lines[2]!, /✗ Recon  aborted\s+↻1/);
 });
 
 test("worker fleet overflow counts direct nested rows and respects narrow widths", () => {

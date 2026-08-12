@@ -41,11 +41,8 @@ class FakeNestedSession implements NestedWorkerSession {
 	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 	aborted = false;
 	disposed = false;
-	private readonly limited: boolean;
-
-	constructor(id: string, limited = false) {
+	constructor(id: string) {
 		this.sessionId = id;
-		this.limited = limited;
 	}
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
 		this.listeners.add(listener);
@@ -66,7 +63,6 @@ class FakeNestedSession implements NestedWorkerSession {
 	}
 	async abort(): Promise<void> { this.aborted = true; }
 	dispose(): void { this.disposed = true; }
-	turnLimitReached(): boolean { return this.limited; }
 	getSessionStats(): SessionStats {
 		return {
 			sessionFile: undefined,
@@ -128,8 +124,8 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 test("nested Agent runs one package-owned foreground child with inherited action binding", async () => {
 	const { value, sessions } = scope();
 	const tool = createNestedAgentTool(action(), value);
-	const result = await tool.execute("call", params({ max_turns: 4 }), undefined, undefined, undefined as never);
-	assert.match(resultText(result), /^Agent completed \(↻1≤4 · 1 tool · 16t · /);
+	const result = await tool.execute("call", params(), undefined, undefined, undefined as never);
+	assert.match(resultText(result), /^Agent completed \(↻1 · 1 tool · 16t · /);
 	assert.equal(sessions.length, 1);
 	assert.equal(sessions[0]!.disposed, true);
 	const snapshot = value.snapshots()[0]!;
@@ -176,20 +172,6 @@ test("each role may run four children concurrently and rejects a fifth", async (
 	await value.stop("test complete");
 	assert.equal(sessions.length, 4);
 	assert.equal(sessions.every((session) => session.aborted && session.disposed), true);
-});
-
-test("a gracefully bounded child preserves partial output with an explicit limited status", async () => {
-	const session = new FakeNestedSession("limited-child", true);
-	const value = new HerderNestedAgentScope({
-		action: action(),
-		agentRoot,
-		createSession: async () => session,
-	});
-	const tool = createNestedAgentTool(action(), value);
-	const result = await tool.execute("limited", params({ max_turns: 1 }), undefined, undefined, undefined as never);
-	assert.match(resultText(result), /^Agent reached the turn limit; output may be partial \(↻1≤1/);
-	assert.match(resultText(result), /Child result$/);
-	assert.equal(value.snapshots()[0]!.status, "limited");
 });
 
 test("closing a parent action aborts, settles, and disposes an in-flight child", async () => {
