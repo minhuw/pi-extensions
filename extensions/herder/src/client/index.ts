@@ -25,7 +25,7 @@ import {
 	type StartExclusion,
 } from "../daemon/service-ownership.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
-import { MANAGER_PROTOCOL_VERSION, stableJson, sha256, type AttentionResolutionInput, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
+import { MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
 const CLIENT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE_ENTRY = path.resolve(CLIENT_ROOT, "../daemon/service.ts");
@@ -74,18 +74,6 @@ export async function pollManagerOperation(service: StoredService, operationId: 
 	return operation as ManagerOperationReceipt;
 }
 
-export async function submitAttentionResolution(
-	service: StoredService,
-	resolution: AttentionResolutionInput,
-	eventId: string = `attention:${sha256(stableJson(resolution))}`,
-): Promise<ManagerOperationReceipt> {
-	return submitManagerOperation(service, "event", {
-		eventId,
-		kind: "attention",
-		attention: resolution,
-	}, `event:${eventId}`);
-}
-
 export async function waitManagerOperation(service: StoredService, operationId: string): Promise<unknown> {
 	for (;;) {
 		const operation = await pollManagerOperation(service, operationId);
@@ -98,7 +86,6 @@ export async function waitManagerOperation(service: StoredService, operationId: 
 const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
 	"/v1/start": "start",
 	"/v1/event": "event",
-	"/v1/attention": "event",
 	"/v1/edit": "edit",
 	"/v1/stop": "stop",
 	"/v1/verification": "verification",
@@ -107,12 +94,7 @@ const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
 export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
 	const kind = OPERATION_PATHS[pathname];
 	if (!kind) return rawRequest(service, pathname, input, timeoutMs);
-	const attentionInput = pathname === "/v1/attention" ? {
-		eventId: `attention:${sha256(stableJson(input ?? {}))}`,
-		kind: "attention",
-		attention: input,
-	} : null;
-	const operationInput = attentionInput ?? input ?? {};
+	const operationInput = input ?? {};
 	const eventId = kind === "event" && operationInput && typeof operationInput === "object" && !Array.isArray(operationInput)
 		? String((operationInput as { eventId?: unknown }).eventId || "")
 		: "";

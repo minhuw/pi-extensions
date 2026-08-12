@@ -129,20 +129,6 @@ async function submitTool(args: JsonObject): Promise<unknown> {
 	}, `event:${eventId}`) };
 }
 
-export async function submitHerderAttention(args: JsonObject): Promise<PendingHerderOperation> {
-	const directory = planDirectory(args);
-	const resolution = attentionResolutionFromArgs(args);
-	const requestId = String(resolution.requestId || "");
-	if (!requestId) throw new Error("Attention resolution requestId is required");
-	const eventId = String(args.eventId || `attention:${sha256(stableJson(resolution))}`);
-	const receipt = await submitManagerOperationReliable(directory, "event", {
-		eventId,
-		kind: "attention",
-		attention: resolution,
-	}, `event:${eventId}`);
-	return { planDirectory: directory, operationId: receipt.operationId };
-}
-
 async function verificationTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	return { ok: true, reply: await executeManagerOperation(directory, "verification", args.manifest) };
@@ -520,11 +506,10 @@ export async function applyHerderCleanup(
 }
 
 
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_attention", args: JsonObject): Promise<unknown> {
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
 	if (name === "herder_verification") return verificationTool(args);
-	if (name === "herder_attention") return submitTool({ ...args, kind: "attention" });
 	return submitTool(args);
 }

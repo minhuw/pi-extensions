@@ -1188,12 +1188,6 @@ export class HerderRunManager {
 		}
 	}
 
-	async resolveAttention(input: AttentionResolutionInput): Promise<ManagerReply> {
-		validateAttentionResolution(input);
-		const eventId = `attention:${input.requestId}:${sha256(stableJson(input))}`;
-		return this.event({ eventId, kind: "attention", attention: input });
-	}
-
 	async event(input: EventInput): Promise<ManagerReply> {
 		validateEventInput(input);
 		const run = this.store.getRun();

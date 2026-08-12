@@ -99,7 +99,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "attention" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
