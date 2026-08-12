@@ -21,7 +21,6 @@ export interface DashboardHostAccess {
   attempted: boolean
   opened: boolean
   targetUrl: string
-  forwardedUrl: string | null
   error: string | null
 }
 
@@ -117,7 +116,7 @@ export async function enableDashboardHostAccess(input: {
   const env = input.env ?? process.env
   const environment = detectDashboardEnvironment(env)
   if (dashboardOpeningDisabled(env) || environment.kind === "terminal") {
-    return { environment, attempted: false, opened: false, targetUrl: input.url, forwardedUrl: null, error: null }
+    return { environment, attempted: false, opened: false, targetUrl: input.url, error: null }
   }
 
   const command = resolveOrcaCommand(env, input.platform ?? process.platform)
@@ -127,7 +126,6 @@ export async function enableDashboardHostAccess(input: {
     attempted: true,
     opened: result.ok,
     targetUrl: input.url,
-    forwardedUrl: null,
     error: result.ok ? null : compactError(result),
   }
 }

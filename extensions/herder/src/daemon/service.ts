@@ -144,7 +144,6 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	}
 	const authToken = randomBytes(32).toString("base64url");
 	let dashboardUrl = "";
-	const forwardedUrl: string | null = null;
 	let auditTimer: NodeJS.Timeout | undefined;
 	let closing = false;
 	let closeService: () => Promise<void> = async () => {};
@@ -178,7 +177,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				? { ...(operation.payload as Record<string, unknown>), mode: "resume" }
 				: operation.payload;
 			const payload = operation.kind === "start" && recoveredPayload && typeof recoveredPayload === "object" && !Array.isArray(recoveredPayload)
-				? { ...(recoveredPayload as Record<string, unknown>), dashboardUrl: forwardedUrl || dashboardUrl }
+				? { ...(recoveredPayload as Record<string, unknown>), dashboardUrl }
 				: recoveredPayload;
 			const result = await executor.call(operation.kind, payload);
 			const reply = operationReply(operation.kind, result);
@@ -232,7 +231,6 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				runtimeExecutable: process.execPath,
 				planDirectory,
 				dashboardUrl,
-				forwardedUrl,
 				managerProtocolVersion: MANAGER_PROTOCOL_VERSION,
 				executionSchemaVersion: EXECUTION_SCHEMA_VERSION,
 				capabilities: ["durable-operations", "snapshot-status", "main-session-verification", "attention-resolution"],
@@ -297,13 +295,13 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	const close = () => new Promise<void>((resolve) => server.close(() => resolve()));
 	try {
 		const now = new Date().toISOString();
-		if (store.getRun()) store.updateRun({ dashboardUrl: forwardedUrl || dashboardUrl });
+		if (store.getRun()) store.updateRun({ dashboardUrl });
 		const initialReply = await executor.call("reply") as ManagerReply;
 		store.transaction(() => {
 			store.putSnapshot(initialReply);
 			// Publish service ownership only after the status snapshot is ready, so a
 			// client cannot discover the new daemon and read the previous daemon's URL.
-			store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, forwardedUrl, startedAt: now });
+			store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, startedAt: now });
 		});
 		updateDashboardRevision(initialReply);
 	} catch (error) {
@@ -346,7 +344,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	};
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());
-	return { instanceId, port: address.port, dashboardUrl, forwardedUrl, server, close: closeService };
+	return { instanceId, port: address.port, dashboardUrl, server, close: closeService };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

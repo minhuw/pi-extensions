@@ -321,7 +321,7 @@ async function runTests(): Promise<void> {
       runCommand: fakeRunCommand,
     })
     assert.equal(unsupportedAccess.attempted, false)
-    assert.equal(unsupportedAccess.forwardedUrl, null)
+    assert.equal(Object.hasOwn(unsupportedAccess, "forwardedUrl"), false)
     assert.deepEqual(hostCalls, [])
     const suppressedTestAccess = await enableDashboardHostAccess({
       url: "http://127.0.0.1:4321/",

@@ -182,7 +182,6 @@ export interface StoredService {
 	port: number;
 	authToken: string;
 	dashboardUrl: string;
-	forwardedUrl: string | null;
 	startedAt: string;
 }
 
@@ -1227,7 +1226,7 @@ export class RunStore {
 	}
 
 	getService(): StoredService | null {
-		const row = this.database.prepare("SELECT * FROM manager_service WHERE singleton = 1").get() as Record<string, unknown> | undefined;
+		const row = this.database.prepare("SELECT instance_id, pid, port, auth_token, dashboard_url, started_at FROM manager_service WHERE singleton = 1").get() as Record<string, unknown> | undefined;
 		if (!row) return null;
 		return {
 			instanceId: String(row.instance_id),
@@ -1235,7 +1234,6 @@ export class RunStore {
 			port: Number(row.port),
 			authToken: String(row.auth_token),
 			dashboardUrl: String(row.dashboard_url),
-			forwardedUrl: row.forwarded_url === null ? null : String(row.forwarded_url),
 			startedAt: String(row.started_at),
 		};
 	}
@@ -1256,7 +1254,7 @@ export class RunStore {
 					started_at = excluded.started_at
 			`).run(
 				service.instanceId, service.pid, service.port, service.authToken, service.dashboardUrl,
-				service.forwardedUrl, service.startedAt,
+				null, service.startedAt,
 			);
 	}
 }

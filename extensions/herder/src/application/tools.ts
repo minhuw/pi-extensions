@@ -69,7 +69,7 @@ async function planTool(args: JsonObject): Promise<unknown> {
 }
 
 async function openDashboard(service: Awaited<ReturnType<typeof ensureService>>): Promise<void> {
-	try { await enableDashboardHostAccess({ url: service.forwardedUrl || service.dashboardUrl }); }
+	try { await enableDashboardHostAccess({ url: service.dashboardUrl }); }
 	catch { /* Host integration is best-effort and must not block manager controls. */ }
 }
 

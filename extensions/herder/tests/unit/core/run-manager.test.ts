@@ -405,8 +405,11 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		await stopService(fixture.planDirectory);
 		let service = await ensureService(fixture.planDirectory);
 		assert.notEqual(service.instanceId, first.instanceId);
+		const restartedHealth = await requestService(service, "/health");
+		assert.equal(restartedHealth.dashboardUrl, service.dashboardUrl);
+		assert.equal(Object.hasOwn(restartedHealth, "forwardedUrl"), false);
 		const midRun = payload(await requestService(service, "/v1/status"));
-		assert.equal(payload(midRun.reply).dashboardUrl, service.forwardedUrl || service.dashboardUrl);
+		assert.equal(payload(midRun.reply).dashboardUrl, service.dashboardUrl);
 		const implementer = payload((payload(midRun.reply).actions as unknown[])[0]);
 		assert.equal(implementer.actionId, initialImplementer.actionId, "proposed action changed across service restart");
 		assert.equal(implementer.role, "plan-implementer");
