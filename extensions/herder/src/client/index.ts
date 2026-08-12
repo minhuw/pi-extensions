@@ -262,15 +262,18 @@ function openServiceLog(logPath: string): number {
 	}
 }
 
-function spawnServiceProcess(planDirectory: string, options: { dashboardPort?: number }, logPath: string): void {
+function spawnServiceProcess(planDirectory: string, options: { dashboardPort?: number; terminalIdleMs?: number; runtimeIdentityCheckMs?: number }, logPath: string): void {
 	const log = openServiceLog(logPath);
 	try {
-		const child = spawn(resolveNodeExecutable(), [
+		const args = [
 			"--experimental-strip-types",
 			SERVICE_ENTRY,
 			"--plan-dir", planDirectory,
 			"--dashboard-port", String(options.dashboardPort ?? 0),
-		], {
+			"--terminal-idle-ms", String(options.terminalIdleMs ?? 30_000),
+			"--runtime-identity-check-ms", String(options.runtimeIdentityCheckMs ?? 1_500),
+		];
+		const child = spawn(resolveNodeExecutable(), args, {
 			detached: true,
 			stdio: ["ignore", log, log],
 			env: process.env,
@@ -281,7 +284,7 @@ function spawnServiceProcess(planDirectory: string, options: { dashboardPort?: n
 	}
 }
 
-export async function ensureService(planDirectoryInput: string, options: { dashboardPort?: number; unresponsiveGraceMs?: number } = {}): Promise<StoredService> {
+export async function ensureService(planDirectoryInput: string, options: { dashboardPort?: number; terminalIdleMs?: number; runtimeIdentityCheckMs?: number; unresponsiveGraceMs?: number } = {}): Promise<StoredService> {
 	const planDirectory = fs.realpathSync(path.resolve(planDirectoryInput));
 	const readme = path.join(planDirectory, "README.md");
 	if (!fs.existsSync(readme) || fs.lstatSync(readme).isSymbolicLink() || !fs.statSync(readme).isFile()) {

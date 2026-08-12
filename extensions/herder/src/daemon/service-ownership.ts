@@ -8,6 +8,11 @@ export interface ServiceOwnership {
 	lockPath: string;
 }
 
+export interface FileIdentity {
+	dev: number;
+	ino: number;
+}
+
 export interface StartExclusion {
 	descriptor: number;
 	lockPath: string;
@@ -83,14 +88,20 @@ export function acquireServiceOwnership(planDirectory: string, instanceId: strin
 	}
 }
 
-export function releaseServiceOwnership(ownership: ServiceOwnership): void {
+export function serviceOwnershipIsCurrent(ownership: ServiceOwnership): boolean {
 	try {
 		const opened = fs.fstatSync(ownership.descriptor);
 		const named = fs.lstatSync(ownership.lockPath);
-		if (opened.dev === named.dev && opened.ino === named.ino) {
-			try { fs.unlinkSync(ownership.lockPath); } catch {}
-		}
-	} catch {}
+		return opened.isFile() && named.isFile() && opened.dev === named.dev && opened.ino === named.ino;
+	} catch {
+		return false;
+	}
+}
+
+export function releaseServiceOwnership(ownership: ServiceOwnership): void {
+	if (serviceOwnershipIsCurrent(ownership)) {
+		try { fs.unlinkSync(ownership.lockPath); } catch {}
+	}
 	try { fs.closeSync(ownership.descriptor); } catch {}
 }
 

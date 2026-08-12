@@ -9,6 +9,8 @@ import { createDashboardHandler } from "../dashboard/herder-dashboard.ts";
 import {
 	acquireServiceOwnership,
 	releaseServiceOwnership,
+	serviceOwnershipIsCurrent,
+	type FileIdentity,
 	type ServiceOwnership,
 } from "./service-ownership.ts";
 import {
@@ -17,32 +19,60 @@ import {
 	type ManagerOperationKind,
 	type ManagerReply,
 } from "../shared/protocol.ts";
-import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "./execution-store.ts";
+import { EXECUTION_SCHEMA_VERSION, executionDatabasePath, openExecutionDatabase } from "./execution-store.ts";
 import type { ManagerWorkerResult } from "./manager-worker.ts";
 import { RunStore, type StoredManagerOperation } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 4 * 1024 * 1024;
 const MAX_PENDING_OPERATIONS = 32;
+const DEFAULT_TERMINAL_IDLE_MS = 30_000;
+const DEFAULT_RUNTIME_IDENTITY_CHECK_MS = 1_500;
+const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "stopped"]);
 const DIRECT_CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/operation", "/shutdown"]);
 const LEGACY_BLOCKING_PATHS = new Set(["/v1/start", "/v1/event", "/v1/edit", "/v1/stop"]);
 
-function parseArguments(argv: string[]): { planDirectory: string; dashboardPort: number } {
+function parseArguments(argv: string[]): { planDirectory: string; dashboardPort: number; terminalIdleMs: number; runtimeIdentityCheckMs: number } {
 	let planDirectory = "herder-plans";
 	let dashboardPort = 0;
+	let terminalIdleMs = DEFAULT_TERMINAL_IDLE_MS;
+	let runtimeIdentityCheckMs = DEFAULT_RUNTIME_IDENTITY_CHECK_MS;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index]!;
-		if (!["--plan-dir", "--dashboard-port"].includes(argument)) throw new Error(`Unknown service argument: ${argument}`);
+		if (!["--plan-dir", "--dashboard-port", "--terminal-idle-ms", "--runtime-identity-check-ms"].includes(argument)) throw new Error(`Unknown service argument: ${argument}`);
 		const value = argv[++index];
 		if (!value) throw new Error(`${argument} requires a value`);
 		if (argument === "--plan-dir") planDirectory = value;
-		else dashboardPort = Number(value);
+		else if (argument === "--dashboard-port") dashboardPort = Number(value);
+		else if (argument === "--terminal-idle-ms") terminalIdleMs = Number(value);
+		else runtimeIdentityCheckMs = Number(value);
 	}
 	if (!Number.isSafeInteger(dashboardPort) || dashboardPort < 0 || dashboardPort > 65535) throw new Error("--dashboard-port must be 0 through 65535");
-	return { planDirectory: path.resolve(planDirectory), dashboardPort };
+	if (!Number.isSafeInteger(terminalIdleMs) || terminalIdleMs < 0) throw new Error("--terminal-idle-ms must be a non-negative integer");
+	if (!Number.isSafeInteger(runtimeIdentityCheckMs) || runtimeIdentityCheckMs < 1) throw new Error("--runtime-identity-check-ms must be a positive integer");
+	return { planDirectory: path.resolve(planDirectory), dashboardPort, terminalIdleMs, runtimeIdentityCheckMs };
 }
 
-function send(response: http.ServerResponse, status: number, value: unknown): void {
+function sameFileIdentity(expected: FileIdentity, current: fs.Stats): boolean {
+	return expected.dev === current.dev && expected.ino === current.ino;
+}
+
+function captureRegularFileIdentity(candidate: string, label: string): FileIdentity {
+	const stat = fs.lstatSync(candidate);
+	if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} must be a regular file: ${candidate}`);
+	return { dev: stat.dev, ino: stat.ino };
+}
+
+function runtimeDatabaseIdentityIsCurrent(candidate: string, expected: FileIdentity): boolean {
+	try {
+		const stat = fs.lstatSync(candidate);
+		return stat.isFile() && !stat.isSymbolicLink() && sameFileIdentity(expected, stat);
+	} catch {
+		return false;
+	}
+}
+
+
 	if (response.destroyed || response.writableEnded) return;
 	const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
 	response.writeHead(status, {
@@ -133,19 +163,29 @@ function operationReply(kind: ManagerOperationKind, result: unknown): ManagerRep
 	return result && typeof result === "object" && !Array.isArray(result) ? result as ManagerReply : null;
 }
 
-export async function startHerderService(input: { planDirectory: string; dashboardPort?: number }) {
+export async function startHerderService(input: { planDirectory: string; dashboardPort?: number; terminalIdleMs?: number; runtimeIdentityCheckMs?: number }) {
 	const planDirectory = fs.realpathSync(input.planDirectory);
+	const terminalIdleMs = input.terminalIdleMs ?? DEFAULT_TERMINAL_IDLE_MS;
+	const runtimeIdentityCheckMs = input.runtimeIdentityCheckMs ?? DEFAULT_RUNTIME_IDENTITY_CHECK_MS;
+	if (!Number.isSafeInteger(terminalIdleMs) || terminalIdleMs < 0) throw new Error("terminalIdleMs must be a non-negative integer");
+	if (!Number.isSafeInteger(runtimeIdentityCheckMs) || runtimeIdentityCheckMs < 1) throw new Error("runtimeIdentityCheckMs must be a positive integer");
 	const instanceId = randomUUID();
 	const ownership: ServiceOwnership = acquireServiceOwnership(planDirectory, instanceId);
-	try { openExecutionDatabase(planDirectory, { create: true })!.close(); }
-	catch (error) {
+	let executionDatabaseIdentity: FileIdentity;
+	try {
+		openExecutionDatabase(planDirectory, { create: true })!.close();
+		executionDatabaseIdentity = captureRegularFileIdentity(executionDatabasePath(planDirectory), "Execution database");
+	} catch (error) {
 		releaseServiceOwnership(ownership);
 		throw error;
 	}
 	const authToken = randomBytes(32).toString("base64url");
 	let dashboardUrl = "";
 	let auditTimer: NodeJS.Timeout | undefined;
+	let terminalIdleTimer: NodeJS.Timeout | undefined;
+	let runtimeIdentityTimer: NodeJS.Timeout | undefined;
 	let closing = false;
+	let closePromise: Promise<void> | undefined;
 	let closeService: () => Promise<void> = async () => {};
 	let backgroundQueue = Promise.resolve();
 	let drainScheduled = false;
@@ -169,7 +209,25 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		return next;
 	};
 
-	const executeOperation = async (operation: StoredManagerOperation): Promise<void> => {
+	const clearTerminalIdleShutdown = (): void => {
+		if (terminalIdleTimer) clearTimeout(terminalIdleTimer);
+		terminalIdleTimer = undefined;
+	};
+
+	const scheduleTerminalIdleShutdown = (): void => {
+		clearTerminalIdleShutdown();
+		if (closing) return;
+		const run = store.getRun();
+		if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || store.countPendingOperations() !== 0) return;
+		terminalIdleTimer = setTimeout(() => {
+			terminalIdleTimer = undefined;
+			const current = store.getRun();
+			if (!closing && current && TERMINAL_RUN_STATUSES.has(current.status) && store.countPendingOperations() === 0) void closeService();
+		}, terminalIdleMs);
+		terminalIdleTimer.unref();
+	};
+
+
 		try {
 			const recoveredPayload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
 				&& operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
@@ -186,8 +244,10 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				if (reply) store.putSnapshot(reply);
 			});
 			if (reply) updateDashboardRevision(reply);
+			scheduleTerminalIdleShutdown();
 		} catch (error) {
 			store.failOperation(operation.operationId, error instanceof Error ? error.message : String(error));
+			scheduleTerminalIdleShutdown();
 		}
 	};
 
@@ -266,6 +326,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 					return;
 				}
 				const operation = store.submitOperation(operationId, kind, record.input ?? {});
+				clearTerminalIdleShutdown();
 				send(response, 202, { ok: true, operation });
 				scheduleDrain();
 			}).catch((error) => send(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) }));
@@ -329,18 +390,41 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		}, 1500);
 		auditTimer.unref();
 	};
+	const scheduleRuntimeIdentityWatchdog = (): void => {
+		if (closing) return;
+		runtimeIdentityTimer = setTimeout(() => {
+			runtimeIdentityTimer = undefined;
+			if (!closing && (!serviceOwnershipIsCurrent(ownership) || !runtimeDatabaseIdentityIsCurrent(executionDatabasePath(planDirectory), executionDatabaseIdentity))) {
+				void closeService();
+				return;
+			}
+			scheduleRuntimeIdentityWatchdog();
+		}, runtimeIdentityCheckMs);
+		runtimeIdentityTimer.unref();
+	};
+
 	scheduleDrain();
 	scheduleAudit();
+	scheduleRuntimeIdentityWatchdog();
 
 	closeService = async () => {
-		if (closing) return;
-		closing = true;
-		if (auditTimer) clearTimeout(auditTimer);
-		await close();
-		await backgroundQueue.catch(() => {});
-		await executor.close();
-		store.close();
-		releaseServiceOwnership(ownership);
+		if (closePromise) return closePromise;
+		closePromise = (async () => {
+			if (closing) return;
+			closing = true;
+			if (auditTimer) clearTimeout(auditTimer);
+			if (terminalIdleTimer) clearTimeout(terminalIdleTimer);
+			if (runtimeIdentityTimer) clearTimeout(runtimeIdentityTimer);
+			auditTimer = undefined;
+			terminalIdleTimer = undefined;
+			runtimeIdentityTimer = undefined;
+			await close();
+			await backgroundQueue.catch(() => {});
+			await executor.close();
+			store.close();
+			releaseServiceOwnership(ownership);
+		})();
+		return closePromise;
 	};
 	process.once("SIGINT", () => void closeService());
 	process.once("SIGTERM", () => void closeService());
