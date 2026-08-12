@@ -25,15 +25,20 @@ import {
 	ATTENTION_PATH_LIMIT,
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
+	attentionCapabilityToken,
 	attentionRequestSha256,
 	canonicalEventPayload,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
 	stableJson,
+	validateAttentionResolution,
 	type AttentionCause,
+	type AttentionGitIdentity,
 	type AttentionRecoveryEvidence,
 	type AttentionRequestInput,
+	type AttentionResolutionAction,
+	type AttentionResolutionInput,
 	type ManagerAttentionRequest,
 	type DispatchResult,
 	type ManagerAction,
@@ -73,11 +78,14 @@ interface StartInput {
 
 interface EventInput {
 	eventId: string;
-	kind: "dispatch_results" | "terminals" | "user_input";
+	kind: "dispatch_results" | "terminals" | "user_input" | "attention" | "attention_resolution";
 	dispatchResults?: DispatchResult[];
 	terminals?: TerminalEvent[];
 	userInput?: string;
 	attentionRequestId?: string;
+	attention?: AttentionResolutionInput;
+	/** Alias used by older application callers. */
+	resolution?: AttentionResolutionInput;
 }
 
 interface PlanEditInput {
@@ -107,7 +115,7 @@ function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
 	}
-	if (!["dispatch_results", "terminals", "user_input"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
+	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
 	if (input.kind === "dispatch_results") {
 		if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
 		const seen = new Set<string>();
@@ -130,12 +138,20 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
 		throw new Error("user_input requires non-empty text");
 	}
+	if (input.kind === "attention" || input.kind === "attention_resolution") {
+		const resolution = input.attention ?? input.resolution;
+		if (!resolution) throw new Error("attention requires a resolution payload");
+		validateAttentionResolution(resolution);
+	}
 	if (input.attentionRequestId !== undefined
 		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
 		throw new Error("attentionRequestId must be a bounded single-line identifier");
 	}
 	if (input.kind !== "user_input" && input.attentionRequestId !== undefined) {
 		throw new Error("attentionRequestId is only valid for user_input");
+	}
+	if (input.kind !== "attention" && input.kind !== "attention_resolution" && (input.attention !== undefined || input.resolution !== undefined)) {
+		throw new Error("attention resolution is only valid for attention events");
 	}
 }
 
@@ -150,6 +166,55 @@ function validatePlanEditInput(input: PlanEditInput): void {
 	if (!input || !["begin", "finish", "cancel"].includes(input.operation)) throw new Error("Plan edit operation must be begin, finish, or cancel");
 	if (input.operation === "begin") normalizePlanId(input.planId);
 	else if (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken)) throw new Error("Plan edit token is required");
+}
+
+function normalizeAttentionAction(value: string): AttentionResolutionAction {
+	const normalized = value.trim().toLowerCase().replace(/[- ]+/g, "_");
+	const aliases: Record<string, AttentionResolutionAction> = {
+		answer: "answer",
+		defer: "defer",
+		retry: "retry",
+		cancel: "cancel",
+		unchanged: "unchanged_retry",
+		unchanged_retry: "unchanged_retry",
+		retry_unchanged: "unchanged_retry",
+		revise: "revise",
+		replace: "revise",
+		reject: "reject",
+		reject_revision: "reject",
+	};
+	const action = aliases[normalized];
+	if (!action) throw new Error(`Unsupported attention resolution action: ${value}`);
+	return action;
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
+	if (request.kind !== "plan_recovery") return null;
+	return {
+		assignmentPath: request.recovery.assignmentPath,
+		assignmentSha256: request.recovery.assignmentSha256,
+		snapshotSha256: request.recovery.snapshotSha256,
+		generationBase: request.recovery.generationBase,
+		branch: request.recovery.branch,
+		worktree: request.recovery.worktree,
+		worktreeHead: request.recovery.worktreeHead,
+		worktreeTree: request.recovery.worktreeTree,
+	};
+}
+
+function sameRecoveryIdentity(left: AttentionGitIdentity, right: AttentionGitIdentity): boolean {
+	return left.assignmentPath === right.assignmentPath
+		&& left.assignmentSha256 === right.assignmentSha256
+		&& left.snapshotSha256 === right.snapshotSha256
+		&& left.generationBase === right.generationBase
+		&& left.branch === right.branch
+		&& left.worktree === right.worktree
+		&& left.worktreeHead === right.worktreeHead
+		&& left.worktreeTree === right.worktreeTree;
 }
 
 function resolveProfile(requested?: string): ResolvedProfile {
@@ -513,9 +578,11 @@ export class HerderRunManager {
 	}): AttentionRequestInput {
 		const detail = input.detail.slice(0, 16_384);
 		const now = new Date().toISOString();
+		const requestId = randomUUID();
 		const request = {
 			schemaVersion: 1,
-			requestId: randomUUID(),
+			requestId,
+			capabilityToken: attentionCapabilityToken(requestId),
 			runId: input.run.runId,
 			planId: input.plan?.planId ?? input.spec?.planId ?? input.planId ?? "",
 			generation: input.plan?.generation ?? input.spec?.graphGeneration ?? input.run.currentGeneration,
@@ -827,8 +894,6 @@ export class HerderRunManager {
 			});
 			return this.reply();
 		}
-		const pendingAttention = this.store.getNextAttention(run.runId);
-		if (pendingAttention && run.status === "failed") return this.reply();
 		if (["failed", "stopped", "paused"].includes(run.status)) this.store.updateRun({ status: "running", terminalDetail: null });
 		run = this.store.getRun()!;
 		return this.reconcile(profile);
@@ -1098,6 +1163,12 @@ export class HerderRunManager {
 		}
 	}
 
+	async resolveAttention(input: AttentionResolutionInput): Promise<ManagerReply> {
+		validateAttentionResolution(input);
+		const eventId = `attention:${input.requestId}:${sha256(stableJson(input))}`;
+		return this.event({ eventId, kind: "attention", attention: input });
+	}
+
 	async event(input: EventInput): Promise<ManagerReply> {
 		validateEventInput(input);
 		const run = this.store.getRun();
@@ -1112,7 +1183,8 @@ export class HerderRunManager {
 		let schedule = true;
 		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults ?? []));
 		else if (input.kind === "terminals") await this.applyTerminals(input.terminals ?? []);
-		else this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
+		else if (input.kind === "user_input") this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
+		else await this.applyAttentionResolution(input.attention ?? input.resolution!);
 		const current = this.store.getRun()!;
 		const drift = this.graphDrift(current);
 		if (drift.changed) {
@@ -1547,6 +1619,12 @@ export class HerderRunManager {
 		}
 		const plan = this.store.getPlan(run.runId, attention.planId);
 		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${attention.requestId} has no matching input-waiting plan`);
+		if (plan.generation !== attention.generation || plan.round !== attention.round) {
+			throw new Error(`Attention request ${attention.requestId} does not match the input-waiting generation and round`);
+		}
+		if (readyPhaseForRole(attention.continuation.role) !== attention.continuation.phase) {
+			throw new Error(`Attention request ${attention.requestId} has an invalid continuation phase`);
+		}
 		this.store.transaction(() => {
 			this.updatePlan(plan, {
 				phase: attention.continuation.phase,
@@ -1559,6 +1637,247 @@ export class HerderRunManager {
 				status: remainingInput ? "needs_input" : "running",
 				terminalDetail: remainingInput?.detail ?? remaining?.detail ?? null,
 			});
+		});
+	}
+
+	private attentionResolutionRequest(run: StoredRun, resolution: AttentionResolutionInput) {
+		validateAttentionResolution(resolution);
+		const attention = this.store.getAttention(resolution.requestId);
+		if (!attention || attention.runId !== run.runId) throw new Error(`Attention request ${resolution.requestId} is not recorded for this run`);
+		if (resolution.requestSha256 !== attention.requestSha256) {
+			throw new Error(`Attention request ${resolution.requestId} hash does not match its immutable evidence`);
+		}
+		const expectedCapability = attention.capabilityToken || attentionCapabilityToken(attention.requestId);
+		if (resolution.capabilityToken !== expectedCapability) {
+			throw new Error(`Attention request ${resolution.requestId} capability token does not match`);
+		}
+		if (resolution.runId !== attention.runId || resolution.planId !== attention.planId
+			|| resolution.generation !== attention.generation || resolution.round !== attention.round) {
+			throw new Error(`Attention resolution identity does not match request ${attention.requestId}`);
+		}
+		if (resolution.continuation && stableJson(resolution.continuation) !== stableJson(attention.continuation)) {
+			throw new Error(`Attention resolution continuation does not match request ${attention.requestId}`);
+		}
+		const next = this.store.getNextAttention(run.runId);
+		if (attention.state === "resolved") {
+			const priorResolution = this.store.getAttentionResolutionHash(attention.requestId);
+			if (priorResolution && priorResolution !== sha256(stableJson(resolution))) {
+				throw new Error(`Attention request ${attention.requestId} was replayed with a different resolution`);
+			}
+			return attention;
+		}
+		if (next && next.requestId !== attention.requestId) {
+			throw new Error(`Attention request ${attention.requestId} is not the next eligible request`);
+		}
+		return attention;
+	}
+
+	private attentionStatusAfterResolution(runId: string): void {
+		const nextInput = this.store.getNextInputAttention(runId);
+		const next = this.store.getNextAttention(runId);
+		this.store.updateRun({
+			status: nextInput ? "needs_input" : "running",
+			terminalDetail: nextInput?.detail ?? next?.detail ?? null,
+		});
+	}
+
+	private validateRecoveryTarget(
+		run: StoredRun,
+		attention: Extract<ManagerAttentionRequest, { kind: "plan_recovery" }>,
+		action: AttentionResolutionAction,
+		resolution: AttentionResolutionInput,
+	): {
+		plan: StoredPlan | null;
+		prior: StoredPlanSpec;
+		compiled: { specs: StoredPlanSpec[]; graphSha256: string };
+		nextSpecs: StoredPlanSpec[];
+		targetChanged: boolean;
+	} {
+		if (run.currentGeneration !== attention.generation) {
+			throw new Error(`Recovery request ${attention.requestId} does not match the current run generation`);
+		}
+		const priorSpecs = this.store.getPlanSpecs(run.runId, attention.generation);
+		const prior = priorSpecs.find((spec) => spec.planId === attention.planId);
+		if (!prior) throw new Error(`Recovery request ${attention.requestId} has no recorded target specification`);
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (plan && (plan.generation !== attention.generation || plan.round !== attention.round)) {
+			throw new Error(`Recovery request ${attention.requestId} does not match the target runtime generation and round`);
+		}
+		if (plan && plan.phase !== "BLOCKED" && plan.phase !== "NEEDS_INPUT") {
+			throw new Error(`Recovery target ${attention.planId} is no longer blocked`);
+		}
+		if (!plan && attention.cause !== "initial_decision_blocked") {
+			throw new Error(`Recovery target ${attention.planId} has no blocked runtime record`);
+		}
+		const expected = recoveryIdentityFromRequest(attention);
+		const supplied = resolution.git ?? resolution.gitIdentity ?? resolution.recovery;
+		if (!expected || !supplied || !sameRecoveryIdentity(expected, supplied)) {
+			throw new Error(`Recovery request ${attention.requestId} is not bound to its recorded Git identity`);
+		}
+		if (plan) {
+			if (plan.branch !== expected.branch || plan.worktree !== expected.worktree
+				|| plan.assignmentPath !== expected.assignmentPath || plan.assignmentSha256 !== expected.assignmentSha256
+				|| plan.snapshotSha256 !== expected.snapshotSha256 || plan.generationBase !== expected.generationBase) {
+				throw new Error(`Recovery target ${attention.planId} runtime evidence changed`);
+			}
+			const driver = this.driver(run);
+			try {
+				driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
+			} catch (error) {
+				if (attention.state !== "editing" || !/not a regular file|missing|cannot change (?:directory|to)|no such file/i.test(error instanceof Error ? error.message : String(error))) throw error;
+			}
+			if (expected.worktreeHead !== null) {
+				try {
+					if (driver.worktreeHead(plan.worktree) !== expected.worktreeHead) throw new Error(`Recovery target ${attention.planId} worktree HEAD changed`);
+					if (expected.worktreeTree !== null && driver.worktreeTree(plan.worktree) !== expected.worktreeTree) {
+						throw new Error(`Recovery target ${attention.planId} worktree tree changed`);
+					}
+				} catch (error) {
+					if (attention.state !== "editing" || !/not a git repository|no such file|does not exist|cannot change (?:directory|to)/i.test(error instanceof Error ? error.message : String(error))) throw error;
+				}
+			}
+			try {
+				const lease = driver.leaseReason(plan.worktree);
+				if (lease) throw new Error(`Recovery target ${attention.planId} is still leased`);
+			} catch (error) {
+				if (!/not registered/i.test(error instanceof Error ? error.message : String(error)) || attention.state !== "editing") throw error;
+			}
+		} else {
+			this.driver(run).verifyAssignment(run.integrationWorktree, expected.assignmentPath, expected.assignmentSha256);
+		}
+		const activeTargetActions = this.store.getActions(run.runId, ["proposed", "dispatched"])
+			.filter((candidate) => candidate.planId === attention.planId);
+		if (activeTargetActions.length > 0) throw new Error(`Recovery target ${attention.planId} still owns active worker actions`);
+
+		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
+		const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
+		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
+		if (current.size !== next.size || [...current.keys()].some((planId) => !next.has(planId))) {
+			throw new Error("Recovery revision cannot change the plan graph topology");
+		}
+		const target = next.get(attention.planId);
+		if (!target) throw new Error(`Recovery target ${attention.planId} is missing from the revised graph`);
+		for (const oldSpec of priorSpecs) {
+			const newSpec = next.get(oldSpec.planId)!;
+			if (oldSpec.planId === attention.planId) {
+				if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFile !== newSpec.planFile || !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+					|| newSpec.assignment.plan.id !== oldSpec.assignment.plan.id
+					|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+					throw new Error(`Recovery target ${attention.planId} cannot change its identity, filename, or dependencies`);
+				}
+				continue;
+			}
+			if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFingerprint !== newSpec.planFingerprint || oldSpec.planFile !== newSpec.planFile
+				|| !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+				|| oldSpec.assignment.plan.id !== newSpec.assignment.plan.id
+				|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+				throw new Error(`Recovery revision changed sibling plan ${oldSpec.planId}`);
+			}
+		}
+		const targetChanged = target.planFingerprint !== prior.planFingerprint;
+		if (action === "unchanged_retry" && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
+		if (action === "revise" && !targetChanged) throw new Error("Target revision did not change the compiled target content");
+		if (["unchanged_retry", "reject"].includes(action) && !(resolution.rationale || "").trim()) {
+			throw new Error(`${action === "reject" ? "Recovery rejection" : "Unchanged recovery"} requires a non-empty rationale`);
+		}
+		const activePaths = this.store.getActions(run.runId, ["proposed", "dispatched"])
+			.map((candidate) => priorSpecs.find((spec) => spec.planId === candidate.planId)?.assignment.plan.inScopePaths ?? [])
+			.flat();
+		if (activePaths.length > 0) {
+			const activePathSet = new Set(activePaths);
+			const oldTargetPaths = new Set(prior.assignment.plan.inScopePaths);
+			const newOverlap = target.assignment.plan.inScopePaths.filter((candidate) => activePathSet.has(candidate));
+			const priorOverlap = [...oldTargetPaths].filter((candidate) => activePathSet.has(candidate));
+			if (newOverlap.some((candidate) => !oldTargetPaths.has(candidate)) || (targetChanged && priorOverlap.length === 0 && newOverlap.length > 0)) {
+				throw new Error(`Recovery target ${attention.planId} introduces an unordered overlap with active work: ${newOverlap.join(", ")}`);
+			}
+		}
+		const rejected = action === "reject" || action === "cancel";
+		const nextSpecs: StoredPlanSpec[] = compiled.specs.map((spec) => spec.planId === attention.planId
+			? { ...spec, initialStatus: (rejected ? "REJECTED" : "TODO") as StoredPlanSpec["initialStatus"], initialStatusDetail: resolution.rationale?.trim() || (rejected ? "Recovery was rejected by the main session." : "") }
+			: spec);
+		return { plan, prior, compiled, nextSpecs, targetChanged };
+	}
+
+	private async applyAttentionResolution(resolution: AttentionResolutionInput): Promise<void> {
+		const run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		const attention = this.attentionResolutionRequest(run, resolution);
+		if (attention.state === "resolved") return;
+		const action = normalizeAttentionAction(String(resolution.action));
+		if (action === "defer") return;
+		if (attention.kind === "plan_recovery") {
+			if (!["unchanged_retry", "revise", "reject", "retry", "cancel"].includes(action)) {
+				throw new Error(`Action ${action} cannot resolve plan-recovery attention`);
+			}
+			const recoveryAction = action === "retry" ? "unchanged_retry" : action === "cancel" ? "reject" : action;
+			if (recoveryAction === "revise" && !(resolution.rationale || "").trim()) {
+				throw new Error("Target revision requires a non-empty rationale");
+			}
+			const driver = this.driver(run);
+			await driver.verifyCheckout(run.checkoutStateToken);
+			if (attention.state === "editing" && run.currentGeneration > attention.generation) {
+				this.store.transaction(() => {
+					this.store.resolveAttention(attention.requestId);
+					this.attentionStatusAfterResolution(run.runId);
+				});
+				return;
+			}
+			const validation = this.validateRecoveryTarget(run, attention, recoveryAction, resolution);
+			const replayingEditingApply = attention.state === "editing";
+			this.store.updateAttentionState(attention.requestId, "editing");
+			driver.resetPlanExecution({
+				branch: attention.recovery.branch,
+				worktree: attention.recovery.worktree,
+				expectedHead: attention.recovery.worktreeHead,
+				expectedTree: attention.recovery.worktreeTree,
+				allowRecordedMissing: replayingEditingApply,
+			});
+			const nextGeneration = run.currentGeneration + 1;
+			const integrationHead = driver.branchHead(run.integrationBranch);
+			const assignment = driver.materializeRunAssignment(integrationHead, validation.nextSpecs.map((spec) => spec.assignment), nextGeneration);
+			this.store.transaction(() => {
+				this.store.putPlanSpecs(validation.nextSpecs);
+				this.store.putGeneration({
+					runId: run.runId,
+					generation: nextGeneration,
+					graphSha256: validation.compiled.graphSha256,
+					parentGeneration: run.currentGeneration,
+					runAssignmentPath: assignment.bundlePath,
+					runAssignmentSha256: assignment.bundleSha256,
+					runSnapshotSha256: assignment.snapshotSha256,
+				});
+				this.store.deletePlan(run.runId, attention.planId);
+				this.store.resolveAttention(attention.requestId);
+				this.store.updateRun({
+					currentGeneration: nextGeneration,
+					graphSha256: validation.compiled.graphSha256,
+					status: this.store.getNextInputAttention(run.runId) ? "needs_input" : "running",
+					terminalDetail: resolution.rationale?.trim() || `Recovery applied for plan ${attention.planId}.`,
+				});
+			});
+			this.cacheSpecs(validation.nextSpecs);
+			return;
+		}
+		if (!["answer", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
+		if (attention.kind === "user_decision" && action === "answer" && !(resolution.answer || "").trim()) {
+			throw new Error(`Attention request ${attention.requestId} requires an answer`);
+		}
+		const plan = this.store.getPlan(run.runId, attention.planId);
+		if (!plan || plan.generation !== attention.generation || plan.round !== attention.round || plan.phase !== "NEEDS_INPUT") {
+			throw new Error(`Attention request ${attention.requestId} has no matching input-waiting continuation`);
+		}
+		const continuationPhase = attention.continuation.phase;
+		const marker = action === "cancel"
+			? `ATTENTION_CANCEL [${attention.requestId}]: ${(resolution.rationale || resolution.answer || "operator cancelled").trim()}`
+			: `ATTENTION_ANSWER [${attention.requestId}]: ${(resolution.answer || resolution.rationale || "retry").trim()}`;
+		this.store.transaction(() => {
+			this.updatePlan(plan, {
+				phase: action === "cancel" ? "BLOCKED" : continuationPhase,
+				repair: [...plan.repair, marker],
+			});
+			this.store.resolveAttention(attention.requestId);
+			this.attentionStatusAfterResolution(run.runId);
 		});
 	}
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 5;
+export const MANAGER_PROTOCOL_VERSION = 6;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"] as const;
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
@@ -117,6 +117,111 @@ export interface AttentionContinuation {
 	phase: PlanPhase;
 }
 
+/** Actions accepted by the manager-owned attention resolution operation. */
+export const ATTENTION_RESOLUTION_ACTIONS = [
+	"answer",
+	"defer",
+	"retry",
+	"cancel",
+	"unchanged_retry",
+	"revise",
+	"reject",
+] as const;
+export type AttentionResolutionAction = typeof ATTENTION_RESOLUTION_ACTIONS[number];
+
+/** Git identity supplied with a recovery decision. It is compared before any destructive operation. */
+export interface AttentionGitIdentity {
+	assignmentPath: string;
+	assignmentSha256: string;
+	snapshotSha256: string;
+	generationBase: string;
+	branch: string;
+	worktree: string;
+	worktreeHead: string | null;
+	worktreeTree: string | null;
+}
+
+export interface AttentionResolutionInput {
+	schemaVersion: 1;
+	requestId: string;
+	requestSha256: string;
+	/** The request-bound capability derived from its immutable ID. */
+	capabilityToken: string;
+	runId: string;
+	planId: string;
+	generation: number;
+	round: number;
+	action: AttentionResolutionAction | string;
+	answer?: string;
+	rationale?: string;
+	continuation?: AttentionContinuation;
+	git?: AttentionGitIdentity;
+	/** Aliases accepted for callers that name the binding explicitly. */
+	gitIdentity?: AttentionGitIdentity;
+	recovery?: AttentionGitIdentity;
+}
+
+/** A deterministic, request-bound capability used by attention submissions. */
+export function attentionCapabilityToken(requestId: string): string {
+	return sha256(`herder-attention-capability:${requestId}`);
+}
+
+export function validateAttentionResolution(value: unknown): asserts value is AttentionResolutionInput {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Attention resolution must be an object");
+	const resolution = value as Partial<AttentionResolutionInput>;
+	if (resolution.schemaVersion !== 1) throw new Error("Attention resolution schemaVersion must be 1");
+	for (const [name, candidate, limit] of [
+		["requestId", resolution.requestId, 200],
+		["runId", resolution.runId, 200],
+		["planId", resolution.planId, 200],
+	] as const) {
+		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) {
+			throw new Error(`Attention resolution ${name} must be a bounded single-line string`);
+		}
+	}
+	if (typeof resolution.requestSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(resolution.requestSha256)) {
+		throw new Error("Attention resolution requestSha256 must be a SHA-256");
+	}
+	if (typeof resolution.capabilityToken !== "string" || !/^[0-9a-f]{64}$/i.test(resolution.capabilityToken)) {
+		throw new Error("Attention resolution capabilityToken must be a SHA-256");
+	}
+	if (!Number.isSafeInteger(resolution.generation) || Number(resolution.generation) < 1) throw new Error("Attention resolution generation must be positive");
+	if (!Number.isSafeInteger(resolution.round) || Number(resolution.round) < 1 || Number(resolution.round) > 6) throw new Error("Attention resolution round must be between 1 and 6");
+	if (typeof resolution.action !== "string" || resolution.action.length === 0 || resolution.action.length > 64 || /[\0\r\n]/.test(resolution.action)) {
+		throw new Error("Attention resolution action is invalid");
+	}
+	for (const [name, candidate, limit] of [["answer", resolution.answer, 16_384], ["rationale", resolution.rationale, 16_384]] as const) {
+		if (candidate !== undefined && (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /\0/.test(candidate))) {
+			throw new Error(`Attention resolution ${name} is invalid`);
+		}
+	}
+	if (resolution.continuation !== undefined && (!resolution.continuation || typeof resolution.continuation !== "object" || Array.isArray(resolution.continuation)
+		|| !WORKER_ROLES.includes(resolution.continuation.role as WorkerRole)
+		|| !PLAN_PHASES.includes(resolution.continuation.phase as PlanPhase))) {
+		throw new Error("Attention resolution continuation is invalid");
+	}
+	const identity = resolution.git ?? resolution.gitIdentity ?? resolution.recovery;
+	if (identity !== undefined) {
+		if (!identity || typeof identity !== "object" || Array.isArray(identity)) throw new Error("Attention resolution Git identity is invalid");
+		for (const [name, candidate, limit] of [
+			["assignmentPath", identity.assignmentPath, 2_048],
+			["assignmentSha256", identity.assignmentSha256, 128],
+			["snapshotSha256", identity.snapshotSha256, 128],
+			["generationBase", identity.generationBase, 128],
+			["branch", identity.branch, 512],
+			["worktree", identity.worktree, 2_048],
+		] as const) {
+			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) {
+				throw new Error(`Attention resolution Git ${name} is invalid`);
+			}
+		}
+		if (!["worktreeHead", "worktreeTree"].every((name) => {
+			const candidate = identity[name as "worktreeHead" | "worktreeTree"];
+			return candidate === null || (typeof candidate === "string" && /^[0-9a-f]{40,64}$/i.test(candidate));
+		})) throw new Error("Attention resolution Git object identity is invalid");
+	}
+}
+
 export interface AttentionRecoveryEvidence {
 	planFingerprint: string;
 	fingerprintVersion: 1 | 2;
@@ -155,6 +260,8 @@ interface AttentionRequestCore {
 	continuation: AttentionContinuation;
 	createdAt: string;
 	updatedAt: string;
+	/** Request-bound capability; older persisted requests may omit it. */
+	capabilityToken?: string;
 	resolvedAt?: string;
 }
 
@@ -269,6 +376,10 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 		if (candidate !== undefined && (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /\0/.test(candidate))) {
 			throw new Error(`Attention ${name} must be bounded evidence without NUL bytes`);
 		}
+	}
+	if (request.capabilityToken !== undefined
+		&& (typeof request.capabilityToken !== "string" || !/^[0-9a-f]{64}$/i.test(request.capabilityToken))) {
+		throw new Error("Attention capability token is invalid");
 	}
 	if (request.kind === "user_decision" && !request.question) throw new Error("User-decision attention requires a question");
 	if (request.kind === "plan_recovery") {

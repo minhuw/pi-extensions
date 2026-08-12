@@ -6,7 +6,9 @@ import {
 } from "./execution-store.ts";
 import {
 	MANAGER_PROTOCOL_VERSION,
+	attentionCapabilityToken,
 	canonicalEventPayload,
+	sha256,
 	stableJson,
 	validateAttentionRequest,
 	type AttentionRequest,
@@ -415,6 +417,7 @@ function rowToAttention(row: Record<string, unknown>): StoredAttentionRequest {
 	const request = {
 		schemaVersion: 1,
 		requestId: String(row.request_id),
+		capabilityToken: attentionCapabilityToken(String(row.request_id)),
 		runId: String(row.run_id),
 		planId: String(row.plan_id),
 		generation: Number(row.generation),
@@ -629,6 +632,23 @@ export class RunStore {
 	getAttention(requestId: string): StoredAttentionRequest | null {
 		const row = this.database.prepare("SELECT * FROM manager_attention_requests WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
 		return row ? rowToAttention(row) : null;
+	}
+
+	/** Return the immutable resolution payload hash retained by durable event operations. */
+	getAttentionResolutionHash(requestId: string): string | null {
+		const rows = this.database.prepare("SELECT payload_json FROM manager_operations WHERE kind = 'event' ORDER BY sequence").all() as Array<{ payload_json: string }>;
+		for (const row of rows) {
+			try {
+				const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
+				if (payload.kind !== "attention" && payload.kind !== "attention_resolution") continue;
+				const resolution = payload.attention ?? payload.resolution;
+				if (!resolution || typeof resolution !== "object" || Array.isArray(resolution)) continue;
+				if (String((resolution as { requestId?: unknown }).requestId || "") === requestId) return sha256(stableJson(resolution));
+			} catch {
+				// A malformed historical operation remains evidence, but cannot bind a new replay.
+			}
+		}
+		return null;
 	}
 
 	getAttentionRequests(runId: string, options: { unresolvedOnly?: boolean } = {}): StoredAttentionRequest[] {

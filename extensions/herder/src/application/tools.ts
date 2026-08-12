@@ -11,7 +11,7 @@ import {
 import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
-import type { VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
+import type { AttentionResolutionInput, VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
 import {
 	ensureService,
 	executeManagerOperation,
@@ -93,14 +93,23 @@ async function runTool(args: JsonObject): Promise<unknown> {
 	return requestService(currentService, "/v1/status");
 }
 
+function attentionResolutionFromArgs(args: JsonObject): AttentionResolutionInput {
+	const nested = args.resolution ?? args.attention;
+	if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested as AttentionResolutionInput;
+	const { planDirectory: _planDirectory, kind: _kind, eventId: _eventId, ...resolution } = args;
+	return resolution as unknown as AttentionResolutionInput;
+}
+
 async function submitTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const kind = requiredString(args, "kind");
-	if (!["dispatch_results", "terminals", "user_input"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
+	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
+	const attentionKind = kind === "attention" || kind === "attention_resolution";
 	const attentionRequestId = kind === "user_input" && typeof args.attentionRequestId === "string" && args.attentionRequestId.length > 0
 		? args.attentionRequestId
-		: undefined;
-	const eventId = String(args.eventId || (attentionRequestId ? `attention:${sha256(attentionRequestId)}` : randomUUID()));
+		: attentionKind ? String((attentionResolutionFromArgs(args) as { requestId?: unknown }).requestId || "") : undefined;
+	const resolution = attentionKind ? attentionResolutionFromArgs(args) : undefined;
+	const eventId = String(args.eventId || (attentionRequestId ? `attention:${sha256(stableJson(resolution ?? attentionRequestId))}` : randomUUID()));
 	return { ok: true, reply: await executeManagerOperation(directory, "event", {
 		eventId,
 		kind,
@@ -110,7 +119,22 @@ async function submitTool(args: JsonObject): Promise<unknown> {
 			userInput: args.userInput,
 			...(attentionRequestId ? { attentionRequestId } : {}),
 		} : {}),
+		...(attentionKind ? { attention: resolution } : {}),
 	}, `event:${eventId}`) };
+}
+
+export async function submitHerderAttention(args: JsonObject): Promise<PendingHerderOperation> {
+	const directory = planDirectory(args);
+	const resolution = attentionResolutionFromArgs(args);
+	const requestId = String(resolution.requestId || "");
+	if (!requestId) throw new Error("Attention resolution requestId is required");
+	const eventId = String(args.eventId || `attention:${sha256(stableJson(resolution))}`);
+	const receipt = await submitManagerOperationReliable(directory, "event", {
+		eventId,
+		kind: "attention",
+		attention: resolution,
+	}, `event:${eventId}`);
+	return { planDirectory: directory, operationId: receipt.operationId };
 }
 
 async function verificationTool(args: JsonObject): Promise<unknown> {
@@ -492,10 +516,11 @@ export async function applyHerderCleanup(
 export const previewCleanup = previewHerderCleanup;
 export const applyCleanup = applyHerderCleanup;
 
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_attention", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
 	if (name === "herder_verification") return verificationTool(args);
+	if (name === "herder_attention") return submitTool({ ...args, kind: "attention" });
 	return submitTool(args);
 }
