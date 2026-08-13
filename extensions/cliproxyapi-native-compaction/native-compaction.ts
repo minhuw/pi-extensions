@@ -9,20 +9,25 @@ import {
 import { calculateCost, type Message, type Model, type Usage } from "@earendil-works/pi-ai";
 
 export const NATIVE_COMPACTION_KIND = "cliproxyapi-openai-native-compaction";
-export const NATIVE_COMPACTION_VERSION = 1;
+export const LEGACY_NATIVE_COMPACTION_VERSION = 1;
+export const NATIVE_COMPACTION_VERSION = 2;
 export const OPAQUE_COMPACTION_TYPES = new Set(["compaction", "compaction_summary"]);
+const REMOTE_COMPACTION_V2_RETAINED_TOKEN_BUDGET = 64_000;
+const REMOTE_COMPACTION_V2_MAX_AGENT_MESSAGE_TOKENS = 10_000;
 const MAX_REMOTE_RETRIES = 2;
 
 export type JsonObject = Record<string, unknown>;
 export type ResponseItem = JsonObject & { type?: string };
 
-export interface NativeCompactionDetails {
+export type NativeCompactionDetails = {
 	kind: typeof NATIVE_COMPACTION_KIND;
-	version: typeof NATIVE_COMPACTION_VERSION;
 	modelKey: string;
-	endpoint: "responses/compact";
 	replacementHistory: ResponseItem[];
-}
+} &
+	(
+		| { version: typeof LEGACY_NATIVE_COMPACTION_VERSION; endpoint: "responses/compact" }
+		| { version: typeof NATIVE_COMPACTION_VERSION; endpoint: "responses" }
+	);
 
 export type NativeCheckpoint = {
 	entryIndex: number;
@@ -55,8 +60,8 @@ function clone<T>(value: T): T {
 
 export function normalizeResponseInputItem(item: ResponseItem): ResponseItem {
 	const normalized = clone(item);
-	// Codex /responses/compact rejects output-only status on replayed message
-	// and reasoning items, even though regular Responses requests may accept it.
+	// Compaction rejects output-only status on replayed message and reasoning
+	// items, even though ordinary Responses turns may accept it.
 	if (normalized.type === "message" || normalized.type === "reasoning") {
 		delete normalized.status;
 	}
@@ -106,18 +111,122 @@ export function parseCompactResponse(value: unknown): CompactResponse {
 	};
 }
 
+function approximateInputTokens(value: unknown): number {
+	if (typeof value === "string") {
+		return value.startsWith("data:image/") ? 1024 : Math.ceil(value.length / 4);
+	}
+	if (Array.isArray(value)) return value.reduce<number>((total, entry) => total + approximateInputTokens(entry), 0);
+	if (!isJsonObject(value)) return 0;
+	return Object.values(value).reduce<number>((total, entry) => total + approximateInputTokens(entry), 0);
+}
+
+function userContentPartTokens(part: unknown): number {
+	if (!isJsonObject(part)) return 0;
+	if (typeof part.text === "string") return Math.ceil(part.text.length / 4);
+	if (typeof part.image_url === "string" || typeof part.data === "string") return 1024;
+	return approximateInputTokens(part);
+}
+
+function userMessageTokens(item: ResponseItem): number {
+	if (typeof item.content === "string") return Math.ceil(item.content.length / 4);
+	if (!Array.isArray(item.content)) return 0;
+	return item.content.reduce<number>((total, part) => total + userContentPartTokens(part), 0);
+}
+
+function truncateTextToTokenBudget(text: string, maxTokens: number): string {
+	return text.slice(0, Math.max(0, maxTokens) * 4);
+}
+
+function truncateRetainedUserItem(item: ResponseItem, maxTokens: number): ResponseItem | undefined {
+	const truncated = clone(item);
+	if (typeof truncated.content === "string") {
+		truncated.content = truncateTextToTokenBudget(truncated.content, maxTokens);
+		return truncated.content ? truncated : undefined;
+	}
+	if (!Array.isArray(truncated.content)) return undefined;
+
+	let remaining = maxTokens;
+	const content: unknown[] = [];
+	for (const part of truncated.content) {
+		if (remaining <= 0) continue;
+		const tokens = userContentPartTokens(part);
+		if (!isJsonObject(part) || typeof part.text !== "string") {
+			if (tokens <= remaining) {
+				content.push(part);
+				remaining -= tokens;
+			}
+			continue;
+		}
+		if (tokens <= remaining) {
+			content.push(part);
+			remaining -= tokens;
+			continue;
+		}
+		const text = truncateTextToTokenBudget(part.text, remaining);
+		if (text) content.push({ ...part, text });
+		remaining = 0;
+	}
+	truncated.content = content;
+	return content.length > 0 ? truncated : undefined;
+}
+
+function isRetainedRemoteCompactionV2Item(item: ResponseItem): boolean {
+	if (item.role === "user") return true;
+	if (item.type !== "agent_message") return false;
+	if (approximateInputTokens(item) > REMOTE_COMPACTION_V2_MAX_AGENT_MESSAGE_TOKENS) return false;
+	const content = Array.isArray(item.content) ? item.content : [];
+	const first = content[0];
+	return !(
+		isJsonObject(first) &&
+		typeof first.text === "string" &&
+		first.text.startsWith("Message Type: FINAL_ANSWER\n")
+	);
+}
+
+export function buildRemoteCompactionV2ReplacementHistory(
+	input: ResponseItem[],
+	output: ResponseItem[],
+): ResponseItem[] {
+	const canonicalOutput = validateReplacementHistory(output);
+	const compactionItem = canonicalOutput.find(isOpaqueCompactionItem)!;
+	const retainedReversed: ResponseItem[] = [];
+	let remaining = REMOTE_COMPACTION_V2_RETAINED_TOKEN_BUDGET;
+	for (let index = input.length - 1; index >= 0 && remaining > 0; index--) {
+		const item = input[index];
+		if (!item || !isRetainedRemoteCompactionV2Item(item)) continue;
+		const tokens = Math.max(1, item.role === "user" ? userMessageTokens(item) : approximateInputTokens(item));
+		if (tokens <= remaining) {
+			retainedReversed.push(clone(item));
+			remaining -= tokens;
+			continue;
+		}
+		if (item.role === "user") {
+			const truncated = truncateRetainedUserItem(item, remaining);
+			if (truncated) retainedReversed.push(truncated);
+			remaining = 0;
+		}
+	}
+	retainedReversed.reverse();
+	return [...retainedReversed, clone(compactionItem)];
+}
+
 export function parseNativeCompactionDetails(value: unknown): NativeCompactionDetails | undefined {
-	if (!isJsonObject(value)) return undefined;
-	if (value.kind !== NATIVE_COMPACTION_KIND || value.version !== NATIVE_COMPACTION_VERSION) return undefined;
-	if (typeof value.modelKey !== "string" || value.endpoint !== "responses/compact") return undefined;
+	if (!isJsonObject(value) || value.kind !== NATIVE_COMPACTION_KIND || typeof value.modelKey !== "string") {
+		return undefined;
+	}
 	try {
-		return {
+		const common: Pick<NativeCompactionDetails, "kind" | "modelKey" | "replacementHistory"> = {
 			kind: NATIVE_COMPACTION_KIND,
-			version: NATIVE_COMPACTION_VERSION,
 			modelKey: value.modelKey,
-			endpoint: "responses/compact",
 			replacementHistory: validateReplacementHistory(value.replacementHistory),
 		};
+		if (value.version === LEGACY_NATIVE_COMPACTION_VERSION && value.endpoint === "responses/compact") {
+			return { ...common, version: LEGACY_NATIVE_COMPACTION_VERSION, endpoint: "responses/compact" };
+		}
+		if (value.version === NATIVE_COMPACTION_VERSION && value.endpoint === "responses") {
+			return { ...common, version: NATIVE_COMPACTION_VERSION, endpoint: "responses" };
+		}
+		return undefined;
 	} catch {
 		return undefined;
 	}
@@ -360,14 +469,19 @@ export function effectiveInputForBranch(params: {
 }
 
 export function resolveCompactUrl(baseUrl: string | undefined, configuredEndpoint?: string): string {
-	if (configuredEndpoint?.trim()) return configuredEndpoint.trim();
+	if (configuredEndpoint?.trim()) {
+		const endpoint = configuredEndpoint.trim().replace(/\/+$/, "");
+		if (endpoint.endsWith("/responses/compact")) {
+			throw new Error("The legacy /responses/compact endpoint is unsafe with CLIProxyAPI; configure the normal /responses endpoint.");
+		}
+		return endpoint;
+	}
 	const normalized = baseUrl?.trim().replace(/\/+$/, "");
 	if (!normalized) throw new Error("The CLIProxyAPI model has no base URL.");
-	if (normalized.endsWith("/codex/responses/compact")) return normalized;
-	if (normalized.endsWith("/codex/responses")) return `${normalized}/compact`;
-	if (normalized.endsWith("/backend-api")) return `${normalized}/codex/responses/compact`;
-	if (normalized.endsWith("/v1")) return `${normalized.slice(0, -3)}/backend-api/codex/responses/compact`;
-	return `${normalized}/backend-api/codex/responses/compact`;
+	if (normalized.endsWith("/codex/responses")) return normalized;
+	if (normalized.endsWith("/backend-api")) return `${normalized}/codex/responses`;
+	if (normalized.endsWith("/v1")) return `${normalized}/responses`;
+	return `${normalized}/backend-api/codex/responses`;
 }
 
 export function buildCompactHeaders(params: {
@@ -384,6 +498,7 @@ export function buildCompactHeaders(params: {
 	headers.set("content-type", "application/json");
 	headers.set("originator", "pi");
 	headers.set("user-agent", "pi-cliproxyapi-native-compaction");
+	headers.set("x-codex-beta-features", "remote_compaction_v2");
 	headers.set("session-id", params.sessionId);
 	headers.set("x-client-request-id", params.sessionId);
 	// A plain CLIProxyAPI key is not a ChatGPT JWT, so never synthesize chatgpt-account-id.
@@ -394,7 +509,8 @@ export function buildCompactHeaders(params: {
 export function buildCompactRequestBody(model: Model<any>, input: ResponseItem[]): JsonObject {
 	return {
 		model: model.id,
-		input: input.map(normalizeResponseInputItem),
+		instructions: "",
+		input: [...input.map(normalizeResponseInputItem), { type: "compaction_trigger" }],
 	};
 }
 
@@ -494,8 +610,11 @@ export async function callRemoteCompaction(params: {
 				continue;
 			}
 			const parsed = parseCompactResponse(await response.json());
+			const input = Array.isArray(params.body.input)
+				? (params.body.input as unknown[]).filter(isResponseItem).filter((item) => item.type !== "compaction_trigger")
+				: [];
 			return {
-				replacementHistory: parsed.output,
+				replacementHistory: buildRemoteCompactionV2ReplacementHistory(input, parsed.output),
 				usage: usageFromResponse(params.model, parsed.usage),
 			};
 		} catch (error) {

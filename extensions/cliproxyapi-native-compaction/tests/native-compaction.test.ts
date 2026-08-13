@@ -7,7 +7,9 @@ import {
 import {
 	buildCompactHeaders,
 	buildCompactRequestBody,
+	buildRemoteCompactionV2ReplacementHistory,
 	callRemoteCompaction,
+	findNativeCheckpoint,
 	parseCompactResponse,
 	resolveCompactUrl,
 	shouldFallbackToBuiltinCompaction,
@@ -44,13 +46,17 @@ describe("model capability gate", () => {
 });
 
 describe("compact endpoint transport", () => {
-	it("derives the backend-api Codex compact route", () => {
+	it("derives the Responses endpoint used by remote compaction v2", () => {
 		expect(resolveCompactUrl("https://proxy.example/backend-api/")).toBe(
-			"https://proxy.example/backend-api/codex/responses/compact",
+			"https://proxy.example/backend-api/codex/responses",
 		);
-		expect(resolveCompactUrl("https://proxy.example/v1")).toBe(
-			"https://proxy.example/backend-api/codex/responses/compact",
-		);
+		expect(resolveCompactUrl("https://proxy.example/v1")).toBe("https://proxy.example/v1/responses");
+	});
+
+	it("rejects an explicitly configured legacy compact endpoint", () => {
+		expect(() =>
+			resolveCompactUrl(undefined, "https://proxy.example/backend-api/codex/responses/compact"),
+		).toThrow(/legacy \/responses\/compact endpoint is unsafe/);
 	});
 
 	it("uses a plain CLIProxyAPI bearer key without a ChatGPT account header", () => {
@@ -63,11 +69,16 @@ describe("compact endpoint transport", () => {
 		expect(headers.get("chatgpt-account-id")).toBeNull();
 		expect(headers.get("x-extra")).toBe("kept");
 		expect(headers.get("accept")).toBe("application/json");
+		expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2");
 	});
 
-	it("sends only the documented model and canonical input", () => {
+	it("appends the documented compaction_trigger to canonical input", () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
-		expect(buildCompactRequestBody(model, input)).toEqual({ model: "gpt-5.6-sol", input });
+		expect(buildCompactRequestBody(model, input)).toEqual({
+			model: "gpt-5.6-sol",
+			instructions: "",
+			input: [...input, { type: "compaction_trigger" }],
+		});
 	});
 
 	it("removes output-only status from replayed messages and reasoning", () => {
@@ -91,6 +102,7 @@ describe("compact endpoint transport", () => {
 
 		expect(buildCompactRequestBody(model, input)).toEqual({
 			model: "gpt-5.6-sol",
+			instructions: "",
 			input: [
 				{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque" },
 				{
@@ -106,6 +118,7 @@ describe("compact endpoint transport", () => {
 					status: "completed",
 					tools: [],
 				},
+				{ type: "compaction_trigger" },
 			],
 		});
 		expect(input[0]).toHaveProperty("status", "completed");
@@ -127,6 +140,54 @@ describe("canonical compacted output", () => {
 		expect(parsed.output).not.toBe(value.output);
 	});
 
+	it("reconstructs the v2 window from retained user context plus the opaque item", () => {
+		const input = [
+			{ role: "user", content: [{ type: "input_text", text: "keep the original task" }] },
+			{ type: "reasoning", encrypted_content: "old-reasoning" },
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "drop me" }] },
+			{ type: "function_call", call_id: "call_1", name: "bash", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_1", output: "drop me too" },
+			{ role: "user", content: [{ type: "input_text", text: "keep the latest instruction" }] },
+		];
+		const output = [{ type: "compaction", encrypted_content: "opaque" }];
+		expect(buildRemoteCompactionV2ReplacementHistory(input, output)).toEqual([
+			input[0],
+			input[5],
+			output[0],
+		]);
+	});
+
+	it("truncates an oversized newest user message instead of keeping older context", () => {
+		const oversized = "x".repeat(300_000);
+		const output = [{ type: "compaction", encrypted_content: "opaque" }];
+		const replacement = buildRemoteCompactionV2ReplacementHistory(
+			[
+				{ role: "user", content: [{ type: "input_text", text: "older task" }] },
+				{ role: "user", content: [{ type: "input_text", text: oversized }] },
+			],
+			output,
+		);
+		expect(replacement).toHaveLength(2);
+		expect(replacement[0]?.role).toBe("user");
+		expect(((replacement[0]?.content as Array<{ text: string }>)[0]?.text ?? "").length).toBe(256_000);
+		expect(replacement[1]).toEqual(output[0]);
+	});
+
+	it("charges retained images against the v2 budget", () => {
+		const images = Array.from({ length: 65 }, (_, index) => ({
+			type: "input_image",
+			image_url: `data:image/png;base64,image-${index}`,
+		}));
+		const output = [{ type: "compaction", encrypted_content: "opaque" }];
+		const replacement = buildRemoteCompactionV2ReplacementHistory(
+			[{ role: "user", content: images }],
+			output,
+		);
+		expect(replacement).toHaveLength(2);
+		expect((replacement[0]?.content as unknown[]).length).toBe(62);
+		expect(replacement[1]).toEqual(output[0]);
+	});
+
 	it("falls back to built-in compaction when native compact has not started", () => {
 		expect(
 			shouldFallbackToBuiltinCompaction({
@@ -142,26 +203,55 @@ describe("canonical compacted output", () => {
 		).toBe(false);
 	});
 
-	it("does not fall back once a native checkpoint already exists", () => {
+	it("keeps legacy dedicated-endpoint checkpoints readable", () => {
+		const checkpoint = findNativeCheckpoint([
+			{
+				type: "compaction",
+				id: "cmp_1",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				summary: "marker",
+				firstKeptEntryId: "message_1",
+				tokensBefore: 100,
+				details: {
+					kind: "cliproxyapi-openai-native-compaction",
+					version: 1,
+					modelKey: "cliproxyapi:cliproxyapi-codex-responses:gpt-5.6-sol",
+					endpoint: "responses/compact",
+					replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+				},
+			} as any,
+		]);
+		expect(checkpoint.status).toBe("valid");
 		expect(
 			shouldFallbackToBuiltinCompaction({
-				checkpoint: {
-					status: "valid",
-					checkpoint: {
-						entryIndex: 0,
-						entryId: "cmp_1",
-						details: {
-							kind: "cliproxyapi-openai-native-compaction",
-							version: 1,
-							modelKey: "cliproxyapi:cliproxyapi-codex-responses:gpt-5.6-sol",
-							endpoint: "responses/compact",
-							replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
-						},
-					},
-				},
+				checkpoint,
 				fallbackToBuiltin: true,
 			}),
 		).toBe(false);
+	});
+
+	it("returns the reconstructed v2 replacement history", async () => {
+		const fetchImpl: typeof fetch = async () =>
+			new Response(
+				JSON.stringify({
+					output: [{ type: "compaction", encrypted_content: "opaque" }],
+					usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		const input = [{ role: "user", content: [{ type: "input_text", text: "keep me" }] }];
+		const result = await callRemoteCompaction({
+			url: "https://proxy.example/backend-api/codex/responses",
+			headers: new Headers(),
+			body: buildCompactRequestBody(model, input),
+			model,
+			fetchImpl,
+		});
+		expect(result.replacementHistory).toEqual([
+			input[0],
+			{ type: "compaction", encrypted_content: "opaque" },
+		]);
 	});
 
 	it("does not retry an auth_unavailable compact response", async () => {
@@ -182,7 +272,7 @@ describe("canonical compacted output", () => {
 
 		await expect(
 			callRemoteCompaction({
-				url: "https://proxy.example/backend-api/codex/responses/compact",
+				url: "https://proxy.example/backend-api/codex/responses",
 				headers: new Headers(),
 				body: { model: "gpt-5.6-sol", input: [] },
 				model,

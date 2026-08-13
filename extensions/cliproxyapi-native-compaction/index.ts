@@ -59,7 +59,7 @@ export default function cliproxyNativeCompactionExtension(pi: ExtensionAPI): voi
 				kind: NATIVE_COMPACTION_KIND,
 				version: NATIVE_COMPACTION_VERSION,
 				modelKey: modelKey(params.model),
-				endpoint: "responses/compact",
+				endpoint: "responses",
 				replacementHistory: remote.replacementHistory,
 			},
 			usage: remote.usage,
@@ -118,7 +118,7 @@ export default function cliproxyNativeCompactionExtension(pi: ExtensionAPI): voi
 
 		try {
 			if (event.customInstructions?.trim()) {
-				notify(ctx, "Custom summary instructions are ignored by the native /responses/compact endpoint.", "warning");
+				notify(ctx, "Custom summary instructions are ignored by the native Responses compaction protocol.", "warning");
 			}
 			const input = effectiveInputForBranch({
 				branch: event.branchEntries as SessionEntry[],
