@@ -250,6 +250,24 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseAdapterOwnership(held);
 	};
 
+	const clearCurrentStateForPlanDirectory = (planDir: string, ctx: ExtensionContext): void => {
+		if (!currentState || path.resolve(currentState.planDir) !== path.resolve(planDir)) return;
+		currentState = undefined;
+		currentAttention = undefined;
+		attentionHint = undefined;
+		deferredAttention.clear();
+		lastSummary = undefined;
+		lastManagerMessage = undefined;
+		pendingVerificationFailure = undefined;
+		verificationRequests.clear();
+		promptedVerifications.clear();
+		verificationMonitors.clear();
+		notifiedVerificationFailures.clear();
+		deliveredVerificationFailureFollowUps.clear();
+		releaseOwnership();
+		render(ctx);
+	};
+
 	const releaseNewOwnership = (acquired: AdapterOwnership | undefined, epoch: number): void => {
 		if (acquired && ownership === acquired && epoch === sessionEpoch) releaseOwnership();
 	};
@@ -853,6 +871,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
 			appendEntry: (entry) => pi.appendEntry(HERDER_CLEANUP_ENTRY, entry),
 		});
+		if (result.applied?.executed) clearCurrentStateForPlanDirectory(planDir, ctx);
 		return result.message;
 	};
 
@@ -869,18 +888,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		// Reset removes the durable run after the service exclusion has stopped its
 		// terminal owner. Drop the adapter's matching in-memory ownership/state too,
 		// otherwise the next Fire in this Pi session would be blocked by stale state.
-		if (currentState && path.resolve(currentState.planDir) === path.resolve(planDir)) {
-			currentState = undefined;
-			currentAttention = undefined;
-			attentionHint = undefined;
-			deferredAttention.clear();
-			lastSummary = undefined;
-			lastManagerMessage = undefined;
-			verificationRequests.clear();
-			promptedVerifications.clear();
-			releaseOwnership();
-			render(ctx);
-		}
+		clearCurrentStateForPlanDirectory(planDir, ctx);
 		return result;
 	};
 
