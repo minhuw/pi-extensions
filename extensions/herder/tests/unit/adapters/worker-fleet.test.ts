@@ -112,6 +112,48 @@ test("aborted nested agents render as failures", () => {
 	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  aborted\s+↻1/);
 });
 
+test("completed nested agents collapse into one summary under the live children", () => {
+	const children = [
+		...Array.from({ length: 6 }, (_, index) => nested({
+			agentId: `done-${index}`,
+			status: "completed",
+			activeTools: [],
+			activity: "done",
+			completedAt: 20_000,
+		})),
+		nested({ agentId: "live", status: "running" }),
+	];
+	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 66_000, 0);
+	assert.equal(lines.length, 4);
+	assert.match(lines[2]!, /⠋ Recon · gpt-5\.6-sol · xhigh · fast  reading…/);
+	assert.match(lines[3]!, /✓ 6 Recon done$/);
+	assert.equal(lines.filter((line) => /✓ Recon ·/.test(line)).length, 0);
+});
+
+test("completed nested summary groups mixed child types and keeps failures expanded", () => {
+	const children = [
+		nested({ agentId: "recon-1", status: "completed", activeTools: [], activity: "done", completedAt: 20_000 }),
+		nested({ agentId: "recon-2", displayName: "Recon", status: "completed", activeTools: [], activity: "done", completedAt: 21_000 }),
+		nested({ agentId: "search-1", displayName: "Searcher", type: "searcher", status: "completed", activeTools: [], activity: "done", completedAt: 22_000 }),
+		nested({ agentId: "failed", status: "error", activeTools: [], activity: "error" }),
+	];
+	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 66_000, 0);
+	assert.equal(lines.length, 4);
+	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  error/);
+	assert.match(lines[3]!, /✓ 2 Recon · 1 Searcher done$/);
+});
+
+test("worker fleet default height shows 16 agent rows before overflow", () => {
+	const workers = Array.from({ length: 18 }, (_, index) => worker({
+		handle: `pi-worker:${index}`,
+		actionId: `action-${index}`,
+		planId: String(index + 1).padStart(3, "0"),
+	}));
+	const lines = workerFleetTreeLines(model(workers), theme, 80, 66_000, 0);
+	assert.equal(lines.length, 18);
+	assert.equal(lines[17], "└─ +2 more agents");
+});
+
 test("worker fleet overflow counts direct nested rows and respects narrow widths", () => {
 	const workers = [worker({ children: [nested(), nested({ agentId: "nested-2" })] }), worker({ handle: "pi-worker:two", actionId: "action-2", planId: "019" })];
 	const overflow = workerFleetTreeLines(model(workers), theme, 80, 66_000, 0, 2);

@@ -4,7 +4,7 @@ import type { PiNestedAgentSnapshot, PiWorkerSnapshot } from "./worker-engine.ts
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 200;
-const MAX_VISIBLE_AGENTS = 8;
+const MAX_VISIBLE_AGENTS = 16;
 
 const I = {
 	herder: "\uF0C0",
@@ -180,17 +180,30 @@ function nestedStats(agent: PiNestedAgentSnapshot, now: number): string {
 }
 
 interface RenderRow {
-	kind: "top" | "nested";
+	kind: "top" | "nested" | "summary";
 	worker?: PiWorkerSnapshot;
 	agent?: PiNestedAgentSnapshot;
+	completed?: readonly PiNestedAgentSnapshot[];
 	prefix: string;
 	connector: "├─" | "└─";
 }
 
+function completedSummaryLabel(agents: readonly PiNestedAgentSnapshot[]): string {
+	const counts = new Map<string, number>();
+	for (const agent of agents) {
+		counts.set(agent.displayName, (counts.get(agent.displayName) ?? 0) + 1);
+	}
+	return `${[...counts.entries()].map(([name, count]) => `${count} ${name}`).join(" · ")} done`;
+}
+
 function appendNestedRows(rows: RenderRow[], children: readonly PiNestedAgentSnapshot[], prefix: string): void {
-	children.forEach((agent, index) => {
-		const connector = index === children.length - 1 ? "└─" : "├─";
-		rows.push({ kind: "nested", agent, prefix, connector });
+	const live = children.filter((agent) => agent.status !== "completed");
+	const completed = children.filter((agent) => agent.status === "completed");
+	const items: RenderRow[] = live.map((agent) => ({ kind: "nested", agent, prefix, connector: "├─" as const }));
+	if (completed.length > 0) items.push({ kind: "summary", completed, prefix, connector: "├─" });
+	items.forEach((item, index) => {
+		item.connector = index === items.length - 1 ? "└─" : "├─";
+		rows.push(item);
 	});
 }
 
@@ -214,6 +227,10 @@ function renderRow(row: RenderRow, width: number, theme: Theme, now: number, fra
 		const identityTag = formatAgentNameIdentity(theme, worker);
 		const left = `${theme.fg("dim", row.connector)} ${theme.fg("muted", `Plan ${worker.planId}`)} ${theme.fg("dim", "·")} ${workerIcon(worker, frame, theme)} ${theme.bold(roleLabel(worker.role))}${identityTag}  ${theme.fg("dim", workerActivity(worker))}`;
 		return rightAlign(left, theme.fg("dim", topStats(worker, now)), width);
+	}
+	if (row.kind === "summary") {
+		const left = `${row.prefix}${theme.fg("dim", row.connector)} ${theme.fg("success", "✓")} ${theme.fg("dim", completedSummaryLabel(row.completed!))}`;
+		return truncateToWidth(left, width);
 	}
 	const agent = row.agent!;
 	const identityTag = formatAgentNameIdentity(theme, agent);
