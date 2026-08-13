@@ -31,6 +31,16 @@
         "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
         "plan-judge": { "model": "claude-fable-5", "effort": "high" }
       }
+    },
+    {
+      "name": "lightspeed",
+      "description": "Grok 4.6 orchestrates and implements while Luna reviews and judges.",
+      "orchestrator": { "model": "grok-4.6", "effort": "xhigh" },
+      "roles": {
+        "plan-implementer": { "model": "grok-4.6", "effort": "xhigh" },
+        "plan-reviewer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
+        "plan-judge": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" }
+      }
     }
   ]
 }

@@ -36,8 +36,8 @@ function run(...args: string[]): unknown {
 }
 
 test("profile registry exposes the supported Pi profiles", () => {
-	assert.deepEqual(run("check"), { ok: true, profiles: 3 });
-	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "epic"]);
+	assert.deepEqual(run("check"), { ok: true, profiles: 4 });
+	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "epic", "lightspeed"]);
 
 	const eclipse = run("resolve");
 	assert.equal(eclipse.profile, "eclipse");
@@ -83,6 +83,26 @@ test("profile registry exposes the supported Pi profiles", () => {
 		agent_type: "herder.plan-judge",
 		model: "claude-fable-5",
 		effort: "high",
+	});
+
+	const lightspeed = run("resolve", "--host", "pi", "--profile", "lightspeed");
+	assert.deepEqual(lightspeed.orchestrator, { model: "grok-4.6", effort: "xhigh" });
+	assert.deepEqual(lightspeed.roles["plan-implementer"], {
+		agent_type: "herder.plan-implementer",
+		model: "grok-4.6",
+		effort: "xhigh",
+	});
+	assert.deepEqual(lightspeed.roles["plan-reviewer"], {
+		agent_type: "herder.plan-reviewer",
+		model: "gpt-5.6-luna",
+		effort: "max",
+		service_tier: "fast",
+	});
+	assert.deepEqual(lightspeed.roles["plan-judge"], {
+		agent_type: "herder.plan-judge",
+		model: "gpt-5.6-luna",
+		effort: "max",
+		service_tier: "fast",
 	});
 
 	const unsupported = spawnSync(process.execPath, [registry, "resolve", "--host", "codex"], { encoding: "utf8" });
