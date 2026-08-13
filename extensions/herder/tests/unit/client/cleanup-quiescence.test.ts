@@ -60,3 +60,16 @@ test("cleanup rejects a healthy nonterminal service owner without calling the ca
 		rmSync(path.dirname(planDir), { recursive: true, force: true });
 	}
 });
+
+test("force exclusion stops a healthy nonterminal service and then runs the callback", async () => {
+	const planDir = planDirectory();
+	try {
+		await ensureService(planDir);
+		let called = false;
+		await withServiceExclusion(planDir, () => { called = true; }, { purpose: "force" });
+		assert.equal(called, true);
+	} finally {
+		await stopService(planDir).catch(() => {});
+		rmSync(path.dirname(planDir), { recursive: true, force: true });
+	}
+});

@@ -7,6 +7,7 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
 import { cleanupRun, parseWorktreeRecords } from "../../../src/daemon/git/cleanup-run.ts"
+import { forceCleanupRun } from "../../../src/daemon/git/force-cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
 
@@ -470,6 +471,48 @@ test("deep cleanup detects apply-time run-status drift before mutation", () => {
     assert.equal(git(fixture.repo, "rev-parse", fixture.planBranch), planHead)
     assert.equal(fs.existsSync(fixture.planWorktree), true)
     assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("force cleanup destroys a rewritten or incomplete namespace that deep cleanup would refuse", () => {
+  const fixture = setup()
+  try {
+    fs.writeFileSync(path.join(fixture.planWorktree, "dirty.txt"), "dirty\n")
+    git(fixture.repo, "worktree", "lock", "--reason", "test", fixture.planWorktree)
+    git(fixture.repo, "reset", "-q", "--hard", "refs/plan-herder/plans/base")
+    writeOverlay(fixture, { planId: "001", phase: "DONE", initialStatus: "TODO", runStatus: "needs_input" })
+    const preview = forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: true })
+    assert.equal(preview.force, true)
+    assert.equal(preview.destruction.eligible, true)
+    const result = forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false })
+    assert.equal(result.destruction.planDirectoryRemoved, true)
+    assert.equal(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(git(fixture.repo, "branch", "--list", fixture.integrationBranch), "")
+    assert.equal(fs.existsSync(fixture.planWorktree), false)
+    assert.equal(fs.existsSync(fixture.integrationWorktree), false)
+    assert.equal(fs.existsSync(fixture.planDir), false)
+    assert.notEqual(spawnSync("git", ["-C", fixture.repo, "show-ref", "--verify", "refs/plan-herder/plans/base"], { encoding: "utf8" }).status, 0)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("force cleanup refuses to delete the current Herder-owned checkout", () => {
+  const fixture = setup()
+  try {
+    git(fixture.repo, "worktree", "remove", fixture.integrationWorktree)
+    git(fixture.repo, "checkout", "-q", fixture.integrationBranch)
+    const preview = forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: true })
+    assert.equal(preview.destruction.eligible, false)
+    assert.equal(preview.destruction.blockers.some((item) => item.reason === "current-branch-is-owned"), true)
+    assert.throws(() => forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false }), /current-branch-is-owned/)
+    assert.equal(fs.existsSync(fixture.planDir), true)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("cleanupRun rejects --force so the fail-closed path stays isolated", () => {
+  const fixture = setup()
+  try {
+    assert.throws(() => runCleanup(fixture, { force: true }), /forceCleanupRun/)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 

@@ -41,6 +41,7 @@ export interface CleanupCommandResult {
 }
 
 function modeFor(request: CleanupCommandRequest): CleanupTranscriptMode {
+	if (request.force) return "force";
 	if (request.deep) return "deep";
 	return request.includeFailed ? "include-failed" : "standard";
 }
@@ -108,15 +109,16 @@ function integrationState(result: CleanupPreview | CleanupApplyResult): CleanupT
 	return "unknown";
 }
 
-function modeLabel(preview: CleanupPreview): string {
+function modeLabel(preview: CleanupPreview): "force" | "deep" | "cleanup" {
+	if (preview.force) return "force";
 	return destructionDetails(preview).requested ? "deep" : "cleanup";
 }
 
 function transcriptPreview(result: CleanupPreview, cancelled = false): CleanupTranscriptPreview {
 	if (cancelled) return "cancelled";
-	if (!result.terminal) return "preview-only";
-	if (!result.canApply || result.blockers.length > 0) return "blocked";
-	return "eligible";
+	if (result.canApply) return "eligible";
+	if (!result.force && !result.terminal) return "preview-only";
+	return "blocked";
 }
 
 function appendTranscript(
@@ -169,25 +171,33 @@ export function formatCleanupPreview(preview: CleanupPreview): string {
 	const skipped = skippedIds(preview);
 	const skippedText = skipped.length ? skipped.join(", ") : "none";
 	const blockers = preview.blockers.length ? preview.blockers.join(", ") : "none";
-	const state = preview.terminal ? "terminal" : `preview-only (${preview.durableStatus})`;
-	if (modeLabel(preview) !== "deep") {
+	const mode = modeLabel(preview);
+	const state = preview.canApply
+		? (preview.terminal ? "terminal" : `eligible (${preview.durableStatus})`)
+		: (preview.terminal ? "blocked" : `preview-only (${preview.durableStatus})`);
+	if (mode === "cleanup") {
 		return `Cleanup preview · ${state} · selected: ${selected}${failed} · eligible actions: ${counts.eligible} · skipped: ${skippedText} · blockers: ${blockers}.`;
 	}
 	const branches = branchLabels(preview);
 	const refs = refLabels(preview, "refsPlanned");
+	if (mode === "force") {
+		return `Force cleanup preview · ${state} · mode: force · selected: ${selected} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · run status ignored: ${preview.durableStatus} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed · plan directory: removed · blockers: ${blockers}.`;
+	}
 	return `Cleanup preview · ${state} · mode: deep · selected: ${selected}${failed} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · deep cleanup: ${deepSummary(preview)} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed only by deep cleanup · skipped: ${skippedText} · blockers: ${blockers}.`;
 }
 
 export function formatCleanupApplied(preview: CleanupPreview, applied: CleanupApplyResult): string {
 	const removed = removedIds(applied);
 	const skipped = skippedIds(applied);
-	if (modeLabel(preview) !== "deep") {
+	const mode = modeLabel(preview);
+	if (mode === "cleanup") {
 		return `Cleanup executed · removed: ${removed.length ? removed.join(", ") : "none"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
 	}
 	const refs = refLabels(applied, "refsRemoved");
 	const handoff = destructionDetails(applied);
 	const integration = integrationState(applied);
-	return `Deep cleanup executed · removed: ${removed.length ? removed.join(", ") : "none"} · refs removed: ${refs.length ? refs.join(", ") : "none"} · integration: ${integration} · plan directory: ${handoff.removed ? "removed" : "preserved"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
+	const label = mode === "force" ? "Force cleanup executed" : "Deep cleanup executed";
+	return `${label} · removed: ${removed.length ? removed.join(", ") : "none"} · refs removed: ${refs.length ? refs.join(", ") : "none"} · integration: ${integration} · plan directory: ${handoff.removed ? "removed" : "preserved"} · skipped: ${skipped.length ? skipped.join(", ") : "none"} · blockers: ${applied.blockers.length ? applied.blockers.join(", ") : "none"}.`;
 }
 
 export function createCleanupOrchestrator(dependencies: CleanupCommandDependencies = {}): CleanupCommandOrchestrator {
@@ -208,6 +218,7 @@ export async function runCleanupCommand(
 		...(parsed.planId === undefined ? {} : { planId: parsed.planId }),
 		includeFailed: parsed.includeFailed,
 		deep: Boolean(parsed.deep),
+		force: Boolean(parsed.force),
 	};
 	const orchestrator = createCleanupOrchestrator(context);
 	const preview = await orchestrator.preview(request);
@@ -217,12 +228,17 @@ export async function runCleanupCommand(
 	}
 
 	const confirm = context.confirm ?? (async () => false);
-	const confirmationTitle = request.deep ? "Deep-clean Herder plan set?" : "Clean up completed Herder plans?";
-	if (!(await confirm(confirmationTitle, formatCleanupPreview(preview)))) {
+	const confirmationTitle = request.force
+		? "Unconditionally destroy this Herder plan set?"
+		: request.deep ? "Deep-clean Herder plan set?" : "Clean up completed Herder plans?";
+	const confirmationBody = request.force
+		? `${formatCleanupPreview(preview)} This ignores run status, completion proofs, dirty or locked worktrees, and merge ancestry. The plan directory, branches, worktrees, and coordination refs will be deleted. This cannot be undone.`
+		: formatCleanupPreview(preview);
+	if (!(await confirm(confirmationTitle, confirmationBody))) {
 		appendTranscript(request, preview, context, { cancelled: true });
 		return { message: "Cleanup cancelled; no Git mutation was applied.", preview, cancelled: true };
 	}
-	if (preview.failedPlanIds.length > 0
+	if (!request.force && preview.failedPlanIds.length > 0
 		&& !(await confirm("Remove failed Herder evidence?", `This second confirmation removes only BLOCKED/REJECTED evidence: ${preview.failedPlanIds.join(", ")}.`))) {
 		appendTranscript(request, preview, context, { cancelled: true });
 		return { message: "Cleanup cancelled; failed evidence was preserved.", preview, cancelled: true };

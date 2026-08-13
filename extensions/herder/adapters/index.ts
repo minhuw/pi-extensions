@@ -42,7 +42,7 @@ import {
 } from "./profile.ts";
 import { HERDER_ATTENTION_MESSAGE, attentionMessageDetails, buildAttentionPrompt } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
-import { resolvePlanDirectory } from "./paths.ts";
+import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
@@ -936,7 +936,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder cleanup.");
 		const parsed = parseCleanupArguments(args);
 		const repoRoot = await repositoryRoot(ctx);
-		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
+		const requested = path.resolve(repoRoot, parsed.planDir);
+		const planDir = parsed.force && !existsSync(requested)
+			? resolvePlanDirectoryTarget(repoRoot, parsed.planDir)
+			: resolvePlanDirectory(repoRoot, parsed.planDir);
 		const result = await runCleanupCommand(parsed, {
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
@@ -1013,7 +1016,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerCommand("herder-revise", { description: "Adopt a validated new plan-graph generation.", handler: command((args, ctx) => launch(parseFireArguments(args, "revise"), ctx)) });
 	pi.registerCommand("herder-status", { description: "Show Herder manager and plan status.", handler: command((args, ctx) => status(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-dashboard", { description: "Open the manager-hosted Herder dashboard.", handler: command((args, ctx) => dashboard(parsePlanDirArguments(args).planDir, ctx)) });
-	pi.registerCommand("herder-cleanup", { description: "Preview and confirm safe cleanup of completed Herder plan worktrees.", handler: command(cleanup) });
+	pi.registerCommand("herder-cleanup", { description: "Preview and confirm Herder cleanup. Use --force to destroy a plan set unconditionally.", handler: command(cleanup) });
 	pi.registerCommand("herder-reset", { description: "Reset a Herder plan set to its pre-initialized execution state.", handler: command(reset) });
 	pi.registerCommand("herder-stop", {
 		description: "Stop active Herder workers and preserve repository state.",

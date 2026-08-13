@@ -99,6 +99,7 @@ function mockedCleanupResult(input: CleanupInput): CleanupResult {
 		dryRun: input.dryRun,
 		includeFailed: input.includeFailed,
 		deep: input.deep,
+		force: Boolean(input.force),
 		actions: plan ? [{ plan, branch: `herder/${planName}/${plan}`, mode: input.includeFailed ? "failed-evidence" : "completed-plan" }] : [],
 		removed: !input.dryRun && plan ? [{ plan }] : [],
 		skipped: [],
@@ -320,6 +321,36 @@ test("confirmed deep cleanup removes the complete plan set after integration rea
 		assert.equal(fs.existsSync(fixture.planDir), false);
 		assert.notEqual(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
 		assert.equal((entries[0] as Record<string, unknown>).deep, true);
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("force cleanup destroys an active unmerged plan set that deep cleanup would refuse", async () => {
+	const fixture = setup();
+	try {
+		const store = new RunStore(fixture.planDir);
+		try { store.updateRun({ status: "needs_input" }); } finally { store.close(); }
+		fs.writeFileSync(path.join(fixture.completed, "dirty.txt"), "dirty\n");
+		const entries: unknown[] = [];
+		const confirmations: string[] = [];
+		const result = await runCleanupCommand("--force", {
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDir,
+			confirm: async (title) => { confirmations.push(title); return true; },
+			appendEntry: (entry) => entries.push(entry),
+		});
+		assert.equal(result.cancelled, false);
+		assert.equal(result.preview.canApply, true);
+		assert.equal(result.preview.force, true);
+		assert.equal(result.applied?.executed, true);
+		assert.deepEqual(confirmations, ["Unconditionally destroy this Herder plan set?"]);
+		assert.equal(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
+		assert.equal(git(fixture.repo, "branch", "--list", "herder/herder-plans/integration"), "");
+		assert.equal(fs.existsSync(fixture.integration), false);
+		assert.equal(fs.existsSync(fixture.completed), false);
+		assert.equal(fs.existsSync(fixture.planDir), false);
+		assert.notEqual(command(fixture.repo, ["show-ref", "--verify", "refs/plan-herder/herder-plans/base"], true).status, 0);
+		assert.equal((entries[0] as Record<string, unknown>).mode, "force");
+		assert.equal((entries[0] as Record<string, unknown>).executed, true);
 	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
 });
 

@@ -22,6 +22,7 @@ function cleanupResult(plan: string, action = true, removed = false): CleanupRes
 		dryRun: !removed,
 		includeFailed: plan === "002",
 		deep: false,
+		force: false,
 		actions: action ? [{ plan, branch: `herder/herder-plans/${plan}`, mode: plan === "002" ? "failed-evidence" : "completed-plan" }] : [],
 		removed: removed ? [{ plan }] : [],
 		skipped: [],
@@ -36,6 +37,7 @@ function preview(input: Partial<CleanupPreview> = {}): CleanupPreview {
 		durableStatus: "complete",
 		terminal: true,
 		canApply: true,
+		force: false,
 		selectedPlanIds: ["001"],
 		failedPlanIds: [],
 		skippedPlanIds: [],
@@ -108,14 +110,18 @@ test("cleanup parser is fail-closed and preserves the exact command shape", () =
 		planId: "7",
 		includeFailed: true,
 		deep: false,
+		force: false,
 	});
-	assert.deepEqual(parseCleanupArguments("--deep --include-failed"), { planDir: "herder-plans", includeFailed: true, deep: true });
-	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false, deep: false });
+	assert.deepEqual(parseCleanupArguments("--deep --include-failed"), { planDir: "herder-plans", includeFailed: true, deep: true, force: false });
+	assert.deepEqual(parseCleanupArguments("--force"), { planDir: "herder-plans", includeFailed: false, deep: false, force: true });
+	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false, deep: false, force: false });
 	assert.throws(() => parseCleanupArguments("--plan 7 --plan 8"), /more than once/);
 	assert.throws(() => parseCleanupArguments("--deep --deep"), /more than once/);
+	assert.throws(() => parseCleanupArguments("--force --force"), /more than once/);
 	assert.throws(() => parseCleanupArguments("--finalize"), /use --deep/);
 	assert.throws(() => parseCleanupArguments("--handoff-target release"), /use --deep/);
 	assert.throws(() => parseCleanupArguments("--deep --plan 7"), /cannot be combined/);
+	assert.throws(() => parseCleanupArguments("--force --deep"), /cannot be combined/);
 	assert.throws(() => parseCleanupArguments("--include-failed --unknown"), /Unknown option/);
 	assert.throws(() => parseCleanupArguments("--plan TODO"), /numeric/);
 });
@@ -246,4 +252,33 @@ test("active or missing durable runs are preview-only", async () => {
 	assert.equal(confirms, 0);
 	assert.equal(applies, 0);
 	assert.match(result.message, /preview-only/);
+});
+
+test("force cleanup can apply while the durable run is still active", async () => {
+	const confirmations: string[] = [];
+	const forcePreview = preview({
+		durableStatus: "active",
+		terminal: false,
+		canApply: true,
+		force: true,
+		outcomes: [{ planId: "RUN", status: "UNKNOWN", result: { ...deepCleanupResult(), force: true } }],
+	});
+	const result = await runCleanupCommand("--force", {
+		repositoryRoot: "/repo",
+		planDirectory: "/repo/herder-plans",
+		preview: async () => forcePreview,
+		apply: async () => ({
+			...forcePreview,
+			outcomes: [{ planId: "RUN", status: "UNKNOWN", result: { ...deepCleanupResult(true), force: true } }],
+			executed: true,
+		}),
+		confirm: async (title) => {
+			confirmations.push(title);
+			return true;
+		},
+	});
+	assert.deepEqual(confirmations, ["Unconditionally destroy this Herder plan set?"]);
+	assert.equal(result.cancelled, false);
+	assert.equal(result.applied?.executed, true);
+	assert.match(result.message, /Force cleanup executed/);
 });

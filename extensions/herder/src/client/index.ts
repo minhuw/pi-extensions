@@ -513,12 +513,25 @@ function managerReplyFromStatus(value: Record<string, unknown>): Record<string, 
 	return reply as Record<string, unknown>;
 }
 
-export type ServiceExclusionPurpose = "cleanup" | "reset";
+export type ServiceExclusionPurpose = "cleanup" | "reset" | "force";
+
+function mayStopLiveRun(purpose: ServiceExclusionPurpose): boolean {
+	return purpose === "reset" || purpose === "force";
+}
+
+async function killOwnedService(pid: number): Promise<void> {
+	if (!serviceProcessAlive(pid)) return;
+	try { process.kill(pid, "SIGTERM"); } catch {}
+	const deadline = Date.now() + 2_000;
+	while (serviceProcessAlive(pid) && Date.now() < deadline) await delay(50);
+	if (!serviceProcessAlive(pid)) return;
+	try { process.kill(pid, "SIGKILL"); } catch {}
+}
 
 /**
  * Exclude daemon startup and hold the daemon-owner lock while a cleanup or reset
- * callback performs its Git mutation. Reset may stop a live run first; cleanup
- * remains terminal-run-only.
+ * callback performs its Git mutation. Reset and force may stop a live run first;
+ * ordinary cleanup remains terminal-run-only.
  */
 export async function withServiceExclusion<T>(
 	planDirectoryInput: string,
@@ -536,18 +549,34 @@ export async function withServiceExclusion<T>(
 		const registered = registeredService(planDirectory);
 		if (registered && serviceProcessAlive(registered.pid)) {
 			const service = await healthyService(planDirectory);
-			if (!service) throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
-			let status: Record<string, unknown>;
-			try { status = managerReplyFromStatus(await requestService(service, "/v1/status", undefined, HEALTH_TIMEOUT_MS)); }
-			catch { throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`); }
-			const serviceStatus = String(status.status || "");
-			if (!CLEANUP_TERMINAL_STATUSES.has(serviceStatus)) {
-				if (purpose !== "reset") throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
-				try { await requestService(service, "/v1/stop", {}); }
-				catch { throw new Error("A live Herder service could not be stopped; reset was not applied."); }
+			if (!service) {
+				if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
+				await killOwnedService(registered.pid);
+			} else {
+				let status: Record<string, unknown>;
+				try { status = managerReplyFromStatus(await requestService(service, "/v1/status", undefined, HEALTH_TIMEOUT_MS)); }
+				catch {
+					if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
+					await killOwnedService(registered.pid);
+					status = { status: "stopped" };
+				}
+				const serviceStatus = String(status.status || "");
+				if (!CLEANUP_TERMINAL_STATUSES.has(serviceStatus)) {
+					if (!mayStopLiveRun(purpose)) throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
+					try { await requestService(service, "/v1/stop", {}); }
+					catch {
+						if (purpose !== "force") throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
+						await killOwnedService(registered.pid);
+					}
+				}
+				if (serviceProcessAlive(registered.pid)) {
+					try { await requestService(service, "/shutdown", {}); }
+					catch {
+						if (purpose !== "force") throw new Error(`A Herder service could not be stopped; ${purpose} was not applied.`);
+						await killOwnedService(registered.pid);
+					}
+				}
 			}
-			try { await requestService(service, "/shutdown", {}); }
-			catch { throw new Error(`A Herder service could not be stopped; ${purpose} was not applied.`); }
 			await waitForServiceShutdown(planDirectory, registered.pid, options.waitMs ?? CLEANUP_EXCLUSION_WAIT_MS);
 		}
 		ownership = acquireServiceOwnership(planDirectory, `${purpose}-${randomUUID()}`);

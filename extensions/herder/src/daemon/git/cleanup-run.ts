@@ -21,6 +21,7 @@ export interface CleanupInput {
   dryRun: boolean
   includeFailed: boolean
   deep: boolean
+  force?: boolean
   expectedPlanStatuses?: Record<string, "DONE" | "BLOCKED" | "REJECTED">
   /** Deterministic race injection for integration tests. Not populated by CLI callers. */
   testHooks?: {
@@ -44,6 +45,7 @@ export interface CleanupResult {
   dryRun: boolean
   includeFailed: boolean
   deep: boolean
+  force: boolean
   actions: CleanupDetail[]
   removed: CleanupDetail[]
   skipped: CleanupDetail[]
@@ -360,6 +362,7 @@ function worktreeStatus(repoRoot: string, worktree?: WorktreeRecord) {
 }
 
 export function cleanupRun(input: CleanupInput) {
+  if (input.force) fail("Use forceCleanupRun for unconditional --force cleanup")
   const repoCandidate = path.resolve(input.repo)
   if (!fs.existsSync(repoCandidate) || !fs.statSync(repoCandidate).isDirectory()) fail(`Repository does not exist: ${repoCandidate}`)
   const repoRoot = fs.realpathSync(repoCandidate)
@@ -711,6 +714,7 @@ export function cleanupRun(input: CleanupInput) {
     dryRun: Boolean(input.dryRun),
     includeFailed: Boolean(input.includeFailed),
     deep: Boolean(input.deep),
+    force: false,
     actions,
     removed,
     skipped,

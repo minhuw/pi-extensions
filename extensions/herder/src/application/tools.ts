@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import {
 	buildGraph,
@@ -9,6 +10,7 @@ import {
 	snapshotPlan,
 } from "../core/plans.ts";
 import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
+import { forceCleanupRun, type ForceCleanupInput } from "../daemon/git/force-cleanup-run.ts";
 import { resetHerderPlanSet, type HerderResetInput, type HerderResetResult } from "../daemon/git/reset-plan-set.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
@@ -228,6 +230,7 @@ export interface CleanupApplicationRequest {
 	planId?: string;
 	includeFailed?: boolean;
 	deep?: boolean;
+	force?: boolean;
 }
 
 export interface CleanupPreviewOutcome {
@@ -241,6 +244,7 @@ export interface CleanupPreview {
 	durableStatus: CleanupDurableStatus;
 	terminal: boolean;
 	canApply: boolean;
+	force: boolean;
 	selectedPlanIds: string[];
 	failedPlanIds: string[];
 	skippedPlanIds: string[];
@@ -255,6 +259,7 @@ export interface CleanupApplyResult extends CleanupPreview {
 
 export interface CleanupApplicationDependencies {
 	cleanupRunner?: (input: CleanupInput) => CleanupResult | Promise<CleanupResult>;
+	forceRunner?: (input: ForceCleanupInput) => CleanupResult | Promise<CleanupResult>;
 	readStatus?: (planDirectory: string) => CleanupDurableStatus | Promise<CleanupDurableStatus>;
 	withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T>;
 }
@@ -290,8 +295,11 @@ function graphWithLifecycle(graph: ReturnType<typeof buildGraph>): ReturnType<ty
 
 export function selectCleanupPlanIds(
 	graph: ReturnType<typeof buildGraph>,
-	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed" | "deep">,
+	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed" | "deep" | "force">,
 ): { selectedPlanIds: string[]; failedPlanIds: string[] } {
+	if (request.force && (request.deep || request.planId !== undefined || request.includeFailed)) {
+		throw new Error("--force cannot be combined with --deep, --plan, or --include-failed");
+	}
 	if (request.deep && request.planId !== undefined) throw new Error("--deep cannot be combined with --plan");
 	const requested = request.planId === undefined ? undefined : cleanupPlanId(request.planId);
 	if (requested && !graph.plans.some((plan) => plan.id === requested)) {
@@ -359,12 +367,56 @@ interface CleanupPreviewBuild {
 	graphStatusSnapshot: string;
 }
 
+function forcePreviewFromResult(
+	durableStatus: CleanupDurableStatus,
+	result: CleanupResult,
+): CleanupPreviewBuild {
+	const selectedPlanIds = [...new Set(result.actions
+		.map((item) => typeof item.plan === "string" ? item.plan : "")
+		.filter((value): value is string => Boolean(value)))].sort();
+	const blockers = [...new Set(result.destruction.blockers
+		.map((item) => typeof item.reason === "string" ? item.reason.toLowerCase() : "force-cleanup-blocked")
+		.filter((reason) => /^[a-z0-9][a-z0-9-]{0,48}$/i.test(reason)))];
+	const preview: CleanupPreview = {
+		version: 1,
+		durableStatus,
+		terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
+		canApply: result.destruction.eligible && blockers.length === 0,
+		force: true,
+		selectedPlanIds,
+		failedPlanIds: [],
+		skippedPlanIds: [],
+		outcomes: [{ planId: result.plan ?? "RUN", status: "UNKNOWN", result }],
+		blockers,
+		normalizedPreview: stableJson({
+			durableStatus,
+			force: true,
+			blockers,
+			selectedPlanIds,
+			result,
+		}),
+	};
+	return { preview, graphStatusSnapshot: "force" };
+}
+
 async function buildCleanupPreviewSnapshot(
 	request: CleanupApplicationRequest,
 	dependencies: CleanupApplicationDependencies,
 ): Promise<CleanupPreviewBuild> {
 	const runner = dependencies.cleanupRunner ?? cleanupRun;
 	const durableStatus = await (dependencies.readStatus ?? readCleanupDurableStatus)(request.planDirectory);
+	const force = request.force === true;
+	if (force) {
+		if (request.deep || request.planId !== undefined || request.includeFailed) {
+			throw new Error("--force cannot be combined with --deep, --plan, or --include-failed");
+		}
+		const result = await (dependencies.forceRunner ?? forceCleanupRun)({
+			repo: request.repositoryRoot,
+			planDir: request.planDirectory,
+			dryRun: true,
+		});
+		return forcePreviewFromResult(durableStatus, result);
+	}
 	const graph = graphWithLifecycle(buildGraph(request.planDirectory));
 	const deep = request.deep === true;
 	if (deep && request.planId !== undefined) throw new Error("--deep cannot be combined with --plan");
@@ -447,6 +499,7 @@ async function buildCleanupPreviewSnapshot(
 			durableStatus,
 			terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
 			canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions && uniqueBlockers.length === 0,
+			force: false,
 			selectedPlanIds: selection.selectedPlanIds,
 			failedPlanIds,
 			skippedPlanIds,
@@ -472,12 +525,42 @@ export async function previewHerderCleanup(
 	return buildCleanupPreview(request, dependencies);
 }
 
+async function applyForceCleanup(
+	request: CleanupApplicationRequest,
+	expectedPreview: CleanupPreview,
+	dependencies: CleanupApplicationDependencies,
+): Promise<CleanupApplyResult> {
+	const apply = async (): Promise<CleanupApplyResult> => {
+		const result = await (dependencies.forceRunner ?? forceCleanupRun)({
+			repo: request.repositoryRoot,
+			planDir: request.planDirectory,
+			dryRun: false,
+		});
+		if (!result.destruction.eligible) {
+			throw new Error(`Force cleanup refused: ${result.destruction.blockers.map((item) => String(item.reason ?? "blocked")).join(", ")}`);
+		}
+		const executed = result.removed.length > 0
+			|| result.destruction.refsRemoved.length > 0
+			|| result.destruction.integrationRemoved
+			|| result.destruction.planDirectoryRemoved;
+		return {
+			...expectedPreview,
+			outcomes: [{ planId: result.plan ?? "RUN", status: "UNKNOWN", result }],
+			executed,
+		};
+	};
+	const runExclusion = dependencies.withExclusion ?? ((planDirectory, callback) => withServiceExclusion(planDirectory, callback, { purpose: "force" }));
+	if (!fs.existsSync(request.planDirectory)) return apply();
+	return runExclusion(request.planDirectory, apply);
+}
+
 export async function applyHerderCleanup(
 	request: CleanupApplicationRequest,
 	expectedPreview: CleanupPreview,
 	dependencies: CleanupApplicationDependencies = {},
 ): Promise<CleanupApplyResult> {
 	if (!expectedPreview.canApply) return { ...expectedPreview, executed: false };
+	if (request.force === true) return applyForceCleanup(request, expectedPreview, dependencies);
 	const runExclusion = dependencies.withExclusion ?? withServiceExclusion;
 	return runExclusion(request.planDirectory, async () => {
 		const freshBuild = await buildCleanupPreviewSnapshot(request, dependencies);

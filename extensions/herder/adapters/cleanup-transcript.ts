@@ -7,7 +7,7 @@ export const HERDER_CLEANUP_LEGACY_ENTRY = "herder-cleanup-v1";
 const MAX_ITEMS = 32;
 const MAX_ITEM_LENGTH = 64;
 
-export type CleanupTranscriptMode = "standard" | "include-failed" | "deep";
+export type CleanupTranscriptMode = "standard" | "include-failed" | "deep" | "force";
 export type CleanupTranscriptPreview = "eligible" | "preview-only" | "blocked" | "cancelled";
 export type CleanupTranscriptIntegration = "preserved" | "removed" | "blocked" | "unknown";
 
@@ -81,9 +81,10 @@ function renderList(values: readonly string[]): string {
 
 export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry | LegacyCleanupTranscriptEntry, theme: Theme): string {
 	const legacy = entry.version === 1 ? entry : null;
+	const force = entry.version === 2 && entry.mode === "force";
 	const deep = entry.version === 1 ? entry.finalize : entry.deep;
 	const state = entry.executed ? theme.fg("success", "executed") : theme.fg("warning", entry.preview);
-	if (!deep) {
+	if (!deep && !force) {
 		return [
 			theme.bold("Herder cleanup"),
 			theme.fg("dim", `  ${entry.mode} · ${state}`),
@@ -92,7 +93,7 @@ export function cleanupTranscriptDisplay(entry: CleanupTranscriptEntry | LegacyC
 			`  blockers: ${renderList(entry.blockers)}`,
 		].join("\n");
 	}
-	const label = legacy ? "finalize" : "deep";
+	const label = legacy ? "finalize" : force ? "force" : "deep";
 	const handoff = legacy?.handoffTarget ? `\n  handoff target: ${legacy.handoffTarget}` : "";
 	return [
 		theme.bold("Herder cleanup"),

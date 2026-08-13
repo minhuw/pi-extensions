@@ -20,12 +20,14 @@ export interface CleanupCommandOptions {
 	planId?: string;
 	includeFailed: boolean;
 	deep: boolean;
+	force: boolean;
 }
 
 export const HERDER_CLEANUP_COMMAND_USAGE = [
 	"Usage:",
 	"  /herder-cleanup [plan-dir] [--plan <id>] [--include-failed]",
 	"  /herder-cleanup [plan-dir] --deep [--include-failed]",
+	"  /herder-cleanup [plan-dir] --force",
 ].join("\n");
 
 export const HERDER_RESET_COMMAND_USAGE = "Usage:\n  /herder-reset [plan-dir]";
@@ -185,6 +187,7 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 	let planId: string | undefined;
 	let includeFailed = false;
 	let deep = false;
+	let force = false;
 	let positional = false;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
@@ -198,8 +201,13 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 			deep = true;
 			continue;
 		}
+		if (argument === "--force") {
+			if (force) throw new Error("--force was provided more than once.");
+			force = true;
+			continue;
+		}
 		if (argument === "--finalize" || argument === "--handoff-target") {
-			throw new Error(`${argument} was removed; use --deep for destructive plan-set cleanup.\n${HERDER_CLEANUP_COMMAND_USAGE}`);
+			throw new Error(`${argument} was removed; use --deep for proven destructive cleanup or --force to destroy the plan set unconditionally.\n${HERDER_CLEANUP_COMMAND_USAGE}`);
 		}
 		if (argument === "--plan") {
 			if (planId !== undefined) throw new Error("--plan was provided more than once.");
@@ -214,8 +222,11 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 		planDir = argument;
 		positional = true;
 	}
+	if (force && (deep || includeFailed || planId !== undefined)) {
+		throw new Error(`--force cannot be combined with --deep, --plan, or --include-failed.\n${HERDER_CLEANUP_COMMAND_USAGE}`);
+	}
 	if (deep && planId !== undefined) throw new Error("--deep is plan-set-level and cannot be combined with --plan.");
-	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed, deep };
+	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed, deep, force };
 }
 
 
