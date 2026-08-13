@@ -59,6 +59,7 @@ import {
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { orcaBusy } from "../../shared/orca-busy.ts";
 
 // ---- Shared helpers ----
 
@@ -708,6 +709,11 @@ export default function (pi: ExtensionAPI) {
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
+  pi.on("agent_settled", async (_event, ctx) => {
+    currentCtx = ctx;
+    orcaBusy.onParentSettled(ctx);
+  });
+
   pi.on("session_before_switch", () => {
     manager.clearCompleted(true);
     scheduler.stop();
@@ -741,6 +747,7 @@ export default function (pi: ExtensionAPI) {
   let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
+  widget.bindOrcaIdle(() => currentCtx?.isIdle() ?? true);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.

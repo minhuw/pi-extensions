@@ -10,6 +10,7 @@ import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, AgentRecord, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import { orcaBusy } from "../../../shared/orca-busy.ts";
 
 // ---- Constants ----
 
@@ -345,6 +346,8 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
+  /** Parent-session idle probe for Orca busy re-assertion. */
+  private idleProbe: () => boolean = () => true;
 
   constructor(
     private manager: AgentManager,
@@ -356,6 +359,10 @@ export class AgentWidget {
      */
     private mode: () => WidgetMode = () => "all",
   ) {}
+
+  bindOrcaIdle(probe: () => boolean): void {
+    this.idleProbe = probe;
+  }
 
   /**
    * Agents eligible for the widget, per the current `WidgetMode`:
@@ -632,6 +639,7 @@ export class AgentWidget {
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
+    orcaBusy.set("subagents", hasActive, { isIdle: this.idleProbe, ui: this.uiCtx as { setTitle?(title: string): void } });
 
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished) {

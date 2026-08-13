@@ -54,6 +54,7 @@ import {
 } from "./ownership.ts";
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerSessionFactory, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
+import { orcaBusy } from "../../shared/orca-busy.ts";
 import {
 	createWorkerInputEntry,
 	createWorkerOutputEntry,
@@ -161,6 +162,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (!currentState) {
 			ctx.ui.setStatus("herder", undefined);
 			widget.update(ctx, undefined);
+			orcaBusy.set("herder", false, ctx);
 			return;
 		}
 		const statusColor = currentState.status === "complete"
@@ -182,6 +184,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			...(lastManagerMessage ? { idleDetail: lastManagerMessage } : {}),
 			workers: engine.snapshots(),
 		});
+		orcaBusy.set("herder", !["complete", "failed", "stopped"].includes(currentState.status), ctx);
 	};
 
 	const renderLaunching = (ctx: ExtensionContext, planDir: string, profile: string, maxParallel: number) => {
@@ -194,6 +197,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planName: path.basename(planDir),
 			workers: [],
 		});
+		orcaBusy.set("herder", true, ctx);
 	};
 
 	const repositoryRoot = async (ctx: ExtensionContext): Promise<string> => {
@@ -1184,6 +1188,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastContext = ctx;
 		drainVerificationFailure();
 		await requestAttentionDrain();
+		orcaBusy.onParentSettled(ctx);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
