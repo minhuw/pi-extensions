@@ -432,6 +432,10 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 }
 
 function rowToReignite(row: Record<string, unknown>): ReigniteRequest {
+	const allocatedPlanDirectory = row.allocated_plan_directory == null || row.allocated_plan_directory === ""
+		? undefined
+		: String(row.allocated_plan_directory);
+	const detail = row.detail == null || row.detail === "" ? undefined : String(row.detail);
 	return {
 		schemaVersion: 1,
 		requestId: String(row.request_id),
@@ -450,6 +454,8 @@ function rowToReignite(row: Record<string, unknown>): ReigniteRequest {
 		rationale: String(row.rationale),
 		createdAt: String(row.created_at),
 		state: String(row.state) as ReigniteRequest["state"],
+		...(allocatedPlanDirectory ? { allocatedPlanDirectory } : {}),
+		...(detail ? { detail } : {}),
 	};
 }
 
@@ -590,7 +596,7 @@ export class RunStore {
 		for (const operation of running) {
 			const mode = operation.kind === "start" && operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
 				? String((operation.payload as { mode?: unknown }).mode || "") : "";
-			const replaySafe = operation.kind === "event" || operation.kind === "stop" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
+			const replaySafe = operation.kind === "event" || operation.kind === "stop" || operation.kind === "reignite" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
 			if (replaySafe) {
 				this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
 					.run(new Date().toISOString(), operation.operationId);
@@ -893,16 +899,36 @@ export class RunStore {
 			INSERT INTO manager_reignite_requests (
 				request_id, run_id, generation, request_sha256, source_plan_directory, graph_sha256,
 				integration_head, integration_tree, integration_branch, verdict, scope,
-				findings_json, fix_guidance_json, rationale, state, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				findings_json, fix_guidance_json, rationale, state, allocated_plan_directory, detail, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			request.requestId, request.runId, request.generation, request.requestSha256,
 			request.sourcePlanDirectory, request.graphSha256, request.integrationHead,
 			request.integrationTree, request.integrationBranch, request.verdict, request.scope,
 			JSON.stringify(request.findings), JSON.stringify(request.fixGuidance), request.rationale,
-			request.state, request.createdAt,
+			request.state, request.allocatedPlanDirectory ?? null, request.detail ?? null, request.createdAt,
 		);
 		return this.getReigniteRequest(request.runId, request.generation)!;
+	}
+
+	updateReigniteRequest(requestId: string, patch: {
+		allocatedPlanDirectory?: string | null;
+		state?: ReigniteRequest["state"];
+		detail?: string | null;
+	}): ReigniteRequest {
+		const row = this.database.prepare("SELECT * FROM manager_reignite_requests WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		if (!row) throw new Error(`Unknown reignite request ${requestId}`);
+		const current = rowToReignite(row);
+		const allocatedPlanDirectory = patch.allocatedPlanDirectory === undefined
+			? current.allocatedPlanDirectory ?? null
+			: patch.allocatedPlanDirectory;
+		const state = patch.state ?? current.state;
+		const detail = patch.detail === undefined ? current.detail ?? null : patch.detail;
+		this.database.prepare("UPDATE manager_reignite_requests SET allocated_plan_directory = ?, state = ?, detail = ? WHERE request_id = ?")
+			.run(allocatedPlanDirectory, state, detail, requestId);
+		const updated = this.database.prepare("SELECT * FROM manager_reignite_requests WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		if (!updated) throw new Error(`Unknown reignite request ${requestId}`);
+		return rowToReignite(updated);
 	}
 
 	getPlanSpecs(runId: string, graphGeneration?: number): StoredPlanSpec[] {

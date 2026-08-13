@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
-import { initPlanDir } from "../../../src/core/plans.ts";
+import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { HerderRunManager } from "../../../src/core/run-manager.ts";
+import { compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import type { VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
@@ -289,6 +289,37 @@ async function finishFinalReview(
 			response,
 		}],
 	})).reply);
+}
+
+function resolvedRepoPath(repo: string, ...parts: string[]): string {
+	return path.join(fs.realpathSync(repo), ...parts);
+}
+
+function writeFollowUpPlanDirectory(directory: string, fixture: { originalHead: string; repo: string }): string {
+	initPlanDir(directory);
+	fs.writeFileSync(path.join(directory, "README.md"), `# Herder Plans
+
+## Execution order & status
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|---|---|---|---|---|---|
+| [001](001-follow-up.md) | Follow up residual work | P1 | S | — | TODO |
+
+## Dependency notes
+
+None.
+
+## Considered and rejected
+
+None.
+`);
+	fs.writeFileSync(path.join(directory, "001-follow-up.md"), fs.readFileSync(path.join(fixture.repo, "herder-plans", "001-update-value.md"), "utf8")
+		.replaceAll("Plan 001: Update the fixture value", "Plan 001: Follow up residual work")
+		.replaceAll("Update the fixture value", "Follow up residual work"));
+	const graph = buildGraph(directory);
+	assert.equal(graph.complete, false);
+	assert.ok(graph.plans.some((plan) => plan.status === "TODO"));
+	return compileGraphIdentity(graph);
 }
 
 test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { timeout: 15_000 }, async () => {
@@ -1031,6 +1062,154 @@ test("final Reviewer follow-up findings persist a skipped reignite dossier", { t
 			const run = store.getRun()!;
 			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "skipped");
 		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("pending reignite allocation is stable and skips an existing README", { timeout: 30_000 }, async () => {
+	const occupiedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-occupied-"));
+	const occupied = writeFixture(occupiedRoot);
+	fs.mkdirSync(path.join(occupied.repo, "herder-reignite"), { recursive: true });
+	fs.writeFileSync(path.join(occupied.repo, "herder-reignite", "README.md"), "# foreign\n");
+	try {
+		const service = await ensureService(occupied.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			occupied,
+			"reignite-occupied",
+			"VERDICT: REVISE\nFINDINGS: [alloc-2][P1][BLOCKING][PLAN_REQUIREMENT] residual work\nFIX_GUIDANCE: Open a sibling plan set.\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		assert.equal(completed.status, "complete");
+		assert.equal(payload(completed.reigniteRequest).allocatedPlanDirectory, resolvedRepoPath(occupied.repo, "herder-reignite-2"));
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: occupied.repo,
+			planDirectory: occupied.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, resolvedRepoPath(occupied.repo, "herder-reignite-2"));
+	} finally {
+		await stopService(occupied.planDirectory).catch(() => {});
+		fs.rmSync(occupiedRoot, { recursive: true, force: true });
+		fs.rmSync(`${occupied.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+
+	const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-empty-"));
+	const empty = writeFixture(emptyRoot);
+	try {
+		const service = await ensureService(empty.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			empty,
+			"reignite-empty",
+			"VERDICT: REVISE\nFINDINGS: [alloc-1][P1][BLOCKING][PLAN_REQUIREMENT] residual work\nFIX_GUIDANCE: Open a sibling plan set.\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		assert.equal(payload(completed.reigniteRequest).allocatedPlanDirectory, resolvedRepoPath(empty.repo, "herder-reignite"));
+	} finally {
+		await stopService(empty.planDirectory).catch(() => {});
+		fs.rmSync(emptyRoot, { recursive: true, force: true });
+		fs.rmSync(`${empty.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("reignite written ack validates the allocated graph and keeps the source complete", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-written-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"reignite-written",
+			"VERDICT: REVISE\nFINDINGS: [wr-1][P1][BLOCKING][PLAN_REQUIREMENT] residual work\nFIX_GUIDANCE: Open a sibling plan set.\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		const reignite = payload(completed.reigniteRequest);
+		assert.equal(reignite.state, "pending");
+		const allocated = String(reignite.allocatedPlanDirectory);
+		assert.equal(allocated, resolvedRepoPath(fixture.repo, "herder-reignite"));
+		const graphSha256 = writeFollowUpPlanDirectory(allocated, fixture);
+		const written = payload(payload(await requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+			graphSha256,
+		})).reply);
+		assert.equal(written.status, "complete");
+		assert.equal((written.actions as unknown[]).length, 0);
+		assert.equal(written.reigniteRequest, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "complete");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "written");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.allocatedPlanDirectory, allocated);
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("reignite failed ack and invalid writes leave the source complete and pending", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-failed-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"reignite-failed",
+			"VERDICT: BLOCK\nFINDINGS: [fl-1][P1][BLOCKING][PATCH_REGRESSION] residual regression\nFIX_GUIDANCE: Restore the missing check.\nDISCOVERED_PATHS: none\nSCOPE: FAIL\nCHECKS: fixture test — passed\nRATIONALE: Residual regression belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		const reignite = payload(completed.reigniteRequest);
+		const allocated = String(reignite.allocatedPlanDirectory);
+		const failed = payload(payload(await requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "failed",
+			detail: "Could not shape a follow-up graph.",
+		})).reply);
+		assert.equal(failed.status, "complete");
+		assert.equal(payload(failed.reigniteRequest).state, "pending");
+		assert.equal(payload(failed.reigniteRequest).allocatedPlanDirectory, allocated);
+		assert.equal(payload(failed.reigniteRequest).detail, "Could not shape a follow-up graph.");
+
+		fs.mkdirSync(allocated, { recursive: true });
+		fs.writeFileSync(path.join(allocated, "README.md"), "# foreign readme\n");
+		await assert.rejects(() => requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+			graphSha256: "a".repeat(64),
+		}), /foreign or invalid README/);
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "complete");
+			store.updateReigniteRequest(String(reignite.requestId), { allocatedPlanDirectory: fixture.planDirectory });
+		} finally { store.close(); }
+		await assert.rejects(() => requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+			graphSha256: "a".repeat(64),
+		}), /source plan directory/);
+
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
+		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, fixture.planDirectory);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

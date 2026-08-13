@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 11
+export const EXECUTION_SCHEMA_VERSION = 12
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -582,7 +582,7 @@ const SCHEMA_9_TABLES = `
   CREATE TABLE IF NOT EXISTS manager_operations (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     operation_id TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification')),
+    kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite')),
     payload_json TEXT NOT NULL,
     payload_sha256 TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
@@ -672,6 +672,8 @@ const SCHEMA_11_TABLES = `
     fix_guidance_json TEXT NOT NULL,
     rationale TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'skipped', 'written', 'failed')),
+    allocated_plan_directory TEXT,
+    detail TEXT,
     created_at TEXT NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS manager_reignite_requests_run_generation
@@ -698,6 +700,47 @@ function applySchema11(database: Database): void {
   database.exec("PRAGMA user_version = 11;")
 }
 
+function applySchema12(database: Database): void {
+  const columns = database.prepare("PRAGMA table_info(manager_reignite_requests)").all() as Array<{ name: string }>
+  if (!columns.some((column) => column.name === "allocated_plan_directory")) {
+    database.exec("ALTER TABLE manager_reignite_requests ADD COLUMN allocated_plan_directory TEXT;")
+  }
+  if (!columns.some((column) => column.name === "detail")) {
+    database.exec("ALTER TABLE manager_reignite_requests ADD COLUMN detail TEXT;")
+  }
+  const operationsSql = String((database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_operations'").get() as { sql?: string } | undefined)?.sql || "")
+  if (operationsSql && !operationsSql.includes("'reignite'")) {
+    database.exec(`
+      CREATE TABLE manager_operations_v12 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite')),
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        result_json TEXT,
+        error TEXT,
+        accepted_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO manager_operations_v12 (
+        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+        result_json, error, accepted_at, started_at, finished_at, updated_at
+      ) SELECT
+        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+        result_json, error, accepted_at, started_at, finished_at, updated_at
+      FROM manager_operations;
+      DROP TABLE manager_operations;
+      ALTER TABLE manager_operations_v12 RENAME TO manager_operations;
+      CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
+    `)
+  }
+  database.exec("PRAGMA user_version = 12;")
+}
+
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
@@ -721,6 +764,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     `)
     applySchema10(database)
     applySchema11(database)
+    applySchema12(database)
     return
   }
   if (version === 7 && allowInitialize) {
@@ -728,21 +772,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     database.exec(SCHEMA_9_TABLES)
     applySchema10(database)
     applySchema11(database)
+    applySchema12(database)
     return
   }
   if (version === 8 && allowInitialize) {
     database.exec(SCHEMA_9_TABLES)
     applySchema10(database)
     applySchema11(database)
+    applySchema12(database)
     return
   }
   if (version === 9 && allowInitialize) {
     applySchema10(database)
     applySchema11(database)
+    applySchema12(database)
     return
   }
   if (version === 10 && allowInitialize) {
     applySchema11(database)
+    applySchema12(database)
+    return
+  }
+  if (version === 11 && allowInitialize) {
+    applySchema12(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -939,8 +991,8 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
       ${SCHEMA_9_TABLES}
       ${SCHEMA_11_TABLES}
-      PRAGMA user_version = 11;
   `)
+  applySchema12(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {

@@ -45,6 +45,7 @@ import {
 	type ManagerReply,
 	type ResolvedProfile,
 	type TerminalEvent,
+	type ReigniteRequest,
 	type VerificationManifest,
 	type WorkerResult,
 	type WorkerRole,
@@ -75,6 +76,14 @@ interface StartInput {
 	profile?: string;
 	maxParallel?: number;
 	dashboardUrl?: string;
+}
+
+interface ReigniteInput {
+	requestId: string;
+	requestSha256: string;
+	state: "written" | "failed";
+	graphSha256?: string;
+	detail?: string;
 }
 
 interface EventInput {
@@ -417,6 +426,50 @@ function compilePlanSpecs(input: {
 	});
 	const graphSha256 = sha256(stableJson(specs.map((spec) => ({ planId: spec.planId, fingerprint: spec.planFingerprint }))));
 	return { specs, graphSha256 };
+}
+
+export function compileGraphIdentity(graph: ReturnType<typeof buildGraph>): string {
+	return compilePlanSpecs({ runId: "graph", graphGeneration: 1, graph }).graphSha256;
+}
+
+const REIGNITE_DIRECTORY_PATTERN = /^(?:herder-reignite|herder-reignite-[2-9]|herder-reignite-[1-9]\d+)$/;
+
+function repoRootReignitePath(repositoryRoot: string, candidate: string): boolean {
+	const relative = path.relative(path.resolve(repositoryRoot), path.resolve(candidate));
+	return relative !== "" && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) && REIGNITE_DIRECTORY_PATTERN.test(relative);
+}
+
+function reigniteDirectoryHasLiveRun(directory: string): boolean {
+	const executionDb = path.join(directory, ".herder", "execution.sqlite3");
+	if (!fs.existsSync(executionDb)) return false;
+	try {
+		const store = new RunStore(directory, { readOnly: true });
+		try {
+			const run = store.getRun();
+			return Boolean(run && !["complete", "failed", "stopped"].includes(run.status));
+		} finally {
+			store.close();
+		}
+	} catch {
+		return true;
+	}
+}
+
+function reigniteDirectoryIsUnused(directory: string): boolean {
+	if (!fs.existsSync(directory)) return true;
+	if (fs.existsSync(path.join(directory, "README.md"))) return false;
+	return !reigniteDirectoryHasLiveRun(directory);
+}
+
+function allocateUnusedReigniteDirectory(repositoryRoot: string, sourcePlanDirectory: string): string {
+	const root = path.resolve(repositoryRoot);
+	const source = path.resolve(sourcePlanDirectory);
+	for (let index = 1; index <= 10_000; index += 1) {
+		const candidate = path.join(root, index === 1 ? "herder-reignite" : `herder-reignite-${index}`);
+		if (path.resolve(candidate) === source) continue;
+		if (reigniteDirectoryIsUnused(candidate)) return candidate;
+	}
+	throw new Error("Could not allocate an unused herder-reignite directory");
 }
 
 interface StoredTerminalRecord {
@@ -1210,6 +1263,44 @@ export class HerderRunManager {
 			}
 			return this.reply();
 		}
+	}
+
+	reignite(input: ReigniteInput): ManagerReply {
+		const requestId = String(input?.requestId ?? "").trim();
+		const requestSha256 = String(input?.requestSha256 ?? "").trim().toLowerCase();
+		const state = input?.state;
+		if (!requestId || requestId.length > 200 || /[\0\r\n]/.test(requestId)) throw new Error("Reignite requestId must be a bounded single-line string");
+		if (!/^[0-9a-f]{64}$/.test(requestSha256)) throw new Error("Reignite requestSha256 must be a SHA-256");
+		if (state !== "written" && state !== "failed") throw new Error("Reignite state must be written or failed");
+		const graphSha256 = input.graphSha256 === undefined ? undefined : String(input.graphSha256).trim().toLowerCase();
+		if (graphSha256 !== undefined && !/^[0-9a-f]{40,64}$/.test(graphSha256)) throw new Error("Reignite graphSha256 must be a hexadecimal Git or SHA-256 identity");
+		const detail = input.detail === undefined ? undefined : String(input.detail);
+		if (detail !== undefined && (detail.length === 0 || detail.length > 16_384 || /\0/.test(detail))) {
+			throw new Error("Reignite detail must be bounded evidence without NUL bytes");
+		}
+		const run = this.store.getRun();
+		if (!run) throw new Error("No deterministic Herder run exists");
+		const existing = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+		const request = existing ? this.ensureReigniteAllocation(run, existing) : null;
+		if (!request || request.requestId !== requestId || request.requestSha256 !== requestSha256) {
+			throw new Error(`Reignite request ${requestId} is not bound to this complete run`);
+		}
+		if (request.state === "skipped") throw new Error("Reignite request was skipped and cannot be acknowledged");
+		if (request.state === "written") {
+			if (state !== "written") throw new Error("Reignite request was already written");
+			return this.reply();
+		}
+		if (request.state !== "pending") throw new Error(`Reignite request ${requestId} is ${request.state}`);
+		if (state === "failed") {
+			this.store.updateReigniteRequest(request.requestId, { detail: detail ?? "Reignite write failed." });
+			return this.reply();
+		}
+		this.assertWrittenReigniteGraph(run, request, graphSha256);
+		this.store.updateReigniteRequest(request.requestId, {
+			state: "written",
+			detail: detail ?? null,
+		});
+		return this.reply();
 	}
 
 	async event(input: EventInput): Promise<ManagerReply> {
@@ -2392,6 +2483,52 @@ export class HerderRunManager {
 		return { active: active.length, freeSlots, runnable: runnablePlanIds.length, runnablePlanIds, expectedNewActions, workConserving, reason, checkedAt: new Date().toISOString() };
 	}
 
+	private ensureReigniteAllocation(run: StoredRun, request: ReigniteRequest): ReigniteRequest {
+		if (request.state !== "pending") return request;
+		if (request.allocatedPlanDirectory) return request;
+		try {
+			const allocatedPlanDirectory = allocateUnusedReigniteDirectory(run.repositoryRoot, run.planDirectory);
+			return this.store.updateReigniteRequest(request.requestId, { allocatedPlanDirectory });
+		} catch {
+			return request;
+		}
+	}
+
+	private assertWrittenReigniteGraph(run: StoredRun, request: ReigniteRequest, graphSha256?: string): string {
+		const allocated = request.allocatedPlanDirectory;
+		if (!allocated) throw new Error("Reignite dossier has no allocated plan directory");
+		const resolvedAllocated = fs.existsSync(allocated) ? fs.realpathSync(allocated) : path.resolve(allocated);
+		const sourcePlanDirectory = fs.existsSync(request.sourcePlanDirectory)
+			? fs.realpathSync(request.sourcePlanDirectory)
+			: path.resolve(request.sourcePlanDirectory);
+		const runPlanDirectory = fs.existsSync(run.planDirectory) ? fs.realpathSync(run.planDirectory) : path.resolve(run.planDirectory);
+		if (resolvedAllocated === sourcePlanDirectory || resolvedAllocated === runPlanDirectory) {
+			throw new Error("Reignite write cannot target the source plan directory");
+		}
+		if (!repoRootReignitePath(run.repositoryRoot, resolvedAllocated)) {
+			throw new Error("Reignite write must target a repo-root herder-reignite[-N] directory");
+		}
+		if (!fs.existsSync(path.join(resolvedAllocated, "README.md"))) {
+			throw new Error("Reignite write requires a validated plan graph at the allocated directory");
+		}
+		if (reigniteDirectoryHasLiveRun(resolvedAllocated)) {
+			throw new Error("Reignite write cannot overwrite a live Herder run");
+		}
+		let graph: ReturnType<typeof buildGraph>;
+		try {
+			graph = buildGraph(resolvedAllocated);
+		} catch (error) {
+			throw new Error(`Reignite write path has a foreign or invalid README: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (graph.complete) throw new Error("Reignite write must not be a complete plan graph");
+		if (!graph.plans.some((plan) => plan.status === "TODO" || plan.status === "BLOCKED")) {
+			throw new Error("Reignite write must contain at least one TODO or BLOCKED plan");
+		}
+		const compiled = compileGraphIdentity(graph);
+		if (graphSha256 && graphSha256 !== compiled) throw new Error("Reignite write graph hash does not match the allocated directory");
+		return compiled;
+	}
+
 	reply(suppression?: "host-backpressure" | "revision-barrier"): ManagerReply {
 		let run = this.store.getRun();
 		if (!run) return {
@@ -2421,7 +2558,8 @@ export class HerderRunManager {
 		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
-		const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+		const storedReignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+		const reignite = storedReignite?.state === "pending" ? this.ensureReigniteAllocation(run, storedReignite) : storedReignite;
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -2466,4 +2604,4 @@ export class HerderRunManager {
 	}
 }
 
-export type { EventInput, PlanEditInput, StartInput };
+export type { EventInput, PlanEditInput, ReigniteInput, StartInput };

@@ -463,7 +463,7 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 	}
 }
 
-export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification"] as const;
+export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification", "reignite"] as const;
 export const MANAGER_OPERATION_STATES = ["accepted", "running", "succeeded", "failed"] as const;
 export type ManagerOperationKind = typeof MANAGER_OPERATION_KINDS[number];
 export type ManagerOperationState = typeof MANAGER_OPERATION_STATES[number];
@@ -520,6 +520,8 @@ export interface ReigniteRequest {
 	rationale: string;
 	createdAt: string;
 	state: ReigniteState;
+	allocatedPlanDirectory?: string;
+	detail?: string;
 }
 
 export interface VerificationGate {

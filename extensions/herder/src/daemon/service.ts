@@ -129,7 +129,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
@@ -293,7 +293,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				dashboardUrl,
 				managerProtocolVersion: MANAGER_PROTOCOL_VERSION,
 				executionSchemaVersion: EXECUTION_SCHEMA_VERSION,
-				capabilities: ["durable-operations", "snapshot-status", "main-session-verification", "attention-resolution"],
+				capabilities: ["durable-operations", "snapshot-status", "main-session-verification", "main-session-reignite", "attention-resolution"],
 			});
 			return;
 		}

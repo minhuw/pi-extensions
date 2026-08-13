@@ -89,6 +89,7 @@ const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
 	"/v1/edit": "edit",
 	"/v1/stop": "stop",
 	"/v1/verification": "verification",
+	"/v1/reignite": "reignite",
 };
 
 export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {

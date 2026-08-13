@@ -166,6 +166,47 @@ test("execution schema migrates version 10 reignite storage and preserves verifi
 	}
 });
 
+test("execution schema migrates version 11 reignite allocation columns", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v11-"));
+	try {
+		const current = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((current.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		current.exec(`
+			CREATE TABLE manager_reignite_requests_v11 (
+				request_id TEXT PRIMARY KEY NOT NULL,
+				run_id TEXT NOT NULL,
+				generation INTEGER NOT NULL,
+				request_sha256 TEXT NOT NULL UNIQUE,
+				source_plan_directory TEXT NOT NULL,
+				graph_sha256 TEXT NOT NULL,
+				integration_head TEXT NOT NULL,
+				integration_tree TEXT NOT NULL,
+				integration_branch TEXT NOT NULL,
+				verdict TEXT NOT NULL,
+				scope TEXT NOT NULL,
+				findings_json TEXT NOT NULL,
+				fix_guidance_json TEXT NOT NULL,
+				rationale TEXT NOT NULL,
+				state TEXT NOT NULL,
+				created_at TEXT NOT NULL
+			);
+		`);
+		current.exec("DROP TABLE manager_reignite_requests;");
+		current.exec("ALTER TABLE manager_reignite_requests_v11 RENAME TO manager_reignite_requests;");
+		current.exec("PRAGMA user_version = 11;");
+		current.close();
+
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		const columns = (migrated.prepare("PRAGMA table_info(manager_reignite_requests)").all() as Array<{ name: string }>).map((row) => row.name);
+		assert.ok(columns.includes("allocated_plan_directory"));
+		assert.ok(columns.includes("detail"));
+		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("reignite requests are put-if-absent per run and generation", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-reignite-put-"));
 	try {
