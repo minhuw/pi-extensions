@@ -897,6 +897,9 @@ export class HerderRunManager {
 		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
 			throw new Error(`Resume must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
 		}
+		if (run.status === "complete" && this.store.getReigniteRequest(run.runId, run.currentGeneration)?.state === "pending") {
+			return this.reply();
+		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		const drift = this.graphDrift(run);

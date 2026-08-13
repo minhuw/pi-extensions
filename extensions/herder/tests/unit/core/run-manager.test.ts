@@ -919,6 +919,47 @@ test("final Reviewer residual findings complete the run with a pending reignite 
 	}
 });
 
+test("complete pending reignite resume re-exposes the dossier after plan-graph drift", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-complete-pending-resume-drift-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const finding = "[fr-drift][P1][BLOCKING][PLAN_REQUIREMENT] residual work after graph drift";
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"complete-pending-resume-drift",
+			`VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual requirement belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
+		);
+		assert.equal(completed.status, "complete");
+		const reignite = payload(completed.reigniteRequest);
+		assert.equal(reignite.state, "pending");
+		appendIndependentPlan(fixture);
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal((resumed.actions as unknown[]).length, 0);
+		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
+		assert.equal(payload(resumed.reigniteRequest).state, "pending");
+		assert.deepEqual(payload(resumed.reigniteRequest).findings, [finding]);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "complete");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.requestId, reignite.requestId);
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "pending");
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("final Reviewer approve with no findings persists a skipped reignite dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-skip-test-"));
 	const fixture = writeFixture(root);
