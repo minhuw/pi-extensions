@@ -137,6 +137,21 @@ async function verificationTool(args: JsonObject): Promise<unknown> {
 	return { ok: true, reply: await executeManagerOperation(directory, "verification", args.manifest) };
 }
 
+function reignitePayload(args: JsonObject): JsonObject {
+	return {
+		requestId: requiredString(args, "requestId"),
+		requestSha256: requiredString(args, "requestSha256"),
+		state: requiredString(args, "state"),
+		...(args.graphSha256 === undefined ? {} : { graphSha256: String(args.graphSha256) }),
+		...(args.detail === undefined ? {} : { detail: String(args.detail) }),
+	};
+}
+
+async function reigniteTool(args: JsonObject): Promise<unknown> {
+	const directory = planDirectory(args);
+	return { ok: true, reply: await executeManagerOperation(directory, "reignite", reignitePayload(args)) };
+}
+
 export interface PendingHerderOperation {
 	planDirectory: string;
 	operationId: string;
@@ -149,6 +164,12 @@ export function prepareHerderVerificationManifest(request: VerificationRequest, 
 export async function submitHerderVerification(args: JsonObject): Promise<PendingHerderOperation> {
 	const directory = planDirectory(args);
 	const receipt = await submitManagerOperationReliable(directory, "verification", args.manifest, String(args.operationId || randomUUID()));
+	return { planDirectory: directory, operationId: receipt.operationId };
+}
+
+export async function submitHerderReignite(args: JsonObject): Promise<PendingHerderOperation> {
+	const directory = planDirectory(args);
+	const receipt = await submitManagerOperationReliable(directory, "reignite", reignitePayload(args), String(args.operationId || randomUUID()));
 	return { planDirectory: directory, operationId: receipt.operationId };
 }
 
@@ -505,10 +526,11 @@ export async function applyHerderReset(
 	return runExclusion(request.planDirectory, () => resetHerderPlanSet(request));
 }
 
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_reignite", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
 	if (name === "herder_verification") return verificationTool(args);
+	if (name === "herder_reignite") return reigniteTool(args);
 	return submitTool(args);
 }

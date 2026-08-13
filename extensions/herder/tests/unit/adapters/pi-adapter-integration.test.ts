@@ -13,6 +13,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
+import { compileGraphIdentity } from "../../../src/core/run-manager.ts";
 import { ensureService, stopService } from "../../../src/client/index.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
@@ -406,6 +407,7 @@ class ControlledSession {
 	prompted = false;
 	aborted = false;
 	disposed = false;
+	finalReviewResponse?: string;
 	private readonly gate?: Deferred<void>;
 	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 
@@ -432,6 +434,7 @@ class ControlledSession {
 		}
 		if (this.action.role === "plan-implementer") this.completeImplementation();
 		else if (this.action.role === "plan-reviewer" && this.action.workerMode !== "FINAL_AUDIT") this.completeReview();
+		else if (this.action.workerMode === "FINAL_AUDIT" && this.finalReviewResponse) this.addAssistantMessage(this.finalReviewResponse);
 		this.finishLifecycle();
 	}
 
@@ -577,6 +580,39 @@ function verificationRequestId(prompt: string): string {
 	return match[1]!;
 }
 
+function fieldValue(prompt: string, name: string): string {
+	const match = prompt.match(new RegExp(`^${name}: (.+)$`, "m"));
+	if (!match) throw new Error(`Prompt did not contain ${name}`);
+	return match[1]!;
+}
+
+function writeAdapterFollowUpPlan(directory: string, fixture: Fixture): string {
+	initPlanDir(directory);
+	fs.writeFileSync(path.join(directory, "README.md"), `# Herder Plans
+
+## Execution order & status
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|---|---|---|---|---|---|
+| [001](001-follow-up.md) | Follow up residual work | P1 | S | — | TODO |
+
+## Dependency notes
+
+None.
+
+## Considered and rejected
+
+None.
+`);
+	fs.writeFileSync(
+		path.join(directory, "001-follow-up.md"),
+		fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
+			.replaceAll("Plan 001: Update the fixture value", "Plan 001: Follow up residual work")
+			.replaceAll("Update the fixture value", "Follow up residual work"),
+	);
+	return compileGraphIdentity(buildGraph(directory));
+}
+
 function readVerification(fixture: Fixture): { runId: string; state: string; manifest: Record<string, unknown> | null } {
 	const store = new RunStore(fixture.planDirectory);
 	try {
@@ -629,7 +665,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"herder-stop",
 			"herder-validate",
 		].sort());
-		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_plan", "herder_verification"]);
+		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_plan", "herder_reignite", "herder_verification"]);
 		assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
 		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_CLEANUP_LEGACY_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
 
@@ -829,6 +865,203 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 	} finally {
 		if (api && context && !shutdown) {
 			await withDeadline(api.invoke("session_shutdown", context), "integration cleanup session_shutdown", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+async function fireThroughPassingVerification(
+	api: CapturedExtensionAPI,
+	factory: CapturedWorkerFactory,
+	context: ExtensionContext,
+): Promise<ControlledSession> {
+	await withDeadline(
+		api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context),
+		"/herder-fire dispatch",
+	);
+	const implementer = await withDeadline(
+		factory.waitForSession((session) => session.action.role === "plan-implementer"),
+		"implementer creation",
+	);
+	await withDeadline(implementer.started.promise, "implementer start");
+	implementer.release();
+	await withDeadline(
+		factory.waitForSession((session) => session.action.role === "plan-reviewer" && session.action.workerMode === "DISCOVERY"),
+		"reviewer creation",
+	);
+	const verificationPrompt = (await withDeadline(api.waitForUserMessage(), "verification delegation")).content;
+	const requestId = verificationRequestId(verificationPrompt);
+	await withDeadline(
+		api.tool("herder_verification").execute(
+			"verification",
+			{
+				planDirectory: "herder-plans",
+				requestId,
+				rationale: "The dependency-free fixture test is the smallest complete local proof.",
+				gates: [{
+					gateId: "local-npm-test",
+					label: "local fixture tests",
+					cwd: ".",
+					argv: ["npm", "test"],
+					rationale: "Runs the integrated fixture without provider access.",
+				}],
+			},
+			undefined,
+			undefined,
+			context,
+			),
+		"passing herder_verification submission",
+	);
+	return await withDeadline(
+		factory.waitForSession((session) => session.action.workerMode === "FINAL_AUDIT"),
+		"final audit dispatch",
+	);
+}
+
+test("complete pending reignite injects one write prompt and ack does not dispatch workers", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-reignite-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		const factory = new CapturedWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "captured session_start");
+		const finalAudit = await fireThroughPassingVerification(api, factory, context);
+		finalAudit.finalReviewResponse = `VERDICT: REVISE
+FINDINGS: [fr-1][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding
+FIX_GUIDANCE: Write a sibling follow-up plan set.
+DISCOVERED_PATHS: none
+SCOPE: PASS
+CHECKS: npm test — passed
+RATIONALE: Residual requirement belongs in a follow-up plan set.
+USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
+		const beforeReignite = api.userMessages.length;
+		finalAudit.release();
+		const reignitePrompt = (await withDeadline(
+			api.waitForUserMessage(beforeReignite, "HERDER_MAIN_SESSION_REIGNITE_V1"),
+			"reignite delegation",
+		)).content;
+		assert.match(reignitePrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
+		assert.match(reignitePrompt, /ALLOCATED_PLAN_DIRECTORY: /);
+		assert.match(reignitePrompt, /Do not call \/herder-fire/);
+		assert.equal(factory.sessions.some((session) => session.action.role === "plan-implementer" && session.action.planId !== "001"), false);
+		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
+		assert.equal(firstCount, 1);
+		await withDeadline(api.command("herder-status").handler("herder-plans", context), "reignite status refresh");
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(
+			api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length,
+			firstCount,
+			"status refresh injected a duplicate reignite prompt",
+		);
+		const messageCountBeforeResume = api.userMessages.length;
+		await withDeadline(api.command("herder-resume").handler("herder-plans", context), "/herder-resume pending reignite");
+		const resumedPrompt = (await withDeadline(
+			api.waitForUserMessage(messageCountBeforeResume, "HERDER_MAIN_SESSION_REIGNITE_V1"),
+			"reignite re-injection",
+		)).content;
+		assert.match(resumedPrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
+		assert.equal(fieldValue(resumedPrompt, "REQUEST_ID"), fieldValue(reignitePrompt, "REQUEST_ID"));
+		const allocated = fieldValue(resumedPrompt, "ALLOCATED_PLAN_DIRECTORY");
+		const graphSha256 = writeAdapterFollowUpPlan(allocated, fixture);
+		const workersBeforeAck = factory.sessions.length;
+		const ack = await withDeadline(
+			api.tool("herder_reignite").execute(
+				"reignite",
+				{
+					planDirectory: "herder-plans",
+					requestId: fieldValue(resumedPrompt, "REQUEST_ID"),
+					requestSha256: fieldValue(resumedPrompt, "REQUEST_SHA256"),
+					state: "written",
+					graphSha256,
+				},
+				undefined,
+				undefined,
+				context,
+			),
+			"herder_reignite written ack",
+		);
+		assert.equal(object(ack).terminate, true);
+		assert.match(toolText(ack), /original run remains complete/i);
+		assert.equal(factory.sessions.length, workersBeforeAck, "reignite ack dispatched workers");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "complete");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "written");
+		} finally { store.close(); }
+		await withDeadline(api.invoke("session_shutdown", context), "reignite session_shutdown");
+		shutdown = true;
+	} finally {
+		if (api && context && !shutdown) {
+			await withDeadline(api.invoke("session_shutdown", context), "reignite cleanup session_shutdown", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("skipped reignite dossier does not inject a write prompt", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-reignite-skip-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		const factory = new CapturedWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "captured session_start");
+		const finalAudit = await fireThroughPassingVerification(api, factory, context);
+		finalAudit.finalReviewResponse = `VERDICT: APPROVE
+FINDINGS: none
+FIX_GUIDANCE: none
+DISCOVERED_PATHS: none
+SCOPE: PASS
+CHECKS: npm test — passed
+RATIONALE: Aggregate review found no residual requirements.
+USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
+		const before = api.userMessages.length;
+		finalAudit.release();
+		await withDeadline(finalAudit.settled.promise, "final audit settlement");
+		await withDeadline((async () => {
+			for (;;) {
+				const store = new RunStore(fixture.planDirectory);
+				try {
+					const run = store.getRun();
+					if (run?.status === "complete") {
+						assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "skipped");
+						return;
+					}
+				} finally { store.close(); }
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+		})(), "skipped dossier completion");
+		assert.equal(
+			api.userMessages.slice(before).some((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")),
+			false,
+		);
+		await withDeadline(api.invoke("session_shutdown", context), "skipped reignite session_shutdown");
+		shutdown = true;
+	} finally {
+		if (api && context && !shutdown) {
+			await withDeadline(api.invoke("session_shutdown", context), "skipped reignite cleanup session_shutdown", 5_000).catch(() => {});
 		}
 		if (fixture) {
 			await stopService(fixture.planDirectory).catch(() => {});

@@ -8,6 +8,7 @@ import {
 	attentionCapabilityToken,
 	type ManagerAttentionRequest,
 	type ManagerReply,
+	type ReigniteRequest,
 	type TerminalEvent,
 	type VerificationManifest,
 	type VerificationRequest,
@@ -15,6 +16,7 @@ import {
 import {
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
+	submitHerderReignite,
 	submitHerderVerification,
 	waitHerderOperation,
 } from "../src/application/tools.ts";
@@ -136,6 +138,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const fallbackPiSessionId = `fallback-${randomUUID()}`;
 	const verificationRequests = new Map<string, VerificationRequest>();
 	const promptedVerifications = new Set<string>();
+	const reigniteRequests = new Map<string, ReigniteRequest>();
+	const promptedReignites = new Set<string>();
 	const verificationMonitors = new Map<string, number>();
 	const notifiedVerificationFailures = new Set<string>();
 	const deliveredVerificationFailureFollowUps = new Set<string>();
@@ -269,6 +273,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		pendingVerificationFailure = undefined;
 		verificationRequests.clear();
 		promptedVerifications.clear();
+		reigniteRequests.clear();
+		promptedReignites.clear();
 		verificationMonitors.clear();
 		notifiedVerificationFailures.clear();
 		deliveredVerificationFailureFollowUps.clear();
@@ -337,6 +343,48 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		} catch (error) {
 			promptedVerifications.delete(request.requestId);
 			lastContext.ui.notify(`Herder could not delegate final verification: ${message(error)}`, "warning");
+		}
+	};
+
+	const delegateReignite = (reply: ManagerReply) => {
+		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId)) return;
+		const request = reply.reigniteRequest;
+		if (!request || request.state !== "pending") return;
+		reigniteRequests.set(request.requestId, request);
+		if ((reply.operations ?? []).some((operation) => operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${request.requestId}:`))) return;
+		if (promptedReignites.has(request.requestId) || !lastContext) return;
+		promptedReignites.add(request.requestId);
+		const findings = request.findings.length > 0 ? request.findings.map((finding) => `- ${finding}`).join("\n") : "none";
+		const guidance = request.fixGuidance.length > 0 ? request.fixGuidance.map((item) => `- ${item}`).join("\n") : "none";
+		const prompt = [
+			"HERDER_MAIN_SESSION_REIGNITE_V1",
+			"The original Herder run is complete. Residual PLAN_REQUIREMENT and PATCH_REGRESSION findings must become a new fireable sibling plan directory in one shot.",
+			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
+			"Use herder_plan init with local tracking, write the plan files, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
+			"As your final action, call herder_reignite exactly once with written or failed. Do not provide a prose-only answer.",
+			`REQUEST_ID: ${request.requestId}`,
+			`REQUEST_SHA256: ${request.requestSha256}`,
+			`RUN_ID: ${request.runId}`,
+			`SOURCE_PLAN_DIRECTORY: ${request.sourcePlanDirectory}`,
+			`ALLOCATED_PLAN_DIRECTORY: ${request.allocatedPlanDirectory ?? "unallocated"}`,
+			`GENERATION: ${request.generation}`,
+			`GRAPH_SHA256: ${request.graphSha256}`,
+			`INTEGRATION_BRANCH: ${request.integrationBranch}`,
+			`INTEGRATION_HEAD: ${request.integrationHead}`,
+			`INTEGRATION_TREE: ${request.integrationTree}`,
+			`VERDICT: ${request.verdict}`,
+			`SCOPE: ${request.scope}`,
+			"FINDINGS:",
+			findings,
+			"FIX_GUIDANCE:",
+			guidance,
+			...(request.detail ? [`PREVIOUS_WRITE_ERROR: ${request.detail.replace(/\s+/g, " ").slice(0, 1_000)}`] : []),
+		].join("\n");
+		try {
+			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+		} catch (error) {
+			promptedReignites.delete(request.requestId);
+			lastContext.ui.notify(`Herder could not delegate the reignite write: ${message(error)}`, "warning");
 		}
 	};
 
@@ -433,6 +481,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			lastManagerMessage = undefined;
 			verificationRequests.clear();
 			promptedVerifications.clear();
+			reigniteRequests.clear();
+			promptedReignites.clear();
 			notifiedVerificationFailures.clear();
 			render();
 			return;
@@ -499,6 +549,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		render();
 		delegateVerification(reply, verificationRetryDetail);
+		delegateReignite(reply);
 		drainVerificationFailure();
 		void requestAttentionDrain();
 	};
@@ -695,6 +746,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			attentionHint = undefined;
 			currentAttention = undefined;
 			deferredAttention.clear();
+			promptedReignites.clear();
 		}
 		let acquired: AdapterOwnership | undefined;
 		let before: ManagerReply | undefined;
@@ -1151,6 +1203,83 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 	});
 
+	pi.registerTool({
+		name: "herder_reignite",
+		label: "Herder Reignite",
+		description: "Acknowledge the one-shot write of residual final-review findings into the allocated herder-reignite[-N] plan directory. The original complete run stays complete.",
+		parameters: Type.Object({
+			planDirectory: Type.String(),
+			requestId: Type.String(),
+			requestSha256: Type.String(),
+			state: Type.Union([Type.Literal("written"), Type.Literal("failed")]),
+			graphSha256: Type.Optional(Type.String()),
+			detail: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const epoch = sessionEpoch;
+			assertSessionActive(epoch);
+			lastContext = ctx;
+			if (!ctx.isProjectTrusted()) throw new Error("Trust this project before acknowledging a Herder reignite write.");
+			const repoRoot = await repositoryRoot(ctx);
+			assertSessionActive(epoch);
+			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
+			let request = reigniteRequests.get(params.requestId);
+			if (!request) {
+				const reply = await enqueueManager(async () => {
+					assertSessionActive(epoch);
+					return unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
+				});
+				assertSessionActive(epoch);
+				assertOwnership(reply.planDirectory, reply.runId);
+				updateFromReply(reply);
+				request = reigniteRequests.get(params.requestId);
+			}
+			if (!request || request.requestId !== params.requestId || request.requestSha256 !== params.requestSha256 || currentState?.runId !== request.runId || currentState.profile === "unknown") {
+				throw new Error(`Herder reignite request ${params.requestId} is not bound to this main session`);
+			}
+			assertOwnership(planDirectory, request.runId);
+			await resolveProfile(ctx, currentState.profile);
+			assertSessionActive(epoch);
+			const operationId = `reignite:${request.requestId}:${randomUUID()}`;
+			const pending = await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				assertOwnership(planDirectory, request!.runId);
+				const submitted = await submitHerderReignite({
+					planDirectory,
+					operationId,
+					requestId: request!.requestId,
+					requestSha256: request!.requestSha256,
+					state: params.state,
+					...(params.graphSha256 === undefined ? {} : { graphSha256: params.graphSha256 }),
+					...(params.detail === undefined ? {} : { detail: params.detail }),
+				});
+				assertSessionActive(epoch);
+				return submitted;
+			});
+			const value = await waitHerderOperation(pending);
+			assertSessionActive(epoch);
+			if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Reignite operation returned no manager reply");
+			const reply = value as ManagerReply;
+			assertOwnership(reply.planDirectory, reply.runId);
+			updateFromReply(reply);
+			if (params.state === "written") reigniteRequests.delete(request.requestId);
+			const written = params.state === "written" && reply.status === "complete" && !reply.reigniteRequest;
+			return {
+				content: [{ type: "text" as const, text: written
+					? `Reignite plan directory written at ${request.allocatedPlanDirectory || "the allocated path"}. The original run remains complete. Fire is a separate command.`
+					: `Reignite write was not accepted as complete. The original run remains complete and the dossier is still pending at ${request.allocatedPlanDirectory || "the allocated path"}.` }],
+				details: {
+					operationId,
+					requestId: request.requestId,
+					state: params.state,
+					allocatedPlanDirectory: request.allocatedPlanDirectory,
+					sourceStatus: reply.status,
+				},
+				terminate: true,
+			};
+		},
+	});
+
 	engine.onUpdate(() => render());
 	engine.onTerminal(async (completed: PiWorkerTerminal) => {
 		const binding = workers.get(completed.handle);
@@ -1264,9 +1393,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		widget.dispose();
 		verificationRequests.clear();
+		reigniteRequests.clear();
 		pendingVerificationFailure = undefined;
 		sendingVerificationFailure = false;
 		promptedVerifications.clear();
+		promptedReignites.clear();
 		currentAttention = undefined;
 		deferredAttention.clear();
 		lastContext = undefined;
