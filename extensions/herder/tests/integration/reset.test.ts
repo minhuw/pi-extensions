@@ -220,14 +220,12 @@ test("dirty, foreign, missing, and locked worktrees refuse before mutation", { t
 	}
 });
 
-test("applyHerderReset delegates service exclusion and refuses an active nonterminal service", async () => {
+test("applyHerderReset stops an active service before resetting", async () => {
 	const value = await initializedFixture();
 	try {
-		const service = await ensureService(value.planDir);
-		await assert.rejects(
-			() => applyHerderReset({ repoRoot: value.repo, planDirectory: value.planDir }),
-			/active|terminal run/i,
-		);
-		assert.equal((await requestService(service, "/v1/status", undefined)).reply !== undefined, true);
+		await ensureService(value.planDir);
+		const result = await applyHerderReset({ repoRoot: value.repo, planDirectory: value.planDir });
+		assert.equal(result.planName, "herder-plans");
+		assert.equal((await requestService(await ensureService(value.planDir), "/v1/status", undefined)).reply !== undefined, true);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });

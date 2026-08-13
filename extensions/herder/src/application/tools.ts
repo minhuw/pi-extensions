@@ -493,7 +493,7 @@ export async function applyHerderReset(
 	request: ResetApplicationRequest,
 	dependencies: { withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T> } = {},
 ): Promise<HerderResetResult> {
-	const runExclusion = dependencies.withExclusion ?? withServiceExclusion;
+	const runExclusion = dependencies.withExclusion ?? ((planDirectory, callback) => withServiceExclusion(planDirectory, callback, { purpose: "reset" }));
 	return runExclusion(request.planDirectory, () => resetHerderPlanSet(request));
 }
 
