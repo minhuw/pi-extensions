@@ -780,7 +780,7 @@ export class HerderRunManager {
 				? plan.repair[0] || attentionDetails.get(spec.planId) || spec.initialStatusDetail
 				: status === spec.initialStatus ? spec.initialStatusDetail : "";
 			const detail = rawDetail.replace(/[\r\n]+/g, " ").replaceAll("|", ";").replace(/\s+/g, " ").trim();
-			return { id: spec.planId, status, detail };
+			return { id: spec.planId, status, detail: status === "BLOCKED" || status === "REJECTED" ? detail : "" };
 		}));
 	}
 
@@ -1839,7 +1839,13 @@ export class HerderRunManager {
 		}
 		const rejected = action === "reject" || action === "cancel";
 		const nextSpecs: StoredPlanSpec[] = compiled.specs.map((spec) => spec.planId === attention.planId
-			? { ...spec, initialStatus: (rejected ? "REJECTED" : "TODO") as StoredPlanSpec["initialStatus"], initialStatusDetail: resolution.rationale?.trim() || (rejected ? "Recovery was rejected by the main session." : "") }
+			? {
+				...spec,
+				initialStatus: (rejected ? "REJECTED" : "TODO") as StoredPlanSpec["initialStatus"],
+				initialStatusDetail: rejected
+					? (resolution.rationale?.trim() || "Recovery was rejected by the main session.")
+					: "",
+			}
 			: spec);
 		return { plan, prior, compiled, nextSpecs, targetChanged };
 	}

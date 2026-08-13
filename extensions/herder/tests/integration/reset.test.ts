@@ -234,6 +234,64 @@ test("locked Herder-owned worktrees reset successfully", { timeout: 30_000 }, as
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
+test("reset drops a recovery rationale stored on TODO and still restores the index", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const store = new RunStore(value.planDir);
+		try {
+			const run = store.getRun()!;
+			const specs = store.getPlanSpecs(run.runId, run.currentGeneration);
+			store.putPlanSpecs(specs.map((spec) => spec.planId === "001"
+				? { ...spec, initialStatusDetail: "Revised only the target plan. Shape and validation both pass." }
+				: spec));
+		} finally { store.close(); }
+		projectStatuses(value.planDir, [{ id: "001", status: "DONE" }]);
+		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
+		assert.deepEqual(result.resetPlans, ["001"]);
+		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+		assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
+		assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /Revised only the target plan/);
+		const empty = new RunStore(value.planDir);
+		try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset completes after a previous attempt already removed the Git namespace", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const store = new RunStore(value.planDir);
+		try {
+			const run = store.getRun()!;
+			const specs = store.getPlanSpecs(run.runId, run.currentGeneration);
+			store.putPlanSpecs(specs.map((spec) => spec.planId === "001"
+				? { ...spec, initialStatusDetail: "Revised only the target plan. The compiled identity is unchanged." }
+				: spec));
+		} finally { store.close(); }
+		const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+		for (const name of ["integration", "001"]) {
+			command(value.repo, ["worktree", "unlock", path.join(planRoot, name)], true);
+			command(value.repo, ["worktree", "remove", "--", path.join(planRoot, name)]);
+		}
+		for (const ref of [
+			...git(value.repo, "for-each-ref", "--format=%(refname)", `refs/heads/herder/${value.planName}/`).split(/\r?\n/),
+			...git(value.repo, "for-each-ref", "--format=%(refname)", `refs/plan-herder/${value.planName}/`).split(/\r?\n/),
+		].filter(Boolean)) command(value.repo, ["update-ref", "-d", ref]);
+		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+		assert.equal(git(value.repo, "for-each-ref", `refs/plan-herder/${value.planName}/`), "");
+		const leftover = new RunStore(value.planDir);
+		try { assert.ok(leftover.getRun()); } finally { leftover.close(); }
+		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
+		assert.deepEqual(result.removedBranches, []);
+		assert.deepEqual(result.removedWorktrees, []);
+		assert.deepEqual(result.removedRefs, []);
+		assert.deepEqual(result.resetPlans, ["001"]);
+		assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
+		assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /Revised only the target plan/);
+		const empty = new RunStore(value.planDir);
+		try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
 test("applyHerderReset stops an active service before resetting", async () => {
 	const value = await initializedFixture();
 	try {

@@ -77,6 +77,20 @@ function validateSpecs(planDir: string): { graph: ReturnType<typeof buildGraph>;
   } finally { store.close(); }
 }
 
+function projectedResetStatuses(specs: StoredPlanSpec[]): Array<{ id: string; status: string; detail: string }> {
+  return specs.map((spec) => {
+    const detail = String(spec.initialStatusDetail ?? "").trim();
+    if (spec.initialStatus === "BLOCKED" || spec.initialStatus === "REJECTED") {
+      if (!detail) fail(`Herder reset refused: ${spec.initialStatus} plan ${spec.planId} is missing its status detail.`);
+      if (/[\r\n|]/.test(detail)) fail(`Herder reset refused: status detail for plan ${spec.planId} is not a single table-safe line.`);
+      return { id: spec.planId, status: spec.initialStatus, detail };
+    }
+    // Recovery retry/revise used to persist the rationale on TODO. That is not a
+    // README status detail; drop it rather than failing after Git mutations.
+    return { id: spec.planId, status: spec.initialStatus, detail: "" };
+  });
+}
+
 /** Reset an entire initialized plan namespace. This intentionally does not use one-plan recovery cleanup. */
 export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const repo = real(path.resolve(input.repoRoot));
@@ -90,50 +104,55 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const { graph, specs, run } = validateSpecs(planDir);
   if (run!.repositoryRoot !== repo || run!.planName !== name || run!.integrationBranch !== `herder/${name}/integration`) fail("Herder reset refused: execution identity does not match this repository and plan set.");
   const integration = `herder/${name}/integration`, integrationRef = `refs/heads/${integration}`, baseRef = `refs/plan-herder/${name}/base`;
-  const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
-  if (!integrationHead) fail(`Herder reset requires integration branch ${integration}.`);
-  if (!base) fail(`Herder reset requires a valid base coordination ref ${baseRef}.`);
-  if (!ancestor(repo, base, integrationHead)) fail("Herder reset refused: integration branch is unrelated to its base coordination ref.");
   const current = checkout(repo);
   if (!current.branch || !current.head) fail("Herder reset cannot run from a detached or unreadable checkout.");
   if (current.branch === integration) fail("Herder reset cannot run from the integration checkout.");
   if (current.branch.startsWith(`herder/${name}/`)) fail("Herder reset cannot run from a Herder-owned plan checkout.");
-  if (integrationHead !== base && ancestor(repo, integrationHead, current.head)) fail("Herder reset cannot be performed because the integration branch has already been merged.");
-
+  // Validate the README projection before any Git mutation so a later
+  // status-format failure cannot leave a half-deleted namespace.
+  const projected = projectedResetStatuses(specs);
+  const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
   const allBranches = branches(repo, name);
   const allRefs = refs(repo, name);
   const worktrees = parseWorktrees(repo);
-  const allowedPlans = new Set(graph.plans.map((p) => p.id));
-  for (const branch of allBranches) {
-    if (branch.relative !== "integration" && !/^\d{3,}$/.test(branch.relative)) fail(`Herder reset refused unknown branch in namespace: ${branch.branch}`);
-    if (branch.relative !== "integration" && !allowedPlans.has(branch.relative)) fail(`Herder reset refused branch for unknown plan: ${branch.branch}`);
-  }
-  for (const ref of allRefs) if (!parseCoordinationRefRelative(ref.relative)) fail(`Herder reset refused unknown coordination ref: ${ref.ref}`);
-  const branchMap = new Map(allBranches.map((b) => [b.branch, b]));
-  const integrationWorktrees = worktrees.filter((w) => w.branch === integration);
-  if (integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
-  for (const w of owned) {
-    if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
-    cleanWorktree(repo, w);
-    const expected = w.branch === integration ? path.join(`${repo}-herder-worktrees`, name, "integration") : path.join(`${repo}-herder-worktrees`, name, w.branch.slice(`herder/${name}/`.length));
-    if (real(w.path) !== real(expected)) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
-  }
-  const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
-  // Revalidate every identity immediately before the first mutation.
-  if (snapshot(branches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(parseWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+  const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   const removedWorktrees: string[] = [];
-  for (const w of owned) {
-    if (w.locked) git(repo, ["worktree", "unlock", "--", w.path]);
-    git(repo, ["worktree", "remove", "--", w.path]);
-    removedWorktrees.push(w.path);
-  }
   const removedBranches: string[] = [];
-  for (const b of allBranches) { deleteBranch(repo, b.branch, b.head); removedBranches.push(b.branch); }
   const removedRefs: string[] = [];
-  for (const ref of allRefs) { deleteRef(repo, ref.ref, ref.target); removedRefs.push(ref.ref); }
+  if (!namespaceEmpty) {
+    if (!integrationHead) fail(`Herder reset requires integration branch ${integration}.`);
+    if (!base) fail(`Herder reset requires a valid base coordination ref ${baseRef}.`);
+    if (!ancestor(repo, base, integrationHead)) fail("Herder reset refused: integration branch is unrelated to its base coordination ref.");
+    if (integrationHead !== base && ancestor(repo, integrationHead, current.head)) fail("Herder reset cannot be performed because the integration branch has already been merged.");
+    const allowedPlans = new Set(graph.plans.map((p) => p.id));
+    for (const branch of allBranches) {
+      if (branch.relative !== "integration" && !/^\d{3,}$/.test(branch.relative)) fail(`Herder reset refused unknown branch in namespace: ${branch.branch}`);
+      if (branch.relative !== "integration" && !allowedPlans.has(branch.relative)) fail(`Herder reset refused branch for unknown plan: ${branch.branch}`);
+    }
+    for (const ref of allRefs) if (!parseCoordinationRefRelative(ref.relative)) fail(`Herder reset refused unknown coordination ref: ${ref.ref}`);
+    const branchMap = new Map(allBranches.map((b) => [b.branch, b]));
+    const integrationWorktrees = worktrees.filter((w) => w.branch === integration);
+    if (integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
+    for (const w of owned) {
+      if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
+      cleanWorktree(repo, w);
+      const expected = w.branch === integration ? path.join(`${repo}-herder-worktrees`, name, "integration") : path.join(`${repo}-herder-worktrees`, name, w.branch.slice(`herder/${name}/`.length));
+      if (real(w.path) !== real(expected)) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
+    }
+    const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
+    // Revalidate every identity immediately before the first mutation.
+    if (snapshot(branches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(parseWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+    for (const w of owned) {
+      if (w.locked) git(repo, ["worktree", "unlock", "--", w.path]);
+      git(repo, ["worktree", "remove", "--", w.path]);
+      removedWorktrees.push(w.path);
+    }
+    for (const b of allBranches) { deleteBranch(repo, b.branch, b.head); removedBranches.push(b.branch); }
+    for (const ref of allRefs) { deleteRef(repo, ref.ref, ref.target); removedRefs.push(ref.ref); }
+  }
   // The README is the durable user-facing projection; use the immutable initial values, never current statuses.
-  projectStatuses(planDir, specs.map((spec) => ({ id: spec.planId, status: spec.initialStatus, detail: spec.initialStatusDetail })));
+  projectStatuses(planDir, projected);
   const writable = new RunStore(planDir);
   try { writable.resetExecutionState(); } finally { writable.close(); }
   clearExecutionRotationMarker(planDir);

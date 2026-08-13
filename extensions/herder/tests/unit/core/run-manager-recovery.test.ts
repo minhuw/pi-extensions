@@ -360,7 +360,10 @@ test("target-only revisions and permitted rejection produce immutable next gener
 			const run = store.getRun();
 			assert.ok(run);
 			assert.equal(run.currentGeneration, 2);
-			assert.match(store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001")?.assignment.planText || "", /Revised target/);
+			const revisedSpec = store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001");
+			assert.equal(revisedSpec?.initialStatus, "TODO");
+			assert.equal(revisedSpec?.initialStatusDetail, "");
+			assert.match(revisedSpec?.assignment.planText || "", /Revised target/);
 			assert.equal(store.getGenerations(run.runId).length, 2);
 			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
 		} finally {
@@ -395,7 +398,9 @@ test("target-only revisions and permitted rejection produce immutable next gener
 		try {
 			const run = store.getRun();
 			assert.ok(run);
-			assert.equal(store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001")?.initialStatus, "REJECTED");
+			const rejectedSpec = store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001");
+			assert.equal(rejectedSpec?.initialStatus, "REJECTED");
+			assert.equal(rejectedSpec?.initialStatusDetail, "The target is not justified for this run.");
 			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
 			assert.equal(store.getActions(run.runId, ["proposed", "dispatched"]).some((action) => action.planId === "001"), false);
 		} finally {
