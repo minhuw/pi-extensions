@@ -3,13 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { invokeHerderTool } from "../../../src/application/tools.ts";
+import { ensureService, requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
-import type { VerificationGate } from "../../../src/shared/protocol.ts";
+import type { ManagerReply, VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -1217,6 +1218,22 @@ test("reignite allocation reserves distinct sibling paths and skips unsafe candi
 	}
 });
 
+test("herder_plan validate and shape expose the graph identity used by written acks", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-validate-hash-"));
+	const fixture = writeFixture(root);
+	try {
+		const allocated = path.join(fixture.repo, "herder-reignite");
+		writeFollowUpPlanDirectory(allocated, fixture);
+		const validated = payload(await invokeHerderTool("herder_plan", { operation: "validate", planDirectory: allocated }));
+		const shaped = payload(await invokeHerderTool("herder_plan", { operation: "shape", planDirectory: allocated }));
+		const expected = compileGraphIdentity(buildGraph(allocated));
+		assert.equal(validated.graphSha256, expected);
+		assert.equal(shaped.graphSha256, expected);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("reignite written ack validates the allocated graph and keeps the source complete", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-written-"));
 	const fixture = writeFixture(root);
@@ -1251,7 +1268,13 @@ test("reignite written ack validates the allocated graph and keeps the source co
 			state: "written",
 			graphSha256: inProgressHash,
 		}), /in-progress plans/);
-		const graphSha256 = writeFollowUpPlanDirectory(allocated, fixture, { extraStatus: "DONE" });
+		writeFollowUpPlanDirectory(allocated, fixture, { extraStatus: "DONE" });
+		const validated = payload(await invokeHerderTool("herder_plan", {
+			operation: "validate",
+			planDirectory: allocated,
+		}));
+		const graphSha256 = String(validated.graphSha256);
+		assert.match(graphSha256, /^[0-9a-f]{64}$/);
 		const written = payload(payload(await requestService(service, "/v1/reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
@@ -1330,6 +1353,59 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 		assert.equal(resumed.status, "complete");
 		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
 		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, fixture.planDirectory);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("status snapshots revalidate live complete state before exposing a reignite dossier", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-stale-status-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"reignite-stale-status",
+			"VERDICT: REVISE\nFINDINGS: [st-1][P1][BLOCKING][PLAN_REQUIREMENT] residual work\nFIX_GUIDANCE: Open a sibling plan set.\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		assert.equal(completed.status, "complete");
+		assert.equal(payload(completed.reigniteRequest).state, "pending");
+		appendIndependentPlan(fixture);
+		const queued = await submitManagerOperation(service, "event", {
+			eventId: "reignite-stale-status-drift",
+			kind: "terminals",
+			terminals: [],
+		});
+		const concurrent = payload(await requestService(service, "/v1/status"));
+		const concurrentReply = payload(concurrent.reply);
+		if (queued.state === "accepted" || queued.state === "running") {
+			if (concurrentReply.status === "complete") {
+				assert.ok(Array.isArray(concurrent.operations) && (concurrent.operations as unknown[]).length > 0);
+			} else {
+				assert.notEqual(concurrentReply.status, "complete");
+				assert.equal(concurrentReply.reigniteRequest, undefined);
+			}
+		}
+		await waitManagerOperation(service, queued.operationId);
+		const after = payload(payload(await requestService(service, "/v1/status")).reply);
+		assert.equal(after.status, "paused");
+		assert.equal(after.reigniteRequest, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "paused");
+			store.putSnapshot({
+				...completed,
+				status: "complete",
+				reigniteRequest: completed.reigniteRequest,
+			} as unknown as ManagerReply);
+		} finally { store.close(); }
+		const stale = payload(payload(await requestService(service, "/v1/status")).reply);
+		assert.equal(stale.status, "paused");
+		assert.equal(stale.reigniteRequest, undefined);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

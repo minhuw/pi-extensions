@@ -11,10 +11,11 @@ import type {
 	ModelRegistry,
 	SessionStats,
 } from "@earendil-works/pi-coding-agent";
-import type { ManagerAction } from "../../../src/shared/protocol.ts";
+import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { compileGraphIdentity } from "../../../src/core/run-manager.ts";
-import { ensureService, stopService } from "../../../src/client/index.ts";
+import { invokeHerderTool } from "../../../src/application/tools.ts";
+import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
@@ -586,6 +587,21 @@ function fieldValue(prompt: string, name: string): string {
 	return match[1]!;
 }
 
+function appendIndependentPlan(fixture: Fixture): void {
+	const readmePath = path.join(fixture.planDirectory, "README.md");
+	const readme = fs.readFileSync(readmePath, "utf8").replace(
+		/(\| \[001\]\(001-update-value\.md\).*\|\n)/,
+		"$1| [002](002-update-other.md) | Update the other fixture value | P1 | S | — | TODO |\n",
+	);
+	fs.writeFileSync(readmePath, readme);
+	const second = fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
+		.replaceAll("Plan 001", "Plan 002")
+		.replaceAll("fixture value", "other fixture value")
+		.replaceAll("src/value.mjs", "src/other.mjs")
+		.replaceAll("`value`", "`other`");
+	fs.writeFileSync(path.join(fixture.planDirectory, "002-update-other.md"), second);
+}
+
 function writeAdapterFollowUpPlan(directory: string, fixture: Fixture): string {
 	initPlanDir(directory);
 	fs.writeFileSync(path.join(directory, "README.md"), `# Herder Plans
@@ -973,7 +989,12 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		assert.match(resumedPrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
 		assert.equal(fieldValue(resumedPrompt, "REQUEST_ID"), fieldValue(reignitePrompt, "REQUEST_ID"));
 		const allocated = fieldValue(resumedPrompt, "ALLOCATED_PLAN_DIRECTORY");
-		const graphSha256 = writeAdapterFollowUpPlan(allocated, fixture);
+		writeAdapterFollowUpPlan(allocated, fixture);
+		const validated = object(await invokeHerderTool("herder_plan", {
+			operation: "validate",
+			planDirectory: allocated,
+		}));
+		const graphSha256 = String(validated.graphSha256);
 		const workersBeforeAck = factory.sessions.length;
 		const ack = await withDeadline(
 			api.tool("herder_reignite").execute(
@@ -1005,6 +1026,77 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 	} finally {
 		if (api && context && !shutdown) {
 			await withDeadline(api.invoke("session_shutdown", context), "reignite cleanup session_shutdown", 5_000).catch(() => {});
+		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("stale complete snapshots do not inject a reignite prompt after the source run pauses", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-reignite-stale-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		const factory = new CapturedWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "captured session_start");
+		const finalAudit = await fireThroughPassingVerification(api, factory, context);
+		finalAudit.finalReviewResponse = `VERDICT: REVISE
+FINDINGS: [fr-stale][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding
+FIX_GUIDANCE: Write a sibling follow-up plan set.
+DISCOVERED_PATHS: none
+SCOPE: PASS
+CHECKS: npm test — passed
+RATIONALE: Residual requirement belongs in a follow-up plan set.
+USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
+		const beforeReignite = api.userMessages.length;
+		finalAudit.release();
+		await withDeadline(
+			api.waitForUserMessage(beforeReignite, "HERDER_MAIN_SESSION_REIGNITE_V1"),
+			"reignite delegation",
+		);
+		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
+		assert.equal(firstCount, 1);
+		const service = await ensureService(fixture.planDirectory);
+		const completeStatus = object(await requestService(service, "/v1/status"));
+		const completeReply = object(completeStatus.reply) as unknown as ManagerReply;
+		assert.equal(completeReply.status, "complete");
+		assert.equal(completeReply.reigniteRequest?.state, "pending");
+		appendIndependentPlan(fixture);
+		await requestService(service, "/v1/event", {
+			eventId: "adapter-reignite-stale-drift",
+			kind: "terminals",
+			terminals: [],
+		});
+		const paused = object(object(await requestService(service, "/v1/status")).reply);
+		assert.equal(paused.status, "paused");
+		assert.equal(paused.reigniteRequest, undefined);
+		await withDeadline(api.command("herder-resume").handler("herder-plans", context), "/herder-resume after pause");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			store.putSnapshot(completeReply);
+		} finally { store.close(); }
+		await withDeadline(api.command("herder-status").handler("herder-plans", context), "stale complete status refresh");
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		assert.equal(
+			api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length,
+			firstCount,
+			"stale complete snapshot injected a reignite prompt after pause",
+		);
+		await withDeadline(api.invoke("session_shutdown", context), "stale reignite session_shutdown");
+		shutdown = true;
+	} finally {
+		if (api && context && !shutdown) {
+			await withDeadline(api.invoke("session_shutdown", context), "stale reignite cleanup session_shutdown", 5_000).catch(() => {});
 		}
 		if (fixture) {
 			await stopService(fixture.planDirectory).catch(() => {});

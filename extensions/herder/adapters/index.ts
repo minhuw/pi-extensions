@@ -16,6 +16,7 @@ import {
 import {
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
+	readLiveRunFreshness,
 	submitHerderReignite,
 	submitHerderVerification,
 	waitHerderOperation,
@@ -346,10 +347,21 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 	};
 
+	const pendingStatusChangingOperations = (reply: ManagerReply, requestId: string): boolean =>
+		(reply.operations ?? []).some((operation) => {
+			if (!["accepted", "running"].includes(operation.state)) return false;
+			if (operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${requestId}:`)) return false;
+			return true;
+		});
+
 	const delegateReignite = (reply: ManagerReply) => {
 		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId) || reply.status !== "complete") return;
 		const request = reply.reigniteRequest;
 		if (!request || request.state !== "pending") return;
+		if (pendingStatusChangingOperations(reply, request.requestId)) return;
+		const live = readLiveRunFreshness(reply.planDirectory);
+		if (!live || live.runId !== reply.runId || live.status !== "complete") return;
+		if (live.pendingOperations > 0) return;
 		reigniteRequests.set(request.requestId, request);
 		if ((reply.operations ?? []).some((operation) => operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${request.requestId}:`))) return;
 		if (promptedReignites.has(request.requestId) || !lastContext) return;
@@ -361,7 +373,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			"The original Herder run is complete. Residual PLAN_REQUIREMENT and PATCH_REGRESSION findings must become a new fireable sibling plan directory in one shot.",
 			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
 			"Use herder_plan init with local tracking, write the plan files, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
-			"As your final action, call herder_reignite exactly once with written or failed. Do not provide a prose-only answer.",
+			"As your final action, call herder_reignite exactly once with written or failed. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
 			`REQUEST_ID: ${request.requestId}`,
 			`REQUEST_SHA256: ${request.requestSha256}`,
 			`RUN_ID: ${request.runId}`,
@@ -1206,7 +1218,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerTool({
 		name: "herder_reignite",
 		label: "Herder Reignite",
-		description: "Acknowledge the one-shot write of residual final-review findings into the allocated herder-reignite[-N] plan directory. The original complete run stays complete.",
+		description: "Acknowledge the one-shot write of residual final-review findings into the allocated herder-reignite[-N] plan directory. The original complete run stays complete. For written, pass graphSha256 from herder_plan validate of the allocated directory.",
 		parameters: Type.Object({
 			planDirectory: Type.String(),
 			requestId: Type.String(),

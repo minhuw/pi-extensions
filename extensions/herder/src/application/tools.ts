@@ -21,6 +21,7 @@ import {
 	waitManagerOperation,
 	withServiceExclusion,
 } from "../client/index.ts";
+import { compileGraphIdentity } from "../core/run-manager.ts";
 import { RunStore } from "../daemon/run-store.ts";
 import { applyLifecycleToGraph, readPlanLifecycle, readPlanLifecycleGraph } from "../core/workflow.ts";
 import { sha256, stableJson } from "../shared/protocol.ts";
@@ -37,6 +38,34 @@ function planDirectory(args: JsonObject): string {
 	return path.resolve(requiredString(args, "planDirectory"));
 }
 
+function withCompiledGraphIdentity<T extends object>(graph: ReturnType<typeof buildGraph>, value: T): T & { graphSha256: string } {
+	return { ...value, graphSha256: compileGraphIdentity(graph) };
+}
+
+export interface LiveRunFreshness {
+	runId: string;
+	status: string;
+	pendingOperations: number;
+}
+
+export function readLiveRunFreshness(planDirectoryInput: string): LiveRunFreshness | null {
+	let store: RunStore | undefined;
+	try {
+		store = new RunStore(path.resolve(planDirectoryInput), { readOnly: true });
+		const run = store.getRun();
+		if (!run) return null;
+		return {
+			runId: run.runId,
+			status: run.status,
+			pendingOperations: store.countPendingOperations(),
+		};
+	} catch {
+		return null;
+	} finally {
+		store?.close();
+	}
+}
+
 async function planTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);
@@ -51,9 +80,15 @@ async function planTool(args: JsonObject): Promise<unknown> {
 		});
 	}
 	if (operation === "init") return initPlanDir(directory, { track: args.track === true });
-	if (operation === "validate") return buildGraph(directory);
+	if (operation === "validate") {
+		const graph = buildGraph(directory);
+		return withCompiledGraphIdentity(graph, graph);
+	}
 	if (operation === "status") return readPlanLifecycleGraph(directory);
-	if (operation === "shape") return getShapeReport(directory);
+	if (operation === "shape") {
+		const graph = buildGraph(directory);
+		return withCompiledGraphIdentity(graph, getShapeReport(directory));
+	}
 	if (operation === "snapshot") return snapshotPlan(directory, requiredString(args, "planId"));
 	if (operation === "report") return getExecutionReport(directory, typeof args.planId === "string" ? args.planId : "RUN");
 	if (operation === "track" || operation === "untrack") return setTracking(directory, operation === "track");

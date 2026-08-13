@@ -17,6 +17,7 @@ import {
 	MANAGER_OPERATION_KINDS,
 	MANAGER_PROTOCOL_VERSION,
 	type ManagerOperationKind,
+	type ManagerOperationReceipt,
 	type ManagerReply,
 } from "../shared/protocol.ts";
 import { EXECUTION_SCHEMA_VERSION, executionDatabasePath, openExecutionDatabase } from "./execution-store.ts";
@@ -70,6 +71,24 @@ function runtimeDatabaseIdentityIsCurrent(candidate: string, expected: FileIdent
 	} catch {
 		return false;
 	}
+}
+
+function statusReplyFromSnapshot(
+	snapshot: ManagerReply,
+	liveStatus: string | undefined,
+	liveDetail: string | null | undefined,
+	operations: ManagerOperationReceipt[],
+): ManagerReply {
+	const status = (liveStatus ?? snapshot.status) as ManagerReply["status"];
+	const diverged = liveStatus !== undefined && liveStatus !== snapshot.status;
+	const { reigniteRequest, operations: _snapshotOperations, ...rest } = snapshot;
+	return {
+		...rest,
+		status,
+		...(diverged && liveDetail ? { message: liveDetail } : {}),
+		...(status === "complete" && reigniteRequest ? { reigniteRequest } : {}),
+		...(operations.length > 0 ? { operations } : {}),
+	};
 }
 
 function send(response: http.ServerResponse, status: number, value: unknown): void {
@@ -300,9 +319,10 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		if (request.method === "GET" && url.pathname === "/v1/status") {
 			const snapshot = store.getSnapshotEnvelope();
 			const operations = store.pendingOperationReceipts();
+			const live = store.getRun();
 			send(response, snapshot ? 200 : 503, snapshot ? {
 				ok: true,
-				reply: { ...snapshot.reply, ...(operations.length > 0 ? { operations } : {}) },
+				reply: statusReplyFromSnapshot(snapshot.reply, live?.status, live?.terminalDetail, operations),
 				snapshot: { revision: snapshot.revision, updatedAt: snapshot.updatedAt },
 				operations,
 			} : { ok: false, error: "manager-snapshot-unavailable" });
