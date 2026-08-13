@@ -24,8 +24,7 @@ test("reset accepts an optional plan directory and rejects options", () => {
 	assert.throws(() => parseResetArguments("one two"), /Usage/);
 	assert.throws(() => parseResetArguments("--force"), /Unknown option/);
 });
-
-
+test("fire defaults to a five-worker pool and an ephemeral dashboard port", () => {
 	assert.deepEqual(parseFireArguments("", "fire"), {
 		mode: "fire",
 		planDir: "herder-plans",

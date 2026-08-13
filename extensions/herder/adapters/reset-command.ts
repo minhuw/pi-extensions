@@ -16,7 +16,7 @@ export async function runResetCommand(
 	context: { repositoryRoot: string; planDirectory: string } & ResetCommandDependencies,
 ): Promise<string> {
 	const parsed = typeof input === "string" ? parseResetArguments(input) : input;
-	const request: ResetApplicationRequest = { repositoryRoot: context.repositoryRoot, planDirectory: context.planDirectory };
+	const request: ResetApplicationRequest = { repoRoot: context.repositoryRoot, planDirectory: context.planDirectory };
 	const confirm = context.confirm ?? (async () => false);
 	if (!(await confirm("Reset Herder plan set?", "This removes all Herder branches, worktrees, coordination refs, and execution state. Plan Markdown and tracking setup are preserved."))) return "Herder reset cancelled; no Git or plan state was changed.";
 	const result = await (context.apply ?? ((value) => applyHerderReset(value)))(request);
