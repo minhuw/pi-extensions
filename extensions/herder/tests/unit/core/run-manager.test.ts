@@ -265,6 +265,15 @@ async function completeSinglePlan(
 	fixture: { repo: string; planDirectory: string },
 	prefix: string,
 ): Promise<Record<string, unknown>> {
+	return finishFinalReview(service, fixture, prefix, "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: aggregate plan set is coherent\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host");
+}
+
+async function finishFinalReview(
+	service: Awaited<ReturnType<typeof ensureService>>,
+	fixture: { repo: string; planDirectory: string },
+	prefix: string,
+	response: string,
+): Promise<Record<string, unknown>> {
 	const afterReviewer = await prepareSinglePlan(service, fixture, prefix);
 	const verified = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, prefix);
 	const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
@@ -277,7 +286,7 @@ async function completeSinglePlan(
 		terminals: [{
 			actionId: finalReviewer.actionId,
 			hostHandle: `${prefix}-final`,
-			response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: aggregate plan set is coherent\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host",
+			response,
 		}],
 	})).reply);
 }
@@ -854,7 +863,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 	}
 });
 
-test("final Reviewer input creates a bounded user-decision attention request", { timeout: 30_000 }, async () => {
+test("final Reviewer residual findings complete the run with a pending reignite dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-input-test-"));
 	const fixture = writeFixture(root);
 	try {
@@ -867,26 +876,119 @@ test("final Reviewer input creates a bounded user-decision attention request", {
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "final-reviewer-input-host" }],
 		});
-		const paused = payload(payload(await requestService(service, "/v1/event", {
+		const finding = "[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] aggregate review needs input";
+		const completed = payload(payload(await requestService(service, "/v1/event", {
 			eventId: "final-reviewer-input-terminal",
 			kind: "terminals",
 			terminals: [{
 				actionId: finalReviewer.actionId,
 				hostHandle: "final-reviewer-input-host",
-				response: "VERDICT: REVISE\nFINDINGS: [BLOCKING][P1] aggregate review needs input\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The final Reviewer needs a main-session decision.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+				response: `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The final Reviewer needs a main-session decision.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
 			}],
 		})).reply);
-		assert.equal(paused.status, "needs_input");
-		assert.equal((paused.actions as unknown[]).length, 0);
-		const attention = payload(paused.attention);
-		assert.equal(attention.kind, "user_decision");
-		assert.equal(attention.cause, "final_reviewer_needs_input");
-		assert.deepEqual(payload(attention.continuation), { role: "plan-reviewer", phase: "READY_REVIEWER" });
+		assert.equal(completed.status, "complete");
+		assert.equal(completed.attention, undefined);
+		assert.equal((completed.actions as unknown[]).length, 0);
+		const reignite = payload(completed.reigniteRequest);
+		assert.equal(reignite.state, "pending");
+		assert.equal(reignite.verdict, "REVISE");
+		assert.deepEqual(reignite.findings, [finding]);
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
-			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 1);
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "FINAL_APPROVED");
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 0);
+			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration);
+			assert.equal(dossier?.state, "pending");
+			assert.deepEqual(dossier?.findings, [finding]);
+			assert.equal(dossier?.requestId, reignite.requestId);
+		} finally { store.close(); }
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
+		assert.equal(payload(resumed.reigniteRequest).state, "pending");
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("final Reviewer approve with no findings persists a skipped reignite dossier", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-skip-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await completeSinglePlan(service, fixture, "final-reviewer-skip");
+		assert.equal(completed.status, "complete");
+		assert.equal(completed.reigniteRequest, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "FINAL_APPROVED");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "skipped");
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 0);
+		} finally { store.close(); }
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal(resumed.reigniteRequest, undefined);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("final Reviewer block with a patch regression completes with a pending dossier", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-block-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const finding = "[fr-2][P1][BLOCKING][PATCH_REGRESSION] integrated patch lost a required check";
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"final-reviewer-block",
+			`VERDICT: BLOCK\nFINDINGS: ${finding}\nFIX_GUIDANCE: Restore the missing check.\nDISCOVERED_PATHS: none\nSCOPE: FAIL\nCHECKS: fixture test — passed\nRATIONALE: Residual regression belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
+		);
+		assert.equal(completed.status, "complete");
+		assert.equal(payload(completed.reigniteRequest).state, "pending");
+		assert.equal(payload(completed.reigniteRequest).verdict, "BLOCK");
+		assert.deepEqual(payload(completed.reigniteRequest).findings, [finding]);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("final Reviewer follow-up findings persist a skipped reignite dossier", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-followup-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"final-reviewer-followup",
+			"VERDICT: APPROVE\nFINDINGS: [fu-1][P2][ADVISORY][FOLLOWUP] later cleanup\n[inv-1][P3][ADVISORY][INVALID] out of scope\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Only follow-up and invalid findings remain.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		assert.equal(completed.status, "complete");
+		assert.equal(completed.reigniteRequest, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "skipped");
 		} finally { store.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
