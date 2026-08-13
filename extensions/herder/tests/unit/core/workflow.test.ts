@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { buildGraph } from "../../../src/core/plans.ts";
-import { readPlanLifecycle } from "../../../src/core/workflow.ts";
+import { readPlanLifecycle, readPlanLifecycleGraph } from "../../../src/core/workflow.ts";
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts";
 
 function planBody(id: string, title: string): string {
@@ -98,6 +99,26 @@ function writePlanDir(root: string, status = "TODO"): string {
 	return planDir;
 }
 
+function writeTwoPlanDir(root: string): string {
+	const planDir = path.join(root, "herder-plans");
+	fs.mkdirSync(planDir, { recursive: true });
+	fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
+
+## Execution order & status
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|------|-------|----------|--------|------------|--------|
+| [001](001-first.md) | First | P1 | S | — | TODO |
+| [002](002-second.md) | Second | P1 | S | 001 | TODO |
+`);
+	fs.writeFileSync(path.join(planDir, "001-first.md"), planBody("001", "First"));
+	fs.writeFileSync(
+		path.join(planDir, "002-second.md"),
+		planBody("002", "Second").replace("- **Depends on**: none", "- **Depends on**: herder-plans/001-*.md"),
+	);
+	return planDir;
+}
+
 function createRun(store: RunStore, planDir: string): string {
 	store.createRun({
 		runId: "run-1",
@@ -119,43 +140,49 @@ function createRun(store: RunStore, planDir: string): string {
 	return "run-1";
 }
 
-function spec(runId: string, initialStatus: StoredPlanSpec["initialStatus"] = "TODO"): StoredPlanSpec {
+function spec(
+	runId: string,
+	initialStatus: StoredPlanSpec["initialStatus"] = "TODO",
+	planId = "001",
+	dependencies: string[] = [],
+): StoredPlanSpec {
+	const title = planId === "001" ? "First" : "Second";
 	return {
 		runId,
 		graphGeneration: 1,
-		planId: "001",
+		planId,
 		planFingerprint: "f".repeat(64),
 		fingerprintVersion: 2,
-		ordinal: 0,
-		title: "First",
+		ordinal: planId === "001" ? 0 : 1,
+		title,
 		priority: "P1",
 		effort: "S",
 		kind: "behavioral",
-		dependencies: [],
+		dependencies,
 		initialStatus,
 		initialStatusDetail: initialStatus === "BLOCKED" ? "waiting on a decision" : "",
 		gateCommands: [],
-		planFile: "001-first.md",
+		planFile: `${planId}-${title.toLowerCase()}.md`,
 		assignment: {
 			snapshotSha256: "s".repeat(64),
 			snapshotInputs: [],
 			plan: {
-				id: "001",
-				title: "First",
+				id: planId,
+				title,
 				kind: "behavioral",
 				parentObjective: "Exercise the lifecycle overlay",
-				dependencies: [],
-				inScopePaths: ["src/001.mjs"],
+				dependencies,
+				inScopePaths: [`src/${planId}.mjs`],
 			},
-			planText: planBody("001", "First"),
+			planText: planBody(planId, title),
 		},
 	};
 }
 
-function runtime(runId: string, phase: StoredPlan["phase"]): Omit<StoredPlan, "updatedAt"> {
+function runtime(runId: string, phase: StoredPlan["phase"], planId = "001"): Omit<StoredPlan, "updatedAt"> {
 	return {
 		runId,
-		planId: "001",
+		planId,
 		generation: 1,
 		round: 1,
 		phase,
@@ -240,6 +267,85 @@ test("readPlanLifecycle uses initialStatus when runtime is missing", () => {
 		}
 		assert.equal(readPlanLifecycle(planDir).get("001"), "DONE");
 		assert.equal(buildGraph(planDir).plans[0]?.status, "TODO");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("readPlanLifecycleGraph and herder_plan ready use the SQLite overlay", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-ready-"));
+	try {
+		const planDir = writeTwoPlanDir(root);
+		const authored = buildGraph(planDir);
+		assert.deepEqual(authored.ready, ["001"]);
+		assert.deepEqual(authored.inProgress, []);
+		assert.deepEqual(authored.waiting, [{ id: "002", unsatisfied: ["001"], rejected: [] }]);
+
+		const store = new RunStore(planDir);
+		try {
+			const runId = createRun(store, planDir);
+			store.putPlanSpecs([
+				spec(runId, "TODO", "001"),
+				spec(runId, "TODO", "002", ["001"]),
+			]);
+			store.putPlan(runtime(runId, "IMPLEMENTING", "001"));
+		} finally {
+			store.close();
+		}
+
+		const overlay = readPlanLifecycleGraph(planDir);
+		assert.equal(overlay.plans.find((plan) => plan.id === "001")?.status, "IN PROGRESS");
+		assert.equal(overlay.plans.find((plan) => plan.id === "002")?.status, "TODO");
+		assert.deepEqual(overlay.ready, []);
+		assert.deepEqual(overlay.inProgress, ["001"]);
+		assert.deepEqual(overlay.blocked, []);
+		assert.deepEqual(overlay.waiting, [{ id: "002", unsatisfied: ["001"], rejected: [] }]);
+		assert.equal(overlay.complete, false);
+		assert.match(fs.readFileSync(path.join(planDir, "README.md"), "utf8"), /\| TODO \|\n\| \[002\].*\| TODO \|/);
+
+		const ready = await invokeHerderTool("herder_plan", { operation: "ready", planDirectory: planDir }) as {
+			ready: string[];
+			inProgress: string[];
+			blocked: string[];
+			waiting: Array<{ id: string; unsatisfied: string[]; rejected: string[] }>;
+			complete: boolean;
+		};
+		assert.deepEqual(ready.ready, overlay.ready);
+		assert.deepEqual(ready.inProgress, overlay.inProgress);
+		assert.deepEqual(ready.blocked, overlay.blocked);
+		assert.deepEqual(ready.waiting, overlay.waiting);
+		assert.equal(ready.complete, overlay.complete);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("readPlanLifecycleGraph unblocks dependents from overlay DONE without rewriting README", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-ready-deps-"));
+	try {
+		const planDir = writeTwoPlanDir(root);
+		const store = new RunStore(planDir);
+		try {
+			const runId = createRun(store, planDir);
+			store.putPlanSpecs([
+				spec(runId, "TODO", "001"),
+				spec(runId, "TODO", "002", ["001"]),
+			]);
+			store.putPlan(runtime(runId, "FINAL_APPROVED", "001"));
+		} finally {
+			store.close();
+		}
+
+		const authored = buildGraph(planDir);
+		assert.deepEqual(authored.ready, ["001"]);
+		assert.deepEqual(authored.waiting.map((entry) => entry.id), ["002"]);
+
+		const overlay = readPlanLifecycleGraph(planDir);
+		assert.equal(overlay.plans.find((plan) => plan.id === "001")?.status, "DONE");
+		assert.deepEqual(overlay.ready, ["002"]);
+		assert.deepEqual(overlay.inProgress, []);
+		assert.deepEqual(overlay.waiting, []);
+		assert.match(fs.readFileSync(path.join(planDir, "README.md"), "utf8"), /\| TODO \|\n\| \[002\].*\| TODO \|/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}

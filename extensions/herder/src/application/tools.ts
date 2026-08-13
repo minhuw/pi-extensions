@@ -58,7 +58,7 @@ async function planTool(args: JsonObject): Promise<unknown> {
 	if (operation === "report") return getExecutionReport(directory, typeof args.planId === "string" ? args.planId : "RUN");
 	if (operation === "track" || operation === "untrack") return setTracking(directory, operation === "track");
 	if (operation === "ready") {
-		const graph = buildGraph(directory);
+		const graph = readPlanLifecycleGraph(directory);
 		return {
 			planDir: graph.planDir,
 			ready: graph.ready,
