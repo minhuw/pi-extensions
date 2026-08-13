@@ -138,7 +138,12 @@ function setup(options: { planId?: string; readmeStatus?: string; writeProof?: b
 
 function writeOverlay(
   fixture: Fixture,
-  input: { planId: string; phase: StoredPlan["phase"]; initialStatus?: StoredPlanSpec["initialStatus"]; runStatus?: "complete" | "failed" | "stopped" },
+  input: {
+    planId: string
+    phase: StoredPlan["phase"]
+    initialStatus?: StoredPlanSpec["initialStatus"]
+    runStatus?: "complete" | "failed" | "stopped" | "running" | "paused" | "initializing" | "needs_input"
+  },
 ): void {
   const store = new RunStore(fixture.planDir)
   const runId = "cleanup-overlay-run"
@@ -252,6 +257,26 @@ test("006-split overlay DONE with a reachable proof is deep-cleanup eligible whi
     const result = runCleanup(fixture, { deep: true, dryRun: false })
     assert.equal(result.destruction.planDirectoryRemoved, true)
     assert.equal(fs.existsSync(fixture.planDir), false)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("ordinary and deep cleanup stay fail-closed while the SQLite run is active", () => {
+  const fixture = setup({ readmeStatus: "TODO" })
+  try {
+    writeOverlay(fixture, { planId: "001", phase: "DONE", initialStatus: "TODO", runStatus: "running" })
+    const ordinaryPreview = runCleanup(fixture)
+    assert.equal(ordinaryPreview.actions.some((item) => item.plan === "001" && item.status === "DONE"), true)
+    assert.throws(() => runCleanup(fixture, { dryRun: false }), /run-not-terminal/)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planWorktree), true)
+    assert.equal(fs.existsSync(fixture.planDir), true)
+
+    const deepPreview = runCleanup(fixture, { deep: true })
+    assert.equal(deepPreview.destruction.eligible, false)
+    assert.equal(deepPreview.destruction.blockers.some((item) => item.reason === "run-not-terminal"), true)
+    assert.throws(() => runCleanup(fixture, { deep: true, dryRun: false }), /run-not-terminal/)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planDir), true)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
@@ -425,6 +450,28 @@ for (const race of ["checkout", "namespace", "coordination-ref"] as const) {
     } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
   })
 }
+
+test("deep cleanup detects apply-time run-status drift before mutation", () => {
+  const fixture = setup({ readmeStatus: "TODO" })
+  try {
+    writeOverlay(fixture, { planId: "001", phase: "DONE", initialStatus: "TODO", runStatus: "complete" })
+    const planHead = git(fixture.repo, "rev-parse", fixture.planBranch)
+    assert.throws(() => runCleanup(fixture, {
+      deep: true,
+      dryRun: false,
+      testHooks: {
+        beforeMutation: () => {
+          const store = new RunStore(fixture.planDir)
+          store.updateRun({ status: "running" })
+          store.close()
+        },
+      },
+    }), /run-not-terminal|run status changed/)
+    assert.equal(git(fixture.repo, "rev-parse", fixture.planBranch), planHead)
+    assert.equal(fs.existsSync(fixture.planWorktree), true)
+    assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
 
 test("deep cleanup revalidates checkout immediately before integration deletion and removes the plan directory last", () => {
   const fixture = setup()

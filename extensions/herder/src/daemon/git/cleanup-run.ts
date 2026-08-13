@@ -8,6 +8,7 @@ import type { SpawnSyncReturns } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
+import { RunStore } from "../run-store.ts"
 import { parseCoordinationRefRelative } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
@@ -319,6 +320,28 @@ function listCoordinationRefs(repoRoot: string, planName: string): CoordinationR
   })
 }
 
+const CLEANUP_TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "stopped"])
+
+function readCleanupRunStatus(planDir: string): { present: boolean; status: string | null; terminal: boolean } {
+  let store: RunStore | undefined
+  try {
+    store = new RunStore(planDir, { readOnly: true })
+    const run = store.getRun()
+    if (!run) return { present: false, status: null, terminal: false }
+    return {
+      present: true,
+      status: run.status,
+      terminal: CLEANUP_TERMINAL_RUN_STATUSES.has(run.status),
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/not initialized/.test(message)) return { present: false, status: null, terminal: false }
+    throw error
+  } finally {
+    store?.close()
+  }
+}
+
 function completionProofs(repoRoot: string, integrationHead: string, completionRefs: CompletionRefRecord[]): Set<string> {
   const completedPlans = new Set<string>()
   for (const item of completionRefs) {
@@ -367,6 +390,7 @@ export function cleanupRun(input: CleanupInput) {
     JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: overlayStatus(plan.id, plan.status, lifecycle) })))
   const plannedLifecycle = readPlanLifecycle(planDir)
   const plannedStatusSnapshot = statusSnapshot(graph, plannedLifecycle)
+  const plannedRun = readCleanupRunStatus(planDir)
   const assertPlanStatusesUnchanged = (): void => {
     const current = buildGraph(planDir)
     const currentLifecycle = readPlanLifecycle(planDir)
@@ -381,7 +405,21 @@ export function cleanupRun(input: CleanupInput) {
       }
     }
   }
+  const assertRunStatusUnchanged = (): void => {
+    const current = readCleanupRunStatus(planDir)
+    if (current.present !== plannedRun.present || current.status !== plannedRun.status) {
+      fail("Cannot clean up because run status changed after preflight")
+    }
+  }
+  const assertMutationAllowed = (): void => {
+    const current = readCleanupRunStatus(planDir)
+    if (current.present && !current.terminal) {
+      fail(`Cannot clean up while run status is ${current.status}: run-not-terminal`)
+    }
+    assertRunStatusUnchanged()
+  }
   assertPlanStatusesUnchanged()
+  assertRunStatusUnchanged()
 
   const planStatus = (plan: { id: string; status: string }): string => overlayStatus(plan.id, plan.status, plannedLifecycle)
   const plans = new Map(graph.plans.map((plan) => [plan.id, plan]))
@@ -556,12 +594,16 @@ export function cleanupRun(input: CleanupInput) {
         destruction.blockers.push({ reason: "completion-proof-missing", plan: plan.id })
       }
     }
+    if (plannedRun.present && !plannedRun.terminal) {
+      destruction.blockers.push({ reason: "run-not-terminal", status: plannedRun.status })
+    }
     destruction.eligible = destruction.blockers.length === 0
   }
 
   const removed: CleanupDetail[] = []
   if (!input.dryRun) {
     assertPlanStatusesUnchanged()
+    assertMutationAllowed()
     if (input.deep) {
       if (!destruction.eligible) fail(`Deep cleanup preflight failed: ${destruction.blockers.map((item) => item.reason).join(", ")}`)
       // All deterministic race hooks run before the first mutation. External Git
@@ -569,6 +611,7 @@ export function cleanupRun(input: CleanupInput) {
       input.testHooks?.beforeMutation?.()
       input.testHooks?.beforeIntegrationDeletion?.()
       assertPlanStatusesUnchanged()
+      assertMutationAllowed()
       if (planBranchSnapshot(listPlanBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
         fail("Deep cleanup plan branch namespace changed after preflight")
       }
@@ -601,6 +644,7 @@ export function cleanupRun(input: CleanupInput) {
     }
     for (const action of actions) {
       assertPlanStatusesUnchanged()
+      assertMutationAllowed()
       if (action.worktree) removeOwnedWorktree(repoRoot, action.worktree)
       deleteBranchIfPresent(repoRoot, action.branch, action.head)
       removed.push(action)

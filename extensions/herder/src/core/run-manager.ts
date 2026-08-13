@@ -59,7 +59,7 @@ import {
 	type StoredRun,
 } from "../daemon/run-store.ts";
 import { resolvePiProfile } from "./profile-registry.ts";
-import { lifecycleStatus, phaseForRole, readyPhaseForRole, roleForPhase, summarizeRun } from "./workflow.ts";
+import { lifecycleStatus, phaseForRole, readyPhaseForRole, readPlanLifecycle, roleForPhase, summarizeRun } from "./workflow.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "./verification.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -812,12 +812,16 @@ export class HerderRunManager {
 		const graph = buildGraph(this.planDirectory);
 		if (!graph.shapeReady) throw new Error("Herder plan graph is not shape-ready");
 		if (graph.plans.length === 0) throw new Error("Herder plan graph is empty");
-		const adopted = graph.plans.filter((plan: { status: string }) => plan.status === "IN PROGRESS");
+		const lifecycle = readPlanLifecycle(this.planDirectory);
+		const adopted = graph.plans.filter((plan: { id: string }) => lifecycle.get(plan.id) === "IN PROGRESS");
 		if (adopted.length > 0) {
-			throw new Error(`Fresh deterministic runs cannot adopt prior execution state: ${adopted.map((plan: { id: string; status: string }) => `${plan.id}=${plan.status}`).join(", ")}`);
+			throw new Error(`Fresh deterministic runs cannot adopt prior execution state: ${adopted.map((plan: { id: string }) => `${plan.id}=${lifecycle.get(plan.id)}`).join(", ")}`);
 		}
-		const unsupported = graph.plans.filter((plan: { status: string }) => !["TODO", "DONE", "BLOCKED", "REJECTED"].includes(plan.status));
-		if (unsupported.length > 0) throw new Error(`Unsupported initial lifecycle state: ${unsupported.map((plan: { id: string; status: string }) => `${plan.id}=${plan.status}`).join(", ")}`);
+		const allowedInitial = new Set(["TODO", "DONE", "BLOCKED", "REJECTED"]);
+		const unsupported = graph.plans.filter((plan: { id: string }) => !allowedInitial.has(lifecycle.get(plan.id) ?? ""));
+		if (unsupported.length > 0) {
+			throw new Error(`Unsupported initial lifecycle state: ${unsupported.map((plan: { id: string }) => `${plan.id}=${lifecycle.get(plan.id) ?? "missing"}`).join(", ")}`);
+		}
 		const checkoutStateToken = await driver.captureCheckout();
 		const baseCommit = gitValue(driver.repoRoot, "rev-parse", "HEAD");
 		const namespace = driver.inspectNamespace("fire");
