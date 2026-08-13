@@ -997,6 +997,19 @@ export class RunStore {
 		return this.getRun()!;
 	}
 
+	resetExecutionState(): void {
+		this.transaction(() => {
+			// Keep the schema/database and runtime directory intact, but remove all
+			// durable execution evidence so the next Fire is a fresh initialization.
+			for (const table of [
+				"manager_plan_edits", "manager_approvals", "manager_plan_specs", "manager_actions",
+				"manager_events", "manager_attention_requests", "manager_plans", "manager_generations",
+				"manager_verifications", "manager_operations", "manager_snapshots", "manager_service",
+				"manager_runs", "run_configuration", "attempts",
+			]) this.database.prepare(`DELETE FROM ${table}`).run();
+		});
+	}
+
 	getPlans(runId: string): StoredPlan[] {
 		return (this.database.prepare("SELECT * FROM manager_plans WHERE run_id = ? ORDER BY plan_id").all(runId) as Record<string, unknown>[]).map(rowToPlan);
 	}

@@ -59,6 +59,7 @@ The deterministic Run Manager owns plan state, Git coordination, verification ex
 | `/herder-status [plan-dir]` | Show current run status in Pi. |
 | `/herder-dashboard [plan-dir]` | Open or report the read-only dashboard. |
 | `/herder-cleanup [plan-dir] [--plan id] [--include-failed]` | Preview and confirm ordinary cleanup of eligible plan worktrees/branches while preserving integration, coordination refs, and plans. |
+| `/herder-reset [plan-dir]` | Reset an unmerged Herder plan set to its pre-initialized execution state while preserving plan Markdown and tracking setup. |
 | `/herder-cleanup [plan-dir] --deep [--include-failed]` | Destructively remove a fully terminal plan set after proving integration is merged into the current branch and all owned worktrees are safe. |
 | `/herder-stop` | Stop the active run owned by the current Pi session. |
 
