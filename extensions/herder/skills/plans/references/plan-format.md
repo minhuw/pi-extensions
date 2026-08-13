@@ -15,7 +15,7 @@ herder-plans/
     execution.sqlite3      # manager-owned immutable attempt accounting
 ```
 
-Do not require YAML execution configuration, another database, or `.herder/state.json`. The one manager-owned SQLite file records execution attempts and statistics only; README owns lifecycle and plan-graph truth, while Git refs/worktrees own completion and integration truth. Plans owns format, parsing, validation, and transitions; Grill, Improve, and Simplify produce the same format; Fire owns execution, branches, and worktrees. Plans must use the canonical Fire-assigned branch instruction and never name a concrete execution branch. Provenance must not alter what Fire receives or require hidden session context.
+Do not require YAML execution configuration, another database, or `.herder/state.json`. README owns the plan graph; the manager-owned SQLite file owns live lifecycle and attempt accounting; Git refs/worktrees own completion and integration truth. Plans owns format, parsing, validation, and transitions; Grill, Improve, and Simplify produce the same format; Fire owns execution, branches, and worktrees. Plans must use the canonical Fire-assigned branch instruction and never name a concrete execution branch. Provenance must not alter what Fire receives or require hidden session context.
 
 The zero-context invariant applies to the immutable snapshot Fire dispatches. A plan may remain file-self-contained, or a producer may put facts reused by multiple plans in `CONTEXT.md`. `snapshot` deterministically composes the exact shared context followed by the local plan and returns hashes for both inputs and the compiled text. A plan must never rely on a sibling plan file or conversation history. Dependency guarantees belong in its local `## Dependency contract`.
 
@@ -99,7 +99,7 @@ DONE → BLOCKED
 REJECTED → TODO
 ```
 
-Only the deterministic Run Manager writes status during Fire runs. It compiles dependencies and initial lifecycle into SQLite once; later README status cells are projections. Dependencies require both canonical `DONE` state and a plan-set-scoped private completion ref naming a reachable commit. `IN PROGRESS` belongs to an active manager run and `BLOCKED` needs explicit user direction.
+The manager compiles dependencies and initial lifecycle into SQLite once. It does not rewrite Status during a run. An optional README snapshot may be written only after the run is complete, failed, or stopped. Dependencies require both canonical `DONE` state and a plan-set-scoped private completion ref naming a reachable commit. `IN PROGRESS` belongs to an active manager run and `BLOCKED` needs explicit user direction.
 
 ## 6. Tracking and Worktrees
 
