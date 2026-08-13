@@ -250,8 +250,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseAdapterOwnership(held);
 	};
 
-	const clearCurrentStateForPlanDirectory = (planDir: string, ctx: ExtensionContext): void => {
+	const clearCurrentStateForPlanDirectory = async (planDir: string, ctx: ExtensionContext): Promise<void> => {
 		if (!currentState || path.resolve(currentState.planDir) !== path.resolve(planDir)) return;
+		sessionEpoch += 1;
+		const activeWorkers = [...workers.values()];
+		workers.clear();
+		await Promise.all(activeWorkers.map((worker) => engine.stop(worker.handle).catch(() => {})));
 		currentState = undefined;
 		currentAttention = undefined;
 		attentionHint = undefined;
@@ -871,7 +875,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
 			appendEntry: (entry) => pi.appendEntry(HERDER_CLEANUP_ENTRY, entry),
 		});
-		if (result.applied?.executed) clearCurrentStateForPlanDirectory(planDir, ctx);
+		if (result.applied && !result.cancelled) await clearCurrentStateForPlanDirectory(planDir, ctx);
 		return result.message;
 	};
 
@@ -888,7 +892,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		// Reset removes the durable run after the service exclusion has stopped its
 		// terminal owner. Drop the adapter's matching in-memory ownership/state too,
 		// otherwise the next Fire in this Pi session would be blocked by stale state.
-		clearCurrentStateForPlanDirectory(planDir, ctx);
+		await clearCurrentStateForPlanDirectory(planDir, ctx);
 		return result;
 	};
 

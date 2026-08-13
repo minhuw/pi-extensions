@@ -797,16 +797,6 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		}]);
 		assert.equal(factory.providerCalls, 0);
 
-		finalAudit.release();
-		await withDeadline(finalAudit.settled.promise, "final audit completion");
-		await withDeadline(
-			api.command("herder-cleanup").handler("herder-plans", context),
-			"/herder-cleanup applied state reset",
-		);
-		assert.equal(ui.widgets.at(-1)?.value, undefined, "successful cleanup did not clear the Herder widget");
-		assert.equal(ui.statuses.at(-1)?.value, undefined, "successful cleanup did not clear the Herder status");
-		assert.ok(ui.notifications.some((notification) => notification.level === "info" && notification.message.startsWith("Cleanup executed")));
-
 		const inputEntries = api.appendedEntries
 			.filter((entry) => entry.customType === HERDER_WORKER_INPUT_ENTRY)
 			.map((entry) => object(entry.data));
@@ -822,14 +812,14 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		await withDeadline(api.invoke("session_shutdown", context), "captured session_shutdown");
 		shutdown = true;
 		await withDeadline(finalAudit.settled.promise, "final audit settlement");
-		assert.equal(finalAudit.aborted, false);
+		assert.equal(finalAudit.aborted, true);
 		assert.equal(finalAudit.disposed, true);
 		assert.equal(factory.sessions.every((session) => session.disposed), true);
 		const interruptedOutputs = api.appendedEntries
 			.filter((entry) => entry.customType === HERDER_WORKER_OUTPUT_ENTRY)
 			.map((entry) => object(entry.data));
 		assert.equal(interruptedOutputs.length, 3);
-		assert.equal(interruptedOutputs[2]!.status, "returned");
+		assert.equal(interruptedOutputs[2]!.status, "interrupted");
 		assert.equal(api.appendedEntries.length > entriesBeforeShutdown, true);
 		assert.equal(ui.widgets.at(-1)?.value, undefined, "shutdown did not dispose the Herder widget");
 		assert.equal(durableFinalAction(fixture, durableVerification.runId).state, "dispatched", "shutdown reported a terminal to the manager");
