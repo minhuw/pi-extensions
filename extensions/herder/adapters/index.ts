@@ -861,11 +861,27 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const parsed = parseResetArguments(args);
 		const repoRoot = await repositoryRoot(ctx);
 		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
-		return runResetCommand(parsed, {
+		const result = await runResetCommand(parsed, {
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
 		});
+		// Reset removes the durable run after the service exclusion has stopped its
+		// terminal owner. Drop the adapter's matching in-memory ownership/state too,
+		// otherwise the next Fire in this Pi session would be blocked by stale state.
+		if (currentState && path.resolve(currentState.planDir) === path.resolve(planDir)) {
+			currentState = undefined;
+			currentAttention = undefined;
+			attentionHint = undefined;
+			deferredAttention.clear();
+			lastSummary = undefined;
+			lastManagerMessage = undefined;
+			verificationRequests.clear();
+			promptedVerifications.clear();
+			releaseOwnership();
+			render(ctx);
+		}
+		return result;
 	};
 
 

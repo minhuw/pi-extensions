@@ -1002,10 +1002,12 @@ export class RunStore {
 			// Keep the schema/database and runtime directory intact, but remove all
 			// durable execution evidence so the next Fire is a fresh initialization.
 			for (const table of [
-				"manager_plan_edits", "manager_approvals", "manager_plan_specs", "manager_actions",
-				"manager_events", "manager_attention_requests", "manager_plans", "manager_generations",
-				"manager_verifications", "manager_operations", "manager_snapshots", "manager_service",
-				"manager_runs", "run_configuration", "attempts",
+				// Delete children before their manager_runs parent. Foreign-key enforcement
+				// is enabled for every execution connection, so relying on cascade order
+				// here would make reset fail part-way through its transaction.
+				"manager_approvals", "manager_plan_edits", "manager_verifications", "manager_attention_requests",
+				"manager_events", "manager_actions", "manager_plans", "manager_plan_specs", "manager_generations",
+				"manager_operations", "manager_snapshots", "manager_service", "manager_runs", "run_configuration", "attempts",
 			]) this.database.prepare(`DELETE FROM ${table}`).run();
 		});
 	}
