@@ -499,6 +499,29 @@ export interface VerificationRequest {
 	requestedAt: string;
 }
 
+export const REIGNITE_STATES = ["pending", "skipped", "written", "failed"] as const;
+export type ReigniteState = typeof REIGNITE_STATES[number];
+
+export interface ReigniteRequest {
+	schemaVersion: 1;
+	requestId: string;
+	requestSha256: string;
+	runId: string;
+	generation: number;
+	sourcePlanDirectory: string;
+	graphSha256: string;
+	integrationHead: string;
+	integrationTree: string;
+	integrationBranch: string;
+	verdict: "APPROVE" | "REVISE" | "BLOCK";
+	scope: "PASS" | "FAIL";
+	findings: string[];
+	fixGuidance: string[];
+	rationale: string;
+	createdAt: string;
+	state: ReigniteState;
+}
+
 export interface VerificationGate {
 	gateId: string;
 	label: string;
@@ -560,6 +583,7 @@ export interface ManagerReply {
 	attention?: ManagerAttentionRequest;
 	planEdit?: ManagerPlanEdit;
 	verificationRequest?: VerificationRequest;
+	reigniteRequest?: ReigniteRequest;
 	operations?: ManagerOperationReceipt[];
 }
 

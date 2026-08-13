@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createReigniteRequest } from "../../../src/core/verification.ts";
 import {
 	clearExecutionRotationMarker,
 	EXECUTION_SCHEMA_VERSION,
@@ -20,6 +21,20 @@ import { RunStore } from "../../../src/daemon/run-store.ts";
 
 function tableNames(database: ReturnType<typeof openExecutionDatabase> & {}) {
 	return new Set((database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+}
+
+function seedManagerRun(
+	database: NonNullable<ReturnType<typeof openExecutionDatabase>>,
+	runId = "run-reignite",
+): void {
+	const now = "2026-08-13T00:00:00.000Z";
+	database.prepare(`
+		INSERT INTO manager_runs (
+			run_id, repository_root, plan_directory, plan_name, host, profile_name, profile_sha256,
+			max_parallel, current_generation, graph_sha256, status, checkout_state_token, base_commit,
+			integration_branch, integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
+		) VALUES (?, '/repo', '/repo/herder-plans', 'herder-plans', 'pi', 'eclipse', ?, 1, 1, ?, 'complete', 'token', 'abc', 'herder/example/integration', '/repo/.herder-integration', NULL, NULL, ?, ?)
+	`).run(runId, "a".repeat(64), "b".repeat(64), now, now);
 }
 
 test("legacy forwarded_url is ignored by service projections and cleared on write", () => {
@@ -74,7 +89,7 @@ test("execution schema migrates version 6 through durable operations, verificati
 		const migrated = openExecutionDatabase(planDirectory, { create: true });
 		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
 		const tables = tableNames(migrated);
-		for (const name of ["manager_plan_edits", "manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests"]) assert.ok(tables.has(name), name);
+		for (const name of ["manager_plan_edits", "manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests", "manager_reignite_requests"]) assert.ok(tables.has(name), name);
 		migrated.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
@@ -90,7 +105,7 @@ test("execution schema migrates version 7 without rebuilding existing run tables
 		const migrated = openExecutionDatabase(planDirectory, { create: true });
 		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
 		const tables = tableNames(migrated);
-		for (const name of ["manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests"]) assert.ok(tables.has(name), name);
+		for (const name of ["manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests", "manager_reignite_requests"]) assert.ok(tables.has(name), name);
 		migrated.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
@@ -108,6 +123,99 @@ test("execution schema migrates version 9 nested usage storage", () => {
 		const columns = (migrated.prepare("PRAGMA table_info(attempts)").all() as Array<{ name: string }>).map((row) => row.name);
 		assert.ok(columns.includes("nested_usage_json"));
 		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("execution schema migrates version 10 reignite storage and preserves verification rows", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v10-"));
+	try {
+		const current = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((current.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		seedManagerRun(current);
+		const now = "2026-08-13T00:00:00.000Z";
+		current.prepare(`
+			INSERT INTO manager_verifications (
+				request_id, run_id, generation, graph_sha256, run_assignment_path, run_assignment_sha256,
+				integration_branch, integration_worktree, integration_head, integration_tree, request_sha256,
+				state, manifest_json, manifest_sha256, result_json, terminal_detail, created_at, updated_at
+			) VALUES (?, 'run-reignite', 1, ?, '/repo/assignment.json', ?, 'herder/example/integration', '/repo/.herder-integration', ?, ?, ?, 'passed', NULL, NULL, NULL, NULL, ?, ?)
+		`).run(
+			"verify-1",
+			"b".repeat(64),
+			"c".repeat(64),
+			"d".repeat(40),
+			"e".repeat(40),
+			"f".repeat(64),
+			now,
+			now,
+		);
+		current.exec("DROP TABLE manager_reignite_requests; PRAGMA user_version = 10;");
+		current.close();
+
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		assert.ok(tableNames(migrated).has("manager_reignite_requests"));
+		const verification = migrated.prepare("SELECT request_id, state FROM manager_verifications WHERE request_id = 'verify-1'").get() as Record<string, unknown>;
+		assert.equal(verification.request_id, "verify-1");
+		assert.equal(verification.state, "passed");
+		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("reignite requests are put-if-absent per run and generation", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-reignite-put-"));
+	try {
+		const seeded = openExecutionDatabase(planDirectory, { create: true });
+		seedManagerRun(seeded);
+		seeded.close();
+		const store = new RunStore(planDirectory);
+		try {
+			const request = createReigniteRequest({
+				requestId: "reignite-1",
+				runId: "run-reignite",
+				generation: 1,
+				sourcePlanDirectory: "/repo/herder-plans",
+				graphSha256: "b".repeat(64),
+				integrationHead: "d".repeat(40),
+				integrationTree: "e".repeat(40),
+				integrationBranch: "herder/example/integration",
+				verdict: "REVISE",
+				scope: "PASS",
+				findings: ["[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding"],
+				fixGuidance: ["Open a sibling follow-up plan set."],
+				rationale: "Gates passed; residual work belongs in a new plan set.",
+				createdAt: "2026-08-13T00:00:00.000Z",
+				state: "pending",
+			});
+			assert.equal(store.putReigniteRequest(request).requestId, request.requestId);
+			assert.equal(store.putReigniteRequest(request).requestSha256, request.requestSha256);
+			const conflict = createReigniteRequest({
+				requestId: "reignite-2",
+				runId: request.runId,
+				generation: request.generation,
+				sourcePlanDirectory: request.sourcePlanDirectory,
+				graphSha256: request.graphSha256,
+				integrationHead: request.integrationHead,
+				integrationTree: request.integrationTree,
+				integrationBranch: request.integrationBranch,
+				verdict: request.verdict,
+				scope: request.scope,
+				findings: ["[fr-2][P1][BLOCKING][PATCH_REGRESSION] different residual"],
+				fixGuidance: request.fixGuidance,
+				rationale: request.rationale,
+				createdAt: "2026-08-13T00:00:01.000Z",
+				state: request.state,
+			});
+			assert.notEqual(conflict.requestSha256, request.requestSha256);
+			assert.throws(() => store.putReigniteRequest(conflict), /Reignite request changed for generation 1/);
+			assert.equal(store.getReigniteRequest("run-reignite", 1)?.requestId, request.requestId);
+		} finally {
+			store.close();
+		}
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}

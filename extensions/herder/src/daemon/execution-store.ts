@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 10
+export const EXECUTION_SCHEMA_VERSION = 11
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -655,6 +655,29 @@ const SCHEMA_9_TABLES = `
     WHERE state <> 'resolved';
 `
 
+const SCHEMA_11_TABLES = `
+  CREATE TABLE IF NOT EXISTS manager_reignite_requests (
+    request_id TEXT PRIMARY KEY NOT NULL,
+    run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    request_sha256 TEXT NOT NULL UNIQUE,
+    source_plan_directory TEXT NOT NULL,
+    graph_sha256 TEXT NOT NULL,
+    integration_head TEXT NOT NULL,
+    integration_tree TEXT NOT NULL,
+    integration_branch TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('APPROVE', 'REVISE', 'BLOCK')),
+    scope TEXT NOT NULL CHECK (scope IN ('PASS', 'FAIL')),
+    findings_json TEXT NOT NULL,
+    fix_guidance_json TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'skipped', 'written', 'failed')),
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS manager_reignite_requests_run_generation
+    ON manager_reignite_requests(run_id, generation);
+`
+
 function ensureLegacyFingerprintVersion(database: Database): void {
   const columns = database.prepare("PRAGMA table_info(manager_plan_specs)").all() as Array<{ name: string }>
   if (!columns.some((column) => column.name === "fingerprint_version")) {
@@ -668,6 +691,11 @@ function applySchema10(database: Database): void {
     database.exec("ALTER TABLE attempts ADD COLUMN nested_usage_json TEXT;")
   }
   database.exec("PRAGMA user_version = 10;")
+}
+
+function applySchema11(database: Database): void {
+  database.exec(SCHEMA_11_TABLES)
+  database.exec("PRAGMA user_version = 11;")
 }
 
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
@@ -692,21 +720,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       ${SCHEMA_9_TABLES}
     `)
     applySchema10(database)
+    applySchema11(database)
     return
   }
   if (version === 7 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
     database.exec(SCHEMA_9_TABLES)
     applySchema10(database)
+    applySchema11(database)
     return
   }
   if (version === 8 && allowInitialize) {
     database.exec(SCHEMA_9_TABLES)
     applySchema10(database)
+    applySchema11(database)
     return
   }
   if (version === 9 && allowInitialize) {
     applySchema10(database)
+    applySchema11(database)
+    return
+  }
+  if (version === 10 && allowInitialize) {
+    applySchema11(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -902,7 +938,8 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       );
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
       ${SCHEMA_9_TABLES}
-      PRAGMA user_version = 10;
+      ${SCHEMA_11_TABLES}
+      PRAGMA user_version = 11;
   `)
 }
 

@@ -24,6 +24,7 @@ import {
 	type ManagerReply,
 	type PlanPhase,
 	type RunStatus,
+	type ReigniteRequest,
 	type VerificationManifest,
 	type VerificationRequest,
 } from "../shared/protocol.ts";
@@ -427,6 +428,28 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 		result: parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null),
 		terminalDetail: row.terminal_detail === null ? null : String(row.terminal_detail),
 		updatedAt: String(row.updated_at),
+	};
+}
+
+function rowToReignite(row: Record<string, unknown>): ReigniteRequest {
+	return {
+		schemaVersion: 1,
+		requestId: String(row.request_id),
+		requestSha256: String(row.request_sha256),
+		runId: String(row.run_id),
+		generation: Number(row.generation),
+		sourcePlanDirectory: String(row.source_plan_directory),
+		graphSha256: String(row.graph_sha256),
+		integrationHead: String(row.integration_head),
+		integrationTree: String(row.integration_tree),
+		integrationBranch: String(row.integration_branch),
+		verdict: String(row.verdict) as ReigniteRequest["verdict"],
+		scope: String(row.scope) as ReigniteRequest["scope"],
+		findings: parseJson<string[]>(String(row.findings_json), []),
+		fixGuidance: parseJson<string[]>(String(row.fix_guidance_json), []),
+		rationale: String(row.rationale),
+		createdAt: String(row.created_at),
+		state: String(row.state) as ReigniteRequest["state"],
 	};
 }
 
@@ -851,6 +874,37 @@ export class RunStore {
 		return rowToVerification(row);
 	}
 
+	getReigniteRequest(runId: string, generation?: number): ReigniteRequest | null {
+		const row = generation === undefined
+			? this.database.prepare("SELECT * FROM manager_reignite_requests WHERE run_id = ? ORDER BY generation DESC, created_at DESC LIMIT 1").get(runId)
+			: this.database.prepare("SELECT * FROM manager_reignite_requests WHERE run_id = ? AND generation = ?").get(runId, generation);
+		return row ? rowToReignite(row as Record<string, unknown>) : null;
+	}
+
+	putReigniteRequest(request: ReigniteRequest): ReigniteRequest {
+		const existing = this.getReigniteRequest(request.runId, request.generation);
+		if (existing) {
+			if (existing.requestSha256 !== request.requestSha256) {
+				throw new Error(`Reignite request changed for generation ${request.generation}`);
+			}
+			return existing;
+		}
+		this.database.prepare(`
+			INSERT INTO manager_reignite_requests (
+				request_id, run_id, generation, request_sha256, source_plan_directory, graph_sha256,
+				integration_head, integration_tree, integration_branch, verdict, scope,
+				findings_json, fix_guidance_json, rationale, state, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			request.requestId, request.runId, request.generation, request.requestSha256,
+			request.sourcePlanDirectory, request.graphSha256, request.integrationHead,
+			request.integrationTree, request.integrationBranch, request.verdict, request.scope,
+			JSON.stringify(request.findings), JSON.stringify(request.fixGuidance), request.rationale,
+			request.state, request.createdAt,
+		);
+		return this.getReigniteRequest(request.runId, request.generation)!;
+	}
+
 	getPlanSpecs(runId: string, graphGeneration?: number): StoredPlanSpec[] {
 		const generation = graphGeneration ?? this.getRun()?.currentGeneration;
 		if (!generation) return [];
@@ -1005,7 +1059,7 @@ export class RunStore {
 				// Delete children before their manager_runs parent. Foreign-key enforcement
 				// is enabled for every execution connection, so relying on cascade order
 				// here would make reset fail part-way through its transaction.
-				"manager_approvals", "manager_plan_edits", "manager_verifications", "manager_attention_requests",
+				"manager_approvals", "manager_plan_edits", "manager_verifications", "manager_reignite_requests", "manager_attention_requests",
 				"manager_events", "manager_actions", "manager_plans", "manager_plan_specs", "manager_generations",
 				"manager_operations", "manager_snapshots", "manager_service", "manager_runs", "run_configuration", "attempts",
 			]) this.database.prepare(`DELETE FROM ${table}`).run();

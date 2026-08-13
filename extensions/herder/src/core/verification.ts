@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+	REIGNITE_STATES,
 	sha256,
 	stableJson,
+	type ReigniteRequest,
+	type ReigniteState,
 	type VerificationGate,
 	type VerificationManifest,
 	type VerificationRequest,
@@ -146,4 +149,59 @@ export function normalizeVerificationManifest(
 		...(selector && Object.keys(selector).length > 0 ? { selector } : {}),
 	};
 	return { manifest, manifestSha256: sha256(stableJson(manifest)) };
+}
+
+export interface ReigniteRequestInput {
+	requestId: string;
+	runId: string;
+	generation: number;
+	sourcePlanDirectory: string;
+	graphSha256: string;
+	integrationHead: string;
+	integrationTree: string;
+	integrationBranch: string;
+	verdict: ReigniteRequest["verdict"];
+	scope: ReigniteRequest["scope"];
+	findings: string[];
+	fixGuidance: string[];
+	rationale: string;
+	createdAt: string;
+	state: ReigniteState;
+}
+
+function stringList(value: unknown, label: string): string[] {
+	if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+	return value.map((entry, index) => {
+		if (typeof entry !== "string" || /[\0\r]/.test(entry)) throw new Error(`${label} ${index + 1} is invalid`);
+		return entry;
+	});
+}
+
+export function createReigniteRequest(input: ReigniteRequestInput): ReigniteRequest {
+	const parsedCreatedAt = new Date(input.createdAt);
+	if (Number.isNaN(parsedCreatedAt.getTime())) throw new Error("Reignite createdAt must be an ISO timestamp");
+	const createdAt = parsedCreatedAt.toISOString();
+	const core = {
+		schemaVersion: 1 as const,
+		requestId: oneLine(input.requestId, "Reignite request ID", 200),
+		runId: oneLine(input.runId, "Reignite run ID", 200),
+		generation: input.generation,
+		sourcePlanDirectory: path.resolve(input.sourcePlanDirectory),
+		graphSha256: sha(input.graphSha256, "Reignite graph SHA-256"),
+		integrationHead: sha(input.integrationHead, "Reignite integration head"),
+		integrationTree: sha(input.integrationTree, "Reignite integration tree"),
+		integrationBranch: oneLine(input.integrationBranch, "Reignite integration branch"),
+		verdict: input.verdict,
+		scope: input.scope,
+		findings: stringList(input.findings, "Reignite finding"),
+		fixGuidance: stringList(input.fixGuidance, "Reignite fix guidance"),
+		rationale: String(input.rationale ?? ""),
+		createdAt,
+		state: input.state,
+	};
+	if (!Number.isSafeInteger(core.generation) || core.generation < 1) throw new Error("Reignite generation must be a positive integer");
+	if (!["APPROVE", "REVISE", "BLOCK"].includes(core.verdict)) throw new Error("Reignite verdict must be APPROVE, REVISE, or BLOCK");
+	if (!["PASS", "FAIL"].includes(core.scope)) throw new Error("Reignite scope must be PASS or FAIL");
+	if (!REIGNITE_STATES.includes(core.state)) throw new Error("Reignite state must be pending, skipped, written, or failed");
+	return { ...core, requestSha256: sha256(stableJson(core)) };
 }
