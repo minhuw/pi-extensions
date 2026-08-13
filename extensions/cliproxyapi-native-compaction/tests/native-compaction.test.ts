@@ -7,8 +7,10 @@ import {
 import {
 	buildCompactHeaders,
 	buildCompactRequestBody,
+	callRemoteCompaction,
 	parseCompactResponse,
 	resolveCompactUrl,
+	shouldFallbackToBuiltinCompaction,
 } from "../native-compaction.ts";
 
 const model = {
@@ -29,6 +31,7 @@ const config: NativeCompactionConfig = {
 	providerId: "cliproxyapi",
 	apiId: "cliproxyapi-codex-responses",
 	models: ["gpt-5.6-sol"],
+	fallbackToBuiltin: true,
 };
 
 describe("model capability gate", () => {
@@ -122,6 +125,71 @@ describe("canonical compacted output", () => {
 		const parsed = parseCompactResponse(value);
 		expect(parsed.output).toEqual(value.output);
 		expect(parsed.output).not.toBe(value.output);
+	});
+
+	it("falls back to built-in compaction when native compact has not started", () => {
+		expect(
+			shouldFallbackToBuiltinCompaction({
+				checkpoint: { status: "none" },
+				fallbackToBuiltin: true,
+			}),
+		).toBe(true);
+		expect(
+			shouldFallbackToBuiltinCompaction({
+				checkpoint: { status: "none" },
+				fallbackToBuiltin: false,
+			}),
+		).toBe(false);
+	});
+
+	it("does not fall back once a native checkpoint already exists", () => {
+		expect(
+			shouldFallbackToBuiltinCompaction({
+				checkpoint: {
+					status: "valid",
+					checkpoint: {
+						entryIndex: 0,
+						entryId: "cmp_1",
+						details: {
+							kind: "cliproxyapi-openai-native-compaction",
+							version: 1,
+							modelKey: "cliproxyapi:cliproxyapi-codex-responses:gpt-5.6-sol",
+							endpoint: "responses/compact",
+							replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
+						},
+					},
+				},
+				fallbackToBuiltin: true,
+			}),
+		).toBe(false);
+	});
+
+	it("does not retry an auth_unavailable compact response", async () => {
+		let calls = 0;
+		const fetchImpl: typeof fetch = async () => {
+			calls += 1;
+			return new Response(
+				JSON.stringify({
+					error: {
+						message: "auth_unavailable: no auth available (providers=codex,openai-compatible-minimax router, model=gpt-5.6-sol)",
+						type: "server_error",
+						code: "internal_server_error",
+					},
+				}),
+				{ status: 503, statusText: "Service Unavailable" },
+			);
+		};
+
+		await expect(
+			callRemoteCompaction({
+				url: "https://proxy.example/backend-api/codex/responses/compact",
+				headers: new Headers(),
+				body: { model: "gpt-5.6-sol", input: [] },
+				model,
+				fetchImpl,
+			}),
+		).rejects.toThrow(/auth_unavailable/);
+		expect(calls).toBe(1);
 	});
 
 	it("rejects output without exactly one encrypted opaque item", () => {

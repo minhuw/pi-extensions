@@ -52,11 +52,16 @@ A trusted project may override it at `.pi/cliproxyapi-native-compaction.json`:
   "enabled": true,
   "providerId": "cliproxyapi",
   "apiId": "cliproxyapi-codex-responses",
-  "models": ["gpt-5.6-sol"]
+  "models": ["gpt-5.6-sol"],
+  "fallbackToBuiltin": true
 }
 ```
 
 The `models` array uses exact model IDs deliberately. Add an alias only after verifying that CLIProxyAPI resolves it to a genuine OpenAI backend supporting `/responses/compact`.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `fallbackToBuiltin` | `true` | If native `/responses/compact` fails and the session has no native checkpoint yet, let Pi's built-in summarizer run instead of canceling. |
 
 Optional environment overrides:
 
@@ -64,10 +69,25 @@ Optional environment overrides:
 | --- | --- |
 | `PI_CLIPROXYAPI_NATIVE_COMPACTION_MODELS` | Comma-separated exact model IDs. |
 | `PI_CLIPROXYAPI_NATIVE_COMPACTION_ENDPOINT` | Explicit full compact endpoint URL. |
+| `PI_CLIPROXYAPI_NATIVE_COMPACTION_FALLBACK` | Override `fallbackToBuiltin` (`true` / `false`). |
+
+## Overlapping GPT backends
+
+CLIProxyAPI still resolves `/backend-api/codex/responses/compact` by **model name**, not by the Codex path. If `gpt-5.6-sol` is advertised by both Codex and an OpenAI-compatible provider (for example MiniMax), compact can fail with:
+
+```text
+auth_unavailable: no auth available (providers=codex,openai-compatible-minimax router, model=gpt-5.6-sol)
+```
+
+The extension does not try to pin that router to Codex. A native compact window is encrypted to the Codex account that created it, so later turns in that session would have to stay on Codex anyway.
+
+If native compact fails and the session has **no** native checkpoint yet, the extension falls back to Pi's built-in text summarizer (`fallbackToBuiltin`, default on). That summary is portable across backends.
+
+Once a native checkpoint exists, fallback is refused — the discarded transcript is only recoverable through the opaque Codex window.
 
 ## Failure and compatibility behavior
 
-The extension fails closed. A malformed compact response, authentication failure, model mismatch, or network error cancels compaction instead of replacing history with incomplete data.
+A malformed compact response, authentication failure, model mismatch, or network error does not replace history with incomplete data. When no native checkpoint exists, those failures fall back to Pi's built-in summarizer. After a native checkpoint exists, they cancel compaction instead.
 
 Once a session contains an opaque OpenAI checkpoint, switching it to an incompatible model is blocked because that model cannot safely recover the discarded transcript.
 

@@ -12,6 +12,7 @@ import {
 	NATIVE_COMPACTION_KIND,
 	NATIVE_COMPACTION_VERSION,
 	resolveCompactUrl,
+	shouldFallbackToBuiltinCompaction,
 	type NativeCompactionDetails,
 	type ResponseItem,
 } from "./native-compaction.ts";
@@ -143,9 +144,16 @@ export default function cliproxyNativeCompactionExtension(pi: ExtensionAPI): voi
 				},
 			};
 		} catch (error) {
-			if (!event.signal.aborted) {
-				notify(ctx, `CLIProxyAPI native compaction failed: ${errorMessage(error)}`, "error");
+			if (event.signal.aborted) return { cancel: true };
+			if (shouldFallbackToBuiltinCompaction({ checkpoint, fallbackToBuiltin: config.fallbackToBuiltin })) {
+				notify(
+					ctx,
+					`CLIProxyAPI native compaction failed; falling back to Pi's built-in summarizer. ${errorMessage(error)}`,
+					"warning",
+				);
+				return undefined;
 			}
+			notify(ctx, `CLIProxyAPI native compaction failed: ${errorMessage(error)}`, "error");
 			return { cancel: true };
 		}
 	});
@@ -161,7 +169,7 @@ export default function cliproxyNativeCompactionExtension(pi: ExtensionAPI): voi
 			const selected = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 			const enabled = isEligibleModel(ctx.model, config);
 			ctx.ui.notify(
-				`${enabled ? "Enabled" : "Disabled"} for ${selected}. Allowlist: ${config.models.join(", ") || "(empty)"}.`,
+				`${enabled ? "Enabled" : "Disabled"} for ${selected}. Fallback to built-in: ${config.fallbackToBuiltin ? "on" : "off"}. Allowlist: ${config.models.join(", ") || "(empty)"}.`,
 				enabled ? "info" : "warning",
 			);
 		},

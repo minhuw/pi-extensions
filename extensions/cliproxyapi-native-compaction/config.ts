@@ -11,6 +11,8 @@ export interface NativeCompactionConfig {
 	apiId: string;
 	models: string[];
 	endpoint?: string;
+	/** When native compact fails and the session has no native checkpoint, let Pi's built-in summarizer run. */
+	fallbackToBuiltin: boolean;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -38,6 +40,23 @@ function stringArray(value: unknown, field: string): string[] | undefined {
 	return [...new Set(value.map((entry) => String(entry).trim()))];
 }
 
+function parseBoolean(value: string): boolean | undefined {
+	switch (value.trim().toLowerCase()) {
+		case "1":
+		case "true":
+		case "yes":
+		case "on":
+			return true;
+		case "0":
+		case "false":
+		case "no":
+		case "off":
+			return false;
+		default:
+			return undefined;
+	}
+}
+
 function applyConfig(base: NativeCompactionConfig, value: JsonObject | undefined): NativeCompactionConfig {
 	if (!value) return base;
 	return {
@@ -46,6 +65,8 @@ function applyConfig(base: NativeCompactionConfig, value: JsonObject | undefined
 		apiId: nonEmptyString(value.apiId) ?? base.apiId,
 		models: stringArray(value.models, "models") ?? base.models,
 		endpoint: nonEmptyString(value.endpoint) ?? base.endpoint,
+		fallbackToBuiltin:
+			typeof value.fallbackToBuiltin === "boolean" ? value.fallbackToBuiltin : base.fallbackToBuiltin,
 	};
 }
 
@@ -64,6 +85,7 @@ export function loadConfig(cwd: string, projectTrusted: boolean): NativeCompacti
 		providerId: configuredProviderId(agentDir) ?? "cliproxyapi",
 		apiId: "cliproxyapi-codex-responses",
 		models: [...DEFAULT_NATIVE_MODELS],
+		fallbackToBuiltin: true,
 	};
 
 	config = applyConfig(config, readObject(join(agentDir, CONFIG_FILE_NAME)));
@@ -77,6 +99,11 @@ export function loadConfig(cwd: string, projectTrusted: boolean): NativeCompacti
 	}
 	const envEndpoint = nonEmptyString(process.env.PI_CLIPROXYAPI_NATIVE_COMPACTION_ENDPOINT);
 	if (envEndpoint) config.endpoint = envEndpoint;
+	const envFallback = process.env.PI_CLIPROXYAPI_NATIVE_COMPACTION_FALLBACK;
+	if (envFallback !== undefined) {
+		const parsed = parseBoolean(envFallback);
+		if (parsed !== undefined) config.fallbackToBuiltin = parsed;
+	}
 
 	return config;
 }

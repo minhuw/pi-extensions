@@ -398,6 +398,17 @@ export function buildCompactRequestBody(model: Model<any>, input: ResponseItem[]
 	};
 }
 
+export function isAuthUnavailableMessage(value: string): boolean {
+	return /auth_unavailable|no auth available/i.test(value);
+}
+
+export function shouldFallbackToBuiltinCompaction(params: {
+	checkpoint: CheckpointLookup;
+	fallbackToBuiltin: boolean;
+}): boolean {
+	return params.fallbackToBuiltin && params.checkpoint.status === "none";
+}
+
 function parseRetryDelay(response: Response): number | undefined {
 	const milliseconds = Number(response.headers.get("retry-after-ms"));
 	if (Number.isFinite(milliseconds) && milliseconds >= 0) return milliseconds;
@@ -472,7 +483,10 @@ export async function callRemoteCompaction(params: {
 			if (!response.ok) {
 				const responseBody = await response.text().catch(() => "");
 				const message = `CLIProxyAPI native compaction failed (${response.status}): ${responseBody || response.statusText}`;
-				if (!isRetryableStatus(response.status)) throw new NonRetryableCompactionError(message);
+				// auth_unavailable is a routing/auth-selection miss. Repeating the same bound request will not recover.
+				if (!isRetryableStatus(response.status) || isAuthUnavailableMessage(responseBody) || isAuthUnavailableMessage(message)) {
+					throw new NonRetryableCompactionError(message);
+				}
 				const error = new Error(message);
 				if (attempt === MAX_REMOTE_RETRIES) throw error;
 				lastError = error;
