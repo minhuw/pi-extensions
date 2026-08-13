@@ -12,7 +12,7 @@ test("reset command asks for confirmation before applying and formats the result
 			return true;
 		},
 		apply: async (request) => {
-			assert.deepEqual(request, { repositoryRoot: "/repo", planDirectory: "/repo/custom-plans" });
+			assert.deepEqual(request, { repoRoot: "/repo", planDirectory: "/repo/custom-plans" });
 			return { planName: "custom-plans", removedBranches: ["integration", "001"], removedWorktrees: ["integration", "001"], removedRefs: ["base"], resetPlans: ["001"] };
 		},
 	});
