@@ -24,10 +24,12 @@ import {
 	parseFireArguments,
 	parseGrillPlanTarget,
 	parsePlanDirArguments,
+	parseResetArguments,
 	type AttachOptions,
 	type FireOptions,
 } from "./arguments.ts";
 import { runCleanupCommand } from "./cleanup-command.ts";
+import { runResetCommand } from "./reset-command.ts";
 import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
 import {
 	activeModelMatches,
@@ -854,6 +856,19 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return result.message;
 	};
 
+	const reset = async (args: string, ctx: ExtensionContext): Promise<string> => {
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder reset.");
+		const parsed = parseResetArguments(args);
+		const repoRoot = await repositoryRoot(ctx);
+		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
+		return runResetCommand(parsed, {
+			repositoryRoot: repoRoot,
+			planDirectory: planDir,
+			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
+		});
+	};
+
+
 	const stop = async (): Promise<string> => {
 		if (!currentState) return "No active Herder run.";
 		const epoch = sessionEpoch;
@@ -903,6 +918,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerCommand("herder-status", { description: "Show Herder manager and plan status.", handler: command((args, ctx) => status(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-dashboard", { description: "Open the manager-hosted Herder dashboard.", handler: command((args, ctx) => dashboard(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-cleanup", { description: "Preview and confirm safe cleanup of completed Herder plan worktrees.", handler: command(cleanup) });
+	pi.registerCommand("herder-reset", { description: "Reset a Herder plan set to its pre-initialized execution state.", handler: command(reset) });
 	pi.registerCommand("herder-stop", {
 		description: "Stop active Herder workers and preserve repository state.",
 		handler: async (_args, ctx) => {

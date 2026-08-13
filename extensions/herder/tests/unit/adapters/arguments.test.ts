@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseAttachArguments, parseCleanupArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
+import { parseAttachArguments, parseCleanupArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, parseResetArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../adapters/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
@@ -18,7 +18,14 @@ test("extracts an active-Fire Grill target without consuming the skill arguments
 	assert.throws(() => parseGrillPlanTarget("--plan 1 --plan 2"), /more than once/);
 });
 
-test("fire defaults to a five-worker pool and an ephemeral dashboard port", () => {
+test("reset accepts an optional plan directory and rejects options", () => {
+	assert.deepEqual(parseResetArguments(""), { planDir: "herder-plans" });
+	assert.deepEqual(parseResetArguments("custom-plans"), { planDir: "custom-plans" });
+	assert.throws(() => parseResetArguments("one two"), /Usage/);
+	assert.throws(() => parseResetArguments("--force"), /Unknown option/);
+});
+
+
 	assert.deepEqual(parseFireArguments("", "fire"), {
 		mode: "fire",
 		planDir: "herder-plans",

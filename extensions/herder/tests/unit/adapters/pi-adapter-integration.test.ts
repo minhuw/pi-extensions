@@ -621,6 +621,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"herder-grill",
 			"herder-improve",
 			"herder-plans",
+			"herder-reset",
 			"herder-simplify",
 			"herder-resume",
 			"herder-revise",

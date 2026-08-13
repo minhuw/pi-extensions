@@ -28,6 +28,10 @@ export const HERDER_CLEANUP_COMMAND_USAGE = [
 	"  /herder-cleanup [plan-dir] --deep [--include-failed]",
 ].join("\n");
 
+export const HERDER_RESET_COMMAND_USAGE = "Usage:\n  /herder-reset [plan-dir]";
+
+export interface ResetCommandOptions { planDir: string }
+
 export interface GrillPlanTarget {
 	planId: string;
 	planDir?: string;
@@ -212,6 +216,14 @@ export function parseCleanupArguments(input: string): CleanupCommandOptions {
 	}
 	if (deep && planId !== undefined) throw new Error("--deep is plan-set-level and cannot be combined with --plan.");
 	return { planDir, ...(planId === undefined ? {} : { planId }), includeFailed, deep };
+}
+
+
+export function parseResetArguments(input: string): ResetCommandOptions {
+	const tokens = tokenizeArguments(input);
+	if (tokens.length > 1) throw new Error(`${HERDER_RESET_COMMAND_USAGE}`);
+	if (tokens[0]?.startsWith("--")) throw new Error(`Unknown option: ${tokens[0]}\n${HERDER_RESET_COMMAND_USAGE}`);
+	return { planDir: tokens[0] ?? "herder-plans" };
 }
 
 

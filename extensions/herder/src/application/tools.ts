@@ -9,6 +9,7 @@ import {
 	snapshotPlan,
 } from "../core/plans.ts";
 import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
+import { resetHerderPlanSet, type HerderResetInput, type HerderResetResult } from "../daemon/git/reset-plan-set.ts";
 import { normalizeVerificationManifest } from "../core/verification.ts";
 import { enableDashboardHostAccess } from "../dashboard/dashboard-host.ts";
 import type { AttentionResolutionInput, VerificationManifest, VerificationRequest } from "../shared/protocol.ts";
@@ -485,6 +486,16 @@ export async function applyHerderCleanup(
 	});
 }
 
+
+export interface ResetApplicationRequest extends HerderResetInput {}
+
+export async function applyHerderReset(
+	request: ResetApplicationRequest,
+	dependencies: { withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T> } = {},
+): Promise<HerderResetResult> {
+	const runExclusion = dependencies.withExclusion ?? withServiceExclusion;
+	return runExclusion(request.planDirectory, () => resetHerderPlanSet(request));
+}
 
 export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
