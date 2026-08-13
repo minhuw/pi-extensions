@@ -3,6 +3,7 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 import type { SpawnSyncReturns } from "node:child_process"
 import { buildGraph } from "../core/plans.ts"
+import { readPlanLifecycle } from "../core/workflow.ts"
 import { executionReport, readManagerState, readUsageState } from "../daemon/execution-store.ts"
 import type { UsageRecord } from "../daemon/execution-store.ts"
 import { validatePlanName } from "../daemon/git/namespace-run.ts"
@@ -337,14 +338,8 @@ export function buildDashboardState(input: DashboardInput = {}) {
   const runtimeById = new Map(manager.plans.map((plan) => [plan.planId, plan]))
   const activeActionById = new Map(manager.actions.filter((action) => ["proposed", "dispatched"].includes(action.state)).map((action) => [action.planId, action]))
   const sourcePlans = graph.plans as DynamicRecord[]
-  const canonicalStatus = (plan: DynamicRecord): string => {
-    const runtime = runtimeById.get(plan.id)
-    if (!runtime) return plan.status
-    if (["DONE", "FINAL_APPROVED"].includes(runtime.phase)) return "DONE"
-    if (["BLOCKED", "NEEDS_INPUT"].includes(runtime.phase)) return "BLOCKED"
-    return "IN PROGRESS"
-  }
-  const statusById = new Map(sourcePlans.map((plan) => [plan.id, canonicalStatus(plan)]))
+  const lifecycle = readPlanLifecycle(context.planDir)
+  const statusById = new Map(sourcePlans.map((plan) => [plan.id, lifecycle.get(plan.id) ?? plan.status]))
   const plans = sourcePlans.map((plan) => {
     const branch = branchByRelative.get(plan.id) ?? null
     const branchName = `herder/${context.planName}/${plan.id}`

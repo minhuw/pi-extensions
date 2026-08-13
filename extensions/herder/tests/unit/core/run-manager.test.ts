@@ -282,24 +282,132 @@ async function completeSinglePlan(
 	})).reply);
 }
 
-test("fresh runs reject lifecycle state without manager-owned execution proof", { timeout: 10_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-adoption-test-"));
-	const fixture = writeFixture(root);
+test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { timeout: 15_000 }, async () => {
+	const doneRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-done-skip-test-"));
+	const doneFixture = writeFixture(doneRoot);
 	fs.writeFileSync(
-		path.join(fixture.planDirectory, "README.md"),
-		fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8").replace("| TODO |", "| DONE |"),
+		path.join(doneFixture.planDirectory, "README.md"),
+		fs.readFileSync(path.join(doneFixture.planDirectory, "README.md"), "utf8").replace("| TODO |", "| DONE |"),
 	);
 	try {
-		const service = await ensureService(fixture.planDirectory);
+		const service = await ensureService(doneFixture.planDirectory);
+		const started = payload(payload(await requestService(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: doneFixture.repo,
+			planDirectory: doneFixture.planDirectory,
+			profile: "eclipse",
+		})).reply);
+		assert.notEqual(started.status, "idle");
+		const store = new RunStore(doneFixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getPlanSpecs(run.runId).find((candidate) => candidate.planId === "001")?.initialStatus, "DONE");
+		} finally {
+			store.close();
+		}
 		await assert.rejects(() => requestService(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: doneFixture.repo,
+			planDirectory: doneFixture.planDirectory,
+			profile: "eclipse",
+		}), /already exists; use resume/);
+	} finally {
+		await stopService(doneFixture.planDirectory).catch(() => {});
+		fs.rmSync(doneRoot, { recursive: true, force: true });
+		fs.rmSync(`${doneFixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+
+	const progressRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-in-progress-test-"));
+	const progressFixture = writeFixture(progressRoot);
+	fs.writeFileSync(
+		path.join(progressFixture.planDirectory, "README.md"),
+		fs.readFileSync(path.join(progressFixture.planDirectory, "README.md"), "utf8").replace("| TODO |", "| IN PROGRESS |"),
+	);
+	try {
+		const service = await ensureService(progressFixture.planDirectory);
+		await assert.rejects(() => requestService(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: progressFixture.repo,
+			planDirectory: progressFixture.planDirectory,
+			profile: "eclipse",
+		}), /cannot adopt prior execution state: 001=IN PROGRESS/);
+	} finally {
+		await stopService(progressFixture.planDirectory).catch(() => {});
+		fs.rmSync(progressRoot, { recursive: true, force: true });
+	}
+});
+
+test("non-terminal reconcile leaves authored README status unchanged", { timeout: 10_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-readme-stable-"));
+	const fixture = writeFixture(root);
+	const readme = path.join(fixture.planDirectory, "README.md");
+	const before = fs.readFileSync(readme, "utf8");
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestService(service, "/v1/start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
 			profile: "eclipse",
-		}), /cannot adopt prior execution state: 001=DONE/);
+			maxParallel: 1,
+		})).reply);
+		assert.equal(started.status, "running");
+		assert.equal(fs.readFileSync(readme, "utf8"), before);
+		assert.match(before, /\| TODO \|/);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("terminal stop snapshots live status and a projection throw leaves the run stopped", { timeout: 15_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-terminal-project-"));
+	const fixture = writeFixture(root);
+	const readme = path.join(fixture.planDirectory, "README.md");
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await requestService(service, "/v1/start", {
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		assert.match(fs.readFileSync(readme, "utf8"), /\| TODO \|/);
+		const stopped = payload(payload(await requestService(service, "/v1/stop", {})).reply);
+		assert.equal(stopped.status, "stopped");
+		assert.match(fs.readFileSync(readme, "utf8"), /\| IN PROGRESS \|/);
+
+		const throwRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-project-throw-"));
+		const throwFixture = writeFixture(throwRoot);
+		try {
+			const throwService = await ensureService(throwFixture.planDirectory);
+			await requestService(throwService, "/v1/start", {
+				mode: "fire",
+				repositoryRoot: throwFixture.repo,
+				planDirectory: throwFixture.planDirectory,
+				profile: "eclipse",
+				maxParallel: 1,
+			});
+			fs.writeFileSync(path.join(throwFixture.planDirectory, "README.md"), "# not a plan index\n");
+			const manager = new HerderRunManager(throwFixture.planDirectory);
+			try {
+				const reply = manager.stop();
+				assert.equal(reply.status, "stopped");
+				assert.equal(manager.store.getRun()?.status, "stopped");
+			} finally {
+				manager.close();
+			}
+		} finally {
+			await stopService(throwFixture.planDirectory).catch(() => {});
+			fs.rmSync(throwRoot, { recursive: true, force: true });
+			fs.rmSync(`${throwFixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
 });
 
@@ -480,6 +588,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		const finalReply = payload(complete.reply);
 		assert.equal(finalReply.status, "complete");
 		assert.equal(payload(finalReply.summary).done, 1);
+		assert.match(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /\| DONE \|/);
 		assert.equal(git(fixture.repo, ["rev-parse", "HEAD"]).stdout.trim(), fixture.originalHead, "user checkout HEAD changed");
 		assert.equal(fs.readFileSync(path.join(fixture.repo, "src/value.mjs"), "utf8"), "export const value = 1\n", "user checkout source changed");
 		assert.equal(git(fixture.repo, ["show", "herder/herder-plans/integration:src/value.mjs"]).stdout, "export const value = 2\n");

@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process"
 import test from "node:test"
 import { cleanupRun, parseWorktreeRecords } from "../../../src/daemon/git/cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
+import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
 
 function git(repo: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" })
@@ -15,8 +16,8 @@ function git(repo: string, ...args: string[]): string {
   return result.stdout.trim()
 }
 
-function planBody(): string {
-  return `# Plan 001: Cleanup fixture
+function planBody(planId = "001"): string {
+  return `# Plan ${planId}: Cleanup fixture
 
 ## Status
 
@@ -83,7 +84,9 @@ interface Fixture {
   integrationWorktree: string
 }
 
-function setup(): Fixture {
+function setup(options: { planId?: string; readmeStatus?: string; writeProof?: boolean } = {}): Fixture {
+  const planId = options.planId ?? "001"
+  const readmeStatus = options.readmeStatus ?? "DONE"
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-cleanup-git-"))
   const repo = path.join(root, "repo")
   const worktrees = path.join(root, "worktrees")
@@ -101,14 +104,14 @@ function setup(): Fixture {
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| [001](001-cleanup-fixture.md) | Cleanup fixture | P1 | S | — | DONE |
+| [${planId}](${planId}-cleanup-fixture.md) | Cleanup fixture | P1 | S | — | ${readmeStatus} |
 `)
-  fs.writeFileSync(path.join(planDir, "001-cleanup-fixture.md"), planBody())
+  fs.writeFileSync(path.join(planDir, `${planId}-cleanup-fixture.md`), planBody(planId))
   git(repo, "add", ".")
   git(repo, "commit", "-q", "-m", "test: initialize cleanup fixture")
   const base = git(repo, "rev-parse", "HEAD")
   const integrationBranch = "herder/plans/integration"
-  const planBranch = "herder/plans/001"
+  const planBranch = `herder/plans/${planId}`
   const integrationWorktree = path.join(worktrees, "integration")
   const planWorktree = path.join(worktrees, "plan")
   git(repo, "worktree", "add", "-q", "-b", integrationBranch, integrationWorktree, base)
@@ -120,15 +123,87 @@ function setup(): Fixture {
   git(integrationWorktree, "merge", "-q", "--ff-only", planBranch)
   git(repo, "merge", "-q", "--ff-only", integrationBranch)
   git(repo, "update-ref", "refs/plan-herder/plans/base", base, "")
-  const proof = buildCompletionProofPayload({
-    runId: "cleanup-test", planId: "001", generation: 1, round: 1,
-    reviewerActionId: "reviewer-001", decisionActionId: "reviewer-001", decisionRole: "plan-reviewer",
-    assignmentSha256: "a".repeat(64), approvedBase: base, approvedHead: completed,
-    approvedTree: git(repo, "rev-parse", `${completed}^{tree}`), reviewResultSha256: "b".repeat(64),
-    decisionResultSha256: "b".repeat(64), integratedHead: completed,
-  })
-  writeCompletionProof(repo, "refs/plan-herder/plans/completed/001", proof, "cleanup-test-proof")
+  if (options.writeProof !== false) {
+    const proof = buildCompletionProofPayload({
+      runId: "cleanup-test", planId, generation: 1, round: 1,
+      reviewerActionId: "reviewer-001", decisionActionId: "reviewer-001", decisionRole: "plan-reviewer",
+      assignmentSha256: "a".repeat(64), approvedBase: base, approvedHead: completed,
+      approvedTree: git(repo, "rev-parse", `${completed}^{tree}`), reviewResultSha256: "b".repeat(64),
+      decisionResultSha256: "b".repeat(64), integratedHead: completed,
+    })
+    writeCompletionProof(repo, `refs/plan-herder/plans/completed/${planId}`, proof, "cleanup-test-proof")
+  }
   return { root, repo, planDir, planBranch, planWorktree, integrationBranch, integrationWorktree }
+}
+
+function writeOverlay(
+  fixture: Fixture,
+  input: { planId: string; phase: StoredPlan["phase"]; initialStatus?: StoredPlanSpec["initialStatus"]; runStatus?: "complete" | "failed" | "stopped" },
+): void {
+  const store = new RunStore(fixture.planDir)
+  const runId = "cleanup-overlay-run"
+  store.createRun({
+    runId,
+    repositoryRoot: fs.realpathSync(fixture.repo),
+    planDirectory: fs.realpathSync(fixture.planDir),
+    planName: "plans",
+    host: "pi",
+    profileName: "eclipse",
+    profileSha256: "c".repeat(64),
+    maxParallel: 1,
+    currentGeneration: 1,
+    graphSha256: "d".repeat(64),
+    status: input.runStatus ?? "complete",
+    checkoutStateToken: "checkout-token",
+    baseCommit: git(fixture.repo, "rev-parse", "HEAD"),
+    integrationBranch: fixture.integrationBranch,
+    integrationWorktree: fs.realpathSync(fixture.integrationWorktree),
+  })
+  store.putPlanSpecs([{
+    runId,
+    graphGeneration: 1,
+    planId: input.planId,
+    planFingerprint: "e".repeat(64),
+    fingerprintVersion: 2,
+    ordinal: 0,
+    title: "Cleanup fixture",
+    priority: "P1",
+    effort: "S",
+    kind: "behavioral",
+    dependencies: [],
+    initialStatus: input.initialStatus ?? "TODO",
+    initialStatusDetail: "",
+    gateCommands: [],
+    planFile: `${input.planId}-cleanup-fixture.md`,
+    assignment: {
+      snapshotSha256: "f".repeat(64),
+      snapshotInputs: [],
+      plan: { id: input.planId, title: "Cleanup fixture", kind: "behavioral", parentObjective: null, dependencies: [], inScopePaths: [] },
+      planText: "# overlay",
+    },
+  }])
+  store.putPlan({
+    runId,
+    planId: input.planId,
+    generation: 1,
+    round: 1,
+    phase: input.phase,
+    branch: `herder/plans/${input.planId}`,
+    worktree: fixture.planWorktree,
+    assignmentPath: "/tmp/assignment.json",
+    assignmentSha256: "a".repeat(64),
+    snapshotSha256: "b".repeat(64),
+    generationBase: "c".repeat(40),
+    reviewPass: 0,
+    findings: [],
+    repair: [],
+    gates: [],
+    approvedBase: null,
+    approvedHead: null,
+    approvedTree: null,
+    rebase: null,
+  })
+  store.close()
 }
 
 function runCleanup(fixture: Fixture, input: Partial<Parameters<typeof cleanupRun>[0]> = {}) {
@@ -166,6 +241,32 @@ test("cleanup refuses to treat the repository root as the plan directory", () =>
     assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
+test("006-split overlay DONE with a reachable proof is deep-cleanup eligible while README stays TODO", () => {
+  const fixture = setup({ planId: "006", readmeStatus: "TODO" })
+  try {
+    writeOverlay(fixture, { planId: "006", phase: "DONE", initialStatus: "TODO", runStatus: "complete" })
+    assert.match(fs.readFileSync(path.join(fixture.planDir, "README.md"), "utf8"), /\| TODO \|/)
+    const preview = runCleanup(fixture, { deep: true })
+    assert.equal(preview.destruction.eligible, true)
+    assert.equal(preview.destruction.blockers.some((item) => item.reason === "plan-not-terminal"), false)
+    const result = runCleanup(fixture, { deep: true, dryRun: false })
+    assert.equal(result.destruction.planDirectoryRemoved, true)
+    assert.equal(fs.existsSync(fixture.planDir), false)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("overlay DONE without a reachable proof is completion-proof-missing", () => {
+  const fixture = setup({ planId: "006", readmeStatus: "TODO", writeProof: false })
+  try {
+    writeOverlay(fixture, { planId: "006", phase: "DONE", initialStatus: "TODO", runStatus: "complete" })
+    const result = runCleanup(fixture, { deep: true })
+    assert.equal(result.destruction.eligible, false)
+    assert.equal(result.destruction.blockers.some((item) => item.reason === "completion-proof-missing" && item.plan === "006"), true)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
+    assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
 test("deep cleanup removes refs, all owned branches/worktrees, and the plan directory last", () => {
   const fixture = setup()
   try {

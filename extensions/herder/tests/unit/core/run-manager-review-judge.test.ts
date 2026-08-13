@@ -686,7 +686,8 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 		assert.equal(attention.cause, "judge_needs_input");
 		assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
 		assert.equal(attention.question, question);
-		assert.match(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /BLOCKED — Which approved repair boundary ; should the Judge apply\?/);
+		assert.match(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /\| TODO \|/);
+		assert.doesNotMatch(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /BLOCKED — Which approved repair boundary/);
 		const before = inspectPlan(fixture);
 		try {
 			assert.equal(before.run!.status, "needs_input");

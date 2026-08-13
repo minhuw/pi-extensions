@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process"
 import type { SpawnSyncReturns } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
+import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
 import { parseCoordinationRefRelative } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
@@ -360,24 +361,29 @@ export function cleanupRun(input: CleanupInput) {
   const planFilter = input.plan ? canonicalPlanId(input.plan) : null
   if (input.deep && planFilter) fail("--deep is plan-set-level and cannot be combined with --plan")
   if (planFilter && !graph.plans.some((plan) => plan.id === planFilter)) fail(`Plan ${planFilter} is not indexed in ${graph.readme}`)
-
-  const statusSnapshot = (value: typeof graph): string => JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: plan.status })))
-  const plannedStatusSnapshot = statusSnapshot(graph)
+  const overlayStatus = (planId: string, fallback: string, lifecycle = readPlanLifecycle(planDir)): PlanLifecycleStatus | string =>
+    lifecycle.get(planId) ?? fallback
+  const statusSnapshot = (value: typeof graph, lifecycle = readPlanLifecycle(planDir)): string =>
+    JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: overlayStatus(plan.id, plan.status, lifecycle) })))
+  const plannedLifecycle = readPlanLifecycle(planDir)
+  const plannedStatusSnapshot = statusSnapshot(graph, plannedLifecycle)
   const assertPlanStatusesUnchanged = (): void => {
     const current = buildGraph(planDir)
-    if (statusSnapshot(current) !== plannedStatusSnapshot) {
+    const currentLifecycle = readPlanLifecycle(planDir)
+    if (statusSnapshot(current, currentLifecycle) !== plannedStatusSnapshot) {
       fail("Cannot clean up because plan status changed after preflight")
     }
     for (const [rawPlanId, expectedStatus] of Object.entries(input.expectedPlanStatuses ?? {})) {
       const planId = canonicalPlanId(rawPlanId)
-      const currentStatus = current.plans.find((plan) => plan.id === planId)?.status
+      const currentStatus = overlayStatus(planId, current.plans.find((plan) => plan.id === planId)?.status ?? "missing", currentLifecycle)
       if (currentStatus !== expectedStatus) {
-        fail(`Cannot clean up plan ${planId}: expected status ${expectedStatus}, found ${currentStatus ?? "missing"}`)
+        fail(`Cannot clean up plan ${planId}: expected status ${expectedStatus}, found ${currentStatus}`)
       }
     }
   }
   assertPlanStatusesUnchanged()
 
+  const planStatus = (plan: { id: string; status: string }): string => overlayStatus(plan.id, plan.status, plannedLifecycle)
   const plans = new Map(graph.plans.map((plan) => [plan.id, plan]))
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
   const completionRefs = listCompletionRefs(repoRoot, planName)
@@ -409,9 +415,10 @@ export function cleanupRun(input: CleanupInput) {
 
     let mode: "completed-plan" | "failed-evidence"
     let proof: "ancestor" | "patch-equivalent" | "superseded-by-completion" | null = null
-    if (plan.status === "DONE") {
+    const status = planStatus(plan)
+    if (status === "DONE") {
       if (!completionProofsForRun.has(plan.id)) {
-        skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, reason: "completion-proof-missing" })
+        skipped.push({ branch: item.branch, plan: plan.id, status, reason: "completion-proof-missing" })
         continue
       }
       if (isAncestor(repoRoot, item.head, integrationHead)) {
@@ -422,10 +429,10 @@ export function cleanupRun(input: CleanupInput) {
         proof = "superseded-by-completion"
       }
       mode = "completed-plan"
-    } else if ((plan.status === "BLOCKED" || plan.status === "REJECTED") && (input.deep || input.includeFailed)) {
+    } else if ((status === "BLOCKED" || status === "REJECTED") && (input.deep || input.includeFailed)) {
       mode = "failed-evidence"
     } else {
-      skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, reason: "preserved-non-done-evidence" })
+      skipped.push({ branch: item.branch, plan: plan.id, status, reason: "preserved-non-done-evidence" })
       continue
     }
 
@@ -433,22 +440,22 @@ export function cleanupRun(input: CleanupInput) {
     if (candidateWorktree) assertNotUserCheckout(repoRoot, candidateWorktree.path)
     const state = worktreeStatus(repoRoot, candidateWorktree)
     if (state.locked) {
-      skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, worktree: state.path, reason: "worktree-locked" })
+      skipped.push({ branch: item.branch, plan: plan.id, status, worktree: state.path, reason: "worktree-locked" })
       continue
     }
     if (state.missing) {
-      skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, worktree: state.path, reason: "worktree-missing" })
+      skipped.push({ branch: item.branch, plan: plan.id, status, worktree: state.path, reason: "worktree-missing" })
       continue
     }
     if (!state.clean) {
-      skipped.push({ branch: item.branch, plan: plan.id, status: plan.status, worktree: state.path, reason: "worktree-dirty" })
+      skipped.push({ branch: item.branch, plan: plan.id, status, worktree: state.path, reason: "worktree-dirty" })
       continue
     }
     actions.push({
       branch: item.branch,
       head: item.head,
       plan: plan.id,
-      status: plan.status,
+      status,
       kind: identity.kind,
       mode,
       proof,
@@ -473,9 +480,9 @@ export function cleanupRun(input: CleanupInput) {
   }
   if (input.deep) {
     const terminal = new Set(["DONE", "BLOCKED", "REJECTED"])
-    if (!graph.plans.every((plan) => terminal.has(plan.status))) {
-      for (const plan of graph.plans.filter((item) => !terminal.has(item.status))) {
-        destruction.blockers.push({ reason: "plan-not-terminal", plan: plan.id, status: plan.status })
+    if (!graph.plans.every((plan) => terminal.has(planStatus(plan)))) {
+      for (const plan of graph.plans.filter((item) => !terminal.has(planStatus(item)))) {
+        destruction.blockers.push({ reason: "plan-not-terminal", plan: plan.id, status: planStatus(plan) })
       }
     }
     if (!integrationHead) destruction.blockers.push({ reason: "integration-branch-missing", branch: integrationBranch })
@@ -521,7 +528,7 @@ export function cleanupRun(input: CleanupInput) {
         }
       } else if (item.kind === "completed") {
         const plan = item.plan ? plans.get(item.plan) : undefined
-        if (!plan || plan.status !== "DONE") {
+        if (!plan || planStatus(plan) !== "DONE") {
           destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan ?? "" })
           continue
         }
@@ -544,8 +551,8 @@ export function cleanupRun(input: CleanupInput) {
     if (!coordinationRefs.some((item) => item.kind === "base")) {
       destruction.blockers.push({ reason: "base-ref-missing", ref: `refs/plan-herder/${planName}/base` })
     }
-    if (graph.plans.some((plan) => plan.status === "DONE" && !completionProofsForRun.has(plan.id))) {
-      for (const plan of graph.plans.filter((item) => item.status === "DONE" && !completionProofsForRun.has(item.id))) {
+    if (graph.plans.some((plan) => planStatus(plan) === "DONE" && !completionProofsForRun.has(plan.id))) {
+      for (const plan of graph.plans.filter((item) => planStatus(item) === "DONE" && !completionProofsForRun.has(item.id))) {
         destruction.blockers.push({ reason: "completion-proof-missing", plan: plan.id })
       }
     }

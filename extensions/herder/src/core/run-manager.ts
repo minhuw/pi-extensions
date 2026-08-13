@@ -784,6 +784,15 @@ export class HerderRunManager {
 		}));
 	}
 
+	private projectLifecycleBestEffort(): void {
+		try {
+			const run = this.store.getRun();
+			if (run) this.projectLifecycle(run);
+		} catch {
+			// Terminal snapshots are best-effort and must not revert a persisted run.
+		}
+	}
+
 	async start(input: StartInput): Promise<ManagerReply> {
 		validateStartInput(input);
 		const existing = this.store.getRun();
@@ -803,11 +812,11 @@ export class HerderRunManager {
 		const graph = buildGraph(this.planDirectory);
 		if (!graph.shapeReady) throw new Error("Herder plan graph is not shape-ready");
 		if (graph.plans.length === 0) throw new Error("Herder plan graph is empty");
-		const adopted = graph.plans.filter((plan: { status: string }) => ["IN PROGRESS", "DONE"].includes(plan.status));
+		const adopted = graph.plans.filter((plan: { status: string }) => plan.status === "IN PROGRESS");
 		if (adopted.length > 0) {
 			throw new Error(`Fresh deterministic runs cannot adopt prior execution state: ${adopted.map((plan: { id: string; status: string }) => `${plan.id}=${plan.status}`).join(", ")}`);
 		}
-		const unsupported = graph.plans.filter((plan: { status: string }) => !["TODO", "BLOCKED", "REJECTED"].includes(plan.status));
+		const unsupported = graph.plans.filter((plan: { status: string }) => !["TODO", "DONE", "BLOCKED", "REJECTED"].includes(plan.status));
 		if (unsupported.length > 0) throw new Error(`Unsupported initial lifecycle state: ${unsupported.map((plan: { id: string; status: string }) => `${plan.id}=${plan.status}`).join(", ")}`);
 		const checkoutStateToken = await driver.captureCheckout();
 		const baseCommit = gitValue(driver.repoRoot, "rev-parse", "HEAD");
@@ -1157,6 +1166,7 @@ export class HerderRunManager {
 					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
 					this.store.updateRun({ status: "failed", terminalDetail: detail });
 				});
+				this.projectLifecycleBestEffort();
 				return this.reply();
 			}
 			this.store.transaction(() => {
@@ -1183,6 +1193,7 @@ export class HerderRunManager {
 					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
 					this.store.updateRun({ status: "failed", terminalDetail: detail });
 				});
+				this.projectLifecycleBestEffort();
 			}
 			return this.reply();
 		}
@@ -2063,7 +2074,6 @@ export class HerderRunManager {
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
 			if (activeActionCount(this.store, run.runId) > 0) {
-				this.projectLifecycle(run);
 				await driver.verifyCheckout(run.checkoutStateToken);
 				return this.reply("revision-barrier");
 			}
@@ -2076,6 +2086,7 @@ export class HerderRunManager {
 			const finalPlan = current.find((plan) => plan.planId === "RUN");
 			if (finalPlan?.phase === "FINAL_APPROVED") {
 				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
+				this.projectLifecycleBestEffort();
 				return this.reply();
 			}
 			if (!finalPlan) {
@@ -2149,9 +2160,9 @@ export class HerderRunManager {
 		const settled = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
 		if (run.status === "running" && activeActionCount(this.store, run.runId) === 0 && settled.blocked.length > 0 && settled.ready.length === 0) {
 			this.store.updateRun({ status: "failed", terminalDetail: `Blocked plans require recovery: ${settled.blocked.join(", ")}` });
+			this.projectLifecycleBestEffort();
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
-		this.projectLifecycle(run);
 		return this.reply(options.schedule === false ? "host-backpressure" : undefined);
 	}
 
@@ -2416,6 +2427,7 @@ export class HerderRunManager {
 		const run = this.store.getRun();
 		if (!run) return this.reply();
 		this.store.updateRun({ status: "stopped", terminalDetail: "Stop requested; repository and worker evidence preserved." });
+		this.projectLifecycleBestEffort();
 		return this.reply();
 	}
 }

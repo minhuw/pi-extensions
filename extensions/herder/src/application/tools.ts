@@ -22,6 +22,7 @@ import {
 	withServiceExclusion,
 } from "../client/index.ts";
 import { RunStore } from "../daemon/run-store.ts";
+import { applyLifecycleToGraph, readPlanLifecycle, readPlanLifecycleGraph } from "../core/workflow.ts";
 import { sha256, stableJson } from "../shared/protocol.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -50,7 +51,8 @@ async function planTool(args: JsonObject): Promise<unknown> {
 		});
 	}
 	if (operation === "init") return initPlanDir(directory, { track: args.track === true });
-	if (operation === "validate" || operation === "status") return buildGraph(directory);
+	if (operation === "validate") return buildGraph(directory);
+	if (operation === "status") return readPlanLifecycleGraph(directory);
 	if (operation === "shape") return getShapeReport(directory);
 	if (operation === "snapshot") return snapshotPlan(directory, requiredString(args, "planId"));
 	if (operation === "report") return getExecutionReport(directory, typeof args.planId === "string" ? args.planId : "RUN");
@@ -226,6 +228,10 @@ function cleanupPlanId(value: string): string {
 	return String(number).padStart(3, "0");
 }
 
+function graphWithLifecycle(graph: ReturnType<typeof buildGraph>): ReturnType<typeof buildGraph> {
+	return applyLifecycleToGraph(graph, readPlanLifecycle(graph.planDir));
+}
+
 export function selectCleanupPlanIds(
 	graph: ReturnType<typeof buildGraph>,
 	request: Pick<CleanupApplicationRequest, "planId" | "includeFailed" | "deep">,
@@ -235,15 +241,16 @@ export function selectCleanupPlanIds(
 	if (requested && !graph.plans.some((plan) => plan.id === requested)) {
 		throw new Error(`Plan ${requested} is not indexed in ${graph.readme}`);
 	}
+	const plans = graphWithLifecycle(graph).plans;
 	if (request.deep) {
 		return {
-			selectedPlanIds: graph.plans.map((plan) => plan.id),
-			failedPlanIds: graph.plans
+			selectedPlanIds: plans.map((plan) => plan.id),
+			failedPlanIds: plans
 				.filter((plan) => plan.status === "BLOCKED" || plan.status === "REJECTED")
 				.map((plan) => plan.id),
 		};
 	}
-	const selected = graph.plans.filter((plan) => {
+	const selected = plans.filter((plan) => {
 		if (requested && plan.id !== requested) return false;
 		if (plan.status === "DONE") return true;
 		return Boolean(request.includeFailed) && (plan.status === "BLOCKED" || plan.status === "REJECTED");
@@ -255,7 +262,7 @@ export function selectCleanupPlanIds(
 }
 
 function cleanupResultStatus(result: CleanupResult, graph: ReturnType<typeof buildGraph>): CleanupPreviewOutcome["status"] {
-	const plan = result.plan ? graph.plans.find((candidate) => candidate.id === result.plan) : undefined;
+	const plan = result.plan ? graphWithLifecycle(graph).plans.find((candidate) => candidate.id === result.plan) : undefined;
 	if (plan?.status === "DONE" || plan?.status === "BLOCKED" || plan?.status === "REJECTED") return plan.status;
 	return "UNKNOWN";
 }
@@ -272,7 +279,7 @@ function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
 }
 
 function cleanupGraphStatusSnapshot(graph: ReturnType<typeof buildGraph>): string {
-	return stableJson(graph.plans.map((plan) => ({ planId: plan.id, status: plan.status })));
+	return stableJson(graphWithLifecycle(graph).plans.map((plan) => ({ planId: plan.id, status: plan.status })));
 }
 
 function cleanupExpectedPlanStatuses(
@@ -280,8 +287,9 @@ function cleanupExpectedPlanStatuses(
 	planIds: string[],
 ): NonNullable<CleanupInput["expectedPlanStatuses"]> {
 	const expected: NonNullable<CleanupInput["expectedPlanStatuses"]> = {};
+	const plans = graphWithLifecycle(graph).plans;
 	for (const planId of planIds) {
-		const status = graph.plans.find((plan) => plan.id === planId)?.status;
+		const status = plans.find((plan) => plan.id === planId)?.status;
 		if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") {
 			throw new Error(`Cleanup plan ${planId} is no longer terminal; cleanup was not applied.`);
 		}
@@ -301,7 +309,7 @@ async function buildCleanupPreviewSnapshot(
 ): Promise<CleanupPreviewBuild> {
 	const runner = dependencies.cleanupRunner ?? cleanupRun;
 	const durableStatus = await (dependencies.readStatus ?? readCleanupDurableStatus)(request.planDirectory);
-	const graph = buildGraph(request.planDirectory);
+	const graph = graphWithLifecycle(buildGraph(request.planDirectory));
 	const deep = request.deep === true;
 	if (deep && request.planId !== undefined) throw new Error("--deep cannot be combined with --plan");
 	const selection = selectCleanupPlanIds(graph, request);
