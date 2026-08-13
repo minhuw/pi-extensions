@@ -46,6 +46,7 @@
 		"@earendil-works/pi-tui": "*"
 	},
 	"pi": {
+		"themes": ["./themes"],
 		"extensions": [
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",

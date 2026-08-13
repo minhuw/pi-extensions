@@ -12,6 +12,14 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [CLIProxyAPI Native Compaction](extensions/cliproxyapi-native-compaction/README.md) | OpenAI Responses native compaction for genuine OpenAI models routed through CLIProxyAPI. |
 
+## Themes
+
+| Theme | Description |
+| --- | --- |
+| `material-bloom` | Material You light palette: cream surfaces, rose primary, teal secondary, lilac tertiary. |
+
+Select it with `/settings` or `"theme": "material-bloom"` in `~/.pi/agent/settings.json`. Best on a light terminal background.
+
 ## Install
 
 ```bash
