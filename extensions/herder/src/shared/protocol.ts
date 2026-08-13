@@ -35,7 +35,7 @@ export interface ResolvedProfile {
 	profile: string;
 	profile_sha256: string;
 	host: HostName;
-	orchestrator: { model: string; effort: string };
+	orchestrator: { model: string; effort: string; service_tier?: string };
 	roles: Record<string, RoleProfile>;
 }
 

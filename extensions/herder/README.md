@@ -76,9 +76,8 @@ Blocked-plan recovery and input waits are durable main-session attention request
 | Profile | Orchestrator | Implementer | Reviewer and Judge |
 | --- | --- | --- | --- |
 | `eclipse` (default) | `gpt-5.6-sol` at `xhigh` | `gpt-5.6-luna` at `max` on the fast tier | `gpt-5.6-sol` at `xhigh` |
-| `poorman` | `gpt-5.6-luna` at `max` | `deepseek-v4-flash` at `high` | `gpt-5.6-luna` at `max` |
-| `comet` | `kimi-k3` at `max` | `grok-4.5` at `max` | `kimi-k3` at `max` |
-| `maxi` | `claude-fable-5` at `high` | `claude-opus-5` at `high` | `gpt-5.6-sol` at `xhigh`; Fable judges at `high` |
+| `poorman` | `gpt-5.6-luna` at `max` on the fast tier | `deepseek-v4-flash` at `high` | `gpt-5.6-luna` at `max` on the fast tier |
+| `epic` | `claude-fable-5` at `high` | `claude-opus-5` at `high` | `gpt-5.6-sol` at `xhigh`; Fable judges at `high` |
 
 Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`.
 

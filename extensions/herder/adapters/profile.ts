@@ -15,7 +15,7 @@ export interface RoleMapping {
 
 export type ResolvedPiProfile = Omit<ResolvedProfile, "orchestrator" | "roles"> & {
 	host: "pi";
-	orchestrator: { model: string; effort: ThinkingEffort };
+	orchestrator: { model: string; effort: ThinkingEffort; service_tier?: "fast" | "standard" };
 	roles: Record<HerderRole, RoleMapping>;
 };
 

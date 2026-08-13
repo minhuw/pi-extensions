@@ -26,27 +26,22 @@ test("Pi resolves profile models into three generic package agents", async () =>
 
 	const profile = await loadPiProfile(catalog, "poorman");
 	assert.equal(profile.host, "pi");
-	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max" });
+	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
 	assert.equal(profile.roles["plan-implementer"].agent_type, "herder.plan-implementer");
 	assert.equal(profile.roles["plan-implementer"].model, "deepseek-v4-flash");
 	assert.equal(profile.roles["plan-implementer"].effort, "high");
 	assert.equal(profile.roles["plan-reviewer"].agent_type, "herder.plan-reviewer");
+	assert.equal(profile.roles["plan-reviewer"].service_tier, "fast");
+	assert.equal(profile.roles["plan-judge"].service_tier, "fast");
 
-	const comet = await loadPiProfile(catalog, "comet");
-	assert.deepEqual(comet.orchestrator, { model: "kimi-k3", effort: "max" });
-	assert.equal(comet.roles["plan-implementer"].model, "grok-4.5");
-	assert.equal(comet.roles["plan-implementer"].effort, "max");
-	assert.equal(comet.roles["plan-reviewer"].model, "kimi-k3");
-	assert.equal(comet.roles["plan-judge"].model, "kimi-k3");
-
-	const maxi = await loadPiProfile(catalog, "maxi");
-	assert.deepEqual(maxi.orchestrator, { model: "claude-fable-5", effort: "high" });
-	assert.equal(maxi.roles["plan-implementer"].model, "claude-opus-5");
-	assert.equal(maxi.roles["plan-implementer"].effort, "high");
-	assert.equal(maxi.roles["plan-reviewer"].model, "gpt-5.6-sol");
-	assert.equal(maxi.roles["plan-reviewer"].effort, "xhigh");
-	assert.equal(maxi.roles["plan-judge"].model, "claude-fable-5");
-	assert.equal(maxi.roles["plan-judge"].effort, "high");
+	const epic = await loadPiProfile(catalog, "epic");
+	assert.deepEqual(epic.orchestrator, { model: "claude-fable-5", effort: "high" });
+	assert.equal(epic.roles["plan-implementer"].model, "claude-opus-5");
+	assert.equal(epic.roles["plan-implementer"].effort, "high");
+	assert.equal(epic.roles["plan-reviewer"].model, "gpt-5.6-sol");
+	assert.equal(epic.roles["plan-reviewer"].effort, "xhigh");
+	assert.equal(epic.roles["plan-judge"].model, "claude-fable-5");
+	assert.equal(epic.roles["plan-judge"].effort, "high");
 
 	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);

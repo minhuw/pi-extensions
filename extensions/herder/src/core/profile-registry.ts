@@ -15,7 +15,7 @@ const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/;
 export interface PiProfileDefinition {
 	name: string;
 	description: string;
-	orchestrator: { model: string; effort: string };
+	orchestrator: { model: string; effort: string; service_tier?: string };
 	roles: Record<WorkerRole, Omit<RoleProfile, "agent_type">>;
 }
 

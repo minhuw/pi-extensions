@@ -22,7 +22,7 @@ type ResolvedProfile = {
 	profile: string;
 	host: string;
 	roles: Record<string, ProfileRole>;
-	orchestrator?: { model: string; effort: string };
+	orchestrator?: { model: string; effort: string; service_tier?: string };
 };
 
 type ProfileSummary = { name: string };
@@ -36,8 +36,8 @@ function run(...args: string[]): unknown {
 }
 
 test("profile registry exposes the supported Pi profiles", () => {
-	assert.deepEqual(run("check"), { ok: true, profiles: 4 });
-	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "comet", "maxi"]);
+	assert.deepEqual(run("check"), { ok: true, profiles: 3 });
+	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "epic"]);
 
 	const eclipse = run("resolve");
 	assert.equal(eclipse.profile, "eclipse");
@@ -52,30 +52,34 @@ test("profile registry exposes the supported Pi profiles", () => {
 	});
 
 	const poorman = run("resolve", "--host", "pi", "--profile", "poorman");
-	assert.deepEqual(poorman.orchestrator, { model: "gpt-5.6-luna", effort: "max" });
+	assert.deepEqual(poorman.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
 	assert.equal(poorman.roles["plan-implementer"].model, "deepseek-v4-flash");
-	assert.equal(poorman.roles["plan-reviewer"].model, "gpt-5.6-luna");
-	assert.equal(poorman.roles["plan-judge"].effort, "max");
+	assert.deepEqual(poorman.roles["plan-reviewer"], {
+		agent_type: "herder.plan-reviewer",
+		model: "gpt-5.6-luna",
+		effort: "max",
+		service_tier: "fast",
+	});
+	assert.deepEqual(poorman.roles["plan-judge"], {
+		agent_type: "herder.plan-judge",
+		model: "gpt-5.6-luna",
+		effort: "max",
+		service_tier: "fast",
+	});
 
-	const comet = run("resolve", "--host", "pi", "--profile", "comet");
-	assert.deepEqual(comet.orchestrator, { model: "kimi-k3", effort: "max" });
-	assert.equal(comet.roles["plan-implementer"].model, "grok-4.5");
-	assert.equal(comet.roles["plan-reviewer"].model, "kimi-k3");
-	assert.equal(comet.roles["plan-judge"].model, "kimi-k3");
-
-	const maxi = run("resolve", "--host", "pi", "--profile", "maxi");
-	assert.deepEqual(maxi.orchestrator, { model: "claude-fable-5", effort: "high" });
-	assert.deepEqual(maxi.roles["plan-implementer"], {
+	const epic = run("resolve", "--host", "pi", "--profile", "epic");
+	assert.deepEqual(epic.orchestrator, { model: "claude-fable-5", effort: "high" });
+	assert.deepEqual(epic.roles["plan-implementer"], {
 		agent_type: "herder.plan-implementer",
 		model: "claude-opus-5",
 		effort: "high",
 	});
-	assert.deepEqual(maxi.roles["plan-reviewer"], {
+	assert.deepEqual(epic.roles["plan-reviewer"], {
 		agent_type: "herder.plan-reviewer",
 		model: "gpt-5.6-sol",
 		effort: "xhigh",
 	});
-	assert.deepEqual(maxi.roles["plan-judge"], {
+	assert.deepEqual(epic.roles["plan-judge"], {
 		agent_type: "herder.plan-judge",
 		model: "claude-fable-5",
 		effort: "high",
