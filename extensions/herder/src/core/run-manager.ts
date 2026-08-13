@@ -57,10 +57,11 @@ import {
 	type StoredPlanEdit,
 	type StoredPlanSpec,
 	type StoredRun,
+	type StoredVerification,
 } from "../daemon/run-store.ts";
 import { resolvePiProfile } from "./profile-registry.ts";
 import { lifecycleStatus, phaseForRole, readyPhaseForRole, readPlanLifecycle, roleForPhase, summarizeRun } from "./workflow.ts";
-import { createVerificationRequest, normalizeVerificationManifest } from "./verification.ts";
+import { createReigniteRequest, createVerificationRequest, normalizeVerificationManifest } from "./verification.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
@@ -360,6 +361,10 @@ function resultOutcome(result: WorkerResult | null, terminal: TerminalEvent): st
 
 function countBlocking(findings: string[]): number {
 	return findings.filter((finding) => /\[BLOCKING\]/.test(finding) && /\[(?:P0|P1)\]/.test(finding)).length;
+}
+
+function isActionableReigniteFinding(finding: string): boolean {
+	return /\[PLAN_REQUIREMENT\]/.test(finding) || /\[PATCH_REGRESSION\]/.test(finding);
 }
 
 function compilePlanSpecs(input: {
@@ -932,6 +937,7 @@ export class HerderRunManager {
 			});
 			return this.reply();
 		}
+		if (run.status === "complete") return this.reply();
 		if (["failed", "stopped", "paused"].includes(run.status)) this.store.updateRun({ status: "running", terminalDetail: null });
 		run = this.store.getRun()!;
 		return this.reconcile(profile);
@@ -1490,27 +1496,8 @@ export class HerderRunManager {
 				|| verification.request.integrationTree !== plan.approvedTree) {
 				throw new Error("Final Reviewer is not bound to passed verification evidence for its frozen tree");
 			}
-			if (verdict === "APPROVE" && result.scope === "PASS" && blockers === 0) {
-				return { plan: { ...plan, phase: "FINAL_APPROVED", reviewPass: plan.reviewPass + 1, findings: result.findings } };
-			}
-			const detail = result.rationale || result.findings[0] || "Final cross-plan audit did not approve";
-			return {
-				plan: { ...plan, phase: "NEEDS_INPUT", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [detail] },
-				runUpdate: { status: "needs_input", terminalDetail: detail },
-				attention: this.attention({
-					run,
-					plan,
-					planId: "RUN",
-					kind: "user_decision",
-					cause: "final_reviewer_needs_input",
-					actionId: action.actionId,
-					state: "awaiting_input",
-					continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
-					detail,
-					question: detail,
-					recommendedAction: "Provide the decision needed by the final Reviewer without changing the frozen integration tree.",
-				}),
-			};
+			this.persistReigniteDossier(run, plan, result, verification);
+			return { plan: { ...plan, phase: "FINAL_APPROVED", reviewPass: plan.reviewPass + 1, findings: result.findings } };
 		}
 		const decision = decideReview({ round: plan.round, verdict, scope: result.scope, openBlockers: blockers });
 		const reviewed = { ...plan, reviewPass: plan.reviewPass + 1, findings: result.findings };
@@ -1546,6 +1533,38 @@ export class HerderRunManager {
 				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Reviewer continuation.",
 			}),
 		};
+	}
+
+	private persistReigniteDossier(
+		run: StoredRun,
+		plan: StoredPlan,
+		result: Extract<WorkerResult, { kind: "reviewer" }>,
+		verification: StoredVerification,
+	): void {
+		try {
+			const existing = this.store.getReigniteRequest(run.runId, plan.generation);
+			const state = result.findings.some(isActionableReigniteFinding) ? "pending" : "skipped";
+			const request = createReigniteRequest({
+				requestId: existing?.requestId ?? randomUUID(),
+				runId: run.runId,
+				generation: plan.generation,
+				sourcePlanDirectory: run.planDirectory,
+				graphSha256: run.graphSha256,
+				integrationHead: verification.request.integrationHead,
+				integrationTree: verification.request.integrationTree,
+				integrationBranch: verification.request.integrationBranch,
+				verdict: result.verdict,
+				scope: result.scope,
+				findings: result.findings,
+				fixGuidance: result.fixGuidance,
+				rationale: result.rationale,
+				createdAt: existing?.createdAt ?? new Date().toISOString(),
+				state,
+			});
+			this.store.putReigniteRequest(request);
+		} catch {
+			// A missing or failed dossier write must not block or un-complete the original run.
+		}
 	}
 
 	private finishJudge(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "judge" }>): TerminalTransition {
@@ -2399,6 +2418,7 @@ export class HerderRunManager {
 		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
+		const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
@@ -2430,6 +2450,7 @@ export class HerderRunManager {
 			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
+			...(reignite?.state === "pending" ? { reigniteRequest: reignite } : {}),
 		};
 	}
 
