@@ -5,6 +5,7 @@ import { buildGraph, projectStatuses } from "../../core/plans.ts";
 import { RunStore, type StoredPlanSpec } from "../run-store.ts";
 import { clearExecutionRotationMarker } from "../execution-store.ts";
 import { parseCoordinationRefRelative } from "./coordination-ref.ts";
+import { allowedWorktreePaths, worktreeRelativeName } from "./worktree-locations.ts";
 
 export interface HerderResetInput { repoRoot: string; planDirectory: string }
 export interface HerderResetResult { planName: string; removedBranches: string[]; removedWorktrees: string[]; removedRefs: string[]; resetPlans: string[] }
@@ -137,8 +138,8 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     for (const w of owned) {
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
       cleanWorktree(repo, w);
-      const expected = w.branch === integration ? path.join(`${repo}-herder-worktrees`, name, "integration") : path.join(`${repo}-herder-worktrees`, name, w.branch.slice(`herder/${name}/`.length));
-      if (real(w.path) !== real(expected)) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
+      const expected = allowedWorktreePaths(repo, planDir, name, worktreeRelativeName(w.branch, name, integration));
+      if (!expected.some((candidate) => real(w.path) === real(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
     }
     const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
     // Revalidate every identity immediately before the first mutation.

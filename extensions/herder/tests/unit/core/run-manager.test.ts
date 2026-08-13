@@ -567,8 +567,8 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.match(String(initialImplementer.taskName), /^[a-z0-9_]+$/, "task name is not portable across native host adapters");
 		assert.equal(
 			String(initialImplementer.worktree),
-			path.join(`${fs.realpathSync(fixture.repo)}-herder-worktrees`, "herder-plans", "001"),
-			"Pi worktree is not in the stable external namespace",
+			path.join(fs.realpathSync(fixture.planDirectory), ".herder", "worktrees", "001"),
+			"Pi worktree is not in the stable plan-directory namespace",
 		);
 		assert.match(String(initialImplementer.prompt), /change to the exact absolute REPOSITORY_WORKTREE, verify pwd and EXPECTED_BRANCH/);
 		assert.match(String(initialImplementer.prompt), /ROLE_CONTRACT_PATH: .*assets\/roles\/contracts\/plan-implementer\.md/);

@@ -5,6 +5,7 @@ import type { SpawnSyncReturns } from "node:child_process";
 import { parseCoordinationRefRelative, type CoordinationRef } from "./coordination-ref.ts";
 import { parseWorktreeRecords } from "./cleanup-run.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
+import { canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
 
 export interface ForceCleanupInput {
 	repo: string;
@@ -108,17 +109,26 @@ function currentCheckout(repoRoot: string): { branch: string | null; head: strin
 	};
 }
 
-function conventionalWorktreeRoot(repoRoot: string, planName: string): string {
-	return `${repoRoot}-herder-worktrees${path.sep}${planName}`;
-}
-
-function ownedWorktrees(repoRoot: string, planName: string, records: WorktreeRecord[]): WorktreeRecord[] {
+function ownedWorktrees(repoRoot: string, planDir: string, planName: string, records: WorktreeRecord[]): WorktreeRecord[] {
 	const namespace = `herder/${planName}/`;
-	const conventionalRoot = conventionalWorktreeRoot(repoRoot, planName);
+	const canonicalRoot = canonicalWorktreeRoot(planDir);
+	const leftoverRoot = legacyWorktreeRoot(repoRoot, planName);
 	return records.filter((item) => {
 		if (item.branch.startsWith(namespace)) return true;
-		return isInside(conventionalRoot, realpathIfPresent(item.path));
+		const resolved = realpathIfPresent(item.path);
+		return isInside(canonicalRoot, resolved) || isInside(leftoverRoot, resolved);
 	});
+}
+
+function removeLegacyWorktreeContainer(repoRoot: string, planName: string): void {
+	const leftoverRoot = legacyWorktreeRoot(repoRoot, planName);
+	if (fs.existsSync(leftoverRoot) && isInside(path.dirname(leftoverRoot), leftoverRoot)) {
+		fs.rmSync(leftoverRoot, { recursive: true, force: true });
+	}
+	const parent = legacyWorktreeContainer(repoRoot);
+	if (path.dirname(leftoverRoot) === parent && fs.existsSync(parent) && fs.readdirSync(parent).length === 0) {
+		fs.rmSync(parent, { recursive: true, force: true });
+	}
 }
 
 function forceRemoveWorktree(repoRoot: string, worktreePath: string): void {
@@ -219,7 +229,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 	}
 
 	const worktrees = parseWorktrees(repoRoot);
-	const owned = ownedWorktrees(repoRoot, planName, worktrees);
+	const owned = ownedWorktrees(repoRoot, planDir, planName, worktrees);
 	const branches = listPlanBranches(repoRoot, planName);
 	const refs = listCoordinationRefs(repoRoot, planName);
 	const integrationWorktree = owned.find((item) => item.branch === integrationBranch)?.path ?? null;
@@ -289,7 +299,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 
 	const remainingBranches = listPlanBranches(repoRoot, planName);
 	const remainingRefs = listCoordinationRefs(repoRoot, planName);
-	const remainingWorktrees = ownedWorktrees(repoRoot, planName, parseWorktrees(repoRoot));
+	const remainingWorktrees = ownedWorktrees(repoRoot, planDir, planName, parseWorktrees(repoRoot));
 	if (remainingBranches.length > 0 || remainingRefs.length > 0 || remainingWorktrees.length > 0) {
 		fail(`Force cleanup left Herder artifacts: ${[
 			...remainingBranches.map((item) => item.branch),
@@ -298,10 +308,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		].join(", ")}`);
 	}
 
-	const conventionalRoot = conventionalWorktreeRoot(repoRoot, planName);
-	if (fs.existsSync(conventionalRoot) && isInside(path.dirname(conventionalRoot), conventionalRoot)) {
-		fs.rmSync(conventionalRoot, { recursive: true, force: true });
-	}
+	removeLegacyWorktreeContainer(repoRoot, planName);
 
 	if (planDirectoryPresent) {
 		const deletionTarget = realpathIfPresent(planDir);

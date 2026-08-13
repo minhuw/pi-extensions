@@ -120,8 +120,8 @@ Each run creates a temporary workspace named `$TMPDIR/herder-pi-live-*` (or the 
 
 - `pi.log`, the Pi RPC, stdout, and stderr log named in the test output.
 - `fixture.json`, which identifies the synthetic repository and its plan directory.
-- The synthetic repository and its Herder-owned worktrees.
-- `herder-plans/.herder`, including execution SQLite state, service logs, assignments, session diagnostics, and gate evidence.
+- The synthetic repository and its Herder-owned worktrees under `herder-plans/.herder/worktrees/`.
+- `herder-plans/.herder`, including execution SQLite state, service logs, assignments, session diagnostics, gate evidence, and worktrees.
 
 After inspecting a retained run, delete the exact fixture path printed by the test; do not delete unrelated temporary directories. Retained local diagnostics may contain endpoint or runtime data, so review them before sharing. CI's artifact collector redacts configured CI secret values and records its work in a manifest, but uploaded diagnostics still deserve review.
 

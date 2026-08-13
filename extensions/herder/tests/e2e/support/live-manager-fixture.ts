@@ -263,7 +263,7 @@ async function verifyFixture(workspace: string, host: string, profile: string): 
       const header = JSON.parse(firstLine)
       assert.equal(header.type, "session")
       assert.equal(header.parentSession, undefined)
-      assert.match(header.cwd, /herder-worktrees/)
+      assert.match(header.cwd, /[/\\]\.herder[/\\]worktrees[/\\]/)
     }
   }
   process.stdout.write(`${JSON.stringify({

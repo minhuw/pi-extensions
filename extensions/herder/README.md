@@ -30,7 +30,7 @@ Herder refuses to start when Pi's active providers cannot resolve every required
 - Dependency-aware scheduling with a configurable global worker limit.
 - Clean, parentless Pi worker sessions with no inherited root transcript or nested extension runtime.
 - A package-owned, one-level nested executor with up to four concurrent children per role; `recon` and `searcher` use a package-owned scout binding, `worker` inherits the parent role, and children cannot delegate again.
-- One stable Herder branch and isolated Git worktree per plan.
+- One stable Herder branch and isolated Git worktree per plan, stored under `<plan-dir>/.herder/worktrees/` so they stay inside the plan set.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.
 - Serialized integration after independent review, while unrelated worker pipelines continue concurrently.

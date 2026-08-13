@@ -15,6 +15,7 @@ import {
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
+import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
 import { stableJson, type VerificationGate } from "../shared/protocol.ts";
@@ -182,9 +183,9 @@ export class GitDriver {
 		if (!isInside(this.repoRoot, this.planDirectory)) throw new Error(`Plan directory must be inside the repository: ${this.planDirectory}`);
 		this.planName = input.planName;
 		this.helperRoot = input.helperRoot;
-		const externalRoot = path.resolve(`${this.repoRoot}-herder-worktrees`, this.planName);
-		this.worktreeRoot = path.resolve(input.worktreeRoot ?? externalRoot);
-		if (this.worktreeRoot !== externalRoot) {
+		const canonicalRoot = canonicalWorktreeRoot(this.planDirectory);
+		this.worktreeRoot = path.resolve(input.worktreeRoot ?? canonicalRoot);
+		if (!isAllowedWorktreeRoot(this.worktreeRoot, this.repoRoot, this.planDirectory, this.planName)) {
 			throw new Error(`Worktree root is outside Herder's allowed locations: ${this.worktreeRoot}`);
 		}
 		this.integrationBranch = `herder/${this.planName}/integration`;

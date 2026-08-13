@@ -8,6 +8,7 @@ import { applyHerderReset } from "../../src/application/tools.ts";
 import { initPlanDir, projectStatuses } from "../../src/core/plans.ts";
 import { ensureService, requestService, stopService } from "../../src/client/index.ts";
 import { resetHerderPlanSet } from "../../src/daemon/git/reset-plan-set.ts";
+import { canonicalWorktreeRoot, legacyWorktreeRoot } from "../../src/daemon/git/worktree-locations.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
 
 function command(cwd: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
@@ -133,7 +134,7 @@ async function initializedFixture(): Promise<Fixture> {
 	});
 	assert.equal((response.reply as Record<string, unknown>).status, "running");
 	await stopService(value.planDir);
-	const worktreeRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+	const worktreeRoot = canonicalWorktreeRoot(value.planDir);
 	for (const worktree of [path.join(worktreeRoot, "integration"), path.join(worktreeRoot, "001")]) command(value.repo, ["worktree", "unlock", worktree], true);
 	return value;
 }
@@ -158,7 +159,7 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 		projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "temporary execution detail" }]);
 		const store = new RunStore(value.planDir);
 		try { store.updateRun({ status: "complete" }); } finally { store.close(); }
-		const planRoot = `${value.repo}-herder-worktrees/${value.planName}`;
+		const planRoot = canonicalWorktreeRoot(value.planDir);
 		assert.equal(fs.realpathSync(path.join(planRoot, "integration")), fs.realpathSync(path.join(planRoot, "integration")));
 		command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/completed/001`, value.base]);
 		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
@@ -187,7 +188,7 @@ test("merged integration refuses without mutating artifacts or statuses", { time
 	const value = await initializedFixture();
 	try {
 		const integration = `herder/${value.planName}/integration`;
-		const integrationRoot = path.join(`${value.repo}-herder-worktrees`, value.planName, "integration");
+		const integrationRoot = path.join(canonicalWorktreeRoot(value.planDir), "integration");
 		fs.writeFileSync(path.join(integrationRoot, "merged.txt"), "merged\n");
 		command(integrationRoot, ["add", "merged.txt"]);
 		command(integrationRoot, ["commit", "-q", "-m", "test: merge integration"]);
@@ -203,7 +204,7 @@ test("dirty, foreign, and missing worktrees refuse before mutation", { timeout: 
 	for (const mode of ["dirty", "foreign", "missing"] as const) {
 		const value = await initializedFixture();
 		try {
-			const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+			const planRoot = canonicalWorktreeRoot(value.planDir);
 			const planWorktree = path.join(planRoot, "001");
 			if (mode === "dirty") fs.writeFileSync(path.join(planWorktree, "dirty.txt"), "dirty\n");
 			if (mode === "foreign") {
@@ -222,7 +223,7 @@ test("dirty, foreign, and missing worktrees refuse before mutation", { timeout: 
 test("locked Herder-owned worktrees reset successfully", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {
-		const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+		const planRoot = canonicalWorktreeRoot(value.planDir);
 		const planWorktree = path.join(planRoot, "001");
 		command(value.repo, ["worktree", "lock", "--reason", "test", planWorktree]);
 		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
@@ -267,7 +268,7 @@ test("reset completes after a previous attempt already removed the Git namespace
 				? { ...spec, initialStatusDetail: "Revised only the target plan. The compiled identity is unchanged." }
 				: spec));
 		} finally { store.close(); }
-		const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+		const planRoot = canonicalWorktreeRoot(value.planDir);
 		for (const name of ["integration", "001"]) {
 			command(value.repo, ["worktree", "unlock", path.join(planRoot, name)], true);
 			command(value.repo, ["worktree", "remove", "--", path.join(planRoot, name)]);
@@ -289,6 +290,24 @@ test("reset completes after a previous attempt already removed the Git namespace
 		assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /Revised only the target plan/);
 		const empty = new RunStore(value.planDir);
 		try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset accepts the legacy sibling worktree location", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const canonical = canonicalWorktreeRoot(value.planDir);
+		const leftover = legacyWorktreeRoot(value.repo, value.planName);
+		fs.mkdirSync(leftover, { recursive: true });
+		for (const name of ["integration", "001"]) {
+			command(value.repo, ["worktree", "unlock", path.join(canonical, name)], true);
+			command(value.repo, ["worktree", "move", path.join(canonical, name), path.join(leftover, name)]);
+		}
+		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
+		assert.deepEqual(result.removedWorktrees.map((worktree) => path.basename(worktree)).sort(), ["001", "integration"]);
+		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+		assert.equal(fs.existsSync(path.join(leftover, "integration")), false);
+		assert.equal(fs.existsSync(path.join(leftover, "001")), false);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
