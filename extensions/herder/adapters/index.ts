@@ -347,7 +347,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const delegateReignite = (reply: ManagerReply) => {
-		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId)) return;
+		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId) || reply.status !== "complete") return;
 		const request = reply.reigniteRequest;
 		if (!request || request.state !== "pending") return;
 		reigniteRequests.set(request.requestId, request);
@@ -1236,6 +1236,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}
 			if (!request || request.requestId !== params.requestId || request.requestSha256 !== params.requestSha256 || currentState?.runId !== request.runId || currentState.profile === "unknown") {
 				throw new Error(`Herder reignite request ${params.requestId} is not bound to this main session`);
+			}
+			if (currentState.status !== "complete") {
+				throw new Error("Herder reignite can only be acknowledged for a complete source run");
 			}
 			assertOwnership(planDirectory, request.runId);
 			await resolveProfile(ctx, currentState.profile);

@@ -8,7 +8,7 @@ import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
+import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import type { VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
@@ -295,15 +295,25 @@ function resolvedRepoPath(repo: string, ...parts: string[]): string {
 	return path.join(fs.realpathSync(repo), ...parts);
 }
 
-function writeFollowUpPlanDirectory(directory: string, fixture: { originalHead: string; repo: string }): string {
+function writeFollowUpPlanDirectory(
+	directory: string,
+	fixture: { originalHead: string; repo: string },
+	options: { shapeReady?: boolean; extraStatus?: "IN PROGRESS" | "DONE" | "REJECTED" } = {},
+): string {
 	initPlanDir(directory);
+	for (const name of fs.readdirSync(directory).filter((entry) => /^\d{3,}-.*\.md$/i.test(entry))) {
+		fs.rmSync(path.join(directory, name));
+	}
+	const extraRow = options.extraStatus
+		? `\n| [002](002-follow-up.md) | Follow up extra work | P1 | S | — | ${options.extraStatus} |`
+		: "";
 	fs.writeFileSync(path.join(directory, "README.md"), `# Herder Plans
 
 ## Execution order & status
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| [001](001-follow-up.md) | Follow up residual work | P1 | S | — | TODO |
+| [001](001-follow-up.md) | Follow up residual work | P1 | S | — | TODO |${extraRow}
 
 ## Dependency notes
 
@@ -313,12 +323,24 @@ None.
 
 None.
 `);
-	fs.writeFileSync(path.join(directory, "001-follow-up.md"), fs.readFileSync(path.join(fixture.repo, "herder-plans", "001-update-value.md"), "utf8")
+	let planBody = fs.readFileSync(path.join(fixture.repo, "herder-plans", "001-update-value.md"), "utf8")
 		.replaceAll("Plan 001: Update the fixture value", "Plan 001: Follow up residual work")
-		.replaceAll("Update the fixture value", "Follow up residual work"));
+		.replaceAll("Update the fixture value", "Follow up residual work");
+	if (options.shapeReady === false) {
+		planBody = planBody.replace(/\n## Review map\n[\s\S]*?(?=\n## )/, "\n");
+	}
+	fs.writeFileSync(path.join(directory, "001-follow-up.md"), planBody);
+	if (options.extraStatus) {
+		fs.writeFileSync(
+			path.join(directory, "002-follow-up.md"),
+			planBody.replaceAll("Plan 001", "Plan 002").replaceAll("Follow up residual work", "Follow up extra work"),
+		);
+	}
 	const graph = buildGraph(directory);
 	assert.equal(graph.complete, false);
 	assert.ok(graph.plans.some((plan) => plan.status === "TODO"));
+	if (options.shapeReady === false) assert.equal(graph.shapeReady, false);
+	if (options.extraStatus === "IN PROGRESS") assert.ok(graph.inProgress.includes("002"));
 	return compileGraphIdentity(graph);
 }
 
@@ -991,6 +1013,56 @@ test("complete pending reignite resume re-exposes the dossier after plan-graph d
 	}
 });
 
+test("final-review graph drift keeps a pending dossier unexposed until the source is complete", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-incomplete-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const prefix = "reignite-incomplete";
+		const awaiting = await prepareSinglePlan(service, fixture, prefix);
+		const verified = await submitFinalVerification(service, fixture.planDirectory, awaiting, prefix);
+		const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
+		await requestService(service, "/v1/event", {
+			eventId: `${prefix}-dispatch-final`,
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
+		});
+		appendIndependentPlan(fixture);
+		const finding = "[fr-incomplete][P1][BLOCKING][PLAN_REQUIREMENT] residual work while drifted";
+		const drifted = payload(payload(await requestService(service, "/v1/event", {
+			eventId: `${prefix}-terminal-final`,
+			kind: "terminals",
+			terminals: [{
+				actionId: finalReviewer.actionId,
+				hostHandle: `${prefix}-final`,
+				response: `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work arrived during graph drift.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
+			}],
+		})).reply);
+		assert.equal(drifted.status, "paused");
+		assert.equal(drifted.reigniteRequest, undefined);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(run.status, "paused");
+			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration);
+			assert.equal(dossier?.state, "pending");
+			assert.deepEqual(dossier?.findings, [finding]);
+			await assert.rejects(() => requestService(service, "/v1/reignite", {
+				requestId: dossier!.requestId,
+				requestSha256: dossier!.requestSha256,
+				state: "written",
+				graphSha256: "a".repeat(64),
+			}), /complete source run/);
+			assert.equal(store.getRun()?.status, "paused");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "pending");
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("final Reviewer approve with no findings persists a skipped reignite dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-skip-test-"));
 	const fixture = writeFixture(root);
@@ -1116,6 +1188,35 @@ test("pending reignite allocation is stable and skips an existing README", { tim
 	}
 });
 
+test("reignite allocation reserves distinct sibling paths and skips unsafe candidates", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-reserve-"));
+	try {
+		const source = path.join(root, "herder-plans");
+		fs.mkdirSync(source);
+		const first = allocateUnusedReigniteDirectory(root, source, "run-a:req-a");
+		const second = allocateUnusedReigniteDirectory(root, source, "run-b:req-b");
+		assert.equal(first, path.join(root, "herder-reignite"));
+		assert.equal(second, path.join(root, "herder-reignite-2"));
+		assert.equal(allocateUnusedReigniteDirectory(root, source, "run-a:req-a"), first);
+		assert.notEqual(first, second);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+
+	const blocked = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-unsafe-"));
+	try {
+		const source = path.join(blocked, "herder-plans");
+		fs.mkdirSync(source);
+		fs.writeFileSync(path.join(blocked, "herder-reignite"), "not a directory\n");
+		fs.symlinkSync(source, path.join(blocked, "herder-reignite-2"));
+		const allocated = allocateUnusedReigniteDirectory(blocked, source, "run-c:req-c");
+		assert.equal(allocated, path.join(blocked, "herder-reignite-3"));
+		assert.equal(fs.lstatSync(allocated).isDirectory(), true);
+	} finally {
+		fs.rmSync(blocked, { recursive: true, force: true });
+	}
+});
+
 test("reignite written ack validates the allocated graph and keeps the source complete", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-written-"));
 	const fixture = writeFixture(root);
@@ -1131,7 +1232,26 @@ test("reignite written ack validates the allocated graph and keeps the source co
 		assert.equal(reignite.state, "pending");
 		const allocated = String(reignite.allocatedPlanDirectory);
 		assert.equal(allocated, resolvedRepoPath(fixture.repo, "herder-reignite"));
-		const graphSha256 = writeFollowUpPlanDirectory(allocated, fixture);
+		await assert.rejects(() => requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+		}), /requires graphSha256/);
+		const unshapedHash = writeFollowUpPlanDirectory(allocated, fixture, { shapeReady: false });
+		await assert.rejects(() => requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+			graphSha256: unshapedHash,
+		}), /shape-ready/);
+		const inProgressHash = writeFollowUpPlanDirectory(allocated, fixture, { extraStatus: "IN PROGRESS" });
+		await assert.rejects(() => requestService(service, "/v1/reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "written",
+			graphSha256: inProgressHash,
+		}), /in-progress plans/);
+		const graphSha256 = writeFollowUpPlanDirectory(allocated, fixture, { extraStatus: "DONE" });
 		const written = payload(payload(await requestService(service, "/v1/reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
