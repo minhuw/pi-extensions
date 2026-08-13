@@ -53,7 +53,6 @@ function ancestor(repo: string, a: string, b: string): boolean { const r = git(r
 function checkout(repo: string): { branch: string | null; head: string | null } { const b = git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], true); const h = git(repo, ["rev-parse", "--verify", "HEAD"], true); return { branch: b.status === 0 ? b.stdout.trim() : null, head: h.status === 0 ? h.stdout.trim() : null }; }
 function snapshot<T>(items: T[]): string { return JSON.stringify(items); }
 function cleanWorktree(repo: string, item: Worktree): void {
-  if (item.locked) fail(`Herder reset cannot remove locked worktree: ${item.path}`);
   if (!fs.existsSync(item.path)) fail(`Herder reset cannot remove missing worktree: ${item.path}`);
   if (real(item.path) === real(repo)) fail("Herder reset cannot remove the user checkout.");
   const status = git(item.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
@@ -124,7 +123,11 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   // Revalidate every identity immediately before the first mutation.
   if (snapshot(branches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(parseWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
   const removedWorktrees: string[] = [];
-  for (const w of owned) { git(repo, ["worktree", "remove", "--", w.path]); removedWorktrees.push(w.path); }
+  for (const w of owned) {
+    if (w.locked) git(repo, ["worktree", "unlock", "--", w.path]);
+    git(repo, ["worktree", "remove", "--", w.path]);
+    removedWorktrees.push(w.path);
+  }
   const removedBranches: string[] = [];
   for (const b of allBranches) { deleteBranch(repo, b.branch, b.head); removedBranches.push(b.branch); }
   const removedRefs: string[] = [];

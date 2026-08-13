@@ -199,8 +199,8 @@ test("merged integration refuses without mutating artifacts or statuses", { time
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
-test("dirty, foreign, missing, and locked worktrees refuse before mutation", { timeout: 30_000 }, async () => {
-	for (const mode of ["dirty", "foreign", "missing", "locked"] as const) {
+test("dirty, foreign, and missing worktrees refuse before mutation", { timeout: 30_000 }, async () => {
+	for (const mode of ["dirty", "foreign", "missing"] as const) {
 		const value = await initializedFixture();
 		try {
 			const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
@@ -212,12 +212,26 @@ test("dirty, foreign, missing, and locked worktrees refuse before mutation", { t
 				command(value.repo, ["worktree", "move", planWorktree, foreign]);
 			}
 			if (mode === "missing") fs.rmSync(planWorktree, { recursive: true, force: true });
-			if (mode === "locked") command(value.repo, ["worktree", "lock", "--reason", "test", planWorktree]);
 			const before = namespaceSnapshot(value);
-			await assert.rejects(async () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /dirty|foreign|moved|missing|locked|cannot remove/i);
+			await assert.rejects(async () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /dirty|foreign|moved|missing|cannot remove/i);
 			assert.equal(namespaceSnapshot(value), before, mode);
 		} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 	}
+});
+
+test("locked Herder-owned worktrees reset successfully", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const planRoot = path.join(`${value.repo}-herder-worktrees`, value.planName);
+		const planWorktree = path.join(planRoot, "001");
+		command(value.repo, ["worktree", "lock", "--reason", "test", planWorktree]);
+		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
+		assert.deepEqual(result.removedWorktrees.map((worktree) => path.basename(worktree)).sort(), ["001", "integration"]);
+		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+		assert.equal(git(value.repo, "worktree", "list", "--porcelain").includes(planRoot), false);
+		assert.equal(fs.existsSync(path.join(planRoot, "001")), false);
+		assert.equal(fs.existsSync(path.join(planRoot, "integration")), false);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
 test("applyHerderReset stops an active service before resetting", async () => {
