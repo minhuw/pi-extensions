@@ -1,6 +1,6 @@
 # Statusline Footer
 
-A rich, theme-aware Pi footer inspired by [claude-tui](https://github.com/slima4/claude-tui)'s Claude Code statusline. It keeps model state, context pressure, streaming performance, session economics, and local Git state visible without adding work to the render hot path.
+A rich, theme-aware Pi footer. The metrics come from this extension; the visual language follows [pikit](https://github.com/adrianapan/pikit)'s status bar: left/right justified rows, a positional gradient context bar, per-level thinking color, a hairline rule, and Nerd Font icons with ASCII fallbacks.
 
 ## Install
 
@@ -20,36 +20,41 @@ Full mode is enabled by default when Pi starts.
 
 ## Layout
 
-Full mode renders three rows, with one theme per row:
+Full mode is three content rows plus a hairline under the identity row. Primary facts sit on the left; capacity, cost, and path sit on the right:
 
 ```text
-  k3 • high (moonshot) │   ███░░░░░░░░░░░░░░ 8% 78.9k/1.05M │   1x │   1h 32m   9 │  65.2k   31.4k │   96% │   $0.75 (~$0.058/turn)
-  μ 4.2s    2.1s │   1.8s │   μ 28.9 tok/s    31.2 │   42 │   2 (4.8%)
-  main │ +42 −17 in 3 │   5 touched │   ~/code/my-project
+  ●  k3  HIGH  FAST  (moonshot)              2×  ▉▉▉▉▉▉▉▉░░░░░░░░░░  8.2%  78.9k/1.05M
+  ────────────────────────────────────────────────────────────────────────────────
+  # 13  ⏱ 1h 28m  μ 4.2s ⇄ 1.8s » 28.9 tok/s     $0.75  ↑ 65.2k ↓ 31.4k ⚡120k  12.1k think  96%
+  ⎇ main  +42 −17  ↑2 ↓1                              ▤ 5 touched  ⌂ ~/code/my-project
 ```
 
-| Row | Theme | Contents |
+| Row | Left | Right |
 | --- | --- | --- |
-| 1 | Model state | Model, current thinking effort, provider, context-window bar, compactions, elapsed time, turns, token totals, cache ratio, and session cost. |
-| 2 | Performance | Mean and latest time to first token, time to first byte, token throughput, tool calls, and error rate. |
-| 3 | Local state | Git branch, working-tree diff, files touched during the session, and current directory. |
+| 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider | Compactions, gradient bar, percent, used/window |
+| 2 | Turns, elapsed, TTFT, TTFB, throughput, tool calls, errors | Cost, input / output / cached-input tokens, reasoning tokens, cache hit rate |
+| 3 | Git branch, working-tree diff, ahead/behind, extension statuses | Files touched, current directory |
 
-Compact mode renders the essential model, context, cost, time, turn, throughput, and compaction data on one line.
+Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard. Segments are separated by space, not mid-dots.
+
+Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
 | `/footer` | Toggle the custom footer on or off. |
-| `/footer full` | Use the three-row layout. |
+| `/footer full` | Use the multi-line layout. |
 | `/footer compact` | Use the one-row layout. |
 | `/footer off` | Restore Pi's default footer. |
 | `/footer debug` | Show metric-collection diagnostics for provider latency. |
 
 ## Features
 
-- A live context-window bar changes from green to yellow to red as usage approaches the model limit.
-- The current thinking effort appears immediately after the model name and updates when the session setting changes.
+- A live context-window bar uses a positional RGB gradient (theme success/warning/error when the theme is 24-bit, otherwise a warm fallback).
+- Thinking effort is a first-class CAPS label with per-level color, including a rainbow wash at `xhigh` and `max`.
+- Rows are left/right justified so identity stays put while capacity and cost hug the right edge.
+- Nerd Font icons are used on Ghostty, WezTerm, Kitty, iTerm2, Alacritty, Foot, Rio, and Contour. Everything else falls back to ASCII. Override with `STATUSLINE_NERD_FONTS=1` or `0`.
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated.
 - Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
@@ -61,7 +66,7 @@ Compact mode renders the essential model, context, cost, time, turn, throughput,
 ## Requirements
 
 - A current version of Pi.
-- A terminal font patched with [Nerd Font](https://www.nerdfonts.com/) glyphs for the icons. Without one, the footer still works but icons may render as boxes.
+- Icons look best with a [Nerd Font](https://www.nerdfonts.com/). Without one, the footer automatically uses ASCII/Unicode fallbacks.
 
 ## Metric sources
 
@@ -69,7 +74,8 @@ Compact mode renders the essential model, context, cost, time, turn, throughput,
 - TTFT spans the provider request marker to the first streamed content event, with `message_start` as a fallback for providers that hide HTTP events.
 - TTFB uses Pi's provider-response event when the provider exposes it.
 - Token throughput uses exact output-token usage over measured stream time; the displayed average is token-weighted.
-- Git branch comes from Pi's footer data, while diff statistics use a throttled background `git diff --shortstat HEAD` call.
+- Git branch comes from Pi's footer data. Working-tree diff uses a throttled `git diff --shortstat HEAD`; ahead/behind uses `git rev-list --left-right --count @{upstream}...HEAD`.
+- Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`.
 
 ## License
 

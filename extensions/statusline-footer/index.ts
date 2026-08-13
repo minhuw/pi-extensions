@@ -1,27 +1,32 @@
 /**
- * ClaudeTUI-style Footer — a rich multi-line statusline for pi, inspired by
- * https://github.com/slima4/claude-tui (claude-code-statusline).
+ * Theme-aware statusline footer for Pi.
  *
- * Full mode (3 lines), one theme per line:
- *   1 · Model state:  name + thinking effort (provider), context bar + %/tokens, compactions,
- *                     elapsed · turns, in/out tokens, cache ratio, cost ($/turn)
- *   2 · Performance:  mean + last TTFT, TTFB, weighted-avg + last tok/s,
- *                     tool call count, error rate
- *   3 · Local state:  git branch, working-tree diff (+adds −dels), files
- *                     touched, cwd
+ * Visual language is borrowed from pikit's footer: left/right justified rows,
+ * a positional RGB gradient context bar, per-level thinking color (rainbow at
+ * max/xhigh), a hairline rule, and Nerd Font icons with ASCII fallbacks.
+ * Metrics remain ours: TTFT/TTFB, token-weighted throughput, cache ratio,
+ * session cost, and working-tree diff.
  *
- * Compact mode (1 line):
- *   model │ ██████░░░░ 42% 84k/200k │ $1.23 │ 12m │ 18 turns │ 2x compact
+ * Full mode:
+ *   model  HIGH  (provider)                         ▉▉▉░░░  8.2% / 1.05M
+ *   ────────────────────────────────────────────
+ *   μ 4.2s  28.9 tok/s                    $0.75  96% cache  9 turns
+ *   main  +42 −17                         5 touched  ~/code/my-project
+ *
+ * Compact mode:
+ *   model  HIGH            ▉▉▉░░░  42%  $1.23  12m
  *
  * Usage:
  *   /footer            toggle on/off
- *   /footer full       3-line layout (default)
+ *   /footer full       multi-line layout (default)
  *   /footer compact    1-line layout
  *   /footer off        restore pi's default footer
  *   /footer debug      show metric-collection internals
  */
 
 import { execFile } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
@@ -29,18 +34,25 @@ import type {
 	ReadonlyFooterDataProvider,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 type Mode = "full" | "compact" | "off";
 
 const BAR_WIDTH = 18;
+const COMPACT_BAR_WIDTH = 10;
+const RESET = "\x1b[0m";
+
+type ThemeToken = Parameters<Theme["fg"]>[0];
+type Rgb = { r: number; g: number; b: number };
 
 // ── formatting helpers ──────────────────────────────────────────────
 
-function fmtTokens(n: number): string {
+export function fmtTokens(n: number): string {
 	if (n < 1000) return `${n}`;
-	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-	return `${(n / 1_000_000).toFixed(2)}M`;
+	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
+	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+	if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	return `${Math.round(n / 1_000_000)}M`;
 }
 
 function fmtCost(usd: number): string {
@@ -54,9 +66,120 @@ function fmtDuration(ms: number): string {
 	return `${h}h ${String(mins % 60).padStart(2, "0")}m`;
 }
 
-function bar(pct: number, width = BAR_WIDTH): string {
-	const filled = Math.round((Math.min(pct, 100) / 100) * width);
-	return "█".repeat(filled) + "░".repeat(width - filled);
+function rgbFg(color: Rgb): string {
+	return `\x1b[38;2;${color.r};${color.g};${color.b}m`;
+}
+
+function hexToRgb(hex: string): Rgb | null {
+	const value = hex.replace("#", "");
+	if (!/^[0-9a-fA-F]{6}$/.test(value)) return null;
+	return {
+		r: Number.parseInt(value.slice(0, 2), 16),
+		g: Number.parseInt(value.slice(2, 4), 16),
+		b: Number.parseInt(value.slice(4, 6), 16),
+	};
+}
+
+export function hexFg(hex: string, text: string): string {
+	const rgb = hexToRgb(hex);
+	return rgb ? `${rgbFg(rgb)}${text}${RESET}` : text;
+}
+
+function lerp(a: number, b: number, t: number): number {
+	return Math.round(a + (b - a) * t);
+}
+
+function mix(start: Rgb, end: Rgb, t: number): Rgb {
+	return { r: lerp(start.r, end.r, t), g: lerp(start.g, end.g, t), b: lerp(start.b, end.b, t) };
+}
+
+function positionColor(pos: number, width: number, start: Rgb, mid: Rgb, end: Rgb, midFrac = 0.55): Rgb {
+	const t = pos / Math.max(width - 1, 1);
+	if (t <= midFrac) return mix(start, mid, t / midFrac);
+	return mix(mid, end, (t - midFrac) / Math.max(1 - midFrac, 0.0001));
+}
+
+export function resolveThemeRgb(theme: Theme, token: ThemeToken): Rgb | null {
+	try {
+		const probed = theme.fg(token, "X");
+		const match = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(probed);
+		if (!match) return null;
+		return { r: Number(match[1]), g: Number(match[2]), b: Number(match[3]) };
+	} catch {
+		return null;
+	}
+}
+
+const FALLBACK_GRADIENT = {
+	start: { r: 0x7d, g: 0xce, b: 0xa0 },
+	mid: { r: 0xf5, g: 0xb0, b: 0x41 },
+	end: { r: 0xae, g: 0x4f, b: 0x2f },
+	unfilled: { r: 0x4e, g: 0x4c, b: 0x49 },
+};
+
+export function gradientBar(pct: number, width: number, theme?: Theme): string {
+	const filled = Math.round((Math.min(Math.max(pct, 0), 100) / 100) * width);
+	const start = (theme && resolveThemeRgb(theme, "success")) ?? FALLBACK_GRADIENT.start;
+	const mid = (theme && resolveThemeRgb(theme, "warning")) ?? FALLBACK_GRADIENT.mid;
+	const end = (theme && resolveThemeRgb(theme, "error")) ?? FALLBACK_GRADIENT.end;
+	const unfilled = (theme && resolveThemeRgb(theme, "dim")) ?? FALLBACK_GRADIENT.unfilled;
+	let bar = "";
+	for (let i = 0; i < width; i++) {
+		bar += i < filled
+			? rgbFg(positionColor(i, width, start, mid, end)) + "▉"
+			: rgbFg(unfilled) + "▉";
+	}
+	return `${bar}${RESET}`;
+}
+
+export function rainbow(text: string): string {
+	const chars = [...text];
+	const visible = chars.filter((char) => char !== " " && char !== ":").length;
+	let result = "";
+	let colorIndex = 0;
+	for (const char of chars) {
+		if (char === " " || char === ":") {
+			result += char;
+			continue;
+		}
+		const hue = (colorIndex / Math.max(visible - 1, 1)) * 300;
+		const sat = 0.85;
+		const light = 0.65;
+		const a = sat * Math.min(light, 1 - light);
+		const channel = (n: number) => {
+			const k = (n + hue / 30) % 12;
+			return Math.round((light - a * Math.max(Math.min(k - 3, 9 - k, 1), -1)) * 255);
+		};
+		result += rgbFg({ r: channel(0), g: channel(8), b: channel(4) }) + char;
+		colorIndex += 1;
+	}
+	return `${result}${RESET}`;
+}
+
+export function formatPath(cwd: string, home = os.homedir()): string {
+	if (cwd === home) return "~";
+	const prefix = home.endsWith(path.sep) ? home : home + path.sep;
+	if (!cwd.startsWith(prefix)) return cwd;
+	return `~/${cwd.slice(prefix.length).replaceAll("\\", "/")}`;
+}
+
+export function alignRow(left: string, right: string, width: number): string {
+	const inner = Math.max(0, width - 2);
+	if (!right) return truncateToWidth(` ${truncateToWidth(left, inner)}`, width);
+	const rightWidth = visibleWidth(right);
+	if (rightWidth >= inner) return truncateToWidth(` ${truncateToWidth(right, inner)} `, width);
+	const leftStr = truncateToWidth(left, Math.max(0, inner - rightWidth - 1));
+	const pad = Math.max(1, inner - visibleWidth(leftStr) - rightWidth);
+	return truncateToWidth(` ${leftStr}${" ".repeat(pad)}${right} `, width);
+}
+
+export function hairline(width: number, theme?: Theme): string {
+	const color = (theme && resolveThemeRgb(theme, "borderMuted")) ?? FALLBACK_GRADIENT.unfilled;
+	return `${rgbFg(color)}${"─".repeat(Math.max(0, width))}${RESET}`;
+}
+
+function cluster(parts: Array<string | false | null | undefined>, sep: string): string {
+	return parts.filter((part): part is string => Boolean(part)).join(sep);
 }
 
 // ── session stats ───────────────────────────────────────────────────
@@ -72,6 +195,7 @@ interface Stats {
 	output: number;
 	cost: number;
 	cacheRead: number;
+	reasoning: number;
 	turns: number;
 	compactions: number;
 	errors: number;
@@ -92,6 +216,7 @@ interface SessionState {
 	gitStat: GitStat | null;
 	gitStatAt: number;
 	gitStatCwd: string;
+	serviceTier?: string;
 	requestRender?: () => void;
 }
 
@@ -109,6 +234,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		output: 0,
 		cost: 0,
 		cacheRead: 0,
+		reasoning: 0,
 		turns: 0,
 		compactions: 0,
 		errors: 0,
@@ -136,6 +262,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 			s.input += a.usage?.input ?? 0;
 			s.output += a.usage?.output ?? 0;
 			s.cacheRead += a.usage?.cacheRead ?? 0;
+			s.reasoning += a.usage?.reasoning ?? 0;
 			s.cost += a.usage?.cost?.total ?? 0;
 			for (const block of a.content ?? []) {
 				if (block.type !== "toolCall") continue;
@@ -226,6 +353,8 @@ interface GitStat {
 	files: number;
 	adds: number;
 	dels: number;
+	ahead: number;
+	behind: number;
 }
 
 // Extension modules are cached within the process, while pi-subagents binds a
@@ -234,12 +363,13 @@ interface GitStat {
 // interactive parent's footer. The map also preserves metrics across /reload.
 const sessionStates = new Map<string, SessionState>();
 
-function freshSessionState(metrics = freshMetrics()): SessionState {
+function freshSessionState(previous?: SessionState): SessionState {
 	return {
-		metrics,
+		metrics: previous?.metrics ?? freshMetrics(),
 		gitStat: null,
 		gitStatAt: 0,
 		gitStatCwd: "",
+		serviceTier: previous?.serviceTier,
 	};
 }
 
@@ -247,77 +377,226 @@ function getSessionState(ctx: ExtensionContext): SessionState | undefined {
 	return sessionStates.get(ctx.sessionManager.getSessionId());
 }
 
+export function parseGitShortstat(stdout: string): Pick<GitStat, "files" | "adds" | "dels"> {
+	const files = /(\d+) files? changed/.exec(stdout);
+	const adds = /(\d+) insertions?\(\+\)/.exec(stdout);
+	const dels = /(\d+) deletions?\(-\)/.exec(stdout);
+	return {
+		files: files ? Number(files[1]) : 0,
+		adds: adds ? Number(adds[1]) : 0,
+		dels: dels ? Number(dels[1]) : 0,
+	};
+}
+
+/** `git rev-list --left-right --count @{upstream}...HEAD` → behind then ahead. */
+export function parseGitAheadBehind(stdout: string): { ahead: number; behind: number } {
+	const match = /^(\d+)\s+(\d+)\s*$/.exec(stdout.trim());
+	if (!match) return { ahead: 0, behind: 0 };
+	return { behind: Number(match[1]), ahead: Number(match[2]) };
+}
+
+export function extractServiceTier(payload: unknown): string | undefined {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+	const record = payload as Record<string, unknown>;
+	const raw = record.service_tier ?? record.serviceTier;
+	if (typeof raw !== "string") return undefined;
+	const tier = raw.trim();
+	return tier || undefined;
+}
+
+const STANDARD_TIERS = new Set(["standard", "default", "auto", "standard_only"]);
+
+export function displayServiceTier(tier: string | undefined): string | undefined {
+	if (!tier) return undefined;
+	const normalized = tier.trim().toLowerCase();
+	if (!normalized || STANDARD_TIERS.has(normalized)) return undefined;
+	return normalized === "priority" ? "FAST" : normalized.toUpperCase();
+}
+
 function refreshGitStat(cwd: string, state: SessionState) {
 	const now = Date.now();
 	if (state.gitStatCwd === cwd && now - state.gitStatAt < 15_000) return;
 	state.gitStatAt = now;
 	state.gitStatCwd = cwd;
-	execFile("git", ["diff", "--shortstat", "HEAD"], { cwd, timeout: 5000 }, (err, stdout) => {
-		if (err) {
+	const opts = { cwd, timeout: 5000 };
+	let shortstat: Pick<GitStat, "files" | "adds" | "dels"> | null = null;
+	let aheadBehind = { ahead: 0, behind: 0 };
+	let pending = 2;
+	const finish = () => {
+		pending -= 1;
+		if (pending > 0) return;
+		if (!shortstat) {
 			state.gitStat = null;
-			return;
+		} else {
+			state.gitStat = { ...shortstat, ...aheadBehind };
 		}
-		const files = /(\d+) files? changed/.exec(stdout);
-		const adds = /(\d+) insertions?\(\+\)/.exec(stdout);
-		const dels = /(\d+) deletions?\(-\)/.exec(stdout);
-		state.gitStat = {
-			files: files ? Number(files[1]) : 0,
-			adds: adds ? Number(adds[1]) : 0,
-			dels: dels ? Number(dels[1]) : 0,
-		};
 		state.requestRender?.();
+	};
+	execFile("git", ["diff", "--shortstat", "HEAD"], opts, (err, stdout) => {
+		shortstat = err ? { files: 0, adds: 0, dels: 0 } : parseGitShortstat(stdout);
+		finish();
+	});
+	execFile("git", ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], opts, (err, stdout) => {
+		aheadBehind = err ? { ahead: 0, behind: 0 } : parseGitAheadBehind(stdout);
+		finish();
 	});
 }
 
-// ── nerd font icons ────────────────────────────────────────────────
-// PUA glyphs from Nerd Fonts (nf-fa-*). If your terminal font has no
-// Nerd Font patched in, these render as boxes — tell me and I'll add
-// an ASCII fallback mode.
+// ── icons ──────────────────────────────────────────────────────────
+// Nerd Fonts when the terminal is known to have them; otherwise ASCII.
+// Override with STATUSLINE_NERD_FONTS=1|0 (FOOTER_NERD_FONTS is also accepted).
 
-const I = {
-	model: "\uF135", //  rocket (FA 4.7 — present in all Nerd Font versions)
-	context: "\uF1C0", //  database
-	compact: "\uF066", //  compress
-	elapsed: "\uF252", //  hourglass-half
-	turns: "\uF086", //  comments
-	input: "\uF062", //  arrow-up
-	output: "\uF063", //  arrow-down
-	cache: "\uF0E7", //  bolt
-	cost: "\uF155", //  usd
-	ttft: "\uF251", //  hourglass-start
-	ttfb: "\uF0EC", //  exchange
-	speed: "\uF0E4", //  tachometer
-	last: "\uF1DA", //  history
-	calls: "\uF0AD", //  wrench
-	err: "\uF057", //  times-circle
-	ok: "\uF00C", //  check
-	branch: "\uF126", //  code-fork
-	file: "\uF0F6", //  file-o
-	cwd: "\uF07C", //  folder-open
+type IconSet = {
+	compact: string;
+	elapsed: string;
+	turns: string;
+	input: string;
+	output: string;
+	cache: string;
+	cost: string;
+	ttft: string;
+	ttfb: string;
+	speed: string;
+	last: string;
+	calls: string;
+	err: string;
+	ok: string;
+	branch: string;
+	file: string;
+	cwd: string;
+};
+
+const NERD_ICONS: IconSet = {
+	compact: "\uF0615", // md-arrow-collapse
+	elapsed: "\uF0954", // md-clock
+	turns: "\uF0368", // md-message-reply-text
+	input: "\uF005E", // md-arrow-up-thick
+	output: "\uF0046", // md-arrow-down-thick
+	cache: "\uF140B", // md-lightning-bolt
+	cost: "\uF01C1", // md-currency-usd
+	ttft: "\uF051B", // md-timer-outline
+	ttfb: "\uF04E1", // md-swap-horizontal
+	speed: "\uF04C5", // md-speedometer
+	last: "\uF02DA", // md-history
+	calls: "\uF05B7", // md-wrench
+	err: "\uF0159", // md-close-circle
+	ok: "\uF0133", // md-checkbox-marked-circle
+	branch: "\uF062C", // md-source-branch
+	file: "\uF0224", // md-file-outline
+	cwd: "\uF0770", // md-folder-open
 } as const;
+
+const ASCII_ICONS: IconSet = {
+	compact: "×",
+	elapsed: "⏱",
+	turns: "#",
+	input: "↑",
+	output: "↓",
+	cache: "⚡",
+	cost: "$",
+	ttft: "⏱",
+	ttfb: "⇄",
+	speed: "»",
+	last: "↺",
+	calls: "⚙",
+	err: "✕",
+	ok: "✓",
+	branch: "⎇",
+	file: "▤",
+	cwd: "⌂",
+} as const;
+
+export function hasNerdFonts(): boolean {
+	const override = process.env.STATUSLINE_NERD_FONTS ?? process.env.FOOTER_NERD_FONTS;
+	if (override === "1") return true;
+	if (override === "0") return false;
+	if (process.env.GHOSTTY_RESOURCES_DIR) return true;
+	const termProg = (process.env.TERM_PROGRAM || "").toLowerCase();
+	const nerdTerms = ["iterm", "wezterm", "kitty", "ghostty", "alacritty", "foot", "rio", "contour"];
+	if (nerdTerms.some((name) => termProg.includes(name))) return true;
+	const term = (process.env.TERM || "").toLowerCase();
+	return ["xterm-kitty", "xterm-ghostty", "alacritty", "foot", "rio", "contour"].some((name) => term.includes(name));
+}
+
+function icons(): IconSet {
+	return hasNerdFonts() ? NERD_ICONS : ASCII_ICONS;
+}
+
+function glyph(theme: Theme, icon: string, color?: ThemeToken): string {
+	return color ? theme.fg(color, theme.bold(icon)) : theme.bold(icon);
+}
 
 // ── rendering ───────────────────────────────────────────────────────
 
-function ctxColor(pct: number): "success" | "warning" | "error" {
-	if (pct < 50) return "success";
-	if (pct < 75) return "warning";
-	return "error";
+const THINKING_CAPS: Record<string, string> = {
+	off: "OFF",
+	minimal: "MIN",
+	low: "LOW",
+	medium: "MED",
+	high: "HIGH",
+	xhigh: "XHIGH",
+	max: "MAX",
+};
+
+export function thinkingCaps(level: string): string {
+	return THINKING_CAPS[level] ?? level.toUpperCase();
 }
 
-function renderModelLabel(ctx: ExtensionContext, theme: Theme, includeProvider: boolean): string {
+export function renderThinking(theme: Theme, level: string): string {
+	const text = thinkingCaps(level);
+	if (level === "max" || level === "xhigh") return rainbow(text);
+	if (level === "high") return hexFg("#afb9fe", text);
+	if (level === "medium") return theme.fg("success", text);
+	if (level === "low") return theme.fg("warning", text);
+	if (level === "off") return theme.fg("dim", text);
+	return theme.fg("muted", text);
+}
+
+function renderModelLabel(
+	ctx: ExtensionContext,
+	theme: Theme,
+	includeProvider: boolean,
+	live = false,
+	queued = false,
+	serviceTier?: string,
+): string {
 	const model = ctx.model;
-	if (!model) return theme.fg("accent", theme.bold("no-model"));
+	const liveMark = live ? theme.fg("success", theme.bold("●")) + "  " : "";
+	const queuedMark = queued ? theme.fg("warning", "queued") + "  " : "";
+	if (!model) return liveMark + queuedMark + theme.fg("accent", theme.bold("no-model"));
 
-	const thinkingLevel = ctx.thinkingLevel ?? "off";
-	const thinking = model.reasoning
-		? theme.fg(
-				"dim",
-				thinkingLevel === "off" ? " • thinking off" : ` • ${thinkingLevel}`,
-			)
-		: "";
-	const provider = includeProvider ? theme.fg("muted", ` (${model.provider})`) : "";
+	const name = theme.fg("accent", theme.bold(model.id));
+	const thinking = model.reasoning ? `  ${renderThinking(theme, ctx.thinkingLevel ?? "off")}` : "";
+	const tier = displayServiceTier(serviceTier);
+	const tierMark = tier ? `  ${theme.fg("warning", theme.bold(tier))}` : "";
+	const provider = includeProvider && model.provider ? theme.fg("dim", `  (${model.provider})`) : "";
+	return liveMark + queuedMark + name + thinking + tierMark + provider;
+}
 
-	return theme.fg("accent", theme.bold(model.id)) + thinking + provider;
+function renderContext(
+	theme: Theme,
+	usage: ReturnType<ExtensionContext["getContextUsage"]>,
+	barWidth: number,
+	compactions: number,
+	compactIcon: string,
+): string {
+	const compact = glyph(theme, compactIcon, compactions > 0 ? "warning" : "dim") + " " +
+		theme.fg(compactions > 0 ? "warning" : "dim", `${compactions}×`);
+	if (usage?.percent != null) {
+		const pct = usage.percent;
+		const used = fmtTokens(usage.tokens ?? 0);
+		const window = fmtTokens(usage.contextWindow);
+		return cluster([
+			compact,
+			gradientBar(pct, barWidth, theme),
+			theme.fg("muted", `${pct.toFixed(1)}%`),
+			theme.fg("dim", `${used}/${window}`),
+		], "  ");
+	}
+	if (usage?.contextWindow) {
+		return cluster([compact, theme.fg("dim", `/ ${fmtTokens(usage.contextWindow)}`)], "  ");
+	}
+	return compact;
 }
 
 function renderCompact(
@@ -326,29 +605,17 @@ function renderCompact(
 	width: number,
 	state: SessionState,
 ): string {
+	const set = icons();
 	const s = collectStats(ctx, state);
 	const usage = ctx.getContextUsage();
-	const sep = theme.fg("borderMuted", " │ ");
-
-	const parts: string[] = [
-		theme.fg("accent", `${I.model} `) + renderModelLabel(ctx, theme, false),
-	];
-	if (usage?.percent != null) {
-		const pct = Math.round(usage.percent);
-		const color = ctxColor(pct);
-		parts.push(
-			theme.fg(color, bar(pct, 10)) +
-				theme.fg("dim", ` ${pct}% ${fmtTokens(usage.tokens ?? 0)}/${fmtTokens(usage.contextWindow)}`),
-		);
-	}
-	parts.push(theme.fg("warning", `${I.cost} ${fmtCost(s.cost)}`));
-	parts.push(theme.fg("muted", `${I.elapsed} `) + theme.fg("dim", fmtDuration(s.durationMs)));
-	parts.push(theme.fg("muted", `${I.turns} `) + theme.fg("dim", `${s.turns}`));
-	const avg = avgTokPerSec(state.metrics);
-	if (avg != null) parts.push(theme.fg("success", `${I.speed} ${fmtTokPerSec(avg)}`));
-	if (s.compactions > 0) parts.push(theme.fg("muted", `${I.compact} ${s.compactions}x`));
-
-	return truncateToWidth(parts.join(sep), width);
+	const sep = "  ";
+	const left = renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
+	const right = cluster([
+		renderContext(theme, usage, COMPACT_BAR_WIDTH, s.compactions, set.compact),
+		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`),
+		theme.fg("dim", fmtDuration(s.durationMs)),
+	], sep);
+	return alignRow(left, right, width);
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -364,129 +631,81 @@ function renderFull(
 	width: number,
 	state: SessionState,
 ): string[] {
+	const set = icons();
 	const s = collectStats(ctx, state);
 	const usage = ctx.getContextUsage();
-	const sep = theme.fg("borderMuted", " │ ");
+	const sep = "  ";
 
-	// ── Line 1 · Model state: identity, context capacity, elapsed, tokens, cost
-	const l1: string[] = [];
-	l1.push(
-		theme.fg("syntaxKeyword", `${I.model} `) +
-			renderModelLabel(ctx, theme, true),
+	const line1 = alignRow(
+		renderModelLabel(ctx, theme, true, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier),
+		renderContext(theme, usage, BAR_WIDTH, s.compactions, set.compact),
+		width,
 	);
-	if (usage?.percent != null) {
-		const pct = Math.round(usage.percent);
-		const color = ctxColor(pct);
-		l1.push(
-			theme.fg("muted", `${I.context} `) +
-				theme.fg(color, bar(pct)) +
-				" " +
-				theme.fg(color, theme.bold(`${pct}%`)) +
-				theme.fg("dim", ` ${fmtTokens(usage.tokens ?? 0)}/${fmtTokens(usage.contextWindow)}`),
-		);
-	} else {
-		l1.push(
-			theme.fg("muted", `${I.context} `) +
-				theme.fg("dim", `window ${fmtTokens(usage?.contextWindow ?? 0)}`),
-		);
-	}
-	if (s.compactions > 0)
-		l1.push(theme.fg("muted", `${I.compact} `) + theme.fg("dim", `${s.compactions}x`));
-	l1.push(
-		theme.fg("syntaxNumber", `${I.elapsed} `) +
-			theme.fg("dim", fmtDuration(s.durationMs)) +
-			theme.fg("muted", ` ${I.turns} `) +
-			theme.fg("dim", `${s.turns}`),
-	);
-	l1.push(
-		theme.fg("toolDiffAdded", `${I.input} `) +
-			theme.fg("dim", fmtTokens(s.input)) +
-			"  " +
-			theme.fg("toolDiffRemoved", `${I.output} `) +
-			theme.fg("dim", fmtTokens(s.output)),
-	);
-	const totalIn = s.input + s.cacheRead;
-	if (totalIn > 0) {
-		const cachePct = Math.round((s.cacheRead / totalIn) * 100);
-		const cColor = cachePct >= 70 ? "success" : cachePct >= 40 ? "warning" : "dim";
-		l1.push(theme.fg(cColor, `${I.cache} ${cachePct}%`));
-	}
-	l1.push(
-		theme.fg("warning", `${I.cost} ${fmtCost(s.cost)}`) +
-			(s.turns > 0 ? theme.fg("dim", ` (~${fmtCost(s.cost / s.turns)}/turn)`) : ""),
-	);
-	const line1 = truncateToWidth(l1.join(sep), width);
 
-	// ── Line 2 · Performance: TTFT, TTFB, tok/s, tool calls, error rate
-	const l2: string[] = [];
 	const { metrics } = state;
 	const avgTtft = avgTtftMs(metrics);
-	if (avgTtft != null) {
-		l2.push(
-			theme.fg(ttftColor(avgTtft), `${I.ttft} μ ${fmtTtft(avgTtft)}`) +
-				(metrics.lastTtftMs != null && metrics.ttftCount > 1
-					? theme.fg("dim", `  ${I.last} ${fmtTtft(metrics.lastTtftMs)}`)
-					: ""),
-		);
-	} else {
-		l2.push(theme.fg("dim", `${I.ttft} —`));
-	}
-	if (metrics.lastTtfbMs != null)
-		l2.push(theme.fg("muted", `${I.ttfb} `) + theme.fg("dim", fmtTtft(metrics.lastTtfbMs)));
 	const avg = avgTokPerSec(metrics);
-	if (avg != null) {
-		l2.push(
-			theme.fg("success", `${I.speed} μ ${fmtTokPerSec(avg)}`) +
-				(metrics.lastTokPerSec != null && metrics.requests > 1
-					? theme.fg("dim", `  ${I.last} ${fmtTokPerSec(metrics.lastTokPerSec)}`)
-					: ""),
-		);
-	} else {
-		l2.push(theme.fg("dim", `${I.speed} — tok/s`));
-	}
-	if (s.toolCalls > 0) {
-		l2.push(theme.fg("syntaxFunction", `${I.calls} `) + theme.fg("dim", `${s.toolCalls}`));
-		l2.push(
-			s.errors > 0
-				? theme.fg(
-						"error",
-						`${I.err} ${s.errors} (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)`,
-					)
-				: theme.fg("success", `${I.ok} 0`),
-		);
-	} else {
-		l2.push(theme.fg("muted", `${I.calls} `) + theme.fg("dim", "0"));
-	}
-	const line2 = truncateToWidth(l2.join(sep), width);
+	const totalIn = s.input + s.cacheRead;
+	const cachePct = totalIn > 0 ? Math.round((s.cacheRead / totalIn) * 100) : null;
+	const cacheColor: ThemeToken = cachePct == null ? "dim" : cachePct >= 70 ? "success" : cachePct >= 40 ? "warning" : "dim";
 
-	// ── Line 3 · Local state: git branch, working-tree diff, touched files, cwd
-	refreshGitStat(ctx.cwd, state); // throttled, async; paints cached value
-	const l3: string[] = [];
+	const perf = cluster([
+		theme.fg("dim", `${glyph(theme, set.turns)} ${s.turns}  ${glyph(theme, set.elapsed)} ${fmtDuration(s.durationMs)}`),
+		avgTtft != null
+			? theme.fg(ttftColor(avgTtft), `${glyph(theme, set.ttft, ttftColor(avgTtft))} μ ${fmtTtft(avgTtft)}`)
+				+ (metrics.lastTtftMs != null && metrics.ttftCount > 1 ? theme.fg("dim", ` ${glyph(theme, set.last)} ${fmtTtft(metrics.lastTtftMs)}`) : "")
+			: theme.fg("dim", `${glyph(theme, set.ttft)} —`),
+		metrics.lastTtfbMs != null ? theme.fg("dim", `${glyph(theme, set.ttfb)} ${fmtTtft(metrics.lastTtfbMs)}`) : "",
+		avg != null
+			? theme.fg("success", `${glyph(theme, set.speed, "success")} μ ${fmtTokPerSec(avg)}`)
+				+ (metrics.lastTokPerSec != null && metrics.requests > 1 ? theme.fg("dim", ` ${glyph(theme, set.last)} ${fmtTokPerSec(metrics.lastTokPerSec)}`) : "")
+			: theme.fg("dim", `${glyph(theme, set.speed)} —`),
+		s.toolCalls > 0
+			? theme.fg("syntaxFunction", `${glyph(theme, set.calls, "syntaxFunction")} ${s.toolCalls}`)
+			: theme.fg("dim", `${glyph(theme, set.calls)} 0`),
+		s.toolCalls > 0
+			? (s.errors > 0
+				? theme.fg("error", `${glyph(theme, set.err, "error")} ${s.errors} (${((s.errors / s.toolCalls) * 100).toFixed(1)}%)`)
+				: theme.fg("success", `${glyph(theme, set.ok, "success")} 0`))
+			: "",
+	], sep);
+
+	const money = cluster([
+		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`)
+			+ (s.turns > 0 ? theme.fg("dim", ` (~${fmtCost(s.cost / s.turns)}/turn)`) : ""),
+		theme.fg("toolDiffAdded", `${glyph(theme, set.input, "toolDiffAdded")} ${fmtTokens(s.input)}`)
+			+ " "
+			+ theme.fg("toolDiffRemoved", `${glyph(theme, set.output, "toolDiffRemoved")} ${fmtTokens(s.output)}`)
+			+ (s.cacheRead > 0 ? " " + theme.fg(cacheColor, `${glyph(theme, set.cache, cacheColor)}${fmtTokens(s.cacheRead)}`) : ""),
+		s.reasoning > 0 ? theme.fg("muted", `${fmtTokens(s.reasoning)} think`) : "",
+		cachePct != null ? theme.fg(cacheColor, `${cachePct}%`) : "",
+	], sep);
+
+	const line2 = alignRow(perf, money, width);
+
+	refreshGitStat(ctx.cwd, state);
 	const branch = footerData.getGitBranch();
-	l3.push(
+	const dirty = state.gitStat && (state.gitStat.adds > 0 || state.gitStat.dels > 0);
+	const statuses = [...footerData.getExtensionStatuses().values()].filter(Boolean);
+	const gitLeft = cluster([
 		branch
-			? theme.fg("syntaxKeyword", `${I.branch} `) + theme.fg("accent", branch)
-			: theme.fg("dim", `${I.branch} no git`),
-	);
-	if (state.gitStat && (state.gitStat.adds > 0 || state.gitStat.dels > 0)) {
-		l3.push(
-			theme.fg("toolDiffAdded", `+${state.gitStat.adds}`) +
-				" " +
-				theme.fg("toolDiffRemoved", `-${state.gitStat.dels}`) +
-				theme.fg("dim", ` in ${state.gitStat.files}`),
-		);
-	} else if (branch) {
-		l3.push(theme.fg("success", `${I.ok} clean`));
-	}
-	if (s.files > 0)
-		l3.push(theme.fg("syntaxType", `${I.file} `) + theme.fg("dim", `${s.files} touched`));
-	l3.push(
-		theme.fg("muted", `${I.cwd} `) +
-			theme.fg("dim", ctx.cwd.replace(/^\/home\/[^/]+/, "~")),
-	);
-	const line3 = truncateToWidth(l3.join(sep), width);
+			? theme.fg(dirty ? "warning" : "success", `${glyph(theme, set.branch, dirty ? "warning" : "success")} ${branch}`)
+			: theme.fg("dim", `${glyph(theme, set.branch)} no git`),
+		dirty
+			? theme.fg("toolDiffAdded", `+${state.gitStat!.adds}`) + " " + theme.fg("toolDiffRemoved", `-${state.gitStat!.dels}`)
+			: (branch ? theme.fg("success", `${glyph(theme, set.ok, "success")} clean`) : ""),
+		state.gitStat && (state.gitStat.ahead > 0 || state.gitStat.behind > 0)
+			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
+			: "",
+		...statuses.map((status) => theme.fg("accent", status)),
+	], "  ");
+	const gitRight = cluster([
+		s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "",
+		theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`),
+	], sep);
+	const line3 = alignRow(gitLeft, gitRight, width);
 
-	return [line1, line2, line3];
+	return [line1, hairline(width, theme), line2, line3];
 }
 
 // ── extension ───────────────────────────────────────────────────────
@@ -531,14 +750,19 @@ export default function (pi: ExtensionAPI) {
 		installedCtx = undefined; // new session runtime → reinstall
 		const sessionId = ctx.sessionManager.getSessionId();
 		const previous = sessionStates.get(sessionId);
-		const state = freshSessionState(
-			event.reason === "reload" ? previous?.metrics : undefined,
-		);
+			const state = freshSessionState(event.reason === "reload" ? previous : undefined);
 		sessionStates.set(sessionId, state);
 		if (mode !== "off") install(ctx, state);
 	});
 
 	// ── streaming metrics collection (TUI session only)
+
+	pi.on("before_provider_request", (event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
+		const tier = extractServiceTier(event.payload);
+		if (tier) state.serviceTier = tier;
+	});
 
 	pi.on("before_provider_headers", (_event, ctx) => {
 		const metrics = getSessionState(ctx)?.metrics;

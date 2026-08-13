@@ -3,7 +3,19 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import statuslineFooter from "../index.ts";
+import statuslineFooter, {
+	alignRow,
+	displayServiceTier,
+	extractServiceTier,
+	formatPath,
+	gradientBar,
+	hasNerdFonts,
+	parseGitAheadBehind,
+	parseGitShortstat,
+	rainbow,
+	thinkingCaps,
+} from "../index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 type FooterComponent = { dispose?: () => void };
@@ -86,6 +98,68 @@ function assistantEnd(output: number) {
 
 afterEach(() => {
 	vi.restoreAllMocks();
+});
+
+describe("statusline footer visual language", () => {
+	it("right-aligns secondary facts and stays within width", () => {
+		const row = alignRow("k3  HIGH", "8.2% / 1.05M", 40);
+		expect(visibleWidth(row)).toBeLessThanOrEqual(40);
+		expect(row).toContain("k3  HIGH");
+		expect(row).toContain("8.2% / 1.05M");
+		expect(row.indexOf("k3")).toBeLessThan(row.indexOf("8.2%"));
+		expect(row.trimEnd().endsWith("8.2% / 1.05M")).toBe(true);
+	});
+
+	it("builds a fixed-width gradient bar", () => {
+		expect(visibleWidth(gradientBar(0, 18))).toBe(18);
+		expect(visibleWidth(gradientBar(50, 18))).toBe(18);
+		expect(visibleWidth(gradientBar(100, 10))).toBe(10);
+		expect(gradientBar(40, 8)).toContain("▉");
+	});
+
+	it("washes max thinking labels across a rainbow", () => {
+		expect(thinkingCaps("xhigh")).toBe("XHIGH");
+		expect(thinkingCaps("max")).toBe("MAX");
+		const painted = rainbow("MAX");
+		expect(painted).toContain("\x1b[38;2;");
+		expect(painted.endsWith("\x1b[0m")).toBe(true);
+		expect(visibleWidth(painted)).toBe(3);
+	});
+
+	it("abbreviates the home directory with a portable tilde", () => {
+		expect(formatPath("/Users/ada/code/pi", "/Users/ada")).toBe("~/code/pi");
+		expect(formatPath("/Users/ada", "/Users/ada")).toBe("~");
+		expect(formatPath("/tmp/work", "/Users/ada")).toBe("/tmp/work");
+	});
+
+	it("parses git shortstat and upstream ahead/behind", () => {
+		expect(parseGitShortstat(" 3 files changed, 12 insertions(+), 4 deletions(-)\n")).toEqual({
+			files: 3,
+			adds: 12,
+			dels: 4,
+		});
+		expect(parseGitAheadBehind("2\t5\n")).toEqual({ behind: 2, ahead: 5 });
+		expect(parseGitAheadBehind("")).toEqual({ ahead: 0, behind: 0 });
+	});
+
+	it("shows only non-standard service tiers", () => {
+		expect(extractServiceTier({ service_tier: "priority" })).toBe("priority");
+		expect(extractServiceTier({ serviceTier: "flex" })).toBe("flex");
+		expect(displayServiceTier("priority")).toBe("FAST");
+		expect(displayServiceTier("flex")).toBe("FLEX");
+		expect(displayServiceTier("standard")).toBeUndefined();
+		expect(displayServiceTier("default")).toBeUndefined();
+	});
+
+	it("honors STATUSLINE_NERD_FONTS over terminal guesses", () => {
+		const previous = process.env.STATUSLINE_NERD_FONTS;
+		process.env.STATUSLINE_NERD_FONTS = "0";
+		expect(hasNerdFonts()).toBe(false);
+		process.env.STATUSLINE_NERD_FONTS = "1";
+		expect(hasNerdFonts()).toBe(true);
+		if (previous === undefined) delete process.env.STATUSLINE_NERD_FONTS;
+		else process.env.STATUSLINE_NERD_FONTS = previous;
+	});
 });
 
 describe("statusline footer session isolation", () => {
