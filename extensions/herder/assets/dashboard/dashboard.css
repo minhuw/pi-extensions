@@ -874,6 +874,20 @@ a:focus-visible,
   font-size: 0.61rem;
 }
 
+.attempt-nested {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  margin-top: 0.28rem;
+}
+
+.attempt-nested-row {
+  display: block;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+}
+
 .outcome-chip {
   max-width: 7rem;
   overflow: hidden;

@@ -14,7 +14,7 @@ const agentRoot = path.join(packageRoot, "assets/roles/pi");
 const available = [
 	{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3", thinkingLevelMap: { max: "max" } },
 	{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash", thinkingLevelMap: { high: "high", max: null } },
-	{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna", thinkingLevelMap: { max: "max" } },
+	{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 ];
 
 test("Herder loads exact non-recursive Pi role definitions", async () => {
@@ -32,10 +32,16 @@ test("Herder loads package-owned one-level nested definitions with explicit perm
 	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
 	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
+	assert.equal(recon.binding, "own");
+	assert.deepEqual(recon.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 	assert.equal(searcher.readOnly, true);
+	assert.equal(searcher.binding, "own");
+	assert.deepEqual(searcher.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
 	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content"]);
 	assert.equal(worker.readOnly, false);
+	assert.equal(worker.binding, "inherit");
+	assert.equal(worker.modelBinding, undefined);
 	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
 	for (const definition of [recon, searcher, worker]) {
 		assert.equal(definition.tools.includes("Agent"), false);
@@ -49,6 +55,14 @@ test("Herder validates package roles against the built-in engine model catalog",
 	await assert.rejects(
 		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "deepseek-v4-flash" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
 		/does not support thinking high/,
+	);
+});
+
+test("Herder refuses own-model nested agents when Luna cannot honor the scout tier", async () => {
+	const profile = await loadPiProfile(catalog, "poorman");
+	await assert.rejects(
+		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "gpt-5.6-luna" ? { ...model, api: "openai-completions" } : model)),
+		/nested agent recon cannot start because gpt-5.6-luna .* does not support service tier fast/,
 	);
 });
 
@@ -78,6 +92,7 @@ package: herder
 kind: nested
 description: Reviewer
 readOnly: true
+binding: inherit
 tools: read, Agent
 ---
 Review.
@@ -89,6 +104,7 @@ package: herder
 kind: nested
 description: Reviewer
 readOnly: true
+binding: inherit
 tools: read, get_subagent_result
 ---
 Review.
@@ -100,6 +116,7 @@ package: herder
 kind: nested
 description: Reviewer
 readOnly: true
+binding: inherit
 tools: read, bash
 ---
 Review.
@@ -111,6 +128,7 @@ package: herder
 kind: nested
 description: Searcher
 readOnly: true
+binding: inherit
 tools: web_search
 extensions: npm:untrusted-extension
 ---

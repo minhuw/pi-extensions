@@ -61,8 +61,14 @@ export function modelMatches(requested: string, candidate: AvailableModel): bool
 	return requested === id || requested === fullId || fullId.endsWith(`/${requested}`);
 }
 
+export const HERDER_OWN_NESTED_MODEL = "gpt-5.6-luna";
+
 export function unavailableProfileModels(profile: ResolvedPiProfile, available: readonly AvailableModel[]): string[] {
-	const required = new Set([profile.orchestrator.model, ...HERDER_ROLES.map((role) => profile.roles[role].model)]);
+	const required = new Set([
+		profile.orchestrator.model,
+		...HERDER_ROLES.map((role) => profile.roles[role].model),
+		HERDER_OWN_NESTED_MODEL,
+	]);
 	return [...required].filter((model) => !available.some((candidate) => modelMatches(model, candidate)));
 }
 

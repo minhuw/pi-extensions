@@ -27,7 +27,6 @@ import {
 } from "./profile.ts";
 import {
 	HerderNestedAgentScope,
-	mergeNestedUsage,
 	type NestedWorkerSession,
 	type PiNestedAgentSnapshot,
 } from "./nested-agent-executor.ts";
@@ -321,11 +320,23 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const sessionRoot = path.join(request.planDirectory, ".herder", "pi-sessions");
 		await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
 		const nestedRoot = path.join(sessionRoot, "nested", request.action.actionId.replace(/[^A-Za-z0-9._-]+/g, "_"));
+		const resolveBinding = (requested: string, effort: ThinkingEffort, serviceTier?: string) => {
+			const resolved = available.find((candidate) => modelMatches(requested, candidate));
+			if (!resolved) throw new Error(`Pi nested agent model ${requested} is unavailable.`);
+			if (!modelSupportsEffort(resolved, effort)) {
+				throw new Error(`Pi nested agent model ${requested} does not support thinking ${effort}.`);
+			}
+			if (serviceTier && !modelSupportsServiceTier(resolved)) {
+				throw new Error(`Pi nested agent model ${requested} (${resolved.api || "unknown api"}) does not support service tier ${serviceTier}.`);
+			}
+			return resolved;
+		};
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot: this.agentRoot,
-			createSession: async ({ id, definition: childDefinition, signal }) => {
+			createSession: async ({ id, definition: childDefinition, binding, signal }) => {
 				signal.throwIfAborted();
+				const childModel = resolveBinding(binding.model, binding.effort, binding.serviceTier);
 				const extensionPaths = this.resolveNestedExtensionPaths(childDefinition.extensions, request.action.worktree);
 				const childRoot = path.join(nestedRoot, id);
 				await mkdir(childRoot, { recursive: true, mode: 0o700 });
@@ -360,8 +371,8 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					cwd: request.action.worktree,
 					agentDir: this.agentDir,
 					modelRuntime: runtime,
-					model: model as Model<any>,
-					thinkingLevel: request.action.effort as ThinkingLevel,
+					model: childModel as Model<any>,
+					thinkingLevel: binding.effort as ThinkingLevel,
 					tools: childDefinition.tools,
 					resourceLoader: childLoader,
 					sessionManager: childManager,
@@ -381,7 +392,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					child.dispose();
 					throw new Error(`Herder nested agent ${childDefinition.name} is missing required tools: ${missingChildTools.join(", ")}.`);
 				}
-				if (request.action.serviceTier) applyServiceTier(child, request.action.serviceTier);
+				if (binding.serviceTier) applyServiceTier(child, binding.serviceTier);
 				return {
 					get sessionId() { return child.sessionId; },
 					get messages() { return child.messages; },
@@ -656,10 +667,10 @@ export class PiWorkerEngine {
 			...(result.text ? { response: result.text } : {}),
 			...(interrupted ? { interrupted: true } : {}),
 			...(interrupted ? { error: errors.join("\n") || (worker.stopRequested ? "Pi worker stopped" : "Pi worker produced no terminal result") } : {}),
-			usage: mergeNestedUsage(
-				usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
-				worker.nested.usage(),
-			),
+			usage: {
+				...usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
+				...(worker.nested.usageSlices().length ? { nested: worker.nested.usageSlices() } : {}),
+			},
 		};
 		try {
 			await Promise.all([...this.terminals].map((listener) => listener(terminal)));

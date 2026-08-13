@@ -68,6 +68,19 @@ export interface DispatchResult {
 	error?: string;
 }
 
+export interface NestedUsageSlice {
+	type: string;
+	model: string;
+	effort: string;
+	serviceTier?: string;
+	count: number;
+	inputTokens: number | null;
+	cachedInputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	durationMs?: number;
+}
+
 export interface UsageEvidence {
 	inputTokens: number | null;
 	cachedInputTokens: number | null;
@@ -77,6 +90,7 @@ export interface UsageEvidence {
 	startedAt?: string;
 	finishedAt?: string;
 	durationMs?: number;
+	nested?: NestedUsageSlice[];
 }
 
 export interface TerminalEvent {
@@ -717,6 +731,36 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 	return result;
 }
 
+function normalizeNestedUsage(value: unknown): NestedUsageSlice[] | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (!Array.isArray(value)) throw new Error("Usage nested breakdown must be an array");
+	const slices = value.map((item, index) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`Usage nested slice ${index} must be an object`);
+		const record = item as Record<string, unknown>;
+		const type = String(record.type ?? "").trim();
+		const model = String(record.model ?? "").trim();
+		const effort = String(record.effort ?? "").trim();
+		const count = optionalCount(record.count);
+		if (!type || !model || !effort) throw new Error(`Usage nested slice ${index} is missing type, model, or effort`);
+		if (count === null || count < 1) throw new Error(`Usage nested slice ${index} has an invalid count`);
+		const serviceTier = typeof record.serviceTier === "string" && record.serviceTier.trim() ? record.serviceTier.trim() : undefined;
+		const durationMs = optionalCount(record.durationMs);
+		return {
+			type,
+			model,
+			effort,
+			...(serviceTier ? { serviceTier } : {}),
+			count,
+			inputTokens: optionalCount(record.inputTokens),
+			cachedInputTokens: optionalCount(record.cachedInputTokens),
+			outputTokens: optionalCount(record.outputTokens),
+			reasoningTokens: optionalCount(record.reasoningTokens),
+			...(durationMs !== null ? { durationMs } : {}),
+		} satisfies NestedUsageSlice;
+	});
+	return slices.length > 0 ? slices : undefined;
+}
+
 export function normalizeUsage(result: WorkerResult | null, terminal: TerminalEvent): UsageEvidence {
 	const supplied = terminal.usage ?? {};
 	const fallback = result?.usage ?? {
@@ -726,6 +770,7 @@ export function normalizeUsage(result: WorkerResult | null, terminal: TerminalEv
 		reasoningTokens: null,
 		source: "unknown",
 	};
+	const nested = normalizeNestedUsage(supplied.nested ?? fallback.nested);
 	return {
 		inputTokens: optionalCount(supplied.inputTokens ?? fallback.inputTokens),
 		cachedInputTokens: optionalCount(supplied.cachedInputTokens ?? fallback.cachedInputTokens),
@@ -737,5 +782,6 @@ export function normalizeUsage(result: WorkerResult | null, terminal: TerminalEv
 		...(supplied.durationMs !== undefined && optionalCount(supplied.durationMs) !== null
 			? { durationMs: optionalCount(supplied.durationMs)! }
 			: {}),
+		...(nested ? { nested } : {}),
 	};
 }

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
-import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
+import type { ManagerAction, NestedUsageSlice } from "../src/shared/protocol.ts";
 import {
 	loadHerderNestedAgent,
+	resolveNestedBinding,
 	type HerderNestedAgentDefinition,
 	type HerderNestedAgentType,
+	type NestedAgentModelBinding,
 } from "./role-config.ts";
 
 export type HerderNestedAgentStatus = "running" | "completed" | "aborted" | "stopped" | "error";
@@ -41,6 +43,10 @@ export interface NestedAgentUsage {
 
 export interface NestedAgentResult {
 	id: string;
+	type: HerderNestedAgentType;
+	model: string;
+	effort: string;
+	serviceTier?: string;
 	status: HerderNestedAgentStatus;
 	output: string;
 	error?: string;
@@ -84,6 +90,7 @@ export interface NestedWorkerSession {
 export interface NestedSessionCreateRequest {
 	id: string;
 	definition: HerderNestedAgentDefinition;
+	binding: NestedAgentModelBinding;
 	signal: AbortSignal;
 }
 
@@ -194,23 +201,43 @@ async function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Pro
 	});
 }
 
-export function mergeNestedUsage(
-	parent: Partial<UsageEvidence>,
-	nested: NestedAgentUsage,
-): Partial<UsageEvidence> {
-	const count = (value: number | null | undefined) => value ?? 0;
-	return {
-		...parent,
-		inputTokens: count(parent.inputTokens) + nested.inputTokens,
-		cachedInputTokens: count(parent.cachedInputTokens) + nested.cachedInputTokens,
-		outputTokens: count(parent.outputTokens) + nested.outputTokens,
-		...(parent.reasoningTokens !== undefined || nested.reasoningKnown
-			? { reasoningTokens: count(parent.reasoningTokens) + nested.reasoningTokens }
-			: {}),
-		source: nested.inputTokens || nested.outputTokens || nested.cachedInputTokens || nested.reasoningKnown
-			? "herder pi worker session plus direct nested child sessions"
-			: parent.source,
-	};
+function sliceKey(slice: Pick<NestedUsageSlice, "type" | "model" | "effort" | "serviceTier">): string {
+	return [slice.type, slice.model, slice.effort, slice.serviceTier ?? ""].join("\0");
+}
+
+export function nestedUsageSlices(results: readonly NestedAgentResult[]): NestedUsageSlice[] {
+	const groups = new Map<string, NestedUsageSlice>();
+	for (const result of results) {
+		const key = sliceKey(result);
+		const existing = groups.get(key);
+		const durationMs = Math.max(0, result.completedAt - result.startedAt);
+		if (!existing) {
+			groups.set(key, {
+				type: result.type,
+				model: result.model,
+				effort: result.effort,
+				...(result.serviceTier ? { serviceTier: result.serviceTier } : {}),
+				count: 1,
+				inputTokens: result.usage.inputTokens,
+				cachedInputTokens: result.usage.cachedInputTokens,
+				outputTokens: result.usage.outputTokens,
+				reasoningTokens: result.usage.reasoningKnown ? result.usage.reasoningTokens : null,
+				durationMs,
+			});
+			continue;
+		}
+		existing.count += 1;
+		existing.inputTokens = (existing.inputTokens ?? 0) + result.usage.inputTokens;
+		existing.cachedInputTokens = (existing.cachedInputTokens ?? 0) + result.usage.cachedInputTokens;
+		existing.outputTokens = (existing.outputTokens ?? 0) + result.usage.outputTokens;
+		if (result.usage.reasoningKnown) {
+			existing.reasoningTokens = (existing.reasoningTokens ?? 0) + result.usage.reasoningTokens;
+		}
+		existing.durationMs = (existing.durationMs ?? 0) + durationMs;
+	}
+	return [...groups.values()].sort((left, right) => {
+		return sliceKey(left).localeCompare(sliceKey(right), undefined, { numeric: true });
+	});
 }
 
 export class HerderNestedAgentScope {
@@ -254,6 +281,10 @@ export class HerderNestedAgentScope {
 
 	usage(): NestedAgentUsage {
 		return { ...this.usageTotals };
+	}
+
+	usageSlices(): NestedUsageSlice[] {
+		return nestedUsageSlices([...this.records.values()].flatMap((item) => item.result ? [item.result] : []));
 	}
 
 	activeCount(): number { return this.active; }
@@ -378,6 +409,7 @@ export class HerderNestedAgentScope {
 			if (this.action.role !== "plan-implementer" && !definition.readOnly) {
 				throw new Error(`${this.action.role} may delegate only to package-owned read-only nested agent types; ${request.type} is mutation-capable.`);
 			}
+			const binding = resolveNestedBinding(definition, this.action);
 			const id = randomUUID();
 			const startedAt = Date.now();
 			const snapshot: PiNestedAgentSnapshot = {
@@ -386,9 +418,9 @@ export class HerderNestedAgentScope {
 				type: definition.name,
 				description: request.description,
 				status: "running",
-				model: this.action.model,
-				effort: this.action.effort,
-				serviceTier: this.action.serviceTier,
+				model: binding.model,
+				effort: binding.effort,
+				serviceTier: binding.serviceTier,
 				startedAt,
 				turns: 0,
 				toolUses: 0,
@@ -430,7 +462,12 @@ export class HerderNestedAgentScope {
 		let failure: string | undefined;
 		try {
 			childController.signal.throwIfAborted();
-			const session = await this.createSession({ id: item.snapshot.agentId, definition, signal: childController.signal });
+			const session = await this.createSession({
+				id: item.snapshot.agentId,
+				definition,
+				binding: resolveNestedBinding(definition, this.action),
+				signal: childController.signal,
+			});
 			item.session = session;
 			item.snapshot.sessionId = session.sessionId;
 			if (session.messages.length !== 0) throw new Error("Herder nested agents require a session with zero inherited messages.");
@@ -469,6 +506,10 @@ export class HerderNestedAgentScope {
 			this.emitUpdate();
 			const result: NestedAgentResult = {
 				id: item.snapshot.agentId,
+				type: item.snapshot.type,
+				model: item.snapshot.model,
+				effort: item.snapshot.effort,
+				...(item.snapshot.serviceTier ? { serviceTier: item.snapshot.serviceTier } : {}),
 				status: item.snapshot.status,
 				output: final.text ?? "",
 				...(errors.length ? { error: errors.join("\n") } : {}),

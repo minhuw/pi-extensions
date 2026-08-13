@@ -279,6 +279,34 @@ function detailFact(label, value) {
   return fact
 }
 
+function attemptTokens(inputTokens, outputTokens) {
+  return inputTokens !== null && inputTokens !== undefined && outputTokens !== null && outputTokens !== undefined
+    ? `${formatCount(inputTokens + outputTokens)} tok`
+    : "tokens unknown"
+}
+
+function attemptIdentity(source) {
+  return [source.model && source.effort ? `${source.model} / ${source.effort}` : source.model, source.serviceTier]
+    .filter(Boolean)
+    .join(" · ")
+}
+
+function renderNestedUsage(slices) {
+  if (!Array.isArray(slices) || slices.length === 0) return null
+  const list = element("div", "attempt-nested")
+  for (const slice of slices) {
+    const count = slice.count > 1 ? `${slice.count}×` : "1×"
+    list.append(element("span", "attempt-nested-row", [
+      slice.type,
+      count,
+      attemptIdentity(slice),
+      formatDuration(slice.durationMs),
+      attemptTokens(slice.inputTokens, slice.outputTokens),
+    ].filter(Boolean).join(" · ")))
+  }
+  return list
+}
+
 function renderAttempt(attempt) {
   const row = element("div", "attempt-row")
   const marker = element("span", "attempt-marker")
@@ -287,14 +315,13 @@ function renderAttempt(attempt) {
   body.append(
     element("span", "attempt-role", humanize(attempt.role)),
     element("span", "attempt-meta", [
-      `${attempt.model} / ${attempt.effort}`,
-      attempt.serviceTier,
+      attemptIdentity(attempt),
       formatDuration(attempt.durationMs),
-      attempt.inputTokens !== null && attempt.outputTokens !== null
-        ? `${formatCount(attempt.inputTokens + attempt.outputTokens)} tok`
-        : "tokens unknown",
+      attemptTokens(attempt.inputTokens, attempt.outputTokens),
     ].filter(Boolean).join(" · ")),
   )
+  const nested = renderNestedUsage(attempt.nestedUsage)
+  if (nested) body.append(nested)
   const outcome = element("span", "outcome-chip", attempt.outcome)
   outcome.title = attempt.outcome
   row.append(marker, body, outcome)

@@ -380,7 +380,7 @@ test("worker completion fails closed when a background child was not collected",
 	assert.match(result.error || "", new RegExp(launch.id));
 });
 
-test("worker terminal aggregates direct nested child usage and removes child state", async () => {
+test("worker terminal keeps parent usage separate from nested model slices", async () => {
 	const factory = new FakeFactory();
 	const engine = new PiWorkerEngine(factory);
 	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
@@ -388,11 +388,24 @@ test("worker terminal aggregates direct nested child usage and removes child sta
 	await factory.nestedScopes[0]!.run({ type: "recon", prompt: "Inspect", description: "inspect" });
 	engine.start(handle);
 	const result = await terminal;
-	assert.equal(result.usage.inputTokens, 20);
-	assert.equal(result.usage.cachedInputTokens, 4);
-	assert.equal(result.usage.outputTokens, 10);
-	assert.equal(result.usage.reasoningTokens, 6);
-	assert.match(result.usage.source || "", /direct nested child sessions/);
+	assert.equal(result.usage.inputTokens, 10);
+	assert.equal(result.usage.cachedInputTokens, 2);
+	assert.equal(result.usage.outputTokens, 5);
+	assert.equal(result.usage.reasoningTokens, 3);
+	assert.equal(result.usage.source, "herder pi worker session");
+	assert.deepEqual(result.usage.nested, [{
+		type: "recon",
+		model: "gpt-5.6-luna",
+		effort: "max",
+		serviceTier: "fast",
+		count: 1,
+		inputTokens: 10,
+		cachedInputTokens: 2,
+		outputTokens: 5,
+		reasoningTokens: 3,
+		durationMs: result.usage.nested?.[0]?.durationMs,
+	}]);
+	assert.equal(typeof result.usage.nested?.[0]?.durationMs, "number");
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.deepEqual(engine.snapshots(), []);
 });

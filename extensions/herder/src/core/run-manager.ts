@@ -1347,6 +1347,7 @@ export class HerderRunManager {
 			startedAt: usage.startedAt,
 			finishedAt: usage.finishedAt,
 			durationMs: usage.durationMs,
+			nestedUsage: usage.nested,
 		};
 		if (inTransaction) insertUsageRecordInDatabase(this.store.database, input);
 		else recordUsageRecordInDatabase(this.store.database, input);

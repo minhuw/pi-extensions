@@ -9,11 +9,24 @@ const require = createRequire(import.meta.url)
 type Database = DatabaseSync
 type SqlRow = Record<string, any>
 
+export interface NestedUsageRecord {
+  type: string
+  model: string
+  effort: string
+  serviceTier?: string
+  count: number
+  inputTokens: number | null
+  cachedInputTokens: number | null
+  outputTokens: number | null
+  reasoningTokens: number | null
+  durationMs?: number
+}
+
 export interface UsageRecordInput {
   attempt?: unknown; plan?: unknown; role?: unknown; model?: unknown; effort?: unknown; outcome?: unknown
   inputTokens?: unknown; cachedInputTokens?: unknown; outputTokens?: unknown; reasoningTokens?: unknown
   source?: unknown; round?: unknown; generation?: unknown; harness?: unknown; serviceTier?: unknown
-  startedAt?: unknown; finishedAt?: unknown; durationMs?: unknown
+  startedAt?: unknown; finishedAt?: unknown; durationMs?: unknown; nested?: unknown; nestedUsage?: unknown
 }
 
 export interface UsageRecord {
@@ -21,6 +34,7 @@ export interface UsageRecord {
   inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningTokens: number | null
   source: string; round: number | null; generation: string | null; harness: string | null; serviceTier: string | null
   startedAt: string | null; finishedAt: string | null; durationMs: number | null; recordedAt?: string
+  nestedUsage: NestedUsageRecord[]
 }
 
 export interface RunRoleBinding { agent_type: string; model: string; effort: string; service_tier?: string }
@@ -35,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 9
+export const EXECUTION_SCHEMA_VERSION = 10
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -72,6 +86,7 @@ const IDENTITY_FIELDS = [
   "startedAt",
   "finishedAt",
   "durationMs",
+  "nestedUsage",
 ]
 
 function fail(message: string): never {
@@ -647,6 +662,14 @@ function ensureLegacyFingerprintVersion(database: Database): void {
   }
 }
 
+function applySchema10(database: Database): void {
+  const columns = database.prepare("PRAGMA table_info(attempts)").all() as Array<{ name: string }>
+  if (!columns.some((column) => column.name === "nested_usage_json")) {
+    database.exec("ALTER TABLE attempts ADD COLUMN nested_usage_json TEXT;")
+  }
+  database.exec("PRAGMA user_version = 10;")
+}
+
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
@@ -667,17 +690,23 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         updated_at TEXT NOT NULL
       );
       ${SCHEMA_9_TABLES}
-      PRAGMA user_version = 9;
     `)
+    applySchema10(database)
     return
   }
   if (version === 7 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
-    database.exec(`${SCHEMA_9_TABLES}\nPRAGMA user_version = 9;`)
+    database.exec(SCHEMA_9_TABLES)
+    applySchema10(database)
     return
   }
   if (version === 8 && allowInitialize) {
-    database.exec(`${SCHEMA_9_TABLES}\nPRAGMA user_version = 9;`)
+    database.exec(SCHEMA_9_TABLES)
+    applySchema10(database)
+    return
+  }
+  if (version === 9 && allowInitialize) {
+    applySchema10(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -702,6 +731,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         started_at TEXT,
         finished_at TEXT,
         duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+        nested_usage_json TEXT,
         recorded_at TEXT NOT NULL
       );
       CREATE INDEX attempts_plan_id ON attempts(plan_id);
@@ -872,7 +902,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       );
       CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
       ${SCHEMA_9_TABLES}
-      PRAGMA user_version = 9;
+      PRAGMA user_version = 10;
   `)
 }
 
@@ -1107,6 +1137,48 @@ function optionalTimestamp(value: unknown, label: string): string | null {
   return new Date(milliseconds).toISOString()
 }
 
+function nestedSliceKey(slice: NestedUsageRecord): string {
+  return [slice.type, slice.model, slice.effort, slice.serviceTier ?? ""].join("\0")
+}
+
+function normalizeNestedUsageRecords(value: unknown): NestedUsageRecord[] {
+  if (value === undefined || value === null || value === "") return []
+  let parsed = value
+  if (typeof value === "string") {
+    try { parsed = JSON.parse(value) } catch (error) {
+      fail(`Nested usage JSON is invalid: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  if (!Array.isArray(parsed)) fail("Nested usage must be an array")
+  const slices = parsed.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) fail(`Nested usage slice ${index} must be an object`)
+    const record = item as Record<string, unknown>
+    const unknownFields = Object.keys(record).filter((field) => ![
+      "type", "model", "effort", "serviceTier", "service_tier", "count",
+      "inputTokens", "cachedInputTokens", "outputTokens", "reasoningTokens", "durationMs",
+    ].includes(field))
+    if (unknownFields.length) fail(`Nested usage slice ${index} has unknown fields: ${unknownFields.join(", ")}`)
+    const count = optionalCount(record.count, `Nested usage slice ${index} count`)
+    if (count === null || count < 1) fail(`Nested usage slice ${index} has an invalid count`)
+    const slice: NestedUsageRecord = {
+      type: requiredText(record.type, `Nested usage slice ${index} type`),
+      model: requiredText(record.model, `Nested usage slice ${index} model`),
+      effort: requiredText(record.effort, `Nested usage slice ${index} effort`),
+      count,
+      inputTokens: optionalCount(record.inputTokens, `Nested usage slice ${index} input tokens`),
+      cachedInputTokens: optionalCount(record.cachedInputTokens, `Nested usage slice ${index} cached input tokens`),
+      outputTokens: optionalCount(record.outputTokens, `Nested usage slice ${index} output tokens`),
+      reasoningTokens: optionalCount(record.reasoningTokens, `Nested usage slice ${index} reasoning tokens`),
+    }
+    const serviceTier = optionalText(record.serviceTier ?? record.service_tier, `Nested usage slice ${index} service tier`)
+    if (serviceTier) slice.serviceTier = serviceTier
+    const durationMs = optionalCount(record.durationMs, `Nested usage slice ${index} duration milliseconds`)
+    if (durationMs !== null) slice.durationMs = durationMs
+    return slice
+  })
+  return slices.sort((left, right) => nestedSliceKey(left).localeCompare(nestedSliceKey(right), undefined, { numeric: true }))
+}
+
 export function normalizeUsageRecord(input: UsageRecordInput = {}): UsageRecord {
   const record: UsageRecord = {
     attempt: requiredText(input.attempt, "Attempt"),
@@ -1127,6 +1199,7 @@ export function normalizeUsageRecord(input: UsageRecordInput = {}): UsageRecord 
     startedAt: optionalTimestamp(input.startedAt, "Started at"),
     finishedAt: optionalTimestamp(input.finishedAt, "Finished at"),
     durationMs: optionalCount(input.durationMs, "Duration milliseconds"),
+    nestedUsage: normalizeNestedUsageRecords(input.nestedUsage ?? input.nested),
   }
   if (record.source.toLowerCase() === "unknown"
     && [record.inputTokens, record.cachedInputTokens, record.outputTokens, record.reasoningTokens].some((value) => value !== null)) {
@@ -1159,6 +1232,7 @@ function rowToRecord(row: SqlRow): UsageRecord {
     finishedAt: row.finished_at,
     durationMs: row.duration_ms,
     recordedAt: row.recorded_at,
+    nestedUsage: normalizeNestedUsageRecords(row.nested_usage_json),
   }
 }
 
@@ -1481,8 +1555,8 @@ function insertRecord(database: Database, record: UsageRecord): boolean {
       attempt_id, plan_id, role, model, effort, outcome,
       input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, source,
       round_number, generation, harness, service_tier,
-      started_at, finished_at, duration_ms, recorded_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      started_at, finished_at, duration_ms, nested_usage_json, recorded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.attempt,
     record.plan,
@@ -1502,6 +1576,7 @@ function insertRecord(database: Database, record: UsageRecord): boolean {
     record.startedAt,
     record.finishedAt,
     record.durationMs,
+    record.nestedUsage.length ? JSON.stringify(record.nestedUsage) : null,
     new Date().toISOString(),
   )
   return true
@@ -1575,16 +1650,42 @@ export function readUsageState(planDir: string) {
   }
 }
 
+function addKnownTokens(group: { tokenAttempts: number; knownTokens: number }, inputTokens: number | null, outputTokens: number | null): void {
+  if (inputTokens === null || outputTokens === null) return
+  group.tokenAttempts += 1
+  group.knownTokens += inputTokens + outputTokens
+}
+
+function summarizeByModel(records: UsageRecord[]) {
+  const groups = new Map<string, { attempts: number; tokenAttempts: number; knownTokens: number }>()
+  const take = (key: string) => {
+    const group = groups.get(key) ?? { attempts: 0, tokenAttempts: 0, knownTokens: 0 }
+    groups.set(key, group)
+    return group
+  }
+  for (const record of records) {
+    const parent = take(`${record.model} / ${record.effort}`)
+    parent.attempts += 1
+    addKnownTokens(parent, record.inputTokens, record.outputTokens)
+    for (const slice of record.nestedUsage) {
+      const child = take(`${slice.model} / ${slice.effort}`)
+      child.attempts += slice.count
+      addKnownTokens(child, slice.inputTokens, slice.outputTokens)
+    }
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+    .map(([key, summary]) => ({ key, ...summary }))
+}
+
 function summarizeRecords(records: UsageRecord[], keyFor: (record: UsageRecord) => string) {
   const groups = new Map<string, { attempts: number; tokenAttempts: number; knownTokens: number }>()
   for (const record of records) {
     const key = keyFor(record)
     const group = groups.get(key) ?? { attempts: 0, tokenAttempts: 0, knownTokens: 0 }
     group.attempts += 1
-    if (record.inputTokens !== null && record.outputTokens !== null) {
-      group.tokenAttempts += 1
-      group.knownTokens += record.inputTokens + record.outputTokens
-    }
+    addKnownTokens(group, record.inputTokens, record.outputTokens)
+    for (const slice of record.nestedUsage) addKnownTokens(group, slice.inputTokens, slice.outputTokens)
     groups.set(key, group)
   }
   return [...groups.entries()]
@@ -1597,7 +1698,7 @@ export function usageReport(records: UsageRecord[]) {
     attempts: records.length,
     byPlan: summarizeRecords(records, (record) => record.plan),
     byRole: summarizeRecords(records, (record) => record.role),
-    byModel: summarizeRecords(records, (record) => `${record.model} / ${record.effort}`),
+    byModel: summarizeByModel(records),
     records,
   }
 }
@@ -1635,9 +1736,18 @@ export function executionReport(records: UsageRecord[], selector = "RUN") {
     cachedInputTokens += record.cachedInputTokens ?? 0
     outputTokens += record.outputTokens ?? 0
     reasoningTokens += record.reasoningTokens ?? 0
+    for (const slice of record.nestedUsage) {
+      inputTokens += slice.inputTokens ?? 0
+      cachedInputTokens += slice.cachedInputTokens ?? 0
+      outputTokens += slice.outputTokens ?? 0
+      reasoningTokens += slice.reasoningTokens ?? 0
+    }
     if (record.inputTokens !== null && record.outputTokens !== null) {
       tokenAttempts += 1
       reportedInputOutput += record.inputTokens + record.outputTokens
+      for (const slice of record.nestedUsage) {
+        if (slice.inputTokens !== null && slice.outputTokens !== null) reportedInputOutput += slice.inputTokens + slice.outputTokens
+      }
     }
     if (record.durationMs !== null) {
       durationAttempts += 1
@@ -1669,7 +1779,7 @@ export function executionReport(records: UsageRecord[], selector = "RUN") {
     byPlan: summarizeRecords(selected, (record) => record.plan),
     byRole: summarizeRecords(selected, (record) => record.role),
     byOutcome: summarizeRecords(selected, (record) => record.outcome),
-    byModel: summarizeRecords(selected, (record) => `${record.model} / ${record.effort}`),
+    byModel: summarizeByModel(selected),
     byHarness: summarizeRecords(selected, (record) => record.harness ?? "unknown"),
     byGeneration: summarizeRecords(selected, (record) => record.generation ?? "unknown"),
     byServiceTier: summarizeRecords(selected, (record) => record.serviceTier ?? "unknown"),

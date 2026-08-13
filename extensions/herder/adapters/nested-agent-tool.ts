@@ -90,7 +90,8 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 			"Delegate one bounded task to a package-owned Herder nested agent.",
 			`Up to ${MAX_NESTED_CONCURRENCY_PER_ACTION} children may run concurrently for this role and at most ${MAX_NESTED_CALLS} may be launched in the action.`,
 			"Set run_in_background to continue working while the child runs, then call get_subagent_result before returning the role's final answer.",
-			"The child inherits this role's exact model, thinking level, service tier, stable worktree, and action lifetime.",
+			"recon and searcher use the package-owned scout binding gpt-5.6-luna at max on the fast tier. worker inherits this role's exact model, thinking level, and service tier.",
+			"Every child inherits this action's stable worktree and lifetime.",
 			"Available types: recon is repository-read-only, searcher has allowlisted remote web tools, and worker may mutate and is available only to Implementer roles.",
 			"Nested children have no Agent tool, extensions, skills, inherited conversation, scheduling, resume, or secondary worktree.",
 		].join(" "),
@@ -99,7 +100,7 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 			"Use Agent only for a bounded subtask with a self-contained prompt; the child has no parent conversation.",
 			`You may launch up to ${MAX_NESTED_CONCURRENCY_PER_ACTION} independent children concurrently. Multiple Agent calls in one response execute in parallel.`,
 			"For background children, retain every returned ID and collect each one with get_subagent_result before your final response.",
-			"Herder Agent children inherit the current action's exact model and worktree and cannot delegate again.",
+			"Herder Agent children cannot delegate again. recon/searcher use the package scout model; worker inherits this role's model and shares the stable worktree.",
 			"The parent role remains accountable for verifying child claims and repository effects, including concurrent edits in the shared worktree.",
 		],
 		parameters: Type.Object({

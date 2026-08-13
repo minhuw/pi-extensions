@@ -3,6 +3,7 @@ name: worker
 package: herder
 kind: nested
 readOnly: false
+binding: inherit
 description: Bounded implementation child inside the parent Herder action worktree.
 tools: read, edit, write, bash, grep, find, ls
 ---

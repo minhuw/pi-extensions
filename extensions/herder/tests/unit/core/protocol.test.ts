@@ -4,6 +4,7 @@ import {
 	ATTENTION_PATH_LIMIT,
 	attentionRequestSha256,
 	canonicalEventPayload,
+	normalizeUsage,
 	parseWorkerResult,
 	sha256,
 	stableJson,
@@ -23,6 +24,33 @@ test("worker envelopes become typed deterministic results", () => {
 	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
 	assert.equal(judge.kind, "judge");
 	assert.deepEqual(judge.authorizedBlockers, ["F001"]);
+});
+
+test("normalizeUsage preserves nested model slices from the terminal event", () => {
+	const usage = normalizeUsage(null, {
+		actionId: "action-1",
+		usage: {
+			inputTokens: 10,
+			cachedInputTokens: 1,
+			outputTokens: 2,
+			reasoningTokens: 3,
+			source: "herder pi worker session",
+			nested: [{
+				type: "recon",
+				model: "gpt-5.6-luna",
+				effort: "max",
+				serviceTier: "fast",
+				count: 1,
+				inputTokens: 4,
+				cachedInputTokens: 0,
+				outputTokens: 1,
+				reasoningTokens: 1,
+			}],
+		},
+	});
+	assert.equal(usage.inputTokens, 10);
+	assert.equal(usage.nested?.[0]?.model, "gpt-5.6-luna");
+	assert.equal(usage.nested?.[0]?.count, 1);
 });
 
 test("typed attention requests require bounded evidence, continuation, and recovery bindings", () => {

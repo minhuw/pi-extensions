@@ -3,6 +3,10 @@ name: recon
 package: herder
 kind: nested
 readOnly: true
+binding: own
+model: gpt-5.6-luna
+effort: max
+service_tier: fast
 description: Fast read-only reconnaissance inside the parent Herder action worktree.
 tools: read, grep, find, ls
 ---

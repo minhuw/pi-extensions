@@ -121,7 +121,7 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return item.type === "text" ? item.text ?? "" : "";
 }
 
-test("nested Agent runs one package-owned foreground child with inherited action binding", async () => {
+test("nested Agent runs one package-owned foreground recon child with the scout binding", async () => {
 	const { value, sessions } = scope();
 	const tool = createNestedAgentTool(action(), value);
 	const result = await tool.execute("call", params(), undefined, undefined, undefined as never);
@@ -129,8 +129,9 @@ test("nested Agent runs one package-owned foreground child with inherited action
 	assert.equal(sessions.length, 1);
 	assert.equal(sessions[0]!.disposed, true);
 	const snapshot = value.snapshots()[0]!;
-	assert.equal(snapshot.model, "proxy/parent");
-	assert.equal(snapshot.effort, "high");
+	assert.equal(snapshot.model, "gpt-5.6-luna");
+	assert.equal(snapshot.effort, "max");
+	assert.equal(snapshot.serviceTier, "fast");
 	assert.equal(snapshot.status, "completed");
 	assert.deepEqual(snapshot.activeTools, []);
 });
@@ -193,6 +194,17 @@ test("closing a parent action aborts, settles, and disposes an in-flight child",
 	assert.equal(result.status, "stopped");
 	assert.equal(session.aborted, true);
 	assert.equal(session.disposed, true);
+});
+
+test("nested worker inherits the parent action binding", async () => {
+	const { value } = scope();
+	const tool = createNestedAgentTool(action(), value);
+	await tool.execute("call", params({ subagent_type: "worker" }), undefined, undefined, undefined as never);
+	const snapshot = value.snapshots()[0]!;
+	assert.equal(snapshot.type, "worker");
+	assert.equal(snapshot.model, "proxy/parent");
+	assert.equal(snapshot.effort, "high");
+	assert.equal(snapshot.serviceTier, undefined);
 });
 
 test("Reviewer and Judge reject the mutation-capable package worker", async () => {

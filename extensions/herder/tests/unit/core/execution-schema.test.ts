@@ -8,7 +8,10 @@ import {
 	EXECUTION_SCHEMA_VERSION,
 	executionAuthorityHandoffReady,
 	executionDatabasePath,
+	executionReport,
 	readManagerState,
+	readUsageState,
+	recordUsageRecord,
 	executionRotationMarkerIdentity,
 	executionRotationMarkerPath,
 	openExecutionDatabase,
@@ -89,6 +92,80 @@ test("execution schema migrates version 7 without rebuilding existing run tables
 		const tables = tableNames(migrated);
 		for (const name of ["manager_operations", "manager_snapshots", "manager_verifications", "manager_attention_requests"]) assert.ok(tables.has(name), name);
 		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("execution schema migrates version 9 nested usage storage", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v9-"));
+	try {
+		const current = openExecutionDatabase(planDirectory, { create: true });
+		current.exec("ALTER TABLE attempts DROP COLUMN nested_usage_json; PRAGMA user_version = 9;");
+		current.close();
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		const columns = (migrated.prepare("PRAGMA table_info(attempts)").all() as Array<{ name: string }>).map((row) => row.name);
+		assert.ok(columns.includes("nested_usage_json"));
+		migrated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("usage records persist nested model slices and report them separately", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-nested-usage-"));
+	try {
+		const stored = recordUsageRecord(planDirectory, {
+			attempt: "attempt-nested",
+			plan: "001",
+			role: "plan-implementer",
+			model: "gpt-5.6-sol",
+			effort: "xhigh",
+			outcome: "COMPLETE",
+			inputTokens: 100,
+			cachedInputTokens: 10,
+			outputTokens: 20,
+			reasoningTokens: 5,
+			source: "herder pi worker session",
+			round: 1,
+			generation: "generation-1",
+			harness: "pi",
+			nested: [{
+				type: "recon",
+				model: "gpt-5.6-luna",
+				effort: "max",
+				serviceTier: "fast",
+				count: 2,
+				inputTokens: 40,
+				cachedInputTokens: 4,
+				outputTokens: 8,
+				reasoningTokens: 2,
+				durationMs: 1200,
+			}],
+		});
+		assert.equal(stored.recorded, true);
+		assert.equal(stored.record.inputTokens, 100);
+		assert.deepEqual(stored.record.nestedUsage, [{
+			type: "recon",
+			model: "gpt-5.6-luna",
+			effort: "max",
+			serviceTier: "fast",
+			count: 2,
+			inputTokens: 40,
+			cachedInputTokens: 4,
+			outputTokens: 8,
+			reasoningTokens: 2,
+			durationMs: 1200,
+		}]);
+		const state = readUsageState(planDirectory);
+		assert.deepEqual(state.records[0]?.nestedUsage, stored.record.nestedUsage);
+		const report = executionReport(state.records);
+		assert.equal(report.tokens.reportedInputOutput, 168);
+		assert.deepEqual(report.byModel.map((row) => ({ key: row.key, knownTokens: row.knownTokens, attempts: row.attempts })), [
+			{ key: "gpt-5.6-luna / max", knownTokens: 48, attempts: 2 },
+			{ key: "gpt-5.6-sol / xhigh", knownTokens: 120, attempts: 1 },
+		]);
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}

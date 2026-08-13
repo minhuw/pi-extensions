@@ -373,6 +373,7 @@ async function runTests(): Promise<void> {
       startedAt: null,
       finishedAt: "2026-08-03T00:00:00Z",
       durationMs: null,
+      nestedUsage: [],
     }
     assert.equal(derivePlanPhase(
       { status: "IN PROGRESS", unsatisfied: [] },
