@@ -94,8 +94,14 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker"\]/);
 	assert.match(roleConfig, /\["Agent", "get_subagent_result"\]/);
 	assert.match(roleConfig, /STRICT_READ_ONLY_NESTED_TOOLS/);
-	assert.match(nestedExecutor, /this\.action\.model/);
-	assert.match(nestedExecutor, /this\.action\.effort/);
+	assert.match(roleConfig, /export function resolveNestedBinding/);
+	assert.match(roleConfig, /model: action\.model/);
+	assert.match(roleConfig, /effort: action\.effort/);
+	assert.match(nestedExecutor, /resolveNestedBinding\(definition, this\.action\)/);
+	assert.match(nestedExecutor, /model: binding\.model/);
+	assert.match(nestedExecutor, /effort: binding\.effort/);
+	assert.doesNotMatch(nestedExecutor, /this\.action\.model/);
+	assert.doesNotMatch(nestedExecutor, /this\.action\.effort/);
 	assert.match(nestedExecutor, /scopeController/);
 	assert.match(nestedExecutor, /MAX_NESTED_CONCURRENCY_PER_ACTION = 4/);
 	assert.doesNotMatch(nestedExecutor, /MAX_GLOBAL_NESTED_CONCURRENCY|globalLimiter/);
@@ -104,6 +110,11 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.match(nested, /^package: herder$/m);
 		assert.match(nested, /^kind: nested$/m);
 		assert.doesNotMatch(nested, /^tools: .*Agent/m);
+		if (type === "worker") {
+			assert.match(nested, /^binding: inherit$/m);
+		} else {
+			assert.match(nested, /^binding: own$/m);
+		}
 	}
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
 	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
