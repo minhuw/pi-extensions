@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 13
+export const EXECUTION_SCHEMA_VERSION = 14
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -833,10 +833,22 @@ function applySchema13(database: Database): void {
   database.exec("PRAGMA user_version = 13;")
 }
 
+function applySchema14(database: Database): void {
+  const columns = database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>
+  if (!columns.some((column) => column.name === "begin_ref_snapshot_json")) {
+    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN begin_ref_snapshot_json TEXT;")
+  }
+  if (!columns.some((column) => column.name === "begin_ref_snapshot_sha256")) {
+    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN begin_ref_snapshot_sha256 TEXT;")
+  }
+  database.exec("PRAGMA user_version = 14;")
+}
+
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
   if (version === EXECUTION_SCHEMA_VERSION) return
+  if (version === 13 && !allowInitialize) return
   if (version === 6 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
     database.exec(`
@@ -858,6 +870,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema11(database)
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 7 && allowInitialize) {
@@ -867,6 +880,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema11(database)
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 8 && allowInitialize) {
@@ -875,6 +889,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema11(database)
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 9 && allowInitialize) {
@@ -882,21 +897,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema11(database)
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 10 && allowInitialize) {
     applySchema11(database)
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 11 && allowInitialize) {
     applySchema12(database)
     applySchema13(database)
+    applySchema14(database)
     return
   }
   if (version === 12 && allowInitialize) {
     applySchema13(database)
+    applySchema14(database)
+    return
+  }
+  if (version === 13 && allowInitialize) {
+    applySchema14(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -1096,6 +1119,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   `)
   applySchema12(database)
   applySchema13(database)
+  applySchema14(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
@@ -1576,9 +1600,15 @@ export function readManagerState(planDir: string) {
       ORDER BY created_at DESC LIMIT 1
     `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
     const repairTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_integration_repairs'").get()
+    const repairColumns = repairTable
+      ? new Set((database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>).map((column) => column.name))
+      : new Set<string>()
+    const beginRefSnapshotColumn = repairColumns.has("begin_ref_snapshot_json") ? "begin_ref_snapshot_json" : "NULL AS begin_ref_snapshot_json"
+    const beginRefSnapshotSha256Column = repairColumns.has("begin_ref_snapshot_sha256") ? "begin_ref_snapshot_sha256" : "NULL AS begin_ref_snapshot_sha256"
     const integrationRepair = run && repairTable ? database.prepare(`
       SELECT repair_id, generation, request_id, request_sha256, owner_session_id, classification, state,
         round_number, parent_commit, current_commit, current_tree, superseded_commits_json,
+        ${beginRefSnapshotColumn}, ${beginRefSnapshotSha256Column},
         canonical_gates_json, canonical_gates_sha256, effective_gates_json, successor_request_id,
         successor_request_sha256, successor_manifest_json, successor_manifest_sha256, detail, created_at, updated_at
       FROM manager_integration_repairs
@@ -1743,6 +1773,8 @@ export function readManagerState(planDir: string) {
         currentCommit: integrationRepair.current_commit,
         currentTree: integrationRepair.current_tree,
         supersededCommits: parseJsonColumn(integrationRepair.superseded_commits_json, []),
+        beginRefSnapshot: parseJsonColumn(integrationRepair.begin_ref_snapshot_json, null),
+        beginRefSnapshotSha256: integrationRepair.begin_ref_snapshot_sha256,
         canonicalGates: parseJsonColumn(integrationRepair.canonical_gates_json, []),
         canonicalGatesSha256: integrationRepair.canonical_gates_sha256,
         effectiveGates: parseJsonColumn(integrationRepair.effective_gates_json, []),

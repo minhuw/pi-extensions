@@ -34,7 +34,7 @@ function repairInput(planDirectory: string) {
 	database.close();
 }
 
-test("schema 12 reopens once into repair-bearing schema 13 and remains idempotent", () => {
+test("schema 12 reopens once into begin-bound repair schema and remains idempotent", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema-"));
 	try {
 		const initial = openExecutionDatabase(planDirectory, { create: true })!;
@@ -43,6 +43,9 @@ test("schema 12 reopens once into repair-bearing schema 13 and remains idempoten
 		initial.close();
 		const migrated = openExecutionDatabase(planDirectory, { create: true })!;
 		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), EXECUTION_SCHEMA_VERSION);
+		const repairColumns = new Set((migrated.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>).map((row) => row.name));
+		assert.equal(repairColumns.has("begin_ref_snapshot_json"), true);
+		assert.equal(repairColumns.has("begin_ref_snapshot_sha256"), true);
 		const tables = new Set((migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 		assert.ok(tables.has("manager_integration_repairs"));
 		assert.ok(tables.has("manager_integration_repair_audits"));
@@ -62,6 +65,9 @@ test("repair rows and audits converge on identical replay and reject divergent e
 		repairInput(planDirectory);
 		const store = new RunStore(planDirectory);
 		const token = "d".repeat(64);
+		const beginRefs = [{ ref: "refs/heads/herder/repair-test/integration", target: "c".repeat(40) }];
+		const beginRefSnapshot = stableJson(beginRefs);
+		const beginRefSnapshotSha256 = sha256(beginRefSnapshot);
 		const row = store.putIntegrationRepair({
 			repairId: "repair-1",
 			runId: "repair-run",
@@ -71,10 +77,14 @@ test("repair rows and audits converge on identical replay and reject divergent e
 			ownerSessionId: "main-session",
 			capabilityDigest: integrationRepairCapabilityDigest(token),
 			classification: "code_defect",
+			beginRefSnapshot,
+			beginRefSnapshotSha256,
 			parentCommit: "c".repeat(40),
 			canonicalGates: [gate],
 			canonicalGatesSha256: sha256(stableJson([gate])),
 		});
+		assert.equal(row.beginRefSnapshot, beginRefSnapshot);
+		assert.equal(row.beginRefSnapshotSha256, beginRefSnapshotSha256);
 		assert.equal(store.putIntegrationRepair({
 			repairId: row.repairId,
 			runId: row.runId,
@@ -88,6 +98,10 @@ test("repair rows and audits converge on identical replay and reject divergent e
 			canonicalGates: [gate],
 			canonicalGatesSha256: row.canonicalGatesSha256,
 		}).repairId, "repair-1");
+		assert.throws(() => store.updateIntegrationRepair(row.repairId, {
+			beginRefSnapshot: stableJson([{ ref: "refs/heads/herder/repair-test/integration", target: "d".repeat(40) }]),
+			beginRefSnapshotSha256: sha256(stableJson([{ ref: "refs/heads/herder/repair-test/integration", target: "d".repeat(40) }])),
+		}), /immutable/);
 		const payloadHash = sha256("begin");
 		assert.equal(store.recordIntegrationRepairAudit(row.repairId, "op-1", "begin", payloadHash, { z: 1, a: 2 }).auditId,
 			store.recordIntegrationRepairAudit(row.repairId, "op-1", "begin", payloadHash, { a: 2, z: 1 }).auditId);

@@ -12,9 +12,11 @@ import {
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
+	integrationRepairRefSnapshotSha256,
 	sha256,
 	stableJson,
 	validateAttentionRequest,
+	validateIntegrationRepairRefSnapshot,
 	type AttentionRequest,
 	type AttentionRequestInput,
 	type AttentionState,
@@ -239,6 +241,8 @@ export interface StoredIntegrationRepair {
 	parentCommit: string;
 	currentCommit: string | null;
 	currentTree: string | null;
+	beginRefSnapshot: string | null;
+	beginRefSnapshotSha256: string | null;
 	supersededCommits: string[];
 	canonicalGates: VerificationManifest["gates"];
 	canonicalGatesSha256: string;
@@ -285,6 +289,26 @@ function attentionCleanupPayload(identity: AttentionCleanupIdentity, step: Atten
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
 	return JSON.parse(value) as T;
+}
+
+function normalizeBeginRefSnapshot(snapshot: string | null | undefined, snapshotSha256: string | null | undefined): { json: string | null; sha256: string | null } {
+	if (snapshot === null || snapshot === undefined || snapshot === "") {
+		if (snapshotSha256 !== null && snapshotSha256 !== undefined && snapshotSha256 !== "") throw new Error("Integration repair begin-ref snapshot hash is missing its snapshot");
+		return { json: null, sha256: null };
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(snapshot);
+	} catch {
+		throw new Error("Integration repair begin-ref snapshot is not valid JSON");
+	}
+	validateIntegrationRepairRefSnapshot(parsed);
+	const json = stableJson(parsed);
+	if (json !== snapshot) throw new Error("Integration repair begin-ref snapshot is not canonical");
+	if (typeof snapshotSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(snapshotSha256)) throw new Error("Integration repair begin-ref snapshot hash is invalid");
+	const normalizedSha256 = snapshotSha256.toLowerCase();
+	if (integrationRepairRefSnapshotSha256(parsed) !== normalizedSha256) throw new Error("Integration repair begin-ref snapshot hash changed");
+	return { json, sha256: normalizedSha256 };
 }
 
 function durableOperationPayload(kind: ManagerOperationKind, payload: unknown): unknown {
@@ -541,6 +565,8 @@ function rowToIntegrationRepair(row: Record<string, unknown>): StoredIntegration
 		parentCommit: String(row.parent_commit),
 		currentCommit: row.current_commit === null ? null : String(row.current_commit),
 		currentTree: row.current_tree === null ? null : String(row.current_tree),
+		beginRefSnapshot: row.begin_ref_snapshot_json === null || row.begin_ref_snapshot_json === undefined ? null : String(row.begin_ref_snapshot_json),
+		beginRefSnapshotSha256: row.begin_ref_snapshot_sha256 === null || row.begin_ref_snapshot_sha256 === undefined ? null : String(row.begin_ref_snapshot_sha256),
 		supersededCommits: parseJson<string[]>(row.superseded_commits_json === null ? null : String(row.superseded_commits_json), []),
 		canonicalGates: parseJson<VerificationManifest["gates"]>(String(row.canonical_gates_json), []),
 		canonicalGatesSha256: String(row.canonical_gates_sha256),
@@ -1091,6 +1117,8 @@ export class RunStore {
 		state?: IntegrationRepairState;
 		round?: number;
 		parentCommit: string;
+		beginRefSnapshot?: string | null;
+		beginRefSnapshotSha256?: string | null;
 		canonicalGates: VerificationManifest["gates"];
 		canonicalGatesSha256: string;
 		effectiveGates?: VerificationManifest["gates"];
@@ -1098,12 +1126,15 @@ export class RunStore {
 		operationPayloadSha256?: string | null;
 		detail?: string | null;
 	}): StoredIntegrationRepair {
+		const providedBeginEvidence = input.beginRefSnapshot !== undefined || input.beginRefSnapshotSha256 !== undefined;
+		const beginEvidence = normalizeBeginRefSnapshot(input.beginRefSnapshot, input.beginRefSnapshotSha256);
 		const existing = this.getIntegrationRepair(input.repairId);
 		if (existing) {
 			if (existing.runId !== input.runId || existing.generation !== input.generation
 				|| existing.requestId !== input.requestId || existing.requestSha256 !== input.requestSha256
 				|| existing.ownerSessionId !== input.ownerSessionId || existing.capabilityDigest !== input.capabilityDigest
-				|| existing.parentCommit !== input.parentCommit || existing.canonicalGatesSha256 !== input.canonicalGatesSha256) {
+				|| existing.parentCommit !== input.parentCommit || existing.canonicalGatesSha256 !== input.canonicalGatesSha256
+				|| (providedBeginEvidence && (existing.beginRefSnapshot !== beginEvidence.json || existing.beginRefSnapshotSha256 !== beginEvidence.sha256))) {
 				throw new Error(`Integration repair ${input.repairId} was replayed with different evidence`);
 			}
 			return existing;
@@ -1113,14 +1144,16 @@ export class RunStore {
 			INSERT INTO manager_integration_repairs (
 				repair_id, run_id, generation, request_id, request_sha256, owner_session_id, capability_digest,
 				classification, state, round_number, max_rounds, parent_commit, current_commit, current_tree,
-				superseded_commits_json, canonical_gates_json, canonical_gates_sha256, effective_gates_json,
+				begin_ref_snapshot_json, begin_ref_snapshot_sha256, superseded_commits_json,
+				canonical_gates_json, canonical_gates_sha256, effective_gates_json,
 				successor_request_id, successor_request_sha256, successor_manifest_json, successor_manifest_sha256,
 				operation_id, operation_payload_sha256, detail, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, ?, ?, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
 		`).run(
 			input.repairId, input.runId, input.generation, input.requestId, input.requestSha256,
 			input.ownerSessionId, input.capabilityDigest, input.classification ?? null, input.state ?? "active",
-			input.round ?? 1, input.parentCommit, JSON.stringify(input.canonicalGates), input.canonicalGatesSha256,
+			input.round ?? 1, input.parentCommit, beginEvidence.json, beginEvidence.sha256,
+			JSON.stringify(input.canonicalGates), input.canonicalGatesSha256,
 			JSON.stringify(input.effectiveGates ?? input.canonicalGates), input.operationId ?? null,
 			input.operationPayloadSha256 ?? null, input.detail ?? null, now, now,
 		);
@@ -1136,6 +1169,8 @@ export class RunStore {
 		round?: number;
 		currentCommit?: string | null;
 		currentTree?: string | null;
+		beginRefSnapshot?: string | null;
+		beginRefSnapshotSha256?: string | null;
 		supersededCommits?: string[];
 		effectiveGates?: VerificationManifest["gates"];
 		successorRequestId?: string | null;
@@ -1148,6 +1183,13 @@ export class RunStore {
 	}): StoredIntegrationRepair {
 		const existing = this.getIntegrationRepair(repairId);
 		if (!existing) throw new Error(`Unknown integration repair ${repairId}`);
+		const providedBeginEvidence = patch.beginRefSnapshot !== undefined || patch.beginRefSnapshotSha256 !== undefined;
+		const beginEvidence = providedBeginEvidence
+			? normalizeBeginRefSnapshot(patch.beginRefSnapshot, patch.beginRefSnapshotSha256)
+			: { json: existing.beginRefSnapshot, sha256: existing.beginRefSnapshotSha256 };
+		if (existing.beginRefSnapshot !== null && (beginEvidence.json !== existing.beginRefSnapshot || beginEvidence.sha256 !== existing.beginRefSnapshotSha256)) {
+			throw new Error(`Integration repair ${repairId} begin-ref evidence is immutable`);
+		}
 		const next = {
 			requestId: patch.requestId ?? existing.requestId,
 			requestSha256: patch.requestSha256 ?? existing.requestSha256,
@@ -1157,6 +1199,8 @@ export class RunStore {
 			round: patch.round ?? existing.round,
 			currentCommit: patch.currentCommit === undefined ? existing.currentCommit : patch.currentCommit,
 			currentTree: patch.currentTree === undefined ? existing.currentTree : patch.currentTree,
+			beginRefSnapshot: beginEvidence.json,
+			beginRefSnapshotSha256: beginEvidence.sha256,
 			supersededCommits: patch.supersededCommits ?? existing.supersededCommits,
 			effectiveGates: patch.effectiveGates ?? existing.effectiveGates,
 			successorRequestId: patch.successorRequestId === undefined ? existing.successorRequestId : patch.successorRequestId,
@@ -1169,12 +1213,14 @@ export class RunStore {
 		};
 		this.database.prepare(`
 			UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ?, capability_digest = ?, classification = ?,
-			state = ?, round_number = ?, current_commit = ?, current_tree = ?, superseded_commits_json = ?, effective_gates_json = ?,
+			state = ?, round_number = ?, current_commit = ?, current_tree = ?, begin_ref_snapshot_json = ?, begin_ref_snapshot_sha256 = ?,
+			superseded_commits_json = ?, effective_gates_json = ?,
 			successor_request_id = ?, successor_request_sha256 = ?, successor_manifest_json = ?, successor_manifest_sha256 = ?,
 			operation_id = ?, operation_payload_sha256 = ?, detail = ?, updated_at = ? WHERE repair_id = ?
 		`).run(
 			next.requestId, next.requestSha256, next.capabilityDigest, next.classification, next.state, next.round,
-			next.currentCommit, next.currentTree, JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates),
+			next.currentCommit, next.currentTree, next.beginRefSnapshot, next.beginRefSnapshotSha256,
+			JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates),
 			next.successorRequestId, next.successorRequestSha256, next.successorManifest ? JSON.stringify(next.successorManifest) : null,
 			next.successorManifestSha256, next.operationId, next.operationPayloadSha256, next.detail, new Date().toISOString(), repairId,
 		);

@@ -588,6 +588,37 @@ export type IntegrationRepairState = typeof INTEGRATION_REPAIR_STATES[number];
 export const INTEGRATION_REPAIR_OPERATIONS = ["begin", "finish", "cancel"] as const;
 export type IntegrationRepairOperation = typeof INTEGRATION_REPAIR_OPERATIONS[number];
 
+/** One immutable object identity in the Herder-owned repair namespace. */
+export interface IntegrationRepairRef {
+	ref: string;
+	target: string;
+}
+
+export function integrationRepairRefSnapshotSha256(snapshot: IntegrationRepairRef[]): string {
+	return sha256(stableJson(snapshot));
+}
+
+export function validateIntegrationRepairRefSnapshot(value: unknown): asserts value is IntegrationRepairRef[] {
+	if (!Array.isArray(value)) throw new Error("Integration repair begin-ref snapshot must be an array");
+	const seen = new Set<string>();
+	let previous = "";
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Integration repair begin-ref snapshot entry is invalid");
+		const candidate = entry as Partial<IntegrationRepairRef>;
+		if (typeof candidate.ref !== "string" || !candidate.ref || /[\0\r\n]/.test(candidate.ref)) {
+			throw new Error("Integration repair begin-ref snapshot ref is invalid");
+		}
+		if (!/^refs\//.test(candidate.ref)) throw new Error("Integration repair begin-ref snapshot ref is not a Git ref");
+		if (typeof candidate.target !== "string" || !/^[0-9a-f]{40,64}$/i.test(candidate.target)) {
+			throw new Error("Integration repair begin-ref snapshot target is invalid");
+		}
+		if (seen.has(candidate.ref)) throw new Error(`Integration repair begin-ref snapshot contains duplicate ref ${candidate.ref}`);
+		if (previous && candidate.ref <= previous) throw new Error("Integration repair begin-ref snapshot is not sorted");
+		seen.add(candidate.ref);
+		previous = candidate.ref;
+	}
+}
+
 /** A deterministic capability bound to exactly one failed verification request. */
 export function integrationRepairCapabilityToken(requestId: string): string {
 	return sha256(`herder-integration-repair-capability:${requestId}`);
@@ -620,6 +651,9 @@ export interface IntegrationRepairRequest {
 	currentTree?: string;
 	failedGates: VerificationGate[];
 	canonicalGates: VerificationGate[];
+	/** Canonical Herder-owned refs captured when the repair began. */
+	beginRefSnapshot?: IntegrationRepairRef[];
+	beginRefSnapshotSha256?: string;
 	successorRequestId?: string;
 	successorRequestSha256?: string;
 	supersededCommits: string[];
@@ -678,6 +712,15 @@ export function validateIntegrationRepairRequest(value: unknown): asserts value 
 		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) throw new Error(`Integration repair request ${name} is invalid`);
 	}
 	if (!Array.isArray(request.failedGates) || !Array.isArray(request.canonicalGates) || !Array.isArray(request.supersededCommits)) throw new Error("Integration repair request evidence is invalid");
+	if (request.beginRefSnapshot !== undefined || request.beginRefSnapshotSha256 !== undefined) {
+		if (request.beginRefSnapshot === undefined || typeof request.beginRefSnapshotSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(request.beginRefSnapshotSha256)) {
+			throw new Error("Integration repair begin-ref snapshot evidence is incomplete");
+		}
+		validateIntegrationRepairRefSnapshot(request.beginRefSnapshot);
+		if (integrationRepairRefSnapshotSha256(request.beginRefSnapshot) !== request.beginRefSnapshotSha256) {
+			throw new Error("Integration repair begin-ref snapshot hash changed");
+		}
+	}
 }
 
 export interface ManagerReply {

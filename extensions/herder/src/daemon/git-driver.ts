@@ -18,7 +18,13 @@ import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanu
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
-import { stableJson, type VerificationGate } from "../shared/protocol.ts";
+import {
+	integrationRepairRefSnapshotSha256,
+	stableJson,
+	validateIntegrationRepairRefSnapshot,
+	type IntegrationRepairRef,
+	type VerificationGate,
+} from "../shared/protocol.ts";
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
 
@@ -61,6 +67,13 @@ export interface IntegrationRepairCommitResult {
 	changedPaths: string[];
 	supersededHead: string | null;
 	committed: boolean;
+}
+
+export interface IntegrationRepairNamespaceEvidence {
+	refs: IntegrationRepairRef[];
+	snapshot: string;
+	sha256: string;
+	snapshotSha256: string;
 }
 
 export interface ActiveRebaseEvidence {
@@ -387,6 +400,93 @@ export class GitDriver {
 		return git(worktree, ["diff", "--name-only", "-z", `${base}..HEAD`, "--"]).stdout.split("\0").filter(Boolean).sort();
 	}
 
+	private integrationRepairRefPrefixes(): string[] {
+		return [
+			`refs/heads/herder/${this.planName}/`,
+			`refs/plan-herder/${this.planName}/`,
+		];
+	}
+
+	/** Read every ref owned by this plan set in a canonical order for repair binding. */
+	readIntegrationRepairNamespace(): IntegrationRepairNamespaceEvidence {
+		const refs: IntegrationRepairRef[] = [];
+		const seen = new Set<string>();
+		for (const prefix of this.integrationRepairRefPrefixes()) {
+			const output = git(this.repoRoot, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]).stdout;
+			for (const line of output.split(/\r?\n/).filter(Boolean)) {
+				const separator = line.indexOf("\t");
+				if (separator <= 0 || line.indexOf("\t", separator + 1) !== -1) throw new Error(`Cannot parse integration repair ref record: ${JSON.stringify(line)}`);
+				const ref = line.slice(0, separator);
+				const target = line.slice(separator + 1);
+				if (!ref.startsWith(prefix) || !/^refs\/(?:heads\/herder|plan-herder)\/[^\0\r\n]+$/.test(ref)) {
+					throw new Error(`Integration repair ref is outside the owned namespace: ${JSON.stringify(ref)}`);
+				}
+				if (!/^[0-9a-f]{40,64}$/i.test(target)) throw new Error(`Integration repair ref has an invalid object identity: ${JSON.stringify(line)}`);
+				if (seen.has(ref)) throw new Error(`Integration repair namespace contains duplicate ref ${ref}`);
+				seen.add(ref);
+				refs.push({ ref, target: target.toLowerCase() });
+			}
+		}
+		refs.sort((left, right) => left.ref.localeCompare(right.ref));
+		validateIntegrationRepairRefSnapshot(refs);
+		const snapshot = stableJson(refs);
+		const snapshotSha256 = integrationRepairRefSnapshotSha256(refs);
+		return { refs, snapshot, sha256: snapshotSha256, snapshotSha256 };
+	}
+
+	captureIntegrationRepairNamespace(): IntegrationRepairNamespaceEvidence {
+		return this.readIntegrationRepairNamespace();
+	}
+
+	private normalizedIntegrationRepairNamespaceSnapshot(input: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence, expectedSha256: string): IntegrationRepairRef[] {
+		let value: unknown = input;
+		if (typeof input === "string") {
+			try { value = JSON.parse(input); } catch { throw new Error("Integration repair begin-ref snapshot is not valid JSON"); }
+		} else if (!Array.isArray(input) && input && typeof input === "object" && "refs" in input) {
+			value = input.refs;
+		}
+		validateIntegrationRepairRefSnapshot(value);
+		const snapshot = stableJson(value);
+		if (snapshot !== (typeof input === "string" ? input : stableJson(value))) throw new Error("Integration repair begin-ref snapshot is not canonical");
+		if (!/^[0-9a-f]{64}$/i.test(expectedSha256) || integrationRepairRefSnapshotSha256(value) !== expectedSha256.toLowerCase()) {
+			throw new Error("Integration repair begin-ref snapshot hash changed");
+		}
+		return value;
+	}
+
+	private assertIntegrationRepairNamespaceContinuity(baseline: IntegrationRepairRef[], current: IntegrationRepairRef[]): void {
+		const integrationRef = `refs/heads/${this.integrationBranch}`;
+		const baselineIntegration = baseline.find((entry) => entry.ref === integrationRef);
+		const currentIntegration = current.find((entry) => entry.ref === integrationRef);
+		if (!baselineIntegration || !currentIntegration) throw new Error("Integration repair integration branch ref is missing from the bound namespace");
+		const nonIntegration = (entries: IntegrationRepairRef[]) => entries.filter((entry) => entry.ref !== integrationRef);
+		if (stableJson(nonIntegration(baseline)) !== stableJson(nonIntegration(current))) {
+			throw new Error("Integration repair changed a manager-owned Herder ref since begin");
+		}
+	}
+
+	validateIntegrationRepairNamespace(input: {
+		beginRefSnapshot: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence;
+		beginRefSnapshotSha256: string;
+		expectedIntegrationHead?: string;
+		expectedWorktreeHead?: string;
+	}): IntegrationRepairNamespaceEvidence {
+		const baseline = this.normalizedIntegrationRepairNamespaceSnapshot(input.beginRefSnapshot, input.beginRefSnapshotSha256);
+		const current = this.readIntegrationRepairNamespace();
+		this.assertIntegrationRepairNamespaceContinuity(baseline, current.refs);
+		if (input.expectedIntegrationHead !== undefined) {
+			const integrationRef = `refs/heads/${this.integrationBranch}`;
+			const currentIntegration = current.refs.find((entry) => entry.ref === integrationRef);
+			if (!currentIntegration || currentIntegration.target !== input.expectedIntegrationHead) {
+				throw new Error(`Integration repair integration branch moved: expected ${input.expectedIntegrationHead}`);
+			}
+		}
+		if (input.expectedWorktreeHead !== undefined && this.worktreeHead(this.integrationWorktree) !== input.expectedWorktreeHead) {
+			throw new Error(`Integration repair integration worktree moved: expected ${input.expectedWorktreeHead}`);
+		}
+		return current;
+	}
+
 	resetPlanExecution(input: {
 		branch: string;
 		worktree: string;
@@ -508,6 +608,12 @@ export class GitDriver {
 		allowedPaths?: string[];
 		commitMessage?: string;
 		allowCommit?: boolean;
+		/** Immutable namespace evidence captured by the successful repair begin. */
+		beginRefSnapshot?: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence;
+		beginRefSnapshotSha256?: string;
+		/** Backward-compatible aliases for callers naming the evidence namespace. */
+		namespaceSnapshot?: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence;
+		namespaceSnapshotSha256?: string;
 	}): IntegrationRepairCommitResult {
 		const worktree = input.worktree ?? this.integrationWorktree;
 		const branch = input.branch ?? this.integrationBranch;
@@ -530,8 +636,14 @@ export class GitDriver {
 		const message = String(input.commitMessage || "Fix integrated verification defect").trim();
 		if (input.round === 1 && (!message || /[\0\r\n]/.test(message) || message.length > 512)) throw new Error("Integration repair commit message is invalid");
 		const markerLine = repairMarker ? `Integration-Repair-Identity: ${repairMarker}` : null;
-
-		const beforeRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
+		const beginRefSnapshot = input.beginRefSnapshot ?? input.namespaceSnapshot;
+		const beginRefSnapshotSha256 = input.beginRefSnapshotSha256 ?? input.namespaceSnapshotSha256;
+		if (beginRefSnapshot === undefined || beginRefSnapshotSha256 === undefined) {
+			throw new Error("Integration repair begin-ref namespace evidence is required");
+		}
+		const baselineRefs = this.normalizedIntegrationRepairNamespaceSnapshot(beginRefSnapshot, beginRefSnapshotSha256);
+		const currentNamespace = this.readIntegrationRepairNamespace();
+		this.assertIntegrationRepairNamespaceContinuity(baselineRefs, currentNamespace.refs);
 		const branchBefore = this.branchHead(branch);
 		const worktreeBefore = this.worktreeHead(worktree);
 		const statusBefore = this.worktreeStatus(worktree);
@@ -638,9 +750,11 @@ export class GitDriver {
 		if (this.branchHead(branch) !== head) throw new Error("Integration repair branch and worktree heads diverged");
 		if (this.worktreeStatus(worktree)) throw new Error("Integration repair worktree is not clean after commit");
 		const changedPaths = validateCommitIdentity(head);
-		const afterRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
-		const normalizeRefs = (value: string): string => value.split(/\r?\n/).filter(Boolean).filter((line) => !line.startsWith(`refs/heads/${this.integrationBranch}=`)).sort().join("\n");
-		if (normalizeRefs(beforeRefs) !== normalizeRefs(afterRefs)) throw new Error("Integration repair changed a manager-owned Herder ref");
+		const afterNamespace = this.readIntegrationRepairNamespace();
+		this.assertIntegrationRepairNamespaceContinuity(baselineRefs, afterNamespace.refs);
+		const integrationRef = `refs/heads/${this.integrationBranch}`;
+		const afterIntegration = afterNamespace.refs.find((entry) => entry.ref === integrationRef);
+		if (!afterIntegration || afterIntegration.target !== head) throw new Error("Integration repair integration branch transition is not the accepted repair head");
 		const tree = this.worktreeTree(worktree);
 		return {
 			head,

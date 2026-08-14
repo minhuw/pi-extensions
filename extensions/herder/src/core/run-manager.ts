@@ -30,6 +30,7 @@ import {
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
+	integrationRepairRefSnapshotSha256,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
 	INTEGRATION_REPAIR_OPERATIONS,
 	normalizeUsage,
@@ -37,6 +38,7 @@ import {
 	sha256,
 	stableJson,
 	validateAttentionResolution,
+	validateIntegrationRepairRefSnapshot,
 	type AttentionCause,
 	type AttentionGitIdentity,
 	type AttentionRecoveryEvidence,
@@ -46,6 +48,7 @@ import {
 	type ManagerAttentionRequest,
 	type IntegrationRepairClassification,
 	type IntegrationRepairInput,
+	type IntegrationRepairRef,
 	type IntegrationRepairRequest,
 	type IntegrationRepairOperation,
 	type DispatchResult,
@@ -185,6 +188,23 @@ function repairAuditEvidence(input: IntegrationRepairInput): Record<string, unkn
 
 function repairInputHash(input: IntegrationRepairInput): string {
 	return sha256(stableJson(repairAuditEvidence(input)));
+}
+
+function repairBeginRefSnapshot(repair: StoredIntegrationRepair): IntegrationRepairRef[] {
+	if (!repair.beginRefSnapshot || !repair.beginRefSnapshotSha256) {
+		throw new Error("Integration repair begin namespace evidence is unavailable; cancel and restart the repair");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(repair.beginRefSnapshot);
+	} catch {
+		throw new Error("Integration repair begin namespace evidence is corrupt; cancel and restart the repair");
+	}
+	validateIntegrationRepairRefSnapshot(parsed);
+	if (stableJson(parsed) !== repair.beginRefSnapshot || integrationRepairRefSnapshotSha256(parsed) !== repair.beginRefSnapshotSha256.toLowerCase()) {
+		throw new Error("Integration repair begin namespace evidence hash changed; cancel and restart the repair");
+	}
+	return parsed;
 }
 
 function integrationRepairCommitMarker(repairId: string, parentCommit: string, round: number, operationId: string, payloadSha256: string): string {
@@ -1126,6 +1146,13 @@ export class HerderRunManager {
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
 		const integrationRepair = failedVerification ? this.store.getIntegrationRepairForRequest(failedVerification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
 		if ((integrationRepair?.state === "verifying" || integrationRepair?.state === "committed") && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
+			const beginRefSnapshot = repairBeginRefSnapshot(integrationRepair);
+			driver.validateIntegrationRepairNamespace({
+				beginRefSnapshot,
+				beginRefSnapshotSha256: integrationRepair.beginRefSnapshotSha256!,
+				expectedIntegrationHead: integrationRepair.currentCommit ?? integrationRepair.parentCommit,
+				expectedWorktreeHead: integrationRepair.currentCommit ?? integrationRepair.parentCommit,
+			});
 			if (integrationRepair.state === "committed") this.store.updateIntegrationRepair(integrationRepair.repairId, { state: "verifying" });
 			return this.verification(integrationRepair.successorManifest);
 		}
@@ -1348,6 +1375,10 @@ export class HerderRunManager {
 			...(repair?.currentTree ? { currentTree: repair.currentTree } : {}),
 			failedGates: verification.manifest?.gates ?? [],
 			canonicalGates,
+			...(repair?.beginRefSnapshot && repair.beginRefSnapshotSha256 ? {
+				beginRefSnapshot: repairBeginRefSnapshot(repair),
+				beginRefSnapshotSha256: repair.beginRefSnapshotSha256,
+			} : {}),
 			...(repair?.successorRequestId ? { successorRequestId: repair.successorRequestId } : {}),
 			...(repair?.successorRequestSha256 ? { successorRequestSha256: repair.successorRequestSha256 } : {}),
 			supersededCommits: repair?.supersededCommits ?? [],
@@ -1363,6 +1394,9 @@ export class HerderRunManager {
 		if (input.capabilityToken !== expectedCapability) throw new Error("Integration repair capability token does not match the failed verification request");
 		const run = this.store.getRun();
 		if (!run || verification.request.runId !== run.runId || verification.request.generation !== run.currentGeneration) throw new Error("Integration repair request is not bound to the current run generation");
+		if (verification.request.integrationBranch !== run.integrationBranch || verification.request.integrationWorktree !== run.integrationWorktree) {
+			throw new Error("Integration repair verification namespace does not match the recorded run");
+		}
 		if (input.runId !== undefined && input.runId !== run.runId) throw new Error("Integration repair runId does not match the current run");
 		if (input.generation !== undefined && input.generation !== run.currentGeneration) throw new Error("Integration repair generation does not match the current run");
 		return verification;
@@ -1476,6 +1510,11 @@ export class HerderRunManager {
 		if (input.repairId && !repair && repairForRequest) throw new Error("Integration repair ID does not match durable evidence");
 		if (repair && input.repairId && repair.repairId !== input.repairId) throw new Error("Integration repair ID does not match durable evidence");
 		const run = this.store.getRun()!;
+		const beginNamespaceEvidence = (): { snapshot: string; sha256: string } => {
+			const driver = this.driver(run);
+			const evidence = driver.readIntegrationRepairNamespace();
+			return { snapshot: evidence.snapshot, sha256: evidence.sha256 };
+		};
 		if (input.operation === "begin") {
 			const classification = normalizeIntegrationRepairClassification(input.classification);
 			const decisionOnly = ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(classification);
@@ -1488,9 +1527,13 @@ export class HerderRunManager {
 				if (!detail) throw new Error("Ambiguity classification requires a rationale or detail for the user decision");
 				if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {
 					if (repair.ownerSessionId !== ownerSessionId || repair.classification !== classification) throw new Error("Ambiguity classification was replayed with different durable evidence");
+					if (!repair.beginRefSnapshot || !repair.beginRefSnapshotSha256) throw new Error("Integration repair begin namespace evidence is unavailable; cancel and restart the repair");
 					return this.reply();
 				}
 				this.validateRepairBeginAdmission(run, verification, input, repair);
+				const beginEvidence = repair?.beginRefSnapshot && repair.beginRefSnapshotSha256
+					? { snapshot: repair.beginRefSnapshot, sha256: repair.beginRefSnapshotSha256 }
+					: beginNamespaceEvidence();
 				if (repair) {
 					if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
 					if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
@@ -1509,6 +1552,8 @@ export class HerderRunManager {
 							requestSha256: input.requestSha256,
 							ownerSessionId,
 							capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+							beginRefSnapshot: beginEvidence.snapshot,
+							beginRefSnapshotSha256: beginEvidence.sha256,
 							classification,
 							state: "paused",
 							round: 1,
@@ -1525,6 +1570,8 @@ export class HerderRunManager {
 							requestId: input.requestId,
 							requestSha256: input.requestSha256,
 							capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+							beginRefSnapshot: beginEvidence.snapshot,
+							beginRefSnapshotSha256: beginEvidence.sha256,
 							classification,
 							state: "paused",
 							operationId,
@@ -1538,7 +1585,8 @@ export class HerderRunManager {
 				return this.reply();
 			}
 			if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {
-				if (repair.state === "active" && run.status !== "stopped" && run.status !== "complete") {
+				if (!repair.beginRefSnapshot || !repair.beginRefSnapshotSha256) throw new Error("Integration repair begin namespace evidence is unavailable; cancel and restart the repair");
+				if (["active", "committing"].includes(repair.state) && run.status !== "stopped" && run.status !== "complete") {
 					this.store.transaction(() => {
 						this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", inputHash, repairAuditEvidence(input));
 						this.store.updateRun({ status: "paused", terminalDetail: `Integration repair round ${repair!.round} is authorized for the owning main session.` });
@@ -1547,6 +1595,9 @@ export class HerderRunManager {
 				return this.reply();
 			}
 			this.validateRepairBeginAdmission(run, verification, input, repair);
+			const beginEvidence = repair?.beginRefSnapshot && repair.beginRefSnapshotSha256
+				? { snapshot: repair.beginRefSnapshot, sha256: repair.beginRefSnapshotSha256 }
+				: beginNamespaceEvidence();
 			if (repair) {
 				if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
 				if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
@@ -1576,6 +1627,8 @@ export class HerderRunManager {
 						requestSha256: input.requestSha256,
 						ownerSessionId,
 						capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+						beginRefSnapshot: beginEvidence.snapshot,
+						beginRefSnapshotSha256: beginEvidence.sha256,
 						classification,
 						state: "active",
 						round: 1,
@@ -1591,6 +1644,8 @@ export class HerderRunManager {
 						requestId: input.requestId,
 						requestSha256: input.requestSha256,
 						capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+						beginRefSnapshot: beginEvidence.snapshot,
+						beginRefSnapshotSha256: beginEvidence.sha256,
 						classification,
 						state: "active",
 						round: repair.round + 1,
@@ -1603,7 +1658,12 @@ export class HerderRunManager {
 						detail: null,
 					});
 				} else if (!repair.operationId || !repair.operationPayloadSha256) {
-					repair = this.store.updateIntegrationRepair(repair.repairId, { operationId, operationPayloadSha256: inputHash });
+					repair = this.store.updateIntegrationRepair(repair.repairId, {
+					beginRefSnapshot: beginEvidence.snapshot,
+					beginRefSnapshotSha256: beginEvidence.sha256,
+					operationId,
+					operationPayloadSha256: inputHash,
+				});
 				}
 				this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", inputHash, repairAuditEvidence(input));
 				this.store.updateRun({ status: "paused", terminalDetail: `Integration repair round ${repair!.round} is authorized for the owning main session.` });
@@ -1631,6 +1691,8 @@ export class HerderRunManager {
 			return this.reply();
 		}
 
+		const beginRefSnapshot = repairBeginRefSnapshot(repair);
+		const beginRefSnapshotSha256 = repair.beginRefSnapshotSha256!;
 		if (!["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(repair.state)) return this.reply();
 		if (["failed", "paused", "interrupted"].includes(repair.state)) {
 			if (repair.operationId === operationId) return this.reply();
@@ -1640,6 +1702,14 @@ export class HerderRunManager {
 			if (repair.operationId && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 				throw new Error("Integration repair finish was replayed with different durable evidence");
 			}
+			const replayDriver = this.driver(run);
+			await replayDriver.verifyCheckout(run.checkoutStateToken);
+			replayDriver.validateIntegrationRepairNamespace({
+				beginRefSnapshot,
+				beginRefSnapshotSha256,
+				expectedIntegrationHead: repair.currentCommit ?? repair.parentCommit,
+				expectedWorktreeHead: repair.currentCommit ?? repair.parentCommit,
+			});
 			const successor = this.store.getVerificationByRequestId(repair.successorRequestId);
 			if (successor?.state === "passed" || successor?.state === "failed") return this.reply();
 			if (repair.state === "committed") this.store.updateIntegrationRepair(repair.repairId, { state: "verifying" });
@@ -1661,6 +1731,7 @@ export class HerderRunManager {
 		const preparedGateProgram = this.prepareRepairGateProgram(verification, repair, input);
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
+		driver.validateIntegrationRepairNamespace({ beginRefSnapshot, beginRefSnapshotSha256 });
 		if (input.observedCommit !== undefined && repair.state !== "committing" && !committedReplay && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
 			throw new Error(`Integration repair observed commit changed: expected ${input.observedCommit}, found ${driver.worktreeHead(run.integrationWorktree)}`);
 		}
@@ -1685,6 +1756,8 @@ export class HerderRunManager {
 				allowedPaths: input.allowedPaths,
 				commitMessage: input.commitMessage,
 				allowCommit: true,
+				beginRefSnapshot,
+				beginRefSnapshotSha256,
 			});
 			head = commit.head;
 			tree = commit.tree;

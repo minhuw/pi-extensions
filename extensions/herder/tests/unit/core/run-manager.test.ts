@@ -1911,9 +1911,30 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			const snapshotRow = store.database.prepare("SELECT reply_json FROM manager_snapshots WHERE singleton = 1").get() as { reply_json: string };
 			assert.equal(operationRows[0]!.result_json.includes(token), false);
 			assert.equal(snapshotRow.reply_json.includes(token), false);
+			assert.ok(Array.isArray(payload(begun.integrationRepair).beginRefSnapshot));
+			assert.ok(String(payload(begun.integrationRepair).beginRefSnapshotSha256));
+			assert.equal(row.beginRefSnapshot !== null, true);
+			assert.equal(row.beginRefSnapshotSha256 !== null, true);
 		} finally {
 			store.close();
 		}
+		const driftRef = "refs/plan-herder/herder-plans/checkpoints/RUN/001";
+		git(fixture.repo, ["update-ref", driftRef, String(repair.parentCommit)]);
+		const driftFinish = {
+			operation: "finish",
+			operationId: "repair-finish-namespace-drift",
+			requestId: String(repair.requestId),
+			requestSha256: String(repair.requestSha256),
+			capabilityToken: token,
+			runId: String(repair.runId),
+			generation: Number(repair.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: "fix: reject namespace drift",
+		};
+		const driftReceipt = await submitManagerOperation(service, "integration_repair", driftFinish, driftFinish.operationId);
+		await assert.rejects(() => waitManagerOperation(service, driftReceipt.operationId), /manager-owned Herder ref/);
+		git(fixture.repo, ["update-ref", "-d", driftRef]);
 		const interrupted = new RunStore(fixture.planDirectory);
 		interrupted.updateRun({ status: "failed", terminalDetail: "simulated crash cut" });
 		interrupted.close();
@@ -2012,6 +2033,8 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 			parent: repair.parentCommit,
 			round: repair.round,
 			repairMarker,
+			beginRefSnapshot: repair.beginRefSnapshot!,
+			beginRefSnapshotSha256: repair.beginRefSnapshotSha256!,
 			allowedPaths: ["src/value.mjs"],
 			commitMessage: finish.commitMessage,
 		});
