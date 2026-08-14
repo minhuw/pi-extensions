@@ -49,10 +49,17 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	const notifications: string[] = [];
 	const requestRender = vi.fn();
 	let footer: FooterComponent | undefined;
+	let footerInstallCount = 0;
+	let footerDisposeCount = 0;
+	const branchSubscribe = vi.fn();
+	const branchUnsubscribe = vi.fn();
 
 	const tui = { requestRender };
 	const footerData = {
-		onBranchChange: () => () => {},
+		onBranchChange: vi.fn(() => {
+			branchSubscribe();
+			return () => branchUnsubscribe();
+		}),
 		getGitBranch: () => options.gitBranch ?? "main",
 		getExtensionStatuses: () => new Map((options.extensionStatuses ?? ["READY"]).map((status) => [status, status])),
 	};
@@ -63,7 +70,10 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 
 	const ui = {
 		setFooter: vi.fn((factory: unknown) => {
-			footer?.dispose?.();
+			if (footer) {
+				footer.dispose?.();
+				footerDisposeCount++;
+			}
 			footer = typeof factory === "function"
 				? (factory as (tui: unknown, theme: unknown, footerData: unknown) => FooterComponent)(
 						tui,
@@ -71,6 +81,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 						footerData,
 					)
 				: undefined;
+			if (footer) footerInstallCount++;
 		}),
 		notify: vi.fn((message: string) => notifications.push(message)),
 	};
@@ -116,6 +127,17 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 		notifications,
 		requestRender,
 		getFooter: () => footer,
+		disposeFooter() {
+			if (footer) {
+				footer.dispose?.();
+				footerDisposeCount++;
+				footer = undefined;
+			}
+		},
+		footerInstallCount: () => footerInstallCount,
+		footerDisposeCount: () => footerDisposeCount,
+		branchSubscribe,
+		branchUnsubscribe,
 		async emit(name: string, event: any) {
 			for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
 		},
@@ -416,6 +438,169 @@ describe("statusline footer rendering", () => {
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
+	});
+});
+
+describe("statusline footer degraded stream lifecycle", () => {
+	it("uses the assistant start fallback and keeps response diagnostics isolated", async () => {
+		let now = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("fallback-stream", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		now = 1_000;
+		await harness.emit("message_start", { type: "message_start", message: { role: "assistant" } });
+		now = 1_100;
+		await harness.emit("after_provider_response", { type: "after_provider_response" });
+		now = 1_150;
+		await harness.emit("message_update", {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "hello" },
+		});
+		now = 2_150;
+		await harness.emit("message_end", assistantEnd(10));
+		await harness.runCommand("footer", "debug");
+
+		let debug = harness.notifications.at(-1)!;
+		expect(debug).toContain("headersSeen=0 responsesSeen=1 requests=1");
+		expect(debug).toContain("lastTtfb=100");
+		expect(debug).toContain("avgTtft=150");
+		expect(debug).toContain("lastTok/s=10.0");
+
+		now = 3_000;
+		await harness.emit("after_provider_response", { type: "after_provider_response" });
+		await harness.runCommand("footer", "debug");
+		debug = harness.notifications.at(-1)!;
+		expect(debug).toContain("responsesSeen=2 requests=1");
+		expect(debug).toContain("lastTtfb=100");
+
+		const noMarker = createHarness("response-without-marker", "tui");
+		statuslineFooter(noMarker.pi);
+		await noMarker.emit("session_start", { type: "session_start", reason: "startup" });
+		await noMarker.emit("after_provider_response", { type: "after_provider_response" });
+		await noMarker.runCommand("footer", "debug");
+		expect(noMarker.notifications.at(-1)).toContain("headersSeen=0 responsesSeen=1 requests=0");
+		expect(noMarker.notifications.at(-1)).toContain("lastTtfb=-");
+		noMarker.disposeFooter();
+
+		const print = createHarness("fallback-print", "print");
+		statuslineFooter(print.pi);
+		await print.emit("session_start", { type: "session_start", reason: "startup" });
+		await print.emit("message_start", { type: "message_start", message: { role: "assistant" } });
+		await print.emit("after_provider_response", { type: "after_provider_response" });
+		await print.emit("message_update", {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "ignored" },
+		});
+		await print.emit("message_end", assistantEnd(10));
+		await print.runCommand("footer", "debug");
+		expect(print.notifications.at(-1)).toContain("metrics unavailable outside the TUI session");
+
+		harness.disposeFooter();
+	});
+
+	it("does not retain rejected samples or contaminate the next valid stream", async () => {
+		let now = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("rejected-streams", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		const sample = async (start: number, firstToken: number, end: number, endEvent: any) => {
+			now = start;
+			await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+			now = firstToken;
+			await harness.emit("message_update", {
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "sample" },
+			});
+			now = end;
+			await harness.emit("message_end", endEvent);
+		};
+
+		await sample(1_000, 1_100, 2_100, { message: { role: "assistant" } });
+		await sample(3_000, 3_100, 4_100, assistantEnd(0));
+		await sample(5_000, 5_010, 5_040, assistantEnd(10));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=0");
+		expect(harness.notifications.at(-1)).toContain("lastTok/s=-");
+		expect(harness.requestRender).toHaveBeenCalledTimes(3);
+
+		await sample(6_000, 6_100, 7_100, assistantEnd(20));
+		await harness.runCommand("footer", "debug");
+		const debug = harness.notifications.at(-1)!;
+		expect(debug).toContain("headersSeen=4 responsesSeen=0 requests=1");
+		expect(debug).toContain("avgTtft=100");
+		expect(debug).toContain("lastTtft=100");
+		expect(debug).toContain("lastTok/s=20.0");
+		harness.disposeFooter();
+	});
+
+	it("owns one timer and subscription through replacement, off, and re-enable", async () => {
+		vi.useFakeTimers();
+		try {
+			const harness = createHarness("footer-resources", "tui");
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			expect(harness.footerInstallCount()).toBe(1);
+			expect(harness.branchSubscribe).toHaveBeenCalledTimes(1);
+			expect(vi.getTimerCount()).toBe(1);
+
+			const first = harness.getFooter();
+			await harness.runCommand("footer", "compact");
+			expect(harness.getFooter()).not.toBe(first);
+			expect(harness.footerInstallCount()).toBe(2);
+			expect(harness.footerDisposeCount()).toBe(1);
+			expect(harness.branchUnsubscribe).toHaveBeenCalledTimes(1);
+			expect(vi.getTimerCount()).toBe(1);
+
+			await harness.runCommand("footer", "off");
+			expect(harness.getFooter()).toBeUndefined();
+			expect(harness.footerDisposeCount()).toBe(2);
+			expect(harness.branchUnsubscribe).toHaveBeenCalledTimes(2);
+			expect(vi.getTimerCount()).toBe(0);
+
+			await harness.runCommand("footer", "full");
+			expect(harness.footerInstallCount()).toBe(3);
+			expect(harness.branchSubscribe).toHaveBeenCalledTimes(3);
+			expect(vi.getTimerCount()).toBe(1);
+			harness.disposeFooter();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("removes quit state while reload keeps completed metrics on a new component", async () => {
+		let now = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("cleanup-state", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		now = 1_000;
+		await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+		now = 1_100;
+		await harness.emit("message_update", {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "done" },
+		});
+		now = 2_100;
+		await harness.emit("message_end", assistantEnd(20));
+		const oldFooter = harness.getFooter();
+		harness.disposeFooter();
+		await harness.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+		await harness.emit("session_start", { type: "session_start", reason: "reload" });
+		expect(harness.getFooter()).not.toBe(oldFooter);
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+
+		harness.disposeFooter();
+		await harness.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=0");
+		harness.disposeFooter();
 	});
 });
 
