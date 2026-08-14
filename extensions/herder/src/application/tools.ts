@@ -170,6 +170,7 @@ async function submitTool(args: JsonObject): Promise<unknown> {
 }
 
 function integrationRepairPayload(args: JsonObject): IntegrationRepairInput {
+	if (Object.prototype.hasOwnProperty.call(args, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
 	const operation = requiredString(args, "operation") as IntegrationRepairInput["operation"];
 	return {
 		schemaVersion: 1,
@@ -189,7 +190,6 @@ function integrationRepairPayload(args: JsonObject): IntegrationRepairInput {
 		...(args.gateAdditions === undefined ? {} : { gateAdditions: args.gateAdditions as VerificationManifest["gates"] }),
 		...(args.allowedPaths === undefined ? {} : { allowedPaths: args.allowedPaths as string[] }),
 		...(args.observedCommit === undefined ? {} : { observedCommit: String(args.observedCommit) }),
-		...(args.commitMessage === undefined ? {} : { commitMessage: String(args.commitMessage) }),
 	};
 }
 

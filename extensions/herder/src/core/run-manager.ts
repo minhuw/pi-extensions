@@ -163,7 +163,9 @@ function normalizeIntegrationRepairClassification(value: unknown): IntegrationRe
 }
 
 function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
-	if (!input || !INTEGRATION_REPAIR_OPERATIONS.includes(input.operation)) throw new Error("Integration repair operation must be begin, finish, or cancel");
+	if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Integration repair input must be an object");
+	if (Object.prototype.hasOwnProperty.call(input, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
+	if (!INTEGRATION_REPAIR_OPERATIONS.includes(input.operation)) throw new Error("Integration repair operation must be begin, finish, or cancel");
 	for (const [name, value, limit] of [["requestId", input.requestId, 200], ["requestSha256", input.requestSha256, 128], ["capabilityToken", input.capabilityToken, 128]] as const) {
 		if (typeof value !== "string" || value.length === 0 || value.length > limit || /[\0\r\n]/.test(value)) throw new Error(`Integration repair ${name} is invalid`);
 	}
@@ -174,7 +176,6 @@ function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
 	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((candidate) => typeof candidate !== "string" || !candidate || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)))) throw new Error("Integration repair allowed paths are invalid");
 	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
-	if (input.commitMessage !== undefined && (typeof input.commitMessage !== "string" || input.commitMessage.trim().length === 0 || input.commitMessage.length > 512 || /[\0\r\n]/.test(input.commitMessage))) throw new Error("Integration repair commitMessage is invalid");
 }
 
 function validateRepairSession(value: string | undefined, expected: string): void {
@@ -205,10 +206,6 @@ function repairBeginRefSnapshot(repair: StoredIntegrationRepair): IntegrationRep
 		throw new Error("Integration repair begin namespace evidence hash changed; cancel and restart the repair");
 	}
 	return parsed;
-}
-
-function integrationRepairCommitMarker(repairId: string, parentCommit: string, round: number, operationId: string, payloadSha256: string): string {
-	return sha256(stableJson({ repairId, parentCommit, round, operationId, payloadSha256 }));
 }
 
 function validateStartInput(input: StartInput): void {
@@ -1679,12 +1676,34 @@ export class HerderRunManager {
 			const replayDriver = this.driver(run);
 			await replayDriver.verifyCheckout(run.checkoutStateToken);
 			const replayBeginRefSnapshot = repairBeginRefSnapshot(finishRepair);
+			const expectedCommit = (finishRepair.currentCommit ?? finishRepair.parentCommit).toLowerCase();
+			if (!input.observedCommit || input.observedCommit.toLowerCase() !== expectedCommit) {
+				throw new Error(`Integration repair replay observed commit changed: expected ${expectedCommit}`);
+			}
 			replayDriver.validateIntegrationRepairNamespace({
 				beginRefSnapshot: replayBeginRefSnapshot,
 				beginRefSnapshotSha256: finishRepair.beginRefSnapshotSha256!,
-				expectedIntegrationHead: finishRepair.currentCommit ?? finishRepair.parentCommit,
-				expectedWorktreeHead: finishRepair.currentCommit ?? finishRepair.parentCommit,
+				expectedIntegrationHead: expectedCommit,
+				expectedWorktreeHead: expectedCommit,
 			});
+			if (finishRepair.currentTree && replayDriver.worktreeTree(run.integrationWorktree) !== finishRepair.currentTree) {
+				throw new Error(`Integration repair replay tree changed: expected ${finishRepair.currentTree}`);
+			}
+			if (finishRepair.classification === "code_defect") {
+				if (!input.allowedPaths || input.allowedPaths.length === 0) throw new Error("Code-defect integration repair replay requires recorded failure-related paths");
+				replayDriver.validateIntegrationRepairCommit({
+					parent: finishRepair.parentCommit,
+					round: finishRepair.round,
+					currentHead: finishRepair.round > 1 ? finishRepair.supersededCommits.at(-1) ?? null : null,
+					replayHead: expectedCommit,
+					observedCommit: input.observedCommit,
+					allowedPaths: input.allowedPaths,
+					beginRefSnapshot: replayBeginRefSnapshot,
+					beginRefSnapshotSha256: finishRepair.beginRefSnapshotSha256!,
+				});
+			} else if (replayDriver.worktreeStatus(run.integrationWorktree)) {
+				throw new Error("Manifest or transient integration repair replay requires the assigned worktree to be clean");
+			}
 		};
 		if (input.operation === "finish" && finishRepair.state === "passed") {
 			if (finishRepair.operationId !== operationId || finishRepair.operationPayloadSha256 !== inputHash) {
@@ -1726,14 +1745,7 @@ export class HerderRunManager {
 			if (repair.operationId && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 				throw new Error("Integration repair finish was replayed with different durable evidence");
 			}
-			const replayDriver = this.driver(run);
-			await replayDriver.verifyCheckout(run.checkoutStateToken);
-			replayDriver.validateIntegrationRepairNamespace({
-				beginRefSnapshot,
-				beginRefSnapshotSha256,
-				expectedIntegrationHead: repair.currentCommit ?? repair.parentCommit,
-				expectedWorktreeHead: repair.currentCommit ?? repair.parentCommit,
-			});
+			await validateFinishReplayNamespace();
 			const successor = this.store.getVerificationByRequestId(repair.successorRequestId);
 			if (successor?.state === "passed" || successor?.state === "failed") return this.reply();
 			if (repair.state === "committed") this.store.updateIntegrationRepair(repair.repairId, { state: "verifying" });
@@ -1742,6 +1754,7 @@ export class HerderRunManager {
 		}
 		const classification = repair.classification;
 		if (!classification) throw new Error("Integration repair has no durable classification");
+		if (!input.observedCommit) throw new Error("Integration repair finish requires the observed integration commit identity");
 		if (classification === "code_defect" && (!input.allowedPaths || input.allowedPaths.length === 0)) {
 			throw new Error("Code-defect integration repair finish requires recorded failure-related paths");
 		}
@@ -1750,36 +1763,27 @@ export class HerderRunManager {
 			&& (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 			throw new Error("Integration repair finish was replayed with different durable evidence");
 		}
-		// Normalize every input-dependent part of the successor before recording
-		// finish intent or allowing the Git driver to mutate the assigned worktree.
+		// Normalize every input-dependent part of the successor and validate the
+		// already-authored commit before recording finish intent or changing repair state.
 		const preparedGateProgram = this.prepareRepairGateProgram(verification, repair, input);
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		driver.validateIntegrationRepairNamespace({ beginRefSnapshot, beginRefSnapshotSha256 });
-		if (input.observedCommit !== undefined && repair.state !== "committing" && !committedReplay && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
-			throw new Error(`Integration repair observed commit changed: expected ${input.observedCommit}, found ${driver.worktreeHead(run.integrationWorktree)}`);
-		}
 		let head = repair.currentCommit ?? repair.parentCommit;
 		let tree = repair.currentTree ?? verification.request.integrationTree;
 		let superseded = [...repair.supersededCommits];
-		this.store.transaction(() => {
-			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: inputHash });
-			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", inputHash, repairAuditEvidence(input));
-		});
 		if (classification === "code_defect") {
 			const replayHead = committedReplay ? repair.currentCommit : null;
-			const durableCurrentHead = replayHead && repair.round > 1
-				? repair.supersededCommits.at(-1) ?? null
-				: replayHead ? null : repair.currentCommit;
-			const commit = driver.acceptIntegrationRepairCommit({
+			const durableCurrentHead = repair.round > 1
+				? (replayHead ? repair.supersededCommits.at(-1) ?? null : repair.currentCommit)
+				: null;
+			const commit = driver.validateIntegrationRepairCommit({
 				parent: repair.parentCommit,
 				round: repair.round,
 				currentHead: durableCurrentHead,
 				replayHead,
-				repairMarker: integrationRepairCommitMarker(repair.repairId, repair.parentCommit, repair.round, operationId, inputHash),
+				observedCommit: input.observedCommit,
 				allowedPaths: input.allowedPaths,
-				commitMessage: input.commitMessage,
-				allowCommit: true,
 				beginRefSnapshot,
 				beginRefSnapshotSha256,
 			});
@@ -1787,12 +1791,17 @@ export class HerderRunManager {
 			tree = commit.tree;
 			if (commit.supersededHead && !superseded.includes(commit.supersededHead)) superseded.push(commit.supersededHead);
 		} else {
-			if (driver.branchHead(run.integrationBranch) !== repair.parentCommit || driver.worktreeHead(run.integrationWorktree) !== repair.parentCommit || driver.worktreeStatus(run.integrationWorktree)) {
+			const parent = repair.parentCommit.toLowerCase();
+			if (input.observedCommit.toLowerCase() !== parent || driver.branchHead(run.integrationBranch).toLowerCase() !== parent || driver.worktreeHead(run.integrationWorktree).toLowerCase() !== parent || driver.worktreeStatus(run.integrationWorktree)) {
 				throw new Error(`${classification} recovery cannot mutate the frozen integration tree`);
 			}
 			head = repair.parentCommit;
-			tree = verification.request.integrationTree;
+			tree = driver.worktreeTree(run.integrationWorktree);
 		}
+		this.store.transaction(() => {
+			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: inputHash });
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", inputHash, repairAuditEvidence(input));
+		});
 		const gateManifest = this.repairGateManifest(verification, repair, preparedGateProgram, head, tree);
 		// Commit lineage and the canonical successor are one durable transition.
 		// A restart can therefore observe either the pre-commit active state or a

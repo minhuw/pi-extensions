@@ -946,7 +946,10 @@ test("request-bound integration repair edits only after begin and automatically 
 		assert.equal(object(begin).terminate, false);
 		const integrationWorktree = fieldValue(recoveryPrompt, "INTEGRATION_WORKTREE");
 		fs.writeFileSync(path.join(integrationWorktree, "src", "value.mjs"), "export const value = 3\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: repair integrated verification defect"]);
 		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout.trim(), "");
 		const finish = await withDeadline(api.tool("herder_integration_repair").execute(
 			"repair-finish",
 			{
@@ -954,7 +957,6 @@ test("request-bound integration repair edits only after begin and automatically 
 				operation: "finish",
 				observedCommit,
 				allowedPaths: ["src/value.mjs"],
-				commitMessage: "fix: repair integrated verification defect",
 				detail: "The authorized integration worktree now contains the bounded fix.",
 			}, undefined, undefined, context), "repair finish");
 		assert.equal(object(finish).terminate, true);
@@ -1029,14 +1031,16 @@ test("failed repaired verification replays through manager deduplication", { tim
 			{ ...repairArgs, operation: "begin", classification: "code_defect" }, undefined, undefined, context), "repair replay begin");
 		const integrationWorktree = fieldValue(recoveryPrompt, "INTEGRATION_WORKTREE");
 		fs.writeFileSync(path.join(integrationWorktree, "src", "value.mjs"), "export const value = 3\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: repair integrated verification defect"]);
 		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout.trim(), "");
 		const finishArgs = {
 			...repairArgs,
 			operation: "finish",
 			operationId: "repair-finish-replay-001",
 			observedCommit,
 			allowedPaths: ["src/value.mjs"],
-			commitMessage: "fix: repair integrated verification defect",
 			detail: "The authorized integration worktree contains the bounded fix.",
 		};
 		const firstFinish = await withDeadline(api.tool("herder_integration_repair").execute("repair-replay-finish", finishArgs, undefined, undefined, context), "repair replay finish");

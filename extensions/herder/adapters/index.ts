@@ -590,11 +590,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					...(repair.classification ? [`RECORDED_CLASSIFICATION: ${repair.classification}`, "For this existing repair identity, preserve the recorded classification exactly; do not switch it between rounds."] : []),
 					"For manifest_error, call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree.",
 					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
-					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE, run optional local diagnostics, and leave the authorized changes for Herder to commit/amend when finish is called. Pass allowedPaths as repository-relative failure-related paths. Local tests are non-authoritative; do not run the final Herder gates directly.",
+					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the round-one commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
 					"For design_ambiguity, scope_ambiguity, credential, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. A corrective plan followed by /herder-revise remains available when the user chooses it.",
 					"Before begin, do not edit the frozen integration worktree, move Git refs, update SQLite, or mutate manager state. If a started code repair cannot be completed safely, restore the assigned worktree to its recorded clean head and call cancel.",
 					"Do not edit the frozen integration worktree before the begin transition binds writable authority to this main session.",
-					"Before finish, pass observedCommit equal to git rev-parse HEAD for the assigned worktree; leave code-repair changes dirty so Herder can create or amend the transaction commit. After an accepted finish, Herder alone reruns the retained authoritative gates and either proceeds to the existing final audit or presents the next bounded recovery request. /herder-resume remains operator recovery, not the ordinary path.",
+					"Before finish, stage and create or amend the session-authored repair commit in the assigned worktree, confirm git status --porcelain is empty, and pass observedCommit equal to git rev-parse HEAD. Herder never stages, creates, or amends commits; it validates the clean commit and reruns the retained authoritative gates, then either proceeds to the existing final audit or presents the next bounded recovery request. /herder-resume remains operator recovery, not the ordinary path.",
 					"FAILED_OR_INHERITED_GATES:",
 					gateJson || "none",
 				].join("\n")
@@ -1350,18 +1350,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		if (operation === "finish") {
 			if (!observedCommit || !/^[0-9a-f]{40,64}$/i.test(observedCommit)) throw new Error("Integration repair finish requires the observed integration commit identity");
-			// A failed or paused successor can still be the durable result of this
-			// finish. Its observedCommit is the pre-repair parent, so defer the
-			// replay identity and payload check to manager operation deduplication.
+			if (head !== observedCommit) throw new Error(`Observed integration commit ${observedCommit} does not match the assigned worktree head ${head}`);
+			if (dirty) throw new Error("Integration repair finish requires the assigned worktree to be clean after the owning session commit");
 			const durableFinishReplay = ["committed", "verifying", "passed", "failed", "paused"].includes(request.state)
 				&& Boolean(request.currentCommit)
 				&& head === request.currentCommit;
-			if (request.state !== "committing" && !durableFinishReplay && head !== observedCommit) throw new Error(`Observed integration commit ${observedCommit} does not match the assigned worktree head ${head}`);
-			if (durableFinishReplay) {
-				if (request.currentTree && tree !== request.currentTree) throw new Error(`Integration repair replay tree changed: expected ${request.currentTree}, found ${tree}`);
-				if (dirty) throw new Error("Integration repair replay requires the assigned worktree to be clean");
-			}
-			if (request.classification !== "code_defect" && (head !== expectedHead || dirty)) {
+			if (durableFinishReplay && request.currentTree && tree !== request.currentTree) throw new Error(`Integration repair replay tree changed: expected ${request.currentTree}, found ${tree}`);
+			if (request.classification !== "code_defect" && head !== expectedHead) {
 				throw new Error("Manifest or transient recovery must leave the frozen integration tree unchanged");
 			}
 		}
@@ -1411,8 +1406,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				rationale: Type.String(),
 			}), { maxItems: 32 })),
 			allowedPaths: Type.Optional(Type.Array(Type.String(), { maxItems: 256 })),
-			commitMessage: Type.Optional(Type.String()),
-			observedCommit: Type.Optional(Type.String({ description: "The current integration-worktree HEAD observed immediately before finish." })),
+			observedCommit: Type.Optional(Type.String({ description: "The clean session-authored integration-worktree HEAD observed immediately before finish." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const epoch = sessionEpoch;
@@ -1482,7 +1476,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					...(params.gates === undefined ? {} : { gates: params.gates }),
 					...(params.gateAdditions === undefined ? {} : { gateAdditions: params.gateAdditions }),
 					...(params.allowedPaths === undefined ? {} : { allowedPaths: params.allowedPaths }),
-					...(params.commitMessage === undefined ? {} : { commitMessage: params.commitMessage }),
 					observedCommit: params.operation === "finish" ? params.observedCommit : checkout.head,
 				});
 			});

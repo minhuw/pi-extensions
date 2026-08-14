@@ -55,12 +55,20 @@ async function rawRequest(service: StoredService, pathname: string, input?: unkn
 	}
 }
 
+function rejectLegacyIntegrationRepairCommitMessage(kind: ManagerOperationKind, input: unknown): void {
+	if (kind !== "integration_repair" && kind !== "repair") return;
+	if (input && typeof input === "object" && !Array.isArray(input) && Object.prototype.hasOwnProperty.call(input, "commitMessage")) {
+		throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
+	}
+}
+
 export async function submitManagerOperation(
 	service: StoredService,
 	kind: ManagerOperationKind,
 	input: unknown,
 	operationId: string = randomUUID(),
 ): Promise<ManagerOperationReceipt> {
+	rejectLegacyIntegrationRepairCommitMessage(kind, input);
 	const body = await rawRequest(service, "/v1/operation", { operationId, kind, input }, 10_000);
 	const operation = body.operation;
 	if (!operation || typeof operation !== "object" || Array.isArray(operation)) throw new Error("Herder service returned no operation receipt");

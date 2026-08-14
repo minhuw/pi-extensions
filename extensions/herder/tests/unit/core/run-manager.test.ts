@@ -1919,6 +1919,11 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			store.close();
 		}
 		const driftRef = "refs/plan-herder/herder-plans/checkpoints/RUN/001";
+		const integrationWorktree = String(repair.integrationWorktree);
+		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: reject namespace drift"]);
+		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
 		git(fixture.repo, ["update-ref", driftRef, String(repair.parentCommit)]);
 		const driftFinish = {
 			operation: "finish",
@@ -1930,7 +1935,7 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			generation: Number(repair.generation),
 			ownerSessionId: "main-session",
 			allowedPaths: ["src/value.mjs"],
-			commitMessage: "fix: reject namespace drift",
+			observedCommit,
 		};
 		const driftReceipt = await submitManagerOperation(service, "integration_repair", driftFinish, driftFinish.operationId);
 		await assert.rejects(() => waitManagerOperation(service, driftReceipt.operationId), /manager-owned Herder ref/);
@@ -1953,7 +1958,88 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 	}
 });
 
-test("integration repair finish replays a crash-created commit", { timeout: 45_000 }, async () => {
+test("persisted legacy commitMessage operations fail before mutation and leave repair cancellation available", { timeout: 35_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-legacy-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-legacy");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-legacy", [{
+			gateId: "failing-gate",
+			label: "deliberate failure before legacy replay",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the active repair used by the legacy payload test.",
+		}]);
+		const repairRequest = payload(failed.reply.integrationRepair);
+		const token = String(repairRequest.capabilityToken);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-begin-legacy",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		await requestService(service, "/v1/integration-repair", begin);
+		await stopService(fixture.planDirectory);
+
+		const before = new RunStore(fixture.planDirectory);
+		const repair = before.getIntegrationRepairForRequest(String(repairRequest.requestId))!;
+		const legacy = {
+			operation: "finish",
+			operationId: "repair-finish-legacy-commit-message",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			observedCommit: String(repairRequest.parentCommit),
+			commitMessage: "legacy manager-authored message",
+		};
+		before.submitOperation(legacy.operationId, "integration_repair", legacy);
+		before.close();
+
+		service = await ensureService(fixture.planDirectory);
+		await assert.rejects(() => waitManagerOperation(service, legacy.operationId), /commitMessage is not accepted/);
+		const unchanged = new RunStore(fixture.planDirectory);
+		try {
+			const current = unchanged.getIntegrationRepair(repair.repairId)!;
+			assert.equal(current.state, "active");
+			assert.equal(current.currentCommit, null);
+			assert.deepEqual(unchanged.getIntegrationRepairAudits(repair.repairId).map((audit) => audit.action), ["begin"]);
+			assert.equal(git(String(repairRequest.integrationWorktree), ["rev-parse", "HEAD"]).stdout.trim(), repair.parentCommit);
+			assert.equal(git(String(repairRequest.integrationWorktree), ["status", "--porcelain", "--untracked-files=all"]).stdout.trim(), "");
+		} finally {
+			unchanged.close();
+		}
+		await requestService(service, "/v1/integration-repair", {
+			operation: "cancel",
+			operationId: "repair-cancel-after-legacy",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			detail: "Cancel the legacy operation safely.",
+		});
+		const cancelled = new RunStore(fixture.planDirectory);
+		try { assert.equal(cancelled.getIntegrationRepair(repair.repairId)!.state, "cancelled"); }
+		finally { cancelled.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("integration repair finish replays a crash after the session-authored commit", { timeout: 45_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-crash-"));
 	const fixture = writeFixture(root);
 	try {
@@ -1985,6 +2071,10 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 		const before = new RunStore(fixture.planDirectory);
 		const run = before.getRun()!;
 		const repair = before.getIntegrationRepairForRequest(String(repairRequest.requestId))!;
+		fs.writeFileSync(path.join(run.integrationWorktree, "src/value.mjs"), "export const value = 3\n");
+		git(run.integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(run.integrationWorktree, ["commit", "-q", "-m", "fix: replay crash repair"]);
+		const observedCommit = git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
 		const finish = {
 			operation: "finish",
 			operationId: "repair-finish-crash",
@@ -1995,17 +2085,10 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 			generation: Number(repairRequest.generation),
 			ownerSessionId: "main-session",
 			allowedPaths: ["src/value.mjs"],
-			commitMessage: "fix: replay crash repair",
+			observedCommit,
 		};
 		const { capabilityToken: _capabilityToken, ...finishEvidence } = finish;
 		const payloadSha256 = sha256(stableJson({ ...finishEvidence, capabilityTokenSha256: integrationRepairCapabilityDigest(token) }));
-		const repairMarker = sha256(stableJson({
-			repairId: repair.repairId,
-			parentCommit: repair.parentCommit,
-			round: repair.round,
-			operationId: finish.operationId,
-			payloadSha256,
-		}));
 		before.close();
 
 		const crashed = new RunStore(fixture.planDirectory);
@@ -2022,33 +2105,16 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 			crashed.close();
 		}
 
-		fs.writeFileSync(path.join(run.integrationWorktree, "src/value.mjs"), "export const value = 3\n");
-		const driver = new GitDriver({
-			repoRoot: fixture.repo,
-			planDirectory: fixture.planDirectory,
-			planName: path.basename(fixture.planDirectory),
-			helperRoot: path.resolve("extensions/herder/src/daemon/git"),
-		});
-		const committed = driver.acceptIntegrationRepairCommit({
-			parent: repair.parentCommit,
-			round: repair.round,
-			repairMarker,
-			beginRefSnapshot: repair.beginRefSnapshot!,
-			beginRefSnapshotSha256: repair.beginRefSnapshotSha256!,
-			allowedPaths: ["src/value.mjs"],
-			commitMessage: finish.commitMessage,
-		});
-		assert.notEqual(committed.head, repair.parentCommit);
-
 		service = await ensureService(fixture.planDirectory);
 		await waitManagerOperation(service, finish.operationId);
 		const recovered = new RunStore(fixture.planDirectory);
 		try {
 			const recoveredRepair = recovered.getIntegrationRepair(repair.repairId)!;
-			assert.equal(recoveredRepair.currentCommit, committed.head);
+			assert.equal(recoveredRepair.currentCommit, observedCommit);
 			assert.equal(recoveredRepair.state, "passed");
 			assert.equal(recoveredRepair.supersededCommits.length, 0);
-			assert.equal(git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), committed.head);
+			assert.equal(git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), observedCommit);
+			assert.match(git(run.integrationWorktree, ["log", "-1", "--format=%s"]).stdout.trim(), /fix: replay crash repair/);
 		} finally {
 			recovered.close();
 		}
@@ -2062,7 +2128,7 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 			replay.close();
 		}
 		const driftRef = "refs/plan-herder/herder-plans/checkpoints/RUN/999";
-		git(fixture.repo, ["update-ref", driftRef, committed.head]);
+		git(fixture.repo, ["update-ref", driftRef, observedCommit]);
 		service = await ensureService(fixture.planDirectory);
 		await assert.rejects(() => waitManagerOperation(service, finish.operationId), /manager-owned Herder ref/);
 	} finally {
@@ -2101,6 +2167,11 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 			classification: "code_defect",
 		};
 		await requestService(service, "/v1/integration-repair", begin);
+		const integrationWorktree = String(repairRequest.integrationWorktree);
+		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: make the repaired fixture pass"]);
+		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
 
 		const finishBase = {
 			operation: "finish",
@@ -2111,7 +2182,7 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 			generation: Number(repairRequest.generation),
 			ownerSessionId: "main-session",
 			allowedPaths: ["src/value.mjs"],
-			commitMessage: "fix: make the repaired fixture pass",
+			observedCommit,
 		};
 		const rejected = async (input: Record<string, unknown>, expected: RegExp): Promise<void> => {
 			await assert.rejects(async () => {
@@ -2149,7 +2220,6 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 			store.close();
 		}
 
-		fs.writeFileSync(path.join(String(repairRequest.integrationWorktree), "src/value.mjs"), "export const value = 3\n");
 		const corrected = { ...finishBase, operationId: "repair-gate-corrected" };
 		const correctedReceipt = await submitManagerOperation(service, "integration_repair", corrected, String(corrected.operationId));
 		await waitManagerOperation(service, correctedReceipt.operationId);
@@ -2205,7 +2275,11 @@ test("successor verification rejects a gate-created Herder ref", { timeout: 45_0
 			classification: "code_defect",
 		};
 		await requestService(service, "/v1/integration-repair", begin);
-		fs.writeFileSync(path.join(String(repairRequest.integrationWorktree), "src/value.mjs"), "export const value = 3\n");
+		const integrationWorktree = String(repairRequest.integrationWorktree);
+		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: reject gate namespace drift"]);
+		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
 		const finish = {
 			operation: "finish",
 			operationId: "repair-successor-namespace-finish",
@@ -2216,7 +2290,7 @@ test("successor verification rejects a gate-created Herder ref", { timeout: 45_0
 			generation: Number(repairRequest.generation),
 			ownerSessionId: "main-session",
 			allowedPaths: ["src/value.mjs"],
-			commitMessage: "fix: reject gate namespace drift",
+			observedCommit,
 		};
 		const receipt = await submitManagerOperation(service, "integration_repair", finish, String(finish.operationId));
 		await waitManagerOperation(service, receipt.operationId);

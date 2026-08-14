@@ -680,13 +680,13 @@ export interface IntegrationRepairInput {
 	gateAdditions?: VerificationGate[];
 	/** Failure-related repository paths allowed in the accepted code-defect commit. Required when finishing code repair. */
 	allowedPaths?: string[];
-	/** The integration-worktree HEAD observed by the owning adapter immediately before finish. */
+	/** The clean integration-worktree HEAD observed by the owning adapter before finish. */
 	observedCommit?: string;
-	commitMessage?: string;
 }
 
 export function validateIntegrationRepairInput(value: unknown): asserts value is IntegrationRepairInput {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair input must be an object");
+	if (Object.prototype.hasOwnProperty.call(value, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
 	const input = value as Partial<IntegrationRepairInput>;
 	if (!INTEGRATION_REPAIR_OPERATIONS.includes(input.operation as IntegrationRepairOperation)) throw new Error("Integration repair operation is invalid");
 	for (const [name, candidate, limit] of [["requestId", input.requestId, 200], ["requestSha256", input.requestSha256, 64], ["capabilityToken", input.capabilityToken, 64]] as const) {
