@@ -1871,3 +1871,63 @@ test("plan graph revision adopts additions while preserving exact completed evid
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("integration repair begin is atomic, request-bound, and terminal-safe", { timeout: 35_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-admission-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-admission");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-admission", [{
+			gateId: "failing-gate",
+			label: "deliberate failure",
+			cwd: ".",
+			argv: ["node", "-e", "process.exit(1)"],
+			rationale: "Proves the repair admission path.",
+		}]);
+		assert.equal(failed.reply.status, "failed");
+		const repair = payload(failed.reply.integrationRepair);
+		const token = String(repair.capabilityToken);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-begin-admission",
+			requestId: String(repair.requestId),
+			requestSha256: String(repair.requestSha256),
+			capabilityToken: token,
+			runId: String(repair.runId),
+			generation: Number(repair.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		const begun = payload(payload(await requestService(service, "/v1/integration-repair", begin)).reply);
+		assert.equal(begun.status, "paused");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const row = store.getIntegrationRepairForRequest(String(repair.requestId))!;
+			assert.equal(run.status, "paused");
+			assert.equal(store.getIntegrationRepairAudits(row.repairId).length, 1);
+			const operationRows = store.database.prepare("SELECT result_json FROM manager_operations WHERE result_json IS NOT NULL ORDER BY sequence DESC LIMIT 1").all() as Array<{ result_json: string }>;
+			const snapshotRow = store.database.prepare("SELECT reply_json FROM manager_snapshots WHERE singleton = 1").get() as { reply_json: string };
+			assert.equal(operationRows[0]!.result_json.includes(token), false);
+			assert.equal(snapshotRow.reply_json.includes(token), false);
+		} finally {
+			store.close();
+		}
+		const interrupted = new RunStore(fixture.planDirectory);
+		interrupted.updateRun({ status: "failed", terminalDetail: "simulated crash cut" });
+		interrupted.close();
+		const replayed = payload(payload(await requestService(service, "/v1/integration-repair", begin)).reply);
+		assert.equal(replayed.status, "paused");
+
+		await requestService(service, "/v1/stop", {});
+		await assert.rejects(
+			() => requestService(service, "/v1/integration-repair", { ...begin, operationId: "repair-begin-after-stop" }),
+			/not allowed after the run is stopped/,
+		);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});

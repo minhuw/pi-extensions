@@ -157,6 +157,7 @@ function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
 	if (input.repairId !== undefined && (typeof input.repairId !== "string" || input.repairId.length === 0 || input.repairId.length > 200 || /[\0\r\n]/.test(input.repairId))) throw new Error("Integration repair repairId is invalid");
 	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
+	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((candidate) => typeof candidate !== "string" || !candidate || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)))) throw new Error("Integration repair allowed paths are invalid");
 	if (input.commitMessage !== undefined && (typeof input.commitMessage !== "string" || input.commitMessage.trim().length === 0 || input.commitMessage.length > 512 || /[\0\r\n]/.test(input.commitMessage))) throw new Error("Integration repair commitMessage is invalid");
 }
 
@@ -1347,6 +1348,32 @@ export class HerderRunManager {
 		return verification;
 	}
 
+	private repairBeginAuditMatches(repair: StoredIntegrationRepair, operationId: string, payloadSha256: string): boolean {
+		return this.store.getIntegrationRepairAudits(repair.repairId).some((audit) =>
+			audit.action === "begin" && audit.operationId === operationId && audit.payloadSha256 === payloadSha256);
+	}
+
+	private validateRepairBeginAdmission(
+		run: StoredRun,
+		verification: StoredVerification,
+		input: IntegrationRepairInput,
+		repair: StoredIntegrationRepair | null,
+	): void {
+		if (run.status === "stopped" || run.status === "complete") throw new Error(`Integration repair begin is not allowed after the run is ${run.status}`);
+		if (this.store.getPlan(run.runId, "RUN")) throw new Error("Integration repair begin is not allowed after final RUN completion");
+		const latest = this.store.getVerification(run.runId, run.currentGeneration);
+		if (!latest || latest.state !== "failed" || latest.request.requestId !== verification.request.requestId) {
+			throw new Error("Integration repair begin must target the latest failed verification request");
+		}
+		if (repair) {
+			if (repair.runId !== run.runId || repair.generation !== run.currentGeneration) throw new Error("Integration repair identity belongs to another run generation");
+			if (![repair.requestId, repair.successorRequestId].includes(input.requestId)) throw new Error("Integration repair request is not bound to the selected repair identity");
+			if (input.repairId && repair.repairId !== input.repairId) throw new Error("Integration repair ID does not match durable evidence");
+		} else if (this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration)) {
+			throw new Error("A conflicting integration repair already exists for the current run generation");
+		}
+	}
+
 	private repairGateManifest(
 		verification: StoredVerification,
 		repair: StoredIntegrationRepair,
@@ -1412,8 +1439,11 @@ export class HerderRunManager {
 	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
 		validateIntegrationRepairInput(input);
 		const operationId = input.operationId || `integration-repair:${input.operation}:${input.requestId}`;
+		const inputHash = repairInputHash(input);
 		const verification = this.repairVerificationForInput(input);
-		let repair = input.repairId ? this.store.getIntegrationRepair(input.repairId) : this.store.getIntegrationRepairForRequest(input.requestId);
+		const repairForRequest = this.store.getIntegrationRepairForRequest(input.requestId);
+		let repair = input.repairId ? this.store.getIntegrationRepair(input.repairId) : repairForRequest;
+		if (input.repairId && !repair && repairForRequest) throw new Error("Integration repair ID does not match durable evidence");
 		if (repair && input.repairId && repair.repairId !== input.repairId) throw new Error("Integration repair ID does not match durable evidence");
 		const run = this.store.getRun()!;
 		if (input.operation === "begin") {
@@ -1422,11 +1452,21 @@ export class HerderRunManager {
 			if (verification.state !== "failed") throw new Error("Integration repair begin requires a failed verification attempt");
 			const ownerSessionId = input.ownerSessionId;
 			if (!ownerSessionId) throw new Error("Integration repair begin requires the owning main session ID");
+			if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {
+				if (repair.state === "active" && run.status !== "stopped" && run.status !== "complete") {
+					this.store.transaction(() => {
+						this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", inputHash, repairAuditEvidence(input));
+						this.store.updateRun({ status: "paused", terminalDetail: `Integration repair round ${repair!.round} is authorized for the owning main session.` });
+					});
+				}
+				return this.reply();
+			}
+			this.validateRepairBeginAdmission(run, verification, input, repair);
 			if (repair) {
 				if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
 				if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
 				if (repair.classification && repair.classification !== classification) throw new Error("Integration repair classification cannot change during a transaction");
-				if (repair.state === "passed" || repair.state === "cancelled") return this.reply();
+				if (repair.state === "passed" || repair.state === "cancelled") throw new Error("Integration repair is already terminal; user choice is required");
 				if (repair.round >= 3 && repair.state === "failed") {
 					this.store.updateIntegrationRepair(repair.repairId, { state: "paused", detail: "Three repaired verification rounds failed; awaiting explicit user choice." });
 					throw new Error("Integration repair round limit reached; user choice is required");
@@ -1434,6 +1474,34 @@ export class HerderRunManager {
 				if (repair.state === "failed" || repair.state === "paused") {
 					if (repair.classification === "transient") throw new Error("Transient verification recovery allows one unchanged retry");
 					if (repair.round >= 3) throw new Error("Integration repair round limit reached; user choice is required");
+				} else if (repair.state === "active") {
+					if (repair.operationId && repair.operationId !== operationId) throw new Error("Integration repair begin was replayed with a different operation");
+					if (repair.operationPayloadSha256 && repair.operationPayloadSha256 !== inputHash) throw new Error("Integration repair begin was replayed with different evidence");
+				} else {
+					throw new Error("Integration repair transaction is already in progress; only its exact begin replay is allowed");
+				}
+			}
+			this.store.transaction(() => {
+				if (!repair) {
+					repair = this.store.putIntegrationRepair({
+						repairId: input.repairId || randomUUID(),
+						runId: run.runId,
+						generation: run.currentGeneration,
+						requestId: input.requestId,
+						requestSha256: input.requestSha256,
+						ownerSessionId,
+						capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+						classification,
+						state: "active",
+						round: 1,
+						parentCommit: verification.request.integrationHead,
+						canonicalGates: verification.manifest?.gates ?? [],
+						canonicalGatesSha256: sha256(stableJson(verification.manifest?.gates ?? [])),
+						effectiveGates: verification.manifest?.gates ?? [],
+						operationId,
+						operationPayloadSha256: inputHash,
+					});
+				} else if (repair.state === "failed" || repair.state === "paused") {
 					repair = this.store.updateIntegrationRepair(repair.repairId, {
 						requestId: input.requestId,
 						requestSha256: input.requestSha256,
@@ -1445,35 +1513,14 @@ export class HerderRunManager {
 						successorRequestSha256: null,
 						successorManifest: null,
 						successorManifestSha256: null,
+						operationId,
+						operationPayloadSha256: inputHash,
 						detail: null,
 					});
-				} else {
-					validateRepairSession(input.ownerSessionId, repair.ownerSessionId);
-					this.store.recordIntegrationRepairAudit(repair.repairId, operationId, "begin", repairInputHash(input), repairAuditEvidence(input));
-					return this.reply();
+				} else if (!repair.operationId || !repair.operationPayloadSha256) {
+					repair = this.store.updateIntegrationRepair(repair.repairId, { operationId, operationPayloadSha256: inputHash });
 				}
-			} else {
-				repair = this.store.putIntegrationRepair({
-					repairId: input.repairId || randomUUID(),
-					runId: run.runId,
-					generation: run.currentGeneration,
-					requestId: input.requestId,
-					requestSha256: input.requestSha256,
-					ownerSessionId,
-					capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
-					classification,
-					state: "active",
-					round: 1,
-					parentCommit: verification.request.integrationHead,
-					canonicalGates: verification.manifest?.gates ?? [],
-					canonicalGatesSha256: sha256(stableJson(verification.manifest?.gates ?? [])),
-					effectiveGates: verification.manifest?.gates ?? [],
-					operationId,
-					operationPayloadSha256: repairInputHash(input),
-				});
-			}
-			this.store.transaction(() => {
-				this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", repairInputHash(input), repairAuditEvidence(input));
+				this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", inputHash, repairAuditEvidence(input));
 				this.store.updateRun({ status: "paused", terminalDetail: `Integration repair round ${repair!.round} is authorized for the owning main session.` });
 			});
 			return this.reply();
@@ -1523,10 +1570,16 @@ export class HerderRunManager {
 			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", repairInputHash(input), repairAuditEvidence(input));
 		});
 		if (classification === "code_defect") {
+			const replayHead = repair.state === "committed" && repair.currentCommit ? repair.currentCommit : null;
+			const durableCurrentHead = replayHead && repair.round > 1
+				? repair.supersededCommits.at(-1) ?? null
+				: replayHead ? null : repair.currentCommit;
 			const commit = driver.acceptIntegrationRepairCommit({
 				parent: repair.parentCommit,
 				round: repair.round,
-				currentHead: repair.currentCommit,
+				currentHead: durableCurrentHead,
+				replayHead,
+				allowedPaths: input.allowedPaths,
 				commitMessage: input.commitMessage,
 				allowCommit: true,
 			});

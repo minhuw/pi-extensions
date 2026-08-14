@@ -502,6 +502,8 @@ export class GitDriver {
 		parent: string;
 		round: number;
 		currentHead?: string | null;
+		replayHead?: string | null;
+		allowedPaths?: string[];
 		commitMessage?: string;
 		allowCommit?: boolean;
 	}): IntegrationRepairCommitResult {
@@ -514,47 +516,104 @@ export class GitDriver {
 		const symbolicBranch = gitValue(worktree, "symbolic-ref", "--short", "HEAD");
 		if (symbolicBranch !== branch) throw new Error(`Integration repair worktree is not on ${branch}`);
 		if (input.round < 1 || input.round > 3 || !Number.isSafeInteger(input.round)) throw new Error("Integration repair round must be between 1 and 3");
+		if (input.round > 1 && !input.currentHead) throw new Error("Later integration repair rounds require the durable current commit");
 		const parent = input.parent;
 		if (!/^[0-9a-f]{40,64}$/i.test(parent)) throw new Error("Integration repair parent must be a Git object identity");
+		const currentHead = input.currentHead ?? null;
+		const replayHead = input.replayHead ?? null;
+		if (currentHead && !/^[0-9a-f]{40,64}$/i.test(currentHead)) throw new Error("Integration repair current commit must be a Git object identity");
+		if (replayHead && !/^[0-9a-f]{40,64}$/i.test(replayHead)) throw new Error("Integration repair replay commit must be a Git object identity");
+		const message = String(input.commitMessage || "Fix integrated verification defect").trim();
+		if (input.round === 1 && (!message || /[\0\r\n]/.test(message) || message.length > 512)) throw new Error("Integration repair commit message is invalid");
+
 		const beforeRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
 		const branchBefore = this.branchHead(branch);
-		const expectedCurrent = input.currentHead ?? (input.round === 1 ? parent : branchBefore);
 		const worktreeBefore = this.worktreeHead(worktree);
 		const statusBefore = this.worktreeStatus(worktree);
-		let replayedCommit = false;
-		if (branchBefore !== expectedCurrent || worktreeBefore !== expectedCurrent) {
-			const candidateParents = gitValue(worktree, "rev-list", "--parents", "-n", "1", worktreeBefore).split(/\s+/).filter(Boolean).slice(1);
-			if (branchBefore !== worktreeBefore || statusBefore || candidateParents.length !== 1 || candidateParents[0] !== parent) {
-				throw new Error(`Integration repair branch or worktree moved: expected ${expectedCurrent}, found ${branchBefore}`);
-			}
-			replayedCommit = true;
+		const expectedCurrent = input.round === 1 ? parent : currentHead!;
+		if (input.round === 1 && currentHead && currentHead !== parent) {
+			throw new Error(`Round 1 integration repair must start at parent ${parent}, found durable current ${currentHead}`);
 		}
+
+		const statusPaths = (): string[] => {
+			const lines = git(worktree, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout.split(/\r?\n/).filter(Boolean);
+			const paths: string[] = [];
+			for (const line of lines) {
+				if (line.length < 4) continue;
+				const candidate = line.slice(3);
+				for (const part of candidate.includes(" -> ") ? candidate.split(" -> ") : [candidate]) {
+					const normalized = part.replace(/^\"|\"$/g, "").replaceAll("\\\\", "/");
+					if (normalized && !paths.includes(normalized)) paths.push(normalized);
+				}
+			}
+			return paths.sort();
+		};
+		const normalizePath = (candidate: string): string => {
+			const normalized = candidate.replaceAll("\\\\", "/").replace(/^\.\//, "");
+			if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) throw new Error(`Integration repair path is not repository-relative: ${candidate}`);
+			return normalized;
+		};
+		const allowedPaths = input.allowedPaths?.map(normalizePath);
+		const protectedRoot = normalizePath(path.relative(this.repoRoot, this.planDirectory));
+		const validateChangedPaths = (paths: string[]): void => {
+			for (const candidate of paths.map(normalizePath)) {
+				if (candidate === protectedRoot || candidate.startsWith(`${protectedRoot}/`)) {
+					throw new Error(`Integration repair cannot modify protected plan path ${candidate}`);
+				}
+				if (allowedPaths && !allowedPaths.some((allowed) => candidate === allowed || candidate.startsWith(`${allowed}/`))) {
+					throw new Error(`Integration repair path ${candidate} is not recorded as failure-related`);
+				}
+			}
+		};
+		const commitPaths = (): string[] => this.changedPaths(worktree, parent).filter((candidate) => candidate);
+		const validateCommitIdentity = (head: string): string[] => {
+			const parents = gitValue(worktree, "rev-list", "--parents", "-n", "1", head).split(/\s+/).filter(Boolean).slice(1);
+			if (parents.length !== 1) throw new Error("Integration repair commit must be a non-merge commit");
+			if (parents[0] !== parent) throw new Error(`Integration repair commit parent changed: expected ${parent}, found ${parents[0]}`);
+			if (git(this.repoRoot, ["diff", "--quiet", parent, head], true).status === 0) throw new Error("Integration repair commit must contain a non-empty diff");
+			const paths = commitPaths();
+			if (paths.length === 0) throw new Error("Integration repair commit has no changed paths");
+			validateChangedPaths(paths);
+			return paths;
+		};
+
+		const existingStatusPaths = statusPaths();
+		validateChangedPaths(existingStatusPaths);
+		if (input.round > 1 && !replayHead) validateChangedPaths(this.changedPaths(worktree, parent));
+		let replayedCommit = false;
+		if (replayHead) {
+			if (replayHead === expectedCurrent || branchBefore !== replayHead || worktreeBefore !== replayHead || statusBefore) {
+				throw new Error(`Integration repair replay head does not match the clean assigned transition: expected ${replayHead}, found ${branchBefore}`);
+			}
+			validateCommitIdentity(replayHead);
+			replayedCommit = true;
+		} else if (branchBefore !== expectedCurrent || worktreeBefore !== expectedCurrent) {
+			throw new Error(`Integration repair branch or worktree moved: expected ${expectedCurrent}, found ${branchBefore}`);
+		}
+
 		let committed = false;
 		if (statusBefore && !replayedCommit) {
 			if (input.allowCommit === false) throw new Error("Integration repair worktree must be committed before finish");
-			git(worktree, ["add", "--all"]);
+			if (existingStatusPaths.length === 0) throw new Error("Integration repair worktree has no repository paths to commit");
+			git(worktree, ["add", "--", ...existingStatusPaths]);
 			if (input.round > 1) {
 				git(worktree, ["commit", "--amend", "--no-edit"]);
 			} else {
-				const message = String(input.commitMessage || "Fix integrated verification defect").trim();
-				if (!message || /[\0\r\n]/.test(message) || message.length > 512) throw new Error("Integration repair commit message is invalid");
 				git(worktree, ["commit", "-m", message]);
 			}
 			committed = true;
+		} else if (input.round > 1 && !replayedCommit) {
+			throw new Error("Later integration repair rounds require a dirty amendment or explicit replay evidence");
 		}
+
 		const head = this.worktreeHead(worktree);
 		if (this.branchHead(branch) !== head) throw new Error("Integration repair branch and worktree heads diverged");
 		if (this.worktreeStatus(worktree)) throw new Error("Integration repair worktree is not clean after commit");
-		const parents = gitValue(worktree, "rev-list", "--parents", "-n", "1", head).split(/\s+/).filter(Boolean).slice(1);
-		if (parents.length !== 1) throw new Error("Integration repair commit must be a non-merge commit");
-		if (parents[0] !== parent) throw new Error(`Integration repair commit parent changed: expected ${parent}, found ${parents[0]}`);
-		if (git(this.repoRoot, ["diff", "--quiet", parent, head], true).status === 0) throw new Error("Integration repair commit must contain a non-empty diff");
+		const changedPaths = validateCommitIdentity(head);
 		const afterRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
 		const normalizeRefs = (value: string): string => value.split(/\r?\n/).filter(Boolean).filter((line) => !line.startsWith(`refs/heads/${this.integrationBranch}=`)).sort().join("\n");
 		if (normalizeRefs(beforeRefs) !== normalizeRefs(afterRefs)) throw new Error("Integration repair changed a manager-owned Herder ref");
 		const tree = this.worktreeTree(worktree);
-		const changedPaths = this.changedPaths(worktree, parent);
-		if (changedPaths.length === 0) throw new Error("Integration repair commit has no changed paths");
 		return {
 			head,
 			tree,

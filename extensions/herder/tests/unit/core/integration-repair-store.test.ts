@@ -6,7 +6,7 @@ import test from "node:test";
 import { normalizeIntegrationRepairGates } from "../../../src/core/verification.ts";
 import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { integrationRepairCapabilityDigest, sha256, stableJson, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type VerificationGate } from "../../../src/shared/protocol.ts";
 
 function seedRun(database: NonNullable<ReturnType<typeof openExecutionDatabase>>, runId = "repair-run"): void {
 	const now = "2026-08-13T00:00:00.000Z";
@@ -97,6 +97,53 @@ test("repair rows and audits converge on identical replay and reject divergent e
 		const operation = store.database.prepare("SELECT payload_json FROM manager_operations WHERE operation_id = 'op-repair'").get() as { payload_json: string };
 		assert.equal(operation.payload_json.includes(token), false);
 		assert.equal(operation.payload_json.includes(integrationRepairCapabilityDigest(token)), true);
+		store.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("repair reply persistence stores only the capability digest and restores request-bound access", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-reply-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const requestId = "verify-reply";
+		const token = integrationRepairCapabilityToken(requestId);
+		const reply = { integrationRepair: {
+			requestId,
+			capabilityToken: token,
+			capabilityTokenSha256: integrationRepairCapabilityDigest(token),
+		} };
+		store.submitOperation("reply-operation", "integration_repair", { operation: "begin", requestId, capabilityToken: token });
+		assert.equal(store.claimNextOperation()?.operationId, "reply-operation");
+		const receipt = store.completeOperation("reply-operation", reply);
+		const storedResult = store.database.prepare("SELECT result_json FROM manager_operations WHERE operation_id = 'reply-operation'").get() as { result_json: string };
+		assert.equal(storedResult.result_json.includes(token), false);
+		assert.equal(storedResult.result_json.includes(integrationRepairCapabilityDigest(token)), true);
+		assert.equal((receipt.result as { integrationRepair: { capabilityToken?: string } }).integrationRepair.capabilityToken, token);
+		const exposed = store.operationReceipt("reply-operation")!;
+		assert.equal((exposed.result as { integrationRepair: { capabilityToken?: string } }).integrationRepair.capabilityToken, token);
+		store.putSnapshot(reply as never);
+		const storedSnapshot = store.database.prepare("SELECT reply_json FROM manager_snapshots WHERE singleton = 1").get() as { reply_json: string };
+		assert.equal(storedSnapshot.reply_json.includes(token), false);
+		assert.equal(storedSnapshot.reply_json.includes(integrationRepairCapabilityDigest(token)), true);
+		assert.equal((store.getSnapshot() as never as { integrationRepair: { capabilityToken?: string } }).integrationRepair.capabilityToken, token);
+		store.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("a claimed begin without a repair row is replayed after recovery", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-recovery-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		store.submitOperation("missing-row-begin", "integration_repair", { operation: "begin", requestId: "verify-1", capabilityToken: "d".repeat(64) });
+		assert.equal(store.claimNextOperation()?.state, "running");
+		store.recoverRunningOperations();
+		assert.equal(store.getOperation("missing-row-begin")?.state, "accepted");
 		store.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });

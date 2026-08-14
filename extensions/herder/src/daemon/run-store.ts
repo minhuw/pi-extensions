@@ -299,6 +299,40 @@ function durableOperationPayload(kind: ManagerOperationKind, payload: unknown): 
 	};
 }
 
+function mapIntegrationRepairReply(value: unknown, restore: boolean): unknown {
+	if (Array.isArray(value)) return value.map((entry) => mapIntegrationRepairReply(entry, restore));
+	if (!value || typeof value !== "object") return value;
+	const mapped: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+		mapped[key] = mapIntegrationRepairReply(entry, restore);
+	}
+	const repair = mapped.integrationRepair;
+	if (!repair || typeof repair !== "object" || Array.isArray(repair)) return mapped;
+	const request = repair as Record<string, unknown>;
+	const token = typeof request.capabilityToken === "string" ? request.capabilityToken : "";
+	if (restore) {
+		if (!token && typeof request.requestId === "string") {
+			const expected = integrationRepairCapabilityToken(request.requestId);
+			if (request.capabilityTokenSha256 === integrationRepairCapabilityDigest(expected)) {
+				request.capabilityToken = expected;
+			}
+		}
+	} else {
+		delete request.capabilityToken;
+		if (token) request.capabilityTokenSha256 = integrationRepairCapabilityDigest(token);
+	}
+	mapped.integrationRepair = request;
+	return mapped;
+}
+
+function durableManagerReply(value: unknown): unknown {
+	return mapIntegrationRepairReply(value, false);
+}
+
+function exposedManagerReply(value: unknown): unknown {
+	return mapIntegrationRepairReply(value, true);
+}
+
 function rowToRun(row: Record<string, unknown> | undefined): StoredRun | null {
 	if (!row) return null;
 	return {
@@ -452,7 +486,7 @@ function rowToOperation(row: Record<string, unknown>): StoredManagerOperation {
 		payloadSha256: String(row.payload_sha256),
 		state: row.state as ManagerOperationState,
 		attemptCount: Number(row.attempt_count),
-		result: parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null),
+		result: exposedManagerReply(parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null)),
 		error: row.error === null ? null : String(row.error),
 		acceptedAt: String(row.accepted_at),
 		startedAt: row.started_at === null ? null : String(row.started_at),
@@ -641,6 +675,30 @@ export class RunStore {
 			: openExecutionDatabase(planDirectory, { create: true, readOnly: false });
 		if (!database) throw new Error(`Herder execution database is not initialized: ${this.databasePath}`);
 		this.database = database;
+		if (!options.readOnly) this.scrubPersistedIntegrationRepairReplies();
+	}
+
+	private scrubPersistedIntegrationRepairReplies(): void {
+		this.transaction(() => {
+			const operations = this.database.prepare("SELECT operation_id, result_json FROM manager_operations WHERE result_json IS NOT NULL").all() as Array<{ operation_id: string; result_json: string | null }>;
+			for (const row of operations) {
+				if (!row.result_json) continue;
+				let parsed: unknown;
+				try { parsed = JSON.parse(row.result_json); } catch { continue; }
+				const durable = durableManagerReply(parsed);
+				if (stableJson(parsed) !== stableJson(durable)) this.database.prepare("UPDATE manager_operations SET result_json = ? WHERE operation_id = ?").run(JSON.stringify(durable), row.operation_id);
+			}
+			const snapshot = this.database.prepare("SELECT reply_json FROM manager_snapshots WHERE singleton = 1").get() as { reply_json?: string } | undefined;
+			if (snapshot?.reply_json) {
+				try {
+					const parsed = JSON.parse(snapshot.reply_json);
+					const durable = durableManagerReply(parsed);
+					if (stableJson(parsed) !== stableJson(durable)) this.database.prepare("UPDATE manager_snapshots SET reply_json = ? WHERE singleton = 1").run(JSON.stringify(durable));
+				} catch {
+					// Leave malformed historical evidence for the normal integrity path.
+				}
+			}
+		});
 	}
 
 	close(): void {
@@ -714,7 +772,17 @@ export class RunStore {
 			if (operation.kind === "integration_repair" || operation.kind === "repair") {
 				const repairId = typeof payload.repairId === "string" ? payload.repairId : "";
 				const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
-				const repair = repairId ? this.getIntegrationRepair(repairId) : requestId ? this.getIntegrationRepairForRequest(requestId) : null;
+				const repairOperation = typeof payload.operation === "string" ? payload.operation : "";
+				const repairForRequest = requestId ? this.getIntegrationRepairForRequest(requestId) : null;
+				const repair = repairId ? this.getIntegrationRepair(repairId) : repairForRequest;
+				// A begin with no repair row proves that the row transaction never
+				// committed. Requeue the exact receipt instead of terminalizing it;
+				// finish and cancel still fail closed when their evidence is absent.
+				if (repairOperation === "begin" && !repair && !repairForRequest) {
+					this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
+						.run(new Date().toISOString(), operation.operationId);
+					continue;
+				}
 				if (repair && repair.state !== "interrupted") {
 					this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
 						.run(new Date().toISOString(), operation.operationId);
@@ -757,14 +825,15 @@ export class RunStore {
 
 	completeOperation(operationId: string, result: unknown): ManagerOperationReceipt {
 		const current = this.getOperation(operationId);
+		const durableResult = durableManagerReply(result);
 		if (current?.state === "succeeded") {
-			if (stableJson(current.result) !== stableJson(result)) throw new Error(`Operation ${operationId} was completed with different evidence`);
+			if (stableJson(durableManagerReply(current.result)) !== stableJson(durableResult)) throw new Error(`Operation ${operationId} was completed with different evidence`);
 			return operationReceipt(current);
 		}
 		if (current?.state === "failed") throw new Error(`Operation ${operationId} is already failed`);
 		const now = new Date().toISOString();
 		this.database.prepare("UPDATE manager_operations SET state = 'succeeded', result_json = ?, error = NULL, finished_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'running'")
-			.run(JSON.stringify(result), now, now, operationId);
+			.run(JSON.stringify(durableResult), now, now, operationId);
 		const operation = this.getOperation(operationId);
 		if (!operation || operation.state !== "succeeded") throw new Error(`Operation ${operationId} is not running`);
 		return operationReceipt(operation);
@@ -803,7 +872,7 @@ export class RunStore {
 			INSERT INTO manager_snapshots (singleton, revision, reply_json, updated_at)
 			VALUES (1, ?, ?, ?)
 			ON CONFLICT(singleton) DO UPDATE SET revision = excluded.revision, reply_json = excluded.reply_json, updated_at = excluded.updated_at
-		`).run(revision, JSON.stringify(reply), new Date().toISOString());
+		`).run(revision, JSON.stringify(durableManagerReply(reply)), new Date().toISOString());
 	}
 
 	getSnapshot(): ManagerReply | null {
@@ -812,7 +881,7 @@ export class RunStore {
 
 	getSnapshotEnvelope(): { revision: number; updatedAt: string; reply: ManagerReply } | null {
 		const row = this.database.prepare("SELECT revision, reply_json, updated_at FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number; reply_json?: string; updated_at?: string } | undefined;
-		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: JSON.parse(row.reply_json) as ManagerReply } : null;
+		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: exposedManagerReply(JSON.parse(row.reply_json)) as ManagerReply } : null;
 	}
 
 	getAttention(requestId: string): StoredAttentionRequest | null {

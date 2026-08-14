@@ -641,6 +641,8 @@ export interface IntegrationRepairInput {
 	gates?: VerificationGate[];
 	/** Explicitly recorded append-only additions for code repair. */
 	gateAdditions?: VerificationGate[];
+	/** Optional failure-related repository paths allowed in the accepted commit. */
+	allowedPaths?: string[];
 	commitMessage?: string;
 }
 
@@ -655,6 +657,7 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 	if (input.capabilityToken !== integrationRepairCapabilityToken(input.requestId!)) throw new Error("Integration repair capability token is not request-bound");
 	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
+	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((path) => typeof path !== "string" || !path || path.length > 2_048 || /[\0\r\n]/.test(path)))) throw new Error("Integration repair allowed paths are invalid");
 }
 
 export function validateIntegrationRepairRequest(value: unknown): asserts value is IntegrationRepairRequest {
