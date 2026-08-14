@@ -979,6 +979,101 @@ test("request-bound integration repair edits only after begin and automatically 
 	}
 });
 
+test("failed repaired verification replays through manager deduplication", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-repair-replay-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		const factory = new CapturedWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "repair replay session_start");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "repair replay fire");
+		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "repair replay implementer");
+		await withDeadline(implementer.started.promise, "repair replay implementer start");
+		implementer.release();
+		const reviewer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-reviewer" && session.action.workerMode === "DISCOVERY"), "repair replay reviewer");
+		await withDeadline(reviewer.settled.promise, "repair replay reviewer settle");
+		const verificationPrompt = (await withDeadline(api.waitForUserMessage(), "repair replay verification prompt")).content;
+		const requestId = verificationRequestId(verificationPrompt);
+		await withDeadline(api.tool("herder_verification").execute(
+			"verification",
+			{
+				planDirectory: "herder-plans",
+				requestId,
+				rationale: "The inherited gate intentionally remains failing to exercise a durable repair replay.",
+				gates: [{
+					gateId: "always-failing",
+					label: "always failing inherited gate",
+					cwd: ".",
+					argv: [process.execPath, "-e", "process.exit(7)"],
+					rationale: "Keeps the repaired successor in a durable failed state.",
+				}],
+			}, undefined, undefined, context), "repair replay failing verification");
+		const recoveryPrompt = (await withDeadline(api.waitForUserMessage(0, "HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1"), "repair replay recovery prompt")).content;
+		const ownerSessionId = fieldValue(recoveryPrompt, "MAIN_SESSION_ID");
+		const repairArgs = {
+			planDirectory: "herder-plans",
+			requestId,
+			requestSha256: fieldValue(recoveryPrompt, "REQUEST_SHA256"),
+			capabilityToken: fieldValue(recoveryPrompt, "CAPABILITY_TOKEN"),
+			ownerSessionId,
+		};
+		await withDeadline(api.tool("herder_integration_repair").execute(
+			"repair-replay-begin",
+			{ ...repairArgs, operation: "begin", classification: "code_defect" }, undefined, undefined, context), "repair replay begin");
+		const integrationWorktree = fieldValue(recoveryPrompt, "INTEGRATION_WORKTREE");
+		fs.writeFileSync(path.join(integrationWorktree, "src", "value.mjs"), "export const value = 3\n");
+		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const finishArgs = {
+			...repairArgs,
+			operation: "finish",
+			operationId: "repair-finish-replay-001",
+			observedCommit,
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: "fix: repair integrated verification defect",
+			detail: "The authorized integration worktree contains the bounded fix.",
+		};
+		const firstFinish = await withDeadline(api.tool("herder_integration_repair").execute("repair-replay-finish", finishArgs, undefined, undefined, context), "repair replay finish");
+		assert.equal(object(firstFinish).terminate, true);
+		const failedRepair = new RunStore(fixture.planDirectory);
+		try {
+			const run = failedRepair.getRun()!;
+			const repair = failedRepair.getIntegrationRepairForRun(run.runId, run.currentGeneration);
+			assert.equal(repair?.state, "failed");
+			assert.ok(repair?.currentCommit);
+		} finally { failedRepair.close(); }
+
+		const replay = await withDeadline(api.tool("herder_integration_repair").execute("repair-replay-finish", finishArgs, undefined, undefined, context), "repair replay exact finish");
+		assert.equal(object(replay).terminate, true);
+		assert.equal(object(object(replay).details).operationId, "repair-finish-replay-001");
+		await assert.rejects(
+			() => api!.tool("herder_integration_repair").execute(
+				"repair-replay-divergent",
+				{ ...finishArgs, detail: "divergent replay evidence" },
+				undefined,
+				undefined,
+				context,
+			),
+			/replayed with different payload/,
+		);
+		await withDeadline(api.invoke("session_shutdown", context), "repair replay session_shutdown");
+		shutdown = true;
+	} finally {
+		if (api && context && !shutdown) await withDeadline(api.invoke("session_shutdown", context), "repair replay cleanup session_shutdown", 5_000).catch(() => {});
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 async function fireThroughPassingVerification(
 	api: CapturedExtensionAPI,
 	factory: CapturedWorkerFactory,

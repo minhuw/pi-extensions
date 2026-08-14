@@ -1350,7 +1350,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		if (operation === "finish") {
 			if (!observedCommit || !/^[0-9a-f]{40,64}$/i.test(observedCommit)) throw new Error("Integration repair finish requires the observed integration commit identity");
-			const durableFinishReplay = ["committed", "verifying", "passed"].includes(request.state)
+			// A failed or paused successor can still be the durable result of this
+			// finish. Its observedCommit is the pre-repair parent, so defer the
+			// replay identity and payload check to manager operation deduplication.
+			const durableFinishReplay = ["committed", "verifying", "passed", "failed", "paused"].includes(request.state)
 				&& Boolean(request.currentCommit)
 				&& head === request.currentCommit;
 			if (request.state !== "committing" && !durableFinishReplay && head !== observedCommit) throw new Error(`Observed integration commit ${observedCommit} does not match the assigned worktree head ${head}`);
