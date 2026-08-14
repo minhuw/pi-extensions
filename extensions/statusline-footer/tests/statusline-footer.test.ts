@@ -18,9 +18,24 @@ import statuslineFooter, {
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
-type FooterComponent = { dispose?: () => void };
+type FooterComponent = {
+	dispose?: () => void;
+	render: (width: number) => string[];
+};
 
-function createHarness(sessionId: string, mode: "tui" | "print") {
+type HarnessOptions = {
+	model?: { id: string; provider?: string; reasoning?: boolean } | null;
+	thinkingLevel?: string;
+	contextUsage?: { percent?: number; tokens?: number; contextWindow: number } | null;
+	branch?: any[];
+	cwd?: string;
+	gitBranch?: string | null;
+	extensionStatuses?: string[];
+	isIdle?: boolean;
+	hasPendingMessages?: boolean;
+};
+
+function createHarness(sessionId: string, mode: "tui" | "print", options: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => unknown }>();
 	const notifications: string[] = [];
@@ -29,11 +44,14 @@ function createHarness(sessionId: string, mode: "tui" | "print") {
 
 	const tui = { requestRender };
 	const footerData = {
-		onBranchChange: () => vi.fn(),
-		getGitBranch: () => null,
-		getExtensionStatuses: () => new Map(),
+		onBranchChange: () => () => {},
+		getGitBranch: () => options.gitBranch ?? "main",
+		getExtensionStatuses: () => new Map((options.extensionStatuses ?? ["READY"]).map((status) => [status, status])),
 	};
-	const theme = {};
+	const theme = {
+		fg: (_token: string, text: string) => text,
+		bold: (text: string) => text,
+	};
 
 	const ui = {
 		setFooter: vi.fn((factory: unknown) => {
@@ -52,9 +70,20 @@ function createHarness(sessionId: string, mode: "tui" | "print") {
 	const ctx = {
 		mode,
 		hasUI: mode === "tui",
-		cwd: process.cwd(),
+		cwd: options.cwd ?? process.cwd(),
+		model: options.model === null
+			? undefined
+			: options.model ?? { id: "k3", provider: "moonshot", reasoning: true },
+		thinkingLevel: options.thinkingLevel ?? "high",
+		isIdle: () => options.isIdle ?? true,
+		hasPendingMessages: () => options.hasPendingMessages ?? false,
+		getContextUsage: () => options.contextUsage === null
+			? undefined
+			: options.contextUsage ?? { percent: 42.5, tokens: 42_500, contextWindow: 100_000 },
 		sessionManager: {
 			getSessionId: () => sessionId,
+			getLeafId: () => "leaf",
+			getBranch: () => options.branch ?? [],
 		},
 		ui,
 	} as unknown as ExtensionContext;
@@ -159,6 +188,88 @@ describe("statusline footer visual language", () => {
 		expect(hasNerdFonts()).toBe(true);
 		if (previous === undefined) delete process.env.STATUSLINE_NERD_FONTS;
 		else process.env.STATUSLINE_NERD_FONTS = previous;
+	});
+});
+
+describe("statusline footer rendering", () => {
+	const branch = [
+		{
+			type: "message",
+			message: { role: "user", timestamp: 1_000 },
+		},
+		{
+			type: "message",
+			message: {
+				role: "assistant",
+				usage: {
+					input: 1_000,
+					output: 250,
+					cacheRead: 500,
+					reasoning: 100,
+					cost: { total: 0.75 },
+				},
+				content: [{ type: "toolCall", arguments: { path: "src/example.ts" } }],
+			},
+		},
+		{ type: "message", message: { role: "toolResult", isError: true } },
+		{ type: "compaction" },
+	];
+
+	it("renders four width-bounded full-mode lines with representative facts", async () => {
+		const harness = createHarness("render-full-session", "tui", { branch });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		const lines = harness.getFooter()!.render(100);
+		expect(lines).toHaveLength(4);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+		expect(lines[0]).toContain("k3");
+		expect(lines[0]).toContain("HIGH");
+		expect(lines[0]).toContain("42.5%");
+		expect(lines[1]).toContain("─");
+		expect(visibleWidth(lines[1]!)).toBe(100);
+		expect(lines[2]).toContain("$0.750");
+		expect(lines[2]).toContain("33%");
+		expect(lines[3]).toContain("main");
+		expect(lines[3]).toContain("READY");
+		expect(lines[3]).toContain("1 touched");
+		harness.getFooter()?.dispose?.();
+	});
+
+	it("renders compact mode and restores the full layout", async () => {
+		const harness = createHarness("render-mode-session", "tui", { branch });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.runCommand("footer", "compact");
+
+		const compact = harness.getFooter()!.render(80);
+		expect(compact).toHaveLength(1);
+		expect(visibleWidth(compact[0]!)).toBeLessThanOrEqual(80);
+		expect(compact[0]).toContain("k3");
+		expect(compact[0]).toContain("42.5%");
+		expect(compact[0]).toContain("$0.750");
+
+		await harness.runCommand("footer", "full");
+		const full = harness.getFooter()!.render(80);
+		expect(full).toHaveLength(4);
+		for (const line of full) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		harness.getFooter()?.dispose?.();
+	});
+
+	it("does not throw or overflow at narrow width with missing model and context", async () => {
+		const harness = createHarness("render-boundary-session", "tui", {
+			model: null,
+			contextUsage: null,
+			branch: [],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		const lines = harness.getFooter()!.render(24);
+		expect(lines).toHaveLength(4);
+		expect(lines[0]).toContain("no-model");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+		harness.getFooter()?.dispose?.();
 	});
 });
 
