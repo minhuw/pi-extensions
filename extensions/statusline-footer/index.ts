@@ -27,7 +27,7 @@
 import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -204,6 +204,15 @@ interface Stats {
 	durationMs: number;
 }
 
+function addUsage(stats: Stats, usage: Usage | undefined): void {
+	if (!usage) return;
+	stats.input += usage.input;
+	stats.output += usage.output;
+	stats.cacheRead += usage.cacheRead;
+	stats.reasoning += usage.reasoning ?? 0;
+	stats.cost += usage.cost.total;
+}
+
 interface StatsCache {
 	leafId: string | null;
 	firstTs: number | undefined;
@@ -248,6 +257,11 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 	for (const e of ctx.sessionManager.getBranch()) {
 		if (e.type === "compaction") {
 			s.compactions++;
+			addUsage(s, e.usage);
+			continue;
+		}
+		if (e.type === "branch_summary") {
+			addUsage(s, e.usage);
 			continue;
 		}
 		if (e.type !== "message") continue;
@@ -258,20 +272,16 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 			s.turns++;
 		} else if (m.role === "assistant") {
 			const a = m as AssistantMessage;
-			// Guard against malformed/aborted messages with missing usage
-			s.input += a.usage?.input ?? 0;
-			s.output += a.usage?.output ?? 0;
-			s.cacheRead += a.usage?.cacheRead ?? 0;
-			s.reasoning += a.usage?.reasoning ?? 0;
-			s.cost += a.usage?.cost?.total ?? 0;
+			addUsage(s, a.usage);
 			for (const block of a.content ?? []) {
 				if (block.type !== "toolCall") continue;
 				s.toolCalls++;
 				const args = block.arguments as Record<string, unknown>;
 				if (typeof args.path === "string") files.add(args.path);
 			}
-		} else if (m.role === "toolResult" && m.isError) {
-			s.errors++;
+		} else if (m.role === "toolResult") {
+			addUsage(s, m.usage);
+			if (m.isError) s.errors++;
 		}
 	}
 

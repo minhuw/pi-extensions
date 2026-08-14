@@ -84,6 +84,9 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 			getSessionId: () => sessionId,
 			getLeafId: () => "leaf",
 			getBranch: () => options.branch ?? [],
+			getEntries: () => {
+				throw new Error("collectStats must use getBranch()");
+			},
 		},
 		ui,
 	} as unknown as ExtensionContext;
@@ -211,8 +214,37 @@ describe("statusline footer rendering", () => {
 				content: [{ type: "toolCall", arguments: { path: "src/example.ts" } }],
 			},
 		},
-		{ type: "message", message: { role: "toolResult", isError: true } },
-		{ type: "compaction" },
+		{ type: "message", message: {
+			role: "toolResult",
+			isError: true,
+			usage: {
+				input: 200,
+				output: 50,
+				cacheRead: 100,
+				reasoning: 25,
+				cost: { total: 0.10 },
+			},
+		} },
+		{
+			type: "compaction",
+			usage: {
+				input: 300,
+				output: 75,
+				cacheRead: 150,
+				reasoning: 30,
+				cost: { total: 0.20 },
+			},
+		},
+		{
+			type: "branch_summary",
+			usage: {
+				input: 400,
+				output: 100,
+				cacheRead: 200,
+				reasoning: 40,
+				cost: { total: 0.30 },
+			},
+		},
 	];
 
 	it("renders four width-bounded full-mode lines with representative facts", async () => {
@@ -228,11 +260,62 @@ describe("statusline footer rendering", () => {
 		expect(lines[0]).toContain("42.5%");
 		expect(lines[1]).toContain("─");
 		expect(visibleWidth(lines[1]!)).toBe(100);
-		expect(lines[2]).toContain("$0.750");
-		expect(lines[2]).toContain("33%");
+		expect(lines[2]).toContain("$1.35");
+		expect(lines[2]).toContain("1.9k");
+		expect(lines[2]).toContain("475");
+		expect(lines[2]).toContain("950");
+		expect(lines[2]).toContain("195 think");
 		expect(lines[3]).toContain("main");
 		expect(lines[3]).toContain("READY");
 		expect(lines[3]).toContain("1 touched");
+		harness.getFooter()?.dispose?.();
+	});
+
+
+	it("counts optional usage once and only on the active branch", async () => {
+		const activeBranch = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					usage: { input: 1, output: 2, cacheRead: 3, reasoning: 4, cost: { total: 0.01 } },
+				},
+			},
+			{ type: "compaction", usage: { input: 10, output: 20, cacheRead: 30, reasoning: 40, cost: { total: 0.10 } } },
+			{ type: "branch_summary", usage: { input: 100, output: 200, cacheRead: 300, reasoning: 400, cost: { total: 1 } } },
+			{ type: "message", message: { role: "toolResult", usage: { input: 1, output: 2, cacheRead: 3, reasoning: 4, cost: { total: 0.01 } } } },
+		];
+		const harness = createHarness("usage-branch-boundary", "tui", {
+			branch: activeBranch,
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		const lines = harness.getFooter()!.render(240);
+		const totals = lines[2]!;
+		expect(lines[2]).toContain("$1.12");
+		expect(totals).toContain("112");
+		expect(totals).toContain("224");
+		expect(totals).toContain("336");
+		expect(totals).toContain("448 think");
+		expect(totals).not.toContain("1M");
+		harness.getFooter()?.dispose?.();
+	});
+
+	it("tolerates missing usage on every optional carrier", async () => {
+		const harness = createHarness("usage-missing", "tui", {
+			branch: [
+				{ type: "message", message: { role: "toolResult", isError: true } },
+				{ type: "compaction" },
+				{ type: "branch_summary" },
+			],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+
+		const lines = harness.getFooter()!.render(240);
+		expect(lines[2]).toContain("$0.000");
+		expect(lines[2]).not.toContain("think");
 		harness.getFooter()?.dispose?.();
 	});
 
@@ -247,7 +330,7 @@ describe("statusline footer rendering", () => {
 		expect(visibleWidth(compact[0]!)).toBeLessThanOrEqual(80);
 		expect(compact[0]).toContain("k3");
 		expect(compact[0]).toContain("42.5%");
-		expect(compact[0]).toContain("$0.750");
+		expect(compact[0]).toContain("$1.35");
 
 		await harness.runCommand("footer", "full");
 		const full = harness.getFooter()!.render(80);
