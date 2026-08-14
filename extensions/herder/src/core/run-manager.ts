@@ -1674,6 +1674,24 @@ export class HerderRunManager {
 		if (!repair) throw new Error("Integration repair begin must precede finish or cancel");
 		validateRepairSession(input.ownerSessionId, repair.ownerSessionId);
 		if (![repair.requestId, repair.successorRequestId].includes(input.requestId)) throw new Error("Integration repair request is not the active transaction request");
+		const finishRepair = repair;
+		const validateFinishReplayNamespace = async (): Promise<void> => {
+			const replayDriver = this.driver(run);
+			await replayDriver.verifyCheckout(run.checkoutStateToken);
+			const replayBeginRefSnapshot = repairBeginRefSnapshot(finishRepair);
+			replayDriver.validateIntegrationRepairNamespace({
+				beginRefSnapshot: replayBeginRefSnapshot,
+				beginRefSnapshotSha256: finishRepair.beginRefSnapshotSha256!,
+				expectedIntegrationHead: finishRepair.currentCommit ?? finishRepair.parentCommit,
+				expectedWorktreeHead: finishRepair.currentCommit ?? finishRepair.parentCommit,
+			});
+		};
+		if (input.operation === "finish" && finishRepair.state === "passed") {
+			if (finishRepair.operationId !== operationId || finishRepair.operationPayloadSha256 !== inputHash) {
+				throw new Error("Integration repair finish was replayed with different durable evidence");
+			}
+			await validateFinishReplayNamespace();
+		}
 		if (repair.state === "passed" || repair.state === "cancelled") return this.reply();
 		if (input.operation === "cancel") {
 			if (!["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(repair.state)) return this.reply();
@@ -1695,7 +1713,13 @@ export class HerderRunManager {
 		const beginRefSnapshotSha256 = repair.beginRefSnapshotSha256!;
 		if (!["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(repair.state)) return this.reply();
 		if (["failed", "paused", "interrupted"].includes(repair.state)) {
-			if (repair.operationId === operationId) return this.reply();
+			if (repair.operationId === operationId) {
+				if (input.operation === "finish") {
+					if (repair.operationPayloadSha256 !== inputHash) throw new Error("Integration repair finish was replayed with different durable evidence");
+					await validateFinishReplayNamespace();
+				}
+				return this.reply();
+			}
 			throw new Error("Integration repair finish requires a new begin transition after a failed round");
 		}
 		if ((repair.state === "verifying" || repair.state === "committed") && repair.successorRequestId && repair.successorManifest) {
@@ -1830,8 +1854,36 @@ export class HerderRunManager {
 		const stored = this.store.getVerification(run.runId, run.currentGeneration);
 		if (!stored) throw new Error("Herder is not waiting for a verification manifest");
 		const { manifest, manifestSha256 } = normalizeVerificationManifest(stored.request, input);
+		const driver = this.driver(run);
+		const successorRepair = stored.request.repairId ? this.store.getIntegrationRepair(stored.request.repairId) : null;
+		if (stored.request.repairId && (!successorRepair || successorRepair.successorRequestId !== stored.request.requestId)) {
+			throw new Error("Verification request is not bound to its durable integration repair successor");
+		}
+		const validateSuccessorNamespace = (requireEvidence: boolean): string | null => {
+			if (!successorRepair) return null;
+			if (!successorRepair.beginRefSnapshot || !successorRepair.beginRefSnapshotSha256) {
+				return requireEvidence ? "Integration repair begin namespace evidence is unavailable; cancel and restart the repair" : null;
+			}
+			try {
+				const beginRefSnapshot = repairBeginRefSnapshot(successorRepair);
+				driver.validateIntegrationRepairNamespace({
+					beginRefSnapshot,
+					beginRefSnapshotSha256: successorRepair.beginRefSnapshotSha256,
+					expectedIntegrationHead: stored.request.integrationHead,
+					expectedWorktreeHead: stored.request.integrationHead,
+				});
+			} catch (error) {
+				return `Verification gate changed the bound integration repair namespace: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return null;
+		};
 		if (stored.state === "passed" || stored.state === "failed") {
 			if (stored.manifestSha256 !== manifestSha256) throw new Error(`Verification request ${stored.request.requestId} was replayed with a different manifest`);
+			if (successorRepair?.beginRefSnapshot && successorRepair.beginRefSnapshotSha256) {
+				await driver.verifyCheckout(run.checkoutStateToken);
+				const namespaceError = validateSuccessorNamespace(false);
+				if (namespaceError) throw new Error(namespaceError);
+			}
 			if (stored.state === "passed") {
 				if (run.status !== "running") this.store.updateRun({ status: "running", terminalDetail: "Recovering passed verification." });
 				run = this.store.getRun()!;
@@ -1839,7 +1891,6 @@ export class HerderRunManager {
 			}
 			return this.reply();
 		}
-		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		if (driver.branchHead(run.integrationBranch) !== stored.request.integrationHead
 			|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
@@ -1856,8 +1907,12 @@ export class HerderRunManager {
 		try {
 			const frozenStateError = async (): Promise<string | null> => {
 				await driver.verifyCheckout(run!.checkoutStateToken);
-				const namespace = driver.inspectNamespace("resume");
-				if (!namespace.ok) return `Verification gate changed the Herder namespace: ${namespace.reason}`;
+				const repairNamespaceError = validateSuccessorNamespace(true);
+				if (repairNamespaceError) return repairNamespaceError;
+				if (!successorRepair) {
+					const namespace = driver.inspectNamespace("resume");
+					if (!namespace.ok) return `Verification gate changed the Herder namespace: ${namespace.reason}`;
+				}
 				if (driver.branchHead(run!.integrationBranch) !== stored.request.integrationHead
 					|| gitValue(run!.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
 					|| driver.worktreeStatus(run!.integrationWorktree)) return "Verification gate changed the frozen integration worktree.";
@@ -1865,9 +1920,8 @@ export class HerderRunManager {
 				if (!live || live.state !== "running" || live.manifestSha256 !== manifestSha256) return "Verification gate changed manager-owned verification state.";
 				return null;
 			};
-			let detail: string | null = null;
+			let detail: string | null = await frozenStateError();
 			for (const gate of manifest.gates) {
-				detail = await frozenStateError();
 				if (detail) break;
 				const [result] = driver.runVerificationGates(stored.request.requestId, run.integrationWorktree, [gate]);
 				gates.push(result!);

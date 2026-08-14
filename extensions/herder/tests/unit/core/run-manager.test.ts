@@ -1961,10 +1961,10 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-finish-crash");
 		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-finish-crash", [{
 			gateId: "failing-gate",
-			label: "deliberate failure",
+			label: "deliberate failure before repair",
 			cwd: ".",
-			argv: [process.execPath, "-e", "process.exit(1)"],
-			rationale: "Creates a durable repair transaction for crash replay.",
+			argv: [process.execPath, "-e", "process.exit(require('node:fs').readFileSync('src/value.mjs', 'utf8').includes('value = 3') ? 0 : 1)"],
+			rationale: "Creates a durable repair transaction for crash replay and passes after the repair.",
 		}]);
 		const repairRequest = payload(failed.reply.integrationRepair);
 		const token = String(repairRequest.capabilityToken);
@@ -2046,11 +2046,25 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 		try {
 			const recoveredRepair = recovered.getIntegrationRepair(repair.repairId)!;
 			assert.equal(recoveredRepair.currentCommit, committed.head);
+			assert.equal(recoveredRepair.state, "passed");
 			assert.equal(recoveredRepair.supersededCommits.length, 0);
 			assert.equal(git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), committed.head);
 		} finally {
 			recovered.close();
 		}
+
+		await stopService(fixture.planDirectory);
+		const replay = new RunStore(fixture.planDirectory);
+		try {
+			replay.database.prepare("UPDATE manager_operations SET state = 'running', result_json = NULL, error = NULL, finished_at = NULL, updated_at = ? WHERE operation_id = ?")
+				.run(new Date().toISOString(), finish.operationId);
+		} finally {
+			replay.close();
+		}
+		const driftRef = "refs/plan-herder/herder-plans/checkpoints/RUN/999";
+		git(fixture.repo, ["update-ref", driftRef, committed.head]);
+		service = await ensureService(fixture.planDirectory);
+		await assert.rejects(() => waitManagerOperation(service, finish.operationId), /manager-owned Herder ref/);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -2154,6 +2168,72 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 			assert.equal(after.getVerificationByRequestId(repaired.successorRequestId)?.state, "passed");
 		} finally {
 			after.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("successor verification rejects a gate-created Herder ref", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-successor-namespace-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-successor-namespace");
+		const retainedGate: VerificationGate = {
+			gateId: "failing-gate",
+			label: "create a namespace ref only after repair",
+			cwd: ".",
+			argv: [process.execPath, "-e", "const fs = require('node:fs'); if (!fs.readFileSync('src/value.mjs', 'utf8').includes('value = 3')) process.exit(1); require('node:child_process').execFileSync('git', ['update-ref', 'refs/plan-herder/herder-plans/checkpoints/RUN/001', 'HEAD'])"],
+			rationale: "Proves a successful gate cannot legitimize a post-begin Herder ref mutation.",
+		};
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-successor-namespace", [retainedGate]);
+		assert.equal(failed.reply.status, "failed");
+		const repairRequest = payload(failed.reply.integrationRepair);
+		const token = String(repairRequest.capabilityToken);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-successor-namespace-begin",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		await requestService(service, "/v1/integration-repair", begin);
+		fs.writeFileSync(path.join(String(repairRequest.integrationWorktree), "src/value.mjs"), "export const value = 3\n");
+		const finish = {
+			operation: "finish",
+			operationId: "repair-successor-namespace-finish",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: "fix: reject gate namespace drift",
+		};
+		const receipt = await submitManagerOperation(service, "integration_repair", finish, String(finish.operationId));
+		await waitManagerOperation(service, receipt.operationId);
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const repair = store.getIntegrationRepairForRequest(String(repairRequest.requestId))!;
+			assert.equal(repair.state, "failed");
+			assert.ok(repair.successorRequestId);
+			const successor = store.getVerificationByRequestId(repair.successorRequestId)!;
+			assert.equal(successor.state, "failed");
+			const evidence = payload(successor.result);
+			assert.equal(payload((evidence.gates as unknown[])[0]).ok, true);
+			assert.match(String(successor.terminalDetail), /bound integration repair namespace|manager-owned Herder ref/);
+			assert.equal(git(fixture.repo, ["show-ref", "--verify", "--quiet", "refs/plan-herder/herder-plans/checkpoints/RUN/001"], true).status, 0);
+		} finally {
+			store.close();
 		}
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
