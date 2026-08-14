@@ -87,28 +87,19 @@ export function createVerificationRequest(input: VerificationRequestInput): Veri
 	return { ...core, requestSha256: sha256(stableJson(core)) };
 }
 
-export function normalizeVerificationManifest(
-	request: VerificationRequest,
-	input: VerificationManifest,
-): { manifest: VerificationManifest; manifestSha256: string } {
-	if (!input || input.schemaVersion !== 1) throw new Error("Verification manifest schemaVersion must be 1");
-	for (const field of ["requestId", "requestSha256", "runId", "graphSha256", "runAssignmentSha256", "integrationHead", "integrationTree"] as const) {
-		if (String(input[field]) !== String(request[field])) throw new Error(`Verification manifest ${field} does not match the active request`);
-	}
-	if (input.generation !== request.generation) throw new Error("Verification manifest generation does not match the active request");
-	for (const field of ["predecessorRequestId", "repairId"] as const) {
-		if (input[field] !== undefined && String(input[field]) !== String(request[field] ?? "")) throw new Error(`Verification manifest ${field} does not match the active request`);
-	}
-	if (input.repairRound !== undefined && input.repairRound !== request.repairRound) throw new Error("Verification manifest repairRound does not match the active request");
-	const rationale = String(input.rationale ?? "").trim();
+export function normalizeVerificationRationale(value: unknown): string {
+	const rationale = String(value ?? "").trim();
 	if (!rationale || rationale.length > MAX_RATIONALE_LENGTH || /\0/.test(rationale)) {
 		throw new Error(`Verification rationale must contain 1 through ${MAX_RATIONALE_LENGTH} characters`);
 	}
-	if (!Array.isArray(input.gates) || input.gates.length > MAX_GATES) throw new Error(`Verification manifest may contain at most ${MAX_GATES} gates`);
+	return rationale;
+}
 
-	const worktree = fs.realpathSync(request.integrationWorktree);
+export function normalizeVerificationGates(integrationWorktree: string, input: VerificationGate[]): VerificationGate[] {
+	if (!Array.isArray(input) || input.length > MAX_GATES) throw new Error(`Verification manifest may contain at most ${MAX_GATES} gates`);
+	const worktree = fs.realpathSync(integrationWorktree);
 	const ids = new Set<string>();
-	const gates: VerificationGate[] = input.gates.map((gate, index) => {
+	return input.map((gate, index) => {
 		if (!gate || typeof gate !== "object" || Array.isArray(gate)) throw new Error(`Verification gate ${index + 1} is invalid`);
 		const gateId = oneLine(gate.gateId, `Verification gate ${index + 1} ID`, 80);
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(gateId)) throw new Error(`Verification gate ${gateId} has an invalid ID`);
@@ -141,6 +132,23 @@ export function normalizeVerificationManifest(
 		}
 		return { gateId, label, cwd: path.relative(worktree, resolvedCwd) || ".", argv, timeoutMs, rationale: gateRationale };
 	});
+}
+
+export function normalizeVerificationManifest(
+	request: VerificationRequest,
+	input: VerificationManifest,
+): { manifest: VerificationManifest; manifestSha256: string } {
+	if (!input || input.schemaVersion !== 1) throw new Error("Verification manifest schemaVersion must be 1");
+	for (const field of ["requestId", "requestSha256", "runId", "graphSha256", "runAssignmentSha256", "integrationHead", "integrationTree"] as const) {
+		if (String(input[field]) !== String(request[field])) throw new Error(`Verification manifest ${field} does not match the active request`);
+	}
+	if (input.generation !== request.generation) throw new Error("Verification manifest generation does not match the active request");
+	for (const field of ["predecessorRequestId", "repairId"] as const) {
+		if (input[field] !== undefined && String(input[field]) !== String(request[field] ?? "")) throw new Error(`Verification manifest ${field} does not match the active request`);
+	}
+	if (input.repairRound !== undefined && input.repairRound !== request.repairRound) throw new Error("Verification manifest repairRound does not match the active request");
+	const rationale = normalizeVerificationRationale(input.rationale);
+	const gates = normalizeVerificationGates(request.integrationWorktree, input.gates);
 	const selector = input.selector && typeof input.selector === "object" && !Array.isArray(input.selector)
 		? {
 			...(input.selector.model ? { model: oneLine(input.selector.model, "Verification selector model", 256) } : {}),

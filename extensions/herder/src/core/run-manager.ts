@@ -71,7 +71,14 @@ import {
 } from "../daemon/run-store.ts";
 import { resolvePiProfile } from "./profile-registry.ts";
 import { lifecycleStatus, phaseForRole, readyPhaseForRole, readPlanLifecycle, roleForPhase, summarizeRun } from "./workflow.ts";
-import { createReigniteRequest, createVerificationRequest, normalizeIntegrationRepairGates, normalizeVerificationManifest } from "./verification.ts";
+import {
+	createReigniteRequest,
+	createVerificationRequest,
+	normalizeIntegrationRepairGates,
+	normalizeVerificationGates,
+	normalizeVerificationManifest,
+	normalizeVerificationRationale,
+} from "./verification.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
@@ -121,6 +128,11 @@ interface PlanEditReply {
 	};
 	reply: ManagerReply;
 }
+
+type PreparedRepairGateProgram = {
+	gates: VerificationManifest["gates"];
+	rationale: string;
+};
 
 const REPAIR_CLASSIFICATION_ALIASES: Record<string, IntegrationRepairClassification> = {
 	code: "code_defect",
@@ -1113,7 +1125,8 @@ export class HerderRunManager {
 		}
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
 		const integrationRepair = failedVerification ? this.store.getIntegrationRepairForRequest(failedVerification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
-		if (integrationRepair?.state === "verifying" && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
+		if ((integrationRepair?.state === "verifying" || integrationRepair?.state === "committed") && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
+			if (integrationRepair.state === "committed") this.store.updateIntegrationRepair(integrationRepair.repairId, { state: "verifying" });
 			return this.verification(integrationRepair.successorManifest);
 		}
 		if (integrationRepair && ["active", "committing", "committed", "failed", "paused", "interrupted"].includes(integrationRepair.state)) {
@@ -1381,13 +1394,11 @@ export class HerderRunManager {
 		}
 	}
 
-	private repairGateManifest(
+	private prepareRepairGateProgram(
 		verification: StoredVerification,
 		repair: StoredIntegrationRepair,
 		input: IntegrationRepairInput,
-		head: string,
-		tree: string,
-	): { request: ReturnType<typeof createVerificationRequest>; manifest: VerificationManifest; gates: VerificationManifest["gates"]; manifestSha256: string } {
+	): PreparedRepairGateProgram {
 		const classification = repair.classification;
 		if (!classification) throw new Error("Integration repair has no durable classification");
 		const retained = repair.effectiveGates;
@@ -1398,6 +1409,28 @@ export class HerderRunManager {
 		let candidate = input.gates;
 		if (candidate === undefined && input.gateAdditions !== undefined) candidate = [...retained, ...input.gateAdditions];
 		if (candidate === undefined) candidate = retained;
+		const normalizedCandidate = normalizeVerificationGates(verification.request.integrationWorktree, candidate);
+		let recordedAdditions: VerificationManifest["gates"] | undefined;
+		if (input.gateAdditions !== undefined) {
+			recordedAdditions = normalizeVerificationGates(verification.request.integrationWorktree, input.gateAdditions);
+		}
+		const gates = normalizeIntegrationRepairGates({
+			classification,
+			retainedGates: retained,
+			candidateGates: normalizedCandidate,
+			recordedAdditions,
+		});
+		const rationale = normalizeVerificationRationale(input.rationale?.trim() || `Authoritative verification after integration repair round ${repair.round}.`);
+		return { gates, rationale };
+	}
+
+	private repairGateManifest(
+		verification: StoredVerification,
+		repair: StoredIntegrationRepair,
+		prepared: PreparedRepairGateProgram,
+		head: string,
+		tree: string,
+	): { request: ReturnType<typeof createVerificationRequest>; manifest: VerificationManifest; gates: VerificationManifest["gates"]; manifestSha256: string } {
 		const request = createVerificationRequest({
 			requestId: repair.successorRequestId || randomUUID(),
 			runId: verification.request.runId,
@@ -1414,8 +1447,8 @@ export class HerderRunManager {
 			repairId: repair.repairId,
 			repairRound: repair.round,
 		});
-		const rawManifest = {
-			schemaVersion: 1 as const,
+		const manifest: VerificationManifest = {
+			schemaVersion: 1,
 			requestId: request.requestId,
 			requestSha256: request.requestSha256,
 			runId: request.runId,
@@ -1424,23 +1457,13 @@ export class HerderRunManager {
 			runAssignmentSha256: request.runAssignmentSha256,
 			integrationHead: request.integrationHead,
 			integrationTree: request.integrationTree,
-			rationale: input.rationale?.trim() || `Authoritative verification after integration repair round ${repair.round}.`,
-			gates: candidate,
+			rationale: prepared.rationale,
+			gates: prepared.gates,
+			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+			...(request.repairId ? { repairId: request.repairId } : {}),
+			...(request.repairRound !== undefined ? { repairRound: request.repairRound } : {}),
 		};
-		const normalized = normalizeVerificationManifest(request, rawManifest);
-		let recordedAdditions: VerificationManifest["gates"] | undefined;
-		if (input.gateAdditions !== undefined) {
-			const additionsManifest = normalizeVerificationManifest(request, { ...rawManifest, gates: input.gateAdditions });
-			recordedAdditions = additionsManifest.manifest.gates;
-		}
-		const gates = normalizeIntegrationRepairGates({
-			classification,
-			retainedGates: retained,
-			candidateGates: normalized.manifest.gates,
-			recordedAdditions,
-		});
-		const manifest = { ...normalized.manifest, gates };
-		return { request, manifest, gates, manifestSha256: sha256(stableJson(manifest)) };
+		return { request, manifest, gates: prepared.gates, manifestSha256: sha256(stableJson(manifest)) };
 	}
 
 	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
@@ -1614,6 +1637,9 @@ export class HerderRunManager {
 			throw new Error("Integration repair finish requires a new begin transition after a failed round");
 		}
 		if ((repair.state === "verifying" || repair.state === "committed") && repair.successorRequestId && repair.successorManifest) {
+			if (repair.operationId && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
+				throw new Error("Integration repair finish was replayed with different durable evidence");
+			}
 			const successor = this.store.getVerificationByRequestId(repair.successorRequestId);
 			if (successor?.state === "passed" || successor?.state === "failed") return this.reply();
 			if (repair.state === "committed") this.store.updateIntegrationRepair(repair.repairId, { state: "verifying" });
@@ -1630,6 +1656,9 @@ export class HerderRunManager {
 			&& (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 			throw new Error("Integration repair finish was replayed with different durable evidence");
 		}
+		// Normalize every input-dependent part of the successor before recording
+		// finish intent or allowing the Git driver to mutate the assigned worktree.
+		const preparedGateProgram = this.prepareRepairGateProgram(verification, repair, input);
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		if (input.observedCommit !== undefined && repair.state !== "committing" && !committedReplay && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
@@ -1639,8 +1668,8 @@ export class HerderRunManager {
 		let tree = repair.currentTree ?? verification.request.integrationTree;
 		let superseded = [...repair.supersededCommits];
 		this.store.transaction(() => {
-			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: repairInputHash(input) });
-			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", repairInputHash(input), repairAuditEvidence(input));
+			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: inputHash });
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", inputHash, repairAuditEvidence(input));
 		});
 		if (classification === "code_defect") {
 			const replayHead = committedReplay ? repair.currentCommit : null;
@@ -1667,16 +1696,10 @@ export class HerderRunManager {
 			head = repair.parentCommit;
 			tree = verification.request.integrationTree;
 		}
-		this.store.transaction(() => {
-			this.store.updateIntegrationRepair(repair!.repairId, {
-				state: "committed",
-				currentCommit: head,
-				currentTree: tree,
-				supersededCommits: superseded,
-			});
-			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "commit", repairInputHash(input), { head, tree, parent: repair!.parentCommit, supersededCommits: superseded });
-		});
-		const gateManifest = this.repairGateManifest(verification, repair, input, head, tree);
+		const gateManifest = this.repairGateManifest(verification, repair, preparedGateProgram, head, tree);
+		// Commit lineage and the canonical successor are one durable transition.
+		// A restart can therefore observe either the pre-commit active state or a
+		// verifying repair that already has exactly one successor request.
 		this.store.transaction(() => {
 			this.store.putVerificationRequest(gateManifest.request);
 			this.store.updateIntegrationRepair(repair!.repairId, {
@@ -1691,7 +1714,8 @@ export class HerderRunManager {
 				successorManifestSha256: gateManifest.manifestSha256,
 				detail: "Accepted repair commit; replaying the retained ordered verification program.",
 			});
-			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "successor", repairInputHash(input), {
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "commit", inputHash, { head, tree, parent: repair!.parentCommit, supersededCommits: superseded });
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "successor", inputHash, {
 				requestId: gateManifest.request.requestId,
 				requestSha256: gateManifest.request.requestSha256,
 				manifestSha256: gateManifest.manifestSha256,

@@ -2034,3 +2034,107 @@ test("integration repair finish replays a crash-created commit", { timeout: 45_0
 		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
 });
+
+test("invalid successor gates remain retryable after rejected finish", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-gates-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-gate-retry");
+		const retainedGate: VerificationGate = {
+			gateId: "failing-gate",
+			label: "wait for the repair value",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(require('node:fs').readFileSync('src/value.mjs', 'utf8').includes('value = 3') ? 0 : 1)"],
+			rationale: "The gate becomes true only after the repair changes the fixture.",
+		};
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-gate-retry", [retainedGate]);
+		assert.equal(failed.reply.status, "failed");
+		const repairRequest = payload(failed.reply.integrationRepair);
+		const token = String(repairRequest.capabilityToken);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-gate-begin",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		await requestService(service, "/v1/integration-repair", begin);
+
+		const finishBase = {
+			operation: "finish",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: "fix: make the repaired fixture pass",
+		};
+		const rejected = async (input: Record<string, unknown>, expected: RegExp): Promise<void> => {
+			await assert.rejects(async () => {
+				const receipt = await submitManagerOperation(service, "integration_repair", input, String(input.operationId));
+				await waitManagerOperation(service, receipt.operationId);
+			}, expected);
+		};
+		const absolute = { ...finishBase, operationId: "repair-gate-absolute", gates: [{ ...retainedGate, cwd: fixture.repo }] };
+		await rejected(absolute, /cwd must be relative/);
+		const replay = await submitManagerOperation(service, "integration_repair", absolute, String(absolute.operationId));
+		assert.equal(replay.state, "failed");
+		assert.match(String(replay.error), /cwd must be relative/);
+		await assert.rejects(() => waitManagerOperation(service, replay.operationId), /cwd must be relative/);
+		await assert.rejects(
+			() => submitManagerOperation(service, "integration_repair", { ...absolute, gates: [retainedGate] }, String(absolute.operationId)),
+			/replayed with different payload/,
+		);
+		await rejected({ ...finishBase, operationId: "repair-gate-missing", gates: [{ ...retainedGate, cwd: "missing-successor-cwd" }] }, /ENOENT|no such file or directory/);
+		const duplicate = { ...retainedGate, label: "duplicate gate" };
+		await rejected({ ...finishBase, operationId: "repair-gate-duplicate", gates: [retainedGate, duplicate], gateAdditions: [duplicate] }, /gate ID failing-gate is duplicated/);
+		await rejected({ ...finishBase, operationId: "repair-gate-prefix", gates: [{ ...retainedGate, label: "changed retained gate" }] }, /changed or was reordered/);
+
+		const store = new RunStore(fixture.planDirectory);
+		const before = store.getIntegrationRepairForRequest(String(repairRequest.requestId))!;
+		try {
+			assert.equal(before.state, "active");
+			assert.equal(before.currentCommit, null);
+			assert.equal(before.currentTree, null);
+			assert.equal(before.successorRequestId, null);
+			assert.deepEqual(before.supersededCommits, []);
+			assert.deepEqual(store.getIntegrationRepairAudits(before.repairId).map((audit) => audit.action), ["begin"]);
+			assert.equal(Number((store.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), 1);
+			assert.equal(git(String(repairRequest.integrationWorktree), ["status", "--porcelain"]).stdout.trim(), "");
+		} finally {
+			store.close();
+		}
+
+		fs.writeFileSync(path.join(String(repairRequest.integrationWorktree), "src/value.mjs"), "export const value = 3\n");
+		const corrected = { ...finishBase, operationId: "repair-gate-corrected" };
+		const correctedReceipt = await submitManagerOperation(service, "integration_repair", corrected, String(corrected.operationId));
+		await waitManagerOperation(service, correctedReceipt.operationId);
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			const repaired = after.getIntegrationRepair(before.repairId)!;
+			assert.equal(repaired.state, "passed");
+			assert.ok(repaired.currentCommit);
+			assert.ok(repaired.currentTree);
+			assert.ok(repaired.successorRequestId);
+			assert.ok(repaired.successorManifest);
+			assert.equal(git(String(repairRequest.integrationWorktree), ["rev-parse", "HEAD"]).stdout.trim(), repaired.currentCommit);
+			assert.equal(git(String(repairRequest.integrationWorktree), ["rev-parse", "HEAD^{tree}"]).stdout.trim(), repaired.currentTree);
+			assert.deepEqual(after.getIntegrationRepairAudits(before.repairId).map((audit) => audit.action), ["begin", "finish-intent", "commit", "successor"]);
+			assert.equal(Number((after.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), 2);
+			assert.equal(after.getVerificationByRequestId(repaired.successorRequestId)?.state, "passed");
+		} finally {
+			after.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
