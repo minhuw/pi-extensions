@@ -188,6 +188,7 @@ function integrationRepairPayload(args: JsonObject): IntegrationRepairInput {
 		...(args.gates === undefined ? {} : { gates: args.gates as VerificationManifest["gates"] }),
 		...(args.gateAdditions === undefined ? {} : { gateAdditions: args.gateAdditions as VerificationManifest["gates"] }),
 		...(args.allowedPaths === undefined ? {} : { allowedPaths: args.allowedPaths as string[] }),
+		...(args.observedCommit === undefined ? {} : { observedCommit: String(args.observedCommit) }),
 		...(args.commitMessage === undefined ? {} : { commitMessage: String(args.commitMessage) }),
 	};
 }

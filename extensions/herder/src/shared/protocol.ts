@@ -643,6 +643,8 @@ export interface IntegrationRepairInput {
 	gateAdditions?: VerificationGate[];
 	/** Failure-related repository paths allowed in the accepted code-defect commit. Required when finishing code repair. */
 	allowedPaths?: string[];
+	/** The integration-worktree HEAD observed by the owning adapter immediately before finish. */
+	observedCommit?: string;
 	commitMessage?: string;
 }
 
@@ -658,6 +660,7 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
 	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((path) => typeof path !== "string" || !path || path.length > 2_048 || /[\0\r\n]/.test(path)))) throw new Error("Integration repair allowed paths are invalid");
+	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 }
 
 export function validateIntegrationRepairRequest(value: unknown): asserts value is IntegrationRepairRequest {

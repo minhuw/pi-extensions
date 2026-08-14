@@ -681,7 +681,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"herder-stop",
 			"herder-validate",
 		].sort());
-		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_plan", "herder_reignite", "herder_verification"]);
+		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_integration_repair", "herder_plan", "herder_reignite", "herder_verification"]);
 		assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
 		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_CLEANUP_LEGACY_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
 
@@ -882,6 +882,95 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		if (api && context && !shutdown) {
 			await withDeadline(api.invoke("session_shutdown", context), "integration cleanup session_shutdown", 5_000).catch(() => {});
 		}
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("request-bound integration repair edits only after begin and automatically reverifies", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-repair-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	let shutdown = false;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		const factory = new CapturedWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "repair session_start");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "repair fire");
+		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "repair implementer");
+		await withDeadline(implementer.started.promise, "repair implementer start");
+		implementer.release();
+		const reviewer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-reviewer" && session.action.workerMode === "DISCOVERY"), "repair reviewer");
+		await withDeadline(reviewer.settled.promise, "repair reviewer settle");
+		const verificationPrompt = (await withDeadline(api.waitForUserMessage(), "repair verification prompt")).content;
+		const requestId = verificationRequestId(verificationPrompt);
+		await withDeadline(api.tool("herder_verification").execute(
+			"verification",
+			{
+				planDirectory: "herder-plans",
+				requestId,
+				rationale: "The value gate reproduces an integrated code defect before repair.",
+				gates: [{
+					gateId: "value-defect",
+					label: "value defect reproduction",
+					cwd: ".",
+					argv: [process.execPath, "-e", "const fs=require('node:fs'); if (fs.readFileSync('src/value.mjs','utf8').includes('2')) process.exit(7)"],
+					rationale: "Reproduces the integrated value defect.",
+				}],
+			}, undefined, undefined, context), "repair failing verification");
+		const recoveryPrompt = (await withDeadline(api.waitForUserMessage(0, "HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1"), "repair recovery prompt")).content;
+		assert.equal(fieldValue(recoveryPrompt, "REQUEST_ID"), requestId);
+		const ownerSessionId = fieldValue(recoveryPrompt, "MAIN_SESSION_ID");
+		const repairArgs = {
+			planDirectory: "herder-plans",
+			requestId,
+			requestSha256: fieldValue(recoveryPrompt, "REQUEST_SHA256"),
+			capabilityToken: fieldValue(recoveryPrompt, "CAPABILITY_TOKEN"),
+			ownerSessionId,
+		};
+		await assert.rejects(
+			() => api!.tool("herder_integration_repair").execute("repair", { ...repairArgs, operation: "finish", observedCommit: "0".repeat(40) }, undefined, undefined, context),
+			/repair finish requires the observed integration commit identity|Code-defect integration repair finish requires recorded failure-related paths|not bound|must be clean|worktree/i,
+		);
+		const begin = await withDeadline(api.tool("herder_integration_repair").execute(
+			"repair-begin",
+			{ ...repairArgs, operation: "begin", classification: "code_defect" }, undefined, undefined, context), "repair begin");
+		assert.equal(object(begin).terminate, false);
+		const integrationWorktree = fieldValue(recoveryPrompt, "INTEGRATION_WORKTREE");
+		fs.writeFileSync(path.join(integrationWorktree, "src", "value.mjs"), "export const value = 3\n");
+		const observedCommit = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const finish = await withDeadline(api.tool("herder_integration_repair").execute(
+			"repair-finish",
+			{
+				...repairArgs,
+				operation: "finish",
+				observedCommit,
+				allowedPaths: ["src/value.mjs"],
+				commitMessage: "fix: repair integrated verification defect",
+				detail: "The authorized integration worktree now contains the bounded fix.",
+			}, undefined, undefined, context), "repair finish");
+		assert.equal(object(finish).terminate, true);
+		await withDeadline(factory.waitForSession((session) => session.action.workerMode === "FINAL_AUDIT"), "repair final audit");
+		assert.equal(readVerification(fixture).state, "passed");
+		const repaired = new RunStore(fixture.planDirectory);
+		try {
+			const run = repaired.getRun()!;
+			const repair = repaired.getIntegrationRepairForRun(run.runId, run.currentGeneration);
+			assert.equal(repair?.state, "passed");
+			assert.equal(repair?.round, 1);
+		} finally { repaired.close(); }
+		await withDeadline(api.invoke("session_shutdown", context), "repair session_shutdown");
+		shutdown = true;
+	} finally {
+		if (api && context && !shutdown) await withDeadline(api.invoke("session_shutdown", context), "repair cleanup session_shutdown", 5_000).catch(() => {});
 		if (fixture) {
 			await stopService(fixture.planDirectory).catch(() => {});
 			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });

@@ -158,6 +158,7 @@ function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
 	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
 	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((candidate) => typeof candidate !== "string" || !candidate || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)))) throw new Error("Integration repair allowed paths are invalid");
+	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 	if (input.commitMessage !== undefined && (typeof input.commitMessage !== "string" || input.commitMessage.trim().length === 0 || input.commitMessage.length > 512 || /[\0\r\n]/.test(input.commitMessage))) throw new Error("Integration repair commitMessage is invalid");
 }
 
@@ -1572,6 +1573,9 @@ export class HerderRunManager {
 		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
+		if (input.observedCommit !== undefined && repair.state !== "committing" && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
+			throw new Error(`Integration repair observed commit changed: expected ${input.observedCommit}, found ${driver.worktreeHead(run.integrationWorktree)}`);
+		}
 		let head = repair.currentCommit ?? repair.parentCommit;
 		let tree = repair.currentTree ?? verification.request.integrationTree;
 		let superseded = [...repair.supersededCommits];
