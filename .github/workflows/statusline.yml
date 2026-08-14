@@ -1,0 +1,50 @@
+name: Statusline CI
+
+on:
+  pull_request:
+    paths:
+      - extensions/statusline-footer/**
+      - .github/workflows/statusline.yml
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  push:
+    branches:
+      - master
+    paths:
+      - extensions/statusline-footer/**
+      - .github/workflows/statusline.yml
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: statusline-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify statusline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install package dependencies
+        run: npm ci
+
+      - name: Run focused statusline tests
+        run: npm run test:statusline -- --cache=false
+
+      - name: Run typecheck
+        run: npm run typecheck
