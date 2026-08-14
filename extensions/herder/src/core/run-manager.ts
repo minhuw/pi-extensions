@@ -1311,7 +1311,7 @@ export class HerderRunManager {
 		const requestId = verification.request.requestId;
 		const capabilityToken = integrationRepairCapabilityToken(requestId);
 		const canonicalGates = repair?.effectiveGates ?? verification.manifest?.gates ?? [];
-		const state = repair && ["active", "committing", "committed", "verifying", "passed", "cancelled", "interrupted"].includes(repair.state)
+		const state = repair
 			? repair.state
 			: "available";
 		return {
@@ -1328,6 +1328,8 @@ export class HerderRunManager {
 			...(repair?.ownerSessionId ? { ownerSessionId: repair.ownerSessionId } : {}),
 			capabilityToken,
 			capabilityTokenSha256: integrationRepairCapabilityDigest(capabilityToken),
+			integrationBranch: verification.request.integrationBranch,
+			integrationWorktree: verification.request.integrationWorktree,
 			parentCommit: repair?.parentCommit ?? verification.request.integrationHead,
 			...(repair?.currentCommit ? { currentCommit: repair.currentCommit } : {}),
 			...(repair?.currentTree ? { currentTree: repair.currentTree } : {}),
@@ -1453,10 +1455,65 @@ export class HerderRunManager {
 		const run = this.store.getRun()!;
 		if (input.operation === "begin") {
 			const classification = normalizeIntegrationRepairClassification(input.classification);
-			if (!["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Only an integrated code/test defect, transient failure, or manifest error may open integration repair");
+			const decisionOnly = ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(classification);
+			if (!decisionOnly && !["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Integration repair classification is not an automatic recovery path");
 			if (verification.state !== "failed") throw new Error("Integration repair begin requires a failed verification attempt");
 			const ownerSessionId = input.ownerSessionId;
 			if (!ownerSessionId) throw new Error("Integration repair begin requires the owning main session ID");
+			if (decisionOnly) {
+				const detail = input.detail?.trim() || input.rationale?.trim();
+				if (!detail) throw new Error("Ambiguity classification requires a rationale or detail for the user decision");
+				if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {
+					if (repair.ownerSessionId !== ownerSessionId || repair.classification !== classification) throw new Error("Ambiguity classification was replayed with different durable evidence");
+					return this.reply();
+				}
+				this.validateRepairBeginAdmission(run, verification, input, repair);
+				if (repair) {
+					if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
+					if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
+					if (repair.classification && repair.classification !== classification) throw new Error("Integration repair classification cannot change during a transaction");
+					if (repair.state !== "paused") throw new Error("A classification-only repair decision is already in progress");
+					if (repair.operationId && repair.operationId !== operationId) throw new Error("Ambiguity classification was replayed with a different operation");
+					if (repair.operationPayloadSha256 && repair.operationPayloadSha256 !== inputHash) throw new Error("Ambiguity classification was replayed with different evidence");
+				}
+				this.store.transaction(() => {
+					if (!repair) {
+						repair = this.store.putIntegrationRepair({
+							repairId: input.repairId || randomUUID(),
+							runId: run.runId,
+							generation: run.currentGeneration,
+							requestId: input.requestId,
+							requestSha256: input.requestSha256,
+							ownerSessionId,
+							capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+							classification,
+							state: "paused",
+							round: 1,
+							parentCommit: verification.request.integrationHead,
+							canonicalGates: verification.manifest?.gates ?? [],
+							canonicalGatesSha256: sha256(stableJson(verification.manifest?.gates ?? [])),
+							effectiveGates: verification.manifest?.gates ?? [],
+							operationId,
+							operationPayloadSha256: inputHash,
+							detail,
+						});
+					} else {
+						repair = this.store.updateIntegrationRepair(repair.repairId, {
+							requestId: input.requestId,
+							requestSha256: input.requestSha256,
+							capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+							classification,
+							state: "paused",
+							operationId,
+							operationPayloadSha256: inputHash,
+							detail,
+						});
+					}
+					this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", inputHash, repairAuditEvidence(input));
+					this.store.updateRun({ status: "paused", terminalDetail: `Integration repair classification ${classification} is recorded; awaiting an explicit user decision.` });
+				});
+				return this.reply();
+			}
 			if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {
 				if (repair.state === "active" && run.status !== "stopped" && run.status !== "complete") {
 					this.store.transaction(() => {
@@ -1568,12 +1625,14 @@ export class HerderRunManager {
 		if (classification === "code_defect" && (!input.allowedPaths || input.allowedPaths.length === 0)) {
 			throw new Error("Code-defect integration repair finish requires recorded failure-related paths");
 		}
-		if (repair.state === "committing" && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
+		const committedReplay = repair.state === "committed" && Boolean(repair.currentCommit);
+		if ((repair.state === "committing" || committedReplay)
+			&& (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 			throw new Error("Integration repair finish was replayed with different durable evidence");
 		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
-		if (input.observedCommit !== undefined && repair.state !== "committing" && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
+		if (input.observedCommit !== undefined && repair.state !== "committing" && !committedReplay && driver.worktreeHead(run.integrationWorktree) !== input.observedCommit) {
 			throw new Error(`Integration repair observed commit changed: expected ${input.observedCommit}, found ${driver.worktreeHead(run.integrationWorktree)}`);
 		}
 		let head = repair.currentCommit ?? repair.parentCommit;
@@ -1584,7 +1643,7 @@ export class HerderRunManager {
 			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", repairInputHash(input), repairAuditEvidence(input));
 		});
 		if (classification === "code_defect") {
-			const replayHead = repair.state === "committed" && repair.currentCommit ? repair.currentCommit : null;
+			const replayHead = committedReplay ? repair.currentCommit : null;
 			const durableCurrentHead = replayHead && repair.round > 1
 				? repair.supersededCommits.at(-1) ?? null
 				: replayHead ? null : repair.currentCommit;
@@ -3080,7 +3139,7 @@ export class HerderRunManager {
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
 		const integrationRepair = verification ? this.store.getIntegrationRepairForRequest(verification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
-		const exposedIntegrationRepair = verification && (verification.state === "failed" || (integrationRepair && ["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(integrationRepair.state)))
+		const exposedIntegrationRepair = verification && (verification.state === "failed" || Boolean(integrationRepair))
 			? this.integrationRepairRequest(verification, integrationRepair)
 			: undefined;
 		const storedReignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);

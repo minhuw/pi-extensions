@@ -342,6 +342,33 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return binding;
 	};
 
+	const mergeDurableIntegrationRepair = (
+		binding: IntegrationRepairBinding,
+		durable: IntegrationRepairRequest,
+	): IntegrationRepairBinding => ({
+		...binding,
+		request: {
+			...binding.request,
+			repairId: durable.repairId ?? binding.request.repairId,
+			state: durable.state,
+			classification: durable.classification ?? binding.request.classification,
+			round: durable.round,
+			maxRounds: durable.maxRounds,
+			ownerSessionId: durable.ownerSessionId ?? binding.request.ownerSessionId,
+			integrationBranch: durable.integrationBranch || binding.request.integrationBranch,
+			integrationWorktree: durable.integrationWorktree || binding.request.integrationWorktree,
+			parentCommit: durable.parentCommit,
+			currentCommit: durable.currentCommit,
+			currentTree: durable.currentTree,
+			failedGates: durable.failedGates,
+			canonicalGates: durable.canonicalGates,
+			successorRequestId: durable.successorRequestId,
+			successorRequestSha256: durable.successorRequestSha256,
+			supersededCommits: durable.supersededCommits,
+			detail: durable.detail,
+		},
+	});
+
 	const delegateVerification = (reply: ManagerReply, retryDetail?: string) => {
 		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId)) return;
 		const request = reply.verificationRequest;
@@ -484,15 +511,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		const repair = failure.repair;
 		const currentMainSessionId = lastContext ? piSessionId(lastContext) : "";
-		const ownerMismatch = Boolean(repair?.ownerSessionId && repair.ownerSessionId !== currentMainSessionId);
+		const strandedRepair = Boolean(repair && ["active", "committing", "committed", "interrupted"].includes(repair.state));
+		const ownerMismatch = Boolean(repair && (
+			(repair.ownerSessionId && repair.ownerSessionId !== currentMainSessionId)
+			|| (strandedRepair && !repair.ownerSessionId)
+		));
+		const ambiguityDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
 		const roundLimitReached = Boolean(repair && (
-			(repair.state === "paused" && repair.round >= repair.maxRounds)
+			repair.round >= repair.maxRounds
 			|| (repair.classification === "transient" && ["available", "failed"].includes(repair.state))
 		));
 		const logPath = failure.detail.match(/\(log ([^)]+)\)/)?.[1] || "the verification failure detail";
 		const verification = repair ? verificationRequests.get(repair.requestId) : undefined;
-		const integrationWorktree = verification?.integrationWorktree || path.resolve(failure.planDirectory, ".herder", "worktrees", "integration");
-		const integrationBranch = verification?.integrationBranch || `herder/${path.basename(failure.planDirectory)}/integration`;
+		const integrationWorktree = repair?.integrationWorktree || verification?.integrationWorktree || "unavailable: manager did not provide the recorded integration worktree";
+		const integrationBranch = repair?.integrationBranch || verification?.integrationBranch || "unavailable: manager did not provide the recorded integration branch";
 		const integrationHead = repair ? repair.currentCommit || repair.parentCommit : "unknown";
 		const integrationTree = repair?.currentTree || verification?.integrationTree || "unknown";
 		const gateJson = (repair?.canonicalGates || repair?.failedGates || []).map((gate) => JSON.stringify(gate)).join("\n");
@@ -510,10 +542,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`LOG_PATH: ${logPath}`,
 				"Do not call herder_integration_repair, edit the integration worktree, or claim recovery. Ask the user to recover the former session or choose an explicit operator/corrective-plan path.",
 			].join("\n")
-			: roundLimitReached
+			: roundLimitReached || ambiguityDecision
 			? [
 				"HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1",
-				"The bounded automatic verification-recovery allowance has been exhausted. Herder has paused the run for an explicit user decision and will not open another automatic capability for this failure.",
+				ambiguityDecision
+					? `The authoritative failure is durably classified as ${repair!.classification}. No writable repair capability was opened; an explicit user decision is required.`
+					: "The bounded automatic verification-recovery allowance has been exhausted. Herder has paused the run for an explicit user decision and will not open another automatic capability for this failure.",
 				`RUN_ID: ${failure.runId}`,
 				`REQUEST_ID: ${repair!.requestId}`,
 				`REPAIR_ID: ${repair!.repairId || "unknown"}`,
@@ -529,7 +563,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					"HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1",
 					"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
 					"Herder authoritative final verification failed and has issued one request-bound recovery capability to the owning main Pi session.",
-					"Use read-only inspection commands to read the exact failure log, then classify exactly one recovery path. Do not claim success, silently retry, or execute Herder's authoritative verification commands yourself.",
+					"Use read-only inspection commands to read the exact failure log, explain the concrete failure to the user, then classify exactly one recovery path. Do not claim success, silently retry, or execute Herder's authoritative verification commands yourself.",
 					`RUN_ID: ${failure.runId}`,
 					`MAIN_SESSION_ID: ${failure.sessionId || "unknown"}`,
 					`OWNER_SESSION_ID: ${repair.ownerSessionId || failure.sessionId || "unknown"}`,
@@ -557,7 +591,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					"For manifest_error, call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree.",
 					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
 					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE, run optional local diagnostics, and leave the authorized changes for Herder to commit/amend when finish is called. Pass allowedPaths as repository-relative failure-related paths. Local tests are non-authoritative; do not run the final Herder gates directly.",
-					"For design_ambiguity, scope_ambiguity, credential, or product_ambiguity, do not call the repair tool; explain the concrete failure to the user and ask for the decision. A corrective plan followed by /herder-revise remains available when the user chooses it.",
+					"For design_ambiguity, scope_ambiguity, credential, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. A corrective plan followed by /herder-revise remains available when the user chooses it.",
 					"Before begin, do not edit the frozen integration worktree, move Git refs, update SQLite, or mutate manager state. If a started code repair cannot be completed safely, restore the assigned worktree to its recorded clean head and call cancel.",
 					"Do not edit the frozen integration worktree before the begin transition binds writable authority to this main session.",
 					"Before finish, pass observedCommit equal to git rev-parse HEAD for the assigned worktree; leave code-repair changes dirty so Herder can create or amend the transaction commit. After an accepted finish, Herder alone reruns the retained authoritative gates and either proceeds to the existing final audit or presents the next bounded recovery request. /herder-resume remains operator recovery, not the ordinary path.",
@@ -652,8 +686,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const repairBinding = bindIntegrationRepair(reply);
 		const repair = repairBinding?.request;
 		const actionableRepair = Boolean(repair && ["available", "failed", "paused"].includes(repair.state));
-		const verificationFailure = /verification/i.test(displayed.message)
-			&& (displayed.status === "failed" || actionableRepair);
+		const strandedRepair = Boolean(repair && ["active", "committing", "committed", "interrupted"].includes(repair.state));
+		const repairOwnerMismatch = Boolean(repair && (
+			(repair.ownerSessionId && repair.ownerSessionId !== (lastContext ? piSessionId(lastContext) : ""))
+			|| (strandedRepair && !repair.ownerSessionId)
+		));
+		const repairNeedsDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
+		const repairAtLimit = Boolean(repair && (
+			repair.round >= repair.maxRounds
+			|| (repair.classification === "transient" && ["available", "failed"].includes(repair.state))
+		));
+		const verificationFailure = ( /verification/i.test(displayed.message)
+			&& (displayed.status === "failed" || actionableRepair))
+			|| repairOwnerMismatch
+			|| repairNeedsDecision;
 		if (verificationFailure) {
 			const failureKey = `${reply.runId}:${repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
 			pendingVerificationFailure = {
@@ -667,12 +713,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (!notifiedVerificationFailures.has(failureKey)) {
 				notifiedVerificationFailures.add(failureKey);
 				lastContext?.ui.notify(
-					(Boolean(repair?.ownerSessionId && repair.ownerSessionId !== (lastContext ? piSessionId(lastContext) : "")))
+					repairOwnerMismatch
 						? `Herder final verification recovery belongs to another main session; operator recovery is required.`
-						: ((repair?.state === "paused" && repair.round >= repair.maxRounds)
-							|| (repair?.classification === "transient" && ["available", "failed"].includes(repair.state)))
-							? `Herder final verification recovery is paused at its automatic limit; user decision required.`
-						: `Herder final verification failed: ${displayed.message}\nAutomatic request-bound recovery is available; Use /herder-resume for operator recovery.`,
+						: ((repairAtLimit || repairNeedsDecision)
+							? `Herder final verification recovery requires an explicit user decision.`
+						: `Herder final verification failed: ${displayed.message}\nAutomatic request-bound recovery is available; Use /herder-resume for operator recovery.`),
 					"error",
 				);
 			}
@@ -1272,10 +1317,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	});
 
 	const integrationRepairWorktree = (binding: IntegrationRepairBinding): string =>
-		binding.verification?.integrationWorktree || path.resolve(binding.planDirectory, ".herder", "worktrees", "integration");
+		binding.request.integrationWorktree || binding.verification?.integrationWorktree || (() => { throw new Error("Integration repair request has no recorded integration worktree"); })();
 
 	const integrationRepairBranch = (binding: IntegrationRepairBinding): string =>
-		binding.verification?.integrationBranch || `herder/${path.basename(binding.planDirectory)}/integration`;
+		binding.request.integrationBranch || binding.verification?.integrationBranch || (() => { throw new Error("Integration repair request has no recorded integration branch"); })();
 
 	const readRepairGit = async (worktree: string, args: string[]): Promise<string> => {
 		if (!lastContext) throw new Error("Herder integration repair has no active main-session context");
@@ -1305,7 +1350,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		if (operation === "finish") {
 			if (!observedCommit || !/^[0-9a-f]{40,64}$/i.test(observedCommit)) throw new Error("Integration repair finish requires the observed integration commit identity");
-			if (request.state !== "committing" && head !== observedCommit) throw new Error(`Observed integration commit ${observedCommit} does not match the assigned worktree head ${head}`);
+			const durableFinishReplay = ["committed", "verifying", "passed"].includes(request.state)
+				&& Boolean(request.currentCommit)
+				&& head === request.currentCommit;
+			if (request.state !== "committing" && !durableFinishReplay && head !== observedCommit) throw new Error(`Observed integration commit ${observedCommit} does not match the assigned worktree head ${head}`);
+			if (durableFinishReplay) {
+				if (request.currentTree && tree !== request.currentTree) throw new Error(`Integration repair replay tree changed: expected ${request.currentTree}, found ${tree}`);
+				if (dirty) throw new Error("Integration repair replay requires the assigned worktree to be clean");
+			}
 			if (request.classification !== "code_defect" && (head !== expectedHead || dirty)) {
 				throw new Error("Manifest or transient recovery must leave the frozen integration tree unchanged");
 			}
@@ -1368,7 +1420,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			assertSessionActive(epoch);
 			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
 			let binding = integrationRepairRequests.get(params.requestId);
-			if (!binding) {
+			if (!binding || params.operation === "finish") {
+				const cachedBinding = binding;
 				const reply = await enqueueManager(async () => {
 					assertSessionActive(epoch);
 					return unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
@@ -1376,7 +1429,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				assertOwnership(reply.planDirectory, reply.runId);
 				updateFromReply(reply);
-				binding = integrationRepairRequests.get(params.requestId);
+				const durable = reply.integrationRepair;
+				if (cachedBinding && durable && cachedBinding.request.repairId && durable.repairId === cachedBinding.request.repairId) {
+					binding = mergeDurableIntegrationRepair(cachedBinding, durable);
+					integrationRepairRequests.set(params.requestId, binding);
+				} else {
+					binding = integrationRepairRequests.get(params.requestId) || cachedBinding;
+				}
 			}
 			if (!binding || binding.planDirectory !== planDirectory || binding.sessionEpoch !== epoch) {
 				throw new Error(`Herder integration repair request ${params.requestId} is not bound to this main session epoch`);
@@ -1394,6 +1453,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}
 			assertOwnership(planDirectory, request.runId);
 			if (params.operation === "begin" && !params.classification) throw new Error("Integration repair begin requires exactly one classification");
+			const classificationOnly = params.operation === "begin"
+				&& ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(params.classification || request.classification || "");
 			await resolveProfile(ctx, currentState?.profile || "unknown");
 			assertSessionActive(epoch);
 			const checkout = await assertRepairCheckout(binding, params.operation, params.observedCommit);
@@ -1431,9 +1492,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			await dispatchReply(reply, epoch);
 			const repairState = reply.integrationRepair?.state || "completed";
 			return {
-				content: [{ type: "text" as const, text: params.operation === "begin"
-					? `Integration repair round ${reply.integrationRepair?.round || request.round} is ${repairState}. The assigned worktree is writable only for this request-bound transaction; finish or cancel it explicitly.`
-					: `Integration repair ${params.operation} was accepted as ${repairState}. Herder is retaining the authoritative verification program and will continue the existing final-audit lifecycle.` }],
+				content: [{ type: "text" as const, text: classificationOnly
+					? `Integration repair classification ${params.classification} was recorded as ${repairState}; no writable repair authority was opened. Ask the user for the next decision.`
+					: params.operation === "begin"
+						? `Integration repair round ${reply.integrationRepair?.round || request.round} is ${repairState}. The assigned worktree is writable only for this request-bound transaction; finish or cancel it explicitly.`
+						: `Integration repair ${params.operation} was accepted as ${repairState}. Herder is retaining the authoritative verification program and will continue the existing final-audit lifecycle.` }],
 				details: {
 					operationId,
 					requestId: request.requestId,
@@ -1442,7 +1505,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					state: repairState,
 					observedCommit: checkout.head,
 				},
-				terminate: params.operation !== "begin",
+				terminate: classificationOnly || params.operation !== "begin",
 			};
 		},
 	});

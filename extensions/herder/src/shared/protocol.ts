@@ -612,6 +612,9 @@ export interface IntegrationRepairRequest {
 	/** Never persist or expose this value in SQLite; it is request-bound evidence. */
 	capabilityToken: string;
 	capabilityTokenSha256: string;
+	/** Durable checkout identity copied from the failed verification request. */
+	integrationBranch: string;
+	integrationWorktree: string;
 	parentCommit: string;
 	currentCommit?: string;
 	currentTree?: string;
@@ -671,6 +674,9 @@ export function validateIntegrationRepairRequest(value: unknown): asserts value 
 	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > 3) throw new Error("Integration repair request round is invalid");
 	if (request.maxRounds !== 3 || typeof request.capabilityToken !== "string" || request.capabilityToken !== integrationRepairCapabilityToken(request.requestId)) throw new Error("Integration repair request capability is invalid");
 	if (request.capabilityTokenSha256 !== integrationRepairCapabilityDigest(request.capabilityToken)) throw new Error("Integration repair request capability digest is invalid");
+	for (const [name, candidate, limit] of [["integrationBranch", request.integrationBranch, 512], ["integrationWorktree", request.integrationWorktree, 2_048]] as const) {
+		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) throw new Error(`Integration repair request ${name} is invalid`);
+	}
 	if (!Array.isArray(request.failedGates) || !Array.isArray(request.canonicalGates) || !Array.isArray(request.supersededCommits)) throw new Error("Integration repair request evidence is invalid");
 }
 
