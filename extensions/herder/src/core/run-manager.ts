@@ -174,6 +174,10 @@ function repairInputHash(input: IntegrationRepairInput): string {
 	return sha256(stableJson(repairAuditEvidence(input)));
 }
 
+function integrationRepairCommitMarker(repairId: string, parentCommit: string, round: number, operationId: string, payloadSha256: string): string {
+	return sha256(stableJson({ repairId, parentCommit, round, operationId, payloadSha256 }));
+}
+
 function validateStartInput(input: StartInput): void {
 	if (!input || !["fire", "resume", "revise"].includes(input.mode)) throw new Error("Start mode must be fire, resume, or revise");
 	if (!input.repositoryRoot || !input.planDirectory) throw new Error("Start requires repositoryRoot and planDirectory");
@@ -1558,13 +1562,19 @@ export class HerderRunManager {
 			await this.verification(repair.successorManifest);
 			return this.reply();
 		}
+		const classification = repair.classification;
+		if (!classification) throw new Error("Integration repair has no durable classification");
+		if (classification === "code_defect" && (!input.allowedPaths || input.allowedPaths.length === 0)) {
+			throw new Error("Code-defect integration repair finish requires recorded failure-related paths");
+		}
+		if (repair.state === "committing" && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
+			throw new Error("Integration repair finish was replayed with different durable evidence");
+		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
 		let head = repair.currentCommit ?? repair.parentCommit;
 		let tree = repair.currentTree ?? verification.request.integrationTree;
 		let superseded = [...repair.supersededCommits];
-		const classification = repair.classification;
-		if (!classification) throw new Error("Integration repair has no durable classification");
 		this.store.transaction(() => {
 			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: repairInputHash(input) });
 			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", repairInputHash(input), repairAuditEvidence(input));
@@ -1579,6 +1589,7 @@ export class HerderRunManager {
 				round: repair.round,
 				currentHead: durableCurrentHead,
 				replayHead,
+				repairMarker: integrationRepairCommitMarker(repair.repairId, repair.parentCommit, repair.round, operationId, inputHash),
 				allowedPaths: input.allowedPaths,
 				commitMessage: input.commitMessage,
 				allowCommit: true,

@@ -503,6 +503,8 @@ export class GitDriver {
 		round: number;
 		currentHead?: string | null;
 		replayHead?: string | null;
+		/** Stable commit evidence derived from the durable repair identity. */
+		repairMarker?: string;
 		allowedPaths?: string[];
 		commitMessage?: string;
 		allowCommit?: boolean;
@@ -520,11 +522,14 @@ export class GitDriver {
 		const parent = input.parent;
 		if (!/^[0-9a-f]{40,64}$/i.test(parent)) throw new Error("Integration repair parent must be a Git object identity");
 		const currentHead = input.currentHead ?? null;
-		const replayHead = input.replayHead ?? null;
+		let replayHead = input.replayHead ?? null;
 		if (currentHead && !/^[0-9a-f]{40,64}$/i.test(currentHead)) throw new Error("Integration repair current commit must be a Git object identity");
 		if (replayHead && !/^[0-9a-f]{40,64}$/i.test(replayHead)) throw new Error("Integration repair replay commit must be a Git object identity");
+		const repairMarker = input.repairMarker?.trim().toLowerCase() || null;
+		if (input.repairMarker !== undefined && (!repairMarker || !/^[0-9a-f]{64}$/.test(repairMarker))) throw new Error("Integration repair marker must be a SHA-256 value");
 		const message = String(input.commitMessage || "Fix integrated verification defect").trim();
 		if (input.round === 1 && (!message || /[\0\r\n]/.test(message) || message.length > 512)) throw new Error("Integration repair commit message is invalid");
+		const markerLine = repairMarker ? `Integration-Repair-Identity: ${repairMarker}` : null;
 
 		const beforeRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
 		const branchBefore = this.branchHead(branch);
@@ -560,12 +565,18 @@ export class GitDriver {
 				if (candidate === protectedRoot || candidate.startsWith(`${protectedRoot}/`)) {
 					throw new Error(`Integration repair cannot modify protected plan path ${candidate}`);
 				}
-				if (allowedPaths && !allowedPaths.some((allowed) => candidate === allowed || candidate.startsWith(`${allowed}/`))) {
+				if (!allowedPaths || allowedPaths.length === 0) throw new Error("Integration repair requires recorded failure-related paths before accepting a commit");
+				if (!allowedPaths.some((allowed) => candidate === allowed || candidate.startsWith(`${allowed}/`))) {
 					throw new Error(`Integration repair path ${candidate} is not recorded as failure-related`);
 				}
 			}
 		};
 		const commitPaths = (): string[] => this.changedPaths(worktree, parent).filter((candidate) => candidate);
+		const commitHasMarker = (head: string): boolean => {
+			if (!markerLine) return false;
+			const log = git(worktree, ["log", "-1", "--format=%B", head], true);
+			return log.status === 0 && log.stdout.split(/\r?\n/).some((line) => line.trim() === markerLine);
+		};
 		const validateCommitIdentity = (head: string): string[] => {
 			const parents = gitValue(worktree, "rev-list", "--parents", "-n", "1", head).split(/\s+/).filter(Boolean).slice(1);
 			if (parents.length !== 1) throw new Error("Integration repair commit must be a non-merge commit");
@@ -579,12 +590,18 @@ export class GitDriver {
 
 		const existingStatusPaths = statusPaths();
 		validateChangedPaths(existingStatusPaths);
+		if (!allowedPaths || allowedPaths.length === 0) throw new Error("Integration repair requires recorded failure-related paths before accepting a commit");
 		if (input.round > 1 && !replayHead) validateChangedPaths(this.changedPaths(worktree, parent));
+		if (!replayHead && markerLine && !statusBefore && branchBefore !== expectedCurrent && worktreeBefore === branchBefore) {
+			const candidateParents = git(worktree, ["rev-list", "--parents", "-n", "1", branchBefore], true).stdout.trim().split(/\s+/).filter(Boolean).slice(1);
+			if (candidateParents.length === 1 && candidateParents[0] === parent && commitHasMarker(branchBefore)) replayHead = branchBefore;
+		}
 		let replayedCommit = false;
 		if (replayHead) {
 			if (replayHead === expectedCurrent || branchBefore !== replayHead || worktreeBefore !== replayHead || statusBefore) {
 				throw new Error(`Integration repair replay head does not match the clean assigned transition: expected ${replayHead}, found ${branchBefore}`);
 			}
+			if (markerLine && !commitHasMarker(replayHead)) throw new Error("Integration repair replay commit lacks the durable repair identity");
 			validateCommitIdentity(replayHead);
 			replayedCommit = true;
 		} else if (branchBefore !== expectedCurrent || worktreeBefore !== expectedCurrent) {
@@ -597,9 +614,20 @@ export class GitDriver {
 			if (existingStatusPaths.length === 0) throw new Error("Integration repair worktree has no repository paths to commit");
 			git(worktree, ["add", "--", ...existingStatusPaths]);
 			if (input.round > 1) {
-				git(worktree, ["commit", "--amend", "--no-edit"]);
+				if (markerLine) {
+					const previousMessage = gitValue(worktree, "log", "-1", "--format=%B");
+					const withoutRepairMarker = previousMessage.split(/\r?\n/)
+						.filter((line) => !/^\s*Integration-Repair-Identity:\s*[0-9a-f]{64}\s*$/i.test(line))
+						.join("\n")
+						.trim();
+					const commitMessage = withoutRepairMarker ? `${withoutRepairMarker}\n\n${markerLine}` : markerLine;
+					git(worktree, ["commit", "--amend", "-m", commitMessage]);
+				} else {
+					git(worktree, ["commit", "--amend", "--no-edit"]);
+				}
 			} else {
-				git(worktree, ["commit", "-m", message]);
+				const commitMessage = markerLine ? `${message}\n\n${markerLine}` : message;
+				git(worktree, ["commit", "-m", commitMessage]);
 			}
 			committed = true;
 		} else if (input.round > 1 && !replayedCommit) {

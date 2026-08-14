@@ -33,13 +33,13 @@ test("repair commits are direct descendants and later rounds preserve the fixed 
 	try {
 		const parent = driver.branchHead(driver.integrationBranch);
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "repaired\n");
-		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: repair integrated verification" });
+		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"], commitMessage: "fix: repair integrated verification" });
 		assert.equal(first.parent, parent);
 		assert.notEqual(first.head, parent);
 		assert.deepEqual(first.changedPaths, ["value.txt"]);
 
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "repaired again\n");
-		const second = driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head, commitMessage: "fix: amend integrated verification" });
+		const second = driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head, allowedPaths: ["value.txt"], commitMessage: "fix: amend integrated verification" });
 		assert.equal(second.parent, parent);
 		assert.equal(second.supersededHead, first.head);
 		assert.notEqual(second.head, first.head);
@@ -54,9 +54,9 @@ test("repair rejects a no-op and a moved worktree before accepting a commit", ()
 	const { root, driver } = fixture();
 	try {
 		const parent = driver.branchHead(driver.integrationBranch);
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1 }), /non-merge|non-empty diff/);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"] }), /non-merge|non-empty diff/);
 		git(driver.integrationWorktree, ["checkout", "--detach", "HEAD"]);
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1 }), /symbolic|not on/);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"] }), /symbolic|not on/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
@@ -67,8 +67,8 @@ test("later-round acceptance requires a dirty amendment or explicit replay evide
 	try {
 		const parent = driver.branchHead(driver.integrationBranch);
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "round one\n");
-		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: first repair" });
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head }), /dirty amendment|replay evidence/);
+		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"], commitMessage: "fix: first repair" });
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head, allowedPaths: ["value.txt"] }), /dirty amendment|replay evidence/);
 		assert.equal(driver.branchHead(driver.integrationBranch), first.head);
 		assert.equal(driver.worktreeHead(driver.integrationWorktree), first.head);
 	} finally {
@@ -81,14 +81,14 @@ test("an unrelated clean sibling is not accepted as a later-round replay", () =>
 	try {
 		const parent = driver.branchHead(driver.integrationBranch);
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "accepted\n");
-		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: accepted repair" });
+		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"], commitMessage: "fix: accepted repair" });
 		git(driver.integrationWorktree, ["reset", "--hard", parent]);
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "sibling\n");
 		git(driver.integrationWorktree, ["add", "value.txt"]);
 		git(driver.integrationWorktree, ["commit", "-q", "-m", "test: unrelated sibling"]);
 		const sibling = driver.branchHead(driver.integrationBranch);
 		assert.notEqual(sibling, first.head);
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head }), /branch or worktree moved/);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 2, currentHead: first.head, allowedPaths: ["value.txt"] }), /branch or worktree moved/);
 		assert.equal(driver.branchHead(driver.integrationBranch), sibling);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -100,13 +100,82 @@ test("a rejected round-one retry does not commit from a moved durable head", () 
 	try {
 		const parent = driver.branchHead(driver.integrationBranch);
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "first\n");
-		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: first repair" });
+		const first = driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["value.txt"], commitMessage: "fix: first repair" });
 		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "invalid retry\n");
 		const beforeStatus = driver.worktreeStatus(driver.integrationWorktree);
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, currentHead: first.head, commitMessage: "fix: invalid retry" }), /Round 1|durable current/);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, currentHead: first.head, allowedPaths: ["value.txt"], commitMessage: "fix: invalid retry" }), /Round 1|durable current/);
 		assert.equal(driver.branchHead(driver.integrationBranch), first.head);
 		assert.equal(driver.worktreeHead(driver.integrationWorktree), first.head);
 		assert.equal(driver.worktreeStatus(driver.integrationWorktree), beforeStatus);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("failure-related paths are required before staging", () => {
+	const { root, driver } = fixture();
+	try {
+		const parent = driver.branchHead(driver.integrationBranch);
+		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "related\n");
+		fs.writeFileSync(path.join(driver.integrationWorktree, "unrelated.txt"), "unrelated\n");
+		const beforeStatus = driver.worktreeStatus(driver.integrationWorktree);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: reject unrelated path" }), /failure-related paths/);
+		assert.equal(driver.branchHead(driver.integrationBranch), parent);
+		assert.equal(driver.worktreeHead(driver.integrationWorktree), parent);
+		assert.equal(driver.worktreeStatus(driver.integrationWorktree), beforeStatus);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a marked repair commit replays after a crash but an unmarked sibling does not", () => {
+	const { root, driver } = fixture();
+	try {
+		const parent = driver.branchHead(driver.integrationBranch);
+		const repairMarker = "a".repeat(64);
+		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "replayed\n");
+		const first = driver.acceptIntegrationRepairCommit({
+			parent,
+			round: 1,
+			repairMarker,
+			allowedPaths: ["value.txt"],
+			commitMessage: "fix: replayable repair",
+		});
+		const replay = driver.acceptIntegrationRepairCommit({
+			parent,
+			round: 1,
+			repairMarker,
+			allowedPaths: ["value.txt"],
+			commitMessage: "fix: replayable repair",
+		});
+		assert.equal(replay.head, first.head);
+		assert.equal(replay.committed, false);
+
+		const roundTwoMarker = "b".repeat(64);
+		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "round two\n");
+		const amended = driver.acceptIntegrationRepairCommit({
+			parent,
+			round: 2,
+			currentHead: first.head,
+			repairMarker: roundTwoMarker,
+			allowedPaths: ["value.txt"],
+		});
+		const amendedReplay = driver.acceptIntegrationRepairCommit({
+			parent,
+			round: 2,
+			currentHead: first.head,
+			repairMarker: roundTwoMarker,
+			allowedPaths: ["value.txt"],
+		});
+		assert.equal(amendedReplay.head, amended.head);
+		assert.equal(amendedReplay.supersededHead, first.head);
+		assert.equal(amendedReplay.committed, false);
+
+		git(driver.integrationWorktree, ["reset", "--hard", parent]);
+		fs.writeFileSync(path.join(driver.integrationWorktree, "value.txt"), "sibling\n");
+		git(driver.integrationWorktree, ["add", "value.txt"]);
+		git(driver.integrationWorktree, ["commit", "-q", "-m", "test: unrelated sibling"]);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, repairMarker, allowedPaths: ["value.txt"] }), /branch or worktree moved/);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
@@ -120,7 +189,7 @@ test("protected plan paths are rejected before staging", () => {
 		fs.writeFileSync(path.join(driver.integrationWorktree, "herder-plans", "README.md"), "foreign\n");
 		fs.writeFileSync(path.join(driver.integrationWorktree, "source.txt"), "failure-related\n");
 		const beforeStatus = driver.worktreeStatus(driver.integrationWorktree);
-		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, commitMessage: "fix: protected path" }), /protected plan path/);
+		assert.throws(() => driver.acceptIntegrationRepairCommit({ parent, round: 1, allowedPaths: ["source.txt"], commitMessage: "fix: protected path" }), /protected plan path/);
 		assert.equal(driver.branchHead(driver.integrationBranch), parent);
 		assert.equal(driver.worktreeHead(driver.integrationWorktree), parent);
 		assert.equal(driver.worktreeStatus(driver.integrationWorktree), beforeStatus);

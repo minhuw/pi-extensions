@@ -641,7 +641,7 @@ export interface IntegrationRepairInput {
 	gates?: VerificationGate[];
 	/** Explicitly recorded append-only additions for code repair. */
 	gateAdditions?: VerificationGate[];
-	/** Optional failure-related repository paths allowed in the accepted commit. */
+	/** Failure-related repository paths allowed in the accepted code-defect commit. Required when finishing code repair. */
 	allowedPaths?: string[];
 	commitMessage?: string;
 }

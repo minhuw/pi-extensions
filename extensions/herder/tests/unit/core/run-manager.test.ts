@@ -10,7 +10,7 @@ import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
-import type { ManagerReply, VerificationGate } from "../../../src/shared/protocol.ts";
+import { integrationRepairCapabilityDigest, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -1925,6 +1925,109 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			() => requestService(service, "/v1/integration-repair", { ...begin, operationId: "repair-begin-after-stop" }),
 			/not allowed after the run is stopped/,
 		);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("integration repair finish replays a crash-created commit", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-crash-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-finish-crash");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-finish-crash", [{
+			gateId: "failing-gate",
+			label: "deliberate failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates a durable repair transaction for crash replay.",
+		}]);
+		const repairRequest = payload(failed.reply.integrationRepair);
+		const token = String(repairRequest.capabilityToken);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-begin-crash",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		await requestService(service, "/v1/integration-repair", begin);
+		await stopService(fixture.planDirectory);
+
+		const before = new RunStore(fixture.planDirectory);
+		const run = before.getRun()!;
+		const repair = before.getIntegrationRepairForRequest(String(repairRequest.requestId))!;
+		const finish = {
+			operation: "finish",
+			operationId: "repair-finish-crash",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: token,
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: "fix: replay crash repair",
+		};
+		const { capabilityToken: _capabilityToken, ...finishEvidence } = finish;
+		const payloadSha256 = sha256(stableJson({ ...finishEvidence, capabilityTokenSha256: integrationRepairCapabilityDigest(token) }));
+		const repairMarker = sha256(stableJson({
+			repairId: repair.repairId,
+			parentCommit: repair.parentCommit,
+			round: repair.round,
+			operationId: finish.operationId,
+			payloadSha256,
+		}));
+		before.close();
+
+		const crashed = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(crashed.claimNextOperation(), null);
+			crashed.submitOperation(finish.operationId, "integration_repair", finish);
+			assert.equal(crashed.claimNextOperation()?.state, "running");
+			crashed.updateIntegrationRepair(repair.repairId, {
+				state: "committing",
+				operationId: finish.operationId,
+				operationPayloadSha256: payloadSha256,
+			});
+		} finally {
+			crashed.close();
+		}
+
+		fs.writeFileSync(path.join(run.integrationWorktree, "src/value.mjs"), "export const value = 3\n");
+		const driver = new GitDriver({
+			repoRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			planName: path.basename(fixture.planDirectory),
+			helperRoot: path.resolve("extensions/herder/src/daemon/git"),
+		});
+		const committed = driver.acceptIntegrationRepairCommit({
+			parent: repair.parentCommit,
+			round: repair.round,
+			repairMarker,
+			allowedPaths: ["src/value.mjs"],
+			commitMessage: finish.commitMessage,
+		});
+		assert.notEqual(committed.head, repair.parentCommit);
+
+		service = await ensureService(fixture.planDirectory);
+		await waitManagerOperation(service, finish.operationId);
+		const recovered = new RunStore(fixture.planDirectory);
+		try {
+			const recoveredRepair = recovered.getIntegrationRepair(repair.repairId)!;
+			assert.equal(recoveredRepair.currentCommit, committed.head);
+			assert.equal(recoveredRepair.supersededCommits.length, 0);
+			assert.equal(git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), committed.head);
+		} finally {
+			recovered.close();
+		}
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
