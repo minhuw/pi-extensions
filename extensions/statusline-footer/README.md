@@ -74,7 +74,7 @@ Compact mode keeps identity on the left and the bar, cost, and elapsed time on t
 - TTFT spans the provider request marker to the first streamed content event, with `message_start` as a fallback for providers that hide HTTP events.
 - TTFB uses Pi's provider-response event when the provider exposes it.
 - Token throughput uses exact output-token usage over measured stream time; the displayed average is token-weighted.
-- Git branch comes from Pi's footer data. Working-tree diff uses a throttled `git diff --shortstat HEAD`; ahead/behind uses `git rev-list --left-right --count @{upstream}...HEAD`.
+- Git branch comes from Pi's footer data. Working-tree state uses a throttled `git status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
 - Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`.
 
 ## License

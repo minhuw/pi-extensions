@@ -222,7 +222,7 @@ interface StatsCache {
 interface SessionState {
 	statsCache?: StatsCache;
 	metrics: StreamMetrics;
-	gitStat: GitStat | null;
+	gitStat: GitStat;
 	gitStatAt: number;
 	gitStatCwd: string;
 	serviceTier?: string;
@@ -360,9 +360,10 @@ function fmtTokPerSec(tps: number): string {
 // background at most every 15s and the last value is painted.
 
 interface GitStat {
-	files: number;
-	adds: number;
-	dels: number;
+	status: "pending" | "clean" | "dirty" | "unavailable";
+	files?: number;
+	adds?: number;
+	dels?: number;
 	ahead: number;
 	behind: number;
 }
@@ -376,7 +377,7 @@ const sessionStates = new Map<string, SessionState>();
 function freshSessionState(previous?: SessionState): SessionState {
 	return {
 		metrics: previous?.metrics ?? freshMetrics(),
-		gitStat: null,
+		gitStat: { status: "pending", ahead: 0, behind: 0 },
 		gitStatAt: 0,
 		gitStatCwd: "",
 		serviceTier: previous?.serviceTier,
@@ -396,6 +397,10 @@ export function parseGitShortstat(stdout: string): Pick<GitStat, "files" | "adds
 		adds: adds ? Number(adds[1]) : 0,
 		dels: dels ? Number(dels[1]) : 0,
 	};
+}
+
+export function parseGitStatus(stdout: string): "clean" | "dirty" {
+	return stdout.length === 0 ? "clean" : "dirty";
 }
 
 /** `git rev-list --left-right --count @{upstream}...HEAD` → behind then ahead. */
@@ -428,22 +433,28 @@ function refreshGitStat(cwd: string, state: SessionState) {
 	if (state.gitStatCwd === cwd && now - state.gitStatAt < 15_000) return;
 	state.gitStatAt = now;
 	state.gitStatCwd = cwd;
+	state.gitStat = { status: "pending", ahead: 0, behind: 0 };
 	const opts = { cwd, timeout: 5000 };
-	let shortstat: Pick<GitStat, "files" | "adds" | "dels"> | null = null;
+	let status: GitStat["status"] | undefined;
+	let shortstat: Pick<GitStat, "files" | "adds" | "dels"> | undefined;
 	let aheadBehind = { ahead: 0, behind: 0 };
-	let pending = 2;
+	let pending = 3;
 	const finish = () => {
 		pending -= 1;
 		if (pending > 0) return;
-		if (!shortstat) {
-			state.gitStat = null;
-		} else {
-			state.gitStat = { ...shortstat, ...aheadBehind };
-		}
+		state.gitStat = {
+			status: status ?? "unavailable",
+			...(shortstat ?? {}),
+			...aheadBehind,
+		};
 		state.requestRender?.();
 	};
+	execFile("git", ["status", "--porcelain=v1", "--untracked-files=normal"], opts, (err, stdout) => {
+		status = err ? "unavailable" : parseGitStatus(stdout);
+		finish();
+	});
 	execFile("git", ["diff", "--shortstat", "HEAD"], opts, (err, stdout) => {
-		shortstat = err ? { files: 0, adds: 0, dels: 0 } : parseGitShortstat(stdout);
+		shortstat = err ? undefined : parseGitShortstat(stdout);
 		finish();
 	});
 	execFile("git", ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], opts, (err, stdout) => {
@@ -695,16 +706,30 @@ function renderFull(
 
 	refreshGitStat(ctx.cwd, state);
 	const branch = footerData.getGitBranch();
-	const dirty = state.gitStat && (state.gitStat.adds > 0 || state.gitStat.dels > 0);
+	const gitStatus = state.gitStat.status;
+	const gitColor: ThemeToken = gitStatus === "clean"
+		? "success"
+		: gitStatus === "dirty"
+			? "warning"
+			: gitStatus === "unavailable"
+				? "error"
+				: "dim";
+	const gitLabel = gitStatus === "clean"
+		? theme.fg("success", `${glyph(theme, set.ok, "success")} clean`)
+		: gitStatus === "dirty"
+			? state.gitStat.adds || state.gitStat.dels
+				? theme.fg("warning", `${theme.fg("toolDiffAdded", `+${state.gitStat.adds ?? 0}`)} ${theme.fg("toolDiffRemoved", `-${state.gitStat.dels ?? 0}`)}`)
+				: theme.fg("warning", "dirty")
+			: gitStatus === "unavailable"
+				? theme.fg("error", "git ?")
+				: theme.fg("dim", "git …");
 	const statuses = [...footerData.getExtensionStatuses().values()].filter(Boolean);
 	const gitLeft = cluster([
 		branch
-			? theme.fg(dirty ? "warning" : "success", `${glyph(theme, set.branch, dirty ? "warning" : "success")} ${branch}`)
+			? theme.fg(gitColor, `${glyph(theme, set.branch, gitColor)} ${branch}`)
 			: theme.fg("dim", `${glyph(theme, set.branch)} no git`),
-		dirty
-			? theme.fg("toolDiffAdded", `+${state.gitStat!.adds}`) + " " + theme.fg("toolDiffRemoved", `-${state.gitStat!.dels}`)
-			: (branch ? theme.fg("success", `${glyph(theme, set.ok, "success")} clean`) : ""),
-		state.gitStat && (state.gitStat.ahead > 0 || state.gitStat.behind > 0)
+		branch ? gitLabel : "",
+		state.gitStat.ahead > 0 || state.gitStat.behind > 0
 			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
 			: "",
 		...statuses.map((status) => theme.fg("accent", status)),

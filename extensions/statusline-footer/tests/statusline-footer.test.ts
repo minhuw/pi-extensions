@@ -2,7 +2,8 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import statuslineFooter, {
 	alignRow,
 	displayServiceTier,
@@ -12,10 +13,17 @@ import statuslineFooter, {
 	hasNerdFonts,
 	parseGitAheadBehind,
 	parseGitShortstat,
+	parseGitStatus,
 	rainbow,
 	thinkingCaps,
 } from "../index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
+
+vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
+
+beforeEach(() => {
+	vi.mocked(execFile).mockReset();
+});
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 type FooterComponent = {
@@ -174,6 +182,11 @@ describe("statusline footer visual language", () => {
 		expect(parseGitAheadBehind("")).toEqual({ ahead: 0, behind: 0 });
 	});
 
+	it("parses authoritative git status output", () => {
+		expect(parseGitStatus("")).toBe("clean");
+		expect(parseGitStatus(" M src/example.ts\n")).toBe("dirty");
+		expect(parseGitStatus("?? untracked.txt\n")).toBe("dirty");
+	});
 	it("shows only non-standard service tiers", () => {
 		expect(extractServiceTier({ service_tier: "priority" })).toBe("priority");
 		expect(extractServiceTier({ serviceTier: "flex" })).toBe("flex");
@@ -271,6 +284,56 @@ describe("statusline footer rendering", () => {
 		harness.getFooter()?.dispose?.();
 	});
 
+
+	it("renders clean, dirty, pending, and unavailable Git states", async () => {
+		let statusOutput = "";
+		let statusError = false;
+		let defer = true;
+		const pendingCallbacks: Array<() => void> = [];
+		vi.mocked(execFile).mockImplementation((_file, args, _options, callback) => {
+			const complete = () => {
+				const cb = callback as (error: Error | null, stdout: string) => void;
+				if (args?.[0] === "status") cb(statusError ? new Error("git unavailable") : null, statusOutput);
+				else if (args?.[0] === "diff") cb(null, "");
+				else cb(new Error("no upstream"), "");
+			};
+			if (defer) pendingCallbacks.push(complete);
+			else complete();
+			return {} as ReturnType<typeof execFile>;
+		});
+
+		const pending = createHarness("git-pending", "tui");
+		statuslineFooter(pending.pi);
+		await pending.emit("session_start", { type: "session_start", reason: "startup" });
+		expect(pending.getFooter()!.render(120)[3]).toContain("git …");
+		defer = false;
+		for (const complete of pendingCallbacks) complete();
+		pending.getFooter()?.dispose?.();
+
+		const clean = createHarness("git-clean", "tui");
+		statuslineFooter(clean.pi);
+		await clean.emit("session_start", { type: "session_start", reason: "startup" });
+		expect(clean.getFooter()!.render(120)[3]).toContain("clean");
+		clean.getFooter()?.dispose?.();
+
+		statusOutput = "?? untracked.txt\n";
+		const dirty = createHarness("git-dirty", "tui");
+		statuslineFooter(dirty.pi);
+		await dirty.emit("session_start", { type: "session_start", reason: "startup" });
+		const dirtyLine = dirty.getFooter()!.render(120)[3]!;
+		expect(dirtyLine).toContain("dirty");
+		expect(dirtyLine).not.toContain("clean");
+		dirty.getFooter()?.dispose?.();
+
+		statusError = true;
+		const unavailable = createHarness("git-unavailable", "tui");
+		statuslineFooter(unavailable.pi);
+		await unavailable.emit("session_start", { type: "session_start", reason: "startup" });
+		const unavailableLine = unavailable.getFooter()!.render(120)[3]!;
+		expect(unavailableLine).toContain("git ?");
+		expect(unavailableLine).not.toContain("clean");
+		unavailable.getFooter()?.dispose?.();
+	});
 
 	it("counts optional usage once and only on the active branch", async () => {
 		const activeBranch = [
