@@ -463,7 +463,7 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 	}
 }
 
-export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification", "reignite"] as const;
+export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification", "reignite", "integration_repair", "repair"] as const;
 export const MANAGER_OPERATION_STATES = ["accepted", "running", "succeeded", "failed"] as const;
 export type ManagerOperationKind = typeof MANAGER_OPERATION_KINDS[number];
 export type ManagerOperationState = typeof MANAGER_OPERATION_STATES[number];
@@ -497,6 +497,11 @@ export interface VerificationRequest {
 	integrationHead: string;
 	integrationTree: string;
 	requestedAt: string;
+	/** The failed verification request from which this successor was created. */
+	predecessorRequestId?: string;
+	/** The bounded integration repair transaction that owns this request. */
+	repairId?: string;
+	repairRound?: number;
 }
 
 export const REIGNITE_STATES = ["pending", "skipped", "written", "failed"] as const;
@@ -546,11 +551,121 @@ export interface VerificationManifest {
 	integrationTree: string;
 	rationale: string;
 	gates: VerificationGate[];
+	predecessorRequestId?: string;
+	repairId?: string;
+	repairRound?: number;
 	selector?: {
 		model?: string;
 		thinkingLevel?: string;
 		sessionId?: string;
 	};
+}
+
+export const INTEGRATION_REPAIR_CLASSIFICATIONS = [
+	"code_defect",
+	"transient",
+	"manifest_error",
+	"design_ambiguity",
+	"scope_ambiguity",
+	"credential",
+	"product_ambiguity",
+] as const;
+export type IntegrationRepairClassification = typeof INTEGRATION_REPAIR_CLASSIFICATIONS[number];
+
+export const INTEGRATION_REPAIR_STATES = [
+	"available",
+	"active",
+	"committing",
+	"committed",
+	"verifying",
+	"passed",
+	"failed",
+	"cancelled",
+	"paused",
+	"interrupted",
+] as const;
+export type IntegrationRepairState = typeof INTEGRATION_REPAIR_STATES[number];
+export const INTEGRATION_REPAIR_OPERATIONS = ["begin", "finish", "cancel"] as const;
+export type IntegrationRepairOperation = typeof INTEGRATION_REPAIR_OPERATIONS[number];
+
+/** A deterministic capability bound to exactly one failed verification request. */
+export function integrationRepairCapabilityToken(requestId: string): string {
+	return sha256(`herder-integration-repair-capability:${requestId}`);
+}
+
+export function integrationRepairCapabilityDigest(capabilityToken: string): string {
+	return sha256(capabilityToken);
+}
+
+export interface IntegrationRepairRequest {
+	schemaVersion: 1;
+	repairId?: string;
+	requestId: string;
+	requestSha256: string;
+	runId: string;
+	generation: number;
+	state: IntegrationRepairState;
+	classification?: IntegrationRepairClassification;
+	round: number;
+	maxRounds: 3;
+	ownerSessionId?: string;
+	/** Never persist or expose this value in SQLite; it is request-bound evidence. */
+	capabilityToken: string;
+	capabilityTokenSha256: string;
+	parentCommit: string;
+	currentCommit?: string;
+	currentTree?: string;
+	failedGates: VerificationGate[];
+	canonicalGates: VerificationGate[];
+	successorRequestId?: string;
+	successorRequestSha256?: string;
+	supersededCommits: string[];
+	detail?: string;
+}
+
+export interface IntegrationRepairInput {
+	schemaVersion?: 1;
+	operation: IntegrationRepairOperation;
+	operationId?: string;
+	repairId?: string;
+	requestId: string;
+	requestSha256: string;
+	capabilityToken: string;
+	runId?: string;
+	generation?: number;
+	ownerSessionId?: string;
+	classification?: IntegrationRepairClassification | string;
+	rationale?: string;
+	detail?: string;
+	/** A complete successor gate array. For code/transient recovery it must retain the exact prefix. */
+	gates?: VerificationGate[];
+	/** Explicitly recorded append-only additions for code repair. */
+	gateAdditions?: VerificationGate[];
+	commitMessage?: string;
+}
+
+export function validateIntegrationRepairInput(value: unknown): asserts value is IntegrationRepairInput {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair input must be an object");
+	const input = value as Partial<IntegrationRepairInput>;
+	if (!INTEGRATION_REPAIR_OPERATIONS.includes(input.operation as IntegrationRepairOperation)) throw new Error("Integration repair operation is invalid");
+	for (const [name, candidate, limit] of [["requestId", input.requestId, 200], ["requestSha256", input.requestSha256, 64], ["capabilityToken", input.capabilityToken, 64]] as const) {
+		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) throw new Error(`Integration repair ${name} is invalid`);
+	}
+	if (!/^[0-9a-f]{64}$/i.test(input.requestSha256!) || !/^[0-9a-f]{64}$/i.test(input.capabilityToken!)) throw new Error("Integration repair identities must be SHA-256 values");
+	if (input.capabilityToken !== integrationRepairCapabilityToken(input.requestId!)) throw new Error("Integration repair capability token is not request-bound");
+	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
+	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
+}
+
+export function validateIntegrationRepairRequest(value: unknown): asserts value is IntegrationRepairRequest {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair request must be an object");
+	const request = value as Partial<IntegrationRepairRequest>;
+	if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || typeof request.requestSha256 !== "string" || typeof request.runId !== "string") throw new Error("Integration repair request identity is invalid");
+	if (!INTEGRATION_REPAIR_STATES.includes(request.state as IntegrationRepairState)) throw new Error("Integration repair request state is invalid");
+	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > 3) throw new Error("Integration repair request round is invalid");
+	if (request.maxRounds !== 3 || typeof request.capabilityToken !== "string" || request.capabilityToken !== integrationRepairCapabilityToken(request.requestId)) throw new Error("Integration repair request capability is invalid");
+	if (request.capabilityTokenSha256 !== integrationRepairCapabilityDigest(request.capabilityToken)) throw new Error("Integration repair request capability digest is invalid");
+	if (!Array.isArray(request.failedGates) || !Array.isArray(request.canonicalGates) || !Array.isArray(request.supersededCommits)) throw new Error("Integration repair request evidence is invalid");
 }
 
 export interface ManagerReply {
@@ -585,6 +700,7 @@ export interface ManagerReply {
 	attention?: ManagerAttentionRequest;
 	planEdit?: ManagerPlanEdit;
 	verificationRequest?: VerificationRequest;
+	integrationRepair?: IntegrationRepairRequest;
 	reigniteRequest?: ReigniteRequest;
 	operations?: ManagerOperationReceipt[];
 }

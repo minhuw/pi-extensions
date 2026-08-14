@@ -28,6 +28,10 @@ import {
 	attentionCapabilityToken,
 	attentionRequestSha256,
 	canonicalEventPayload,
+	integrationRepairCapabilityDigest,
+	integrationRepairCapabilityToken,
+	INTEGRATION_REPAIR_CLASSIFICATIONS,
+	INTEGRATION_REPAIR_OPERATIONS,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
@@ -40,6 +44,10 @@ import {
 	type AttentionResolutionAction,
 	type AttentionResolutionInput,
 	type ManagerAttentionRequest,
+	type IntegrationRepairClassification,
+	type IntegrationRepairInput,
+	type IntegrationRepairRequest,
+	type IntegrationRepairOperation,
 	type DispatchResult,
 	type ManagerAction,
 	type ManagerReply,
@@ -59,10 +67,11 @@ import {
 	type StoredPlanSpec,
 	type StoredRun,
 	type StoredVerification,
+	type StoredIntegrationRepair,
 } from "../daemon/run-store.ts";
 import { resolvePiProfile } from "./profile-registry.ts";
 import { lifecycleStatus, phaseForRole, readyPhaseForRole, readPlanLifecycle, roleForPhase, summarizeRun } from "./workflow.ts";
-import { createReigniteRequest, createVerificationRequest, normalizeVerificationManifest } from "./verification.ts";
+import { createReigniteRequest, createVerificationRequest, normalizeIntegrationRepairGates, normalizeVerificationManifest } from "./verification.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
@@ -111,6 +120,57 @@ interface PlanEditReply {
 		editToken?: string;
 	};
 	reply: ManagerReply;
+}
+
+const REPAIR_CLASSIFICATION_ALIASES: Record<string, IntegrationRepairClassification> = {
+	code: "code_defect",
+	code_defect: "code_defect",
+	integrated_code_defect: "code_defect",
+	integrated_code_test_defect: "code_defect",
+	test_defect: "code_defect",
+	transient: "transient",
+	manifest: "manifest_error",
+	manifest_error: "manifest_error",
+	design: "design_ambiguity",
+	design_ambiguity: "design_ambiguity",
+	scope: "scope_ambiguity",
+	scope_ambiguity: "scope_ambiguity",
+	credential: "credential",
+	product: "product_ambiguity",
+	product_ambiguity: "product_ambiguity",
+};
+
+function normalizeIntegrationRepairClassification(value: unknown): IntegrationRepairClassification {
+	const normalized = String(value ?? "").trim().toLowerCase().replace(/[ -]+/g, "_");
+	const classification = REPAIR_CLASSIFICATION_ALIASES[normalized];
+	if (!classification || !INTEGRATION_REPAIR_CLASSIFICATIONS.includes(classification)) throw new Error("Integration repair classification is invalid");
+	return classification;
+}
+
+function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
+	if (!input || !INTEGRATION_REPAIR_OPERATIONS.includes(input.operation)) throw new Error("Integration repair operation must be begin, finish, or cancel");
+	for (const [name, value, limit] of [["requestId", input.requestId, 200], ["requestSha256", input.requestSha256, 128], ["capabilityToken", input.capabilityToken, 128]] as const) {
+		if (typeof value !== "string" || value.length === 0 || value.length > limit || /[\0\r\n]/.test(value)) throw new Error(`Integration repair ${name} is invalid`);
+	}
+	if (!/^[0-9a-f]{64}$/i.test(input.requestSha256) || !/^[0-9a-f]{64}$/i.test(input.capabilityToken)) throw new Error("Integration repair request and capability identities must be SHA-256 values");
+	if (input.ownerSessionId !== undefined && (typeof input.ownerSessionId !== "string" || input.ownerSessionId.length === 0 || input.ownerSessionId.length > 256 || /[\0\r\n]/.test(input.ownerSessionId))) throw new Error("Integration repair ownerSessionId is invalid");
+	if (input.repairId !== undefined && (typeof input.repairId !== "string" || input.repairId.length === 0 || input.repairId.length > 200 || /[\0\r\n]/.test(input.repairId))) throw new Error("Integration repair repairId is invalid");
+	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
+	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
+	if (input.commitMessage !== undefined && (typeof input.commitMessage !== "string" || input.commitMessage.trim().length === 0 || input.commitMessage.length > 512 || /[\0\r\n]/.test(input.commitMessage))) throw new Error("Integration repair commitMessage is invalid");
+}
+
+function validateRepairSession(value: string | undefined, expected: string): void {
+	if (!value || value !== expected) throw new Error("Integration repair owner session does not match the request-bound capability");
+}
+
+function repairAuditEvidence(input: IntegrationRepairInput): Record<string, unknown> {
+	const { capabilityToken, ...rest } = input;
+	return { ...rest, capabilityTokenSha256: integrationRepairCapabilityDigest(capabilityToken) };
+}
+
+function repairInputHash(input: IntegrationRepairInput): string {
+	return sha256(stableJson(repairAuditEvidence(input)));
 }
 
 function validateStartInput(input: StartInput): void {
@@ -1046,6 +1106,13 @@ export class HerderRunManager {
 			if (!namespace.ok) throw new Error(`Cannot resume ambiguous Herder namespace: ${namespace.reason}`);
 		}
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
+		const integrationRepair = failedVerification ? this.store.getIntegrationRepairForRequest(failedVerification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
+		if (integrationRepair?.state === "verifying" && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
+			return this.verification(integrationRepair.successorManifest);
+		}
+		if (integrationRepair && ["active", "committing", "committed", "failed", "paused", "interrupted"].includes(integrationRepair.state)) {
+			return this.reply();
+		}
 		if (run.status === "failed" && failedVerification?.state === "failed" && !this.store.getPlan(run.runId, "RUN")) {
 			if (driver.branchHead(run.integrationBranch) !== failedVerification.request.integrationHead
 				|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== failedVerification.request.integrationTree
@@ -1234,6 +1301,305 @@ export class HerderRunManager {
 		return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
 	}
 
+	private integrationRepairRequest(verification: StoredVerification, repair: StoredIntegrationRepair | null): IntegrationRepairRequest {
+		const requestId = verification.request.requestId;
+		const capabilityToken = integrationRepairCapabilityToken(requestId);
+		const canonicalGates = repair?.effectiveGates ?? verification.manifest?.gates ?? [];
+		const state = repair && ["active", "committing", "committed", "verifying", "passed", "cancelled", "interrupted"].includes(repair.state)
+			? repair.state
+			: "available";
+		return {
+			schemaVersion: 1,
+			...(repair ? { repairId: repair.repairId } : {}),
+			requestId,
+			requestSha256: verification.request.requestSha256,
+			runId: verification.request.runId,
+			generation: verification.request.generation,
+			state,
+			...(repair?.classification ? { classification: repair.classification } : {}),
+			round: repair?.round ?? 1,
+			maxRounds: 3,
+			...(repair?.ownerSessionId ? { ownerSessionId: repair.ownerSessionId } : {}),
+			capabilityToken,
+			capabilityTokenSha256: integrationRepairCapabilityDigest(capabilityToken),
+			parentCommit: repair?.parentCommit ?? verification.request.integrationHead,
+			...(repair?.currentCommit ? { currentCommit: repair.currentCommit } : {}),
+			...(repair?.currentTree ? { currentTree: repair.currentTree } : {}),
+			failedGates: verification.manifest?.gates ?? [],
+			canonicalGates,
+			...(repair?.successorRequestId ? { successorRequestId: repair.successorRequestId } : {}),
+			...(repair?.successorRequestSha256 ? { successorRequestSha256: repair.successorRequestSha256 } : {}),
+			supersededCommits: repair?.supersededCommits ?? [],
+			...(repair?.detail ? { detail: repair.detail } : {}),
+		};
+	}
+
+	private repairVerificationForInput(input: IntegrationRepairInput): StoredVerification {
+		const verification = this.store.getVerificationByRequestId(input.requestId);
+		if (!verification) throw new Error(`Unknown integration repair verification request ${input.requestId}`);
+		if (verification.request.requestSha256 !== input.requestSha256) throw new Error("Integration repair request evidence changed");
+		const expectedCapability = integrationRepairCapabilityToken(input.requestId);
+		if (input.capabilityToken !== expectedCapability) throw new Error("Integration repair capability token does not match the failed verification request");
+		const run = this.store.getRun();
+		if (!run || verification.request.runId !== run.runId || verification.request.generation !== run.currentGeneration) throw new Error("Integration repair request is not bound to the current run generation");
+		if (input.runId !== undefined && input.runId !== run.runId) throw new Error("Integration repair runId does not match the current run");
+		if (input.generation !== undefined && input.generation !== run.currentGeneration) throw new Error("Integration repair generation does not match the current run");
+		return verification;
+	}
+
+	private repairGateManifest(
+		verification: StoredVerification,
+		repair: StoredIntegrationRepair,
+		input: IntegrationRepairInput,
+		head: string,
+		tree: string,
+	): { request: ReturnType<typeof createVerificationRequest>; manifest: VerificationManifest; gates: VerificationManifest["gates"]; manifestSha256: string } {
+		const classification = repair.classification;
+		if (!classification) throw new Error("Integration repair has no durable classification");
+		const retained = repair.effectiveGates;
+		if (classification === "manifest_error" && input.gates === undefined) throw new Error("Manifest-error recovery requires a replacement gate array");
+		if (classification !== "manifest_error" && input.gates !== undefined && input.gateAdditions === undefined && input.gates.length > retained.length) {
+			throw new Error("Integration repair gate additions must be explicitly recorded");
+		}
+		let candidate = input.gates;
+		if (candidate === undefined && input.gateAdditions !== undefined) candidate = [...retained, ...input.gateAdditions];
+		if (candidate === undefined) candidate = retained;
+		const request = createVerificationRequest({
+			requestId: repair.successorRequestId || randomUUID(),
+			runId: verification.request.runId,
+			generation: verification.request.generation,
+			graphSha256: verification.request.graphSha256,
+			runAssignmentPath: verification.request.runAssignmentPath,
+			runAssignmentSha256: verification.request.runAssignmentSha256,
+			integrationBranch: verification.request.integrationBranch,
+			integrationWorktree: verification.request.integrationWorktree,
+			integrationHead: head,
+			integrationTree: tree,
+			requestedAt: new Date().toISOString(),
+			predecessorRequestId: verification.request.requestId,
+			repairId: repair.repairId,
+			repairRound: repair.round,
+		});
+		const rawManifest = {
+			schemaVersion: 1 as const,
+			requestId: request.requestId,
+			requestSha256: request.requestSha256,
+			runId: request.runId,
+			generation: request.generation,
+			graphSha256: request.graphSha256,
+			runAssignmentSha256: request.runAssignmentSha256,
+			integrationHead: request.integrationHead,
+			integrationTree: request.integrationTree,
+			rationale: input.rationale?.trim() || `Authoritative verification after integration repair round ${repair.round}.`,
+			gates: candidate,
+		};
+		const normalized = normalizeVerificationManifest(request, rawManifest);
+		let recordedAdditions: VerificationManifest["gates"] | undefined;
+		if (input.gateAdditions !== undefined) {
+			const additionsManifest = normalizeVerificationManifest(request, { ...rawManifest, gates: input.gateAdditions });
+			recordedAdditions = additionsManifest.manifest.gates;
+		}
+		const gates = normalizeIntegrationRepairGates({
+			classification,
+			retainedGates: retained,
+			candidateGates: normalized.manifest.gates,
+			recordedAdditions,
+		});
+		const manifest = { ...normalized.manifest, gates };
+		return { request, manifest, gates, manifestSha256: sha256(stableJson(manifest)) };
+	}
+
+	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
+		validateIntegrationRepairInput(input);
+		const operationId = input.operationId || `integration-repair:${input.operation}:${input.requestId}`;
+		const verification = this.repairVerificationForInput(input);
+		let repair = input.repairId ? this.store.getIntegrationRepair(input.repairId) : this.store.getIntegrationRepairForRequest(input.requestId);
+		if (repair && input.repairId && repair.repairId !== input.repairId) throw new Error("Integration repair ID does not match durable evidence");
+		const run = this.store.getRun()!;
+		if (input.operation === "begin") {
+			const classification = normalizeIntegrationRepairClassification(input.classification);
+			if (!["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Only an integrated code/test defect, transient failure, or manifest error may open integration repair");
+			if (verification.state !== "failed") throw new Error("Integration repair begin requires a failed verification attempt");
+			const ownerSessionId = input.ownerSessionId;
+			if (!ownerSessionId) throw new Error("Integration repair begin requires the owning main session ID");
+			if (repair) {
+				if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
+				if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
+				if (repair.classification && repair.classification !== classification) throw new Error("Integration repair classification cannot change during a transaction");
+				if (repair.state === "passed" || repair.state === "cancelled") return this.reply();
+				if (repair.round >= 3 && repair.state === "failed") {
+					this.store.updateIntegrationRepair(repair.repairId, { state: "paused", detail: "Three repaired verification rounds failed; awaiting explicit user choice." });
+					throw new Error("Integration repair round limit reached; user choice is required");
+				}
+				if (repair.state === "failed" || repair.state === "paused") {
+					if (repair.classification === "transient") throw new Error("Transient verification recovery allows one unchanged retry");
+					if (repair.round >= 3) throw new Error("Integration repair round limit reached; user choice is required");
+					repair = this.store.updateIntegrationRepair(repair.repairId, {
+						requestId: input.requestId,
+						requestSha256: input.requestSha256,
+						capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+						classification,
+						state: "active",
+						round: repair.round + 1,
+						successorRequestId: null,
+						successorRequestSha256: null,
+						successorManifest: null,
+						successorManifestSha256: null,
+						detail: null,
+					});
+				} else {
+					validateRepairSession(input.ownerSessionId, repair.ownerSessionId);
+					this.store.recordIntegrationRepairAudit(repair.repairId, operationId, "begin", repairInputHash(input), repairAuditEvidence(input));
+					return this.reply();
+				}
+			} else {
+				repair = this.store.putIntegrationRepair({
+					repairId: input.repairId || randomUUID(),
+					runId: run.runId,
+					generation: run.currentGeneration,
+					requestId: input.requestId,
+					requestSha256: input.requestSha256,
+					ownerSessionId,
+					capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
+					classification,
+					state: "active",
+					round: 1,
+					parentCommit: verification.request.integrationHead,
+					canonicalGates: verification.manifest?.gates ?? [],
+					canonicalGatesSha256: sha256(stableJson(verification.manifest?.gates ?? [])),
+					effectiveGates: verification.manifest?.gates ?? [],
+					operationId,
+					operationPayloadSha256: repairInputHash(input),
+				});
+			}
+			this.store.transaction(() => {
+				this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "begin", repairInputHash(input), repairAuditEvidence(input));
+				this.store.updateRun({ status: "paused", terminalDetail: `Integration repair round ${repair!.round} is authorized for the owning main session.` });
+			});
+			return this.reply();
+		}
+
+		if (!repair) throw new Error("Integration repair begin must precede finish or cancel");
+		validateRepairSession(input.ownerSessionId, repair.ownerSessionId);
+		if (![repair.requestId, repair.successorRequestId].includes(input.requestId)) throw new Error("Integration repair request is not the active transaction request");
+		if (repair.state === "passed" || repair.state === "cancelled") return this.reply();
+		if (input.operation === "cancel") {
+			if (!["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(repair.state)) return this.reply();
+			const driver = this.driver(run);
+			await driver.verifyCheckout(run.checkoutStateToken);
+			const expectedHead = repair.currentCommit ?? repair.parentCommit;
+			if (driver.branchHead(run.integrationBranch) !== expectedHead || driver.worktreeHead(run.integrationWorktree) !== expectedHead || driver.worktreeStatus(run.integrationWorktree)) {
+				throw new Error("Integration repair cannot be cancelled after the assigned worktree changed");
+			}
+			this.store.transaction(() => {
+				this.store.updateIntegrationRepair(repair!.repairId, { state: "cancelled", detail: input.detail ?? "Integration repair cancelled by the owning main session." });
+				this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "cancel", repairInputHash(input), repairAuditEvidence(input));
+				this.store.updateRun({ status: "paused", terminalDetail: input.detail ?? "Integration repair cancelled; awaiting user choice." });
+			});
+			return this.reply();
+		}
+
+		if (!["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(repair.state)) return this.reply();
+		if (["failed", "paused", "interrupted"].includes(repair.state)) {
+			if (repair.operationId === operationId) return this.reply();
+			throw new Error("Integration repair finish requires a new begin transition after a failed round");
+		}
+		if ((repair.state === "verifying" || repair.state === "committed") && repair.successorRequestId && repair.successorManifest) {
+			const successor = this.store.getVerificationByRequestId(repair.successorRequestId);
+			if (successor?.state === "passed" || successor?.state === "failed") return this.reply();
+			if (repair.state === "committed") this.store.updateIntegrationRepair(repair.repairId, { state: "verifying" });
+			await this.verification(repair.successorManifest);
+			return this.reply();
+		}
+		const driver = this.driver(run);
+		await driver.verifyCheckout(run.checkoutStateToken);
+		let head = repair.currentCommit ?? repair.parentCommit;
+		let tree = repair.currentTree ?? verification.request.integrationTree;
+		let superseded = [...repair.supersededCommits];
+		const classification = repair.classification;
+		if (!classification) throw new Error("Integration repair has no durable classification");
+		this.store.transaction(() => {
+			this.store.updateIntegrationRepair(repair!.repairId, { state: "committing", operationId, operationPayloadSha256: repairInputHash(input) });
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "finish-intent", repairInputHash(input), repairAuditEvidence(input));
+		});
+		if (classification === "code_defect") {
+			const commit = driver.acceptIntegrationRepairCommit({
+				parent: repair.parentCommit,
+				round: repair.round,
+				currentHead: repair.currentCommit,
+				commitMessage: input.commitMessage,
+				allowCommit: true,
+			});
+			head = commit.head;
+			tree = commit.tree;
+			if (commit.supersededHead && !superseded.includes(commit.supersededHead)) superseded.push(commit.supersededHead);
+		} else {
+			if (driver.branchHead(run.integrationBranch) !== repair.parentCommit || driver.worktreeHead(run.integrationWorktree) !== repair.parentCommit || driver.worktreeStatus(run.integrationWorktree)) {
+				throw new Error(`${classification} recovery cannot mutate the frozen integration tree`);
+			}
+			head = repair.parentCommit;
+			tree = verification.request.integrationTree;
+		}
+		this.store.transaction(() => {
+			this.store.updateIntegrationRepair(repair!.repairId, {
+				state: "committed",
+				currentCommit: head,
+				currentTree: tree,
+				supersededCommits: superseded,
+			});
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "commit", repairInputHash(input), { head, tree, parent: repair!.parentCommit, supersededCommits: superseded });
+		});
+		const gateManifest = this.repairGateManifest(verification, repair, input, head, tree);
+		this.store.transaction(() => {
+			this.store.putVerificationRequest(gateManifest.request);
+			this.store.updateIntegrationRepair(repair!.repairId, {
+				state: "verifying",
+				currentCommit: head,
+				currentTree: tree,
+				supersededCommits: superseded,
+				effectiveGates: gateManifest.gates,
+				successorRequestId: gateManifest.request.requestId,
+				successorRequestSha256: gateManifest.request.requestSha256,
+				successorManifest: gateManifest.manifest,
+				successorManifestSha256: gateManifest.manifestSha256,
+				detail: "Accepted repair commit; replaying the retained ordered verification program.",
+			});
+			this.store.recordIntegrationRepairAudit(repair!.repairId, operationId, "successor", repairInputHash(input), {
+				requestId: gateManifest.request.requestId,
+				requestSha256: gateManifest.request.requestSha256,
+				manifestSha256: gateManifest.manifestSha256,
+				gates: gateManifest.gates,
+			});
+			this.store.updateRun({ status: "paused", terminalDetail: "Executing the authoritative verification program after integration repair." });
+		});
+		const result = await this.verification(gateManifest.manifest);
+		const successor = this.store.getVerificationByRequestId(gateManifest.request.requestId);
+		if (successor?.state === "passed") {
+			this.store.updateIntegrationRepair(repair.repairId, { state: "passed", detail: "Successor verification passed." });
+		} else if (successor?.state === "failed") {
+			const paused = repair.round >= 3;
+			this.store.updateIntegrationRepair(repair.repairId, { state: paused ? "paused" : "failed", detail: paused ? "Three repaired verification rounds failed; awaiting explicit user choice." : successor.terminalDetail });
+		}
+		return this.reply();
+	}
+
+	async repair(input: IntegrationRepairInput): Promise<ManagerReply> {
+		return this.integrationRepair(input);
+	}
+
+	private recordIntegrationRepairVerificationOutcome(requestId: string, state: "passed" | "failed", detail: string | null): void {
+		const repair = this.store.getIntegrationRepairForRequest(requestId);
+		if (!repair) return;
+		if (state === "passed") {
+			this.store.updateIntegrationRepair(repair.repairId, { state: "passed", detail: "Successor verification passed." });
+			return;
+		}
+		this.store.updateIntegrationRepair(repair.repairId, {
+			state: repair.round >= 3 ? "paused" : "failed",
+			detail: repair.round >= 3 ? "Three repaired verification rounds failed; awaiting explicit user choice." : detail,
+		});
+	}
+
 	async verification(input: VerificationManifest): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
@@ -1297,16 +1663,20 @@ export class HerderRunManager {
 				passed: !detail,
 				finishedAt: new Date().toISOString(),
 			};
+
 			if (detail) {
+				const repair = this.store.getIntegrationRepairForRequest(stored.request.requestId);
 				this.store.transaction(() => {
 					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
-					this.store.updateRun({ status: "failed", terminalDetail: detail });
+					this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "failed", detail);
+					this.store.updateRun({ status: repair && repair.round >= 3 ? "paused" : "failed", terminalDetail: repair && repair.round >= 3 ? "Three repaired verification rounds failed; awaiting explicit user choice." : detail });
 				});
 				this.projectLifecycleBestEffort();
 				return this.reply();
 			}
 			this.store.transaction(() => {
 				this.store.finishVerification(stored.request.requestId, "passed", evidence, null);
+				this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "passed", null);
 				this.store.updateRun({ status: "running", terminalDetail: "Final verification passed; preparing the aggregate audit." });
 			});
 			run = this.store.getRun()!;
@@ -1323,11 +1693,13 @@ export class HerderRunManager {
 				finishedAt: new Date().toISOString(),
 				error: detail,
 			};
-			const live = this.store.getVerification(run.runId, run.currentGeneration);
+			const live = this.store.getVerificationByRequestId(stored.request.requestId);
 			if (live?.state === "running") {
+				const repair = this.store.getIntegrationRepairForRequest(stored.request.requestId);
 				this.store.transaction(() => {
 					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
-					this.store.updateRun({ status: "failed", terminalDetail: detail });
+					this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "failed", detail);
+					this.store.updateRun({ status: repair && repair.round >= 3 ? "paused" : "failed", terminalDetail: repair && repair.round >= 3 ? "Three repaired verification rounds failed; awaiting explicit user choice." : detail });
 				});
 				this.projectLifecycleBestEffort();
 			}
@@ -2639,6 +3011,10 @@ export class HerderRunManager {
 		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
+		const integrationRepair = verification ? this.store.getIntegrationRepairForRequest(verification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
+		const exposedIntegrationRepair = verification && (verification.state === "failed" || (integrationRepair && ["active", "committing", "committed", "verifying", "failed", "paused", "interrupted"].includes(integrationRepair.state)))
+			? this.integrationRepairRequest(verification, integrationRepair)
+			: undefined;
 		const storedReignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
 		const reignite = run.status === "complete" && storedReignite?.state === "pending"
 			? this.ensureReigniteAllocation(run, storedReignite)
@@ -2674,6 +3050,7 @@ export class HerderRunManager {
 			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
+			...(exposedIntegrationRepair ? { integrationRepair: exposedIntegrationRepair } : {}),
 			...(run.status === "complete" && reignite?.state === "pending" ? { reigniteRequest: reignite } : {}),
 		};
 	}
@@ -2687,4 +3064,4 @@ export class HerderRunManager {
 	}
 }
 
-export type { EventInput, PlanEditInput, ReigniteInput, StartInput };
+export type { EventInput, IntegrationRepairInput, PlanEditInput, ReigniteInput, StartInput };

@@ -9,6 +9,7 @@ import {
 	type VerificationGate,
 	type VerificationManifest,
 	type VerificationRequest,
+	type IntegrationRepairClassification,
 } from "../shared/protocol.ts";
 
 /**
@@ -38,6 +39,9 @@ export interface VerificationRequestInput {
 	integrationHead: string;
 	integrationTree: string;
 	requestedAt: string;
+	predecessorRequestId?: string;
+	repairId?: string;
+	repairRound?: number;
 }
 
 function oneLine(value: unknown, label: string, maximum = 512): string {
@@ -72,7 +76,13 @@ export function createVerificationRequest(input: VerificationRequestInput): Veri
 		integrationHead: sha(input.integrationHead, "Verification integration head"),
 		integrationTree: sha(input.integrationTree, "Verification integration tree"),
 		requestedAt: new Date(input.requestedAt).toISOString(),
+		...(input.predecessorRequestId ? { predecessorRequestId: oneLine(input.predecessorRequestId, "Verification predecessor request ID", 200) } : {}),
+		...(input.repairId ? { repairId: oneLine(input.repairId, "Verification repair ID", 200) } : {}),
+		...(input.repairRound !== undefined ? { repairRound: input.repairRound } : {}),
 	};
+	if (core.repairRound !== undefined && (!Number.isSafeInteger(core.repairRound) || core.repairRound < 1 || core.repairRound > 3)) {
+		throw new Error("Verification repairRound must be between 1 and 3");
+	}
 	if (!Number.isSafeInteger(core.generation) || core.generation < 1) throw new Error("Verification generation must be a positive integer");
 	return { ...core, requestSha256: sha256(stableJson(core)) };
 }
@@ -86,6 +96,10 @@ export function normalizeVerificationManifest(
 		if (String(input[field]) !== String(request[field])) throw new Error(`Verification manifest ${field} does not match the active request`);
 	}
 	if (input.generation !== request.generation) throw new Error("Verification manifest generation does not match the active request");
+	for (const field of ["predecessorRequestId", "repairId"] as const) {
+		if (input[field] !== undefined && String(input[field]) !== String(request[field] ?? "")) throw new Error(`Verification manifest ${field} does not match the active request`);
+	}
+	if (input.repairRound !== undefined && input.repairRound !== request.repairRound) throw new Error("Verification manifest repairRound does not match the active request");
 	const rationale = String(input.rationale ?? "").trim();
 	if (!rationale || rationale.length > MAX_RATIONALE_LENGTH || /\0/.test(rationale)) {
 		throw new Error(`Verification rationale must contain 1 through ${MAX_RATIONALE_LENGTH} characters`);
@@ -146,10 +160,50 @@ export function normalizeVerificationManifest(
 		integrationTree: request.integrationTree,
 		rationale,
 		gates,
+		...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+		...(request.repairId ? { repairId: request.repairId } : {}),
+		...(request.repairRound !== undefined ? { repairRound: request.repairRound } : {}),
 		...(selector && Object.keys(selector).length > 0 ? { selector } : {}),
 	};
 	return { manifest, manifestSha256: sha256(stableJson(manifest)) };
 }
+
+export interface IntegrationRepairGateProgramInput {
+	classification: IntegrationRepairClassification | string;
+	retainedGates: VerificationGate[];
+	candidateGates: VerificationGate[];
+	recordedAdditions?: VerificationGate[];
+}
+
+/**
+ * Validate the durable gate program used by a repaired verification. Code and
+ * transient recovery are monotonic: the old normalized array is an exact
+ * ordered prefix and only the explicitly recorded suffix may be appended.
+ * A manifest error is the sole classification allowed to replace that array.
+ */
+export function normalizeIntegrationRepairGates(input: IntegrationRepairGateProgramInput): VerificationGate[] {
+	if (!Array.isArray(input.retainedGates) || !Array.isArray(input.candidateGates)) throw new Error("Integration repair gates must be arrays");
+	if (input.candidateGates.length > MAX_GATES) throw new Error(`Integration repair manifest may contain at most ${MAX_GATES} gates`);
+	if (input.classification === "manifest_error") return input.candidateGates.map((gate) => ({ ...gate, argv: [...gate.argv] }));
+	if (input.candidateGates.length < input.retainedGates.length) throw new Error("Integration repair cannot drop retained verification gates");
+	for (let index = 0; index < input.retainedGates.length; index += 1) {
+		if (stableJson(input.candidateGates[index]) !== stableJson(input.retainedGates[index])) {
+			throw new Error(`Integration repair gate ${index + 1} changed or was reordered`);
+		}
+	}
+	const ids = new Set(input.retainedGates.map((gate) => gate.gateId));
+	const additions = input.candidateGates.slice(input.retainedGates.length);
+	if (input.recordedAdditions !== undefined) {
+		if (stableJson(additions) !== stableJson(input.recordedAdditions)) throw new Error("Integration repair gate additions are not the recorded append-only program");
+	}
+	for (const gate of additions) {
+		if (ids.has(gate.gateId)) throw new Error(`Integration repair gate ID ${gate.gateId} is duplicated`);
+		ids.add(gate.gateId);
+	}
+	return input.candidateGates.map((gate) => ({ ...gate, argv: [...gate.argv] }));
+}
+
+export const validateIntegrationRepairGates = normalizeIntegrationRepairGates;
 
 export interface ReigniteRequestInput {
 	requestId: string;

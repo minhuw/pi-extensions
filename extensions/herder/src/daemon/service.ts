@@ -16,6 +16,8 @@ import {
 import {
 	MANAGER_OPERATION_KINDS,
 	MANAGER_PROTOCOL_VERSION,
+	integrationRepairCapabilityDigest,
+	integrationRepairCapabilityToken,
 	type ManagerOperationKind,
 	type ManagerOperationReceipt,
 	type ManagerReply,
@@ -148,7 +150,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "repair" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
@@ -253,9 +255,22 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				&& (operation.payload as { mode?: unknown }).mode === "fire"
 				? { ...(operation.payload as Record<string, unknown>), mode: "resume" }
 				: operation.payload;
-			const payload = operation.kind === "start" && recoveredPayload && typeof recoveredPayload === "object" && !Array.isArray(recoveredPayload)
+			let payload = operation.kind === "start" && recoveredPayload && typeof recoveredPayload === "object" && !Array.isArray(recoveredPayload)
 				? { ...(recoveredPayload as Record<string, unknown>), dashboardUrl }
 				: recoveredPayload;
+			if ((operation.kind === "integration_repair" || operation.kind === "repair") && payload && typeof payload === "object" && !Array.isArray(payload)) {
+				const repairPayload = payload as Record<string, unknown>;
+				if (!repairPayload.capabilityToken && typeof repairPayload.requestId === "string") {
+					const capabilityToken = integrationRepairCapabilityToken(repairPayload.requestId);
+					if (repairPayload.capabilityTokenSha256 !== integrationRepairCapabilityDigest(capabilityToken)) throw new Error("Integration repair capability digest is missing or invalid");
+					payload = { ...repairPayload, capabilityToken };
+				}
+			}
+			if (operation.kind === "verification" && payload && typeof payload === "object" && !Array.isArray(payload)) {
+				const verificationPayload = payload as Record<string, unknown>;
+				const stored = typeof verificationPayload.requestId === "string" ? store.getVerificationByRequestId(verificationPayload.requestId) : null;
+				if (stored?.request.repairId && stored.state === "running" && stored.manifest) payload = stored.manifest;
+			}
 			const result = await executor.call(operation.kind, payload);
 			const reply = operationReply(operation.kind, result);
 			store.transaction(() => {
@@ -312,7 +327,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				dashboardUrl,
 				managerProtocolVersion: MANAGER_PROTOCOL_VERSION,
 				executionSchemaVersion: EXECUTION_SCHEMA_VERSION,
-				capabilities: ["durable-operations", "snapshot-status", "main-session-verification", "main-session-reignite", "attention-resolution"],
+				capabilities: ["durable-operations", "snapshot-status", "main-session-verification", "main-session-reignite", "attention-resolution", "transactional-integration-repair"],
 			});
 			return;
 		}

@@ -10,6 +10,8 @@ import {
 	MANAGER_PROTOCOL_VERSION,
 	attentionCapabilityToken,
 	canonicalEventPayload,
+	integrationRepairCapabilityDigest,
+	integrationRepairCapabilityToken,
 	sha256,
 	stableJson,
 	validateAttentionRequest,
@@ -27,6 +29,9 @@ import {
 	type ReigniteRequest,
 	type VerificationManifest,
 	type VerificationRequest,
+	type IntegrationRepairClassification,
+	type IntegrationRepairRequest,
+	type IntegrationRepairState,
 } from "../shared/protocol.ts";
 
 type Database = DatabaseSync;
@@ -219,6 +224,46 @@ export interface StoredVerification {
 	updatedAt: string;
 }
 
+export interface StoredIntegrationRepair {
+	repairId: string;
+	runId: string;
+	generation: number;
+	requestId: string;
+	requestSha256: string;
+	ownerSessionId: string;
+	capabilityDigest: string;
+	classification: IntegrationRepairClassification | null;
+	state: IntegrationRepairState;
+	round: number;
+	maxRounds: 3;
+	parentCommit: string;
+	currentCommit: string | null;
+	currentTree: string | null;
+	supersededCommits: string[];
+	canonicalGates: VerificationManifest["gates"];
+	canonicalGatesSha256: string;
+	effectiveGates: VerificationManifest["gates"];
+	successorRequestId: string | null;
+	successorRequestSha256: string | null;
+	successorManifest: VerificationManifest | null;
+	successorManifestSha256: string | null;
+	operationId: string | null;
+	operationPayloadSha256: string | null;
+	detail: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface StoredIntegrationRepairAudit {
+	auditId: number;
+	repairId: string;
+	operationId: string;
+	action: string;
+	payloadSha256: string;
+	evidence: unknown;
+	createdAt: string;
+}
+
 export type StoredAttentionRequest = AttentionRequest & { sequence: number };
 export type AttentionCleanupStep = ResetPlanCleanupEvidence["step"];
 export type AttentionCleanupIdentity = Omit<ResetPlanCleanupEvidence, "evidenceId" | "step" | "state">;
@@ -240,6 +285,18 @@ function attentionCleanupPayload(identity: AttentionCleanupIdentity, step: Atten
 function parseJson<T>(value: string | null | undefined, fallback: T): T {
 	if (!value) return fallback;
 	return JSON.parse(value) as T;
+}
+
+function durableOperationPayload(kind: ManagerOperationKind, payload: unknown): unknown {
+	if (kind !== "integration_repair" && kind !== "repair") return payload;
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+	const record = payload as Record<string, unknown>;
+	const token = typeof record.capabilityToken === "string" ? record.capabilityToken : "";
+	const { capabilityToken: _capabilityToken, ...rest } = record;
+	return {
+		...rest,
+		...(token ? { capabilityTokenSha256: integrationRepairCapabilityDigest(token) } : {}),
+	};
 }
 
 function rowToRun(row: Record<string, unknown> | undefined): StoredRun | null {
@@ -419,6 +476,9 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 		integrationHead: String(row.integration_head),
 		integrationTree: String(row.integration_tree),
 		requestedAt: String(row.created_at),
+		...(row.predecessor_request_id === null || row.predecessor_request_id === undefined ? {} : { predecessorRequestId: String(row.predecessor_request_id) }),
+		...(row.repair_id === null || row.repair_id === undefined ? {} : { repairId: String(row.repair_id) }),
+		...(row.repair_round === null || row.repair_round === undefined ? {} : { repairRound: Number(row.repair_round) }),
 	};
 	return {
 		request,
@@ -428,6 +488,50 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 		result: parseJson<unknown>(row.result_json === null ? null : String(row.result_json), null),
 		terminalDetail: row.terminal_detail === null ? null : String(row.terminal_detail),
 		updatedAt: String(row.updated_at),
+	};
+}
+
+function rowToIntegrationRepair(row: Record<string, unknown>): StoredIntegrationRepair {
+	return {
+		repairId: String(row.repair_id),
+		runId: String(row.run_id),
+		generation: Number(row.generation),
+		requestId: String(row.request_id),
+		requestSha256: String(row.request_sha256),
+		ownerSessionId: String(row.owner_session_id),
+		capabilityDigest: String(row.capability_digest),
+		classification: row.classification === null ? null : String(row.classification) as IntegrationRepairClassification,
+		state: String(row.state) as IntegrationRepairState,
+		round: Number(row.round_number),
+		maxRounds: 3,
+		parentCommit: String(row.parent_commit),
+		currentCommit: row.current_commit === null ? null : String(row.current_commit),
+		currentTree: row.current_tree === null ? null : String(row.current_tree),
+		supersededCommits: parseJson<string[]>(row.superseded_commits_json === null ? null : String(row.superseded_commits_json), []),
+		canonicalGates: parseJson<VerificationManifest["gates"]>(String(row.canonical_gates_json), []),
+		canonicalGatesSha256: String(row.canonical_gates_sha256),
+		effectiveGates: parseJson<VerificationManifest["gates"]>(String(row.effective_gates_json), []),
+		successorRequestId: row.successor_request_id === null ? null : String(row.successor_request_id),
+		successorRequestSha256: row.successor_request_sha256 === null ? null : String(row.successor_request_sha256),
+		successorManifest: parseJson<VerificationManifest | null>(row.successor_manifest_json === null ? null : String(row.successor_manifest_json), null),
+		successorManifestSha256: row.successor_manifest_sha256 === null ? null : String(row.successor_manifest_sha256),
+		operationId: row.operation_id === null ? null : String(row.operation_id),
+		operationPayloadSha256: row.operation_payload_sha256 === null ? null : String(row.operation_payload_sha256),
+		detail: row.detail === null ? null : String(row.detail),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+	};
+}
+
+function rowToIntegrationRepairAudit(row: Record<string, unknown>): StoredIntegrationRepairAudit {
+	return {
+		auditId: Number(row.audit_id),
+		repairId: String(row.repair_id),
+		operationId: String(row.operation_id),
+		action: String(row.action),
+		payloadSha256: String(row.payload_sha256),
+		evidence: parseJson<unknown>(String(row.evidence_json), null),
+		createdAt: String(row.created_at),
 	};
 }
 
@@ -569,8 +673,9 @@ export class RunStore {
 
 	submitOperation(operationId: string, kind: ManagerOperationKind, payload: unknown): ManagerOperationReceipt {
 		if (!operationId || operationId.length > 200 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 200 characters");
-		const canonicalPayload = canonicalEventPayload(payload);
-		const identity = canonicalEventPayload({ kind, payload });
+		const durablePayload = durableOperationPayload(kind, payload);
+		const canonicalPayload = canonicalEventPayload(durablePayload);
+		const identity = canonicalEventPayload({ kind, payload: durablePayload });
 		const existing = this.getOperation(operationId);
 		if (existing) {
 			if (existing.kind !== kind || existing.payloadSha256 !== identity.sha256) throw new Error(`Operation ${operationId} was replayed with different payload`);
@@ -594,24 +699,46 @@ export class RunStore {
 	recoverRunningOperations(): void {
 		const running = (this.database.prepare("SELECT * FROM manager_operations WHERE state = 'running' ORDER BY sequence").all() as Record<string, unknown>[]).map(rowToOperation);
 		for (const operation of running) {
-			const mode = operation.kind === "start" && operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
-				? String((operation.payload as { mode?: unknown }).mode || "") : "";
+			const payload = operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
+				? operation.payload as Record<string, unknown> : {};
+			const mode = operation.kind === "start" ? String(payload.mode || "") : "";
+			if (operation.kind === "verification") {
+				const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+				const stored = requestId ? this.getVerificationByRequestId(requestId) : null;
+				if (stored?.request.repairId && stored.state === "running" && stored.manifest) {
+					this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
+						.run(new Date().toISOString(), operation.operationId);
+					continue;
+				}
+			}
+			if (operation.kind === "integration_repair" || operation.kind === "repair") {
+				const repairId = typeof payload.repairId === "string" ? payload.repairId : "";
+				const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+				const repair = repairId ? this.getIntegrationRepair(repairId) : requestId ? this.getIntegrationRepairForRequest(requestId) : null;
+				if (repair && repair.state !== "interrupted") {
+					this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
+						.run(new Date().toISOString(), operation.operationId);
+					continue;
+				}
+			}
 			const replaySafe = operation.kind === "event" || operation.kind === "stop" || operation.kind === "reignite" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
 			if (replaySafe) {
 				this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
 					.run(new Date().toISOString(), operation.operationId);
 				continue;
 			}
-			const detail = `Operation ${operation.operationId} was interrupted while ${operation.kind} was running; its side effects are ambiguous and were not replayed.`;
+			const detail = `Operation ${operation.operationId} was interrupted while ${operation.kind} was running; its durable evidence was incomplete and was not replayed.`;
 			const now = new Date().toISOString();
 			this.transaction(() => {
 				this.database.prepare("UPDATE manager_operations SET state = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE operation_id = ?")
 					.run(detail, now, now, operation.operationId);
-				if (operation.kind === "verification") {
-					this.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ?, updated_at = ? WHERE state = 'running'")
-						.run(detail, now);
-					this.database.prepare("UPDATE manager_runs SET status = 'failed', terminal_detail = ?, updated_at = ? WHERE status IN ('running', 'paused')")
-						.run(detail, now);
+				if (operation.kind === "integration_repair" || operation.kind === "repair") {
+					const repairId = typeof payload.repairId === "string" ? payload.repairId : "";
+					if (repairId && this.getIntegrationRepair(repairId)) this.updateIntegrationRepair(repairId, { state: "interrupted", detail });
+				} else if (operation.kind === "verification") {
+					const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+					if (requestId) this.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ?, updated_at = ? WHERE request_id = ? AND state = 'running'").run(detail, now, requestId);
+					this.database.prepare("UPDATE manager_runs SET status = 'failed', terminal_detail = ?, updated_at = ? WHERE status IN ('running', 'paused')").run(detail, now);
 				}
 			});
 		}
@@ -629,6 +756,12 @@ export class RunStore {
 	}
 
 	completeOperation(operationId: string, result: unknown): ManagerOperationReceipt {
+		const current = this.getOperation(operationId);
+		if (current?.state === "succeeded") {
+			if (stableJson(current.result) !== stableJson(result)) throw new Error(`Operation ${operationId} was completed with different evidence`);
+			return operationReceipt(current);
+		}
+		if (current?.state === "failed") throw new Error(`Operation ${operationId} is already failed`);
 		const now = new Date().toISOString();
 		this.database.prepare("UPDATE manager_operations SET state = 'succeeded', result_json = ?, error = NULL, finished_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'running'")
 			.run(JSON.stringify(result), now, now, operationId);
@@ -638,9 +771,16 @@ export class RunStore {
 	}
 
 	failOperation(operationId: string, error: string): ManagerOperationReceipt {
+		const current = this.getOperation(operationId);
+		const bounded = error.slice(0, 16_384);
+		if (current?.state === "failed") {
+			if (current.error !== bounded) throw new Error(`Operation ${operationId} was failed with different evidence`);
+			return operationReceipt(current);
+		}
+		if (current?.state === "succeeded") throw new Error(`Operation ${operationId} is already succeeded`);
 		const now = new Date().toISOString();
 		this.database.prepare("UPDATE manager_operations SET state = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE operation_id = ? AND state = 'running'")
-			.run(error.slice(0, 16_384), now, now, operationId);
+			.run(bounded, now, now, operationId);
 		const operation = this.getOperation(operationId);
 		if (!operation || operation.state !== "failed") throw new Error(`Operation ${operationId} is not running`);
 		return operationReceipt(operation);
@@ -840,7 +980,156 @@ export class RunStore {
 		return row ? rowToVerification(row as Record<string, unknown>) : null;
 	}
 
+	getVerificationByRequestId(requestId: string): StoredVerification | null {
+		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		return row ? rowToVerification(row) : null;
+	}
+
+	getIntegrationRepair(repairId: string): StoredIntegrationRepair | null {
+		const row = this.database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(repairId) as Record<string, unknown> | undefined;
+		return row ? rowToIntegrationRepair(row) : null;
+	}
+
+	getIntegrationRepairForRequest(requestId: string): StoredIntegrationRepair | null {
+		const row = this.database.prepare(`
+			SELECT * FROM manager_integration_repairs
+			WHERE request_id = ? OR successor_request_id = ?
+			ORDER BY updated_at DESC LIMIT 1
+		`).get(requestId, requestId) as Record<string, unknown> | undefined;
+		return row ? rowToIntegrationRepair(row) : null;
+	}
+
+	getIntegrationRepairForRun(runId: string, generation?: number): StoredIntegrationRepair | null {
+		const row = generation === undefined
+			? this.database.prepare("SELECT * FROM manager_integration_repairs WHERE run_id = ? ORDER BY generation DESC, updated_at DESC LIMIT 1").get(runId)
+			: this.database.prepare("SELECT * FROM manager_integration_repairs WHERE run_id = ? AND generation = ? ORDER BY updated_at DESC LIMIT 1").get(runId, generation);
+		return row ? rowToIntegrationRepair(row as Record<string, unknown>) : null;
+	}
+
+	getIntegrationRepairAudits(repairId: string): StoredIntegrationRepairAudit[] {
+		return (this.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repairId) as Record<string, unknown>[]).map(rowToIntegrationRepairAudit);
+	}
+
+	putIntegrationRepair(input: {
+		repairId: string;
+		runId: string;
+		generation: number;
+		requestId: string;
+		requestSha256: string;
+		ownerSessionId: string;
+		capabilityDigest: string;
+		classification?: IntegrationRepairClassification | null;
+		state?: IntegrationRepairState;
+		round?: number;
+		parentCommit: string;
+		canonicalGates: VerificationManifest["gates"];
+		canonicalGatesSha256: string;
+		effectiveGates?: VerificationManifest["gates"];
+		operationId?: string | null;
+		operationPayloadSha256?: string | null;
+		detail?: string | null;
+	}): StoredIntegrationRepair {
+		const existing = this.getIntegrationRepair(input.repairId);
+		if (existing) {
+			if (existing.runId !== input.runId || existing.generation !== input.generation
+				|| existing.requestId !== input.requestId || existing.requestSha256 !== input.requestSha256
+				|| existing.ownerSessionId !== input.ownerSessionId || existing.capabilityDigest !== input.capabilityDigest
+				|| existing.parentCommit !== input.parentCommit || existing.canonicalGatesSha256 !== input.canonicalGatesSha256) {
+				throw new Error(`Integration repair ${input.repairId} was replayed with different evidence`);
+			}
+			return existing;
+		}
+		const now = new Date().toISOString();
+		this.database.prepare(`
+			INSERT INTO manager_integration_repairs (
+				repair_id, run_id, generation, request_id, request_sha256, owner_session_id, capability_digest,
+				classification, state, round_number, max_rounds, parent_commit, current_commit, current_tree,
+				superseded_commits_json, canonical_gates_json, canonical_gates_sha256, effective_gates_json,
+				successor_request_id, successor_request_sha256, successor_manifest_json, successor_manifest_sha256,
+				operation_id, operation_payload_sha256, detail, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+		`).run(
+			input.repairId, input.runId, input.generation, input.requestId, input.requestSha256,
+			input.ownerSessionId, input.capabilityDigest, input.classification ?? null, input.state ?? "active",
+			input.round ?? 1, input.parentCommit, JSON.stringify(input.canonicalGates), input.canonicalGatesSha256,
+			JSON.stringify(input.effectiveGates ?? input.canonicalGates), input.operationId ?? null,
+			input.operationPayloadSha256 ?? null, input.detail ?? null, now, now,
+		);
+		return this.getIntegrationRepair(input.repairId)!;
+	}
+
+	updateIntegrationRepair(repairId: string, patch: {
+		requestId?: string;
+		requestSha256?: string;
+		capabilityDigest?: string;
+		classification?: IntegrationRepairClassification | null;
+		state?: IntegrationRepairState;
+		round?: number;
+		currentCommit?: string | null;
+		currentTree?: string | null;
+		supersededCommits?: string[];
+		effectiveGates?: VerificationManifest["gates"];
+		successorRequestId?: string | null;
+		successorRequestSha256?: string | null;
+		successorManifest?: VerificationManifest | null;
+		successorManifestSha256?: string | null;
+		operationId?: string | null;
+		operationPayloadSha256?: string | null;
+		detail?: string | null;
+	}): StoredIntegrationRepair {
+		const existing = this.getIntegrationRepair(repairId);
+		if (!existing) throw new Error(`Unknown integration repair ${repairId}`);
+		const next = {
+			requestId: patch.requestId ?? existing.requestId,
+			requestSha256: patch.requestSha256 ?? existing.requestSha256,
+			capabilityDigest: patch.capabilityDigest ?? existing.capabilityDigest,
+			classification: patch.classification === undefined ? existing.classification : patch.classification,
+			state: patch.state ?? existing.state,
+			round: patch.round ?? existing.round,
+			currentCommit: patch.currentCommit === undefined ? existing.currentCommit : patch.currentCommit,
+			currentTree: patch.currentTree === undefined ? existing.currentTree : patch.currentTree,
+			supersededCommits: patch.supersededCommits ?? existing.supersededCommits,
+			effectiveGates: patch.effectiveGates ?? existing.effectiveGates,
+			successorRequestId: patch.successorRequestId === undefined ? existing.successorRequestId : patch.successorRequestId,
+			successorRequestSha256: patch.successorRequestSha256 === undefined ? existing.successorRequestSha256 : patch.successorRequestSha256,
+			successorManifest: patch.successorManifest === undefined ? existing.successorManifest : patch.successorManifest,
+			successorManifestSha256: patch.successorManifestSha256 === undefined ? existing.successorManifestSha256 : patch.successorManifestSha256,
+			operationId: patch.operationId === undefined ? existing.operationId : patch.operationId,
+			operationPayloadSha256: patch.operationPayloadSha256 === undefined ? existing.operationPayloadSha256 : patch.operationPayloadSha256,
+			detail: patch.detail === undefined ? existing.detail : patch.detail,
+		};
+		this.database.prepare(`
+			UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ?, capability_digest = ?, classification = ?,
+			state = ?, round_number = ?, current_commit = ?, current_tree = ?, superseded_commits_json = ?, effective_gates_json = ?,
+			successor_request_id = ?, successor_request_sha256 = ?, successor_manifest_json = ?, successor_manifest_sha256 = ?,
+			operation_id = ?, operation_payload_sha256 = ?, detail = ?, updated_at = ? WHERE repair_id = ?
+		`).run(
+			next.requestId, next.requestSha256, next.capabilityDigest, next.classification, next.state, next.round,
+			next.currentCommit, next.currentTree, JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates),
+			next.successorRequestId, next.successorRequestSha256, next.successorManifest ? JSON.stringify(next.successorManifest) : null,
+			next.successorManifestSha256, next.operationId, next.operationPayloadSha256, next.detail, new Date().toISOString(), repairId,
+		);
+		return this.getIntegrationRepair(repairId)!;
+	}
+
+	recordIntegrationRepairAudit(repairId: string, operationId: string, action: string, payloadSha256: string, evidence: unknown): StoredIntegrationRepairAudit {
+		const canonicalEvidence = canonicalEventPayload(evidence).json;
+		const existing = this.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? AND operation_id = ? AND action = ?").get(repairId, operationId, action) as Record<string, unknown> | undefined;
+		if (existing) {
+			if (String(existing.payload_sha256) !== payloadSha256 || String(existing.evidence_json) !== canonicalEvidence) throw new Error(`Integration repair audit ${action} was replayed with different evidence`);
+			return rowToIntegrationRepairAudit(existing);
+		}
+		this.database.prepare(`INSERT INTO manager_integration_repair_audits (repair_id, operation_id, action, payload_sha256, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+			.run(repairId, operationId, action, payloadSha256, canonicalEvidence, new Date().toISOString());
+		return rowToIntegrationRepairAudit(this.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? AND operation_id = ? AND action = ?").get(repairId, operationId, action) as Record<string, unknown>);
+	}
+
 	putVerificationRequest(request: VerificationRequest): StoredVerification {
+		const existingById = this.getVerificationByRequestId(request.requestId);
+		if (existingById) {
+			if (existingById.request.requestSha256 !== request.requestSha256) throw new Error(`Verification request ${request.requestId} was replayed with different evidence`);
+			return existingById;
+		}
 		const existing = this.getVerification(request.runId, request.generation);
 		if (existing && existing.state !== "failed") {
 			if (existing.request.requestSha256 !== request.requestSha256) throw new Error(`Verification request changed for generation ${request.generation}`);
@@ -850,13 +1139,14 @@ export class RunStore {
 			INSERT INTO manager_verifications (
 				request_id, run_id, generation, graph_sha256, run_assignment_path, run_assignment_sha256,
 				integration_branch, integration_worktree, integration_head, integration_tree, request_sha256,
-				state, manifest_json, manifest_sha256, result_json, terminal_detail, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_manifest', NULL, NULL, NULL, NULL, ?, ?)
+				state, manifest_json, manifest_sha256, result_json, terminal_detail, predecessor_request_id, repair_id, repair_round, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_manifest', NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
 		`).run(
 			request.requestId, request.runId, request.generation, request.graphSha256,
 			request.runAssignmentPath, request.runAssignmentSha256, request.integrationBranch,
 			request.integrationWorktree, request.integrationHead, request.integrationTree,
-			request.requestSha256, request.requestedAt, request.requestedAt,
+			request.requestSha256, request.predecessorRequestId ?? null, request.repairId ?? null,
+			request.repairRound ?? null, request.requestedAt, request.requestedAt,
 		);
 		return this.getVerification(request.runId, request.generation)!;
 	}
@@ -866,18 +1156,28 @@ export class RunStore {
 		if (!row) throw new Error(`Unknown verification request ${requestId}`);
 		const existing = rowToVerification(row);
 		if (existing.manifestSha256 && existing.manifestSha256 !== manifestSha256) throw new Error(`Verification request ${requestId} was submitted with a different manifest`);
-		if (existing.state === "passed" || existing.state === "failed") return existing;
-		this.database.prepare("UPDATE manager_verifications SET state = 'running', manifest_json = ?, manifest_sha256 = ?, terminal_detail = NULL, updated_at = ? WHERE request_id = ?")
+		if (existing.state === "passed" || existing.state === "failed" || existing.state === "running") return existing;
+		this.database.prepare("UPDATE manager_verifications SET state = 'running', manifest_json = ?, manifest_sha256 = ?, terminal_detail = NULL, updated_at = ? WHERE request_id = ? AND state = 'awaiting_manifest'")
 			.run(JSON.stringify(manifest), manifestSha256, new Date().toISOString(), requestId);
 		return rowToVerification(this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown>);
 	}
 
 	finishVerification(requestId: string, state: "passed" | "failed", result: unknown, terminalDetail: string | null): StoredVerification {
-		this.database.prepare("UPDATE manager_verifications SET state = ?, result_json = ?, terminal_detail = ?, updated_at = ? WHERE request_id = ?")
-			.run(state, JSON.stringify(result), terminalDetail, new Date().toISOString(), requestId);
 		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
 		if (!row) throw new Error(`Unknown verification request ${requestId}`);
-		return rowToVerification(row);
+		const existing = rowToVerification(row);
+		if (existing.state === "passed" || existing.state === "failed") {
+			if (existing.state !== state || stableJson(existing.result) !== stableJson(result) || existing.terminalDetail !== terminalDetail) {
+				throw new Error(`Verification request ${requestId} was finalized with different evidence`);
+			}
+			return existing;
+		}
+		if (existing.state !== "running") throw new Error(`Verification request ${requestId} is not running`);
+		this.database.prepare("UPDATE manager_verifications SET state = ?, result_json = ?, terminal_detail = ?, updated_at = ? WHERE request_id = ? AND state = 'running'")
+			.run(state, JSON.stringify(result), terminalDetail, new Date().toISOString(), requestId);
+		const updated = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
+		if (!updated) throw new Error(`Unknown verification request ${requestId}`);
+		return rowToVerification(updated);
 	}
 
 	getReigniteRequest(runId: string, generation?: number): ReigniteRequest | null {

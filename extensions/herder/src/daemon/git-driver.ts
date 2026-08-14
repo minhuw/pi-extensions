@@ -54,6 +54,15 @@ export interface IntegrationResult {
 	detachedHead?: string;
 }
 
+export interface IntegrationRepairCommitResult {
+	head: string;
+	tree: string;
+	parent: string;
+	changedPaths: string[];
+	supersededHead: string | null;
+	committed: boolean;
+}
+
 export interface ActiveRebaseEvidence {
 	checkpointRef: string;
 	checkpoint: string;
@@ -480,6 +489,83 @@ export class GitDriver {
 			}
 		});
 	}
+
+	/**
+	 * Accept one integration repair commit without allowing the repair to move
+	 * Herder's namespace. The first round creates a child of `parent`; later
+	 * rounds amend the logical repair commit and therefore retain that parent.
+	 * A replay after a crash is recognized from the already committed parent/tree
+	 * rather than creating a second commit.
+	 */	acceptIntegrationRepairCommit(input: {
+		worktree?: string;
+		branch?: string;
+		parent: string;
+		round: number;
+		currentHead?: string | null;
+		commitMessage?: string;
+		allowCommit?: boolean;
+	}): IntegrationRepairCommitResult {
+		const worktree = input.worktree ?? this.integrationWorktree;
+		const branch = input.branch ?? this.integrationBranch;
+		if (branch !== this.integrationBranch) throw new Error(`Integration repair branch must remain ${this.integrationBranch}`);
+		if (!fs.existsSync(worktree)) throw new Error(`Integration repair worktree does not exist: ${worktree}`);
+		const expectedWorktree = fs.realpathSync(this.integrationWorktree);
+		if (fs.realpathSync(worktree) !== expectedWorktree) throw new Error("Integration repair must use the assigned integration worktree");
+		const symbolicBranch = gitValue(worktree, "symbolic-ref", "--short", "HEAD");
+		if (symbolicBranch !== branch) throw new Error(`Integration repair worktree is not on ${branch}`);
+		if (input.round < 1 || input.round > 3 || !Number.isSafeInteger(input.round)) throw new Error("Integration repair round must be between 1 and 3");
+		const parent = input.parent;
+		if (!/^[0-9a-f]{40,64}$/i.test(parent)) throw new Error("Integration repair parent must be a Git object identity");
+		const beforeRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
+		const branchBefore = this.branchHead(branch);
+		const expectedCurrent = input.currentHead ?? (input.round === 1 ? parent : branchBefore);
+		const worktreeBefore = this.worktreeHead(worktree);
+		const statusBefore = this.worktreeStatus(worktree);
+		let replayedCommit = false;
+		if (branchBefore !== expectedCurrent || worktreeBefore !== expectedCurrent) {
+			const candidateParents = gitValue(worktree, "rev-list", "--parents", "-n", "1", worktreeBefore).split(/\s+/).filter(Boolean).slice(1);
+			if (branchBefore !== worktreeBefore || statusBefore || candidateParents.length !== 1 || candidateParents[0] !== parent) {
+				throw new Error(`Integration repair branch or worktree moved: expected ${expectedCurrent}, found ${branchBefore}`);
+			}
+			replayedCommit = true;
+		}
+		let committed = false;
+		if (statusBefore && !replayedCommit) {
+			if (input.allowCommit === false) throw new Error("Integration repair worktree must be committed before finish");
+			git(worktree, ["add", "--all"]);
+			if (input.round > 1) {
+				git(worktree, ["commit", "--amend", "--no-edit"]);
+			} else {
+				const message = String(input.commitMessage || "Fix integrated verification defect").trim();
+				if (!message || /[\0\r\n]/.test(message) || message.length > 512) throw new Error("Integration repair commit message is invalid");
+				git(worktree, ["commit", "-m", message]);
+			}
+			committed = true;
+		}
+		const head = this.worktreeHead(worktree);
+		if (this.branchHead(branch) !== head) throw new Error("Integration repair branch and worktree heads diverged");
+		if (this.worktreeStatus(worktree)) throw new Error("Integration repair worktree is not clean after commit");
+		const parents = gitValue(worktree, "rev-list", "--parents", "-n", "1", head).split(/\s+/).filter(Boolean).slice(1);
+		if (parents.length !== 1) throw new Error("Integration repair commit must be a non-merge commit");
+		if (parents[0] !== parent) throw new Error(`Integration repair commit parent changed: expected ${parent}, found ${parents[0]}`);
+		if (git(this.repoRoot, ["diff", "--quiet", parent, head], true).status === 0) throw new Error("Integration repair commit must contain a non-empty diff");
+		const afterRefs = git(this.repoRoot, ["for-each-ref", "--format=%(refname)=%(objectname)", `refs/heads/herder/${this.planName}/`, `refs/plan-herder/${this.planName}/`]).stdout;
+		const normalizeRefs = (value: string): string => value.split(/\r?\n/).filter(Boolean).filter((line) => !line.startsWith(`refs/heads/${this.integrationBranch}=`)).sort().join("\n");
+		if (normalizeRefs(beforeRefs) !== normalizeRefs(afterRefs)) throw new Error("Integration repair changed a manager-owned Herder ref");
+		const tree = this.worktreeTree(worktree);
+		const changedPaths = this.changedPaths(worktree, parent);
+		if (changedPaths.length === 0) throw new Error("Integration repair commit has no changed paths");
+		return {
+			head,
+			tree,
+			parent,
+			changedPaths,
+			supersededHead: input.round > 1 && expectedCurrent !== head ? expectedCurrent : null,
+			committed,
+		};
+	}
+
+	validateIntegrationRepairCommit = this.acceptIntegrationRepairCommit.bind(this);
 
 	integrate(input: {
 		planId: string;

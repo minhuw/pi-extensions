@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 12
+export const EXECUTION_SCHEMA_VERSION = 13
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -680,6 +680,55 @@ const SCHEMA_11_TABLES = `
     ON manager_reignite_requests(run_id, generation);
 `
 
+const SCHEMA_13_TABLES = `
+  CREATE TABLE IF NOT EXISTS manager_integration_repairs (
+    repair_id TEXT PRIMARY KEY NOT NULL,
+    run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    owner_session_id TEXT NOT NULL,
+    capability_digest TEXT NOT NULL,
+    classification TEXT,
+    state TEXT NOT NULL CHECK (state IN ('available', 'active', 'committing', 'committed', 'verifying', 'passed', 'failed', 'cancelled', 'paused', 'interrupted')),
+    round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 3),
+    max_rounds INTEGER NOT NULL DEFAULT 3 CHECK (max_rounds = 3),
+    parent_commit TEXT NOT NULL,
+    current_commit TEXT,
+    current_tree TEXT,
+    superseded_commits_json TEXT NOT NULL DEFAULT '[]',
+    canonical_gates_json TEXT NOT NULL,
+    canonical_gates_sha256 TEXT NOT NULL,
+    effective_gates_json TEXT NOT NULL,
+    successor_request_id TEXT,
+    successor_request_sha256 TEXT,
+    successor_manifest_json TEXT,
+    successor_manifest_sha256 TEXT,
+    operation_id TEXT,
+    operation_payload_sha256 TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS manager_integration_repairs_run_request
+    ON manager_integration_repairs(run_id, request_id);
+  CREATE INDEX IF NOT EXISTS manager_integration_repairs_run_state
+    ON manager_integration_repairs(run_id, state, generation, round_number);
+
+  CREATE TABLE IF NOT EXISTS manager_integration_repair_audits (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repair_id TEXT NOT NULL REFERENCES manager_integration_repairs(repair_id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(repair_id, operation_id, action)
+  );
+  CREATE INDEX IF NOT EXISTS manager_integration_repair_audits_repair
+    ON manager_integration_repair_audits(repair_id, audit_id);
+`
+
 function ensureLegacyFingerprintVersion(database: Database): void {
   const columns = database.prepare("PRAGMA table_info(manager_plan_specs)").all() as Array<{ name: string }>
   if (!columns.some((column) => column.name === "fingerprint_version")) {
@@ -741,6 +790,49 @@ function applySchema12(database: Database): void {
   database.exec("PRAGMA user_version = 12;")
 }
 
+function applySchema13(database: Database): void {
+  database.exec(SCHEMA_13_TABLES)
+  const verificationColumns = database.prepare("PRAGMA table_info(manager_verifications)").all() as Array<{ name: string }>
+  const addVerificationColumn = (name: string, definition: string): void => {
+    if (!verificationColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE manager_verifications ADD COLUMN ${name} ${definition};`)
+  }
+  addVerificationColumn("predecessor_request_id", "TEXT")
+  addVerificationColumn("repair_id", "TEXT")
+  addVerificationColumn("repair_round", "INTEGER")
+
+  const operationsSql = String((database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_operations'").get() as { sql?: string } | undefined)?.sql || "")
+  if (operationsSql && (!operationsSql.includes("'integration_repair'") || !operationsSql.includes("'repair'"))) {
+    database.exec(`
+      CREATE TABLE manager_operations_v13 (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite', 'integration_repair', 'repair')),
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        result_json TEXT,
+        error TEXT,
+        accepted_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO manager_operations_v13 (
+        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+        result_json, error, accepted_at, started_at, finished_at, updated_at
+      ) SELECT
+        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+        result_json, error, accepted_at, started_at, finished_at, updated_at
+      FROM manager_operations;
+      DROP TABLE manager_operations;
+      ALTER TABLE manager_operations_v13 RENAME TO manager_operations;
+      CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
+    `)
+  }
+  database.exec("PRAGMA user_version = 13;")
+}
+
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
@@ -765,6 +857,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema10(database)
     applySchema11(database)
     applySchema12(database)
+    applySchema13(database)
     return
   }
   if (version === 7 && allowInitialize) {
@@ -773,6 +866,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema10(database)
     applySchema11(database)
     applySchema12(database)
+    applySchema13(database)
     return
   }
   if (version === 8 && allowInitialize) {
@@ -780,21 +874,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema10(database)
     applySchema11(database)
     applySchema12(database)
+    applySchema13(database)
     return
   }
   if (version === 9 && allowInitialize) {
     applySchema10(database)
     applySchema11(database)
     applySchema12(database)
+    applySchema13(database)
     return
   }
   if (version === 10 && allowInitialize) {
     applySchema11(database)
     applySchema12(database)
+    applySchema13(database)
     return
   }
   if (version === 11 && allowInitialize) {
     applySchema12(database)
+    applySchema13(database)
+    return
+  }
+  if (version === 12 && allowInitialize) {
+    applySchema13(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -993,6 +1095,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       ${SCHEMA_11_TABLES}
   `)
   applySchema12(database)
+  applySchema13(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
@@ -1433,10 +1536,10 @@ function parseJsonColumn<T>(value: unknown, fallback: T): T {
 
 export function readManagerState(planDir: string) {
   const database = openDatabase(planDir, { readOnly: true })
-  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, attention: null, service: null }
+  if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, integrationRepair: null, attention: null, service: null }
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
-    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, attention: null, service: null }
+    if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, integrationRepair: null, attention: null, service: null }
     const run = (database.prepare(`
       SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel,
         current_generation, graph_sha256, status, integration_branch,
@@ -1471,6 +1574,16 @@ export function readManagerState(planDir: string) {
       FROM manager_verifications
       WHERE run_id = ? AND generation = ?
       ORDER BY created_at DESC LIMIT 1
+    `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
+    const repairTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_integration_repairs'").get()
+    const integrationRepair = run && repairTable ? database.prepare(`
+      SELECT repair_id, generation, request_id, request_sha256, owner_session_id, classification, state,
+        round_number, parent_commit, current_commit, current_tree, superseded_commits_json,
+        canonical_gates_json, canonical_gates_sha256, effective_gates_json, successor_request_id,
+        successor_request_sha256, successor_manifest_json, successor_manifest_sha256, detail, created_at, updated_at
+      FROM manager_integration_repairs
+      WHERE run_id = ? AND generation = ?
+      ORDER BY updated_at DESC LIMIT 1
     `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
     const attentionTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_attention_requests'").get()
     const attention = run && attentionTable ? database.prepare(`
@@ -1616,6 +1729,30 @@ export function readManagerState(planDir: string) {
         state: verification.state,
         terminalDetail: verification.terminal_detail,
         updatedAt: verification.updated_at,
+      } : null,
+      integrationRepair: integrationRepair ? {
+        repairId: integrationRepair.repair_id,
+        generation: integrationRepair.generation,
+        requestId: integrationRepair.request_id,
+        requestSha256: integrationRepair.request_sha256,
+        ownerSessionId: integrationRepair.owner_session_id,
+        classification: integrationRepair.classification,
+        state: integrationRepair.state,
+        round: integrationRepair.round_number,
+        parentCommit: integrationRepair.parent_commit,
+        currentCommit: integrationRepair.current_commit,
+        currentTree: integrationRepair.current_tree,
+        supersededCommits: parseJsonColumn(integrationRepair.superseded_commits_json, []),
+        canonicalGates: parseJsonColumn(integrationRepair.canonical_gates_json, []),
+        canonicalGatesSha256: integrationRepair.canonical_gates_sha256,
+        effectiveGates: parseJsonColumn(integrationRepair.effective_gates_json, []),
+        successorRequestId: integrationRepair.successor_request_id,
+        successorRequestSha256: integrationRepair.successor_request_sha256,
+        successorManifest: parseJsonColumn(integrationRepair.successor_manifest_json, null),
+        successorManifestSha256: integrationRepair.successor_manifest_sha256,
+        detail: integrationRepair.detail,
+        createdAt: integrationRepair.created_at,
+        updatedAt: integrationRepair.updated_at,
       } : null,
       attention: projectedAttention,
       service: service ? {
