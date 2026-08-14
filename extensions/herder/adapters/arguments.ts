@@ -37,6 +37,7 @@ export interface ResetCommandOptions { planDir: string }
 export interface GrillPlanTarget {
 	planId: string;
 	planDir?: string;
+	split?: true;
 }
 
 export const HERDER_PLAN_COMMAND_USAGE = [
@@ -242,8 +243,14 @@ export function parseGrillPlanTarget(input: string): GrillPlanTarget | null {
 	const tokens = tokenizeArguments(input);
 	let planId: string | undefined;
 	let planDir: string | undefined;
+	let split = false;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
+		if (argument === "--split") {
+			if (split) throw new Error("--split was provided more than once.");
+			split = true;
+			continue;
+		}
 		if (argument === "--plan" || argument === "--plan-dir") {
 			const value = valueAfter(tokens, index, argument);
 			index += 1;
@@ -256,7 +263,8 @@ export function parseGrillPlanTarget(input: string): GrillPlanTarget | null {
 			}
 		}
 	}
-	return planId ? { planId, ...(planDir ? { planDir } : {}) } : null;
+	if (split && !planId) throw new Error("--split requires --plan <id-or-path>.");
+	return planId ? { planId, ...(planDir ? { planDir } : {}), ...(split ? { split: true as const } : {}) } : null;
 }
 
 export function parsePlanCommandArguments(input: string): PlanCommandOptions {

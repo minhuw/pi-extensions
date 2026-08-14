@@ -12,10 +12,13 @@ test("tokenizes shell-style plan paths without invoking a shell", () => {
 	assert.throws(() => tokenizeArguments("'unfinished"), /unterminated quote/);
 });
 
-test("extracts an active-Fire Grill target without consuming the skill arguments", () => {
+test("extracts standalone and active-Fire Grill targets without consuming skill arguments", () => {
 	assert.deepEqual(parseGrillPlanTarget("--plan 7 --plan-dir custom-plans"), { planId: "7", planDir: "custom-plans" });
+	assert.deepEqual(parseGrillPlanTarget("--plan 007-plan.md --split --plan-dir custom-plans"), { planId: "007-plan.md", planDir: "custom-plans", split: true });
 	assert.deepEqual(parseGrillPlanTarget("refine this later"), null);
 	assert.throws(() => parseGrillPlanTarget("--plan 1 --plan 2"), /more than once/);
+	assert.throws(() => parseGrillPlanTarget("--plan 1 --split --split"), /--split was provided more than once/);
+	assert.throws(() => parseGrillPlanTarget("--split"), /--split requires --plan/);
 });
 
 test("reset accepts an optional plan directory and rejects options", () => {

@@ -14,11 +14,14 @@ Interpret tokens after the command name as arguments. Pi accepts `/herder-grill 
 ```text
 /herder-grill <change-description> [--plan-dir <plan-dir>]
 /herder-grill --plan <plan-id-or-path> [--plan-dir <plan-dir>]
+/herder-grill --plan <plan-id-or-path> --split [--plan-dir <plan-dir>]
 ```
 
-Default to `herder-plans/`. Without `--plan`, use the remaining text as the request; if empty, ask what to change. With `--plan`, accept a numeric ID or `NNN-*.md` path and refine that plan in place. Preserve one coherent user objective, but create as many focused subplans as its safe implementation graph requires. Ask the user to narrow only when the request contains independently selectable objectives or unresolved product scope—not merely because implementation needs multiple plans.
+Default to `herder-plans/`. Without `--plan`, use the remaining text as the request; if empty, ask what to change. With `--plan`, accept a numeric ID or `NNN-*.md` path and refine that plan. `--split` requires `--plan` and explicitly requests that Grill elevate splitting in its shaping proposal; reject duplicate `--split`. Ordinary standalone `--plan` refinement may still propose a split when shaping proves it necessary. Preserve one coherent user objective, but create as many focused subplans as its safe implementation graph requires. Ask the user to narrow only when the request contains independently selectable objectives or unresolved product scope—not merely because implementation needs multiple plans.
 
-If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_EDIT_V1`, the manager has already reserved the named never-started plan. Treat `PLAN_ID`, `PLAN_DIRECTORY`, and `EDIT_TOKEN` as an exact capability contract:
+When no `HERDER_ACTIVE_PLAN_EDIT_V1` runtime block is present, `--plan` is standalone authoring. After confirmation, Grill may preserve or rewrite the target and create, remove, or update sibling plans, index entries, dependencies, and plan-set shared context as required by the confirmed split. Every graph-wide edit must directly decompose the target's existing objective; do not use this authority for unrelated cleanup, reprioritization, or arbitrary graph changes.
+
+If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_EDIT_V1`, the manager has already reserved the named never-started plan. Explicit `--split` is forbidden in this path because the reservation is target-local; finish or stop Fire and invoke standalone Grill for a graph-wide split. Treat `PLAN_ID`, `PLAN_DIRECTORY`, and `EDIT_TOKEN` as an exact capability contract:
 
 - Edit only the reserved plan and necessary index fields; do not create, remove, or modify another plan.
 - Do not change the edit token, plan directory, or target identity.
@@ -91,16 +94,24 @@ Producers name every credible path. A discovered companion must directly support
 
 Keep each local plan compact: target 500–900 words and never exceed 1,200. State each fact once, omit non-load-bearing code excerpts, and use plan-set context for genuinely repeated facts. A long explanation is evidence that the node needs a sharper boundary, not a reason to waive the prose budget.
 
-Allocate IDs and dependency order centrally before drafting. Independent nodes may be researched or drafted concurrently when the host safely supports it, but only the root producer writes plan files and the index, preventing ID and dependency races.
+Allocate IDs and dependency order centrally before drafting. For a standalone existing-plan split:
+
+- Preserve the original target ID for an appropriate first replacement node when the target's initial guarantee remains a coherent first slice; otherwise retain the ID for the closest faithful replacement and explain the mapping at confirmation.
+- Allocate every new ID monotonically from the plan set's central next-ID sequence. Never derive IDs independently or reuse removed IDs.
+- Identify every downstream consumer of the old target's complete guarantee. Make those consumers depend on the terminal replacement node or nodes that collectively provide that same guarantee, rather than merely on the preserved first node.
+- Order overlapping scopes and compatibility transitions explicitly. Every intermediate graph state must be buildable, testable, and semantically valid; add characterization, additive compatibility, migration, or cleanup nodes when needed rather than leaving a broken midpoint.
+- Change or remove existing sibling nodes only when their scope or dependency contract is directly affected by decomposing the target. Preserve unrelated graph content exactly.
+
+Independent nodes may be researched or drafted concurrently when the host safely supports it, but only the root producer writes plan files and the index, preventing ID and dependency races.
 
 ## Confirm, Write, Shape, Validate
 
-Before any edit, summarize the outcome, accepted decisions, key facts, non-goals, unresolved STOP conditions, the proposed plan DAG with per-node outcome/kind/dependencies/scope, shared-context use, documentation obligations, and whether the operation creates or changes named plans. For a decision-blocked plan, state whether it returns to `TODO`. Ask one final question confirming that this understanding and graph should be written. Corrections return to the one-question loop; ambiguity is not confirmation.
+Before any edit, summarize the outcome, accepted decisions, key facts, non-goals, unresolved STOP conditions, the proposed plan DAG with per-node outcome/kind/dependencies/scope, shared-context use, documentation obligations, and a complete final file/graph change set listing every plan and shared/index file to create, change, or remove. For an existing-plan split, also state which node retains the target ID, which terminal replacement guarantee downstream consumers will use, and every dependency rewrite. For a decision-blocked plan, state whether it returns to `TODO`. Ask one final question confirming that this understanding and exact graph change set should be written. Corrections return to the one-question loop; ambiguity is not confirmation.
 
 After explicit confirmation:
 
 1. For new work, run `init`, reconcile existing work, choose monotonic IDs, and write the confirmed focused plan or plan set plus index rows from the shared template.
-2. For `--plan`, edit only the target and any index fields that changed. Preserve ID and filename unless rename was explicitly approved.
+2. For standalone `--plan`, apply only the confirmed target refinement or split: preserve or rewrite the target as approved, create/remove/update directly affected siblings, update the index and shared context, and rewrite dependencies needed to preserve the old complete guarantee. Preserve the target ID and filename where the confirmed graph has an appropriate replacement node; any exception must have been explicitly confirmed. Under `HERDER_ACTIVE_PLAN_EDIT_V1`, edit only the reserved target and necessary index fields—never perform graph-wide splitting.
 3. Create or update plan-set `CONTEXT.md` only when multiple plans reuse verified facts. Make each compiled snapshot self-contained for an executor without this conversation. Integrate decisions into the template rather than appending an interview transcript; remove resolved placeholders and superseded language.
 4. Change status only through the manager. Reopen a decision-blocked plan with `transition <id> TODO` only when reopening was confirmed.
 5. Reread every draft and compiled `snapshot` from disk and complete the template's Producer self-review. Clarify only confirmed intent. If review exposes a missing product decision, unsafe split, material approach/scope choice, or incoherent graph, resume the one-question interview and reconfirm before rewriting.

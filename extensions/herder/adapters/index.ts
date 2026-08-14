@@ -31,6 +31,7 @@ import {
 	type AttachOptions,
 	type FireOptions,
 } from "./arguments.ts";
+import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "./run-guidance.ts";
 import { runCleanupCommand } from "./cleanup-command.ts";
 import { runResetCommand } from "./reset-command.ts";
 import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
@@ -764,6 +765,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		let before: ManagerReply | undefined;
 		try {
 			if (options.mode !== "fire") {
+				const existingRunMode = options.mode;
 				before = await enqueueManager(async () => {
 					assertSessionActive(epoch);
 					const reply = unwrapReply(await invokeHerderTool("herder_run", {
@@ -771,7 +773,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						planDirectory: planDir,
 					}) as Record<string, unknown>);
 					assertSessionActive(epoch);
-					if (reply.status === "idle" || !reply.runId) throw new Error(`No deterministic Herder run exists in ${planDir}.`);
+					if (reply.status === "idle" || !reply.runId) throw new Error(noDeterministicRunMessage(existingRunMode, planDir));
 					acquired = await claimOwnership(planDir, reply.runId, ctx, epoch);
 					return reply;
 				});
@@ -1051,12 +1053,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}
 		},
 		prepareWorkflow: async (skill, args, ctx) => {
+			const target = skill === "grill" ? parseGrillPlanTarget(args) : null;
 			if (!activeFire()) return {};
 			const epoch = sessionEpoch;
 			assertSessionActive(epoch);
 			if (skill !== "grill") throw new Error("Only /herder-grill --plan <unstarted-plan> may run while Herder Fire is active.");
-			const target = parseGrillPlanTarget(args);
-			if (!target) throw new Error("Active Herder Fire requires /herder-grill --plan <unstarted-plan>.");
+			assertActiveFireGrillTarget(target);
 			const repoRoot = await repositoryRoot(ctx);
 			const planDir = resolvePlanDirectory(repoRoot, target.planDir ?? currentState?.planDir ?? "herder-plans");
 			if (currentState?.planDir && path.resolve(currentState.planDir) !== planDir) {

@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
+import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "../../../adapters/run-guidance.ts";
 import { validateAttentionResolution } from "../../../src/shared/protocol.ts";
 import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
 import {
@@ -18,6 +20,23 @@ import {
 	registerPiPlanningWorkflows,
 } from "../../../adapters/planning-workflows.ts";
 import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
+
+test("active Fire rejects explicit Grill splitting before target reservation", () => {
+	assert.doesNotThrow(() => assertActiveFireGrillTarget(parseGrillPlanTarget("--plan 7")));
+	assert.throws(
+		() => assertActiveFireGrillTarget(parseGrillPlanTarget("--plan 7 --split")),
+		/error|split cannot run during active Herder Fire|target-local/i,
+	);
+});
+
+test("no-run guidance is specific to Revise", () => {
+	const revise = noDeterministicRunMessage("revise", "/repo/herder-plans");
+	assert.match(revise, /revise only adopts a validated graph generation into an existing deterministic run/);
+	assert.match(revise, /herder-grill --plan <id-or-path> --split --plan-dir <plan-dir>/);
+	const resume = noDeterministicRunMessage("resume", "/repo/herder-plans");
+	assert.equal(resume, "No deterministic Herder run exists in /repo/herder-plans.");
+	assert.doesNotMatch(resume, /herder-grill|split/);
+});
 
 async function fixture(): Promise<string> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-planning-"));
