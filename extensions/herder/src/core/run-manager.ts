@@ -1869,35 +1869,10 @@ export class HerderRunManager {
 			if (state !== "failed") return;
 			const verification = this.store.getVerificationByRequestId(requestId);
 			if (!verification) return;
-			const canonicalGates = verification.manifest?.gates ?? [];
-			const canonicalGatesSha256 = sha256(stableJson(canonicalGates));
 			// Record the failed request and its exact verification evidence before
 			// any session claims a repair. Owner and begin-namespace authority stay
 			// unbound until an authenticated begin operation supplies them.
-			repair = this.store.putIntegrationRepair({
-				repairId: randomUUID(),
-				runId: verification.request.runId,
-				generation: verification.request.generation,
-				requestId: verification.request.requestId,
-				requestSha256: verification.request.requestSha256,
-				ownerSessionId: null,
-				capabilityDigest: null,
-				classification: null,
-				state: "failed",
-				round: 1,
-				parentCommit: verification.request.integrationHead,
-				currentTree: verification.request.integrationTree,
-				canonicalGates,
-				canonicalGatesSha256,
-				effectiveGates: canonicalGates,
-				detail,
-				episode: {
-					integrationHead: verification.request.integrationHead,
-					integrationTree: verification.request.integrationTree,
-					canonicalGates,
-					canonicalGatesSha256,
-				},
-			});
+			this.store.recordInitialIntegrationRepairFailure(verification, detail);
 			return;
 		}
 		if (state === "passed") {

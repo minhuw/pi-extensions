@@ -585,8 +585,8 @@ function rowToIntegrationRepairEpisode(row: Record<string, unknown>): StoredInte
 		canonicalGatesSha256: String(row.episode_canonical_gates_sha256 ?? row.canonical_gates_sha256),
 		classification: classification === null || classification === undefined ? null : String(classification) as IntegrationRepairClassification,
 		state: String(row.episode_state ?? row.state) as IntegrationRepairState,
-		operationId: row.episode_operation_id === null || row.episode_operation_id === undefined ? null : String(row.episode_operation_id),
-		operationPayloadSha256: row.episode_operation_payload_sha256 === null || row.episode_operation_payload_sha256 === undefined ? null : String(row.episode_operation_payload_sha256),
+		operationId: (row.episode_operation_id ?? row.operation_id) === null || (row.episode_operation_id ?? row.operation_id) === undefined ? null : String(row.episode_operation_id ?? row.operation_id),
+		operationPayloadSha256: (row.episode_operation_payload_sha256 ?? row.operation_payload_sha256) === null || (row.episode_operation_payload_sha256 ?? row.operation_payload_sha256) === undefined ? null : String(row.episode_operation_payload_sha256 ?? row.operation_payload_sha256),
 		transientUsed: Number(row.episode_transient_used ?? row.transient_used ?? 0) === 1,
 		transientUseEvidenceSha256: row.episode_transient_use_evidence_sha256 === null || row.episode_transient_use_evidence_sha256 === undefined ? null : String(row.episode_transient_use_evidence_sha256),
 		createdAt: String(row.episode_created_at ?? row.created_at),
@@ -896,7 +896,11 @@ export class RunStore {
 					if (repairId && this.getIntegrationRepair(repairId)) this.updateIntegrationRepair(repairId, { state: "interrupted", detail });
 				} else if (operation.kind === "verification") {
 					const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
-					if (requestId) this.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ?, updated_at = ? WHERE request_id = ? AND state = 'running'").run(detail, now, requestId);
+					if (requestId) {
+						const verification = this.getVerificationByRequestId(requestId);
+						this.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ?, updated_at = ? WHERE request_id = ? AND state = 'running'").run(detail, now, requestId);
+						if (verification && !verification.request.repairId) this.recordInitialIntegrationRepairFailure(verification, detail);
+					}
 					this.database.prepare("UPDATE manager_runs SET status = 'failed', terminal_detail = ?, updated_at = ? WHERE status IN ('running', 'paused')").run(detail, now);
 				}
 			});
@@ -1143,6 +1147,37 @@ export class RunStore {
 	getVerificationByRequestId(requestId: string): StoredVerification | null {
 		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
 		return row ? rowToVerification(row) : null;
+	}
+
+	recordInitialIntegrationRepairFailure(verification: StoredVerification, detail: string | null): StoredIntegrationRepair {
+		const existing = this.getIntegrationRepairForRequest(verification.request.requestId);
+		if (existing) return existing;
+		const canonicalGates = verification.manifest?.gates ?? [];
+		const canonicalGatesSha256 = sha256(stableJson(canonicalGates));
+		return this.putIntegrationRepair({
+			repairId: randomUUID(),
+			runId: verification.request.runId,
+			generation: verification.request.generation,
+			requestId: verification.request.requestId,
+			requestSha256: verification.request.requestSha256,
+			ownerSessionId: null,
+			capabilityDigest: null,
+			classification: null,
+			state: "failed",
+			round: 1,
+			parentCommit: verification.request.integrationHead,
+			currentTree: verification.request.integrationTree,
+			canonicalGates,
+			canonicalGatesSha256,
+			effectiveGates: canonicalGates,
+			detail,
+			episode: {
+				integrationHead: verification.request.integrationHead,
+				integrationTree: verification.request.integrationTree,
+				canonicalGates,
+				canonicalGatesSha256,
+			},
+		});
 	}
 
 	private integrationRepairSelect(): string {

@@ -983,6 +983,7 @@ function applySchema16(database: Database): void {
     for (const audit of auditRows) {
       const evidence = parseRecord(audit.evidence_json)
       if (String(audit.action) === "begin") {
+        const previousEpisodeId = activeEpisodeId
         const requestId = typeof evidence.requestId === "string" && evidence.requestId.length > 0 ? evidence.requestId : baseRequestId
         const requestSha256 = typeof evidence.requestSha256 === "string" && /^[0-9a-f]{64}$/i.test(evidence.requestSha256)
           ? evidence.requestSha256
@@ -1003,6 +1004,7 @@ function applySchema16(database: Database): void {
           String(audit.operation_id),
           String(audit.payload_sha256),
         )
+        if (activeEpisodeId !== previousEpisodeId) episodeClose.run("failed", now, now, previousEpisodeId)
       }
       if (String(audit.action) === "commit") {
         if (activeClassification === "code_defect") codeRounds += 1
@@ -1015,7 +1017,7 @@ function applySchema16(database: Database): void {
 
     const successorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
     const successorStoredVerification = successorRequestId ? getVerification(successorRequestId) : undefined
-    let currentEpisodeId = episodeByRequest.get(baseRequestId) ?? String(row.current_episode_id || baseEpisodeId)
+    let currentEpisodeId = activeEpisodeId
     let currentRequestId = baseRequestId
     let currentRequestSha256 = baseEvidence.requestSha256
     let currentClassification: string | null = row.classification === null || row.classification === undefined ? null : String(row.classification)
@@ -1038,6 +1040,7 @@ function applySchema16(database: Database): void {
         episodeByRequest.set(successorRequestId, successorEpisodeId)
         episodeEvidence.set(successorEpisodeId, successorEvidence)
         if (currentEpisodeId !== successorEpisodeId) episodeClose.run("failed", now, now, currentEpisodeId)
+        activeEpisodeId = successorEpisodeId
         currentEpisodeId = successorEpisodeId
         currentRequestId = successorEvidence.requestId
         currentRequestSha256 = successorEvidence.requestSha256
@@ -1088,6 +1091,7 @@ function applySchema16(database: Database): void {
       if (String(audit.episode_id || "") !== activeEpisodeId) auditEpisode.run(activeEpisodeId, audit.audit_id)
     }
 
+    const failedSuccessor = successorRequestId.length > 0 && successorStoredVerification?.state === "failed"
     repairUpdate.run(
       acceptedCodeRounds,
       currentEpisodeId,
@@ -1095,8 +1099,8 @@ function applySchema16(database: Database): void {
       currentRequestSha256,
       currentClassification,
       currentState,
-      successorRequestId && successorStoredVerification ? null : row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
-      successorRequestId && successorStoredVerification ? null : row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
+      failedSuccessor ? null : row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
+      failedSuccessor ? null : row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
       now,
       repairId,
     )
