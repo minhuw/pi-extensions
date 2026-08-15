@@ -1142,7 +1142,8 @@ export class HerderRunManager {
 		}
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
 		const integrationRepair = failedVerification ? this.integrationRepairForVerification(failedVerification) : null;
-		if ((integrationRepair?.state === "verifying" || integrationRepair?.state === "committed") && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
+		if (integrationRepair && (integrationRepair.state === "verifying" || integrationRepair.state === "committed")) {
+			const successor = this.validateDurableRepairSuccessor(integrationRepair);
 			const beginRefSnapshot = repairBeginRefSnapshot(integrationRepair);
 			driver.validateIntegrationRepairNamespace({
 				beginRefSnapshot,
@@ -1151,7 +1152,7 @@ export class HerderRunManager {
 				expectedWorktreeHead: integrationRepair.currentCommit ?? integrationRepair.parentCommit,
 			});
 			if (integrationRepair.state === "committed") this.store.updateIntegrationRepair(integrationRepair.repairId, { state: "verifying" });
-			return this.verification(integrationRepair.successorManifest);
+			return this.verification(successor.manifest);
 		}
 		const unclaimedInitialFailure = Boolean(integrationRepair
 			&& integrationRepair.requestId === failedVerification?.request.requestId
@@ -1359,31 +1360,52 @@ export class HerderRunManager {
 			: null;
 	}
 
-	private validateRepairSuccessorManifest(
-		request: StoredVerification["request"],
-		incomingManifestSha256: string,
+	private validateDurableRepairSuccessor(
 		repair: StoredIntegrationRepair | null,
-	): void {
-		if (!request.repairId) return;
+	): { verification: StoredVerification; manifest: VerificationManifest; manifestSha256: string } {
 		if (!repair
-			|| repair.runId !== request.runId
-			|| repair.generation !== request.generation
-			|| repair.successorRequestId !== request.requestId
-			|| repair.successorRequestSha256 !== request.requestSha256
+			|| !repair.successorRequestId
+			|| !repair.successorRequestSha256
 			|| !repair.successorManifest
 			|| !repair.successorManifestSha256) {
 			throw new Error("Verification request is not bound to its durable integration repair successor");
 		}
+		const verification = this.store.getVerificationByRequestId(repair.successorRequestId);
+		if (!verification
+			|| verification.request.requestId !== repair.successorRequestId
+			|| verification.request.runId !== repair.runId
+			|| verification.request.generation !== repair.generation
+			|| verification.request.repairId !== repair.repairId
+			|| verification.request.requestSha256 !== repair.successorRequestSha256) {
+			throw new Error("Verification request is not bound to its durable integration repair successor");
+		}
 		let durable: { manifest: VerificationManifest; manifestSha256: string };
 		try {
-			durable = normalizeVerificationManifest(request, repair.successorManifest);
+			durable = normalizeVerificationManifest(verification.request, repair.successorManifest);
 		} catch (error) {
 			throw new Error(`Durable integration repair successor manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		if (durable.manifestSha256 !== repair.successorManifestSha256) {
 			throw new Error("Durable integration repair successor manifest does not match its persisted hash");
 		}
-		if (incomingManifestSha256 !== repair.successorManifestSha256) {
+		return { verification, manifest: durable.manifest, manifestSha256: durable.manifestSha256 };
+	}
+
+	private validateRepairSuccessorManifest(
+		request: StoredVerification["request"],
+		incomingManifestSha256: string,
+		repair: StoredIntegrationRepair | null,
+	): void {
+		if (!request.repairId) return;
+		const durable = this.validateDurableRepairSuccessor(repair);
+		if (durable.verification.request.requestId !== request.requestId
+			|| durable.verification.request.requestSha256 !== request.requestSha256
+			|| durable.verification.request.runId !== request.runId
+			|| durable.verification.request.generation !== request.generation
+			|| durable.verification.request.repairId !== request.repairId) {
+			throw new Error("Verification request is not bound to its durable integration repair successor");
+		}
+		if (incomingManifestSha256 !== durable.manifestSha256) {
 			throw new Error("Verification manifest does not match the persisted integration repair successor manifest");
 		}
 	}
@@ -1814,15 +1836,21 @@ export class HerderRunManager {
 			}
 			throw new Error("Integration repair finish requires a new begin transition after a failed round");
 		}
-		if ((repair.state === "verifying" || repair.state === "committed") && repair.successorRequestId && repair.successorManifest) {
+		if (repair.state === "verifying" || repair.state === "committed") {
+			// A committed successor is already the durable recovery boundary. Never
+			// rebuild one from a finish caller when any part of its evidence is absent.
+			if (!repair.successorRequestId
+				|| !repair.successorRequestSha256
+				|| !repair.successorManifest
+				|| !repair.successorManifestSha256) return this.reply();
+			const successor = this.validateDurableRepairSuccessor(repair);
 			if (repair.operationId && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 				throw new Error("Integration repair finish was replayed with different durable evidence");
 			}
 			await validateFinishReplayNamespace();
-			const successor = this.store.getVerificationByRequestId(repair.successorRequestId);
-			if (successor?.state === "passed" || successor?.state === "failed") return this.reply();
+			if (successor.verification.state === "passed" || successor.verification.state === "failed") return this.reply();
 			if (repair.state === "committed") this.store.updateIntegrationRepair(repair.repairId, { state: "verifying" });
-			await this.verification(repair.successorManifest);
+			await this.verification(successor.manifest);
 			return this.reply();
 		}
 		const classification = repair.classification;
@@ -1831,8 +1859,7 @@ export class HerderRunManager {
 		if (classification === "code_defect" && (!input.allowedPaths || input.allowedPaths.length === 0)) {
 			throw new Error("Code-defect integration repair finish requires recorded failure-related paths");
 		}
-		const committedReplay = repair.state === "committed" && Boolean(repair.currentCommit);
-		if ((repair.state === "committing" || committedReplay)
+		if (repair.state === "committing"
 			&& (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 			throw new Error("Integration repair finish was replayed with different durable evidence");
 		}
@@ -1846,7 +1873,7 @@ export class HerderRunManager {
 		let tree = repair.currentTree ?? verification.request.integrationTree;
 		let superseded = [...repair.supersededCommits];
 		if (classification === "code_defect") {
-			const replayHead = committedReplay ? repair.currentCommit : null;
+			const replayHead = null;
 			const durableCurrentHead = repair.round > 1
 				? (replayHead ? repair.supersededCommits.at(-1) ?? null : repair.currentCommit)
 				: null;

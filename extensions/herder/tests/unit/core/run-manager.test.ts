@@ -2456,6 +2456,93 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 			}
 		}
 
+		const committedCorrupt = new RunStore(fixture.planDirectory);
+		try {
+			committedCorrupt.updateIntegrationRepair(beforeRepair.repairId, {
+				state: "committed",
+				successorManifestSha256: "0".repeat(64),
+			});
+		} finally {
+			committedCorrupt.close();
+		}
+		await assert.rejects(
+			() => requestService(service, "/v1/start", {
+				mode: "resume",
+				repositoryRoot: fixture.repo,
+				planDirectory: fixture.planDirectory,
+				profile: "eclipse",
+				maxParallel: 1,
+			}),
+			/persisted hash/,
+		);
+		const committedUnchanged = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(committedUnchanged.getIntegrationRepair(beforeRepair.repairId)!.state, "committed");
+			assert.equal(committedUnchanged.getVerificationByRequestId(persistedManifest.requestId)!.state, "awaiting_manifest");
+		} finally {
+			committedUnchanged.close();
+		}
+		const restoreCommitted = new RunStore(fixture.planDirectory);
+		try {
+			restoreCommitted.updateIntegrationRepair(beforeRepair.repairId, {
+				state: "verifying",
+				successorRequestSha256: beforeRepair.successorRequestSha256,
+				successorManifest: persistedManifest,
+				successorManifestSha256: persistedHash,
+			});
+		} finally {
+			restoreCommitted.close();
+		}
+
+		const missingSuccessor = new RunStore(fixture.planDirectory);
+		try {
+			missingSuccessor.updateIntegrationRepair(beforeRepair.repairId, {
+				state: "verifying",
+				successorRequestId: null,
+				successorRequestSha256: null,
+				successorManifest: null,
+				successorManifestSha256: null,
+			});
+		} finally {
+			missingSuccessor.close();
+		}
+		await requestService(service, "/v1/integration-repair", {
+			operation: "finish",
+			operationId: "repair-successor-missing-finish",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: String(repairRequest.capabilityToken),
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			observedCommit: beforeRepair.parentCommit,
+			rationale: "Caller input cannot reconstruct missing successor evidence.",
+		});
+		const missingUnchanged = new RunStore(fixture.planDirectory);
+		try {
+			const repair = missingUnchanged.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.equal(repair.state, "verifying");
+			assert.equal(repair.successorRequestId, null);
+			assert.equal(repair.successorManifest, null);
+			assert.equal(repair.successorManifestSha256, null);
+			assert.deepEqual(missingUnchanged.getIntegrationRepairAudits(repair.repairId).map((audit) => audit.action), beforeAuditActions);
+			assert.equal(Number((missingUnchanged.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), 2);
+		} finally {
+			missingUnchanged.close();
+		}
+		const restoreMissing = new RunStore(fixture.planDirectory);
+		try {
+			restoreMissing.updateIntegrationRepair(beforeRepair.repairId, {
+				state: "verifying",
+				successorRequestId: beforeRepair.successorRequestId,
+				successorRequestSha256: beforeRepair.successorRequestSha256,
+				successorManifest: persistedManifest,
+				successorManifestSha256: persistedHash,
+			});
+		} finally {
+			restoreMissing.close();
+		}
+
 		const rejected = new RunStore(fixture.planDirectory);
 		try {
 			const verification = rejected.getVerificationByRequestId(persistedManifest.requestId)!;
