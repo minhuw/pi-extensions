@@ -1958,6 +1958,158 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 	}
 });
 
+test("each failed successor opens a fresh classification episode", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-episodes-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-episodes");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-episodes", [{
+			gateId: "bad-manifest",
+			label: "deliberately invalid selected gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the first classification episode.",
+		}]);
+		const initial = payload(failed.reply.integrationRepair);
+		const token = String(initial.capabilityToken);
+		const common = {
+			requestId: String(initial.requestId),
+			requestSha256: String(initial.requestSha256),
+			capabilityToken: token,
+			runId: String(initial.runId),
+			generation: Number(initial.generation),
+			ownerSessionId: "main-session",
+		};
+		await requestService(service, "/v1/integration-repair", { ...common, operation: "begin", operationId: "episode-manifest-begin", classification: "manifest_error" });
+		const codeGate: VerificationGate = {
+			gateId: "value-after-code",
+			label: "value is repaired",
+			cwd: ".",
+			argv: [process.execPath, "-e", "if (!require('node:fs').readFileSync('src/value.mjs', 'utf8').includes('value = 3')) process.exit(1)"],
+			rationale: "The corrected gate should pass only after the code repair.",
+		};
+		const manifestFinish = { ...common, operation: "finish", operationId: "episode-manifest-finish", observedCommit: String(initial.parentCommit), gates: [codeGate] };
+		const manifestReceipt = await submitManagerOperation(service, "integration_repair", manifestFinish, manifestFinish.operationId);
+		await waitManagerOperation(service, manifestReceipt.operationId);
+		const afterManifestFailure = new RunStore(fixture.planDirectory);
+		const lineage = afterManifestFailure.getIntegrationRepairForRun(afterManifestFailure.getRun()!.runId, 1)!;
+		const currentRequest = lineage.requestId;
+		const episodes = afterManifestFailure.getIntegrationRepairEpisodes(lineage.repairId);
+		assert.equal(episodes.length, 2);
+		assert.equal(episodes[0]!.classification, "manifest_error");
+		assert.equal(episodes[1]!.classification, null);
+		assert.equal(lineage.acceptedCodeRounds, 0);
+		afterManifestFailure.close();
+
+		const status = payload(payload(await requestService(service, "/v1/status")).reply);
+		const successor = payload(status.integrationRepair);
+		assert.equal(String(successor.requestId), currentRequest);
+		await requestService(service, "/v1/integration-repair", {
+			operation: "begin",
+			operationId: "episode-code-begin",
+			requestId: String(successor.requestId),
+			requestSha256: String(successor.requestSha256),
+			capabilityToken: String(successor.capabilityToken),
+			runId: String(successor.runId),
+			generation: Number(successor.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		});
+		const worktree = String(successor.integrationWorktree);
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 3\n");
+		git(worktree, ["add", "src/value.mjs"]);
+		git(worktree, ["commit", "-q", "-m", "fix: repair successor code defect"]);
+		const observedCommit = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const codeFinish = {
+			operation: "finish",
+			operationId: "episode-code-finish",
+			requestId: String(successor.requestId),
+			requestSha256: String(successor.requestSha256),
+			capabilityToken: String(successor.capabilityToken),
+			runId: String(successor.runId),
+			generation: Number(successor.generation),
+			ownerSessionId: "main-session",
+			allowedPaths: ["src/value.mjs"],
+			observedCommit,
+		};
+		const codeReceipt = await submitManagerOperation(service, "integration_repair", codeFinish, codeFinish.operationId);
+		await waitManagerOperation(service, codeReceipt.operationId);
+		const completed = new RunStore(fixture.planDirectory);
+		try {
+			const repair = completed.getIntegrationRepairForRun(completed.getRun()!.runId, 1)!;
+			assert.equal(repair.state, "passed");
+			assert.equal(repair.acceptedCodeRounds, 1);
+			assert.equal(completed.getIntegrationRepairEpisodes(repair.repairId)[1]!.classification, "code_defect");
+		} finally { completed.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("transient retry budget follows identical successor evidence", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-transient-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-transient");
+		const retainedGate: VerificationGate = {
+			gateId: "always-failing-transient",
+			label: "always failing transient gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Keeps the unchanged retry evidence identical.",
+		};
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-transient", [retainedGate]);
+		const initial = payload(failed.reply.integrationRepair);
+		const begin = {
+			operation: "begin",
+			operationId: "transient-begin-1",
+			requestId: String(initial.requestId),
+			requestSha256: String(initial.requestSha256),
+			capabilityToken: String(initial.capabilityToken),
+			runId: String(initial.runId),
+			generation: Number(initial.generation),
+			ownerSessionId: "main-session",
+			classification: "transient",
+		};
+		await requestService(service, "/v1/integration-repair", begin);
+		const finish = { ...begin, operation: "finish", operationId: "transient-finish-1", observedCommit: String(initial.parentCommit) };
+		const receipt = await submitManagerOperation(service, "integration_repair", finish, finish.operationId);
+		await waitManagerOperation(service, receipt.operationId);
+		const afterRetry = new RunStore(fixture.planDirectory);
+		const repair = afterRetry.getIntegrationRepairForRun(afterRetry.getRun()!.runId, 1)!;
+		assert.equal(repair.transientRetryUsed, true);
+		assert.equal(repair.acceptedCodeRounds, 0);
+		assert.equal(afterRetry.getIntegrationRepairEpisodes(repair.repairId).length, 2);
+		const current = {
+			operation: "begin",
+			operationId: "transient-begin-2",
+			requestId: repair.requestId,
+			requestSha256: repair.requestSha256,
+			capabilityToken: String(initial.capabilityToken),
+			runId: repair.runId,
+			generation: repair.generation,
+			ownerSessionId: "main-session",
+			classification: "transient",
+		};
+		// The capability is derived from the successor request; the manager reply is
+		// the source of truth for the token exposed to the owning session.
+		afterRetry.close();
+		const status = payload(payload(await requestService(service, "/v1/status")).reply);
+		const request = payload(status.integrationRepair);
+		current.capabilityToken = String(request.capabilityToken);
+		const rejected = await submitManagerOperation(service, "integration_repair", current, current.operationId);
+		await assert.rejects(() => waitManagerOperation(service, rejected.operationId), /one unchanged retry|evidence chain/);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("persisted legacy commitMessage operations fail before mutation and leave repair cancellation available", { timeout: 35_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-legacy-"));
 	const fixture = writeFixture(root);

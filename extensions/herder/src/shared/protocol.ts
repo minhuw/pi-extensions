@@ -588,6 +588,43 @@ export type IntegrationRepairState = typeof INTEGRATION_REPAIR_STATES[number];
 export const INTEGRATION_REPAIR_OPERATIONS = ["begin", "finish", "cancel"] as const;
 export type IntegrationRepairOperation = typeof INTEGRATION_REPAIR_OPERATIONS[number];
 
+export interface IntegrationRepairEpisode {
+	episodeId: string;
+	repairId: string;
+	requestId: string;
+	requestSha256: string;
+	integrationHead: string;
+	integrationTree: string;
+	canonicalGates: VerificationGate[];
+	canonicalGatesSha256: string;
+	classification: IntegrationRepairClassification | null;
+	state: IntegrationRepairState;
+	operationId: string | null;
+	operationPayloadSha256: string | null;
+	transientUsed: boolean;
+	transientUseEvidenceSha256: string | null;
+	createdAt: string;
+	updatedAt: string;
+	closedAt: string | null;
+}
+
+/** Bind one classification episode to the exact failed verification evidence. */
+export function integrationRepairEpisodeId(input: {
+	requestId: string;
+	requestSha256: string;
+	integrationHead: string;
+	integrationTree: string;
+	canonicalGates: VerificationGate[];
+}): string {
+	return sha256(stableJson({
+		requestId: input.requestId,
+		requestSha256: input.requestSha256,
+		integrationHead: input.integrationHead,
+		integrationTree: input.integrationTree,
+		canonicalGates: input.canonicalGates,
+	}));
+}
+
 /** One immutable object identity in the Herder-owned repair namespace. */
 export interface IntegrationRepairRef {
 	ref: string;
@@ -631,14 +668,24 @@ export function integrationRepairCapabilityDigest(capabilityToken: string): stri
 export interface IntegrationRepairRequest {
 	schemaVersion: 1;
 	repairId?: string;
+	episodeId?: string;
 	requestId: string;
 	requestSha256: string;
 	runId: string;
 	generation: number;
 	state: IntegrationRepairState;
 	classification?: IntegrationRepairClassification;
+	episodeState?: "unclassified" | IntegrationRepairState;
+	episodeRequestSha256?: string;
+	episodeIntegrationHead?: string;
+	episodeIntegrationTree?: string;
+	episodeCanonicalGatesSha256?: string;
 	round: number;
 	maxRounds: 3;
+	/** Number of accepted code-defect commits across the repair lineage. */
+	acceptedCodeRounds?: number;
+	/** Whether an unchanged transient retry has been consumed for this evidence chain. */
+	transientRetryUsed?: boolean;
 	ownerSessionId?: string;
 	/** Never persist or expose this value in SQLite; it is request-bound evidence. */
 	capabilityToken: string;
@@ -712,6 +759,30 @@ export function validateIntegrationRepairRequest(value: unknown): asserts value 
 		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) throw new Error(`Integration repair request ${name} is invalid`);
 	}
 	if (!Array.isArray(request.failedGates) || !Array.isArray(request.canonicalGates) || !Array.isArray(request.supersededCommits)) throw new Error("Integration repair request evidence is invalid");
+	if (request.episodeId !== undefined && (typeof request.episodeId !== "string" || !/^[0-9a-f]{64}$/i.test(request.episodeId))) throw new Error("Integration repair episode identity is invalid");
+	if (request.episodeState !== undefined && request.episodeState !== "unclassified" && !INTEGRATION_REPAIR_STATES.includes(request.episodeState as IntegrationRepairState)) throw new Error("Integration repair episode state is invalid");
+	for (const [name, candidate] of [["episodeRequestSha256", request.episodeRequestSha256], ["episodeCanonicalGatesSha256", request.episodeCanonicalGatesSha256]] as const) {
+		if (candidate !== undefined && (typeof candidate !== "string" || !/^[0-9a-f]{64}$/i.test(candidate))) throw new Error(`Integration repair ${name} is invalid`);
+	}
+	for (const [name, candidate] of [["episodeIntegrationHead", request.episodeIntegrationHead], ["episodeIntegrationTree", request.episodeIntegrationTree]] as const) {
+		if (candidate !== undefined && (typeof candidate !== "string" || !/^[0-9a-f]{40,64}$/i.test(candidate))) throw new Error(`Integration repair ${name} is invalid`);
+	}
+	if (request.acceptedCodeRounds !== undefined && (!Number.isSafeInteger(request.acceptedCodeRounds) || request.acceptedCodeRounds < 0 || request.acceptedCodeRounds > 3)) throw new Error("Integration repair accepted code rounds are invalid");
+	if (request.transientRetryUsed !== undefined && typeof request.transientRetryUsed !== "boolean") throw new Error("Integration repair transient retry evidence is invalid");
+	const episodeEvidencePresent = request.episodeId !== undefined || request.episodeRequestSha256 !== undefined || request.episodeIntegrationHead !== undefined || request.episodeIntegrationTree !== undefined || request.episodeCanonicalGatesSha256 !== undefined;
+	if (episodeEvidencePresent && (request.episodeId === undefined || request.episodeRequestSha256 === undefined || request.episodeIntegrationHead === undefined || request.episodeIntegrationTree === undefined || request.episodeCanonicalGatesSha256 === undefined)) {
+		throw new Error("Integration repair episode evidence is incomplete");
+	}
+	if (request.episodeId !== undefined && request.episodeRequestSha256 !== undefined && request.episodeIntegrationHead !== undefined && request.episodeIntegrationTree !== undefined) {
+		if (sha256(stableJson(request.canonicalGates)) !== request.episodeCanonicalGatesSha256
+			|| integrationRepairEpisodeId({
+				requestId: request.requestId,
+				requestSha256: request.episodeRequestSha256,
+				integrationHead: request.episodeIntegrationHead,
+				integrationTree: request.episodeIntegrationTree,
+				canonicalGates: request.canonicalGates,
+			}) !== request.episodeId) throw new Error("Integration repair episode identity does not match its evidence");
+	}
 	if (request.beginRefSnapshot !== undefined || request.beginRefSnapshotSha256 !== undefined) {
 		if (request.beginRefSnapshot === undefined || typeof request.beginRefSnapshotSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(request.beginRefSnapshotSha256)) {
 			throw new Error("Integration repair begin-ref snapshot evidence is incomplete");

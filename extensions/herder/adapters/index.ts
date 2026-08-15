@@ -356,10 +356,22 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		request: {
 			...binding.request,
 			repairId: durable.repairId ?? binding.request.repairId,
+			episodeId: durable.episodeId ?? binding.request.episodeId,
 			state: durable.state,
-			classification: durable.classification ?? binding.request.classification,
+			classification: durable.episodeId && durable.episodeId !== binding.request.episodeId
+				? durable.classification
+				: durable.classification ?? binding.request.classification,
+			episodeState: durable.episodeId && durable.episodeId !== binding.request.episodeId
+				? durable.episodeState
+				: durable.episodeState ?? binding.request.episodeState,
+			episodeRequestSha256: durable.episodeRequestSha256 ?? binding.request.episodeRequestSha256,
+			episodeIntegrationHead: durable.episodeIntegrationHead ?? binding.request.episodeIntegrationHead,
+			episodeIntegrationTree: durable.episodeIntegrationTree ?? binding.request.episodeIntegrationTree,
+			episodeCanonicalGatesSha256: durable.episodeCanonicalGatesSha256 ?? binding.request.episodeCanonicalGatesSha256,
 			round: durable.round,
 			maxRounds: durable.maxRounds,
+			acceptedCodeRounds: durable.acceptedCodeRounds ?? binding.request.acceptedCodeRounds,
+			transientRetryUsed: durable.transientRetryUsed ?? binding.request.transientRetryUsed,
 			ownerSessionId: durable.ownerSessionId ?? binding.request.ownerSessionId,
 			integrationBranch: durable.integrationBranch || binding.request.integrationBranch,
 			integrationWorktree: durable.integrationWorktree || binding.request.integrationWorktree,
@@ -524,8 +536,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		));
 		const ambiguityDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
 		const roundLimitReached = Boolean(repair && (
-			repair.round >= repair.maxRounds
-			|| (repair.classification === "transient" && ["available", "failed"].includes(repair.state))
+			(repair.classification === "code_defect" && (repair.acceptedCodeRounds ?? repair.round) >= repair.maxRounds)
+			|| (repair.classification === "transient" && repair.transientRetryUsed && ["available", "failed"].includes(repair.state))
 		));
 		const logPath = failure.detail.match(/\(log ([^)]+)\)/)?.[1] || "the verification failure detail";
 		const verification = repair ? verificationRequests.get(repair.requestId) : undefined;
@@ -543,6 +555,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`CURRENT_MAIN_SESSION_ID: ${currentMainSessionId}`,
 				`REQUEST_ID: ${repair!.requestId}`,
 				`REPAIR_ID: ${repair!.repairId || "unknown"}`,
+				...(repair!.episodeId ? [`EPISODE_ID: ${repair!.episodeId}`, `EPISODE_STATE: ${repair!.episodeState || "unclassified"}`] : []),
 				`REPAIR_STATE: ${repair!.state}`,
 				`FAILURE_DETAIL: ${failure.detail}`,
 				`LOG_PATH: ${logPath}`,
@@ -557,7 +570,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`RUN_ID: ${failure.runId}`,
 				`REQUEST_ID: ${repair!.requestId}`,
 				`REPAIR_ID: ${repair!.repairId || "unknown"}`,
+				...(repair!.episodeId ? [`EPISODE_ID: ${repair!.episodeId}`, `EPISODE_STATE: ${repair!.episodeState || "unclassified"}`] : []),
 				`REPAIR_ROUND: ${repair!.round}`,
+				`CODE_REPAIR_ROUNDS: ${repair!.acceptedCodeRounds ?? repair!.round}/${repair!.maxRounds}`,
 				`MAX_ROUNDS: ${repair!.maxRounds}`,
 				`FAILURE_DETAIL: ${failure.detail}`,
 				`LOG_PATH: ${logPath}`,
@@ -576,10 +591,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					`ADAPTER_EPOCH: ${sessionEpoch}`,
 					`REQUEST_ID: ${repair.requestId}`,
 					`REQUEST_SHA256: ${repair.requestSha256}`,
+					...(repair.episodeId ? [
+						`EPISODE_ID: ${repair.episodeId}`,
+						`EPISODE_REQUEST_SHA256: ${repair.episodeRequestSha256 || repair.requestSha256}`,
+						`EPISODE_INTEGRATION_HEAD: ${repair.episodeIntegrationHead || integrationHead}`,
+						`EPISODE_INTEGRATION_TREE: ${repair.episodeIntegrationTree || integrationTree}`,
+						`EPISODE_CANONICAL_GATES_SHA256: ${repair.episodeCanonicalGatesSha256 || "unknown"}`,
+					] : []),
 					`CAPABILITY_TOKEN: ${repair.capabilityToken}`,
 					`GENERATION: ${repair.generation}`,
 					`REPAIR_ID: ${repair.repairId || "none"}`,
+					...(repair.episodeId ? [`EPISODE_ID: ${repair.episodeId}`, `EPISODE_STATE: ${repair.episodeState || "unclassified"}`] : []),
 					`REPAIR_ROUND: ${repair.round}`,
+					`CODE_REPAIR_ROUNDS: ${repair.acceptedCodeRounds ?? repair.round}/${repair.maxRounds}`,
+					`TRANSIENT_RETRY_USED: ${repair.transientRetryUsed ? "yes" : "no"}`,
 					`MAX_ROUNDS: ${repair.maxRounds}`,
 					`REPAIR_STATE: ${repair.state}`,
 					`PARENT_COMMIT: ${repair.parentCommit}`,
@@ -593,10 +618,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					`FAILURE_DETAIL: ${failure.detail}`,
 					`LOG_PATH: ${logPath}`,
 					"CLASSIFICATIONS: manifest_error | transient | code_defect | design_ambiguity | scope_ambiguity | credential | product_ambiguity",
-					...(repair.classification ? [`RECORDED_CLASSIFICATION: ${repair.classification}`, "For this existing repair identity, preserve the recorded classification exactly; do not switch it between rounds."] : []),
+					...(repair.episodeId ? [
+						`CLASSIFICATION_EPISODE: ${repair.episodeId}`,
+						"A classification is immutable only inside this episode. Every newly failed successor opens a fresh unclassified episode; classify the current evidence and do not carry forward a prior episode's classification.",
+					] : []),
+					...(repair.transientRetryUsed ? ["TRANSIENT_BUDGET: The unchanged transient retry for this exact head/tree/gate program is already consumed; select a different evidence-supported path."] : []),
 					"For manifest_error, call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree.",
 					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
-					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the round-one commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
+					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the next bounded code-repair commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
 					"For design_ambiguity, scope_ambiguity, credential, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. A corrective plan followed by /herder-revise remains available when the user chooses it.",
 					"Before begin, do not edit the frozen integration worktree, move Git refs, update SQLite, or mutate manager state. If a started code repair cannot be completed safely, restore the assigned worktree to its recorded clean head and call cancel.",
 					"Do not edit the frozen integration worktree before the begin transition binds writable authority to this main session.",
@@ -699,15 +728,16 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		));
 		const repairNeedsDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
 		const repairAtLimit = Boolean(repair && (
-			repair.round >= repair.maxRounds
-			|| (repair.classification === "transient" && ["available", "failed"].includes(repair.state))
+			(repair.classification === "code_defect" && (repair.acceptedCodeRounds ?? repair.round) >= repair.maxRounds)
+			|| (repair.classification === "transient" && repair.transientRetryUsed && ["available", "failed"].includes(repair.state))
 		));
 		const verificationFailure = ( /verification/i.test(displayed.message)
 			&& (displayed.status === "failed" || actionableRepair))
+			|| Boolean(repair && actionableRepair)
 			|| repairOwnerMismatch
 			|| repairNeedsDecision;
 		if (verificationFailure) {
-			const failureKey = `${reply.runId}:${repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
+			const failureKey = `${reply.runId}:${repair?.episodeId || repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
 			pendingVerificationFailure = {
 				key: failureKey,
 				runId: reply.runId,

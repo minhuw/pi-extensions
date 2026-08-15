@@ -12,6 +12,7 @@ import {
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
+	integrationRepairEpisodeId,
 	integrationRepairRefSnapshotSha256,
 	sha256,
 	stableJson,
@@ -32,6 +33,7 @@ import {
 	type VerificationManifest,
 	type VerificationRequest,
 	type IntegrationRepairClassification,
+	type IntegrationRepairEpisode,
 	type IntegrationRepairRequest,
 	type IntegrationRepairState,
 } from "../shared/protocol.ts";
@@ -226,6 +228,8 @@ export interface StoredVerification {
 	updatedAt: string;
 }
 
+export interface StoredIntegrationRepairEpisode extends IntegrationRepairEpisode {}
+
 export interface StoredIntegrationRepair {
 	repairId: string;
 	runId: string;
@@ -236,6 +240,22 @@ export interface StoredIntegrationRepair {
 	capabilityDigest: string;
 	classification: IntegrationRepairClassification | null;
 	state: IntegrationRepairState;
+	/** Current classification episode; lineage identity remains the repair ID. */
+	episodeId: string | null;
+	episodeRequestId: string | null;
+	episodeRequestSha256: string | null;
+	episodeIntegrationHead: string | null;
+	episodeIntegrationTree: string | null;
+	episodeCanonicalGates: VerificationManifest["gates"];
+	episodeCanonicalGatesSha256: string | null;
+	episodeState: IntegrationRepairState | null;
+	episodeClassification: IntegrationRepairClassification | null;
+	episodeOperationId: string | null;
+	episodeOperationPayloadSha256: string | null;
+	episodeTransientUsed: boolean;
+	episodeTransientUseEvidenceSha256: string | null;
+	transientRetryUsed: boolean;
+	acceptedCodeRounds: number;
 	round: number;
 	maxRounds: 3;
 	parentCommit: string;
@@ -261,6 +281,7 @@ export interface StoredIntegrationRepair {
 export interface StoredIntegrationRepairAudit {
 	auditId: number;
 	repairId: string;
+	episodeId: string | null;
 	operationId: string;
 	action: string;
 	payloadSha256: string;
@@ -549,7 +570,33 @@ function rowToVerification(row: Record<string, unknown>): StoredVerification {
 	};
 }
 
+function rowToIntegrationRepairEpisode(row: Record<string, unknown>): StoredIntegrationRepairEpisode {
+	const classification = row.episode_classification ?? row.classification;
+	return {
+		episodeId: String(row.episode_id),
+		repairId: String(row.episode_repair_id ?? row.repair_id),
+		requestId: String(row.episode_request_id ?? row.request_id),
+		requestSha256: String(row.episode_request_sha256 ?? row.request_sha256),
+		integrationHead: String(row.episode_integration_head ?? row.integration_head),
+		integrationTree: String(row.episode_integration_tree ?? row.integration_tree),
+		canonicalGates: parseJson<VerificationManifest["gates"]>(String(row.episode_canonical_gates_json ?? row.canonical_gates_json), []),
+		canonicalGatesSha256: String(row.episode_canonical_gates_sha256 ?? row.canonical_gates_sha256),
+		classification: classification === null || classification === undefined ? null : String(classification) as IntegrationRepairClassification,
+		state: String(row.episode_state ?? row.state) as IntegrationRepairState,
+		operationId: row.episode_operation_id === null || row.episode_operation_id === undefined ? null : String(row.episode_operation_id),
+		operationPayloadSha256: row.episode_operation_payload_sha256 === null || row.episode_operation_payload_sha256 === undefined ? null : String(row.episode_operation_payload_sha256),
+		transientUsed: Number(row.episode_transient_used ?? row.transient_used ?? 0) === 1,
+		transientUseEvidenceSha256: row.episode_transient_use_evidence_sha256 === null || row.episode_transient_use_evidence_sha256 === undefined ? null : String(row.episode_transient_use_evidence_sha256),
+		createdAt: String(row.episode_created_at ?? row.created_at),
+		updatedAt: String(row.episode_updated_at ?? row.updated_at),
+		closedAt: (row.episode_closed_at ?? row.closed_at) === null || (row.episode_closed_at ?? row.closed_at) === undefined ? null : String(row.episode_closed_at ?? row.closed_at),
+	};
+}
+
 function rowToIntegrationRepair(row: Record<string, unknown>): StoredIntegrationRepair {
+	const episodeId = row.episode_current_id === null || row.episode_current_id === undefined
+		? (row.current_episode_id === null || row.current_episode_id === undefined ? null : String(row.current_episode_id))
+		: String(row.episode_current_id);
 	return {
 		repairId: String(row.repair_id),
 		runId: String(row.run_id),
@@ -560,6 +607,21 @@ function rowToIntegrationRepair(row: Record<string, unknown>): StoredIntegration
 		capabilityDigest: String(row.capability_digest),
 		classification: row.classification === null ? null : String(row.classification) as IntegrationRepairClassification,
 		state: String(row.state) as IntegrationRepairState,
+		episodeId,
+		episodeRequestId: row.episode_request_id === null || row.episode_request_id === undefined ? null : String(row.episode_request_id),
+		episodeRequestSha256: row.episode_request_sha256 === null || row.episode_request_sha256 === undefined ? null : String(row.episode_request_sha256),
+		episodeIntegrationHead: row.episode_integration_head === null || row.episode_integration_head === undefined ? null : String(row.episode_integration_head),
+		episodeIntegrationTree: row.episode_integration_tree === null || row.episode_integration_tree === undefined ? null : String(row.episode_integration_tree),
+		episodeCanonicalGates: row.episode_canonical_gates_json === null || row.episode_canonical_gates_json === undefined ? [] : parseJson<VerificationManifest["gates"]>(String(row.episode_canonical_gates_json), []),
+		episodeCanonicalGatesSha256: row.episode_canonical_gates_sha256 === null || row.episode_canonical_gates_sha256 === undefined ? null : String(row.episode_canonical_gates_sha256),
+		episodeState: row.episode_state === null || row.episode_state === undefined ? null : String(row.episode_state) as IntegrationRepairState,
+		episodeClassification: row.episode_classification === null || row.episode_classification === undefined ? null : String(row.episode_classification) as IntegrationRepairClassification,
+		episodeOperationId: row.episode_operation_id === null || row.episode_operation_id === undefined ? null : String(row.episode_operation_id),
+		episodeOperationPayloadSha256: row.episode_operation_payload_sha256 === null || row.episode_operation_payload_sha256 === undefined ? null : String(row.episode_operation_payload_sha256),
+		episodeTransientUsed: Number(row.episode_transient_used ?? 0) === 1,
+		episodeTransientUseEvidenceSha256: row.episode_transient_use_evidence_sha256 === null || row.episode_transient_use_evidence_sha256 === undefined ? null : String(row.episode_transient_use_evidence_sha256),
+		transientRetryUsed: Number(row.transient_retry_used ?? 0) === 1,
+		acceptedCodeRounds: Number(row.accepted_code_rounds ?? 0),
 		round: Number(row.round_number),
 		maxRounds: 3,
 		parentCommit: String(row.parent_commit),
@@ -587,6 +649,7 @@ function rowToIntegrationRepairAudit(row: Record<string, unknown>): StoredIntegr
 	return {
 		auditId: Number(row.audit_id),
 		repairId: String(row.repair_id),
+		episodeId: row.episode_id === null || row.episode_id === undefined ? null : String(row.episode_id),
 		operationId: String(row.operation_id),
 		action: String(row.action),
 		payloadSha256: String(row.payload_sha256),
@@ -1080,25 +1143,60 @@ export class RunStore {
 		return row ? rowToVerification(row) : null;
 	}
 
+	private integrationRepairSelect(): string {
+		return `
+			SELECT r.*, (SELECT EXISTS (
+				SELECT 1 FROM manager_integration_repair_episodes h
+				WHERE h.repair_id = r.repair_id AND h.transient_used = 1
+				  AND h.integration_head = e.integration_head AND h.integration_tree = e.integration_tree
+				  AND h.canonical_gates_sha256 = e.canonical_gates_sha256
+			)) AS transient_retry_used,
+			e.episode_id AS episode_current_id,
+				e.repair_id AS episode_repair_id, e.request_id AS episode_request_id, e.request_sha256 AS episode_request_sha256,
+				e.integration_head AS episode_integration_head, e.integration_tree AS episode_integration_tree,
+				e.canonical_gates_json AS episode_canonical_gates_json, e.canonical_gates_sha256 AS episode_canonical_gates_sha256,
+				e.classification AS episode_classification, e.state AS episode_state,
+				e.operation_id AS episode_operation_id, e.operation_payload_sha256 AS episode_operation_payload_sha256,
+				e.transient_used AS episode_transient_used, e.transient_use_evidence_sha256 AS episode_transient_use_evidence_sha256,
+				e.created_at AS episode_created_at, e.updated_at AS episode_updated_at, e.closed_at AS episode_closed_at
+			FROM manager_integration_repairs r
+			LEFT JOIN manager_integration_repair_episodes e ON e.episode_id = r.current_episode_id
+		`;
+	}
+
 	getIntegrationRepair(repairId: string): StoredIntegrationRepair | null {
-		const row = this.database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(repairId) as Record<string, unknown> | undefined;
+		const row = this.database.prepare(`${this.integrationRepairSelect()} WHERE r.repair_id = ?`).get(repairId) as Record<string, unknown> | undefined;
 		return row ? rowToIntegrationRepair(row) : null;
 	}
 
 	getIntegrationRepairForRequest(requestId: string): StoredIntegrationRepair | null {
-		const row = this.database.prepare(`
-			SELECT * FROM manager_integration_repairs
-			WHERE request_id = ? OR successor_request_id = ?
-			ORDER BY updated_at DESC LIMIT 1
-		`).get(requestId, requestId) as Record<string, unknown> | undefined;
+		const row = this.database.prepare(`${this.integrationRepairSelect()}
+			WHERE r.request_id = ? OR r.successor_request_id = ?
+			   OR EXISTS (SELECT 1 FROM manager_integration_repair_episodes h WHERE h.repair_id = r.repair_id AND h.request_id = ?)
+			ORDER BY r.updated_at DESC LIMIT 1
+		`).get(requestId, requestId, requestId) as Record<string, unknown> | undefined;
 		return row ? rowToIntegrationRepair(row) : null;
 	}
 
 	getIntegrationRepairForRun(runId: string, generation?: number): StoredIntegrationRepair | null {
 		const row = generation === undefined
-			? this.database.prepare("SELECT * FROM manager_integration_repairs WHERE run_id = ? ORDER BY generation DESC, updated_at DESC LIMIT 1").get(runId)
-			: this.database.prepare("SELECT * FROM manager_integration_repairs WHERE run_id = ? AND generation = ? ORDER BY updated_at DESC LIMIT 1").get(runId, generation);
+			? this.database.prepare(`${this.integrationRepairSelect()} WHERE r.run_id = ? ORDER BY r.generation DESC, r.updated_at DESC LIMIT 1`).get(runId)
+			: this.database.prepare(`${this.integrationRepairSelect()} WHERE r.run_id = ? AND r.generation = ? ORDER BY r.updated_at DESC LIMIT 1`).get(runId, generation);
 		return row ? rowToIntegrationRepair(row as Record<string, unknown>) : null;
+	}
+
+	getIntegrationRepairEpisode(episodeId: string): StoredIntegrationRepairEpisode | null {
+		const row = this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(episodeId) as Record<string, unknown> | undefined;
+		return row ? rowToIntegrationRepairEpisode(row) : null;
+	}
+
+	getIntegrationRepairEpisodeForRequest(requestId: string): StoredIntegrationRepairEpisode | null {
+		const row = this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE request_id = ? ORDER BY created_at DESC, episode_id DESC LIMIT 1").get(requestId) as Record<string, unknown> | undefined;
+		return row ? rowToIntegrationRepairEpisode(row) : null;
+	}
+
+	getIntegrationRepairEpisodes(repairId: string): StoredIntegrationRepairEpisode[] {
+		return (this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY created_at, episode_id").all(repairId) as Record<string, unknown>[]).map(rowToIntegrationRepairEpisode);
 	}
 
 	getIntegrationRepairAudits(repairId: string): StoredIntegrationRepairAudit[] {
@@ -1117,6 +1215,7 @@ export class RunStore {
 		state?: IntegrationRepairState;
 		round?: number;
 		parentCommit: string;
+		currentTree?: string | null;
 		beginRefSnapshot?: string | null;
 		beginRefSnapshotSha256?: string | null;
 		canonicalGates: VerificationManifest["gates"];
@@ -1124,10 +1223,32 @@ export class RunStore {
 		effectiveGates?: VerificationManifest["gates"];
 		operationId?: string | null;
 		operationPayloadSha256?: string | null;
+		acceptedCodeRounds?: number;
+		episode?: {
+			episodeId?: string;
+			integrationHead?: string;
+			integrationTree?: string;
+			canonicalGates?: VerificationManifest["gates"];
+			canonicalGatesSha256?: string;
+		};
 		detail?: string | null;
 	}): StoredIntegrationRepair {
 		const providedBeginEvidence = input.beginRefSnapshot !== undefined || input.beginRefSnapshotSha256 !== undefined;
 		const beginEvidence = normalizeBeginRefSnapshot(input.beginRefSnapshot, input.beginRefSnapshotSha256);
+		const episodeGates = input.episode?.canonicalGates ?? input.canonicalGates;
+		const episodeHead = input.episode?.integrationHead ?? input.parentCommit;
+		const episodeTree = input.episode?.integrationTree ?? input.currentTree ?? input.parentCommit;
+		const calculatedEpisodeId = integrationRepairEpisodeId({
+			requestId: input.requestId,
+			requestSha256: input.requestSha256,
+			integrationHead: episodeHead,
+			integrationTree: episodeTree,
+			canonicalGates: episodeGates,
+		});
+		const episodeId = input.episode?.episodeId ?? calculatedEpisodeId;
+		if (episodeId !== calculatedEpisodeId || (input.episode?.canonicalGatesSha256 ?? input.canonicalGatesSha256) !== sha256(stableJson(episodeGates))) {
+			throw new Error(`Integration repair episode ${episodeId} was supplied with different evidence`);
+		}
 		const existing = this.getIntegrationRepair(input.repairId);
 		if (existing) {
 			if (existing.runId !== input.runId || existing.generation !== input.generation
@@ -1139,6 +1260,8 @@ export class RunStore {
 			}
 			return existing;
 		}
+		const codeRounds = input.acceptedCodeRounds ?? 0;
+		if (!Number.isSafeInteger(codeRounds) || codeRounds < 0 || codeRounds > 3) throw new Error("Integration repair accepted code rounds are out of bounds");
 		const now = new Date().toISOString();
 		this.database.prepare(`
 			INSERT INTO manager_integration_repairs (
@@ -1147,15 +1270,28 @@ export class RunStore {
 				begin_ref_snapshot_json, begin_ref_snapshot_sha256, superseded_commits_json,
 				canonical_gates_json, canonical_gates_sha256, effective_gates_json,
 				successor_request_id, successor_request_sha256, successor_manifest_json, successor_manifest_sha256,
-				operation_id, operation_payload_sha256, detail, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, ?, ?, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+				operation_id, operation_payload_sha256, detail, accepted_code_rounds, current_episode_id, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, ?, ?, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			input.repairId, input.runId, input.generation, input.requestId, input.requestSha256,
 			input.ownerSessionId, input.capabilityDigest, input.classification ?? null, input.state ?? "active",
 			input.round ?? 1, input.parentCommit, beginEvidence.json, beginEvidence.sha256,
 			JSON.stringify(input.canonicalGates), input.canonicalGatesSha256,
 			JSON.stringify(input.effectiveGates ?? input.canonicalGates), input.operationId ?? null,
-			input.operationPayloadSha256 ?? null, input.detail ?? null, now, now,
+			input.operationPayloadSha256 ?? null, input.detail ?? null, codeRounds, episodeId, now, now,
+		);
+		this.database.prepare(`
+			INSERT INTO manager_integration_repair_episodes (
+				episode_id, repair_id, request_id, request_sha256, integration_head, integration_tree,
+				canonical_gates_json, canonical_gates_sha256, classification, state,
+				operation_id, operation_payload_sha256, transient_used, transient_use_evidence_sha256,
+				created_at, updated_at, closed_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, NULL)
+		`).run(
+			episodeId, input.repairId, input.requestId, input.requestSha256, episodeHead, episodeTree,
+			JSON.stringify(episodeGates), input.episode?.canonicalGatesSha256 ?? input.canonicalGatesSha256,
+			input.classification ?? null, input.state ?? "active", input.operationId ?? null,
+			input.operationPayloadSha256 ?? null, now, now,
 		);
 		return this.getIntegrationRepair(input.repairId)!;
 	}
@@ -1179,6 +1315,7 @@ export class RunStore {
 		successorManifestSha256?: string | null;
 		operationId?: string | null;
 		operationPayloadSha256?: string | null;
+		acceptedCodeRounds?: number;
 		detail?: string | null;
 	}): StoredIntegrationRepair {
 		const existing = this.getIntegrationRepair(repairId);
@@ -1209,33 +1346,149 @@ export class RunStore {
 			successorManifestSha256: patch.successorManifestSha256 === undefined ? existing.successorManifestSha256 : patch.successorManifestSha256,
 			operationId: patch.operationId === undefined ? existing.operationId : patch.operationId,
 			operationPayloadSha256: patch.operationPayloadSha256 === undefined ? existing.operationPayloadSha256 : patch.operationPayloadSha256,
+			acceptedCodeRounds: patch.acceptedCodeRounds ?? existing.acceptedCodeRounds,
 			detail: patch.detail === undefined ? existing.detail : patch.detail,
 		};
+		if (!Number.isSafeInteger(next.acceptedCodeRounds) || next.acceptedCodeRounds < 0 || next.acceptedCodeRounds > 3) throw new Error("Integration repair accepted code rounds are out of bounds");
+		if (existing.episodeClassification !== null && patch.classification !== undefined && patch.classification !== existing.episodeClassification) {
+			throw new Error(`Integration repair episode ${existing.episodeId} classification is immutable`);
+		}
 		this.database.prepare(`
 			UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ?, capability_digest = ?, classification = ?,
 			state = ?, round_number = ?, current_commit = ?, current_tree = ?, begin_ref_snapshot_json = ?, begin_ref_snapshot_sha256 = ?,
-			superseded_commits_json = ?, effective_gates_json = ?,
+			superseded_commits_json = ?, effective_gates_json = ?, accepted_code_rounds = ?,
 			successor_request_id = ?, successor_request_sha256 = ?, successor_manifest_json = ?, successor_manifest_sha256 = ?,
 			operation_id = ?, operation_payload_sha256 = ?, detail = ?, updated_at = ? WHERE repair_id = ?
 		`).run(
 			next.requestId, next.requestSha256, next.capabilityDigest, next.classification, next.state, next.round,
 			next.currentCommit, next.currentTree, next.beginRefSnapshot, next.beginRefSnapshotSha256,
-			JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates),
+			JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates), next.acceptedCodeRounds,
 			next.successorRequestId, next.successorRequestSha256, next.successorManifest ? JSON.stringify(next.successorManifest) : null,
 			next.successorManifestSha256, next.operationId, next.operationPayloadSha256, next.detail, new Date().toISOString(), repairId,
 		);
+		if (existing.episodeId) {
+			this.database.prepare("UPDATE manager_integration_repair_episodes SET classification = ?, state = ?, updated_at = ? WHERE episode_id = ? AND closed_at IS NULL")
+				.run(next.classification, next.state, new Date().toISOString(), existing.episodeId);
+		}
 		return this.getIntegrationRepair(repairId)!;
 	}
 
-	recordIntegrationRepairAudit(repairId: string, operationId: string, action: string, payloadSha256: string, evidence: unknown): StoredIntegrationRepairAudit {
+	closeIntegrationRepairEpisode(repairId: string, episodeId: string, state: IntegrationRepairState): StoredIntegrationRepairEpisode {
+		const episode = this.getIntegrationRepairEpisode(episodeId);
+		if (!episode || episode.repairId !== repairId) throw new Error(`Unknown integration repair episode ${episodeId}`);
+		if (episode.closedAt !== null) {
+			if (episode.state !== state) throw new Error(`Integration repair episode ${episodeId} was closed with different state`);
+			return episode;
+		}
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_integration_repair_episodes SET state = ?, updated_at = ?, closed_at = ? WHERE episode_id = ? AND closed_at IS NULL")
+			.run(state, now, now, episodeId);
+		return this.getIntegrationRepairEpisode(episodeId)!;
+	}
+
+	openIntegrationRepairEpisode(input: {
+		repairId: string;
+		requestId: string;
+		requestSha256: string;
+		integrationHead: string;
+		integrationTree: string;
+		canonicalGates: VerificationManifest["gates"];
+		canonicalGatesSha256: string;
+		state: IntegrationRepairState;
+		round?: number;
+		detail?: string | null;
+	}): StoredIntegrationRepair {
+		const repair = this.getIntegrationRepair(input.repairId);
+		if (!repair) throw new Error(`Unknown integration repair ${input.repairId}`);
+		if (input.canonicalGatesSha256 !== sha256(stableJson(input.canonicalGates))) throw new Error(`Integration repair episode evidence hash changed`);
+		const episodeId = integrationRepairEpisodeId(input);
+		const existing = this.getIntegrationRepairEpisode(episodeId);
+		if (existing) {
+			if (existing.repairId !== input.repairId || existing.requestId !== input.requestId || existing.requestSha256 !== input.requestSha256
+				|| existing.integrationHead !== input.integrationHead || existing.integrationTree !== input.integrationTree
+				|| existing.canonicalGatesSha256 !== input.canonicalGatesSha256
+				|| stableJson(existing.canonicalGates) !== stableJson(input.canonicalGates)) {
+				throw new Error(`Integration repair episode ${episodeId} was replayed with different evidence`);
+			}
+			if (repair.episodeId !== episodeId) {
+				const now = new Date().toISOString();
+				this.database.prepare("UPDATE manager_integration_repairs SET current_episode_id = ?, request_id = ?, request_sha256 = ?, classification = NULL, state = ?, round_number = ?, operation_id = NULL, operation_payload_sha256 = NULL, detail = ?, updated_at = ? WHERE repair_id = ?")
+					.run(episodeId, input.requestId, input.requestSha256, input.state, input.round ?? repair.round, input.detail ?? null, now, input.repairId);
+			}
+			return this.getIntegrationRepair(input.repairId)!;
+		}
+		if (repair.episodeId && repair.episodeId !== episodeId) {
+			this.closeIntegrationRepairEpisode(input.repairId, repair.episodeId, repair.episodeState ?? repair.state);
+		}
+		const now = new Date().toISOString();
+		this.database.prepare(`
+			INSERT INTO manager_integration_repair_episodes (
+				episode_id, repair_id, request_id, request_sha256, integration_head, integration_tree,
+				canonical_gates_json, canonical_gates_sha256, classification, state,
+				operation_id, operation_payload_sha256, transient_used, transient_use_evidence_sha256,
+				created_at, updated_at, closed_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 0, NULL, ?, ?, NULL)
+		`).run(
+			episodeId, input.repairId, input.requestId, input.requestSha256, input.integrationHead, input.integrationTree,
+			JSON.stringify(input.canonicalGates), input.canonicalGatesSha256, input.state, now, now,
+		);
+		this.database.prepare("UPDATE manager_integration_repairs SET current_episode_id = ?, request_id = ?, request_sha256 = ?, classification = NULL, state = ?, round_number = ?, operation_id = NULL, operation_payload_sha256 = NULL, detail = ?, updated_at = ? WHERE repair_id = ?")
+			.run(episodeId, input.requestId, input.requestSha256, input.state, input.round ?? repair.round, input.detail ?? null, now, input.repairId);
+		return this.getIntegrationRepair(input.repairId)!;
+	}
+
+	selectIntegrationRepairEpisode(repairId: string, input: { classification: IntegrationRepairClassification; operationId: string; operationPayloadSha256: string; state: IntegrationRepairState }): StoredIntegrationRepair {
+		const repair = this.getIntegrationRepair(repairId);
+		if (!repair || !repair.episodeId) throw new Error(`Integration repair ${repairId} has no current classification episode`);
+		if (repair.episodeClassification !== null && repair.episodeClassification !== input.classification) {
+			throw new Error(`Integration repair episode ${repair.episodeId} classification cannot change within an episode`);
+		}
+		if (repair.episodeOperationId !== null && (repair.episodeOperationId !== input.operationId || repair.episodeOperationPayloadSha256 !== input.operationPayloadSha256)) {
+			throw new Error(`Integration repair episode ${repair.episodeId} operation was replayed with different evidence`);
+		}
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_integration_repair_episodes SET classification = ?, state = ?, operation_id = COALESCE(operation_id, ?), operation_payload_sha256 = COALESCE(operation_payload_sha256, ?), updated_at = ? WHERE episode_id = ? AND closed_at IS NULL")
+			.run(input.classification, input.state, input.operationId, input.operationPayloadSha256, now, repair.episodeId);
+		this.database.prepare("UPDATE manager_integration_repairs SET classification = ?, state = ?, operation_id = ?, operation_payload_sha256 = ?, updated_at = ? WHERE repair_id = ?")
+			.run(input.classification, input.state, input.operationId, input.operationPayloadSha256, now, repairId);
+		return this.getIntegrationRepair(repairId)!;
+	}
+
+	markIntegrationRepairEpisodeTransientUsed(repairId: string, episodeId: string, evidenceSha256: string): StoredIntegrationRepairEpisode {
+		const episode = this.getIntegrationRepairEpisode(episodeId);
+		if (!episode || episode.repairId !== repairId) throw new Error(`Unknown integration repair episode ${episodeId}`);
+		if (episode.transientUsed) {
+			if (episode.transientUseEvidenceSha256 !== evidenceSha256) throw new Error(`Integration repair episode ${episodeId} transient evidence changed`);
+			return episode;
+		}
+		this.database.prepare("UPDATE manager_integration_repair_episodes SET transient_used = 1, transient_use_evidence_sha256 = ?, updated_at = ? WHERE episode_id = ? AND closed_at IS NULL")
+			.run(evidenceSha256, new Date().toISOString(), episodeId);
+		return this.getIntegrationRepairEpisode(episodeId)!;
+	}
+
+	hasIntegrationRepairTransientUse(repairId: string, evidence: { integrationHead: string; integrationTree: string; canonicalGatesSha256: string }): boolean {
+		return Boolean(this.database.prepare(`
+			SELECT 1 FROM manager_integration_repair_episodes
+			WHERE repair_id = ? AND transient_used = 1 AND integration_head = ? AND integration_tree = ? AND canonical_gates_sha256 = ?
+			LIMIT 1
+		`).get(repairId, evidence.integrationHead, evidence.integrationTree, evidence.canonicalGatesSha256));
+	}
+
+	recordIntegrationRepairAudit(repairId: string, operationId: string, action: string, payloadSha256: string, evidence: unknown, episodeId?: string | null): StoredIntegrationRepairAudit {
 		const canonicalEvidence = canonicalEventPayload(evidence).json;
+		const repair = this.getIntegrationRepair(repairId);
+		if (!repair) throw new Error(`Unknown integration repair ${repairId}`);
+		const expectedEpisodeId = episodeId ?? repair.episodeId;
 		const existing = this.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? AND operation_id = ? AND action = ?").get(repairId, operationId, action) as Record<string, unknown> | undefined;
 		if (existing) {
-			if (String(existing.payload_sha256) !== payloadSha256 || String(existing.evidence_json) !== canonicalEvidence) throw new Error(`Integration repair audit ${action} was replayed with different evidence`);
+			if (String(existing.payload_sha256) !== payloadSha256 || String(existing.evidence_json) !== canonicalEvidence
+				|| (expectedEpisodeId && existing.episode_id && String(existing.episode_id) !== expectedEpisodeId)) {
+				throw new Error(`Integration repair audit ${action} was replayed with different evidence`);
+			}
 			return rowToIntegrationRepairAudit(existing);
 		}
-		this.database.prepare(`INSERT INTO manager_integration_repair_audits (repair_id, operation_id, action, payload_sha256, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-			.run(repairId, operationId, action, payloadSha256, canonicalEvidence, new Date().toISOString());
+		this.database.prepare(`INSERT INTO manager_integration_repair_audits (repair_id, episode_id, operation_id, action, payload_sha256, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+			.run(repairId, expectedEpisodeId, operationId, action, payloadSha256, canonicalEvidence, new Date().toISOString());
 		return rowToIntegrationRepairAudit(this.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? AND operation_id = ? AND action = ?").get(repairId, operationId, action) as Record<string, unknown>);
 	}
 

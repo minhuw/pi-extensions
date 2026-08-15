@@ -49,6 +49,10 @@ test("schema 12 reopens once into begin-bound repair schema and remains idempote
 		const tables = new Set((migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
 		assert.ok(tables.has("manager_integration_repairs"));
 		assert.ok(tables.has("manager_integration_repair_audits"));
+		assert.ok(tables.has("manager_integration_repair_episodes"));
+		const episodeColumns = new Set((migrated.prepare("PRAGMA table_info(manager_integration_repair_episodes)").all() as Array<{ name: string }>).map((row) => row.name));
+		assert.equal(episodeColumns.has("transient_used"), true);
+		assert.equal(episodeColumns.has("canonical_gates_sha256"), true);
 		assert.match(String((migrated.prepare("SELECT sql FROM sqlite_master WHERE name = 'manager_operations'").get() as { sql: string }).sql), /integration_repair/);
 		migrated.close();
 		const repeated = openExecutionDatabase(planDirectory, { create: true })!;
@@ -170,4 +174,68 @@ test("repair gate programs retain an exact ordered prefix and append only record
 	assert.throws(() => normalizeIntegrationRepairGates({ classification: "code_defect", retainedGates: [gate], candidateGates: [addition, gate] }), /changed or was reordered/);
 	assert.throws(() => normalizeIntegrationRepairGates({ classification: "code_defect", retainedGates: [gate], candidateGates: [gate, addition], recordedAdditions: [] }), /not the recorded append-only program/);
 	assert.deepEqual(normalizeIntegrationRepairGates({ classification: "manifest_error", retainedGates: [gate], candidateGates: [addition] }), [addition]);
+});
+
+test("classification episodes retain immutable history and transient evidence across successors", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-episodes-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const head = "c".repeat(40);
+		const tree = "d".repeat(40);
+		const first = store.putIntegrationRepair({
+			repairId: "episode-lineage",
+			runId: "repair-run",
+			generation: 1,
+			requestId: "verify-episode-1",
+			requestSha256: "e".repeat(64),
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("f".repeat(64)),
+			classification: "transient",
+			state: "active",
+			parentCommit: head,
+			currentTree: tree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+		});
+		assert.ok(first.episodeId);
+		assert.equal(store.getIntegrationRepairEpisodes(first.repairId).length, 1);
+		store.recordIntegrationRepairAudit(first.repairId, "episode-begin-1", "begin", sha256("episode-begin-1"), { classification: "transient" });
+		const evidence = sha256(stableJson({ integrationHead: head, integrationTree: tree, canonicalGatesSha256: sha256(stableJson([gate])) }));
+		store.markIntegrationRepairEpisodeTransientUsed(first.repairId, first.episodeId!, evidence);
+		store.closeIntegrationRepairEpisode(first.repairId, first.episodeId!, "failed");
+		const second = store.openIntegrationRepairEpisode({
+			repairId: first.repairId,
+			requestId: "verify-episode-2",
+			requestSha256: "a".repeat(64),
+			integrationHead: head,
+			integrationTree: tree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			state: "failed",
+		});
+		assert.notEqual(second.episodeId, first.episodeId);
+		assert.equal(second.classification, null);
+		assert.equal(second.acceptedCodeRounds, 0);
+		assert.equal(second.transientRetryUsed, true);
+		assert.equal(store.getIntegrationRepairEpisodes(first.repairId)[0]!.classification, "transient");
+		assert.equal(store.getIntegrationRepairEpisodes(first.repairId)[0]!.closedAt !== null, true);
+		const selected = store.selectIntegrationRepairEpisode(first.repairId, {
+			classification: "manifest_error",
+			operationId: "episode-begin-2",
+			operationPayloadSha256: sha256("episode-begin-2"),
+			state: "active",
+		});
+		assert.equal(selected.classification, "manifest_error");
+		assert.throws(() => store.selectIntegrationRepairEpisode(first.repairId, {
+			classification: "code_defect",
+			operationId: "episode-begin-3",
+			operationPayloadSha256: sha256("episode-begin-3"),
+			state: "active",
+		}), /cannot change/);
+		assert.equal(store.getIntegrationRepairAudits(first.repairId)[0]!.episodeId, first.episodeId);
+		store.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
 });

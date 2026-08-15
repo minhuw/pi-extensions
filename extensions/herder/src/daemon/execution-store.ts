@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { validateAttentionRequest } from "../shared/protocol.ts"
+import { integrationRepairEpisodeId, validateAttentionRequest } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 14
+export const EXECUTION_SCHEMA_VERSION = 15
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -729,6 +729,105 @@ const SCHEMA_13_TABLES = `
     ON manager_integration_repair_audits(repair_id, audit_id);
 `
 
+const SCHEMA_15_TABLES = `
+  CREATE TABLE IF NOT EXISTS manager_integration_repair_episodes (
+    episode_id TEXT PRIMARY KEY NOT NULL,
+    repair_id TEXT NOT NULL REFERENCES manager_integration_repairs(repair_id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    integration_head TEXT NOT NULL,
+    integration_tree TEXT NOT NULL,
+    canonical_gates_json TEXT NOT NULL,
+    canonical_gates_sha256 TEXT NOT NULL,
+    classification TEXT,
+    state TEXT NOT NULL CHECK (state IN ('available', 'active', 'committing', 'committed', 'verifying', 'passed', 'failed', 'cancelled', 'paused', 'interrupted')),
+    operation_id TEXT,
+    operation_payload_sha256 TEXT,
+    transient_used INTEGER NOT NULL DEFAULT 0 CHECK (transient_used IN (0, 1)),
+    transient_use_evidence_sha256 TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    UNIQUE(repair_id, request_id)
+  );
+  CREATE INDEX IF NOT EXISTS manager_integration_repair_episodes_repair
+    ON manager_integration_repair_episodes(repair_id, created_at, episode_id);
+  CREATE INDEX IF NOT EXISTS manager_integration_repair_episodes_evidence
+    ON manager_integration_repair_episodes(repair_id, integration_head, integration_tree, canonical_gates_sha256, transient_used);
+`
+
+function applySchema15(database: Database): void {
+  const repairColumns = database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>
+  if (!repairColumns.some((column) => column.name === "accepted_code_rounds")) {
+    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN accepted_code_rounds INTEGER NOT NULL DEFAULT 0 CHECK (accepted_code_rounds BETWEEN 0 AND 3);")
+  }
+  if (!repairColumns.some((column) => column.name === "current_episode_id")) {
+    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN current_episode_id TEXT;")
+  }
+  const auditColumns = database.prepare("PRAGMA table_info(manager_integration_repair_audits)").all() as Array<{ name: string }>
+  if (!auditColumns.some((column) => column.name === "episode_id")) {
+    database.exec("ALTER TABLE manager_integration_repair_audits ADD COLUMN episode_id TEXT;")
+  }
+  database.exec(SCHEMA_15_TABLES)
+
+  const rows = database.prepare(`
+    SELECT r.*, v.integration_head AS verification_head, v.integration_tree AS verification_tree
+    FROM manager_integration_repairs r
+    LEFT JOIN manager_verifications v ON v.request_id = r.request_id
+  `).all() as SqlRow[]
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO manager_integration_repair_episodes (
+      episode_id, repair_id, request_id, request_sha256, integration_head, integration_tree,
+      canonical_gates_json, canonical_gates_sha256, classification, state,
+      operation_id, operation_payload_sha256, transient_used, transient_use_evidence_sha256,
+      created_at, updated_at, closed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, NULL)
+  `)
+  const updateCurrent = database.prepare("UPDATE manager_integration_repairs SET current_episode_id = ? WHERE repair_id = ?")
+  const updateAudits = database.prepare("UPDATE manager_integration_repair_audits SET episode_id = ? WHERE repair_id = ? AND episode_id IS NULL")
+  for (const row of rows) {
+    const currentEpisodeId = row.current_episode_id === null || row.current_episode_id === undefined ? "" : String(row.current_episode_id)
+    if (currentEpisodeId) {
+      updateAudits.run(currentEpisodeId, String(row.repair_id))
+      continue
+    }
+    const requestId = String(row.request_id)
+    const requestSha256 = String(row.request_sha256)
+    const integrationHead = String(row.verification_head || row.parent_commit)
+    const integrationTree = String(row.verification_tree || row.current_tree || row.parent_commit)
+    const canonicalGatesJson = String(row.canonical_gates_json || "[]")
+    let canonicalGates: unknown = []
+    try { canonicalGates = JSON.parse(canonicalGatesJson) } catch { canonicalGates = [] }
+    const episodeId = integrationRepairEpisodeId({
+      requestId,
+      requestSha256,
+      integrationHead,
+      integrationTree,
+      canonicalGates: Array.isArray(canonicalGates) ? canonicalGates as never[] : [],
+    })
+    const now = String(row.updated_at || row.created_at || new Date().toISOString())
+    insert.run(
+      episodeId,
+      String(row.repair_id),
+      requestId,
+      requestSha256,
+      integrationHead,
+      integrationTree,
+      canonicalGatesJson,
+      String(row.canonical_gates_sha256),
+      row.classification === null || row.classification === undefined ? null : String(row.classification),
+      String(row.state),
+      row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
+      row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
+      now,
+      now,
+    )
+    updateCurrent.run(episodeId, String(row.repair_id))
+    updateAudits.run(episodeId, String(row.repair_id))
+  }
+  database.exec("PRAGMA user_version = 15;")
+}
+
 function ensureLegacyFingerprintVersion(database: Database): void {
   const columns = database.prepare("PRAGMA table_info(manager_plan_specs)").all() as Array<{ name: string }>
   if (!columns.some((column) => column.name === "fingerprint_version")) {
@@ -848,6 +947,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
   if (version === EXECUTION_SCHEMA_VERSION) return
+  if (version === 14 && !allowInitialize) return
   if (version === 13 && !allowInitialize) return
   if (version === 6 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
@@ -871,6 +971,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 7 && allowInitialize) {
@@ -881,6 +982,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 8 && allowInitialize) {
@@ -890,6 +992,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 9 && allowInitialize) {
@@ -898,6 +1001,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 10 && allowInitialize) {
@@ -905,21 +1009,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 11 && allowInitialize) {
     applySchema12(database)
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 12 && allowInitialize) {
     applySchema13(database)
     applySchema14(database)
+    applySchema15(database)
     return
   }
   if (version === 13 && allowInitialize) {
     applySchema14(database)
+    applySchema15(database)
+    return
+  }
+  if (version === 14 && allowInitialize) {
+    applySchema15(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -1120,6 +1232,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   applySchema12(database)
   applySchema13(database)
   applySchema14(database)
+  applySchema15(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
@@ -1605,9 +1718,13 @@ export function readManagerState(planDir: string) {
       : new Set<string>()
     const beginRefSnapshotColumn = repairColumns.has("begin_ref_snapshot_json") ? "begin_ref_snapshot_json" : "NULL AS begin_ref_snapshot_json"
     const beginRefSnapshotSha256Column = repairColumns.has("begin_ref_snapshot_sha256") ? "begin_ref_snapshot_sha256" : "NULL AS begin_ref_snapshot_sha256"
+    const acceptedCodeRoundsColumn = repairColumns.has("accepted_code_rounds") ? "accepted_code_rounds" : "0 AS accepted_code_rounds"
+    const currentEpisodeIdColumn = repairColumns.has("current_episode_id") ? "current_episode_id" : "NULL AS current_episode_id"
+    const episodeTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_integration_repair_episodes'").get()
     const integrationRepair = run && repairTable ? database.prepare(`
       SELECT repair_id, generation, request_id, request_sha256, owner_session_id, classification, state,
         round_number, parent_commit, current_commit, current_tree, superseded_commits_json,
+        ${acceptedCodeRoundsColumn}, ${currentEpisodeIdColumn},
         ${beginRefSnapshotColumn}, ${beginRefSnapshotSha256Column},
         canonical_gates_json, canonical_gates_sha256, effective_gates_json, successor_request_id,
         successor_request_sha256, successor_manifest_json, successor_manifest_sha256, detail, created_at, updated_at
@@ -1615,6 +1732,17 @@ export function readManagerState(planDir: string) {
       WHERE run_id = ? AND generation = ?
       ORDER BY updated_at DESC LIMIT 1
     `).get(run.run_id, run.current_generation) as SqlRow | undefined : undefined
+    const currentEpisode = integrationRepair && episodeTable && integrationRepair.current_episode_id
+      ? database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(integrationRepair.current_episode_id) as SqlRow | undefined
+      : undefined
+    const currentEpisodeForRequest = integrationRepair && currentEpisode && currentEpisode.request_id === integrationRepair.request_id ? currentEpisode : undefined
+    const transientRetryUsed = integrationRepair && currentEpisodeForRequest && episodeTable
+      ? Boolean(database.prepare(`
+          SELECT 1 FROM manager_integration_repair_episodes
+          WHERE repair_id = ? AND transient_used = 1 AND integration_head = ? AND integration_tree = ? AND canonical_gates_sha256 = ?
+          LIMIT 1
+        `).get(integrationRepair.repair_id, currentEpisodeForRequest.integration_head, currentEpisodeForRequest.integration_tree, currentEpisodeForRequest.canonical_gates_sha256))
+      : false
     const attentionTable = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_attention_requests'").get()
     const attention = run && attentionTable ? database.prepare(`
       SELECT sequence, request_id, plan_id, generation, round_number, action_id, request_sha256,
@@ -1767,6 +1895,14 @@ export function readManagerState(planDir: string) {
         requestSha256: integrationRepair.request_sha256,
         ownerSessionId: integrationRepair.owner_session_id,
         classification: integrationRepair.classification,
+        episodeId: currentEpisodeForRequest?.episode_id ?? undefined,
+        episodeState: currentEpisodeForRequest ? (currentEpisodeForRequest.classification ? currentEpisodeForRequest.state : "unclassified") : undefined,
+        episodeRequestSha256: currentEpisodeForRequest?.request_sha256,
+        episodeIntegrationHead: currentEpisodeForRequest?.integration_head,
+        episodeIntegrationTree: currentEpisodeForRequest?.integration_tree,
+        episodeCanonicalGatesSha256: currentEpisodeForRequest?.canonical_gates_sha256,
+        acceptedCodeRounds: Number(integrationRepair.accepted_code_rounds ?? 0),
+        transientRetryUsed,
         state: integrationRepair.state,
         round: integrationRepair.round_number,
         parentCommit: integrationRepair.parent_commit,

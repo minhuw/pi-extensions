@@ -944,6 +944,7 @@ test("request-bound integration repair edits only after begin and automatically 
 			}, undefined, undefined, context), "repair failing verification");
 		const recoveryPrompt = (await withDeadline(api.waitForUserMessage(0, "HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1"), "repair recovery prompt")).content;
 		assert.equal(fieldValue(recoveryPrompt, "REQUEST_ID"), requestId);
+		assert.doesNotMatch(recoveryPrompt, /preserve the recorded classification exactly|RECORDED_CLASSIFICATION/);
 		const ownerSessionId = fieldValue(recoveryPrompt, "MAIN_SESSION_ID");
 		const repairArgs = {
 			planDirectory: "herder-plans",
