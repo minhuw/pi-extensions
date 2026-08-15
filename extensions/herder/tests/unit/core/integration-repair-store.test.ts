@@ -239,6 +239,63 @@ test("verification recovery records one unclaimed initial repair episode", () =>
 	}
 });
 
+test("verification recovery preserves a durably passed initial verification", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-passed-verification-recovery-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const request: VerificationRequest = {
+			schemaVersion: 1,
+			requestId: "verification-recovery-passed",
+			requestSha256: "e".repeat(64),
+			runId: "repair-run",
+			generation: 1,
+			graphSha256: "a".repeat(64),
+			runAssignmentPath: "/repo/run-assignment.json",
+			runAssignmentSha256: "b".repeat(64),
+			integrationBranch: "herder/repair/integration",
+			integrationWorktree: "/repo/.herder-integration",
+			integrationHead: "c".repeat(40),
+			integrationTree: "d".repeat(40),
+			requestedAt: "2026-08-15T00:00:00.000Z",
+		};
+		const manifest: VerificationManifest = {
+			schemaVersion: 1,
+			requestId: request.requestId,
+			requestSha256: request.requestSha256,
+			runId: request.runId,
+			generation: request.generation,
+			graphSha256: request.graphSha256,
+			runAssignmentSha256: request.runAssignmentSha256,
+			integrationHead: request.integrationHead,
+			integrationTree: request.integrationTree,
+			rationale: "passed recovery fixture",
+			gates: [gate],
+		};
+		store.submitOperation("verification-recovery-passed", "verification", { requestId: request.requestId });
+		assert.equal(store.claimNextOperation()?.state, "running");
+		store.putVerificationRequest(request);
+		store.startVerification(request.requestId, manifest, sha256(stableJson(manifest)));
+		store.finishVerification(request.requestId, "passed", { passed: true }, null);
+		// Legacy passed verifications may not retain a manifest, but their terminal
+		// state is still sufficient to replay the in-flight operation safely.
+		store.database.prepare("UPDATE manager_verifications SET manifest_json = NULL, manifest_sha256 = NULL WHERE request_id = ?").run(request.requestId);
+		store.database.prepare("UPDATE manager_runs SET status = 'running'").run();
+
+		store.recoverRunningOperations();
+
+		assert.equal(store.getOperation("verification-recovery-passed")?.state, "accepted");
+		assert.equal(store.getVerificationByRequestId(request.requestId)?.state, "passed");
+		assert.equal(store.getRun()?.status, "running");
+		assert.equal(store.getIntegrationRepairForRequest(request.requestId), null);
+		store.recoverRunningOperations();
+		assert.equal(store.getIntegrationRepairForRequest(request.requestId), null);
+		store.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("repair gate programs retain an exact ordered prefix and append only recorded IDs", () => {
 	const addition = { ...gate, gateId: "added", label: "added gate" };
 	assert.deepEqual(normalizeIntegrationRepairGates({ classification: "code_defect", retainedGates: [gate], candidateGates: [gate, addition], recordedAdditions: [addition] }), [gate, addition]);
@@ -472,6 +529,150 @@ test("schema 14 migration preserves successor evidence, code rounds, and transie
 			assert.equal(repeated.getIntegrationRepairEpisodes(transientRepairId).length, 2);
 			assert.equal(repeated.getIntegrationRepair(codeRepairId)!.acceptedCodeRounds, 1);
 			assert.equal(repeated.getIntegrationRepair(transientRepairId)!.transientRetryUsed, true);
+		} finally {
+			repeated.close();
+		}
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("schema 16 migration keeps a selected failed successor episode open", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema16-current-episode-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const now = "2026-08-15T00:00:00.000Z";
+		const makeRequest = (requestId: string, requestSha256: string, integrationHead: string, integrationTree: string, predecessorRequestId?: string): VerificationRequest => ({
+			schemaVersion: 1,
+			requestId,
+			requestSha256,
+			runId: "repair-run",
+			generation: 1,
+			graphSha256: "a".repeat(64),
+			runAssignmentPath: "/repo/run-assignment.json",
+			runAssignmentSha256: "b".repeat(64),
+			integrationBranch: "herder/repair/integration",
+			integrationWorktree: "/repo/.herder-integration",
+			integrationHead,
+			integrationTree,
+			requestedAt: now,
+			...(predecessorRequestId ? { predecessorRequestId } : {}),
+			repairId: "schema16-repair",
+			repairRound: 1,
+		});
+		const failVerification = (request: VerificationRequest): VerificationManifest => {
+			const manifest: VerificationManifest = {
+				schemaVersion: 1,
+				requestId: request.requestId,
+				requestSha256: request.requestSha256,
+				runId: request.runId,
+				generation: request.generation,
+				graphSha256: request.graphSha256,
+				runAssignmentSha256: request.runAssignmentSha256,
+				integrationHead: request.integrationHead,
+				integrationTree: request.integrationTree,
+				rationale: "schema 16 recovery fixture",
+				gates: [gate],
+				...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+				repairId: "schema16-repair",
+				repairRound: 1,
+			};
+			store.putVerificationRequest(request);
+			store.startVerification(request.requestId, manifest, sha256(stableJson(manifest)));
+			store.finishVerification(request.requestId, "failed", { passed: false }, "failed");
+			return manifest;
+		};
+		const r0 = makeRequest("schema16-r0", "1".repeat(64), "c".repeat(40), "d".repeat(40));
+		failVerification(r0);
+		const repair = store.putIntegrationRepair({
+			repairId: "schema16-repair",
+			runId: "repair-run",
+			generation: 1,
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+			classification: "code_defect",
+			state: "failed",
+			parentCommit: r0.integrationHead,
+			currentTree: r0.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			operationId: "schema16-begin-r0",
+			operationPayloadSha256: sha256("schema16-begin-r0"),
+		});
+		store.recordIntegrationRepairAudit(repair.repairId, "schema16-begin-r0", "begin", sha256("schema16-begin-r0"), {
+			operation: "begin",
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			classification: "code_defect",
+		});
+		const r1 = makeRequest("schema16-r1", "3".repeat(64), "e".repeat(40), "f".repeat(40), r0.requestId);
+		const r1Manifest = failVerification(r1);
+		store.updateIntegrationRepair(repair.repairId, {
+			state: "failed",
+			successorRequestId: r1.requestId,
+			successorRequestSha256: r1.requestSha256,
+			successorManifest: r1Manifest,
+			successorManifestSha256: sha256(stableJson(r1Manifest)),
+		});
+		store.closeIntegrationRepairEpisode(repair.repairId, repair.episodeId!, "failed");
+		store.openIntegrationRepairEpisode({
+			repairId: repair.repairId,
+			requestId: r1.requestId,
+			requestSha256: r1.requestSha256,
+			integrationHead: r1.integrationHead,
+			integrationTree: r1.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			state: "failed",
+			detail: "failed successor",
+		});
+		const before = store.getIntegrationRepair(repair.repairId)!;
+		assert.equal(before.requestId, r1.requestId);
+		assert.equal(store.getIntegrationRepairEpisode(before.episodeId!)?.closedAt, null);
+		store.database.exec("PRAGMA user_version = 15;");
+		store.close();
+
+		const migrated = new RunStore(planDirectory);
+		try {
+			const current = migrated.getIntegrationRepair(repair.repairId)!;
+			const episodes = migrated.getIntegrationRepairEpisodes(repair.repairId);
+			assert.equal(current.requestId, r1.requestId);
+			assert.equal(current.successorRequestId, r1.requestId);
+			assert.equal(episodes.length, 2);
+			assert.equal(episodes[0]!.requestId, r0.requestId);
+			assert.equal(episodes[0]!.classification, "code_defect");
+			assert.notEqual(episodes[0]!.closedAt, null);
+			assert.equal(episodes[1]!.requestId, r1.requestId);
+			assert.equal(episodes[1]!.classification, null);
+			assert.equal(episodes[1]!.closedAt, null);
+			const selected = migrated.selectIntegrationRepairEpisode(repair.repairId, {
+				classification: "manifest_error",
+				operationId: "schema16-begin-r1",
+				operationPayloadSha256: sha256("schema16-begin-r1"),
+				state: "active",
+			});
+			assert.equal(selected.episodeClassification, "manifest_error");
+			assert.equal(selected.episodeState, "active");
+			assert.equal(selected.episodeId, episodes[1]!.episodeId);
+			assert.equal(migrated.getIntegrationRepairEpisode(selected.episodeId!)?.closedAt, null);
+			assert.deepEqual(migrated.getIntegrationRepairAudits(repair.repairId).map((audit) => audit.episodeId), [episodes[0]!.episodeId]);
+			migrated.database.exec("PRAGMA user_version = 15;");
+		} finally {
+			migrated.close();
+		}
+
+		const repeated = new RunStore(planDirectory);
+		try {
+			const repeatedEpisodes = repeated.getIntegrationRepairEpisodes(repair.repairId);
+			assert.equal(repeatedEpisodes.length, 2);
+			assert.equal(repeatedEpisodes[0]!.classification, "code_defect");
+			assert.notEqual(repeatedEpisodes[0]!.closedAt, null);
+			assert.equal(repeatedEpisodes[1]!.classification, "manifest_error");
+			assert.equal(repeatedEpisodes[1]!.closedAt, null);
+			assert.deepEqual(repeated.getIntegrationRepairAudits(repair.repairId).map((audit) => audit.episodeId), [repeatedEpisodes[0]!.episodeId]);
 		} finally {
 			repeated.close();
 		}

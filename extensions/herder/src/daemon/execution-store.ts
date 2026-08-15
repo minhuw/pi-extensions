@@ -973,6 +973,9 @@ function applySchema16(database: Database): void {
       row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
       row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
     )
+    const successorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
+    const successorStoredVerification = successorRequestId ? getVerification(successorRequestId) : undefined
+    const baseIsFailedSuccessor = baseRequestId === successorRequestId && successorStoredVerification?.state === "failed"
     const auditRows = audits.all(repairId) as SqlRow[]
     let activeEpisodeId = baseEpisodeId
     let activeClassification = row.classification === null || row.classification === undefined ? null : String(row.classification)
@@ -1004,7 +1007,7 @@ function applySchema16(database: Database): void {
           String(audit.operation_id),
           String(audit.payload_sha256),
         )
-        if (activeEpisodeId !== previousEpisodeId) episodeClose.run("failed", now, now, previousEpisodeId)
+        if (activeEpisodeId !== previousEpisodeId && !(baseIsFailedSuccessor && previousEpisodeId === baseEpisodeId)) episodeClose.run("failed", now, now, previousEpisodeId)
       }
       if (String(audit.action) === "commit") {
         if (activeClassification === "code_defect") codeRounds += 1
@@ -1015,8 +1018,6 @@ function applySchema16(database: Database): void {
       }
     }
 
-    const successorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
-    const successorStoredVerification = successorRequestId ? getVerification(successorRequestId) : undefined
     let currentEpisodeId = activeEpisodeId
     let currentRequestId = baseRequestId
     let currentRequestSha256 = baseEvidence.requestSha256

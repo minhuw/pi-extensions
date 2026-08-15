@@ -854,7 +854,7 @@ export class RunStore {
 			if (operation.kind === "verification") {
 				const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
 				const stored = requestId ? this.getVerificationByRequestId(requestId) : null;
-				if (stored?.request.repairId && stored.state === "running" && stored.manifest) {
+				if (stored?.state === "passed" || (stored?.manifest && stored.request.repairId && stored.state === "running")) {
 					this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
 						.run(new Date().toISOString(), operation.operationId);
 					continue;
