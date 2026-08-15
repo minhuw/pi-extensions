@@ -34,6 +34,118 @@ function repairInput(planDirectory: string) {
 	database.close();
 }
 
+function selectedSuccessorMigrationFixture(): { planDirectory: string; repairId: string; episodeId: string } {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-invalid-"));
+	repairInput(planDirectory);
+	const store = new RunStore(planDirectory);
+	const now = "2026-08-15T00:00:00.000Z";
+	const repairId = "schema17-invalid";
+	const makeRequest = (requestId: string, requestSha256: string, integrationHead: string, integrationTree: string, predecessorRequestId?: string): VerificationRequest => ({
+		schemaVersion: 1,
+		requestId,
+		requestSha256,
+		runId: "repair-run",
+		generation: 1,
+		graphSha256: "a".repeat(64),
+		runAssignmentPath: "/repo/run-assignment.json",
+		runAssignmentSha256: "b".repeat(64),
+		integrationBranch: "herder/repair/integration",
+		integrationWorktree: "/repo/.herder-integration",
+		integrationHead,
+		integrationTree,
+		requestedAt: now,
+		...(predecessorRequestId ? { predecessorRequestId } : {}),
+		repairId,
+		repairRound: 1,
+	});
+	const makeManifest = (request: VerificationRequest): VerificationManifest => ({
+		schemaVersion: 1,
+		requestId: request.requestId,
+		requestSha256: request.requestSha256,
+		runId: request.runId,
+		generation: request.generation,
+		graphSha256: request.graphSha256,
+		runAssignmentSha256: request.runAssignmentSha256,
+		integrationHead: request.integrationHead,
+		integrationTree: request.integrationTree,
+		rationale: "invalid migration fixture",
+		gates: [gate],
+		...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+		repairId,
+		repairRound: 1,
+	});
+	const failVerification = (request: VerificationRequest): VerificationManifest => {
+		const manifest = makeManifest(request);
+		store.putVerificationRequest(request);
+		store.startVerification(request.requestId, manifest, sha256(stableJson(manifest)));
+		store.finishVerification(request.requestId, "failed", { passed: false }, "failed");
+		return manifest;
+	};
+	const r0 = makeRequest("schema17-invalid-r0", "1".repeat(64), "c".repeat(40), "d".repeat(40));
+	const r1 = makeRequest("schema17-invalid-r1", "3".repeat(64), "e".repeat(40), "f".repeat(40), r0.requestId);
+	failVerification(r0);
+	const r1Manifest = failVerification(r1);
+	const operationId = "schema17-invalid-begin-r0";
+	const operationPayloadSha256 = sha256(operationId);
+	const repair = store.putIntegrationRepair({
+		repairId,
+		runId: "repair-run",
+		generation: 1,
+		requestId: r0.requestId,
+		requestSha256: r0.requestSha256,
+		ownerSessionId: "main-session",
+		capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+		classification: "code_defect",
+		state: "failed",
+		parentCommit: r0.integrationHead,
+		currentTree: r0.integrationTree,
+		canonicalGates: [gate],
+		canonicalGatesSha256: sha256(stableJson([gate])),
+		operationId,
+		operationPayloadSha256,
+	});
+	store.recordIntegrationRepairAudit(repair.repairId, operationId, "begin", operationPayloadSha256, {
+		operation: "begin",
+		requestId: r0.requestId,
+		requestSha256: r0.requestSha256,
+		classification: "code_defect",
+	});
+	store.updateIntegrationRepair(repair.repairId, {
+		state: "failed",
+		successorRequestId: r1.requestId,
+		successorRequestSha256: r1.requestSha256,
+		successorManifest: r1Manifest,
+		successorManifestSha256: sha256(stableJson(r1Manifest)),
+	});
+	store.closeIntegrationRepairEpisode(repair.repairId, repair.episodeId!, "failed");
+	const successor = store.openIntegrationRepairEpisode({
+		repairId,
+		requestId: r1.requestId,
+		requestSha256: r1.requestSha256,
+		integrationHead: r1.integrationHead,
+		integrationTree: r1.integrationTree,
+		canonicalGates: [gate],
+		canonicalGatesSha256: sha256(stableJson([gate])),
+		state: "failed",
+		detail: "failed successor",
+	});
+	const selectedOperationId = "schema17-invalid-begin-r1";
+	store.selectIntegrationRepairEpisode(repairId, {
+		classification: "manifest_error",
+		operationId: selectedOperationId,
+		operationPayloadSha256: sha256(selectedOperationId),
+		state: "active",
+	});
+	store.recordIntegrationRepairAudit(repairId, selectedOperationId, "begin", sha256(selectedOperationId), {
+		operation: "begin",
+		requestId: r1.requestId,
+		requestSha256: r1.requestSha256,
+		classification: "manifest_error",
+	});
+	store.close();
+	return { planDirectory, repairId, episodeId: successor.episodeId! };
+}
+
 test("schema 12 reopens once into begin-bound repair schema and remains idempotent", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema-"));
 	try {
@@ -846,6 +958,53 @@ test("schema migration preserves a preselected failed successor episode", () => 
 		}
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("schema 17 migration rejects invalid successor evidence before mutation", () => {
+	const cases: Array<{ name: string; mutate: (database: NonNullable<ReturnType<typeof openExecutionDatabase>>, episodeId: string, repairId: string) => void }> = [
+		{
+			name: "missing current episode",
+			mutate: (database) => database.prepare("UPDATE manager_integration_repairs SET current_episode_id = 'bad-episode-id' WHERE repair_id = ?").run("schema17-invalid"),
+		},
+		{
+			name: "mismatched episode evidence",
+			mutate: (database, episodeId) => database.prepare("UPDATE manager_integration_repair_episodes SET integration_tree = ? WHERE episode_id = ?").run("0".repeat(40), episodeId),
+		},
+		{
+			name: "conflicting successor request hash",
+			mutate: (database) => database.prepare("UPDATE manager_integration_repairs SET successor_request_sha256 = ? WHERE repair_id = ?").run("b".repeat(64), "schema17-invalid"),
+		},
+		{
+			name: "successor repair lineage mismatch",
+			mutate: (database) => { database.prepare("UPDATE manager_verifications SET repair_id = 'other-repair' WHERE request_id = 'schema17-invalid-r1'").run(); },
+		},
+	];
+	for (const fixtureCase of cases) {
+		const fixture = selectedSuccessorMigrationFixture();
+		try {
+			const database = openExecutionDatabase(fixture.planDirectory, { create: true })!;
+			database.prepare("UPDATE manager_integration_repairs SET classification = NULL, state = 'failed', operation_id = NULL, operation_payload_sha256 = NULL WHERE repair_id = ?").run(fixture.repairId);
+			fixtureCase.mutate(database, fixture.episodeId, fixture.repairId);
+			const beforeRepair = database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId);
+			const beforeEpisodes = database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId);
+			const beforeAudits = database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId);
+			database.exec("PRAGMA user_version = 16;");
+			database.close();
+
+			assert.throws(() => new RunStore(fixture.planDirectory), /Cannot migrate integration repair/, fixtureCase.name);
+			const unchanged = openExecutionDatabase(fixture.planDirectory, { readOnly: true })!;
+			try {
+				assert.equal(Number((unchanged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 16);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId), beforeRepair, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId), beforeEpisodes, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId), beforeAudits, fixtureCase.name);
+			} finally {
+				unchanged.close();
+			}
+		} finally {
+			fs.rmSync(fixture.planDirectory, { recursive: true, force: true });
+		}
 	}
 });
 
