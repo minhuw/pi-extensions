@@ -1173,7 +1173,10 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 			"reignite delegation",
 		)).content;
 		assert.match(reignitePrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
+		assert.match(reignitePrompt, /SOURCE_PLAN_DIRECTORY: /);
 		assert.match(reignitePrompt, /ALLOCATED_PLAN_DIRECTORY: /);
+		assert.match(reignitePrompt, /Pass SOURCE_PLAN_DIRECTORY as planDirectory/);
+		assert.match(reignitePrompt, /allocated sibling is also accepted/);
 		assert.match(reignitePrompt, /Do not call \/herder-fire/);
 		assert.equal(factory.sessions.some((session) => session.action.role === "plan-implementer" && session.action.planId !== "001"), false);
 		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
@@ -1201,21 +1204,31 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		}));
 		const graphSha256 = String(validated.graphSha256);
 		const workersBeforeAck = factory.sessions.length;
-		const ack = await withDeadline(
-			api.tool("herder_reignite").execute(
-				"reignite",
-				{
-					planDirectory: "herder-plans",
-					requestId: fieldValue(resumedPrompt, "REQUEST_ID"),
-					requestSha256: fieldValue(resumedPrompt, "REQUEST_SHA256"),
-					state: "written",
-					graphSha256,
-				},
+		const ackArgs = {
+			requestId: fieldValue(resumedPrompt, "REQUEST_ID"),
+			requestSha256: fieldValue(resumedPrompt, "REQUEST_SHA256"),
+			state: "written" as const,
+			graphSha256,
+		};
+		await assert.rejects(
+			() => api!.tool("herder_reignite").execute(
+				"reignite-wrong-dir",
+				{ ...ackArgs, planDirectory: "src" },
 				undefined,
 				undefined,
 				context,
 			),
-			"herder_reignite written ack",
+			/must be the source run/,
+		);
+		const ack = await withDeadline(
+			api.tool("herder_reignite").execute(
+				"reignite",
+				{ ...ackArgs, planDirectory: allocated },
+				undefined,
+				undefined,
+				context,
+			),
+			"herder_reignite written ack against allocated directory",
 		);
 		assert.equal(object(ack).terminate, true);
 		assert.match(toolText(ack), /original run remains complete/i);

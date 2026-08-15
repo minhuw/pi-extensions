@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -111,6 +111,27 @@ type HerderPiWorkerFactory = PiWorkerSessionFactory & {
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function sameResolvedDirectory(left: string, right: string | undefined): boolean {
+	if (!right) return false;
+	const resolvedLeft = path.resolve(left);
+	const resolvedRight = path.resolve(right);
+	if (resolvedLeft === resolvedRight) return true;
+	try {
+		return realpathSync(resolvedLeft) === realpathSync(resolvedRight);
+	} catch {
+		return false;
+	}
+}
+
+function optionalResolvedPlanDirectory(repoRoot: string, input: string | undefined): string | undefined {
+	if (!input) return undefined;
+	try {
+		return resolvePlanDirectory(repoRoot, input);
+	} catch {
+		return undefined;
+	}
 }
 
 function rejectLegacyIntegrationRepairCommitMessage(value: unknown): void {
@@ -461,7 +482,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			"The original Herder run is complete. Residual PLAN_REQUIREMENT and PATCH_REGRESSION findings must become a new fireable sibling plan directory in one shot.",
 			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
 			"Use herder_plan init with local tracking, write the plan files, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
-			"As your final action, call herder_reignite exactly once with written or failed. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
+			"As your final action, call herder_reignite exactly once with written or failed. Pass SOURCE_PLAN_DIRECTORY as planDirectory; the allocated sibling is also accepted. Acknowledgement always targets the source run. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
 			`REQUEST_ID: ${request.requestId}`,
 			`REQUEST_SHA256: ${request.requestSha256}`,
 			`RUN_ID: ${request.runId}`,
@@ -1630,7 +1651,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerTool({
 		name: "herder_reignite",
 		label: "Herder Reignite",
-		description: "Acknowledge the one-shot write of residual final-review findings into the allocated herder-reignite[-N] plan directory. The original complete run stays complete. For written, pass graphSha256 from herder_plan validate of the allocated directory.",
+		description: "Acknowledge the one-shot write of residual final-review findings. planDirectory may be the source run or the allocated herder-reignite[-N] sibling; acknowledgement always targets the source run. The original complete run stays complete. For written, pass graphSha256 from herder_plan validate of the allocated directory.",
 		parameters: Type.Object({
 			planDirectory: Type.String(),
 			requestId: Type.String(),
@@ -1646,17 +1667,27 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (!ctx.isProjectTrusted()) throw new Error("Trust this project before acknowledging a Herder reignite write.");
 			const repoRoot = await repositoryRoot(ctx);
 			assertSessionActive(epoch);
-			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
+			const requestedDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
 			let request = reigniteRequests.get(params.requestId);
 			if (!request) {
-				const reply = await enqueueManager(async () => {
+				const refreshDirectories: string[] = [];
+				for (const candidate of [currentState?.planDir, requestedDirectory]) {
+					const resolved = optionalResolvedPlanDirectory(repoRoot, candidate);
+					if (!resolved || refreshDirectories.some((entry) => sameResolvedDirectory(entry, resolved))) continue;
+					refreshDirectories.push(resolved);
+				}
+				for (const directory of refreshDirectories) {
+					const reply = await enqueueManager(async () => {
+						assertSessionActive(epoch);
+						return unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: directory }) as Record<string, unknown>);
+					});
 					assertSessionActive(epoch);
-					return unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory }) as Record<string, unknown>);
-				});
-				assertSessionActive(epoch);
-				assertOwnership(reply.planDirectory, reply.runId);
-				updateFromReply(reply);
-				request = reigniteRequests.get(params.requestId);
+					if (reply.status === "idle" || !reply.runId) continue;
+					assertOwnership(reply.planDirectory, reply.runId);
+					updateFromReply(reply);
+					request = reigniteRequests.get(params.requestId);
+					if (request) break;
+				}
 			}
 			if (!request || request.requestId !== params.requestId || request.requestSha256 !== params.requestSha256 || currentState?.runId !== request.runId || currentState.profile === "unknown") {
 				throw new Error(`Herder reignite request ${params.requestId} is not bound to this main session`);
@@ -1664,15 +1695,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (currentState.status !== "complete") {
 				throw new Error("Herder reignite can only be acknowledged for a complete source run");
 			}
-			assertOwnership(planDirectory, request.runId);
+			const sourceDirectory = resolvePlanDirectory(repoRoot, request.sourcePlanDirectory);
+			const allocatedDirectory = optionalResolvedPlanDirectory(repoRoot, request.allocatedPlanDirectory);
+			if (!sameResolvedDirectory(requestedDirectory, sourceDirectory) && !sameResolvedDirectory(requestedDirectory, allocatedDirectory)) {
+				throw new Error(`Herder reignite planDirectory must be the source run (${sourceDirectory}) or its allocated sibling${allocatedDirectory ? ` (${allocatedDirectory})` : ""}.`);
+			}
+			assertOwnership(sourceDirectory, request.runId);
 			await resolveProfile(ctx, currentState.profile);
 			assertSessionActive(epoch);
 			const operationId = `reignite:${request.requestId}:${randomUUID()}`;
 			const pending = await enqueueManager(async () => {
 				assertSessionActive(epoch);
-				assertOwnership(planDirectory, request!.runId);
+				assertOwnership(sourceDirectory, request!.runId);
 				const submitted = await submitHerderReignite({
-					planDirectory,
+					planDirectory: sourceDirectory,
 					operationId,
 					requestId: request!.requestId,
 					requestSha256: request!.requestSha256,
