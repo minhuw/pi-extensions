@@ -220,7 +220,8 @@ export class GitDriver {
 	}
 
 	async verifyCheckout(expected: string): Promise<void> {
-		await snapshotCheckout({ repo: this.repoRoot, excludes: [this.planDirectory], expect: expected });
+		const result = await snapshotCheckout({ repo: this.repoRoot, excludes: [this.planDirectory], expect: expected });
+		if (!result.ok) throw new Error(`Checkout changed since the run checkpoint: ${result.changedComponents?.join(", ") ?? "unknown"}`);
 	}
 
 	inspectNamespace(mode: "fire" | "resume" | "status") {

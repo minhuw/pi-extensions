@@ -1455,6 +1455,38 @@ export class HerderRunManager {
 		}
 	}
 
+	private async validateFreshRepairBeginGitIdentity(
+		run: StoredRun,
+		verification: StoredVerification,
+		repair: StoredIntegrationRepair | null,
+	): Promise<void> {
+		const driver = this.driver(run);
+		await driver.verifyCheckout(run.checkoutStateToken);
+		const expectedHead = verification.request.integrationHead.toLowerCase();
+		const expectedTree = verification.request.integrationTree.toLowerCase();
+		if (repair?.currentCommit && repair.currentCommit.toLowerCase() !== expectedHead) {
+			throw new Error(`Integration repair begin failed head changed: durable current ${repair.currentCommit}, expected ${verification.request.integrationHead}`);
+		}
+		if (repair?.currentTree && repair.currentTree.toLowerCase() !== expectedTree) {
+			throw new Error(`Integration repair begin failed tree changed: durable current ${repair.currentTree}, expected ${verification.request.integrationTree}`);
+		}
+		const symbolicBranch = gitValue(run.integrationWorktree, "symbolic-ref", "--short", "HEAD");
+		if (symbolicBranch !== run.integrationBranch) throw new Error(`Integration repair begin worktree is not on ${run.integrationBranch}`);
+		if (driver.worktreeStatus(run.integrationWorktree)) throw new Error("Integration repair begin worktree must be clean");
+		const branchHead = driver.branchHead(run.integrationBranch).toLowerCase();
+		if (branchHead !== expectedHead) {
+			throw new Error(`Integration repair begin integration branch changed: expected ${verification.request.integrationHead}, found ${branchHead}`);
+		}
+		const worktreeHead = driver.worktreeHead(run.integrationWorktree).toLowerCase();
+		if (worktreeHead !== expectedHead) {
+			throw new Error(`Integration repair begin integration worktree changed: expected ${verification.request.integrationHead}, found ${worktreeHead}`);
+		}
+		const worktreeTree = driver.worktreeTree(run.integrationWorktree).toLowerCase();
+		if (worktreeTree !== expectedTree) {
+			throw new Error(`Integration repair begin integration tree changed: expected ${verification.request.integrationTree}, found ${worktreeTree}`);
+		}
+	}
+
 	private prepareRepairGateProgram(
 		verification: StoredVerification,
 		repair: StoredIntegrationRepair,
@@ -1546,9 +1578,14 @@ export class HerderRunManager {
 		const historicalFinishReplay = Boolean(repair && input.operation === "finish" && ["failed", "paused", "passed"].includes(repair.state)
 			&& this.store.getIntegrationRepairAudits(repair.repairId).some((audit) =>
 				audit.operationId === operationId && audit.payloadSha256 === inputHash && ["finish-intent", "successor", "commit"].includes(audit.action)));
-		const beginNamespaceEvidence = (): { snapshot: string; sha256: string } => {
+		const beginNamespaceEvidence = (expectedHead: string): { snapshot: string; sha256: string } => {
 			const driver = this.driver(run);
 			const evidence = driver.readIntegrationRepairNamespace();
+			const integrationRef = `refs/heads/${run.integrationBranch}`;
+			const capturedIntegration = evidence.refs.find((entry) => entry.ref === integrationRef);
+			if (!capturedIntegration || capturedIntegration.target !== expectedHead.toLowerCase()) {
+				throw new Error(`Integration repair begin integration branch changed before authorization: expected ${expectedHead}`);
+			}
 			return { snapshot: evidence.snapshot, sha256: evidence.sha256 };
 		};
 		if (input.operation === "begin") {
@@ -1575,9 +1612,6 @@ export class HerderRunManager {
 			const detail = input.detail?.trim() || input.rationale?.trim();
 			if (decisionOnly && !detail) throw new Error("Ambiguity classification requires a rationale or detail for the user decision");
 			this.validateRepairBeginAdmission(run, verification, input, repair);
-			const beginEvidence = repair?.beginRefSnapshot && repair.beginRefSnapshotSha256
-				? { snapshot: repair.beginRefSnapshot, sha256: repair.beginRefSnapshotSha256 }
-				: beginNamespaceEvidence();
 			if (repair) {
 				if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
 				if (repair.ownerSessionId && repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
@@ -1602,6 +1636,10 @@ export class HerderRunManager {
 					if (!repair.episodeId || repair.episodeRequestId !== verification.request.requestId) throw new Error("Integration repair classification episode is stale");
 				}
 			}
+			await this.validateFreshRepairBeginGitIdentity(run, verification, repair);
+			const beginEvidence = repair?.beginRefSnapshot && repair.beginRefSnapshotSha256
+				? { snapshot: repair.beginRefSnapshot, sha256: repair.beginRefSnapshotSha256 }
+				: beginNamespaceEvidence(verification.request.integrationHead);
 			const round = classification === "code_defect" ? Math.max(1, (repair?.acceptedCodeRounds ?? 0) + 1) : (repair?.round ?? 1);
 			this.store.transaction(() => {
 				if (!repair) {

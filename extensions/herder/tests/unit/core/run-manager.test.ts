@@ -1872,6 +1872,80 @@ test("plan graph revision adopts additions while preserving exact completed evid
 	}
 });
 
+test("integration repair begin rejects a pre-authorized repair commit", { timeout: 35_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-pre-authorized-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-pre-authorized");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-pre-authorized", [{
+			gateId: "failing-gate",
+			label: "deliberate failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Proves a repair commit cannot be authorized retroactively.",
+		}]);
+		const repair = payload(failed.reply.integrationRepair);
+		const begin = {
+			operation: "begin",
+			operationId: "repair-pre-authorized-begin",
+			requestId: String(repair.requestId),
+			requestSha256: String(repair.requestSha256),
+			capabilityToken: String(repair.capabilityToken),
+			runId: String(repair.runId),
+			generation: Number(repair.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		const before = new RunStore(fixture.planDirectory);
+		const beforeRepair = before.getIntegrationRepairForRequest(String(repair.requestId))!;
+		const beforeRunStatus = before.getRun()!.status;
+		const beforeEpisodeCount = before.getIntegrationRepairEpisodes(beforeRepair.repairId).length;
+		before.close();
+
+		const integrationWorktree = String(repair.integrationWorktree);
+		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\\n");
+		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
+		git(integrationWorktree, ["commit", "-q", "-m", "fix: pre-authorized repair commit"]);
+		const preAuthorizedHead = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const preAuthorizedTree = git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+		const preAuthorizedStatus = git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout;
+		const namespaceBeforeBegin = git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout;
+
+		await assert.rejects(
+			() => requestService(service, "/v1/integration-repair", begin),
+			/Integration repair begin integration branch changed/,
+		);
+
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			const afterRepair = after.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.equal(afterRepair.ownerSessionId, beforeRepair.ownerSessionId);
+			assert.equal(afterRepair.capabilityDigest, beforeRepair.capabilityDigest);
+			assert.equal(afterRepair.classification, beforeRepair.classification);
+			assert.equal(afterRepair.episodeClassification, beforeRepair.episodeClassification);
+			assert.equal(afterRepair.beginRefSnapshot, beforeRepair.beginRefSnapshot);
+			assert.equal(afterRepair.beginRefSnapshotSha256, beforeRepair.beginRefSnapshotSha256);
+			assert.equal(after.getIntegrationRepairAudits(afterRepair.repairId).length, 0);
+			assert.equal(after.getIntegrationRepairEpisodes(afterRepair.repairId).length, beforeEpisodeCount);
+			assert.equal(after.getRun()!.status, beforeRunStatus);
+		} finally {
+			after.close();
+		}
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), preAuthorizedHead);
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim(), preAuthorizedTree);
+		assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout, preAuthorizedStatus);
+		assert.equal(git(fixture.repo, ["for-each-ref", "--format=%(refname)\\t%(objectname)", "refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/"]).stdout, namespaceBeforeBegin);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("integration repair begin is atomic, request-bound, and terminal-safe", { timeout: 35_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-admission-"));
 	const fixture = writeFixture(root);
