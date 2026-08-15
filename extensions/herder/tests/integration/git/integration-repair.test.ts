@@ -121,6 +121,44 @@ test("later-round replacements retain the superseded head while sharing the fixe
 	}
 });
 
+test("later rounds reject previously superseded heads without mutation", () => {
+	const { root, driver } = fixture();
+	try {
+		const parent = driver.branchHead(driver.integrationBranch);
+		const evidence = namespaceEvidence(driver);
+		const firstHead = authorRepairCommit(driver, "round one\n", "fix: first repair");
+		const first = validate(driver, { parent, round: 1, observedCommit: firstHead, ...evidence, allowedPaths: ["value.txt"] });
+		git(driver.integrationWorktree, ["reset", "--hard", parent]);
+		const secondHead = authorRepairCommit(driver, "round two\n", "fix: second repair");
+		const second = validate(driver, {
+			parent,
+			round: 2,
+			currentHead: first.head,
+			supersededCommits: [],
+			observedCommit: secondHead,
+			...evidence,
+			allowedPaths: ["value.txt"],
+		});
+		assert.equal(second.supersededHead, first.head);
+
+		git(driver.integrationWorktree, ["reset", "--hard", first.head]);
+		assert.throws(() => validate(driver, {
+			parent,
+			round: 3,
+			currentHead: second.head,
+			supersededCommits: [first.head],
+			observedCommit: first.head,
+			...evidence,
+			allowedPaths: ["value.txt"],
+		}), /previously superseded/);
+		assert.equal(driver.branchHead(driver.integrationBranch), first.head);
+		assert.equal(driver.worktreeHead(driver.integrationWorktree), first.head);
+		assert.equal(driver.worktreeStatus(driver.integrationWorktree), "");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("a rejected round-one retry preserves the clean commit and dirty evidence", () => {
 	const { root, driver } = fixture();
 	try {

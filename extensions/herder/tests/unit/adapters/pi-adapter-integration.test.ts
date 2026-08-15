@@ -653,6 +653,22 @@ function durableFinalAction(fixture: Fixture, runId: string): { state: string; w
 	}
 }
 
+test("integration repair rejects commitMessage at the adapter boundary", async () => {
+	const api = new CapturedExtensionAPI();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, new CapturedWorkerFactory());
+	await assert.rejects(
+		() => api.tool("herder_integration_repair").execute(
+			"legacy-commit-message",
+			{ commitMessage: "manager-authored" },
+			undefined,
+			undefined,
+			undefined,
+		),
+		/commitMessage is not accepted/,
+	);
+	assert.deepEqual(api.execCalls, []);
+});
+
 test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-integration-"));
 	let fixture: Fixture | undefined;

@@ -603,6 +603,8 @@ export class GitDriver {
 		round: number;
 		currentHead?: string | null;
 		replayHead?: string | null;
+		/** Previously accepted repair heads that may not be submitted again as replacements. */
+		supersededCommits?: string[];
 		observedCommit: string;
 		allowedPaths?: string[];
 		/** Immutable namespace evidence captured by the successful repair begin. */
@@ -623,15 +625,25 @@ export class GitDriver {
 		if (symbolicBranch !== branch) throw new Error(`Integration repair worktree is not on ${branch}`);
 		if (input.round < 1 || input.round > 3 || !Number.isSafeInteger(input.round)) throw new Error("Integration repair round must be between 1 and 3");
 		if (input.round > 1 && !input.currentHead) throw new Error("Later integration repair rounds require the durable current commit");
+		if (input.round > 2 && (!Array.isArray(input.supersededCommits) || input.supersededCommits.length === 0)) {
+			throw new Error("Integration repair superseded commit lineage is required for round three");
+		}
 		const parent = input.parent.trim().toLowerCase();
 		if (!/^[0-9a-f]{40,64}$/.test(parent)) throw new Error("Integration repair parent must be a Git object identity");
 		const currentHead = input.currentHead?.trim().toLowerCase() || null;
 		const observedCommit = input.observedCommit.trim().toLowerCase();
 		let replayHead = input.replayHead?.trim().toLowerCase() || null;
+		const supersededCommits = (input.supersededCommits ?? []).map((candidate) => {
+			const normalized = typeof candidate === "string" ? candidate.trim().toLowerCase() : "";
+			if (!/^[0-9a-f]{40,64}$/.test(normalized)) throw new Error("Integration repair superseded commit must be a Git object identity");
+			return normalized;
+		});
 		if (!/^[0-9a-f]{40,64}$/.test(observedCommit)) throw new Error("Integration repair observed commit must be a Git object identity");
 		if (currentHead && !/^[0-9a-f]{40,64}$/.test(currentHead)) throw new Error("Integration repair current commit must be a Git object identity");
 		if (replayHead && !/^[0-9a-f]{40,64}$/.test(replayHead)) throw new Error("Integration repair replay commit must be a Git object identity");
 		if (replayHead && replayHead !== observedCommit) throw new Error("Integration repair replay commit must equal the observed commit");
+		if (replayHead && supersededCommits.includes(replayHead)) throw new Error("Integration repair replay commit was previously superseded");
+		if (!replayHead && supersededCommits.includes(observedCommit)) throw new Error("Integration repair observed commit was previously superseded");
 		const beginRefSnapshot = input.beginRefSnapshot ?? input.namespaceSnapshot;
 		const beginRefSnapshotSha256 = input.beginRefSnapshotSha256 ?? input.namespaceSnapshotSha256;
 		if (beginRefSnapshot === undefined || beginRefSnapshotSha256 === undefined) {

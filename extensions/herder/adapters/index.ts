@@ -113,6 +113,12 @@ function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function rejectLegacyIntegrationRepairCommitMessage(value: unknown): void {
+	if (value && typeof value === "object" && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, "commitMessage")) {
+		throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
+	}
+}
+
 function activeModelLabel(ctx: ExtensionContext): string {
 	return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 }
@@ -1407,8 +1413,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}), { maxItems: 32 })),
 			allowedPaths: Type.Optional(Type.Array(Type.String(), { maxItems: 256 })),
 			observedCommit: Type.Optional(Type.String({ description: "The clean session-authored integration-worktree HEAD observed immediately before finish." })),
-		}),
+		}, { additionalProperties: false }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			rejectLegacyIntegrationRepairCommitMessage(params);
 			const epoch = sessionEpoch;
 			assertSessionActive(epoch);
 			lastContext = ctx;
