@@ -2137,6 +2137,153 @@ test("each failed successor opens a fresh classification episode", { timeout: 60
 	}
 });
 
+test("migrated selected repair episode replays begin and completes manifest-error finish", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-migrated-selected-episode-"));
+	const fixture = writeFixture(root);
+	let service = await ensureService(fixture.planDirectory);
+	try {
+		const afterReviewer = await prepareSinglePlan(service, fixture, "migrated-selected-episode");
+		const initialFailureGate: VerificationGate = {
+			gateId: "migrated-initial-failure",
+			label: "initial failing gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the initial failed verification.",
+		};
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "migrated-selected-episode", [initialFailureGate]);
+		const initial = payload(failed.reply.integrationRepair);
+		const initialBegin = {
+			operation: "begin",
+			operationId: "migrated-selected-initial-begin",
+			requestId: String(initial.requestId),
+			requestSha256: String(initial.requestSha256),
+			capabilityToken: String(initial.capabilityToken),
+			runId: String(initial.runId),
+			generation: Number(initial.generation),
+			ownerSessionId: "main-session",
+			classification: "manifest_error",
+		};
+		await requestService(service, "/v1/integration-repair", initialBegin);
+		const successorFailureGate: VerificationGate = {
+			gateId: "migrated-successor-failure",
+			label: "successor failing gate",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the failed successor episode that is selected before migration.",
+		};
+		const firstFinish = {
+			...initialBegin,
+			operation: "finish",
+			operationId: "migrated-selected-first-finish",
+			observedCommit: String(initial.parentCommit),
+			gates: [successorFailureGate],
+		};
+		const firstReceipt = await submitManagerOperation(service, "integration_repair", firstFinish, firstFinish.operationId);
+		await waitManagerOperation(service, firstReceipt.operationId);
+
+		const failedSuccessorStore = new RunStore(fixture.planDirectory);
+		let failedSuccessor: ReturnType<RunStore["getIntegrationRepairForRun"]>;
+		try {
+			const run = failedSuccessorStore.getRun()!;
+			failedSuccessor = failedSuccessorStore.getIntegrationRepairForRun(run.runId, run.currentGeneration)!;
+			assert.equal(failedSuccessor.state, "failed");
+			assert.ok(failedSuccessor.successorRequestId);
+			assert.equal(failedSuccessor.episodeClassification, null);
+		} finally {
+			failedSuccessorStore.close();
+		}
+
+		const successorStatus = payload(payload(await requestService(service, "/v1/status")).reply);
+		const successorRequest = payload(successorStatus.integrationRepair);
+		assert.equal(successorRequest.requestId, failedSuccessor!.requestId);
+		const selectedBegin = {
+			operation: "begin",
+			operationId: "migrated-selected-successor-begin",
+			requestId: String(successorRequest.requestId),
+			requestSha256: String(successorRequest.requestSha256),
+			capabilityToken: String(successorRequest.capabilityToken),
+			runId: String(successorRequest.runId),
+			generation: Number(successorRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "manifest_error",
+		};
+		await requestService(service, "/v1/integration-repair", selectedBegin);
+
+		await stopService(fixture.planDirectory);
+		const stranded = new RunStore(fixture.planDirectory);
+		let selectedEpisodeId: string;
+		let selectedOperationPayloadSha256: string;
+		try {
+			const repair = stranded.getIntegrationRepairForRun(stranded.getRun()!.runId, 1)!;
+			selectedEpisodeId = String(repair.episodeId);
+			selectedOperationPayloadSha256 = String(repair.episodeOperationPayloadSha256);
+			assert.equal(repair.episodeClassification, "manifest_error");
+			assert.equal(repair.episodeState, "active");
+			stranded.database.prepare("UPDATE manager_integration_repairs SET classification = NULL, state = 'failed', operation_id = NULL, operation_payload_sha256 = NULL WHERE repair_id = ?").run(repair.repairId);
+			stranded.database.exec("PRAGMA user_version = 16;");
+		} finally {
+			stranded.close();
+		}
+
+		service = await ensureService(fixture.planDirectory);
+		const migrated = new RunStore(fixture.planDirectory);
+		try {
+			const repair = migrated.getIntegrationRepairForRun(migrated.getRun()!.runId, 1)!;
+			assert.equal(repair.episodeId, selectedEpisodeId!);
+			assert.equal(repair.classification, "manifest_error");
+			assert.equal(repair.state, "active");
+			assert.equal(repair.operationPayloadSha256, selectedOperationPayloadSha256!);
+		} finally {
+			migrated.close();
+		}
+
+		const replayed = payload(payload(await requestService(service, "/v1/integration-repair", selectedBegin)).reply);
+		assert.equal(replayed.status, "paused");
+		const passingGate: VerificationGate = {
+			gateId: "migrated-successor-pass",
+			label: "migrated successor passes",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(0)"],
+			rationale: "Completes the manifest-error recovery after migration.",
+		};
+		const finishStore = new RunStore(fixture.planDirectory);
+		let observedCommit: string;
+		try {
+			const repair = finishStore.getIntegrationRepairForRequest(String(selectedBegin.requestId))!;
+			observedCommit = repair.currentCommit ?? repair.parentCommit;
+		} finally {
+			finishStore.close();
+		}
+		const finish = {
+			...selectedBegin,
+			operation: "finish",
+			operationId: "migrated-selected-successor-finish",
+			observedCommit: observedCommit!,
+			gates: [passingGate],
+		};
+		const finishReceipt = await submitManagerOperation(service, "integration_repair", finish, finish.operationId);
+		await waitManagerOperation(service, finishReceipt.operationId);
+
+		const completed = new RunStore(fixture.planDirectory);
+		try {
+			const repair = completed.getIntegrationRepairForRun(completed.getRun()!.runId, 1)!;
+			assert.equal(repair.state, "passed");
+			assert.ok(repair.successorRequestId);
+			assert.equal(completed.getVerificationByRequestId(repair.successorRequestId!)?.state, "passed");
+			const episodes = completed.getIntegrationRepairEpisodes(repair.repairId);
+			assert.equal(episodes.length, 2);
+			assert.equal(episodes[1]!.classification, "manifest_error");
+			assert.equal(episodes[1]!.closedAt, null);
+		} finally {
+			completed.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("transient retry budget follows identical successor evidence", { timeout: 45_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-transient-"));
 	const fixture = writeFixture(root);

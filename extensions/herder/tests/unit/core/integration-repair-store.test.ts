@@ -681,6 +681,174 @@ test("schema 16 migration keeps a selected failed successor episode open", () =>
 	}
 });
 
+test("schema migration preserves a preselected failed successor episode", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-selected-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const now = "2026-08-15T00:00:00.000Z";
+		const makeRequest = (requestId: string, requestSha256: string, integrationHead: string, integrationTree: string, predecessorRequestId?: string): VerificationRequest => ({
+			schemaVersion: 1,
+			requestId,
+			requestSha256,
+			runId: "repair-run",
+			generation: 1,
+			graphSha256: "a".repeat(64),
+			runAssignmentPath: "/repo/run-assignment.json",
+			runAssignmentSha256: "b".repeat(64),
+			integrationBranch: "herder/repair/integration",
+			integrationWorktree: "/repo/.herder-integration",
+			integrationHead,
+			integrationTree,
+			requestedAt: now,
+			...(predecessorRequestId ? { predecessorRequestId } : {}),
+			repairId: "schema17-selected",
+			repairRound: 1,
+		});
+		const makeManifest = (request: VerificationRequest): VerificationManifest => ({
+			schemaVersion: 1,
+			requestId: request.requestId,
+			requestSha256: request.requestSha256,
+			runId: request.runId,
+			generation: request.generation,
+			graphSha256: request.graphSha256,
+			runAssignmentSha256: request.runAssignmentSha256,
+			integrationHead: request.integrationHead,
+			integrationTree: request.integrationTree,
+			rationale: "selected migration fixture",
+			gates: [gate],
+			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+			repairId: "schema17-selected",
+			repairRound: 1,
+		});
+		const failVerification = (request: VerificationRequest): VerificationManifest => {
+			const manifest = makeManifest(request);
+			store.putVerificationRequest(request);
+			store.startVerification(request.requestId, manifest, sha256(stableJson(manifest)));
+			store.finishVerification(request.requestId, "failed", { passed: false }, "failed");
+			return manifest;
+		};
+		const r0 = makeRequest("schema17-selected-r0", "1".repeat(64), "c".repeat(40), "d".repeat(40));
+		const r1 = makeRequest("schema17-selected-r1", "3".repeat(64), "e".repeat(40), "f".repeat(40), r0.requestId);
+		failVerification(r0);
+		const r1Manifest = failVerification(r1);
+		const operationId = "schema17-selected-begin-r0";
+		const operationPayloadSha256 = sha256(operationId);
+		const repair = store.putIntegrationRepair({
+			repairId: "schema17-selected",
+			runId: "repair-run",
+			generation: 1,
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+			classification: "code_defect",
+			state: "failed",
+			parentCommit: r0.integrationHead,
+			currentTree: r0.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			operationId,
+			operationPayloadSha256,
+		});
+		store.recordIntegrationRepairAudit(repair.repairId, operationId, "begin", operationPayloadSha256, {
+			operation: "begin",
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			classification: "code_defect",
+		});
+		store.updateIntegrationRepair(repair.repairId, {
+			state: "failed",
+			successorRequestId: r1.requestId,
+			successorRequestSha256: r1.requestSha256,
+			successorManifest: r1Manifest,
+			successorManifestSha256: sha256(stableJson(r1Manifest)),
+		});
+		const successor = store.openIntegrationRepairEpisode({
+			repairId: repair.repairId,
+			requestId: r1.requestId,
+			requestSha256: r1.requestSha256,
+			integrationHead: r1.integrationHead,
+			integrationTree: r1.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			state: "failed",
+			detail: "failed successor",
+		});
+		const selectedOperationId = "schema17-selected-begin-r1";
+		const selectedOperationPayloadSha256 = sha256(selectedOperationId);
+		store.selectIntegrationRepairEpisode(repair.repairId, {
+			classification: "manifest_error",
+			operationId: selectedOperationId,
+			operationPayloadSha256: selectedOperationPayloadSha256,
+			state: "active",
+		});
+		store.recordIntegrationRepairAudit(repair.repairId, selectedOperationId, "begin", selectedOperationPayloadSha256, {
+			operation: "begin",
+			requestId: r1.requestId,
+			requestSha256: r1.requestSha256,
+			classification: "manifest_error",
+		});
+		const episodeBefore = store.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(successor.episodeId) as Record<string, unknown>;
+		const auditsBefore = store.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repair.repairId) as Record<string, unknown>[];
+		store.database.exec("PRAGMA user_version = 15;");
+		store.close();
+
+		const migrated = new RunStore(planDirectory);
+		try {
+			const current = migrated.getIntegrationRepair(repair.repairId)!;
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), EXECUTION_SCHEMA_VERSION);
+			assert.equal(current.requestId, r1.requestId);
+			assert.equal(current.requestSha256, r1.requestSha256);
+			assert.equal(current.classification, "manifest_error");
+			assert.equal(current.state, "active");
+			assert.equal(current.operationId, selectedOperationId);
+			assert.equal(current.operationPayloadSha256, selectedOperationPayloadSha256);
+			assert.equal(current.episodeId, successor.episodeId);
+			assert.equal(current.episodeClassification, "manifest_error");
+			assert.equal(current.episodeState, "active");
+			assert.equal(current.episodeOperationId, selectedOperationId);
+			assert.equal(migrated.getIntegrationRepairEpisode(successor.episodeId!)!.closedAt, null);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(successor.episodeId), episodeBefore);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repair.repairId), auditsBefore);
+
+			migrated.database.prepare("UPDATE manager_integration_repairs SET classification = NULL, state = 'failed', operation_id = NULL, operation_payload_sha256 = NULL WHERE repair_id = ?").run(repair.repairId);
+			migrated.database.exec("PRAGMA user_version = 16;");
+		} finally {
+			migrated.close();
+		}
+
+		const repaired = new RunStore(planDirectory);
+		try {
+			const current = repaired.getIntegrationRepair(repair.repairId)!;
+			assert.equal(current.classification, "manifest_error");
+			assert.equal(current.state, "active");
+			assert.equal(current.operationId, selectedOperationId);
+			assert.equal(current.operationPayloadSha256, selectedOperationPayloadSha256);
+			assert.equal(current.episodeId, successor.episodeId);
+			assert.deepEqual(repaired.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(successor.episodeId), episodeBefore);
+			assert.deepEqual(repaired.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repair.repairId), auditsBefore);
+			repaired.database.exec("PRAGMA user_version = 16;");
+		} finally {
+			repaired.close();
+		}
+
+		const repeated = new RunStore(planDirectory);
+		try {
+			const current = repeated.getIntegrationRepair(repair.repairId)!;
+			assert.equal(current.classification, "manifest_error");
+			assert.equal(current.state, "active");
+			assert.equal(current.operationId, selectedOperationId);
+			assert.deepEqual(repeated.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(successor.episodeId), episodeBefore);
+			assert.deepEqual(repeated.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repair.repairId), auditsBefore);
+		} finally {
+			repeated.close();
+		}
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("schema 14 migration retains the finish operation while a successor verifies", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-migration-operation-"));
 	try {

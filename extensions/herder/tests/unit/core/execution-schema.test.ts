@@ -207,6 +207,26 @@ test("execution schema migrates version 11 reignite allocation columns", () => {
 	}
 });
 
+test("execution schema migrates version 16 forward idempotently", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v16-"));
+	try {
+		const current = openExecutionDatabase(planDirectory, { create: true });
+		current.exec("CREATE TABLE migration_probe (value TEXT NOT NULL); INSERT INTO migration_probe VALUES ('preserved'); PRAGMA user_version = 16;");
+		current.close();
+
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		assert.deepEqual((migrated.prepare("SELECT value FROM migration_probe").all() as Array<{ value: string }>).map((row) => row.value), ["preserved"]);
+		migrated.close();
+
+		const repeated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((repeated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), EXECUTION_SCHEMA_VERSION);
+		repeated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("reignite requests are put-if-absent per run and generation", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-reignite-put-"));
 	try {

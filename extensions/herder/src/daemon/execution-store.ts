@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 16
+export const EXECUTION_SCHEMA_VERSION = 17
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -756,6 +756,106 @@ const SCHEMA_15_TABLES = `
     ON manager_integration_repair_episodes(repair_id, integration_head, integration_tree, canonical_gates_sha256, transient_used);
 `
 
+const INTEGRATION_REPAIR_STATES = new Set(["available", "active", "committing", "committed", "verifying", "passed", "failed", "cancelled", "paused", "interrupted"])
+
+type FailedSuccessorEvidence = {
+  requestId: string
+  requestSha256: string
+  integrationHead: string
+  integrationTree: string
+  canonicalGates: unknown[]
+  canonicalGatesSha256: string
+}
+
+type SelectedFailedSuccessorProjection = FailedSuccessorEvidence & {
+  episodeId: string
+  classification: string
+  state: string
+  operationId: string
+  operationPayloadSha256: string
+}
+
+function parseMigrationRecord(value: unknown): SqlRow {
+  if (typeof value !== "string" || value.length === 0) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as SqlRow : {}
+  } catch {
+    return {}
+  }
+}
+
+function parseMigrationArray(value: unknown): unknown[] | null {
+  if (typeof value !== "string" || value.length === 0) return null
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function selectedFailedSuccessorProjection(
+  episode: SqlRow | undefined,
+  repairId: string,
+  evidence: FailedSuccessorEvidence,
+): SelectedFailedSuccessorProjection | null {
+  if (!episode || String(episode.repair_id) !== repairId || String(episode.request_id) !== evidence.requestId) return null
+  if (String(episode.request_sha256).toLowerCase() !== evidence.requestSha256.toLowerCase()
+    || String(episode.integration_head).toLowerCase() !== evidence.integrationHead.toLowerCase()
+    || String(episode.integration_tree).toLowerCase() !== evidence.integrationTree.toLowerCase()
+    || String(episode.canonical_gates_sha256).toLowerCase() !== evidence.canonicalGatesSha256.toLowerCase()) return null
+  const episodeGates = parseMigrationArray(episode.canonical_gates_json)
+  if (!episodeGates || stableJson(episodeGates) !== stableJson(evidence.canonicalGates)) return null
+  const episodeId = integrationRepairEpisodeId({
+    requestId: evidence.requestId,
+    requestSha256: evidence.requestSha256,
+    integrationHead: evidence.integrationHead,
+    integrationTree: evidence.integrationTree,
+    canonicalGates: evidence.canonicalGates as never[],
+  })
+  if (String(episode.episode_id) !== episodeId) return null
+  if (episode.closed_at !== null && episode.closed_at !== undefined && String(episode.closed_at) !== "") return null
+  const classification = episode.classification === null || episode.classification === undefined ? "" : String(episode.classification)
+  const state = episode.state === null || episode.state === undefined ? "" : String(episode.state)
+  const operationId = episode.operation_id === null || episode.operation_id === undefined ? "" : String(episode.operation_id)
+  const operationPayloadSha256 = episode.operation_payload_sha256 === null || episode.operation_payload_sha256 === undefined ? "" : String(episode.operation_payload_sha256)
+  if (!classification || !INTEGRATION_REPAIR_STATES.has(state) || !operationId || !operationPayloadSha256) return null
+  return {
+    ...evidence,
+    episodeId,
+    classification,
+    state,
+    operationId,
+    operationPayloadSha256,
+  }
+}
+
+function migrationSuccessorEvidence(row: SqlRow, verification: SqlRow | undefined, requestIdOverride?: string): FailedSuccessorEvidence | null {
+  if (!verification) return null
+  const verificationManifest = parseMigrationRecord(verification.manifest_json)
+  const persistedSuccessorManifest = parseMigrationRecord(row.successor_manifest_json)
+  const canonicalGates = Array.isArray(verificationManifest.gates)
+    ? verificationManifest.gates
+    : Array.isArray(persistedSuccessorManifest.gates) ? persistedSuccessorManifest.gates : null
+  if (!canonicalGates) return null
+  const text = (value: unknown): string => value === null || value === undefined ? "" : String(value)
+  const requestSha256 = text(verification.request_sha256) || text(row.successor_request_sha256) || text(row.request_sha256)
+  const integrationHead = text(verification.integration_head) || text(row.current_commit) || text(row.parent_commit)
+  const integrationTree = text(verification.integration_tree) || text(row.current_tree) || text(row.parent_commit)
+  if (!requestSha256 || !integrationHead || !integrationTree) return null
+  const requestId = requestIdOverride || text(row.successor_request_id)
+  if (!requestId) return null
+  return {
+    requestId,
+    requestSha256,
+    integrationHead,
+    integrationTree,
+    canonicalGates,
+    canonicalGatesSha256: sha256(stableJson(canonicalGates)),
+  }
+}
+
 function applySchema15(database: Database): void {
   const repairColumns = database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>
   if (!repairColumns.some((column) => column.name === "accepted_code_rounds")) {
@@ -833,7 +933,7 @@ function applySchema16(database: Database): void {
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow>()
   const verification = database.prepare(`
-    SELECT request_id, request_sha256, integration_head, integration_tree, state, manifest_json, terminal_detail
+    SELECT request_id, request_sha256, integration_head, integration_tree, predecessor_request_id, repair_id, state, manifest_json, terminal_detail
     FROM manager_verifications WHERE request_id = ?
   `)
   const audits = database.prepare(`
@@ -973,7 +1073,17 @@ function applySchema16(database: Database): void {
       row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
       row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
     )
-    const successorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
+    const explicitSuccessorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
+    const selectedCurrentEpisodeId = row.current_episode_id === null || row.current_episode_id === undefined ? "" : String(row.current_episode_id)
+    const selectedCurrentEpisode = selectedCurrentEpisodeId ? episodeSelect.get(selectedCurrentEpisodeId) as SqlRow | undefined : undefined
+    const selectedCurrentVerification = selectedCurrentEpisode ? getVerification(String(selectedCurrentEpisode.request_id)) : undefined
+    const inferredSuccessorRequestId = !explicitSuccessorRequestId && selectedCurrentVerification
+      && selectedCurrentVerification.state === "failed"
+      && String(selectedCurrentVerification.repair_id || "") === repairId
+      && String(selectedCurrentVerification.predecessor_request_id || "") !== ""
+      ? String(selectedCurrentEpisode!.request_id)
+      : ""
+    const successorRequestId = explicitSuccessorRequestId || inferredSuccessorRequestId
     const successorStoredVerification = successorRequestId ? getVerification(successorRequestId) : undefined
     const baseIsFailedSuccessor = baseRequestId === successorRequestId && successorStoredVerification?.state === "failed"
     const auditRows = audits.all(repairId) as SqlRow[]
@@ -1023,6 +1133,7 @@ function applySchema16(database: Database): void {
     let currentRequestSha256 = baseEvidence.requestSha256
     let currentClassification: string | null = row.classification === null || row.classification === undefined ? null : String(row.classification)
     let currentState = validStates.has(String(row.state)) ? String(row.state) : "failed"
+    let failedSuccessorProjection: SelectedFailedSuccessorProjection | null = null
 
     if (successorRequestId && successorStoredVerification) {
       if (activeClassification === "transient" || row.classification === "transient") transientEpisodeIds.add(episodeByRequest.get(baseRequestId) ?? baseEpisodeId)
@@ -1037,6 +1148,11 @@ function applySchema16(database: Database): void {
       // durably failed. An in-flight successor still belongs to its
       // predecessor episode until verification records its outcome.
       if (successorStoredVerification.state === "failed") {
+        failedSuccessorProjection = selectedFailedSuccessorProjection(
+          selectedCurrentEpisodeId ? episodeSelect.get(selectedCurrentEpisodeId) as SqlRow | undefined : undefined,
+          repairId,
+          successorEvidence,
+        )
         const successorEpisodeId = ensureEpisode(successorEvidence, null, "failed", null, null)
         episodeByRequest.set(successorRequestId, successorEpisodeId)
         episodeEvidence.set(successorEpisodeId, successorEvidence)
@@ -1045,8 +1161,8 @@ function applySchema16(database: Database): void {
         currentEpisodeId = successorEpisodeId
         currentRequestId = successorEvidence.requestId
         currentRequestSha256 = successorEvidence.requestSha256
-        currentClassification = null
-        currentState = "failed"
+        currentClassification = failedSuccessorProjection?.classification ?? null
+        currentState = failedSuccessorProjection?.state ?? "failed"
       } else if (successorStoredVerification.state === "passed") {
         currentState = "passed"
       } else {
@@ -1098,15 +1214,72 @@ function applySchema16(database: Database): void {
       currentEpisodeId,
       currentRequestId,
       currentRequestSha256,
-      currentClassification,
-      currentState,
-      failedSuccessor ? null : row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
-      failedSuccessor ? null : row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
+      failedSuccessorProjection?.classification ?? currentClassification,
+      failedSuccessorProjection?.state ?? (failedSuccessor ? "failed" : currentState),
+      failedSuccessorProjection?.operationId ?? (failedSuccessor ? null : row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id)),
+      failedSuccessorProjection?.operationPayloadSha256 ?? (failedSuccessor ? null : row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256)),
       now,
       repairId,
     )
   }
   database.exec("PRAGMA user_version = 16;")
+}
+
+/** Repair schema-16 rows whose selected failed-successor episode survived but whose mutable projection did not. */
+function applySchema17(database: Database): void {
+  const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
+  const verification = database.prepare(`
+    SELECT request_id, request_sha256, integration_head, integration_tree, predecessor_request_id, repair_id, state, manifest_json
+    FROM manager_verifications WHERE request_id = ?
+  `)
+  const episodeSelect = database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?")
+  const repairUpdate = database.prepare(`
+    UPDATE manager_integration_repairs
+    SET request_id = ?, request_sha256 = ?, classification = ?, state = ?, operation_id = ?, operation_payload_sha256 = ?, updated_at = ?
+    WHERE repair_id = ?
+  `)
+  for (const row of repairRows) {
+    const explicitSuccessorRequestId = row.successor_request_id === null || row.successor_request_id === undefined ? "" : String(row.successor_request_id)
+    const currentEpisodeId = row.current_episode_id === null || row.current_episode_id === undefined ? "" : String(row.current_episode_id)
+    const currentEpisode = currentEpisodeId ? episodeSelect.get(currentEpisodeId) as SqlRow | undefined : undefined
+    const successorRequestId = explicitSuccessorRequestId || (currentEpisode ? String(currentEpisode.request_id) : "")
+    if (!successorRequestId) continue
+    const verificationRow = verification.get(successorRequestId) as SqlRow | undefined
+    if (!verificationRow || String(verificationRow.state) !== "failed") continue
+    if (!explicitSuccessorRequestId
+      && (String(verificationRow.repair_id || "") !== String(row.repair_id)
+        || String(verificationRow.predecessor_request_id || "") === "")) continue
+    const successorEvidence = migrationSuccessorEvidence(row, verificationRow, successorRequestId)
+    if (!successorEvidence || successorEvidence.requestId !== successorRequestId) continue
+    const projection = currentEpisodeId
+      ? selectedFailedSuccessorProjection(currentEpisode, String(row.repair_id), successorEvidence)
+      : null
+    const rowClassification = row.classification === null || row.classification === undefined ? null : String(row.classification)
+    const rowState = row.state === null || row.state === undefined ? null : String(row.state)
+    const rowOperationId = row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id)
+    const rowOperationPayloadSha256 = row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256)
+    if (!projection) {
+      if (rowClassification !== null || rowState !== "failed" || rowOperationId !== null || rowOperationPayloadSha256 !== null
+        || String(row.request_id) !== successorEvidence.requestId || String(row.request_sha256).toLowerCase() !== successorEvidence.requestSha256.toLowerCase()) {
+        repairUpdate.run(successorEvidence.requestId, successorEvidence.requestSha256, null, "failed", null, null, new Date().toISOString(), String(row.repair_id))
+      }
+      continue
+    }
+    if (String(row.request_id) === projection.requestId && String(row.request_sha256).toLowerCase() === projection.requestSha256.toLowerCase()
+      && rowClassification === projection.classification && rowState === projection.state
+      && rowOperationId === projection.operationId && rowOperationPayloadSha256 === projection.operationPayloadSha256) continue
+    repairUpdate.run(
+      projection.requestId,
+      projection.requestSha256,
+      projection.classification,
+      projection.state,
+      projection.operationId,
+      projection.operationPayloadSha256,
+      new Date().toISOString(),
+      String(row.repair_id),
+    )
+  }
+  database.exec("PRAGMA user_version = 17;")
 }
 
 function ensureLegacyFingerprintVersion(database: Database): void {
@@ -1228,7 +1401,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   const row = database.prepare("PRAGMA user_version").get() as SqlRow
   const version = Number(row.user_version)
   if (version === EXECUTION_SCHEMA_VERSION) return
-  if ((version === 15 || version === 14 || version === 13) && !allowInitialize) return
+  if ((version === 16 || version === 15 || version === 14 || version === 13) && !allowInitialize) return
   if (version === 6 && allowInitialize) {
     ensureLegacyFingerprintVersion(database)
     database.exec(`
@@ -1253,6 +1426,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 7 && allowInitialize) {
@@ -1265,6 +1439,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 8 && allowInitialize) {
@@ -1276,6 +1451,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 9 && allowInitialize) {
@@ -1286,6 +1462,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 10 && allowInitialize) {
@@ -1295,6 +1472,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 11 && allowInitialize) {
@@ -1303,6 +1481,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 12 && allowInitialize) {
@@ -1310,21 +1489,29 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 13 && allowInitialize) {
     applySchema14(database)
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 14 && allowInitialize) {
     applySchema15(database)
     applySchema16(database)
+    applySchema17(database)
     return
   }
   if (version === 15 && allowInitialize) {
     applySchema16(database)
+    applySchema17(database)
+    return
+  }
+  if (version === 16 && allowInitialize) {
+    applySchema17(database)
     return
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -1527,6 +1714,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   applySchema14(database)
   applySchema15(database)
   applySchema16(database)
+  applySchema17(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
