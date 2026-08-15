@@ -1839,10 +1839,6 @@ export class HerderRunManager {
 		if (repair.state === "verifying" || repair.state === "committed") {
 			// A committed successor is already the durable recovery boundary. Never
 			// rebuild one from a finish caller when any part of its evidence is absent.
-			if (!repair.successorRequestId
-				|| !repair.successorRequestSha256
-				|| !repair.successorManifest
-				|| !repair.successorManifestSha256) return this.reply();
 			const successor = this.validateDurableRepairSuccessor(repair);
 			if (repair.operationId && (repair.operationId !== operationId || repair.operationPayloadSha256 !== inputHash)) {
 				throw new Error("Integration repair finish was replayed with different durable evidence");

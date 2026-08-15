@@ -2506,7 +2506,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 		} finally {
 			missingSuccessor.close();
 		}
-		await requestService(service, "/v1/integration-repair", {
+		const missingFinish = {
 			operation: "finish",
 			operationId: "repair-successor-missing-finish",
 			requestId: String(repairRequest.requestId),
@@ -2517,7 +2517,11 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 			ownerSessionId: "main-session",
 			observedCommit: beforeRepair.parentCommit,
 			rationale: "Caller input cannot reconstruct missing successor evidence.",
-		});
+		};
+		await assert.rejects(async () => {
+			const receipt = await submitManagerOperation(service, "integration_repair", missingFinish, "repair-successor-missing-operation");
+			await waitManagerOperation(service, receipt.operationId);
+		}, /not bound to its durable integration repair successor/);
 		const missingUnchanged = new RunStore(fixture.planDirectory);
 		try {
 			const repair = missingUnchanged.getIntegrationRepair(beforeRepair.repairId)!;
