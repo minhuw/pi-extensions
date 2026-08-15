@@ -10,6 +10,7 @@ import { readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
+import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
 import { integrationRepairCapabilityDigest, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
@@ -2271,6 +2272,217 @@ test("persisted legacy commitMessage operations fail before mutation and leave r
 		const cancelled = new RunStore(fixture.planDirectory);
 		try { assert.equal(cancelled.getIntegrationRepair(repair.repairId)!.state, "cancelled"); }
 		finally { cancelled.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("awaiting repair successor rejects a replacement manifest", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-repair-successor-manifest-"));
+	const fixture = writeFixture(root);
+	let service = await ensureService(fixture.planDirectory);
+	try {
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-successor-manifest");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-successor-manifest", [{
+			gateId: "initial-failure",
+			label: "deliberate initial failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the failed verification that owns the repair successor.",
+		}]);
+		const repairRequest = payload(failed.reply.integrationRepair);
+		await requestService(service, "/v1/integration-repair", {
+			operation: "begin",
+			operationId: "repair-successor-manifest-begin",
+			requestId: String(repairRequest.requestId),
+			requestSha256: String(repairRequest.requestSha256),
+			capabilityToken: String(repairRequest.capabilityToken),
+			runId: String(repairRequest.runId),
+			generation: Number(repairRequest.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		});
+		await stopService(fixture.planDirectory);
+
+		const seed = new RunStore(fixture.planDirectory);
+		try {
+			const run = seed.getRun()!;
+			const predecessor = seed.getVerification(run.runId, run.currentGeneration)!;
+			const repair = seed.getIntegrationRepairForRequest(predecessor.request.requestId)!;
+			const integrationHead = git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+			const integrationTree = git(run.integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+			const successorRequest = createVerificationRequest({
+				requestId: "repair-successor-manifest-request",
+				runId: run.runId,
+				generation: run.currentGeneration,
+				graphSha256: predecessor.request.graphSha256,
+				runAssignmentPath: predecessor.request.runAssignmentPath,
+				runAssignmentSha256: predecessor.request.runAssignmentSha256,
+				integrationBranch: predecessor.request.integrationBranch,
+				integrationWorktree: predecessor.request.integrationWorktree,
+				integrationHead,
+				integrationTree,
+				requestedAt: new Date().toISOString(),
+				predecessorRequestId: predecessor.request.requestId,
+				repairId: repair.repairId,
+				repairRound: repair.round,
+			});
+			const normalized = normalizeVerificationManifest(successorRequest, {
+				schemaVersion: 1,
+				requestId: successorRequest.requestId,
+				requestSha256: successorRequest.requestSha256,
+				runId: successorRequest.runId,
+				generation: successorRequest.generation,
+				graphSha256: successorRequest.graphSha256,
+				runAssignmentSha256: successorRequest.runAssignmentSha256,
+				integrationHead: successorRequest.integrationHead,
+				integrationTree: successorRequest.integrationTree,
+				predecessorRequestId: successorRequest.predecessorRequestId,
+				repairId: successorRequest.repairId,
+				repairRound: successorRequest.repairRound,
+				rationale: "Runs the persisted repair verification program.",
+				gates: [
+					{
+						gateId: "successor-first",
+						label: "successor first gate",
+						cwd: ".",
+						argv: [process.execPath, "-e", "process.exit(0)"],
+						rationale: "The first successor gate is intentionally successful.",
+					},
+					{
+						gateId: "successor-second",
+						label: "successor second gate",
+						cwd: ".",
+						argv: [process.execPath, "-e", "process.exit(0)"],
+						rationale: "The second successor gate is intentionally successful.",
+					},
+				],
+			});
+			seed.transaction(() => {
+				seed.putVerificationRequest(successorRequest);
+				seed.updateIntegrationRepair(repair.repairId, {
+					state: "verifying",
+					currentCommit: integrationHead,
+					currentTree: integrationTree,
+					successorRequestId: successorRequest.requestId,
+					successorRequestSha256: successorRequest.requestSha256,
+					successorManifest: normalized.manifest,
+					successorManifestSha256: normalized.manifestSha256,
+				});
+				seed.updateRun({ status: "paused", terminalDetail: "Waiting to execute the persisted repair successor manifest." });
+			});
+		} finally {
+			seed.close();
+		}
+
+		service = await ensureService(fixture.planDirectory);
+		const beforeStore = new RunStore(fixture.planDirectory);
+		const beforeRepair = beforeStore.getIntegrationRepairForRun(beforeStore.getRun()!.runId, 1)!;
+		const persistedManifest = beforeRepair.successorManifest!;
+		const persistedHash = beforeRepair.successorManifestSha256!;
+		const beforeAuditActions = beforeStore.getIntegrationRepairAudits(beforeRepair.repairId).map((audit) => audit.action);
+		beforeStore.close();
+
+		const replacements = [
+			{ ...persistedManifest, rationale: "A caller cannot replace the persisted rationale." },
+			{
+				...persistedManifest,
+				gates: persistedManifest.gates.map((gate, index) => index === 0 ? { ...gate, label: "replacement label" } : gate),
+			},
+			{
+				...persistedManifest,
+				gates: persistedManifest.gates.map((gate, index) => index === 0 ? { ...gate, argv: [...gate.argv, "replacement-argument"] } : gate),
+			},
+			{
+				...persistedManifest,
+				gates: persistedManifest.gates.map((gate, index) => index === 0 ? { ...gate, timeoutMs: 1_000 } : gate),
+			},
+			{ ...persistedManifest, gates: [persistedManifest.gates[1]!, persistedManifest.gates[0]!] },
+			{ ...persistedManifest, selector: { model: "replacement-selector" } },
+		];
+		for (const replacement of replacements) {
+			await assert.rejects(
+				() => requestService(service, "/v1/verification", replacement),
+				/persisted integration repair successor manifest/,
+			);
+		}
+
+		const corruptionCases: Array<{ patch: Parameters<RunStore["updateIntegrationRepair"]>[1]; expected: RegExp }> = [
+			{
+				patch: { successorManifest: { ...persistedManifest, rationale: "Corrupted durable rationale." } },
+				expected: /persisted hash/,
+			},
+			{
+				patch: { successorManifest: null },
+				expected: /not bound to its durable integration repair successor/,
+			},
+			{
+				patch: { successorManifestSha256: "0".repeat(64) },
+				expected: /persisted hash/,
+			},
+			{
+				patch: { successorRequestSha256: "0".repeat(64) },
+				expected: /not bound to its durable integration repair successor/,
+			},
+		];
+		for (const corruption of corruptionCases) {
+			const corrupt = new RunStore(fixture.planDirectory);
+			try {
+				corrupt.updateIntegrationRepair(beforeRepair.repairId, corruption.patch);
+			} finally {
+				corrupt.close();
+			}
+			await assert.rejects(
+				() => requestService(service, "/v1/verification", persistedManifest),
+				corruption.expected,
+			);
+			const unchanged = new RunStore(fixture.planDirectory);
+			try {
+				assert.equal(unchanged.getVerificationByRequestId(persistedManifest.requestId)!.state, "awaiting_manifest");
+			} finally {
+				unchanged.close();
+			}
+			const restore = new RunStore(fixture.planDirectory);
+			try {
+				restore.updateIntegrationRepair(beforeRepair.repairId, {
+					successorRequestSha256: beforeRepair.successorRequestSha256,
+					successorManifest: persistedManifest,
+					successorManifestSha256: persistedHash,
+				});
+			} finally {
+				restore.close();
+			}
+		}
+
+		const rejected = new RunStore(fixture.planDirectory);
+		try {
+			const verification = rejected.getVerificationByRequestId(persistedManifest.requestId)!;
+			const repair = rejected.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.equal(verification.state, "awaiting_manifest");
+			assert.equal(verification.manifest, null);
+			assert.equal(verification.manifestSha256, null);
+			assert.deepEqual(repair.successorManifest, persistedManifest);
+			assert.equal(repair.successorManifestSha256, persistedHash);
+			assert.equal(repair.state, "verifying");
+			assert.deepEqual(rejected.getIntegrationRepairAudits(repair.repairId).map((audit) => audit.action), beforeAuditActions);
+		} finally {
+			rejected.close();
+		}
+
+		await requestService(service, "/v1/verification", persistedManifest);
+		const accepted = new RunStore(fixture.planDirectory);
+		try {
+			const verification = accepted.getVerificationByRequestId(persistedManifest.requestId)!;
+			const repair = accepted.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.equal(verification.state, "passed");
+			assert.deepEqual(verification.manifest, persistedManifest);
+			assert.equal(verification.manifestSha256, persistedHash);
+			assert.equal(repair.state, "passed");
+		} finally {
+			accepted.close();
+		}
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

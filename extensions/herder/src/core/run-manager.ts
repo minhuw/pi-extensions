@@ -1359,6 +1359,35 @@ export class HerderRunManager {
 			: null;
 	}
 
+	private validateRepairSuccessorManifest(
+		request: StoredVerification["request"],
+		incomingManifestSha256: string,
+		repair: StoredIntegrationRepair | null,
+	): void {
+		if (!request.repairId) return;
+		if (!repair
+			|| repair.runId !== request.runId
+			|| repair.generation !== request.generation
+			|| repair.successorRequestId !== request.requestId
+			|| repair.successorRequestSha256 !== request.requestSha256
+			|| !repair.successorManifest
+			|| !repair.successorManifestSha256) {
+			throw new Error("Verification request is not bound to its durable integration repair successor");
+		}
+		let durable: { manifest: VerificationManifest; manifestSha256: string };
+		try {
+			durable = normalizeVerificationManifest(request, repair.successorManifest);
+		} catch (error) {
+			throw new Error(`Durable integration repair successor manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (durable.manifestSha256 !== repair.successorManifestSha256) {
+			throw new Error("Durable integration repair successor manifest does not match its persisted hash");
+		}
+		if (incomingManifestSha256 !== repair.successorManifestSha256) {
+			throw new Error("Verification manifest does not match the persisted integration repair successor manifest");
+		}
+	}
+
 	private integrationRepairRequest(verification: StoredVerification, repair: StoredIntegrationRepair | null): IntegrationRepairRequest {
 		const requestId = verification.request.requestId;
 		const capabilityToken = integrationRepairCapabilityToken(requestId);
@@ -1949,11 +1978,9 @@ export class HerderRunManager {
 		const stored = this.store.getVerification(run.runId, run.currentGeneration);
 		if (!stored) throw new Error("Herder is not waiting for a verification manifest");
 		const { manifest, manifestSha256 } = normalizeVerificationManifest(stored.request, input);
-		const driver = this.driver(run);
 		const successorRepair = stored.request.repairId ? this.store.getIntegrationRepair(stored.request.repairId) : null;
-		if (stored.request.repairId && (!successorRepair || successorRepair.successorRequestId !== stored.request.requestId)) {
-			throw new Error("Verification request is not bound to its durable integration repair successor");
-		}
+		this.validateRepairSuccessorManifest(stored.request, manifestSha256, successorRepair);
+		const driver = this.driver(run);
 		const validateSuccessorNamespace = (requireEvidence: boolean): string | null => {
 			if (!successorRepair) return null;
 			if (!successorRepair.beginRefSnapshot || !successorRepair.beginRefSnapshotSha256) {
