@@ -239,3 +239,164 @@ test("classification episodes retain immutable history and transient evidence ac
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });
+
+test("schema 14 migration preserves successor evidence, code rounds, and transient consumption", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-migration-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const now = "2026-08-15T00:00:00.000Z";
+		const graphSha256 = "a".repeat(64);
+		const assignmentSha256 = "b".repeat(64);
+		const branch = "herder/repair/integration";
+		const worktree = "/repo/.herder-integration";
+		const makeRequest = (requestId: string, requestSha256: string, head: string, tree: string, repairId: string, predecessorRequestId?: string) => ({
+			schemaVersion: 1 as const,
+			requestId,
+			requestSha256,
+			runId: "repair-run",
+			generation: 1,
+			graphSha256,
+			runAssignmentPath: "/repo/run-assignment.json",
+			runAssignmentSha256: assignmentSha256,
+			integrationBranch: branch,
+			integrationWorktree: worktree,
+			integrationHead: head,
+			integrationTree: tree,
+			requestedAt: now,
+			...(predecessorRequestId ? { predecessorRequestId } : {}),
+			repairId,
+			repairRound: 1,
+		});
+		const makeManifest = (request: ReturnType<typeof makeRequest>) => ({
+			schemaVersion: 1 as const,
+			requestId: request.requestId,
+			requestSha256: request.requestSha256,
+			runId: request.runId,
+			generation: request.generation,
+			graphSha256: request.graphSha256,
+			runAssignmentSha256: request.runAssignmentSha256,
+			integrationHead: request.integrationHead,
+			integrationTree: request.integrationTree,
+			rationale: "migration fixture",
+			gates: [gate],
+			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+			repairId: request.repairId,
+			repairRound: request.repairRound,
+		});
+		const insertVerification = (request: ReturnType<typeof makeRequest>) => {
+			const manifest = makeManifest(request);
+			store.putVerificationRequest(request);
+			const manifestSha256 = sha256(stableJson(manifest));
+			store.startVerification(request.requestId, manifest, manifestSha256);
+			store.finishVerification(request.requestId, "failed", { passed: false }, "failed");
+			return { manifest, manifestSha256 };
+		};
+		const head = "c".repeat(40);
+		const tree = "d".repeat(40);
+		const codeHead = "e".repeat(40);
+		const codeTree = "f".repeat(40);
+		const codeRepairId = "migration-code";
+		const codeRequest0 = makeRequest("migration-code-r0", "1".repeat(64), head, tree, codeRepairId);
+		insertVerification(codeRequest0);
+		const codeRepair = store.putIntegrationRepair({
+			repairId: codeRepairId,
+			runId: "repair-run",
+			generation: 1,
+			requestId: codeRequest0.requestId,
+			requestSha256: codeRequest0.requestSha256,
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+			classification: "code_defect",
+			state: "verifying",
+			round: 3,
+			parentCommit: head,
+			currentTree: codeTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			effectiveGates: [gate],
+		});
+		const codeRequest1 = makeRequest("migration-code-r1", "3".repeat(64), codeHead, codeTree, codeRepairId, codeRequest0.requestId);
+		const codeSuccessor = insertVerification(codeRequest1);
+		const transientRepairId = "migration-transient";
+		const transientRequest0 = makeRequest("migration-transient-r0", "4".repeat(64), head, tree, transientRepairId);
+		insertVerification(transientRequest0);
+		const transientRepair = store.putIntegrationRepair({
+			repairId: transientRepairId,
+			runId: "repair-run",
+			generation: 1,
+			requestId: transientRequest0.requestId,
+			requestSha256: transientRequest0.requestSha256,
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("5".repeat(64)),
+			classification: "transient",
+			state: "verifying",
+			parentCommit: head,
+			currentTree: tree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			effectiveGates: [gate],
+		});
+		const transientRequest1 = makeRequest("migration-transient-r1", "6".repeat(64), head, tree, transientRepairId, transientRequest0.requestId);
+		const transientSuccessor = insertVerification(transientRequest1);
+		const setLegacySuccessor = store.database.prepare(`
+			UPDATE manager_integration_repairs SET state = 'verifying', successor_request_id = ?, successor_request_sha256 = ?,
+				successor_manifest_json = ?, successor_manifest_sha256 = ?, current_episode_id = NULL, accepted_code_rounds = 0
+			WHERE repair_id = ?
+		`);
+		setLegacySuccessor.run(codeRequest1.requestId, codeRequest1.requestSha256, JSON.stringify(codeSuccessor.manifest), codeSuccessor.manifestSha256, codeRepairId);
+		setLegacySuccessor.run(transientRequest1.requestId, transientRequest1.requestSha256, JSON.stringify(transientSuccessor.manifest), transientSuccessor.manifestSha256, transientRepairId);
+		const insertAudit = store.database.prepare(`
+			INSERT INTO manager_integration_repair_audits (repair_id, operation_id, action, payload_sha256, evidence_json, created_at, episode_id)
+			VALUES (?, ?, ?, ?, ?, ?, NULL)
+		`);
+		for (const [repairId, request, classification, headValue, treeValue] of [
+			[codeRepairId, codeRequest0, "code_defect", codeHead, codeTree],
+			[transientRepairId, transientRequest0, "transient", head, tree],
+		] as const) {
+			insertAudit.run(repairId, `${repairId}-begin`, "begin", "1".repeat(64), JSON.stringify({ operation: "begin", requestId: request.requestId, requestSha256: request.requestSha256, classification }), now);
+			insertAudit.run(repairId, `${repairId}-finish`, "finish-intent", "2".repeat(64), JSON.stringify({ operation: "finish", requestId: request.requestId, requestSha256: request.requestSha256 }), now);
+			insertAudit.run(repairId, `${repairId}-finish`, "commit", "2".repeat(64), JSON.stringify({ head: headValue, tree: treeValue, parent: head, supersededCommits: [] }), now);
+			insertAudit.run(repairId, `${repairId}-finish`, "successor", "2".repeat(64), JSON.stringify({ requestId: `${request.requestId.slice(0, -2)}r1` }), now);
+		}
+		store.database.exec("DELETE FROM manager_integration_repair_episodes; PRAGMA user_version = 14;");
+		store.close();
+
+		const migrated = new RunStore(planDirectory);
+		try {
+			const migratedCode = migrated.getIntegrationRepair(codeRepair.repairId)!;
+			assert.equal(migratedCode.requestId, codeRequest1.requestId);
+			assert.equal(migratedCode.classification, null);
+			assert.equal(migratedCode.acceptedCodeRounds, 1);
+			const codeEpisodes = migrated.getIntegrationRepairEpisodes(codeRepair.repairId);
+			assert.equal(codeEpisodes.length, 2);
+			assert.equal(codeEpisodes[0]!.classification, "code_defect");
+			assert.equal(codeEpisodes[0]!.closedAt !== null, true);
+			assert.equal(codeEpisodes[1]!.requestId, codeRequest1.requestId);
+			assert.equal(codeEpisodes[1]!.classification, null);
+
+			const migratedTransient = migrated.getIntegrationRepair(transientRepair.repairId)!;
+			assert.equal(migratedTransient.requestId, transientRequest1.requestId);
+			assert.equal(migratedTransient.transientRetryUsed, true);
+			assert.equal(migratedTransient.acceptedCodeRounds, 0);
+			const transientEpisodes = migrated.getIntegrationRepairEpisodes(transientRepair.repairId);
+			assert.equal(transientEpisodes[0]!.transientUsed, true);
+			assert.equal(transientEpisodes[1]!.classification, null);
+			const auditEpisodes = migrated.getIntegrationRepairAudits(codeRepair.repairId).map((audit) => audit.episodeId);
+			assert.equal(auditEpisodes.every((episodeId) => episodeId === codeEpisodes[0]!.episodeId), true);
+		} finally {
+			migrated.close();
+		}
+		const repeated = new RunStore(planDirectory);
+		try {
+			assert.equal(repeated.getIntegrationRepairEpisodes(codeRepairId).length, 2);
+			assert.equal(repeated.getIntegrationRepairEpisodes(transientRepairId).length, 2);
+			assert.equal(repeated.getIntegrationRepair(codeRepairId)!.acceptedCodeRounds, 1);
+			assert.equal(repeated.getIntegrationRepair(transientRepairId)!.transientRetryUsed, true);
+		} finally {
+			repeated.close();
+		}
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});

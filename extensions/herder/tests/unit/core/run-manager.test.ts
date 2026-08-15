@@ -1887,6 +1887,19 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 		}]);
 		assert.equal(failed.reply.status, "failed");
 		const repair = payload(failed.reply.integrationRepair);
+		const initialStore = new RunStore(fixture.planDirectory);
+		try {
+			const storedInitial = initialStore.getIntegrationRepairForRequest(String(repair.requestId));
+			assert.ok(storedInitial);
+			assert.equal(storedInitial.ownerSessionId, null);
+			assert.equal(storedInitial.classification, null);
+			assert.equal(storedInitial.episodeClassification, null);
+			assert.equal(initialStore.getIntegrationRepairEpisodes(storedInitial.repairId).length, 1);
+		} finally {
+			initialStore.close();
+		}
+		assert.ok(repair.repairId);
+		assert.ok(repair.episodeId);
 		const token = String(repair.capabilityToken);
 		const begin = {
 			operation: "begin",

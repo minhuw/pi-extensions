@@ -178,8 +178,8 @@ function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
 	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 }
 
-function validateRepairSession(value: string | undefined, expected: string): void {
-	if (!value || value !== expected) throw new Error("Integration repair owner session does not match the request-bound capability");
+function validateRepairSession(value: string | undefined, expected: string | null): void {
+	if (!value || !expected || value !== expected) throw new Error("Integration repair owner session does not match the request-bound capability");
 }
 
 function repairAuditEvidence(input: IntegrationRepairInput): Record<string, unknown> {
@@ -1141,7 +1141,7 @@ export class HerderRunManager {
 			if (!namespace.ok) throw new Error(`Cannot resume ambiguous Herder namespace: ${namespace.reason}`);
 		}
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
-		const integrationRepair = failedVerification ? this.store.getIntegrationRepairForRequest(failedVerification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
+		const integrationRepair = failedVerification ? this.integrationRepairForVerification(failedVerification) : null;
 		if ((integrationRepair?.state === "verifying" || integrationRepair?.state === "committed") && integrationRepair.successorRequestId && integrationRepair.successorManifest) {
 			const beginRefSnapshot = repairBeginRefSnapshot(integrationRepair);
 			driver.validateIntegrationRepairNamespace({
@@ -1153,7 +1153,12 @@ export class HerderRunManager {
 			if (integrationRepair.state === "committed") this.store.updateIntegrationRepair(integrationRepair.repairId, { state: "verifying" });
 			return this.verification(integrationRepair.successorManifest);
 		}
-		if (integrationRepair && ["active", "committing", "committed", "failed", "paused", "interrupted"].includes(integrationRepair.state)) {
+		const unclaimedInitialFailure = Boolean(integrationRepair
+			&& integrationRepair.requestId === failedVerification?.request.requestId
+			&& integrationRepair.episodeClassification === null
+			&& !integrationRepair.ownerSessionId
+			&& !integrationRepair.successorRequestId);
+		if (integrationRepair && ["active", "committing", "committed", "failed", "paused", "interrupted"].includes(integrationRepair.state) && !unclaimedInitialFailure) {
 			return this.reply();
 		}
 		if (run.status === "failed" && failedVerification?.state === "failed" && !this.store.getPlan(run.runId, "RUN")) {
@@ -1342,6 +1347,16 @@ export class HerderRunManager {
 			return { edit: { planId: edit.planId, state: "barrier" }, reply: await this.reconcile(boundProfile(run, this.store)) };
 		}
 		return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
+	}
+
+	private integrationRepairForVerification(verification: StoredVerification): StoredIntegrationRepair | null {
+		const byRequest = this.store.getIntegrationRepairForRequest(verification.request.requestId);
+		if (byRequest) return byRequest;
+		const candidate = this.store.getIntegrationRepairForRun(verification.request.runId, verification.request.generation);
+		if (!candidate) return null;
+		return [candidate.requestId, candidate.successorRequestId, candidate.episodeRequestId].includes(verification.request.requestId)
+			? candidate
+			: null;
 	}
 
 	private integrationRepairRequest(verification: StoredVerification, repair: StoredIntegrationRepair | null): IntegrationRepairRequest {
@@ -1565,7 +1580,7 @@ export class HerderRunManager {
 				: beginNamespaceEvidence();
 			if (repair) {
 				if (repair.state === "interrupted") throw new Error("Integration repair evidence is interrupted and requires explicit user choice");
-				if (repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
+				if (repair.ownerSessionId && repair.ownerSessionId !== ownerSessionId) throw new Error("Integration repair belongs to another main session");
 				if (repair.state === "passed" || repair.state === "cancelled") throw new Error("Integration repair is already terminal; user choice is required");
 				if (repair.state === "active" || repair.state === "committing" || repair.state === "committed" || repair.state === "verifying") {
 					if (repair.operationId && repair.operationId !== operationId) throw new Error("Integration repair begin was replayed with a different operation");
@@ -1622,6 +1637,7 @@ export class HerderRunManager {
 					repair = this.store.updateIntegrationRepair(repair.repairId, {
 						requestId: input.requestId,
 						requestSha256: input.requestSha256,
+						ownerSessionId,
 						capabilityDigest: integrationRepairCapabilityDigest(input.capabilityToken),
 						beginRefSnapshot: beginEvidence.snapshot,
 						beginRefSnapshotSha256: beginEvidence.sha256,
@@ -1848,8 +1864,42 @@ export class HerderRunManager {
 	}
 
 	private recordIntegrationRepairVerificationOutcome(requestId: string, state: "passed" | "failed", detail: string | null): void {
-		const repair = this.store.getIntegrationRepairForRequest(requestId);
-		if (!repair) return;
+		let repair = this.store.getIntegrationRepairForRequest(requestId);
+		if (!repair) {
+			if (state !== "failed") return;
+			const verification = this.store.getVerificationByRequestId(requestId);
+			if (!verification) return;
+			const canonicalGates = verification.manifest?.gates ?? [];
+			const canonicalGatesSha256 = sha256(stableJson(canonicalGates));
+			// Record the failed request and its exact verification evidence before
+			// any session claims a repair. Owner and begin-namespace authority stay
+			// unbound until an authenticated begin operation supplies them.
+			repair = this.store.putIntegrationRepair({
+				repairId: randomUUID(),
+				runId: verification.request.runId,
+				generation: verification.request.generation,
+				requestId: verification.request.requestId,
+				requestSha256: verification.request.requestSha256,
+				ownerSessionId: null,
+				capabilityDigest: null,
+				classification: null,
+				state: "failed",
+				round: 1,
+				parentCommit: verification.request.integrationHead,
+				currentTree: verification.request.integrationTree,
+				canonicalGates,
+				canonicalGatesSha256,
+				effectiveGates: canonicalGates,
+				detail,
+				episode: {
+					integrationHead: verification.request.integrationHead,
+					integrationTree: verification.request.integrationTree,
+					canonicalGates,
+					canonicalGatesSha256,
+				},
+			});
+			return;
+		}
 		if (state === "passed") {
 			this.store.updateIntegrationRepair(repair.repairId, { state: "passed", detail: "Successor verification passed." });
 			return;
@@ -3323,7 +3373,7 @@ export class HerderRunManager {
 		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
-		const integrationRepair = verification ? this.store.getIntegrationRepairForRequest(verification.request.requestId) ?? this.store.getIntegrationRepairForRun(run.runId, run.currentGeneration) : null;
+		const integrationRepair = verification ? this.integrationRepairForVerification(verification) : null;
 		const exposedIntegrationRepair = verification && (verification.state === "failed" || Boolean(integrationRepair))
 			? this.integrationRepairRequest(verification, integrationRepair)
 			: undefined;

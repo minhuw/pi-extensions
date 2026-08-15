@@ -236,8 +236,10 @@ export interface StoredIntegrationRepair {
 	generation: number;
 	requestId: string;
 	requestSha256: string;
-	ownerSessionId: string;
-	capabilityDigest: string;
+	/** Null until the owning session claims an automatically recorded failure. */
+	ownerSessionId: string | null;
+	/** Null until begin binds the request-bound capability to an owner. */
+	capabilityDigest: string | null;
 	classification: IntegrationRepairClassification | null;
 	state: IntegrationRepairState;
 	/** Current classification episode; lineage identity remains the repair ID. */
@@ -603,8 +605,8 @@ function rowToIntegrationRepair(row: Record<string, unknown>): StoredIntegration
 		generation: Number(row.generation),
 		requestId: String(row.request_id),
 		requestSha256: String(row.request_sha256),
-		ownerSessionId: String(row.owner_session_id),
-		capabilityDigest: String(row.capability_digest),
+		ownerSessionId: row.owner_session_id === null || row.owner_session_id === undefined || String(row.owner_session_id) === "" ? null : String(row.owner_session_id),
+		capabilityDigest: row.capability_digest === null || row.capability_digest === undefined || String(row.capability_digest) === "" ? null : String(row.capability_digest),
 		classification: row.classification === null ? null : String(row.classification) as IntegrationRepairClassification,
 		state: String(row.state) as IntegrationRepairState,
 		episodeId,
@@ -1209,8 +1211,8 @@ export class RunStore {
 		generation: number;
 		requestId: string;
 		requestSha256: string;
-		ownerSessionId: string;
-		capabilityDigest: string;
+		ownerSessionId: string | null;
+		capabilityDigest: string | null;
 		classification?: IntegrationRepairClassification | null;
 		state?: IntegrationRepairState;
 		round?: number;
@@ -1274,7 +1276,7 @@ export class RunStore {
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, ?, NULL, NULL, ?, ?, '[]', ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			input.repairId, input.runId, input.generation, input.requestId, input.requestSha256,
-			input.ownerSessionId, input.capabilityDigest, input.classification ?? null, input.state ?? "active",
+			input.ownerSessionId ?? "", input.capabilityDigest ?? "", input.classification ?? null, input.state ?? "active",
 			input.round ?? 1, input.parentCommit, beginEvidence.json, beginEvidence.sha256,
 			JSON.stringify(input.canonicalGates), input.canonicalGatesSha256,
 			JSON.stringify(input.effectiveGates ?? input.canonicalGates), input.operationId ?? null,
@@ -1299,7 +1301,8 @@ export class RunStore {
 	updateIntegrationRepair(repairId: string, patch: {
 		requestId?: string;
 		requestSha256?: string;
-		capabilityDigest?: string;
+		ownerSessionId?: string | null;
+		capabilityDigest?: string | null;
 		classification?: IntegrationRepairClassification | null;
 		state?: IntegrationRepairState;
 		round?: number;
@@ -1330,7 +1333,8 @@ export class RunStore {
 		const next = {
 			requestId: patch.requestId ?? existing.requestId,
 			requestSha256: patch.requestSha256 ?? existing.requestSha256,
-			capabilityDigest: patch.capabilityDigest ?? existing.capabilityDigest,
+			ownerSessionId: patch.ownerSessionId === undefined ? existing.ownerSessionId : patch.ownerSessionId,
+			capabilityDigest: patch.capabilityDigest === undefined ? existing.capabilityDigest : patch.capabilityDigest,
 			classification: patch.classification === undefined ? existing.classification : patch.classification,
 			state: patch.state ?? existing.state,
 			round: patch.round ?? existing.round,
@@ -1354,13 +1358,13 @@ export class RunStore {
 			throw new Error(`Integration repair episode ${existing.episodeId} classification is immutable`);
 		}
 		this.database.prepare(`
-			UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ?, capability_digest = ?, classification = ?,
+			UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ?, owner_session_id = ?, capability_digest = ?, classification = ?,
 			state = ?, round_number = ?, current_commit = ?, current_tree = ?, begin_ref_snapshot_json = ?, begin_ref_snapshot_sha256 = ?,
 			superseded_commits_json = ?, effective_gates_json = ?, accepted_code_rounds = ?,
 			successor_request_id = ?, successor_request_sha256 = ?, successor_manifest_json = ?, successor_manifest_sha256 = ?,
 			operation_id = ?, operation_payload_sha256 = ?, detail = ?, updated_at = ? WHERE repair_id = ?
 		`).run(
-			next.requestId, next.requestSha256, next.capabilityDigest, next.classification, next.state, next.round,
+			next.requestId, next.requestSha256, next.ownerSessionId ?? "", next.capabilityDigest ?? "", next.classification, next.state, next.round,
 			next.currentCommit, next.currentTree, next.beginRefSnapshot, next.beginRefSnapshotSha256,
 			JSON.stringify(next.supersededCommits), JSON.stringify(next.effectiveGates), next.acceptedCodeRounds,
 			next.successorRequestId, next.successorRequestSha256, next.successorManifest ? JSON.stringify(next.successorManifest) : null,
