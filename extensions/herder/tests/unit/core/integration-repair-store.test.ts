@@ -968,6 +968,10 @@ test("schema 17 migration rejects invalid successor evidence before mutation", (
 			mutate: (database) => database.prepare("UPDATE manager_integration_repairs SET current_episode_id = 'bad-episode-id' WHERE repair_id = ?").run("schema17-invalid"),
 		},
 		{
+			name: "null current episode",
+			mutate: (database) => database.prepare("UPDATE manager_integration_repairs SET current_episode_id = NULL WHERE repair_id = ?").run("schema17-invalid"),
+		},
+		{
 			name: "mismatched episode evidence",
 			mutate: (database, episodeId) => database.prepare("UPDATE manager_integration_repair_episodes SET integration_tree = ? WHERE episode_id = ?").run("0".repeat(40), episodeId),
 		},
@@ -978,6 +982,10 @@ test("schema 17 migration rejects invalid successor evidence before mutation", (
 		{
 			name: "successor repair lineage mismatch",
 			mutate: (database) => { database.prepare("UPDATE manager_verifications SET repair_id = 'other-repair' WHERE request_id = 'schema17-invalid-r1'").run(); },
+		},
+		{
+			name: "predecessor repair lineage mismatch",
+			mutate: (database) => { database.prepare("UPDATE manager_verifications SET repair_id = 'other-repair' WHERE request_id = 'schema17-invalid-r0'").run(); },
 		},
 	];
 	for (const fixtureCase of cases) {

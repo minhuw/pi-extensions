@@ -956,10 +956,12 @@ function validateFailedSuccessorEpisode(
 
 function migrationSuccessorHasPredecessor(database: Database, row: SqlRow, evidence: FailedSuccessorEvidence): boolean {
   if (evidence.predecessorRequestId === evidence.requestId) return false
-  const predecessorVerification = database.prepare("SELECT run_id, generation, state FROM manager_verifications WHERE request_id = ?").get(evidence.predecessorRequestId) as SqlRow | undefined
+  const predecessorVerification = database.prepare("SELECT run_id, generation, state, repair_id FROM manager_verifications WHERE request_id = ?").get(evidence.predecessorRequestId) as SqlRow | undefined
   if (!predecessorVerification || migrationText(predecessorVerification.state) !== "failed"
     || migrationText(predecessorVerification.run_id) !== migrationText(row.run_id)
     || Number(predecessorVerification.generation) !== Number(row.generation)) return false
+  const predecessorRepairId = migrationText(predecessorVerification.repair_id)
+  if (predecessorRepairId && predecessorRepairId !== evidence.repairId) return false
   if (migrationText(row.request_id) === evidence.predecessorRequestId) return true
   if (database.prepare("SELECT 1 FROM manager_integration_repair_episodes WHERE repair_id = ? AND request_id = ? LIMIT 1").get(evidence.repairId, evidence.predecessorRequestId)) return true
   const audits = database.prepare("SELECT evidence_json FROM manager_integration_repair_audits WHERE repair_id = ?").all(evidence.repairId) as SqlRow[]
@@ -1013,12 +1015,15 @@ function validateFailedSuccessorMigration(database: Database, allowPredecessorEp
     }
     if (migrationText(successorVerification.state) !== "failed") continue
 
+    if (!currentEpisodeId) {
+      fail(`Cannot migrate integration repair ${repairId}: failed successor has no current episode`)
+    }
     const predecessorEpisode = allowPredecessorEpisode && currentEpisode
       && migrationText(currentEpisode.request_id) === migrationText(row.request_id)
       && migrationText(row.request_id) !== successorRequestId
-    const selection = currentEpisodeId && !predecessorEpisode
-      ? validateFailedSuccessorEpisode(currentEpisode, repairId, successorEvidence)
-      : { kind: "unselected", evidence: successorEvidence, state: "failed" } as const
+    const selection = predecessorEpisode
+      ? { kind: "unselected", evidence: successorEvidence, state: "failed" } as const
+      : validateFailedSuccessorEpisode(currentEpisode, repairId, successorEvidence)
     if (selection.kind === "invalid") {
       fail(`Cannot migrate integration repair ${repairId}: ${selection.reason}`)
     }
@@ -1438,9 +1443,7 @@ function applySchema17(database: Database): void {
     if (migrationText(verificationRow.state) !== "failed") continue
     const successorEvidence = migrationSuccessorEvidence(row, verificationRow, successorRequestId)
     if (!successorEvidence) fail(`Cannot migrate integration repair ${repairId}: successor evidence is inconsistent`)
-    const selection = currentEpisodeId
-      ? validateFailedSuccessorEpisode(currentEpisode, repairId, successorEvidence)
-      : { kind: "unselected", evidence: successorEvidence, state: "failed" } as const
+    const selection = validateFailedSuccessorEpisode(currentEpisode, repairId, successorEvidence)
     if (selection.kind === "invalid") fail(`Cannot migrate integration repair ${repairId}: ${selection.reason}`)
     const projection = selection.kind === "selected" ? selection.projection : null
     const fallbackState = selection.kind === "unselected" ? selection.state : "failed"
