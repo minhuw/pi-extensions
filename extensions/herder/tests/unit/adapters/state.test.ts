@@ -12,7 +12,6 @@ test("session restoration uses the newest valid Herder entry", () => {
 		planDir: "/tmp/repo/herder-plans",
 		profile: "poorman",
 		maxParallel: 5,
-		dashboardEnabled: true,
 		startedAt: 1,
 		updatedAt: 2,
 	};
@@ -32,11 +31,28 @@ test("session restoration accepts attach mode", () => {
 		planDir: "/tmp/repo/herder-plans",
 		profile: "eclipse",
 		maxParallel: 3,
-		dashboardEnabled: true,
 		startedAt: 1,
 		updatedAt: 2,
 	};
 	assert.deepEqual(restoreLastRun([{ type: "custom", customType: HERDER_STATE_ENTRY, data: state }]), state);
+});
+
+test("historical state with legacy fields remains restorable", () => {
+	const state: HerderRunState = {
+		version: 1,
+		mode: "resume",
+		status: "running",
+		runId: "run-legacy",
+		repoRoot: "/tmp/repo",
+		planDir: "/tmp/repo/herder-plans",
+		profile: "eclipse",
+		maxParallel: 2,
+		startedAt: 1,
+		updatedAt: 2,
+	};
+	const legacyState = { ...state, asyncDir: "/tmp/async", dashboardEnabled: true };
+	assert.deepEqual(restoreLastRun([{ type: "custom", customType: HERDER_STATE_ENTRY, data: legacyState }]), legacyState);
+	assert.equal(sameHerderRunState(state, legacyState), true);
 });
 
 test("state persistence ignores heartbeat-only timestamp changes", () => {
@@ -49,7 +65,6 @@ test("state persistence ignores heartbeat-only timestamp changes", () => {
 		planDir: "/tmp/repo/herder-plans",
 		profile: "eclipse",
 		maxParallel: 5,
-		dashboardEnabled: true,
 		startedAt: 1,
 		updatedAt: 2,
 	};

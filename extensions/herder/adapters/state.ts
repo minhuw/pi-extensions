@@ -7,12 +7,10 @@ export interface HerderRunState {
 	runId: string;
 	/** Session-local hint only; SQLite remains authoritative for attention state. */
 	attentionRequestId?: string;
-	asyncDir?: string;
 	repoRoot: string;
 	planDir: string;
 	profile: string;
 	maxParallel: number;
-	dashboardEnabled: boolean;
 	startedAt: number;
 	updatedAt: number;
 	dashboardUrl?: string;
@@ -24,12 +22,10 @@ export function sameHerderRunState(left: HerderRunState, right: HerderRunState):
 		&& left.status === right.status
 		&& left.runId === right.runId
 		&& left.attentionRequestId === right.attentionRequestId
-		&& left.asyncDir === right.asyncDir
 		&& left.repoRoot === right.repoRoot
 		&& left.planDir === right.planDir
 		&& left.profile === right.profile
 		&& left.maxParallel === right.maxParallel
-		&& left.dashboardEnabled === right.dashboardEnabled
 		&& left.startedAt === right.startedAt
 		&& left.dashboardUrl === right.dashboardUrl;
 }
@@ -44,7 +40,6 @@ function isRunState(value: unknown): value is HerderRunState {
 		&& typeof state.planDir === "string"
 		&& typeof state.profile === "string"
 		&& typeof state.maxParallel === "number"
-		&& typeof state.dashboardEnabled === "boolean"
 		&& typeof state.startedAt === "number"
 		&& typeof state.updatedAt === "number"
 		&& ["fire", "resume", "revise", "attach"].includes(state.mode || "")

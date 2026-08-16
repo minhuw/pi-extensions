@@ -730,6 +730,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.ok(api.execCalls.some((call) => call.command === "git" && call.args.includes("rev-parse")));
 		const stateEntries = api.appendedEntries.filter((entry) => entry.customType === HERDER_STATE_ENTRY).map((entry) => object(entry.data));
 		assert.ok(stateEntries.some((state) => state.status === "running" && state.profile === "eclipse" && state.maxParallel === 1));
+		assert.ok(stateEntries.every((state) => !Object.hasOwn(state, "asyncDir") && !Object.hasOwn(state, "dashboardEnabled")));
 
 		implementer.release();
 		const reviewer = await withDeadline(
