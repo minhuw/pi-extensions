@@ -1155,10 +1155,8 @@ export class HerderRunManager {
 			return this.verification(successor.manifest);
 		}
 		const unclaimedInitialFailure = Boolean(integrationRepair
-			&& integrationRepair.requestId === failedVerification?.request.requestId
-			&& integrationRepair.episodeClassification === null
-			&& !integrationRepair.ownerSessionId
-			&& !integrationRepair.successorRequestId);
+			&& failedVerification
+			&& this.isProvableInitialRepair(failedVerification, integrationRepair));
 		if (integrationRepair && ["active", "committing", "committed", "failed", "paused", "interrupted"].includes(integrationRepair.state) && !unclaimedInitialFailure) {
 			return this.reply();
 		}
@@ -1506,6 +1504,76 @@ export class HerderRunManager {
 		}
 	}
 
+	private isProvableInitialRepair(
+		verification: StoredVerification,
+		repair: StoredIntegrationRepair,
+	): boolean {
+		const request = verification.request;
+		if (verification.state !== "failed"
+			|| request.predecessorRequestId !== undefined
+			|| request.repairId !== undefined
+			|| request.repairRound !== undefined) return false;
+		const episodes = this.store.getIntegrationRepairEpisodes(repair.repairId);
+		if (episodes.length !== 1 || this.store.getIntegrationRepairAudits(repair.repairId).length !== 0) return false;
+		const [episode] = episodes;
+		if (!episode) return false;
+		const canonicalGates = verification.manifest?.gates ?? [];
+		const canonicalGatesSha256 = sha256(stableJson(canonicalGates));
+		const sameIdentity = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
+		return repair.runId === request.runId
+			&& repair.generation === request.generation
+			&& repair.requestId === request.requestId
+			&& sameIdentity(repair.requestSha256, request.requestSha256)
+			&& sameIdentity(repair.parentCommit, request.integrationHead)
+			&& repair.currentCommit === null
+			&& repair.currentTree === null
+			&& repair.beginRefSnapshot === null
+			&& repair.beginRefSnapshotSha256 === null
+			&& repair.ownerSessionId === null
+			&& repair.capabilityDigest === null
+			&& repair.classification === null
+			&& repair.state === "failed"
+			&& repair.round === 1
+			&& repair.acceptedCodeRounds === 0
+			&& repair.supersededCommits.length === 0
+			&& repair.successorRequestId === null
+			&& repair.successorRequestSha256 === null
+			&& repair.successorManifest === null
+			&& repair.successorManifestSha256 === null
+			&& repair.operationId === null
+			&& repair.operationPayloadSha256 === null
+			&& sameIdentity(repair.canonicalGatesSha256, canonicalGatesSha256)
+			&& stableJson(repair.canonicalGates) === stableJson(canonicalGates)
+			&& stableJson(repair.effectiveGates) === stableJson(canonicalGates)
+			&& repair.episodeId === episode.episodeId
+			&& episode.repairId === repair.repairId
+			&& episode.requestId === request.requestId
+			&& sameIdentity(episode.requestSha256, request.requestSha256)
+			&& sameIdentity(episode.integrationHead, request.integrationHead)
+			&& sameIdentity(episode.integrationTree, request.integrationTree)
+			&& sameIdentity(episode.canonicalGatesSha256, canonicalGatesSha256)
+			&& stableJson(episode.canonicalGates) === stableJson(canonicalGates)
+			&& episode.classification === null
+			&& episode.state === "failed"
+			&& episode.operationId === null
+			&& episode.operationPayloadSha256 === null
+			&& episode.transientUsed === false
+			&& episode.transientUseEvidenceSha256 === null
+			&& episode.closedAt === null
+			&& repair.episodeRequestId === episode.requestId
+			&& repair.episodeRequestSha256 !== null
+			&& sameIdentity(repair.episodeRequestSha256, episode.requestSha256)
+			&& repair.episodeIntegrationHead !== null
+			&& sameIdentity(repair.episodeIntegrationHead, episode.integrationHead)
+			&& repair.episodeIntegrationTree !== null
+			&& sameIdentity(repair.episodeIntegrationTree, episode.integrationTree)
+			&& repair.episodeCanonicalGatesSha256 !== null
+			&& sameIdentity(repair.episodeCanonicalGatesSha256, episode.canonicalGatesSha256)
+			&& stableJson(repair.episodeCanonicalGates) === stableJson(episode.canonicalGates)
+			&& repair.episodeState === episode.state
+			&& repair.episodeClassification === null;
+	}
+
 	private async validateFreshRepairBeginGitIdentity(
 		run: StoredRun,
 		verification: StoredVerification,
@@ -1537,12 +1605,8 @@ export class HerderRunManager {
 			throw new Error(`Integration repair begin integration tree changed: expected ${verification.request.integrationTree}, found ${worktreeTree}`);
 		}
 		if (repair) {
-			const unclaimedInitialFailure = repair.requestId === verification.request.requestId
-				&& repair.episodeClassification === null
-				&& repair.ownerSessionId === null
-				&& repair.successorRequestId === null;
 			if (repair.beginRefSnapshot === null && repair.beginRefSnapshotSha256 === null) {
-				if (!unclaimedInitialFailure) repairBeginRefSnapshot(repair);
+				if (!this.isProvableInitialRepair(verification, repair)) repairBeginRefSnapshot(repair);
 			} else {
 				const beginRefSnapshot = repairBeginRefSnapshot(repair);
 				driver.validateIntegrationRepairNamespace({
