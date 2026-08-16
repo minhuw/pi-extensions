@@ -195,10 +195,6 @@ function integrationRepairPayload(args: JsonObject): IntegrationRepairInput {
 
 async function verificationTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
-	if (args.operation !== undefined || args.repairOperation !== undefined) {
-		const payload = { ...args, operation: args.repairOperation ?? args.operation };
-		return { ok: true, reply: await executeManagerOperation(directory, "integration_repair", integrationRepairPayload(payload)) };
-	}
 	return { ok: true, reply: await executeManagerOperation(directory, "verification", args.manifest) };
 }
 
@@ -683,7 +679,6 @@ export async function applyHerderReset(
 	return runExclusion(request.planDirectory, () => resetHerderPlanSet(request));
 }
 
-export function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_reignite", args: JsonObject): Promise<unknown>;
 export function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown>;
 export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);

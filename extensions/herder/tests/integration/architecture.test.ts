@@ -26,7 +26,13 @@ test("Pi and planning commands share one direct application facade", () => {
 	assert.match(adapter, /src\/application\/tools\.ts/);
 	assert.match(planning, /src\/application\/tools\.ts/);
 	assert.doesNotMatch(adapter + planning + application, /adapters\/mcp|herder_wait|codex_terminal|herder_profile/);
-	assert.match(application, /"herder_plan" \| "herder_run" \| "herder_submit" \| "herder_verification" \| "herder_reignite"/);
+	assert.equal((application.match(/export function invokeHerderTool/g) ?? []).length, 1);
+	assert.match(application, /export function invokeHerderTool\(name: "herder_plan" \| "herder_run" \| "herder_submit" \| "herder_verification" \| "herder_integration_repair" \| "herder_reignite", args: JsonObject\)/);
+	assert.match(application, /if \(name === "herder_verification"\) return verificationTool\(args\);/);
+	assert.match(application, /if \(name === "herder_integration_repair"\) return integrationRepairTool\(args\);/);
+	const verificationBody = application.match(/async function verificationTool\([\s\S]*?\n}\n\nasync function integrationRepairTool/)?.[0] ?? "";
+	assert.notEqual(verificationBody, "");
+	assert.doesNotMatch(verificationBody, /args\.(?:operation|repairOperation)|integrationRepairPayload|"integration_repair"/);
 	assert.match(application, /submitHerderVerification/);
 });
 
