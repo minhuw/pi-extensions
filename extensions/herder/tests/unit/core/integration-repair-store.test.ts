@@ -1035,7 +1035,7 @@ test("schema 17 migration accepts an awaiting repair successor", () => {
 		const successorManifestSha256 = sha256(stableJson(successorManifest));
 		store.putVerificationRequest(successor);
 		store.updateIntegrationRepair(repair.repairId, {
-			state: "verifying",
+			state: "committed",
 			currentCommit: successor.integrationHead,
 			currentTree: successor.integrationTree,
 			successorRequestId: successor.requestId,

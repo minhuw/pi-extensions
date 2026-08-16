@@ -2518,7 +2518,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 			seed.transaction(() => {
 				seed.putVerificationRequest(successorRequest);
 				seed.updateIntegrationRepair(repair.repairId, {
-					state: "verifying",
+					state: "committed",
 					currentCommit: integrationHead,
 					currentTree: integrationTree,
 					effectiveGates: persisted.manifest.gates,
@@ -2542,6 +2542,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 			assert.equal(verification.state, "awaiting_manifest");
 			assert.equal(verification.manifest, null);
 			assert.equal(verification.manifestSha256, null);
+			assert.equal(migrated.getIntegrationRepair(repairId)?.state, "committed");
 			assert.deepEqual(migrated.getIntegrationRepair(repairId)?.successorManifest, persistedManifest);
 		} finally {
 			migrated.close();

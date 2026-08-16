@@ -1147,7 +1147,8 @@ function validateFailedSuccessorMigration(database: Database, allowPredecessorEp
       fail(`Cannot migrate integration repair ${repairId}: successor verification predecessor is outside the repair lineage`)
     }
     if (migrationText(successorVerification.state) === "awaiting_manifest") {
-      if (migrationText(row.state) !== "verifying") {
+      const repairState = migrationText(row.state)
+      if (repairState !== "committed" && repairState !== "verifying") {
         fail(`Cannot migrate integration repair ${repairId}: awaiting successor has an unrecoverable repair state`)
       }
       if (!currentEpisodeId || !currentEpisode
