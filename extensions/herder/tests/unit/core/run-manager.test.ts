@@ -2426,6 +2426,164 @@ test("persisted legacy commitMessage operations fail before mutation and leave r
 	}
 });
 
+test("migrated awaiting repair successor resumes the persisted manifest", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-migrated-awaiting-successor-"));
+	const fixture = writeFixture(root);
+	let service = await ensureService(fixture.planDirectory);
+	let repairId = "";
+	let persistedManifest: ReturnType<typeof normalizeVerificationManifest>["manifest"] | null = null;
+	let persistedManifestSha256 = "";
+	try {
+		const afterReviewer = await prepareSinglePlan(service, fixture, "migrated-awaiting-successor");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "migrated-awaiting-successor", [{
+			gateId: "initial-failure",
+			label: "deliberate initial failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the failed verification that owns the repair successor.",
+		}]);
+		const predecessorRepair = payload(failed.reply.integrationRepair);
+		await requestService(service, "/v1/integration-repair", {
+			operation: "begin",
+			operationId: "migrated-awaiting-successor-begin",
+			requestId: String(predecessorRepair.requestId),
+			requestSha256: String(predecessorRepair.requestSha256),
+			capabilityToken: String(predecessorRepair.capabilityToken),
+			runId: String(predecessorRepair.runId),
+			generation: Number(predecessorRepair.generation),
+			ownerSessionId: "main-session",
+			classification: "manifest_error",
+		});
+		await stopService(fixture.planDirectory);
+
+		const orderLog = path.join(root, "persisted-gate-order.log");
+		const persistedGates: VerificationGate[] = [
+			{
+				gateId: "persisted-first",
+				label: "persisted first gate",
+				cwd: ".",
+				argv: [process.execPath, "-e", `require("node:fs").appendFileSync(${JSON.stringify(orderLog)}, "first\\n")`],
+				rationale: "The first persisted gate records its execution order.",
+			},
+			{
+				gateId: "persisted-second",
+				label: "persisted second gate",
+				cwd: ".",
+				argv: [process.execPath, "-e", `require("node:fs").appendFileSync(${JSON.stringify(orderLog)}, "second\\n")`],
+				rationale: "The second persisted gate records its execution order.",
+			},
+		];
+		const seed = new RunStore(fixture.planDirectory);
+		try {
+			const run = seed.getRun()!;
+			const predecessor = seed.getVerification(run.runId, run.currentGeneration)!;
+			const repair = seed.getIntegrationRepairForRequest(predecessor.request.requestId)!;
+			repairId = repair.repairId;
+			const integrationHead = git(run.integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+			const integrationTree = git(run.integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+			const successorRequest = createVerificationRequest({
+				requestId: "migrated-awaiting-successor-request",
+				runId: run.runId,
+				generation: run.currentGeneration,
+				graphSha256: predecessor.request.graphSha256,
+				runAssignmentPath: predecessor.request.runAssignmentPath,
+				runAssignmentSha256: predecessor.request.runAssignmentSha256,
+				integrationBranch: predecessor.request.integrationBranch,
+				integrationWorktree: predecessor.request.integrationWorktree,
+				integrationHead,
+				integrationTree,
+				requestedAt: new Date().toISOString(),
+				predecessorRequestId: predecessor.request.requestId,
+				repairId: repair.repairId,
+				repairRound: repair.round,
+			});
+			const persisted = normalizeVerificationManifest(successorRequest, {
+				schemaVersion: 1,
+				requestId: successorRequest.requestId,
+				requestSha256: successorRequest.requestSha256,
+				runId: successorRequest.runId,
+				generation: successorRequest.generation,
+				graphSha256: successorRequest.graphSha256,
+				runAssignmentSha256: successorRequest.runAssignmentSha256,
+				integrationHead: successorRequest.integrationHead,
+				integrationTree: successorRequest.integrationTree,
+				predecessorRequestId: successorRequest.predecessorRequestId,
+				repairId: successorRequest.repairId,
+				repairRound: successorRequest.repairRound,
+				rationale: "Only the durable successor program may execute after migration.",
+				gates: persistedGates,
+			});
+			persistedManifest = persisted.manifest;
+			persistedManifestSha256 = persisted.manifestSha256;
+			seed.transaction(() => {
+				seed.putVerificationRequest(successorRequest);
+				seed.updateIntegrationRepair(repair.repairId, {
+					state: "verifying",
+					currentCommit: integrationHead,
+					currentTree: integrationTree,
+					effectiveGates: persisted.manifest.gates,
+					successorRequestId: successorRequest.requestId,
+					successorRequestSha256: successorRequest.requestSha256,
+					successorManifest: persisted.manifest,
+					successorManifestSha256: persisted.manifestSha256,
+				});
+				seed.updateRun({ status: "paused", terminalDetail: "Waiting to execute the persisted repair successor manifest." });
+				seed.database.exec("PRAGMA user_version = 16;");
+			});
+		} finally {
+			seed.close();
+		}
+
+		service = await ensureService(fixture.planDirectory);
+		const migrated = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 17);
+			const verification = migrated.getVerificationByRequestId("migrated-awaiting-successor-request")!;
+			assert.equal(verification.state, "awaiting_manifest");
+			assert.equal(verification.manifest, null);
+			assert.equal(verification.manifestSha256, null);
+			assert.deepEqual(migrated.getIntegrationRepair(repairId)?.successorManifest, persistedManifest);
+		} finally {
+			migrated.close();
+		}
+
+		await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		assert.equal(fs.readFileSync(orderLog, "utf8"), "first\nsecond\n");
+		const completed = new RunStore(fixture.planDirectory);
+		try {
+			const verification = completed.getVerificationByRequestId("migrated-awaiting-successor-request")!;
+			const repair = completed.getIntegrationRepairForRequest("migrated-awaiting-successor-request")!;
+			assert.equal(verification.state, "passed");
+			assert.deepEqual(verification.manifest, persistedManifest);
+			assert.equal(verification.manifestSha256, persistedManifestSha256);
+			assert.equal(repair.state, "passed");
+		} finally {
+			completed.close();
+		}
+
+		await stopService(fixture.planDirectory);
+		service = await ensureService(fixture.planDirectory);
+		await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		assert.equal(fs.readFileSync(orderLog, "utf8"), "first\nsecond\n");
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("awaiting repair successor rejects a replacement manifest", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-repair-successor-manifest-"));
 	const fixture = writeFixture(root);

@@ -821,74 +821,150 @@ function migrationSourcesAgree(values: unknown[], { requireAll = true } = {}): s
  */
 function migrationSuccessorEvidence(row: SqlRow, verification: SqlRow | undefined, requestIdOverride?: string): FailedSuccessorEvidence | null {
   if (!verification) return null
+  const verificationState = migrationText(verification.state)
+  if (!new Set(["awaiting_manifest", "running", "passed", "failed"]).has(verificationState)) return null
+
   const explicitRequestId = migrationText(row.successor_request_id)
-  const verificationManifest = parseMigrationRecord(verification.manifest_json)
-  const persistedSuccessorManifest = parseMigrationRecord(row.successor_manifest_json)
   const persistedManifestJson = migrationText(row.successor_manifest_json)
   const persistedManifestSha256 = migrationText(row.successor_manifest_sha256)
-  const verificationManifestSha256 = migrationText(verification.manifest_sha256)
   const hasPersistedManifest = persistedManifestJson !== ""
-  if (!verificationManifestSha256 || sha256(stableJson(verificationManifest)) !== verificationManifestSha256
-    || (!hasPersistedManifest && persistedManifestSha256 !== "")
-    || (explicitRequestId && !hasPersistedManifest)
-    || (hasPersistedManifest && (!persistedManifestSha256
-      || sha256(stableJson(persistedSuccessorManifest)) !== persistedManifestSha256
-      || stableJson(persistedSuccessorManifest) !== stableJson(verificationManifest)))) return null
+  const hasPersistedManifestSha256 = persistedManifestSha256 !== ""
+  if (hasPersistedManifest !== hasPersistedManifestSha256) return null
+  const persistedSuccessorManifest = parseMigrationRecord(persistedManifestJson)
+  const requiredManifestFields = [
+    "requestId", "requestSha256", "runId", "graphSha256", "runAssignmentSha256",
+    "integrationHead", "integrationTree", "rationale", "repairId", "predecessorRequestId",
+  ]
+  const validGate = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false
+    const gate = value as SqlRow
+    const normalizedCwd = typeof gate.cwd === "string" ? path.normalize(gate.cwd) : ""
+    return typeof gate.gateId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(gate.gateId)
+      && gate.gateId.length <= 80
+      && typeof gate.label === "string" && gate.label.length > 0 && gate.label.length <= 160 && !/[\0\r\n]/.test(gate.label)
+      && typeof gate.cwd === "string" && gate.cwd.length > 0 && gate.cwd.length <= 1024 && !path.isAbsolute(gate.cwd)
+      && normalizedCwd !== ".." && !normalizedCwd.startsWith(`..${path.sep}`) && !/[\0\r\n]/.test(gate.cwd)
+      && Array.isArray(gate.argv) && gate.argv.length > 0 && gate.argv.length <= 64
+      && gate.argv.every((argument: unknown) => typeof argument === "string" && argument.length > 0 && argument.length <= 8192 && !/[\0\r\n]/.test(argument))
+      && (gate.timeoutMs === undefined || (typeof gate.timeoutMs === "number" && Number.isSafeInteger(gate.timeoutMs) && gate.timeoutMs >= 1000 && gate.timeoutMs <= 2 * 60 * 60 * 1000))
+      && typeof gate.rationale === "string" && gate.rationale.length > 0 && gate.rationale.length <= 4096 && !/\0/.test(gate.rationale)
+  }
+  const validManifest = (manifest: SqlRow): boolean => manifest.schemaVersion === 1
+    && Array.isArray(manifest.gates) && manifest.gates.length <= 32 && manifest.gates.every(validGate)
+    && requiredManifestFields.every((field) => typeof manifest[field] === "string" && String(manifest[field]).length > 0)
+    && ["requestSha256", "graphSha256", "runAssignmentSha256", "integrationHead", "integrationTree"]
+      .every((field) => /^[0-9a-f]{40,64}$/i.test(String(manifest[field])))
+    && typeof manifest.generation === "number"
+    && Number.isSafeInteger(manifest.generation)
+    && manifest.generation >= 1
+    && (manifest.repairRound === undefined
+      || (typeof manifest.repairRound === "number" && Number.isSafeInteger(manifest.repairRound) && manifest.repairRound >= 1 && manifest.repairRound <= 3))
+  // Older schema rows can infer a failed successor from the selected episode without
+  // having the later durable repair-manifest columns. Every new or in-flight cut
+  // still requires the repair row's canonical successor evidence.
+  const legacyInferredSuccessor = verificationState === "failed" && !explicitRequestId && !hasPersistedManifest
+  const requiresPersistedManifest = !legacyInferredSuccessor
+  if (requiresPersistedManifest && (!hasPersistedManifest || !validManifest(persistedSuccessorManifest)
+    || sha256(stableJson(persistedSuccessorManifest)) !== persistedManifestSha256)) return null
+
+  const verificationManifestJson = verification.manifest_json
+  const verificationManifestSha256 = migrationText(verification.manifest_sha256)
+  let verificationManifest: SqlRow = {}
+  if (verificationState === "awaiting_manifest") {
+    if (!hasPersistedManifest
+      || verificationManifestJson !== null && verificationManifestJson !== undefined
+      || verification.manifest_sha256 !== null && verification.manifest_sha256 !== undefined) return null
+  } else {
+    if (typeof verificationManifestJson !== "string" || verificationManifestJson.length === 0 || !verificationManifestSha256) return null
+    verificationManifest = parseMigrationRecord(verificationManifestJson)
+    if (!validManifest(verificationManifest)
+      || sha256(stableJson(verificationManifest)) !== verificationManifestSha256
+      || hasPersistedManifest && (verificationManifestSha256 !== persistedManifestSha256
+        || stableJson(verificationManifest) !== stableJson(persistedSuccessorManifest))) return null
+  }
 
   const requestId = requestIdOverride || explicitRequestId
-  if (!requestId || (explicitRequestId && explicitRequestId !== requestId)) return null
-  const repairRequestId = explicitRequestId || (migrationText(row.request_id) === requestId ? migrationText(row.request_id) : "")
-  const requestIdSources = [
-    requestId,
-    ...(repairRequestId ? [repairRequestId] : []),
-    verification.request_id,
-    verificationManifest.requestId,
-    ...(hasPersistedManifest ? [persistedSuccessorManifest.requestId] : []),
-  ]
-  if (migrationSourcesAgree(requestIdSources) === null) return null
+  if (!requestId || (explicitRequestId && explicitRequestId !== requestId)
+    || migrationText(verification.request_id) !== requestId
+    || hasPersistedManifest && migrationText(persistedSuccessorManifest.requestId) !== requestId) return null
 
   const successorHash = migrationText(row.successor_request_sha256)
+  if (hasPersistedManifest && (!explicitRequestId || !successorHash)) return null
+  if (explicitRequestId && !successorHash) return null
+  const inferredRepairRequestId = !explicitRequestId && migrationText(row.request_id) === requestId ? requestId : ""
   const requestSha256Sources = [
-    ...(explicitRequestId || successorHash ? [row.successor_request_sha256] : repairRequestId ? [row.request_sha256] : []),
     verification.request_sha256,
-    verificationManifest.requestSha256,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.requestSha256]),
     ...(hasPersistedManifest ? [persistedSuccessorManifest.requestSha256] : []),
+    ...(successorHash ? [successorHash] : inferredRepairRequestId ? [row.request_sha256] : []),
   ]
-  if (migrationSourcesAgree(requestSha256Sources) === null) return null
-  const requestSha256 = migrationSourcesAgree(requestSha256Sources)!
+  const requestSha256 = migrationSourcesAgree(requestSha256Sources)
+  if (!requestSha256 || !/^[0-9a-f]{40,64}$/i.test(requestSha256)) return null
 
-  const integrationHeadSources = [verification.integration_head, verificationManifest.integrationHead]
-  const integrationTreeSources = [verification.integration_tree, verificationManifest.integrationTree]
-  if (hasPersistedManifest) {
-    integrationHeadSources.push(persistedSuccessorManifest.integrationHead)
-    integrationTreeSources.push(persistedSuccessorManifest.integrationTree)
-  }
-  const integrationHead = migrationSourcesAgree(integrationHeadSources)
-  const integrationTree = migrationSourcesAgree(integrationTreeSources)
-  if (!integrationHead || !integrationTree) return null
+  const generation = Number(row.generation)
+  if (!Number.isSafeInteger(generation) || generation < 1
+    || Number(verification.generation) !== generation
+    || verificationState !== "awaiting_manifest" && Number(verificationManifest.generation) !== generation
+    || hasPersistedManifest && Number(persistedSuccessorManifest.generation) !== generation) return null
+  const runId = migrationSourcesAgree([
+    row.run_id,
+    verification.run_id,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.runId]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.runId] : []),
+  ])
+  if (!runId) return null
+
+  const graphSha256 = migrationSourcesAgree([
+    verification.graph_sha256,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.graphSha256]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.graphSha256] : []),
+  ])
+  const runAssignmentSha256 = migrationSourcesAgree([
+    verification.run_assignment_sha256,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.runAssignmentSha256]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.runAssignmentSha256] : []),
+  ])
+  if (!graphSha256 || !runAssignmentSha256
+    || !/^[0-9a-f]{40,64}$/i.test(graphSha256)
+    || !/^[0-9a-f]{40,64}$/i.test(runAssignmentSha256)) return null
+
+  const integrationHead = migrationSourcesAgree([
+    verification.integration_head,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.integrationHead]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.integrationHead] : []),
+  ])
+  const integrationTree = migrationSourcesAgree([
+    verification.integration_tree,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.integrationTree]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.integrationTree] : []),
+  ])
+  if (!integrationHead || !integrationTree
+    || !/^[0-9a-f]{40,64}$/i.test(integrationHead)
+    || !/^[0-9a-f]{40,64}$/i.test(integrationTree)) return null
   const currentCommit = migrationText(row.current_commit)
   const currentTree = migrationText(row.current_tree)
   if (currentCommit && currentTree && (currentCommit !== integrationHead || currentTree !== integrationTree)) return null
 
-  const canonicalGates = Array.isArray(verificationManifest.gates) ? verificationManifest.gates : null
-  const persistedGates = hasPersistedManifest && Array.isArray(persistedSuccessorManifest.gates) ? persistedSuccessorManifest.gates : null
-  if (!canonicalGates || (hasPersistedManifest && (!persistedGates || stableJson(canonicalGates) !== stableJson(persistedGates)))) return null
-  const effectiveGatesText = migrationText(row.effective_gates_json)
-  if (effectiveGatesText) {
-    const effectiveGates = parseMigrationArray(effectiveGatesText)
-    if (!effectiveGates || stableJson(effectiveGates) !== stableJson(canonicalGates)) return null
-  }
+  const canonicalManifest = hasPersistedManifest ? persistedSuccessorManifest : verificationManifest
+  const canonicalGates = Array.isArray(canonicalManifest.gates) ? canonicalManifest.gates : null
+  if (!canonicalGates) return null
+  const effectiveGates = parseMigrationArray(row.effective_gates_json)
+  if (!effectiveGates || stableJson(effectiveGates) !== stableJson(canonicalGates)) return null
 
-  const repairIdSources = [row.repair_id, verification.repair_id, verificationManifest.repairId]
-  const predecessorSources = [verification.predecessor_request_id, verificationManifest.predecessorRequestId]
-  if (hasPersistedManifest) {
-    repairIdSources.push(persistedSuccessorManifest.repairId)
-    predecessorSources.push(persistedSuccessorManifest.predecessorRequestId)
-  }
-  const repairId = migrationSourcesAgree(repairIdSources)
-  const predecessorRequestId = migrationSourcesAgree(predecessorSources)
-  if (!repairId || !predecessorRequestId || migrationText(verification.run_id) !== migrationText(row.run_id)
-    || Number(verification.generation) !== Number(row.generation)) return null
+  const repairId = migrationSourcesAgree([
+    row.repair_id,
+    verification.repair_id,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.repairId]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.repairId] : []),
+  ])
+  const predecessorRequestId = migrationSourcesAgree([
+    verification.predecessor_request_id,
+    ...(verificationState === "awaiting_manifest" ? [] : [verificationManifest.predecessorRequestId]),
+    ...(hasPersistedManifest ? [persistedSuccessorManifest.predecessorRequestId] : []),
+  ])
+  if (!repairId || !predecessorRequestId) return null
+  if (hasPersistedManifest && persistedSuccessorManifest.repairRound !== undefined && verification.repair_round !== null && verification.repair_round !== undefined
+    && Number(persistedSuccessorManifest.repairRound) !== Number(verification.repair_round)) return null
 
   return {
     requestId,
@@ -973,8 +1049,8 @@ function validateFailedSuccessorMigration(database: Database, allowPredecessorEp
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow | undefined>()
   const verification = database.prepare(`
-    SELECT request_id, run_id, generation, request_sha256, integration_head, integration_tree,
-      predecessor_request_id, repair_id, state, manifest_json, manifest_sha256
+    SELECT request_id, run_id, generation, graph_sha256, run_assignment_sha256, request_sha256, integration_head, integration_tree,
+      predecessor_request_id, repair_id, repair_round, state, manifest_json, manifest_sha256
     FROM manager_verifications WHERE request_id = ?
   `)
   const episodeSelect = database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?")
@@ -1108,8 +1184,8 @@ function applySchema16(database: Database): void {
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow>()
   const verification = database.prepare(`
-    SELECT request_id, run_id, generation, request_sha256, integration_head, integration_tree,
-      predecessor_request_id, repair_id, state, manifest_json, manifest_sha256, terminal_detail
+    SELECT request_id, run_id, generation, graph_sha256, run_assignment_sha256, request_sha256, integration_head, integration_tree,
+      predecessor_request_id, repair_id, repair_round, state, manifest_json, manifest_sha256, terminal_detail
     FROM manager_verifications WHERE request_id = ?
   `)
   const audits = database.prepare(`
@@ -1411,8 +1487,8 @@ function applySchema17(database: Database): void {
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow | undefined>()
   const verification = database.prepare(`
-    SELECT request_id, run_id, generation, request_sha256, integration_head, integration_tree,
-      predecessor_request_id, repair_id, state, manifest_json, manifest_sha256
+    SELECT request_id, run_id, generation, graph_sha256, run_assignment_sha256, request_sha256, integration_head, integration_tree,
+      predecessor_request_id, repair_id, repair_round, state, manifest_json, manifest_sha256
     FROM manager_verifications WHERE request_id = ?
   `)
   const getVerification = (requestId: string): SqlRow | undefined => {
