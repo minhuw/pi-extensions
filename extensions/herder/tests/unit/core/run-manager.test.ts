@@ -11,7 +11,7 @@ import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { integrationRepairCapabilityDigest, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -3054,6 +3054,71 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 		} finally {
 			accepted.close();
 		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("legacy repair operations replay by stored identity and dispatch through canonical behavior", { timeout: 15_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-legacy-operation-"));
+	const fixture = writeFixture(root);
+	const requestId = "legacy-runtime-request";
+	const legacyPayload = {
+		operation: "invalid",
+		requestId,
+		capabilityTokenSha256: integrationRepairCapabilityDigest(integrationRepairCapabilityToken(requestId)),
+	};
+	const seeded = new RunStore(fixture.planDirectory);
+	const accepted = seeded.submitOperation("legacy-repair-operation", "repair", legacyPayload);
+	seeded.close();
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await assert.rejects(
+			() => waitManagerOperation(service, accepted.operationId),
+			/Integration repair operation is invalid/,
+		);
+		const replayBody = await requestService(service, "/v1/operation", {
+			operationId: accepted.operationId,
+			kind: "repair",
+			input: legacyPayload,
+		});
+		const replay = payload(replayBody.operation);
+		assert.equal(replay.kind, "repair");
+		assert.equal(replay.payloadSha256, accepted.payloadSha256);
+		assert.equal(replay.protocolVersion, accepted.protocolVersion);
+		await assert.rejects(
+			() => requestService(service, "/v1/operation", {
+				operationId: accepted.operationId,
+				kind: "repair",
+				input: { ...legacyPayload, operation: "begin" },
+			}),
+			/replayed with different payload/,
+		);
+		await assert.rejects(
+			() => requestService(service, "/v1/operation", {
+				operationId: "new-legacy-repair-operation",
+				kind: "repair",
+				input: legacyPayload,
+			}),
+			/Unknown manager operation kind/,
+		);
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(after.getOperation(accepted.operationId)?.kind, "repair");
+			assert.equal((after.database.prepare("SELECT COUNT(*) AS count FROM manager_operations").get() as { count: number }).count, 1);
+			const manager = new HerderRunManager(fixture.planDirectory);
+			try {
+				assert.equal("repair" in manager, false);
+				assert.equal(typeof manager.integrationRepair, "function");
+			} finally {
+				manager.close();
+			}
+		} finally {
+			after.close();
+		}
+		await stopService(fixture.planDirectory);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

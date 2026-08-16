@@ -5,7 +5,7 @@ import type { VerificationManifest } from "../shared/protocol.ts";
 
 export interface ManagerWorkerCall {
 	id: number;
-	method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "repair" | "auditScheduler" | "dashboardState";
+	method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "auditScheduler" | "dashboardState";
 	input?: unknown;
 }
 
@@ -42,7 +42,7 @@ async function handle(call: ManagerWorkerCall): Promise<void> {
 		else if (call.method === "stop") result = manager.stop();
 		else if (call.method === "verification") result = await manager.verification(call.input as VerificationManifest);
 		else if (call.method === "reignite") result = manager.reignite(call.input as ReigniteInput);
-		else if (call.method === "integration_repair" || call.method === "repair") result = await manager.integrationRepair(call.input as IntegrationRepairInput);
+		else if (call.method === "integration_repair") result = await manager.integrationRepair(call.input as IntegrationRepairInput);
 		else if (call.method === "auditScheduler") result = await manager.auditScheduler({ includeReply: false });
 		else if (call.method === "dashboardState") result = buildDashboardStateBody({ planDir: planDirectory });
 		else throw new Error(`Unknown Herder manager method ${JSON.stringify(call.method)}.`);

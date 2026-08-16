@@ -13,6 +13,7 @@ import {
 } from "../../../src/client/index.ts";
 import { git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
+import { MANAGER_PROTOCOL_VERSION } from "../../../src/shared/protocol.ts";
 
 function planRoot(): string {
 	const root = mkdtempSync(path.join(os.tmpdir(), "herder-ensure-service-"));
@@ -48,14 +49,14 @@ function fakeServiceProcess(script: string): { pid: number; kill: () => void } {
 	return { pid: child.pid, kill: () => { try { process.kill(child.pid!, "SIGKILL"); } catch {} } };
 }
 
-function registerService(planDirectory: string, pid: number): void {
+function registerService(planDirectory: string, pid: number, port = 1, authToken = "stale"): void {
 	const store = new RunStore(planDirectory);
 	try {
 		store.putService({
 			instanceId: "stale-instance",
 			pid,
-			port: 1,
-			authToken: "stale",
+			port,
+			authToken,
 			dashboardUrl: "http://127.0.0.1:1/",
 			startedAt: new Date().toISOString(),
 		});
@@ -64,6 +65,23 @@ function registerService(planDirectory: string, pid: number): void {
 
 function alive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function oldProtocolServiceProcess(): Promise<{ pid: number; port: number; authToken: string; kill: () => void }> {
+	const authToken = "stale";
+	const child = spawn(process.execPath, ["-e", `const http = require("node:http"); const server = http.createServer((req, res) => { if (req.url !== "/health" || req.headers.authorization !== "Bearer ${authToken}") { res.writeHead(401); return res.end(); } res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, instanceId: "stale-instance", pid: process.pid, runtimeExecutable: process.execPath, managerProtocolVersion: ${MANAGER_PROTOCOL_VERSION - 1}, executionSchemaVersion: 17, capabilities: ["durable-operations"] })); }); server.listen(0, "127.0.0.1", () => console.log(server.address().port)); setInterval(() => {}, 1000);`], { stdio: ["ignore", "pipe", "ignore"] });
+	if (!child.pid || !child.stdout) throw new Error("failed to spawn old protocol service");
+	const port = await new Promise<number>((resolve, reject) => {
+		let output = "";
+		const onData = (chunk: Buffer): void => {
+			output += chunk.toString();
+			const value = Number(output.trim());
+			if (Number.isInteger(value) && value > 0) { child.stdout!.off("data", onData); resolve(value); }
+		};
+		child.stdout.on("data", onData);
+		child.once("error", reject);
+	});
+	return { pid: child.pid, port, authToken, kill: () => { try { process.kill(child.pid!, "SIGKILL"); } catch {} } };
 }
 
 test("detached daemon startup does not invoke Orca host integration", async () => {
@@ -156,6 +174,23 @@ test("manager controls use immediate durable submission and polling", async () =
 		assert.equal(replay.state, "succeeded");
 		await assert.rejects(() => submitManagerOperation(service, "stop", { changed: true }, receipt.operationId), /replayed with different payload/);
 	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureService replaces a prior-protocol daemon", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	const old = await oldProtocolServiceProcess();
+	try {
+		registerService(planDirectory, old.pid, old.port, old.authToken);
+		const service = await ensureService(planDirectory, { unresponsiveGraceMs: 1_000 });
+		assert.notEqual(service.pid, old.pid);
+		assert.ok(alive(service.pid));
+		assert.equal((await requestService(service, "/health")).managerProtocolVersion, MANAGER_PROTOCOL_VERSION);
+	} finally {
+		old.kill();
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });
 	}

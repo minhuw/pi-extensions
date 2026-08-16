@@ -19,6 +19,7 @@ import {
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
 	type ManagerOperationKind,
+	type StoredManagerOperationKind,
 	type ManagerOperationReceipt,
 	type ManagerReply,
 } from "../shared/protocol.ts";
@@ -150,7 +151,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "repair" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
+	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);
@@ -271,8 +272,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 				const stored = typeof verificationPayload.requestId === "string" ? store.getVerificationByRequestId(verificationPayload.requestId) : null;
 				if (stored?.request.repairId && stored.state === "running" && stored.manifest) payload = stored.manifest;
 			}
-			const result = await executor.call(operation.kind, payload);
-			const reply = operationReply(operation.kind, result);
+			const runtimeKind = operation.kind === "repair" ? "integration_repair" : operation.kind;
+			const result = await executor.call(runtimeKind, payload);
+			const reply = operationReply(runtimeKind, result);
 			store.transaction(() => {
 				store.completeOperation(operation.operationId, result);
 				if (reply) store.putSnapshot(reply);
@@ -353,9 +355,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			void readBody(request).then((body) => {
 				const record = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
 				const operationId = String(record.operationId || "");
-				const kind = String(record.kind || "") as ManagerOperationKind;
-				if (!MANAGER_OPERATION_KINDS.includes(kind)) throw new Error(`Unknown manager operation kind: ${kind}`);
+				const kind = String(record.kind || "") as StoredManagerOperationKind;
 				const existing = operationId ? store.getOperation(operationId) : null;
+				if (!existing && !MANAGER_OPERATION_KINDS.includes(kind as ManagerOperationKind)) throw new Error(`Unknown manager operation kind: ${kind}`);
 				if (!existing && store.countPendingOperations() >= MAX_PENDING_OPERATIONS) {
 					send(response, 429, { ok: false, error: "operation-queue-full" });
 					return;

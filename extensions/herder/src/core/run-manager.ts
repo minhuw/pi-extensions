@@ -2014,10 +2014,6 @@ export class HerderRunManager {
 		return this.reply();
 	}
 
-	async repair(input: IntegrationRepairInput): Promise<ManagerReply> {
-		return this.integrationRepair(input);
-	}
-
 	private recordIntegrationRepairVerificationOutcome(requestId: string, state: "passed" | "failed", detail: string | null): void {
 		let repair = this.store.getIntegrationRepairForRequest(requestId);
 		if (!repair) {

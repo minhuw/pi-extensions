@@ -23,8 +23,8 @@ import {
 	type AttentionState,
 	type ManagerAction,
 	type ManagerAttentionRequest,
-	type ManagerOperationKind,
 	type ManagerOperationReceipt,
+	type StoredManagerOperationKind,
 	type ManagerOperationState,
 	type ManagerReply,
 	type PlanPhase,
@@ -205,7 +205,7 @@ export interface StoredProfileBinding {
 export interface StoredManagerOperation {
 	sequence: number;
 	operationId: string;
-	kind: ManagerOperationKind;
+	kind: StoredManagerOperationKind;
 	payload: unknown;
 	payloadSha256: string;
 	state: ManagerOperationState;
@@ -334,7 +334,7 @@ function normalizeBeginRefSnapshot(snapshot: string | null | undefined, snapshot
 	return { json, sha256: normalizedSha256 };
 }
 
-function durableOperationPayload(kind: ManagerOperationKind, payload: unknown): unknown {
+function durableOperationPayload(kind: StoredManagerOperationKind, payload: unknown): unknown {
 	if (kind !== "integration_repair" && kind !== "repair") return payload;
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
 	const record = payload as Record<string, unknown>;
@@ -528,7 +528,7 @@ function rowToOperation(row: Record<string, unknown>): StoredManagerOperation {
 	return {
 		sequence: Number(row.sequence),
 		operationId: String(row.operation_id),
-		kind: row.kind as ManagerOperationKind,
+		kind: row.kind as StoredManagerOperationKind,
 		payload: JSON.parse(String(row.payload_json)),
 		payloadSha256: String(row.payload_sha256),
 		state: row.state as ManagerOperationState,
@@ -820,7 +820,7 @@ export class RunStore {
 		return row ? rowToOperation(row) : null;
 	}
 
-	submitOperation(operationId: string, kind: ManagerOperationKind, payload: unknown): ManagerOperationReceipt {
+	submitOperation(operationId: string, kind: StoredManagerOperationKind, payload: unknown): ManagerOperationReceipt {
 		if (!operationId || operationId.length > 200 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 200 characters");
 		const durablePayload = durableOperationPayload(kind, payload);
 		const canonicalPayload = canonicalEventPayload(durablePayload);

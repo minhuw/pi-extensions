@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 7;
+export const MANAGER_PROTOCOL_VERSION = 8;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"] as const;
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
@@ -463,15 +463,17 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 	}
 }
 
-export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification", "reignite", "integration_repair", "repair"] as const;
+export const MANAGER_OPERATION_KINDS = ["start", "event", "edit", "stop", "verification", "reignite", "integration_repair"] as const;
+export const MANAGER_STORED_OPERATION_KINDS = [...MANAGER_OPERATION_KINDS, "repair"] as const;
 export const MANAGER_OPERATION_STATES = ["accepted", "running", "succeeded", "failed"] as const;
 export type ManagerOperationKind = typeof MANAGER_OPERATION_KINDS[number];
+export type StoredManagerOperationKind = typeof MANAGER_STORED_OPERATION_KINDS[number];
 export type ManagerOperationState = typeof MANAGER_OPERATION_STATES[number];
 
 export interface ManagerOperationReceipt {
 	protocolVersion: number;
 	operationId: string;
-	kind: ManagerOperationKind;
+	kind: StoredManagerOperationKind;
 	payloadSha256: string;
 	state: ManagerOperationState;
 	acceptedAt: string;

@@ -56,7 +56,7 @@ async function rawRequest(service: StoredService, pathname: string, input?: unkn
 }
 
 function rejectLegacyIntegrationRepairCommitMessage(kind: ManagerOperationKind, input: unknown): void {
-	if (kind !== "integration_repair" && kind !== "repair") return;
+	if (kind !== "integration_repair") return;
 	if (input && typeof input === "object" && !Array.isArray(input) && Object.prototype.hasOwnProperty.call(input, "commitMessage")) {
 		throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
 	}
@@ -99,7 +99,6 @@ const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
 	"/v1/verification": "verification",
 	"/v1/reignite": "reignite",
 	"/v1/integration-repair": "integration_repair",
-	"/v1/repair": "repair",
 };
 
 export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
