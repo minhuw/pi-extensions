@@ -161,6 +161,12 @@ test("nested results keep a distinct no-result diagnostic and complete empty con
 	const empty = await run({ role: "assistant", content: [{ type: "text", text: "  \n" }], stopReason: "stop" }, "empty");
 	assert.equal(empty.status, "completed");
 	assert.equal(empty.output, "");
+	const noTextBlock = await run({ role: "assistant", content: [{ type: "image", data: "ignored" }], stopReason: "stop" }, "no-text-block");
+	assert.equal(noTextBlock.status, "completed");
+	assert.equal(noTextBlock.output, "");
+	const zeroLength = await run({ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "stop" }, "zero-length");
+	assert.equal(zeroLength.status, "completed");
+	assert.equal(zeroLength.output, "");
 	const padded = await run({ role: "assistant", content: [{ type: "text", text: "  padded child  " }], stopReason: "stop" }, "padded");
 	assert.equal(padded.status, "completed");
 	assert.equal(padded.output, "  padded child  ");

@@ -344,6 +344,12 @@ test("worker terminals preserve distinct no-result and empty-content behavior", 
 	const empty = await run({ role: "assistant", content: [{ type: "text", text: "  \n" }], stopReason: "stop" }, "empty");
 	assert.equal(empty.interrupted, true);
 	assert.equal(empty.error, "Pi worker produced no terminal result");
+	const noTextBlock = await run({ role: "assistant", content: [{ type: "image", data: "ignored" }], stopReason: "stop" }, "no-text-block");
+	assert.equal(noTextBlock.interrupted, true);
+	assert.equal(noTextBlock.error, "Pi worker produced no terminal result");
+	const zeroLength = await run({ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "stop" }, "zero-length");
+	assert.equal(zeroLength.interrupted, true);
+	assert.equal(zeroLength.error, "Pi worker produced no terminal result");
 	const padded = await run({ role: "assistant", content: [{ type: "text", text: "  padded child  " }], stopReason: "stop" }, "padded");
 	assert.equal(padded.response, "  padded child  ");
 	const provider = await run({ role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "error", errorMessage: "provider failed" }, "provider");
