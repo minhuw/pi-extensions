@@ -338,24 +338,67 @@ test("repair rows and audits converge on identical replay and reject divergent e
 	}
 });
 
-test("legacy repair operation identity remains replayable while new admission is canonical", () => {
+test("legacy repair operation identity remains replayable while fresh admission is canonical", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-legacy-operation-replay-"));
 	try {
 		repairInput(planDirectory);
-		const store = new RunStore(planDirectory);
 		const payload = { operation: "begin", requestId: "verify-legacy", capabilityTokenSha256: "a".repeat(64) };
-		const first = store.submitOperation("legacy-repair-operation", "repair", payload);
+		const payloadJson = stableJson(payload);
+		const payloadSha256 = sha256(stableJson({ kind: "repair", payload }));
+		const repairStore = new RunStore(planDirectory);
+		const legacyRepair = repairStore.putIntegrationRepair({
+			repairId: "legacy-repair",
+			runId: "repair-run",
+			generation: 1,
+			requestId: payload.requestId,
+			requestSha256: "b".repeat(64),
+			ownerSessionId: "legacy-session",
+			capabilityDigest: "c".repeat(64),
+			classification: "code_defect",
+			state: "active",
+			parentCommit: "d".repeat(40),
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+		});
+		const legacyAudit = repairStore.recordIntegrationRepairAudit(legacyRepair.repairId, "legacy-repair-operation", "begin", payloadSha256, {
+			operation: "begin",
+			requestId: payload.requestId,
+			requestSha256: legacyRepair.requestSha256,
+		});
+		repairStore.close();
+		const seed = openExecutionDatabase(planDirectory, { create: true })!;
+		const acceptedAt = "2026-08-15T00:00:00.000Z";
+		const updatedAt = "2026-08-15T00:01:00.000Z";
+		seed.prepare(`
+			INSERT INTO manager_operations (
+				operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+				result_json, error, accepted_at, started_at, finished_at, updated_at
+			) VALUES (?, 'repair', ?, ?, 'succeeded', 1, ?, NULL, ?, ?, ?, ?)
+		`).run("legacy-repair-operation", payloadJson, payloadSha256, JSON.stringify({ legacy: true, payloadSha256 }), acceptedAt, acceptedAt, updatedAt, updatedAt);
+		seed.exec("PRAGMA user_version = 13;");
+		seed.close();
+
+		const store = new RunStore(planDirectory);
+		assert.equal(Number((store.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), EXECUTION_SCHEMA_VERSION);
+		const first = store.replayOperation("legacy-repair-operation", "repair", payload);
 		assert.equal(first.kind, "repair");
 		assert.equal(first.protocolVersion, MANAGER_PROTOCOL_VERSION);
-		const stored = store.database.prepare("SELECT kind, payload_json, payload_sha256, accepted_at, updated_at FROM manager_operations WHERE operation_id = ?").get("legacy-repair-operation") as Record<string, string>;
-		const replay = store.submitOperation("legacy-repair-operation", "repair", payload);
+		assert.equal(first.state, "succeeded");
+		assert.deepEqual(first.result, { legacy: true, payloadSha256 });
+		const stored = store.database.prepare("SELECT kind, payload_json, payload_sha256, result_json, accepted_at, updated_at FROM manager_operations WHERE operation_id = ?").get("legacy-repair-operation") as Record<string, string>;
+		const audits = store.getIntegrationRepairAudits(legacyRepair.repairId);
+		assert.deepEqual(audits, [legacyAudit]);
+		const replay = store.replayOperation("legacy-repair-operation", "repair", payload);
 		assert.deepEqual(replay, first);
 		assert.equal(stored.kind, "repair");
-		assert.equal(stored.payload_json.includes(payload.capabilityTokenSha256), true);
+		assert.equal(stored.payload_json, payloadJson);
 		assert.equal(stored.payload_sha256, first.payloadSha256);
+		assert.equal(stored.result_json, JSON.stringify({ legacy: true, payloadSha256 }));
 		assert.equal(stored.accepted_at, first.acceptedAt);
 		assert.equal(stored.updated_at, first.updatedAt);
+		assert.deepEqual(store.getIntegrationRepairAudits(legacyRepair.repairId), [legacyAudit]);
 		assert.throws(() => store.submitOperation("legacy-repair-operation", "integration_repair", payload), /replayed with different payload/);
+		assert.throws(() => Reflect.apply(store.submitOperation, store, ["new-legacy-repair-operation", "repair", payload]), /Unknown manager operation kind: repair/);
 		assert.equal((store.database.prepare("SELECT COUNT(*) AS count FROM manager_operations").get() as { count: number }).count, 1);
 		store.close();
 	} finally {

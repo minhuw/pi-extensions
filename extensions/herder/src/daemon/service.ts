@@ -362,7 +362,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 					send(response, 429, { ok: false, error: "operation-queue-full" });
 					return;
 				}
-				const operation = store.submitOperation(operationId, kind, record.input ?? {});
+				const operation = existing
+					? store.replayOperation(operationId, kind, record.input ?? {})
+					: store.submitOperation(operationId, kind as ManagerOperationKind, record.input ?? {});
 				clearTerminalIdleShutdown();
 				send(response, 202, { ok: true, operation });
 				scheduleDrain();

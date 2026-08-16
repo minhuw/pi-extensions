@@ -23,6 +23,7 @@ import {
 	type AttentionState,
 	type ManagerAction,
 	type ManagerAttentionRequest,
+	type ManagerOperationKind,
 	type ManagerOperationReceipt,
 	type StoredManagerOperationKind,
 	type ManagerOperationState,
@@ -820,7 +821,15 @@ export class RunStore {
 		return row ? rowToOperation(row) : null;
 	}
 
-	submitOperation(operationId: string, kind: StoredManagerOperationKind, payload: unknown): ManagerOperationReceipt {
+	submitOperation(operationId: string, kind: ManagerOperationKind, payload: unknown): ManagerOperationReceipt {
+		return this.submitOperationInternal(operationId, kind, payload, true);
+	}
+
+	replayOperation(operationId: string, kind: StoredManagerOperationKind, payload: unknown): ManagerOperationReceipt {
+		return this.submitOperationInternal(operationId, kind, payload, false);
+	}
+
+	private submitOperationInternal(operationId: string, kind: StoredManagerOperationKind, payload: unknown, allowInsertion: boolean): ManagerOperationReceipt {
 		if (!operationId || operationId.length > 200 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 200 characters");
 		const durablePayload = durableOperationPayload(kind, payload);
 		const canonicalPayload = canonicalEventPayload(durablePayload);
@@ -830,6 +839,8 @@ export class RunStore {
 			if (existing.kind !== kind || existing.payloadSha256 !== identity.sha256) throw new Error(`Operation ${operationId} was replayed with different payload`);
 			return operationReceipt(existing);
 		}
+		if (!allowInsertion) throw new Error(`Operation ${operationId} was not found for replay`);
+		if (kind === "repair") throw new Error("Unknown manager operation kind: repair");
 		const now = new Date().toISOString();
 		this.database.prepare(`
 			INSERT INTO manager_operations (

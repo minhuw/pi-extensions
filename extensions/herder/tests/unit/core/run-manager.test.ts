@@ -6,12 +6,12 @@ import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
-import { readManagerState } from "../../../src/daemon/execution-store.ts";
+import { openExecutionDatabase, readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -3070,8 +3070,21 @@ test("legacy repair operations replay by stored identity and dispatch through ca
 		requestId,
 		capabilityTokenSha256: integrationRepairCapabilityDigest(integrationRepairCapabilityToken(requestId)),
 	};
+	const seedDatabase = openExecutionDatabase(fixture.planDirectory, { create: true })!;
+	const acceptedAt = "2026-08-15T00:00:00.000Z";
+	const payloadJson = stableJson(legacyPayload);
+	const payloadSha256 = sha256(stableJson({ kind: "repair", payload: legacyPayload }));
+	seedDatabase.prepare(`
+		INSERT INTO manager_operations (
+			operation_id, kind, payload_json, payload_sha256, state, attempt_count,
+			result_json, error, accepted_at, started_at, finished_at, updated_at
+		) VALUES (?, 'repair', ?, ?, 'accepted', 0, NULL, NULL, ?, NULL, NULL, ?)
+	`).run("legacy-repair-operation", payloadJson, payloadSha256, acceptedAt, acceptedAt);
+	seedDatabase.exec("PRAGMA user_version = 13;");
+	seedDatabase.close();
 	const seeded = new RunStore(fixture.planDirectory);
-	const accepted = seeded.submitOperation("legacy-repair-operation", "repair", legacyPayload);
+	const acceptedOperation = seeded.getOperation("legacy-repair-operation")!;
+	const accepted = { ...acceptedOperation, protocolVersion: MANAGER_PROTOCOL_VERSION };
 	seeded.close();
 	try {
 		const service = await ensureService(fixture.planDirectory);
