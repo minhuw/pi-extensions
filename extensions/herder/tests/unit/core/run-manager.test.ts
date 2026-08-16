@@ -3158,6 +3158,10 @@ test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }
 			store.close();
 		}
 
+		const migrated = new RunStore(fixture.planDirectory);
+		migrated.database.prepare("UPDATE manager_integration_repairs SET begin_ref_snapshot_json = NULL, begin_ref_snapshot_sha256 = NULL WHERE repair_id = ?").run(String(repairRequest.repairId));
+		migrated.close();
+
 		const status = payload(payload(await requestService(service, "/v1/status")).reply);
 		const successor = payload(status.integrationRepair);
 		assert.equal(String(successor.repairId), String(repairRequest.repairId));
@@ -3188,7 +3192,7 @@ test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }
 		};
 		await assert.rejects(
 			() => requestService(service, "/v1/integration-repair", laterBegin),
-			/manager-owned Herder ref/,
+			/namespace evidence is unavailable/,
 		);
 		const after = new RunStore(fixture.planDirectory);
 		try {
