@@ -3094,7 +3094,7 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 	}
 });
 
-test("successor verification rejects a gate-created Herder ref", { timeout: 45_000 }, async () => {
+test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-successor-namespace-"));
 	const fixture = writeFixture(root);
 	try {
@@ -3157,6 +3157,58 @@ test("successor verification rejects a gate-created Herder ref", { timeout: 45_0
 		} finally {
 			store.close();
 		}
+
+		const status = payload(payload(await requestService(service, "/v1/status")).reply);
+		const successor = payload(status.integrationRepair);
+		assert.equal(String(successor.repairId), String(repairRequest.repairId));
+		assert.ok(successor.requestId);
+		const before = new RunStore(fixture.planDirectory);
+		const beforeRepair = before.getIntegrationRepair(String(repairRequest.repairId))!;
+		const beforeRun = before.getRun()!;
+		const beforeEpisodes = before.getIntegrationRepairEpisodes(beforeRepair.repairId);
+		const beforeAudits = before.getIntegrationRepairAudits(beforeRepair.repairId);
+		before.close();
+		const beforeHead = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const beforeTree = git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+		const beforeWorktreeStatus = git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout;
+		const beforeNamespace = git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout;
+		const laterBegin = {
+			operation: "begin",
+			operationId: "repair-successor-namespace-later-begin",
+			requestId: String(successor.requestId),
+			requestSha256: String(successor.requestSha256),
+			capabilityToken: String(successor.capabilityToken),
+			runId: String(successor.runId),
+			generation: Number(successor.generation),
+			ownerSessionId: "main-session",
+			classification: "code_defect",
+		};
+		await assert.rejects(
+			() => requestService(service, "/v1/integration-repair", laterBegin),
+			/manager-owned Herder ref/,
+		);
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			const afterRepair = after.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.deepEqual(afterRepair, beforeRepair);
+			assert.deepEqual(after.getIntegrationRepairEpisodes(afterRepair.repairId), beforeEpisodes);
+			assert.deepEqual(after.getIntegrationRepairAudits(afterRepair.repairId), beforeAudits);
+			assert.deepEqual(after.getRun(), beforeRun);
+			assert.equal(after.getRun()!.status, "failed");
+		} finally {
+			after.close();
+		}
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), beforeHead);
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim(), beforeTree);
+		assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout, beforeWorktreeStatus);
+		assert.equal(git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout, beforeNamespace);
+		assert.equal(git(fixture.repo, ["show-ref", "--verify", "--quiet", "refs/plan-herder/herder-plans/checkpoints/RUN/001"], true).status, 0);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

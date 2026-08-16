@@ -1536,6 +1536,15 @@ export class HerderRunManager {
 		if (worktreeTree !== expectedTree) {
 			throw new Error(`Integration repair begin integration tree changed: expected ${verification.request.integrationTree}, found ${worktreeTree}`);
 		}
+		if (repair && (repair.beginRefSnapshot !== null || repair.beginRefSnapshotSha256 !== null)) {
+			const beginRefSnapshot = repairBeginRefSnapshot(repair);
+			driver.validateIntegrationRepairNamespace({
+				beginRefSnapshot,
+				beginRefSnapshotSha256: repair.beginRefSnapshotSha256!,
+				expectedIntegrationHead: expectedHead,
+				expectedWorktreeHead: expectedHead,
+			});
+		}
 	}
 
 	private prepareRepairGateProgram(
