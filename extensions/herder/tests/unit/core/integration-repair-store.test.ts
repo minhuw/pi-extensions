@@ -1079,6 +1079,28 @@ test("schema 17 migration rejects corrupt awaiting successor evidence before mut
 			mutate: (database, _episodeId, repairId) => database.prepare("UPDATE manager_integration_repairs SET successor_manifest_json = NULL, successor_manifest_sha256 = NULL WHERE repair_id = ?").run(repairId),
 		},
 		{
+			name: "noncanonical persisted successor manifest",
+			mutate: (database, _episodeId, repairId) => {
+				const row = database.prepare("SELECT successor_manifest_json FROM manager_integration_repairs WHERE repair_id = ?").get(repairId) as { successor_manifest_json: string };
+				const manifest = JSON.parse(row.successor_manifest_json) as Record<string, unknown>;
+				delete manifest.repairRound;
+				database.prepare("UPDATE manager_integration_repairs SET successor_manifest_json = ?, successor_manifest_sha256 = ? WHERE repair_id = ?")
+					.run(JSON.stringify(manifest), sha256(stableJson(manifest)), repairId);
+			},
+		},
+		{
+			name: "awaiting repair projection has an impossible state",
+			mutate: (database, _episodeId, repairId) => database.prepare("UPDATE manager_integration_repairs SET state = 'active' WHERE repair_id = ?").run(repairId),
+		},
+		{
+			name: "awaiting repair projection has no current episode",
+			mutate: (database, _episodeId, repairId) => database.prepare("UPDATE manager_integration_repairs SET current_episode_id = NULL WHERE repair_id = ?").run(repairId),
+		},
+		{
+			name: "awaiting repair projection has one-sided current lineage",
+			mutate: (database, _episodeId, repairId) => database.prepare("UPDATE manager_integration_repairs SET current_commit = ?, current_tree = NULL WHERE repair_id = ?").run("0".repeat(40), repairId),
+		},
+		{
 			name: "missing persisted successor hash",
 			mutate: (database, _episodeId, repairId) => database.prepare("UPDATE manager_integration_repairs SET successor_manifest_sha256 = NULL WHERE repair_id = ?").run(repairId),
 		},
