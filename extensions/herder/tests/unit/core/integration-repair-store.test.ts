@@ -146,6 +146,111 @@ function selectedSuccessorMigrationFixture(): { planDirectory: string; repairId:
 	return { planDirectory, repairId, episodeId: successor.episodeId! };
 }
 
+type AwaitingMigrationFixture = {
+	planDirectory: string;
+	repairId: string;
+	predecessorRequestId: string;
+	predecessorRequestSha256: string;
+	successorRequestId: string;
+	successorRequestSha256: string;
+	episodeId: string;
+};
+
+function awaitingSuccessorMigrationFixture(repairId = "schema17-awaiting-canonical"): AwaitingMigrationFixture {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-awaiting-canonical-"));
+	repairInput(planDirectory);
+	const store = new RunStore(planDirectory);
+	const now = "2026-08-15T00:00:00.000Z";
+	const makeRequest = (requestId: string, requestSha256: string, integrationHead: string, integrationTree: string, predecessorRequestId?: string): VerificationRequest => ({
+		schemaVersion: 1,
+		requestId,
+		requestSha256,
+		runId: "repair-run",
+		generation: 1,
+		graphSha256: "a".repeat(64),
+		runAssignmentPath: "/repo/run-assignment.json",
+		runAssignmentSha256: "b".repeat(64),
+		integrationBranch: "herder/repair/integration",
+		integrationWorktree: "/repo/.herder-integration",
+		integrationHead,
+		integrationTree,
+		requestedAt: now,
+		...(predecessorRequestId ? { predecessorRequestId } : {}),
+		repairId,
+		repairRound: 1,
+	});
+	const makeManifest = (request: VerificationRequest): VerificationManifest => ({
+		schemaVersion: 1,
+		requestId: request.requestId,
+		requestSha256: request.requestSha256,
+		runId: request.runId,
+		generation: request.generation,
+		graphSha256: request.graphSha256,
+		runAssignmentSha256: request.runAssignmentSha256,
+		integrationHead: request.integrationHead,
+		integrationTree: request.integrationTree,
+		rationale: "canonical finish-before-start migration fixture",
+		gates: [gate],
+		...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+		repairId,
+		repairRound: 1,
+	});
+	const predecessor = makeRequest("schema17-awaiting-canonical-r0", "1".repeat(64), "c".repeat(40), "d".repeat(40));
+	const predecessorManifest = makeManifest(predecessor);
+	store.putVerificationRequest(predecessor);
+	store.startVerification(predecessor.requestId, predecessorManifest, sha256(stableJson(predecessorManifest)));
+	store.finishVerification(predecessor.requestId, "failed", { passed: false }, "failed");
+	const beginOperationId = "schema17-awaiting-canonical-begin";
+	const repair = store.putIntegrationRepair({
+		repairId,
+		runId: "repair-run",
+		generation: 1,
+		requestId: predecessor.requestId,
+		requestSha256: predecessor.requestSha256,
+		ownerSessionId: "main-session",
+		capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+		classification: "code_defect",
+		state: "active",
+		parentCommit: predecessor.integrationHead,
+		currentTree: predecessor.integrationTree,
+		canonicalGates: [gate],
+		canonicalGatesSha256: sha256(stableJson([gate])),
+		operationId: beginOperationId,
+		operationPayloadSha256: sha256(beginOperationId),
+	});
+	store.recordIntegrationRepairAudit(repairId, beginOperationId, "begin", sha256(beginOperationId), {
+		operation: "begin",
+		requestId: predecessor.requestId,
+		requestSha256: predecessor.requestSha256,
+		classification: "code_defect",
+	});
+	const successor = makeRequest("schema17-awaiting-canonical-r1", "3".repeat(64), "e".repeat(40), "f".repeat(40), predecessor.requestId);
+	const successorManifest = makeManifest(successor);
+	store.putVerificationRequest(successor);
+	store.updateIntegrationRepair(repairId, {
+		state: "committed",
+		currentCommit: successor.integrationHead,
+		currentTree: successor.integrationTree,
+		effectiveGates: [gate],
+		successorRequestId: successor.requestId,
+		successorRequestSha256: successor.requestSha256,
+		successorManifest,
+		successorManifestSha256: sha256(stableJson(successorManifest)),
+	});
+	const current = store.getIntegrationRepair(repairId)!;
+	store.database.exec("PRAGMA user_version = 17;");
+	store.close();
+	return {
+		planDirectory,
+		repairId,
+		predecessorRequestId: predecessor.requestId,
+		predecessorRequestSha256: predecessor.requestSha256,
+		successorRequestId: successor.requestId,
+		successorRequestSha256: successor.requestSha256,
+		episodeId: current.episodeId!,
+	};
+}
+
 test("schema 12 reopens once into begin-bound repair schema and remains idempotent", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema-"));
 	try {
@@ -961,6 +1066,78 @@ test("schema migration preserves a preselected failed successor episode", () => 
 	}
 });
 
+test("schema 17 awaiting successor requires its canonical predecessor episode", () => {
+	const cases: Array<{ name: string; mutate: (database: NonNullable<ReturnType<typeof openExecutionDatabase>>, fixture: AwaitingMigrationFixture) => void }> = [
+		{
+			name: "predecessor integration tree mismatch",
+			mutate: (database, fixture) => database.prepare("UPDATE manager_integration_repair_episodes SET integration_tree = ? WHERE episode_id = ?")
+				.run("0".repeat(40), fixture.episodeId),
+		},
+		{
+			name: "predecessor canonical gates mismatch",
+			mutate: (database, fixture) => {
+				const changedGates = [{ ...gate, label: "changed predecessor gate" }];
+				database.prepare("UPDATE manager_integration_repair_episodes SET canonical_gates_json = ?, canonical_gates_sha256 = ? WHERE episode_id = ?")
+					.run(JSON.stringify(changedGates), sha256(stableJson(changedGates)), fixture.episodeId);
+			},
+		},
+		{
+			name: "predecessor canonical gate hash mismatch",
+			mutate: (database, fixture) => database.prepare("UPDATE manager_integration_repair_episodes SET canonical_gates_sha256 = ? WHERE episode_id = ?")
+				.run("0".repeat(64), fixture.episodeId),
+		},
+		{
+			name: "predecessor episode ID mismatch",
+			mutate: (database, fixture) => {
+				database.prepare("UPDATE manager_integration_repair_episodes SET episode_id = ? WHERE episode_id = ?").run("noncanonical-predecessor-episode", fixture.episodeId);
+				database.prepare("UPDATE manager_integration_repairs SET current_episode_id = ? WHERE repair_id = ?").run("noncanonical-predecessor-episode", fixture.repairId);
+			},
+		},
+		{
+			name: "repair projection selects an older request",
+			mutate: (database, fixture) => database.prepare("UPDATE manager_integration_repairs SET request_id = ?, request_sha256 = ? WHERE repair_id = ?")
+				.run("older-predecessor-request", "4".repeat(64), fixture.repairId),
+		},
+		{
+			name: "predecessor episode is closed",
+			mutate: (database, fixture) => database.prepare("UPDATE manager_integration_repair_episodes SET closed_at = ? WHERE episode_id = ?")
+				.run("2026-08-15T00:01:00.000Z", fixture.episodeId),
+		},
+		{
+			name: "predecessor verification manifest evidence is stale",
+			mutate: (database, fixture) => database.prepare("UPDATE manager_verifications SET integration_tree = ? WHERE request_id = ?")
+				.run("0".repeat(40), fixture.predecessorRequestId),
+		},
+	];
+	for (const [index, fixtureCase] of cases.entries()) {
+		const fixture = awaitingSuccessorMigrationFixture(`schema17-awaiting-canonical-${index}`);
+		try {
+			const database = openExecutionDatabase(fixture.planDirectory, { create: true })!;
+			fixtureCase.mutate(database, fixture);
+			const beforeRepair = database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId);
+			const beforeVerifications = database.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all();
+			const beforeEpisodes = database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId);
+			const beforeAudits = database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId);
+			database.exec("PRAGMA user_version = 16;");
+			database.close();
+
+			assert.throws(() => new RunStore(fixture.planDirectory), /Cannot migrate integration repair/, fixtureCase.name);
+			const unchanged = openExecutionDatabase(fixture.planDirectory, { readOnly: true })!;
+			try {
+				assert.equal(Number((unchanged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 16, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId), beforeRepair, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all(), beforeVerifications, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId), beforeEpisodes, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId), beforeAudits, fixtureCase.name);
+			} finally {
+				unchanged.close();
+			}
+		} finally {
+			fs.rmSync(fixture.planDirectory, { recursive: true, force: true });
+		}
+	}
+});
+
 test("schema 17 migration accepts an awaiting repair successor", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-awaiting-"));
 	try {
@@ -998,7 +1175,7 @@ test("schema 17 migration accepts an awaiting repair successor", () => {
 			integrationTree: request.integrationTree,
 			rationale: "finish-before-start migration fixture",
 			gates: [gate],
-			predecessorRequestId: request.predecessorRequestId,
+			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
 			repairId,
 			repairRound: 1,
 		});
@@ -1064,6 +1241,156 @@ test("schema 17 migration accepts an awaiting repair successor", () => {
 			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repair.repairId), beforeAudits);
 			assert.deepEqual(migrated.getIntegrationRepair(repair.repairId)?.successorManifest, successorManifest);
 			assert.equal(migrated.getIntegrationRepair(repair.repairId)?.successorManifestSha256, successorManifestSha256);
+		} finally {
+			migrated.close();
+		}
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("schema 17 migration accepts an awaiting successor after a later repair episode", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-awaiting-later-"));
+	try {
+		repairInput(planDirectory);
+		const store = new RunStore(planDirectory);
+		const now = "2026-08-15T00:00:00.000Z";
+		const repairId = "schema17-awaiting-later";
+		const makeRequest = (requestId: string, requestSha256: string, integrationHead: string, integrationTree: string, predecessorRequestId?: string): VerificationRequest => ({
+			schemaVersion: 1,
+			requestId,
+			requestSha256,
+			runId: "repair-run",
+			generation: 1,
+			graphSha256: "a".repeat(64),
+			runAssignmentPath: "/repo/run-assignment.json",
+			runAssignmentSha256: "b".repeat(64),
+			integrationBranch: "herder/repair/integration",
+			integrationWorktree: "/repo/.herder-integration",
+			integrationHead,
+			integrationTree,
+			requestedAt: now,
+			...(predecessorRequestId ? { predecessorRequestId } : {}),
+			repairId,
+			repairRound: 1,
+		});
+		const makeManifest = (request: VerificationRequest): VerificationManifest => ({
+			schemaVersion: 1,
+			requestId: request.requestId,
+			requestSha256: request.requestSha256,
+			runId: request.runId,
+			generation: request.generation,
+			graphSha256: request.graphSha256,
+			runAssignmentSha256: request.runAssignmentSha256,
+			integrationHead: request.integrationHead,
+			integrationTree: request.integrationTree,
+			rationale: "later predecessor migration fixture",
+			gates: [gate],
+			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
+			repairId,
+			repairRound: 1,
+		});
+		const failVerification = (request: VerificationRequest): VerificationManifest => {
+			const manifest = makeManifest(request);
+			store.putVerificationRequest(request);
+			store.startVerification(request.requestId, manifest, sha256(stableJson(manifest)));
+			store.finishVerification(request.requestId, "failed", { passed: false }, "failed");
+			return manifest;
+		};
+		const r0 = makeRequest("schema17-awaiting-later-r0", "1".repeat(64), "c".repeat(40), "d".repeat(40));
+		failVerification(r0);
+		const repair = store.putIntegrationRepair({
+			repairId,
+			runId: "repair-run",
+			generation: 1,
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			ownerSessionId: "main-session",
+			capabilityDigest: integrationRepairCapabilityDigest("2".repeat(64)),
+			classification: "code_defect",
+			state: "active",
+			parentCommit: r0.integrationHead,
+			currentTree: r0.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			operationId: "schema17-awaiting-later-begin-r0",
+			operationPayloadSha256: sha256("schema17-awaiting-later-begin-r0"),
+		});
+		store.recordIntegrationRepairAudit(repairId, "schema17-awaiting-later-begin-r0", "begin", sha256("schema17-awaiting-later-begin-r0"), {
+			operation: "begin",
+			requestId: r0.requestId,
+			requestSha256: r0.requestSha256,
+			classification: "code_defect",
+		});
+		const r1 = makeRequest("schema17-awaiting-later-r1", "3".repeat(64), "e".repeat(40), "f".repeat(40), r0.requestId);
+		const r1Manifest = failVerification(r1);
+		store.updateIntegrationRepair(repairId, {
+			state: "failed",
+			successorRequestId: r1.requestId,
+			successorRequestSha256: r1.requestSha256,
+			successorManifest: r1Manifest,
+			successorManifestSha256: sha256(stableJson(r1Manifest)),
+		});
+		store.openIntegrationRepairEpisode({
+			repairId,
+			requestId: r1.requestId,
+			requestSha256: r1.requestSha256,
+			integrationHead: r1.integrationHead,
+			integrationTree: r1.integrationTree,
+			canonicalGates: [gate],
+			canonicalGatesSha256: sha256(stableJson([gate])),
+			state: "failed",
+			detail: "later failed predecessor",
+		});
+		const beginR1 = "schema17-awaiting-later-begin-r1";
+		store.selectIntegrationRepairEpisode(repairId, {
+			classification: "code_defect",
+			operationId: beginR1,
+			operationPayloadSha256: sha256(beginR1),
+			state: "active",
+		});
+		store.recordIntegrationRepairAudit(repairId, beginR1, "begin", sha256(beginR1), {
+			operation: "begin",
+			requestId: r1.requestId,
+			requestSha256: r1.requestSha256,
+			classification: "code_defect",
+		});
+		const r2 = makeRequest("schema17-awaiting-later-r2", "5".repeat(64), "7".repeat(40), "8".repeat(40), r1.requestId);
+		const r2Manifest = makeManifest(r2);
+		store.putVerificationRequest(r2);
+		store.updateIntegrationRepair(repairId, {
+			state: "committed",
+			currentCommit: r2.integrationHead,
+			currentTree: r2.integrationTree,
+			effectiveGates: [gate],
+			successorRequestId: r2.requestId,
+			successorRequestSha256: r2.requestSha256,
+			successorManifest: r2Manifest,
+			successorManifestSha256: sha256(stableJson(r2Manifest)),
+		});
+		const beforeRepair = store.database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(repairId);
+		const beforeVerifications = store.database.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all();
+		const beforeEpisodes = store.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(repairId);
+		const beforeAudits = store.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repairId);
+		const currentEpisodeId = store.getIntegrationRepair(repairId)!.episodeId!;
+		store.database.exec("PRAGMA user_version = 16;");
+		store.close();
+
+		const migrated = new RunStore(planDirectory);
+		try {
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), EXECUTION_SCHEMA_VERSION);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(repairId), beforeRepair);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all(), beforeVerifications);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(repairId), beforeEpisodes);
+			assert.deepEqual(migrated.database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(repairId), beforeAudits);
+			const current = migrated.getIntegrationRepair(repairId)!;
+			assert.equal(current.requestId, r1.requestId);
+			assert.equal(current.requestSha256, r1.requestSha256);
+			assert.equal(current.episodeId, currentEpisodeId);
+			assert.equal(migrated.getVerificationByRequestId(r2.requestId)!.state, "awaiting_manifest");
+			assert.equal(migrated.getVerificationByRequestId(r2.requestId)!.manifest, null);
+			assert.equal(migrated.getVerificationByRequestId(r2.requestId)!.manifestSha256, null);
+			assert.deepEqual(current.successorManifest, r2Manifest);
 		} finally {
 			migrated.close();
 		}
