@@ -1513,6 +1513,9 @@ export class HerderRunManager {
 			|| request.predecessorRequestId !== undefined
 			|| request.repairId !== undefined
 			|| request.repairRound !== undefined) return false;
+		// A replacement verification can omit predecessor metadata; another durable
+		// repair row in this run generation still proves that this is not the first failure.
+		if (this.store.hasOtherIntegrationRepairForGeneration(request.runId, request.generation, repair.repairId)) return false;
 		const episodes = this.store.getIntegrationRepairEpisodes(repair.repairId);
 		if (episodes.length !== 1 || this.store.getIntegrationRepairAudits(repair.repairId).length !== 0) return false;
 		const [episode] = episodes;

@@ -3365,3 +3365,114 @@ test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }
 		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
 });
+
+test("replacement failure cannot recapture namespace evidence from prior repair", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-replacement-recapture-test-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "replacement-recapture");
+		const firstFailed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "replacement-recapture-first", [{
+			gateId: "first-failure",
+			label: "first failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the first immutable failed verification and unclaimed repair.",
+		}]);
+		const firstRepair = payload(firstFailed.reply.integrationRepair);
+		const resumed = payload(payload(await requestService(service, "/v1/start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		})).reply);
+		assert.equal(resumed.status, "paused");
+		const replacementRequest = payload(resumed.verificationRequest);
+		assert.notEqual(replacementRequest.requestId, firstRepair.requestId);
+		assert.equal(replacementRequest.predecessorRequestId, undefined);
+		const secondFailed = await submitFinalVerification(service, fixture.planDirectory, resumed, "replacement-recapture-second", [{
+			gateId: "second-failure",
+			label: "replacement failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates a later failed request with prior run-generation repair history.",
+		}]);
+		assert.equal(secondFailed.reply.status, "failed");
+		const laterRepair = payload(secondFailed.reply.integrationRepair);
+		assert.notEqual(laterRepair.repairId, firstRepair.repairId);
+
+		const before = new RunStore(fixture.planDirectory);
+		let beforeRepair;
+		let beforeRun;
+		let beforeEpisodes;
+		let beforeAudits;
+		let beforeVerificationCount: number;
+		try {
+			const run = before.getRun()!;
+			beforeRepair = before.getIntegrationRepair(String(laterRepair.repairId))!;
+			beforeRun = run;
+			beforeEpisodes = before.getIntegrationRepairEpisodes(beforeRepair.repairId);
+			beforeAudits = before.getIntegrationRepairAudits(beforeRepair.repairId);
+			beforeVerificationCount = Number((before.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count);
+			assert.equal(before.hasOtherIntegrationRepairForGeneration(run.runId, run.currentGeneration, beforeRepair.repairId), true);
+			assert.equal(beforeRepair.beginRefSnapshot, null);
+			assert.equal(beforeEpisodes.length, 1);
+			assert.equal(beforeAudits.length, 0);
+		} finally {
+			before.close();
+		}
+
+		git(fixture.repo, ["update-ref", "refs/plan-herder/herder-plans/checkpoints/RUN/999", String(laterRepair.parentCommit)]);
+		const integrationWorktree = String(laterRepair.integrationWorktree);
+		const beforeHead = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const beforeTree = git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+		const beforeWorktreeStatus = git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout;
+		const beforeNamespace = git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout;
+		await stopService(fixture.planDirectory);
+		service = await ensureService(fixture.planDirectory);
+		await assert.rejects(
+			() => requestService(service, "/v1/integration-repair", {
+				operation: "begin",
+				operationId: "replacement-recapture-later-begin",
+				requestId: String(laterRepair.requestId),
+				requestSha256: String(laterRepair.requestSha256),
+				capabilityToken: String(laterRepair.capabilityToken),
+				runId: String(laterRepair.runId),
+				generation: Number(laterRepair.generation),
+				ownerSessionId: "main-session",
+				classification: "code_defect",
+			}),
+			/namespace evidence is unavailable/,
+		);
+
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			assert.deepEqual(after.getIntegrationRepair(String(laterRepair.repairId)), beforeRepair);
+			assert.deepEqual(after.getIntegrationRepairEpisodes(String(laterRepair.repairId)), beforeEpisodes);
+			assert.deepEqual(after.getIntegrationRepairAudits(String(laterRepair.repairId)), beforeAudits);
+			const afterRun = after.getRun()!;
+			assert.equal(afterRun.status, beforeRun.status);
+			assert.equal(afterRun.terminalDetail, beforeRun.terminalDetail);
+			assert.equal(afterRun.currentGeneration, beforeRun.currentGeneration);
+			assert.equal(afterRun.graphSha256, beforeRun.graphSha256);
+			assert.equal(Number((after.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), beforeVerificationCount);
+		} finally {
+			after.close();
+		}
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), beforeHead);
+		assert.equal(git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim(), beforeTree);
+		assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout, beforeWorktreeStatus);
+		assert.equal(git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout, beforeNamespace);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});

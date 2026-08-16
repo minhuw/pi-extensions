@@ -1222,6 +1222,16 @@ export class RunStore {
 		return row ? rowToIntegrationRepair(row as Record<string, unknown>) : null;
 	}
 
+	hasOtherIntegrationRepairForGeneration(runId: string, generation: number, repairId: string): boolean {
+		const row = this.database.prepare(`
+			SELECT 1
+			FROM manager_integration_repairs
+			WHERE run_id = ? AND generation = ? AND repair_id <> ?
+			LIMIT 1
+		`).get(runId, generation, repairId);
+		return Boolean(row);
+	}
+
 	getIntegrationRepairEpisode(episodeId: string): StoredIntegrationRepairEpisode | null {
 		const row = this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(episodeId) as Record<string, unknown> | undefined;
 		return row ? rowToIntegrationRepairEpisode(row) : null;
