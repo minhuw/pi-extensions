@@ -12,11 +12,60 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	const lock = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
 	const rootReadme = await readFile(path.join(repositoryRoot, "README.md"), "utf8");
 	const herderReadme = await readFile(path.join(extensionRoot, "README.md"), "utf8");
+	const adapterReadme = await readFile(path.join(extensionRoot, "adapters/README.md"), "utf8");
 	assert.deepEqual(manifest.engines, { node: ">=22.19.0" });
 	assert.deepEqual(lock.packages[""].engines, { node: ">=22.19.0" });
 	assert.match(rootReadme, /Node >=22\.19\.0/);
 	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
+	assert.match(herderReadme, /^## Planning and execution commands$/m);
+	const expectedCommandNames = [
+		"/herder-attach",
+		"/herder-cleanup",
+		"/herder-dashboard",
+		"/herder-fire",
+		"/herder-grill",
+		"/herder-improve",
+		"/herder-plans",
+		"/herder-reset",
+		"/herder-resume",
+		"/herder-revise",
+		"/herder-simplify",
+		"/herder-status",
+		"/herder-stop",
+		"/herder-validate",
+	].sort();
+	assert.deepEqual([...new Set(herderReadme.match(/\/herder-[a-z-]+/g))].sort(), expectedCommandNames);
+	const commandSection = herderReadme.split("## Planning and execution commands")[1].split("Fire, resume")[0];
+	const actualCommandForms = [...commandSection.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1].replaceAll("\\|", "|"));
+	assert.deepEqual(actualCommandForms, [
+		"/herder-grill <change>",
+		"/herder-grill --plan <id-or-path> [--plan-dir <dir>]",
+		"/herder-grill --plan <id-or-path> --split [--plan-dir <dir>]",
+		"/herder-improve [quick|standard|deep] [focus]",
+		"/herder-simplify [quick|standard|deep] [focus-or-path]",
+		"/herder-validate [plan-dir] [--fix]",
+		"/herder-plans init [plan-dir] [--track]",
+		"/herder-plans validate|shape|status|ready [plan-dir]",
+		"/herder-plans snapshot <plan-id> [plan-dir]",
+		"/herder-plans report <plan-id|RUN> [plan-dir]",
+		"/herder-plans track|untrack [plan-dir]",
+		"/herder-fire [plan-dir] [options]",
+		"/herder-attach [plan-dir] [--dashboard-port n]",
+		"/herder-resume [plan-dir] [options]",
+		"/herder-revise [plan-dir] [options]",
+		"/herder-status [plan-dir]",
+		"/herder-dashboard [plan-dir]",
+		"/herder-cleanup [plan-dir] [--plan id] [--include-failed]",
+		"/herder-reset [plan-dir]",
+		"/herder-cleanup [plan-dir] --deep [--include-failed]",
+		"/herder-cleanup [plan-dir] --force",
+		"/herder-stop",
+	]);
+	assert.match(adapterReadme, /\[canonical planning and execution command reference\]\(\.\.\/README\.md#planning-and-execution-commands\)/);
+	assert.doesNotMatch(adapterReadme, /^Available commands:/m);
+	assert.doesNotMatch(adapterReadme, /^- .*\/herder-/m);
+
 	assert.equal(Object.hasOwn(manifest.pi, "skills"), false);
 	for (const skill of ["improve", "simplify", "grill", "plans", "validate"]) {
 		const contents = await readFile(path.join(extensionRoot, "skills", skill, "SKILL.md"), "utf8");

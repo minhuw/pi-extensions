@@ -17,30 +17,7 @@ pi --model <provider>/gpt-5.6-luna --thinking max
 /herder-fire herder-plans --profile poorman
 ```
 
-Available commands:
-
-- `/herder-improve [quick|standard|deep] [focus]`
-- `/herder-simplify [quick|standard|deep] [focus-or-path]`
-- `/herder-grill <change-description>`
-- `/herder-grill --plan <id-or-path> [--plan-dir <dir>]`
-- `/herder-grill --plan <id-or-path> --split [--plan-dir <dir>]`
-- `/herder-plans init [plan-dir] [--track]`
-- `/herder-plans validate|shape|status|ready [plan-dir]`
-- `/herder-plans snapshot <plan-id> [plan-dir]`
-- `/herder-plans report <plan-id|RUN> [plan-dir]`
-- `/herder-plans track|untrack [plan-dir]`
-- `/herder-validate [plan-dir] [--fix]`
-- `/herder-fire [plan-dir] [--profile name] [--max-parallel n] [--dashboard-port n]`
-- `/herder-attach [plan-dir] [--dashboard-port n]`
-- `/herder-resume [plan-dir] [--profile name] [--max-parallel n] [--dashboard-port n]`
-- `/herder-revise [plan-dir] [--profile name] [--dashboard-port n]`
-- `/herder-status [plan-dir]`
-- `/herder-dashboard [plan-dir]`
-- `/herder-cleanup [plan-dir] [--plan <id>] [--include-failed]`
-- `/herder-reset [plan-dir]`
-- `/herder-cleanup [plan-dir] --deep [--include-failed]`
-- `/herder-cleanup [plan-dir] --force`
-- `/herder-stop`
+See the [canonical planning and execution command reference](../README.md#planning-and-execution-commands) in the package README for the complete command and option inventory. This adapter document continues below with the detailed Pi runtime contract.
 
 The agentic planning commands—`/herder-improve`, `/herder-simplify`, `/herder-grill`, and `/herder-validate`—inject the exact package-owned instructions plus the supplied arguments into the current Pi session. The skill files are command-owned implementation assets rather than separately exposed `/skill:` commands.
 
