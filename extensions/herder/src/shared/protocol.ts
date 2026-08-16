@@ -741,6 +741,8 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 	}
 	if (!/^[0-9a-f]{64}$/i.test(input.requestSha256!) || !/^[0-9a-f]{64}$/i.test(input.capabilityToken!)) throw new Error("Integration repair identities must be SHA-256 values");
 	if (input.capabilityToken !== integrationRepairCapabilityToken(input.requestId!)) throw new Error("Integration repair capability token is not request-bound");
+	if (input.ownerSessionId !== undefined && (typeof input.ownerSessionId !== "string" || input.ownerSessionId.length === 0 || input.ownerSessionId.length > 256 || /[\0\r\n]/.test(input.ownerSessionId))) throw new Error("Integration repair ownerSessionId is invalid");
+	if (input.repairId !== undefined && (typeof input.repairId !== "string" || input.repairId.length === 0 || input.repairId.length > 200 || /[\0\r\n]/.test(input.repairId))) throw new Error("Integration repair repairId is invalid");
 	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
 	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
 	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((path) => typeof path !== "string" || !path || path.length > 2_048 || /[\0\r\n]/.test(path)))) throw new Error("Integration repair allowed paths are invalid");

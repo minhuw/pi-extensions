@@ -9,6 +9,8 @@ import {
 	sha256,
 	stableJson,
 	validateAttentionRequest,
+	validateIntegrationRepairInput,
+	integrationRepairCapabilityToken,
 } from "../../../src/shared/protocol.ts";
 
 test("worker envelopes become typed deterministic results", () => {
@@ -120,6 +122,28 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	assert.throws(() => validateAttentionRequest({ ...request, continuation: { role: "plan-judge", phase: "UNKNOWN" } }), /request hash|continuation/);
 });
 
+test("integration repair input validation owns context-free admission rules", () => {
+	const requestId = "request-1";
+	const valid = {
+		operation: "begin" as const,
+		requestId,
+		requestSha256: "a".repeat(64),
+		capabilityToken: integrationRepairCapabilityToken(requestId),
+		ownerSessionId: "session-1",
+		repairId: "repair-1",
+		gates: [],
+		gateAdditions: [],
+		allowedPaths: ["src/value.mjs"],
+		observedCommit: "b".repeat(40),
+	};
+	assert.doesNotThrow(() => validateIntegrationRepairInput(valid));
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, capabilityToken: "c".repeat(64) }), /request-bound/);
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, ownerSessionId: "" }), /ownerSessionId is invalid/);
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, repairId: "x".repeat(201) }), /repairId is invalid/);
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, commitMessage: "legacy" }), /commitMessage is not accepted/);
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, gates: Array.from({ length: 33 }, () => ({})) }), /gates are invalid/);
+	assert.throws(() => validateIntegrationRepairInput({ ...valid, observedCommit: "not-a-commit" }), /observed commit is invalid/);
+});
 test("malformed envelopes and payload-changing replay identities fail closed", () => {
 	assert.throws(() => parseWorkerResult("plan-reviewer", "VERDICT: MAYBE"), /missing SCOPE|Invalid Reviewer/);
 	assert.throws(() => parseWorkerResult("plan-judge", "DECISION: DONE\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: none\nQUESTION: none"), /cannot retain authorized blockers/);

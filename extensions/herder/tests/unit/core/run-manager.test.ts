@@ -2133,6 +2133,34 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			ownerSessionId: "main-session",
 			classification: "code_defect",
 		};
+		const beforeForeignHead = git(String(repair.integrationWorktree), ["rev-parse", "HEAD"]).stdout.trim();
+		const beforeForeignNamespace = git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout;
+		const foreignBegin = { ...begin, operationId: "repair-foreign-capability", capabilityToken: "f".repeat(64) };
+		const foreignReceipt = await submitManagerOperation(service, "integration_repair", foreignBegin, foreignBegin.operationId);
+		await assert.rejects(() => waitManagerOperation(service, foreignReceipt.operationId), /capability digest is missing or invalid|request-bound/);
+		const afterForeign = new RunStore(fixture.planDirectory);
+		try {
+			const foreignRepair = afterForeign.getIntegrationRepairForRequest(String(repair.requestId))!;
+			assert.equal(foreignRepair.ownerSessionId, null);
+			assert.equal(foreignRepair.classification, null);
+			assert.equal(afterForeign.getIntegrationRepairEpisodes(foreignRepair.repairId).length, 1);
+			assert.equal(afterForeign.getIntegrationRepairAudits(foreignRepair.repairId).length, 0);
+			assert.equal(afterForeign.getRun()!.status, "failed");
+			const foreignOperation = afterForeign.database.prepare("SELECT payload_json FROM manager_operations WHERE operation_id = ?").get(foreignReceipt.operationId) as { payload_json: string };
+			assert.equal(foreignOperation.payload_json.includes(foreignBegin.capabilityToken), false);
+			assert.equal(foreignOperation.payload_json.includes(integrationRepairCapabilityDigest(foreignBegin.capabilityToken)), true);
+		} finally {
+			afterForeign.close();
+		}
+		assert.equal(git(String(repair.integrationWorktree), ["rev-parse", "HEAD"]).stdout.trim(), beforeForeignHead);
+		assert.equal(git(fixture.repo, [
+			"for-each-ref", "--format=%(refname)\\t%(objectname)",
+			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
+		]).stdout, beforeForeignNamespace);
+
 		const begun = payload(payload(await requestService(service, "/v1/integration-repair", begin)).reply);
 		assert.equal(begun.status, "paused");
 		const store = new RunStore(fixture.planDirectory);

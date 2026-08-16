@@ -32,12 +32,12 @@ import {
 	integrationRepairCapabilityToken,
 	integrationRepairRefSnapshotSha256,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
-	INTEGRATION_REPAIR_OPERATIONS,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
 	stableJson,
 	validateAttentionResolution,
+	validateIntegrationRepairInput,
 	validateIntegrationRepairRefSnapshot,
 	type AttentionCause,
 	type AttentionGitIdentity,
@@ -50,7 +50,6 @@ import {
 	type IntegrationRepairInput,
 	type IntegrationRepairRef,
 	type IntegrationRepairRequest,
-	type IntegrationRepairOperation,
 	type DispatchResult,
 	type ManagerAction,
 	type ManagerReply,
@@ -160,22 +159,6 @@ function normalizeIntegrationRepairClassification(value: unknown): IntegrationRe
 	const classification = REPAIR_CLASSIFICATION_ALIASES[normalized];
 	if (!classification || !INTEGRATION_REPAIR_CLASSIFICATIONS.includes(classification)) throw new Error("Integration repair classification is invalid");
 	return classification;
-}
-
-function validateIntegrationRepairInput(input: IntegrationRepairInput): void {
-	if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Integration repair input must be an object");
-	if (Object.prototype.hasOwnProperty.call(input, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
-	if (!INTEGRATION_REPAIR_OPERATIONS.includes(input.operation)) throw new Error("Integration repair operation must be begin, finish, or cancel");
-	for (const [name, value, limit] of [["requestId", input.requestId, 200], ["requestSha256", input.requestSha256, 128], ["capabilityToken", input.capabilityToken, 128]] as const) {
-		if (typeof value !== "string" || value.length === 0 || value.length > limit || /[\0\r\n]/.test(value)) throw new Error(`Integration repair ${name} is invalid`);
-	}
-	if (!/^[0-9a-f]{64}$/i.test(input.requestSha256) || !/^[0-9a-f]{64}$/i.test(input.capabilityToken)) throw new Error("Integration repair request and capability identities must be SHA-256 values");
-	if (input.ownerSessionId !== undefined && (typeof input.ownerSessionId !== "string" || input.ownerSessionId.length === 0 || input.ownerSessionId.length > 256 || /[\0\r\n]/.test(input.ownerSessionId))) throw new Error("Integration repair ownerSessionId is invalid");
-	if (input.repairId !== undefined && (typeof input.repairId !== "string" || input.repairId.length === 0 || input.repairId.length > 200 || /[\0\r\n]/.test(input.repairId))) throw new Error("Integration repair repairId is invalid");
-	if (input.gates !== undefined && (!Array.isArray(input.gates) || input.gates.length > 32)) throw new Error("Integration repair gates are invalid");
-	if (input.gateAdditions !== undefined && (!Array.isArray(input.gateAdditions) || input.gateAdditions.length > 32)) throw new Error("Integration repair gate additions are invalid");
-	if (input.allowedPaths !== undefined && (!Array.isArray(input.allowedPaths) || input.allowedPaths.length > 256 || input.allowedPaths.some((candidate) => typeof candidate !== "string" || !candidate || candidate.length > 2_048 || /[\0\r\n]/.test(candidate)))) throw new Error("Integration repair allowed paths are invalid");
-	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 }
 
 function validateRepairSession(value: string | undefined, expected: string | null): void {
@@ -1459,8 +1442,6 @@ export class HerderRunManager {
 		const verification = this.store.getVerificationByRequestId(input.requestId);
 		if (!verification) throw new Error(`Unknown integration repair verification request ${input.requestId}`);
 		if (verification.request.requestSha256 !== input.requestSha256) throw new Error("Integration repair request evidence changed");
-		const expectedCapability = integrationRepairCapabilityToken(input.requestId);
-		if (input.capabilityToken !== expectedCapability) throw new Error("Integration repair capability token does not match the failed verification request");
 		const run = this.store.getRun();
 		if (!run || verification.request.runId !== run.runId || verification.request.generation !== run.currentGeneration) throw new Error("Integration repair request is not bound to the current run generation");
 		if (verification.request.integrationBranch !== run.integrationBranch || verification.request.integrationWorktree !== run.integrationWorktree) {
