@@ -1136,6 +1136,13 @@ function migrationCanonicalVerificationEvidence(verification: SqlRow | undefined
   }
 }
 
+function migrationOperationEvidence(row: SqlRow): { operationId: string; operationPayloadSha256: string } | null {
+  const operationId = migrationText(row.operation_id)
+  const operationPayloadSha256 = migrationText(row.operation_payload_sha256)
+  if ((operationId === "") !== (operationPayloadSha256 === "")) return null
+  return { operationId, operationPayloadSha256 }
+}
+
 function validateFailedSuccessorEpisode(
   episode: SqlRow | undefined,
   repairId: string,
@@ -1166,8 +1173,9 @@ function validateFailedSuccessorEpisode(
 
   const classification = migrationText(episode.classification)
   const state = migrationText(episode.state)
-  const operationId = migrationText(episode.operation_id)
-  const operationPayloadSha256 = migrationText(episode.operation_payload_sha256)
+  const operation = migrationOperationEvidence(episode)
+  if (!operation) return { kind: "invalid", reason: "the selected current episode has incomplete projection evidence" }
+  const { operationId, operationPayloadSha256 } = operation
   if (!classification && (state === "failed" || state === "paused") && !operationId && !operationPayloadSha256) {
     return { kind: "unselected", evidence, state }
   }
@@ -1237,8 +1245,12 @@ function migrationSuccessorHasPredecessor(database: Database, row: SqlRow, evide
   return audits.some((audit) => migrationText(parseMigrationRecord(audit.evidence_json).requestId) === evidence.predecessorRequestId)
 }
 
-/** Preflight all successor pointers before any schema-16/17 projection mutation. */
-function validateFailedSuccessorMigration(database: Database, allowPredecessorEpisode = false): void {
+/** Preflight all successor pointers before schema-16/17 projection mutation; legacy schema-14/15 replay may defer exact awaiting-episode checks until reconstruction completes. */
+function validateFailedSuccessorMigration(
+  database: Database,
+  allowPredecessorEpisode = false,
+  deferAwaitingPredecessorEpisode = false,
+): void {
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow | undefined>()
   const verification = database.prepare(`
@@ -1287,21 +1299,22 @@ function validateFailedSuccessorMigration(database: Database, allowPredecessorEp
       if (repairState !== "committed" && repairState !== "verifying") {
         fail(`Cannot migrate integration repair ${repairId}: awaiting successor has an unrecoverable repair state`)
       }
-      const predecessorSelection = validateAwaitingSuccessorPredecessorEpisode(database, row, successorEvidence, currentEpisode)
-      if (predecessorSelection.kind === "invalid") {
-        fail(`Cannot migrate integration repair ${repairId}: ${predecessorSelection.reason}`)
-      }
-      if (predecessorSelection.kind !== "selected") {
-        fail(`Cannot migrate integration repair ${repairId}: awaiting successor predecessor episode is not selected`)
-      }
-      const selected = predecessorSelection.projection
-      const rowClassification = row.classification === null || row.classification === undefined ? null : String(row.classification)
-      const rowState = row.state === null || row.state === undefined ? null : String(row.state)
-      const rowOperationId = row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id)
-      const rowOperationPayloadSha256 = row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256)
-      if (rowClassification !== selected.classification || rowState !== selected.state
-        || rowOperationId !== selected.operationId || rowOperationPayloadSha256 !== selected.operationPayloadSha256) {
-        fail(`Cannot migrate integration repair ${repairId}: awaiting successor current projection is inconsistent with its predecessor episode`)
+      if (!deferAwaitingPredecessorEpisode) {
+        const predecessorSelection = validateAwaitingSuccessorPredecessorEpisode(database, row, successorEvidence, currentEpisode)
+        if (predecessorSelection.kind === "invalid") {
+          fail(`Cannot migrate integration repair ${repairId}: ${predecessorSelection.reason}`)
+        }
+        if (predecessorSelection.kind !== "selected") {
+          fail(`Cannot migrate integration repair ${repairId}: awaiting successor predecessor episode is not selected`)
+        }
+        const selected = predecessorSelection.projection
+        const rowClassification = row.classification === null || row.classification === undefined ? null : String(row.classification)
+        const rowState = row.state === null || row.state === undefined ? null : String(row.state)
+        const rowOperation = migrationOperationEvidence(row)
+        if (rowClassification !== selected.classification || rowState !== selected.state
+          || !rowOperation || !rowOperation.operationId || !rowOperation.operationPayloadSha256) {
+          fail(`Cannot migrate integration repair ${repairId}: awaiting successor current projection is inconsistent with its predecessor episode`)
+        }
       }
     }
     if (migrationText(successorVerification.state) !== "failed") continue
@@ -1336,7 +1349,7 @@ function applySchema15(database: Database): void {
   database.exec(SCHEMA_15_TABLES)
 
   const rows = database.prepare(`
-    SELECT r.*, v.integration_head AS verification_head, v.integration_tree AS verification_tree
+    SELECT r.*, v.integration_head AS verification_head, v.integration_tree AS verification_tree, v.manifest_json AS verification_manifest_json
     FROM manager_integration_repairs r
     LEFT JOIN manager_verifications v ON v.request_id = r.request_id
   `).all() as SqlRow[]
@@ -1360,9 +1373,19 @@ function applySchema15(database: Database): void {
     const requestSha256 = String(row.request_sha256)
     const integrationHead = String(row.verification_head || row.parent_commit)
     const integrationTree = String(row.verification_tree || row.current_tree || row.parent_commit)
-    const canonicalGatesJson = String(row.canonical_gates_json || "[]")
-    let canonicalGates: unknown = []
-    try { canonicalGates = JSON.parse(canonicalGatesJson) } catch { canonicalGates = [] }
+    const rowCanonicalGatesJson = String(row.canonical_gates_json || "[]")
+    let rowCanonicalGates: unknown = []
+    try { rowCanonicalGates = JSON.parse(rowCanonicalGatesJson) } catch { rowCanonicalGates = [] }
+    // A schema-14 row may seed a provisional episode from mutable repair gates.
+    // Prefer the durable current verification manifest so audit replay starts with canonical evidence.
+    const verificationManifest = parseMigrationRecord(row.verification_manifest_json)
+    const canonicalGates = Array.isArray(verificationManifest.gates)
+      ? verificationManifest.gates
+      : Array.isArray(rowCanonicalGates) ? rowCanonicalGates : []
+    const canonicalGatesJson = JSON.stringify(canonicalGates)
+    const canonicalGatesSha256 = Array.isArray(verificationManifest.gates)
+      ? sha256(stableJson(canonicalGates))
+      : String(row.canonical_gates_sha256)
     const episodeId = integrationRepairEpisodeId({
       requestId,
       requestSha256,
@@ -1379,7 +1402,7 @@ function applySchema15(database: Database): void {
       integrationHead,
       integrationTree,
       canonicalGatesJson,
-      String(row.canonical_gates_sha256),
+      canonicalGatesSha256,
       row.classification === null || row.classification === undefined ? null : String(row.classification),
       String(row.state),
       row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
@@ -1395,7 +1418,7 @@ function applySchema15(database: Database): void {
 
 /** Repair the first episode migration without changing immutable audit evidence. */
 function applySchema16(database: Database): void {
-  validateFailedSuccessorMigration(database, true)
+  validateFailedSuccessorMigration(database, true, true)
   const repairRows = database.prepare("SELECT * FROM manager_integration_repairs ORDER BY repair_id").all() as SqlRow[]
   const verificationRows = new Map<string, SqlRow>()
   const verification = database.prepare(`
@@ -1554,6 +1577,10 @@ function applySchema16(database: Database): void {
     const successorStoredVerification = successorRequestId ? getVerification(successorRequestId) : undefined
     const baseIsFailedSuccessor = baseRequestId === successorRequestId && successorStoredVerification?.state === "failed"
     const auditRows = audits.all(repairId) as SqlRow[]
+    const firstBeginAudit = auditRows.find((audit) => String(audit.action) === "begin")
+    const firstAuditedRequestId = firstBeginAudit ? migrationText(parseRecord(firstBeginAudit.evidence_json).requestId) : ""
+    const baseRequestAppearsInAudits = auditRows.some((audit) => String(audit.action) === "begin"
+      && migrationText(parseRecord(audit.evidence_json).requestId) === baseRequestId)
     let activeEpisodeId = baseEpisodeId
     let activeClassification = row.classification === null || row.classification === undefined ? null : String(row.classification)
     let codeRounds = 0
@@ -1584,7 +1611,11 @@ function applySchema16(database: Database): void {
           String(audit.operation_id),
           String(audit.payload_sha256),
         )
-        if (activeEpisodeId !== previousEpisodeId && !(baseIsFailedSuccessor && previousEpisodeId === baseEpisodeId)) episodeClose.run("failed", now, now, previousEpisodeId)
+        const preserveBaseEpisode = previousEpisodeId === baseEpisodeId
+          && firstAuditedRequestId !== baseRequestId && baseRequestAppearsInAudits && requestId !== baseRequestId
+        if (activeEpisodeId !== previousEpisodeId
+          && !(baseIsFailedSuccessor && previousEpisodeId === baseEpisodeId)
+          && !preserveBaseEpisode) episodeClose.run("failed", now, now, previousEpisodeId)
       }
       if (String(audit.action) === "commit") {
         if (activeClassification === "code_defect") codeRounds += 1
@@ -1679,6 +1710,15 @@ function applySchema16(database: Database): void {
       if (String(audit.episode_id || "") !== activeEpisodeId) auditEpisode.run(activeEpisodeId, audit.audit_id)
     }
 
+    // Audit replay has rebuilt the selected episode; bind the mutable projection to it before strict validation.
+    const reconstructedCurrentEpisode = episodeSelect.get(currentEpisodeId) as SqlRow | undefined
+    if (!reconstructedCurrentEpisode) fail(`Cannot migrate integration repair ${repairId}: reconstructed current episode is missing`)
+    currentRequestId = migrationText(reconstructedCurrentEpisode.request_id)
+    currentRequestSha256 = migrationText(reconstructedCurrentEpisode.request_sha256)
+    currentClassification = reconstructedCurrentEpisode.classification === null || reconstructedCurrentEpisode.classification === undefined
+      ? null
+      : String(reconstructedCurrentEpisode.classification)
+
     const failedSuccessor = successorRequestId.length > 0 && successorStoredVerification?.state === "failed"
     repairUpdate.run(
       acceptedCodeRounds,
@@ -1693,6 +1733,8 @@ function applySchema16(database: Database): void {
       repairId,
     )
   }
+  // The canonical episodes now exist, so enforce the exact awaiting predecessor contract.
+  validateFailedSuccessorMigration(database, true)
   database.exec("PRAGMA user_version = 16;")
 }
 
