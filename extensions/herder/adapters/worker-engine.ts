@@ -32,6 +32,8 @@ import {
 } from "./nested-agent-executor.ts";
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { loadHerderPiRole } from "./role-config.ts";
+import { assistantText, finalAssistantResult, responseActivity } from "./assistant-message.ts";
+export { finalAssistantResult };
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
 export type { PiNestedAgentSnapshot } from "./nested-agent-executor.ts";
@@ -181,48 +183,8 @@ export function trustedNestedExtensionPath(agentDir: string, installed: string, 
 	return realInstalled;
 }
 
-function responseActivity(text: string | undefined): string | undefined {
-	const line = text?.split("\n").find((candidate) => candidate.trim())?.trim();
-	if (!line) return undefined;
-	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-}
-
-function assistantText(value: unknown): string | undefined {
-	const message = record(value);
-	if (message?.role !== "assistant" || !Array.isArray(message.content)) return undefined;
-	const text = message.content
-		.map(record)
-		.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
-		.map((item) => String(item.text))
-		.join("\n");
-	return text || undefined;
-}
-
 function cloneNested(agent: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
 	return { ...agent, activeTools: [...agent.activeTools] };
-}
-
-export function finalAssistantResult(messages: readonly unknown[]): { text?: string; error?: string; failed: boolean } {
-	for (let index = messages.length - 1; index >= 0; index -= 1) {
-		const candidate = record(messages[index]);
-		if (candidate?.role !== "assistant") continue;
-		const content = Array.isArray(candidate.content) ? candidate.content : [];
-		const text = content
-			.map(record)
-			.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
-			.map((item) => String(item.text))
-			.join("\n");
-		const stopReason = String(candidate.stopReason || "");
-		const error = typeof candidate.errorMessage === "string" && candidate.errorMessage.trim()
-			? candidate.errorMessage.trim()
-			: undefined;
-		return {
-			...(text.trim() ? { text } : {}),
-			...(error ? { error } : {}),
-			failed: stopReason === "error" || stopReason === "aborted" || Boolean(error),
-		};
-	}
-	return { failed: true, error: "Pi worker returned no assistant result." };
 }
 
 function reasoningTokens(messages: readonly unknown[]): number | undefined {

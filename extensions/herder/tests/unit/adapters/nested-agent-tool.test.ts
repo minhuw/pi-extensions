@@ -136,6 +136,39 @@ test("nested Agent runs one package-owned foreground recon child with the scout 
 	assert.deepEqual(snapshot.activeTools, []);
 });
 
+test("nested results keep a distinct no-result diagnostic and complete empty content", async () => {
+	class CaseSession extends FakeNestedSession {
+		private readonly message?: unknown;
+		constructor(id: string, message?: unknown) {
+			super(id);
+			this.message = message;
+		}
+		override async prompt(): Promise<void> {
+			if (this.message !== undefined) this.messages.push(this.message);
+		}
+	}
+	async function run(message: unknown, id: string) {
+		const value = new HerderNestedAgentScope({
+			action: action(),
+			agentRoot,
+			createSession: async () => new CaseSession(id, message),
+		});
+		return await value.run({ type: "recon", prompt: "Inspect", description: "inspect" });
+	}
+	const missing = await run(undefined, "missing");
+	assert.equal(missing.status, "error");
+	assert.equal(missing.error, "Nested Herder agent returned no assistant result.");
+	const empty = await run({ role: "assistant", content: [{ type: "text", text: "  \n" }], stopReason: "stop" }, "empty");
+	assert.equal(empty.status, "completed");
+	assert.equal(empty.output, "");
+	const padded = await run({ role: "assistant", content: [{ type: "text", text: "  padded child  " }], stopReason: "stop" }, "padded");
+	assert.equal(padded.status, "completed");
+	assert.equal(padded.output, "  padded child  ");
+	const provider = await run({ role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "error", errorMessage: "provider failed" }, "provider");
+	assert.equal(provider.status, "error");
+	assert.equal(provider.error, "provider failed");
+});
+
 test("background children return IDs and must be collected through the scoped result tool", async () => {
 	const { value } = scope();
 	const [agentTool, resultTool] = createNestedAgentTools(action(), value);

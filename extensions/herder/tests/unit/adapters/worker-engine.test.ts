@@ -306,6 +306,50 @@ test("worker terminals retain transport and provider diagnostics", async () => {
 	assert.equal(result.error, "transport failed\nprovider failed");
 });
 
+test("worker terminals preserve distinct no-result and empty-content behavior", async () => {
+	class CaseSession extends FakeSession {
+		private readonly message?: unknown;
+		constructor(id: string, message?: unknown) {
+			super(id);
+			this.message = message;
+		}
+		override async prompt(): Promise<void> {
+			if (this.message !== undefined) this.messages.push(this.message);
+		}
+	}
+	async function run(message: unknown, id: string): Promise<PiWorkerTerminal> {
+		const session = new CaseSession(`session-${id}`, message);
+		const factory: PiWorkerSessionFactory = {
+			async availableModels() { return [{ provider: "proxy", id: "grok-4.5" }]; },
+			async create(request) {
+				return {
+					session,
+					nested: new HerderNestedAgentScope({
+						action: request.action,
+						agentRoot,
+						createSession: async () => { throw new Error("unused"); },
+					}),
+				};
+			},
+		};
+		const engine = new PiWorkerEngine(factory);
+		const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
+		const handle = await engine.prepare({ action: action(`action-${id}`), planDirectory: "/tmp/repo/herder-plans" });
+		engine.start(handle);
+		return await terminal;
+	}
+	const missing = await run(undefined, "missing");
+	assert.equal(missing.interrupted, true);
+	assert.equal(missing.error, "Pi worker returned no assistant result.");
+	const empty = await run({ role: "assistant", content: [{ type: "text", text: "  \n" }], stopReason: "stop" }, "empty");
+	assert.equal(empty.interrupted, true);
+	assert.equal(empty.error, "Pi worker produced no terminal result");
+	const padded = await run({ role: "assistant", content: [{ type: "text", text: "  padded child  " }], stopReason: "stop" }, "padded");
+	assert.equal(padded.response, "  padded child  ");
+	const provider = await run({ role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "error", errorMessage: "provider failed" }, "provider");
+	assert.equal(provider.error, "provider failed");
+});
+
 test("worker lifetime usage excludes cache reads and compaction usage while context stays current", async () => {
 	const factory = new FakeFactory();
 	const engine = new PiWorkerEngine(factory);

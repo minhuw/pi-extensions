@@ -8,6 +8,7 @@ import {
 	type HerderNestedAgentType,
 	type NestedAgentModelBinding,
 } from "./role-config.ts";
+import { assistantText, decodeAssistantResult, responseActivity } from "./assistant-message.ts";
 
 export type HerderNestedAgentStatus = "running" | "completed" | "aborted" | "stopped" | "error";
 
@@ -116,46 +117,6 @@ function finiteCount(value: unknown): number | undefined {
 
 function record(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function assistantText(value: unknown): string | undefined {
-	const message = record(value);
-	if (message?.role !== "assistant" || !Array.isArray(message.content)) return undefined;
-	const text = message.content
-		.map(record)
-		.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
-		.map((item) => String(item.text))
-		.join("\n");
-	return text || undefined;
-}
-
-function responseActivity(text: string | undefined): string | undefined {
-	const line = text?.split("\n").find((candidate) => candidate.trim())?.trim();
-	if (!line) return undefined;
-	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-}
-
-function finalAssistantResult(messages: readonly unknown[]): { text?: string; error?: string; failed: boolean } {
-	for (let index = messages.length - 1; index >= 0; index -= 1) {
-		const candidate = record(messages[index]);
-		if (candidate?.role !== "assistant") continue;
-		const content = Array.isArray(candidate.content) ? candidate.content : [];
-		const text = content
-			.map(record)
-			.filter((item): item is Record<string, unknown> => item?.type === "text" && typeof item.text === "string")
-			.map((item) => String(item.text))
-			.join("\n");
-		const stopReason = String(candidate.stopReason || "");
-		const error = typeof candidate.errorMessage === "string" && candidate.errorMessage.trim()
-			? candidate.errorMessage.trim()
-			: undefined;
-		return {
-			...(text.trim() ? { text } : {}),
-			...(error ? { error } : {}),
-			failed: stopReason === "error" || stopReason === "aborted" || Boolean(error),
-		};
-	}
-	return { failed: true, error: "Nested Herder agent returned no assistant result." };
 }
 
 function usageFromSession(session: NestedWorkerSession): NestedAgentUsage {
@@ -485,7 +446,9 @@ export class HerderNestedAgentScope {
 		}
 		try {
 			const completedAt = Date.now();
-			const final = item.session ? finalAssistantResult(item.session.messages) : { failed: true, error: failure || "Nested session was not created." };
+			const final = item.session
+				? decodeAssistantResult(item.session.messages) ?? { failed: true, error: "Nested Herder agent returned no assistant result." }
+				: { failed: true, error: failure || "Nested session was not created." };
 			const aborted = childController.signal.aborted || this.scopeController.signal.aborted;
 			const errors = [...new Set([failure, final.error].filter((value): value is string => Boolean(value)))];
 			item.snapshot.status = aborted
