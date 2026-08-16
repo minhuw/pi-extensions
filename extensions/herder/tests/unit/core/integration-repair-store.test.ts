@@ -1411,6 +1411,56 @@ test("schema 17 migration accepts an awaiting repair successor", () => {
 	}
 });
 
+test("schema 17 migration rejects unknown successor gate properties", () => {
+	const cases = [
+		{ name: "one unknown property", properties: { metadata: "not part of the runtime gate" } },
+		{ name: "multiple unknown properties regardless of order", properties: { extension: true, "x-extra": 1 } },
+	];
+	for (const [index, fixtureCase] of cases.entries()) {
+		const fixture = awaitingSuccessorMigrationFixture(`schema17-awaiting-unknown-${index}`);
+		try {
+			const database = openExecutionDatabase(fixture.planDirectory, { create: true })!;
+			const row = database.prepare("SELECT successor_manifest_json FROM manager_integration_repairs WHERE repair_id = ?")
+				.get(fixture.repairId) as { successor_manifest_json: string };
+			const successorManifest = JSON.parse(row.successor_manifest_json) as Record<string, unknown>;
+			const currentGates = successorManifest.gates as Array<Record<string, unknown>>;
+			const mutatedGate = { ...currentGates[0], ...fixtureCase.properties };
+			successorManifest.gates = [mutatedGate];
+			database.prepare(`
+				UPDATE manager_integration_repairs
+				SET successor_manifest_json = ?, successor_manifest_sha256 = ?, effective_gates_json = ?
+				WHERE repair_id = ?
+			`).run(
+				JSON.stringify(successorManifest),
+				sha256(stableJson(successorManifest)),
+				JSON.stringify([mutatedGate]),
+				fixture.repairId,
+			);
+			database.exec("PRAGMA user_version = 16;");
+			const beforeUserVersion = Number((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+			const beforeRepair = database.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId);
+			const beforeVerifications = database.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all();
+			const beforeEpisodes = database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId);
+			const beforeAudits = database.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId);
+			database.close();
+
+			assert.throws(() => new RunStore(fixture.planDirectory), /Cannot migrate integration repair/, fixtureCase.name);
+			const unchanged = openExecutionDatabase(fixture.planDirectory, { readOnly: true })!;
+			try {
+				assert.equal(Number((unchanged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), beforeUserVersion, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repairs WHERE repair_id = ?").get(fixture.repairId), beforeRepair, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_verifications ORDER BY request_id").all(), beforeVerifications, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_episodes WHERE repair_id = ? ORDER BY episode_id").all(fixture.repairId), beforeEpisodes, fixtureCase.name);
+				assert.deepEqual(unchanged.prepare("SELECT * FROM manager_integration_repair_audits WHERE repair_id = ? ORDER BY audit_id").all(fixture.repairId), beforeAudits, fixtureCase.name);
+			} finally {
+				unchanged.close();
+			}
+		} finally {
+			fs.rmSync(fixture.planDirectory, { recursive: true, force: true });
+		}
+	}
+});
+
 test("schema 17 migration accepts an awaiting successor after a later repair episode", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-repair-schema17-awaiting-later-"));
 	try {

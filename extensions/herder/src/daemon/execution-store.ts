@@ -760,6 +760,12 @@ const INTEGRATION_REPAIR_STATES = new Set(["available", "active", "committing", 
 const INTEGRATION_REPAIR_CLASSIFICATION_SET = new Set<string>(INTEGRATION_REPAIR_CLASSIFICATIONS)
 const MIGRATION_CANONICAL_GATE_FIELDS = new Set(["gateId", "label", "cwd", "argv", "timeoutMs", "rationale"])
 
+function hasExactMigrationCanonicalGateFields(gate: SqlRow): boolean {
+  const fields = Object.keys(gate)
+  return fields.length === MIGRATION_CANONICAL_GATE_FIELDS.size
+    && fields.every((field) => MIGRATION_CANONICAL_GATE_FIELDS.has(field))
+}
+
 type MigrationEpisodeEvidence = {
   requestId: string
   requestSha256: string
@@ -842,7 +848,7 @@ function migrationSuccessorEvidence(row: SqlRow, verification: SqlRow | undefine
   const validGate = (value: unknown, canonical = false): boolean => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false
     const gate = value as SqlRow
-    if (canonical && Object.keys(gate).some((field) => !MIGRATION_CANONICAL_GATE_FIELDS.has(field))) return false
+    if (canonical && !hasExactMigrationCanonicalGateFields(gate)) return false
     const normalizedCwd = typeof gate.cwd === "string" ? path.normalize(gate.cwd) : ""
     return typeof gate.gateId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(gate.gateId)
       && gate.gateId.length <= 80
@@ -937,7 +943,7 @@ function migrationSuccessorEvidence(row: SqlRow, verification: SqlRow | undefine
   } else {
     if (typeof verificationManifestJson !== "string" || verificationManifestJson.length === 0 || !verificationManifestSha256) return null
     verificationManifest = parseMigrationRecord(verificationManifestJson)
-    if (!validManifest(verificationManifest, hasPersistedManifest)
+    if (!validManifest(verificationManifest, true)
       || sha256(stableJson(verificationManifest)) !== verificationManifestSha256
       || hasPersistedManifest && (verificationManifestSha256 !== persistedManifestSha256
         || stableJson(verificationManifest) !== stableJson(persistedSuccessorManifest))) return null
@@ -1076,7 +1082,7 @@ function migrationCanonicalVerificationEvidence(verification: SqlRow | undefined
   for (const value of manifest.gates as unknown[]) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null
     const gate = value as SqlRow
-    if (Object.keys(gate).some((field) => !MIGRATION_CANONICAL_GATE_FIELDS.has(field))) return null
+    if (!hasExactMigrationCanonicalGateFields(gate)) return null
     const normalizedCwd = typeof gate.cwd === "string" ? path.normalize(gate.cwd) : ""
     if (typeof gate.gateId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(gate.gateId)
       || gate.gateId.length > 80 || gate.gateId !== gate.gateId.trim()

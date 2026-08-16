@@ -38,6 +38,8 @@ test("verification manifests are exact-tree bound and structurally validated", (
 		});
 		const replay = normalizeVerificationManifest(request, JSON.parse(JSON.stringify(first.manifest)));
 		assert.equal(replay.manifestSha256, first.manifestSha256);
+		assert.deepEqual(Object.keys(first.manifest.gates[0]!).sort(), ["argv", "cwd", "gateId", "label", "rationale", "timeoutMs"]);
+		assert.equal(first.manifest.gates[0]!.timeoutMs, 30 * 60 * 1_000);
 		assert.equal(first.manifest.gates[0]!.cwd, "pkg");
 		const dotted = normalizeVerificationManifest(request, {
 			...first.manifest,
