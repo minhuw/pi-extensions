@@ -4,14 +4,14 @@ import { spawnSync } from "node:child_process";
 import { buildGraph, projectStatuses } from "../../core/plans.ts";
 import { RunStore, type StoredPlanSpec } from "../run-store.ts";
 import { clearExecutionRotationMarker } from "../execution-store.ts";
+import { listHerderBranches, listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
 import { parseCoordinationRefRelative } from "./coordination-ref.ts";
 import { allowedWorktreePaths, worktreeRelativeName } from "./worktree-locations.ts";
 
 export interface HerderResetInput { repoRoot: string; planDirectory: string }
 export interface HerderResetResult { planName: string; removedBranches: string[]; removedWorktrees: string[]; removedRefs: string[]; resetPlans: string[] }
-type Worktree = { path: string; branch: string; locked: boolean };
+type Worktree = WorktreeRecord;
 type Ref = { ref: string; target: string; relative: string };
-type Branch = { branch: string; head: string; relative: string };
 
 function fail(message: string): never { throw new Error(message); }
 function git(repo: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
@@ -23,25 +23,6 @@ function git(repo: string, args: string[], allowFailure = false): { status: numb
 }
 function real(candidate: string): string { try { return fs.realpathSync(candidate); } catch { return path.resolve(candidate); } }
 function inside(parent: string, candidate: string): boolean { const r = path.relative(parent, candidate); return r !== "" && r !== ".." && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r); }
-function parseWorktrees(repo: string): Worktree[] {
-  const out = git(repo, ["worktree", "list", "--porcelain"]).stdout;
-  return out.split(/(?:\r?\n){2,}/).filter((x) => x.trim()).map((block) => {
-    const item: Worktree = { path: "", branch: "", locked: false };
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith("worktree ")) item.path = line.slice(9);
-      else if (line.startsWith("branch refs/heads/")) item.branch = line.slice(18);
-      else if (line === "locked" || line.startsWith("locked ")) item.locked = true;
-    }
-    return item;
-  });
-}
-function branches(repo: string, name: string): Branch[] {
-  const prefix = `herder/${name}/`;
-  return git(repo, ["for-each-ref", "--format=%(refname:lstrip=2)%09%(objectname)", `refs/heads/${prefix}`]).stdout.split(/\r?\n/).filter(Boolean).map((line) => {
-    const i = line.indexOf("\t"); if (i < 0) fail("Cannot parse Herder branch namespace");
-    const branch = line.slice(0, i); return { branch, head: line.slice(i + 1), relative: branch.slice(prefix.length) };
-  });
-}
 function refs(repo: string, name: string): Ref[] {
   const prefix = `refs/plan-herder/${name}/`;
   return git(repo, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]).stdout.split(/\r?\n/).filter(Boolean).map((line) => {
@@ -113,9 +94,9 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   // status-format failure cannot leave a half-deleted namespace.
   const projected = projectedResetStatuses(specs);
   const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
-  const allBranches = branches(repo, name);
+  const allBranches = listHerderBranches(repo, name);
   const allRefs = refs(repo, name);
-  const worktrees = parseWorktrees(repo);
+  const worktrees = listWorktrees(repo);
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   const removedWorktrees: string[] = [];
@@ -136,6 +117,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     const integrationWorktrees = worktrees.filter((w) => w.branch === integration);
     if (integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
     for (const w of owned) {
+      if (!w.path) fail(`Herder reset refused pathless worktree record for branch: ${w.branch}`);
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
       cleanWorktree(repo, w);
       const expected = allowedWorktreePaths(repo, planDir, name, worktreeRelativeName(w.branch, name, integration));
@@ -143,7 +125,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     }
     const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
     // Revalidate every identity immediately before the first mutation.
-    if (snapshot(branches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(parseWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(listWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
     for (const w of owned) {
       if (w.locked) git(repo, ["worktree", "unlock", "--", w.path]);
       git(repo, ["worktree", "remove", "--", w.path]);

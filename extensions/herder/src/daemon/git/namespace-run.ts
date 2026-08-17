@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { listCoordinationRefs } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
+import { listHerderBranches, listWorktrees } from "./namespace-inventory.ts"
 
 type NamespaceMode = "fire" | "resume" | "status"
 interface NamespaceInput {
@@ -18,9 +19,7 @@ interface NamespaceInput {
   mode: NamespaceMode
   pretty?: boolean
 }
-interface BranchRecord { branch: string; head: string; relative: string }
 interface RefRecord { ref: string; target: string; relative: string }
-interface WorktreeRecord { path: string; branch: string; locked: boolean }
 type NamespaceConflict = Record<string, string>
 
 function fail(message: string): never {
@@ -101,36 +100,6 @@ function isAncestor(repoRoot: string, ancestor: string, descendant: string): boo
   fail(`Cannot compare ${ancestor} with ${descendant}: ${(result.stderr || result.stdout).trim()}`)
 }
 
-function listNamespaceBranches(repoRoot: string, planName: string): BranchRecord[] {
-  const prefix = `herder/${planName}/`
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname:lstrip=2)%09%(objectname)",
-    `refs/heads/${prefix}`,
-  ]).stdout
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse Git branch record: ${JSON.stringify(line)}`)
-    const branch = line.slice(0, separator)
-    return { branch, head: line.slice(separator + 1), relative: branch.slice(prefix.length) }
-  })
-}
-
-function listWorktrees(repoRoot: string): WorktreeRecord[] {
-  const output = runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout
-  const records: WorktreeRecord[] = []
-  for (const block of output.split(/(?:\r?\n){2,}/).filter((item) => item.trim())) {
-    const record = { path: "", branch: "", locked: false }
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith("worktree ")) record.path = line.slice("worktree ".length)
-      else if (line.startsWith("branch refs/heads/")) record.branch = line.slice("branch refs/heads/".length)
-      else if (line === "locked" || line.startsWith("locked ")) record.locked = true
-    }
-    if (record.path) records.push(record)
-  }
-  return records
-}
-
 export function inspectNamespace(input: NamespaceInput) {
   const repoCandidate = path.resolve(input.repo)
   if (!fs.existsSync(repoCandidate) || !fs.statSync(repoCandidate).isDirectory()) fail(`Repository does not exist: ${repoCandidate}`)
@@ -150,7 +119,7 @@ export function inspectNamespace(input: NamespaceInput) {
 
   const graph = buildGraph(planDir)
   const planIds = new Set(graph.plans.map((plan) => plan.id))
-  const branches = listNamespaceBranches(repoRoot, planName)
+  const branches = listHerderBranches(repoRoot, planName)
   const coordinationRecords = listCoordinationRefs(repoRoot, planName)
   const parentConflicts = [
     "refs/heads/herder",
@@ -173,7 +142,7 @@ export function inspectNamespace(input: NamespaceInput) {
     .filter((item) => item.identity?.kind === "completed")
     .map((item) => ({ item, proof: inspectCompletionProof(repoRoot, item.ref) }))
     .filter(({ item, proof }) => !proof.ok || proof.payload.planId !== item.identity?.plan)
-  const worktrees = listWorktrees(repoRoot)
+  const worktrees = listWorktrees(repoRoot).filter((item) => item.path)
   const rawCoordinationRef = ({ ref, target, relative }: RefRecord) => ({ ref, target, relative })
   const namespaceBranchNames = new Set(branches.map((item) => item.branch))
   const namespaceWorktrees = worktrees.filter((item) => namespaceBranchNames.has(item.branch))

@@ -12,6 +12,7 @@ import { RunStore } from "../run-store.ts"
 import { listCoordinationRefs, type CoordinationRefRecord } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
+import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
 
 export interface CleanupInput {
   repo: string
@@ -66,8 +67,6 @@ export interface CleanupResult {
     planDirectory: boolean
   }
 }
-interface WorktreeRecord { path: string; branch: string; locked: boolean }
-interface BranchRecord { branch: string; head: string; relative: string }
 type CompletionRefRecord = ReturnType<typeof listCompletionRefs>[number]
 
 function fail(message: string): never {
@@ -184,48 +183,6 @@ function resolvePlanName(planDir: string, inputName: unknown): string {
     fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(name)}`)
   }
   return name
-}
-
-export function parseWorktreeRecords(output: string, nulDelimited: boolean): WorktreeRecord[] {
-  const records: WorktreeRecord[] = []
-  const rawRecords = nulDelimited
-    ? output.split("\0\0")
-    : output.split(/(?:\r?\n){2,}/)
-  for (const rawRecord of rawRecords.filter((record) => record.trim())) {
-    const record = { path: "", branch: "", locked: false }
-    const fields = nulDelimited ? rawRecord.split("\0") : rawRecord.split(/\r?\n/)
-    for (const field of fields.filter(Boolean)) {
-      if (field.startsWith("worktree ")) record.path = field.slice("worktree ".length)
-      else if (field.startsWith("branch refs/heads/")) record.branch = field.slice("branch refs/heads/".length)
-      else if (field === "locked" || field.startsWith("locked ")) record.locked = true
-    }
-    if (record.path) records.push(record)
-  }
-  return records
-}
-
-function parseWorktrees(repoRoot: string): WorktreeRecord[] {
-  const nulResult = runGit(repoRoot, ["worktree", "list", "--porcelain", "-z"], { allowFailure: true })
-  if (nulResult.status === 0) return parseWorktreeRecords(nulResult.stdout, true)
-
-  // Git 2.34 and older do not support `git worktree list -z`.
-  const output = runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout
-  return parseWorktreeRecords(output, false)
-}
-
-function listPlanBranches(repoRoot: string, planName: string): BranchRecord[] {
-  const prefix = `herder/${planName}/`
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname:lstrip=2)%09%(objectname)",
-    `refs/heads/${prefix}`,
-  ]).stdout
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse Git branch record: ${JSON.stringify(line)}`)
-    const branch = line.slice(0, separator)
-    return { branch, head: line.slice(separator + 1), relative: branch.slice(prefix.length) }
-  })
 }
 
 function planBranchSnapshot(items: BranchRecord[]): string {
@@ -404,14 +361,14 @@ export function cleanupRun(input: CleanupInput) {
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
   const completionRefs = listCompletionRefs(repoRoot, planName)
   const completionProofsForRun = integrationHead ? completionProofs(repoRoot, integrationHead, completionRefs) : new Set<string>()
-  const allPlanBranches = listPlanBranches(repoRoot, planName)
+  const allPlanBranches = listHerderBranches(repoRoot, planName)
   const expectedPlanBranchSnapshot = planBranchSnapshot(allPlanBranches)
   const expectedCoordinationRefSnapshot = coordinationRefSnapshot(coordinationRefs)
   const expectedCheckout = currentCheckout(repoRoot)
-  const initialWorktrees = parseWorktrees(repoRoot)
+  const initialWorktrees = listWorktrees(repoRoot).filter((item) => item.path)
   const expectedWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, false)
   const expectedIntegrationWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, true)
-  const worktrees = new Map(initialWorktrees.filter((item) => item.branch).map((item) => [item.branch, item]))
+  const worktrees = new Map(initialWorktrees.filter((item) => item.path && item.branch).map((item) => [item.branch, item]))
   const actions: CleanupDetail[] = []
   const skipped: CleanupDetail[] = []
   const planBranches = allPlanBranches.filter((item) => item.relative !== "integration")
@@ -590,10 +547,10 @@ export function cleanupRun(input: CleanupInput) {
       input.testHooks?.beforeIntegrationDeletion?.()
       assertPlanStatusesUnchanged()
       assertMutationAllowed()
-      if (planBranchSnapshot(listPlanBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
+      if (planBranchSnapshot(listHerderBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
         fail("Deep cleanup plan branch namespace changed after preflight")
       }
-      const currentWorktrees = parseWorktrees(repoRoot)
+      const currentWorktrees = listWorktrees(repoRoot).filter((item) => item.path)
       if (worktreeSnapshot(currentWorktrees, `herder/${planName}`, false) !== expectedWorktreeSnapshot) {
         fail("Deep cleanup plan worktree namespace changed after preflight")
       }
@@ -628,8 +585,8 @@ export function cleanupRun(input: CleanupInput) {
       removed.push(action)
     }
     if (input.deep) {
-      const remainingBranches = listPlanBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
-      const remainingWorktrees = parseWorktrees(repoRoot).filter((item) => item.branch.startsWith(`herder/${planName}/`) && item.branch !== integrationBranch)
+      const remainingBranches = listHerderBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
+      const remainingWorktrees = listWorktrees(repoRoot).filter((item) => item.path && item.branch.startsWith(`herder/${planName}/`) && item.branch !== integrationBranch)
       if (remainingBranches.length > 0 || remainingWorktrees.length > 0) {
         fail(`Cannot deep-clean while plan namespace artifacts remain: ${[
           ...remainingBranches.map((item) => item.branch),

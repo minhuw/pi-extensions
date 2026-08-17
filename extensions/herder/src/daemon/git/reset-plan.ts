@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
 
 export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";
 
@@ -55,8 +56,6 @@ export interface ResetPlanExecutionResult {
 	alreadyMissing: boolean;
 }
 
-type WorktreeRecord = { path: string; branch: string; locked: boolean };
-
 function fail(message: string): never {
 	throw new Error(message);
 }
@@ -77,19 +76,6 @@ function realpathIfPresent(candidate: string): string {
 function isInside(parent: string, candidate: string): boolean {
 	const relative = path.relative(parent, candidate);
 	return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-function parseWorktrees(repoRoot: string): WorktreeRecord[] {
-	const output = git(repoRoot, ["worktree", "list", "--porcelain"]).stdout;
-	return output.split(/(?:\r?\n){2,}/).filter((block) => block.trim()).map((block) => {
-		const record: WorktreeRecord = { path: "", branch: "", locked: false };
-		for (const line of block.split(/\r?\n/)) {
-			if (line.startsWith("worktree ")) record.path = line.slice("worktree ".length);
-			else if (line.startsWith("branch refs/heads/")) record.branch = line.slice("branch refs/heads/".length);
-			else if (line === "locked" || line.startsWith("locked ")) record.locked = true;
-		}
-		return record;
-	});
 }
 
 function branchHead(repoRoot: string, branch: string): string | null {
@@ -165,10 +151,13 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 	if (realpathIfPresent(repoRoot) !== repoRoot) fail(`Recovery repository root is not canonical: ${repoRoot}`);
 	verifyExpectedNamespace({ ...input, worktree, integrationWorktree }, repoRoot, worktreeRoot, worktree);
 
-	const records = parseWorktrees(repoRoot);
+	const records = listWorktrees(repoRoot);
 	const canonicalWorktree = realpathIfPresent(worktree);
-	const record = records.find((candidate) => realpathIfPresent(candidate.path) === canonicalWorktree);
+	const record = records.find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
 	const branchRecord = records.find((candidate) => candidate.branch === input.branch);
+	if (branchRecord && !branchRecord.path) {
+		fail(`Recovery branch ${input.branch} has a pathless worktree record`);
+	}
 	if (branchRecord && realpathIfPresent(branchRecord.path) !== canonicalWorktree) {
 		fail(`Recovery branch ${input.branch} is attached to a foreign worktree: ${branchRecord.path}`);
 	}
@@ -234,7 +223,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		}
 		if (recordedStep !== "worktree_removed" && recordedStep !== "branch_deleted") input.onPrepare?.("worktree_removed");
 		removeWorktree(repoRoot, worktree);
-		const afterRemoval = parseWorktrees(repoRoot).find((candidate) => realpathIfPresent(candidate.path) === canonicalWorktree);
+		const afterRemoval = listWorktrees(repoRoot).find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
 		if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);
 		input.onProgress?.("worktree_removed");
 		input.onComplete?.("worktree_removed");

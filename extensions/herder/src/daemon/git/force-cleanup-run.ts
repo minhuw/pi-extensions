@@ -3,8 +3,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import { listCoordinationRefs } from "./coordination-ref.ts";
-import { parseWorktreeRecords } from "./cleanup-run.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
+import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
 import { canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
 
 export interface ForceCleanupInput {
@@ -14,8 +14,6 @@ export interface ForceCleanupInput {
 	dryRun: boolean;
 }
 
-interface WorktreeRecord { path: string; branch: string; locked: boolean }
-interface BranchRecord { branch: string; head: string; relative: string }
 
 function fail(message: string): never {
 	throw new Error(message);
@@ -52,27 +50,6 @@ function resolvePlanName(planDir: string, inputName: unknown): string {
 		fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(name)}`);
 	}
 	return name;
-}
-
-function parseWorktrees(repoRoot: string): WorktreeRecord[] {
-	const nulResult = runGit(repoRoot, ["worktree", "list", "--porcelain", "-z"], { allowFailure: true });
-	if (nulResult.status === 0) return parseWorktreeRecords(nulResult.stdout, true);
-	return parseWorktreeRecords(runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout, false);
-}
-
-function listPlanBranches(repoRoot: string, planName: string): BranchRecord[] {
-	const prefix = `herder/${planName}/`;
-	const output = runGit(repoRoot, [
-		"for-each-ref",
-		"--format=%(refname:lstrip=2)%09%(objectname)",
-		`refs/heads/${prefix}`,
-	]).stdout;
-	return output.split(/\r?\n/).filter(Boolean).map((line) => {
-		const separator = line.indexOf("\t");
-		if (separator === -1) fail(`Cannot parse Git branch record: ${JSON.stringify(line)}`);
-		const branch = line.slice(0, separator);
-		return { branch, head: line.slice(separator + 1), relative: branch.slice(prefix.length) };
-	});
 }
 
 function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
@@ -117,7 +94,7 @@ function forceRemoveWorktree(repoRoot: string, worktreePath: string): void {
 			fs.rmSync(worktreePath, { recursive: true, force: true });
 			runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
 		}
-		const stillListed = parseWorktrees(repoRoot).some((item) => realpathIfPresent(item.path) === resolved);
+		const stillListed = listWorktrees(repoRoot).some((item) => item.path && realpathIfPresent(item.path) === resolved);
 		if (stillListed) {
 			fail(`Cannot force-remove worktree ${worktreePath}: ${(removed.stderr || removed.stdout).trim()}`);
 		}
@@ -203,9 +180,9 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		planDirectoryPresent = true;
 	}
 
-	const worktrees = parseWorktrees(repoRoot);
-	const owned = ownedWorktrees(repoRoot, planDir, planName, worktrees);
-	const branches = listPlanBranches(repoRoot, planName);
+	const worktrees = listWorktrees(repoRoot);
+	const owned = ownedWorktrees(repoRoot, planDir, planName, worktrees.filter((item) => item.path));
+	const branches = listHerderBranches(repoRoot, planName);
 	const refs = listCoordinationRefs(repoRoot, planName);
 	const integrationWorktree = owned.find((item) => item.branch === integrationBranch)?.path ?? null;
 	const checkout = currentCheckout(repoRoot);
@@ -272,9 +249,9 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		});
 	}
 
-	const remainingBranches = listPlanBranches(repoRoot, planName);
+	const remainingBranches = listHerderBranches(repoRoot, planName);
 	const remainingRefs = listCoordinationRefs(repoRoot, planName);
-	const remainingWorktrees = ownedWorktrees(repoRoot, planDir, planName, parseWorktrees(repoRoot));
+	const remainingWorktrees = ownedWorktrees(repoRoot, planDir, planName, listWorktrees(repoRoot).filter((item) => item.path));
 	if (remainingBranches.length > 0 || remainingRefs.length > 0 || remainingWorktrees.length > 0) {
 		fail(`Force cleanup left Herder artifacts: ${[
 			...remainingBranches.map((item) => item.branch),
