@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { resetPlanExecution, type ResetPlanCleanupStep } from "../../../src/daemon/git/reset-plan.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
@@ -28,6 +30,29 @@ function fixture(prefix: string): { root: string; repo: string; worktreeRoot: st
 	return { root, repo, worktreeRoot, branch, worktree, head, tree };
 }
 
+function withWorktreeShim<T>(branch: string, mode: "replace" | "append", callback: () => T): T {
+	const originalPath = process.env.PATH ?? "";
+	const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'");
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-recovery-shim-"));
+	const shim = path.join(directory, "git");
+	const record = `branch refs/heads/${branch}`;
+	fs.writeFileSync(shim, `#!/bin/sh
+real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
+case "$*" in
+	*"worktree list --porcelain -z"*)
+		${mode === "replace" ? `printf '${record}\\0\\0'` : `real_git "$@"; printf '${record}\\0\\0'`}
+		exit ;;
+esac
+real_git "$@"
+`);
+	fs.chmodSync(shim, 0o755);
+	process.env.PATH = `${directory}:${originalPath}`;
+	try { return callback(); } finally {
+		process.env.PATH = originalPath;
+		fs.rmSync(directory, { recursive: true, force: true });
+	}
+}
+
 function cleanup(value: { root: string }): void {
 	fs.rmSync(value.root, { recursive: true, force: true });
 }
@@ -45,6 +70,24 @@ function resetInput(value: ReturnType<typeof fixture>, extra: Record<string, unk
 	} as Parameters<typeof resetPlanExecution>[0];
 }
 
+test("recovery rejects a pathless exact target before mutation", () => {
+	const value = fixture("herder-plan-reset-pathless-target-");
+	try {
+		assert.throws(() => withWorktreeShim(value.branch, "replace", () => resetPlanExecution(resetInput(value))), /pathless worktree record/);
+		assert.equal(fs.existsSync(value.worktree), true);
+		assert.equal(git(value.repo, ["rev-parse", `refs/heads/${value.branch}`]).stdout.trim(), value.head);
+	} finally { cleanup(value); }
+});
+
+test("recovery ignores an unrelated pathless record", () => {
+	const value = fixture("herder-plan-reset-pathless-unrelated-");
+	try {
+		const result = withWorktreeShim("herder/plans/999", "append", () => resetPlanExecution(resetInput(value)));
+		assert.equal(result.deletedBranch, true);
+		assert.equal(fs.existsSync(value.worktree), false);
+		assert.notEqual(git(value.repo, ["show-ref", "--verify", `refs/heads/${value.branch}`], true).status, 0);
+	} finally { cleanup(value); }
+});
 test("manager reset force-removes dirty and untracked failed plan worktrees with CAS branch deletion", () => {
 	const value = fixture("herder-plan-reset-dirty-");
 	try {

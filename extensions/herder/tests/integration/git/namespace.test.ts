@@ -23,6 +23,29 @@ function git(repo: string, ...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
+function withGitShim<T>(output: string, callback: () => T): T {
+  const originalPath = process.env.PATH ?? ""
+  const realGitLink = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
+  assert.ok(realGitLink)
+  const realGit = fs.realpathSync(realGitLink)
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-namespace-shim-"))
+  const shim = path.join(directory, "git")
+  const quotedGit = `'${realGit.replaceAll("'", "'\\\"'\\\"'")}'`
+  fs.writeFileSync(shim, `#!/bin/sh
+case "$*" in
+  *"worktree list --porcelain -z"*)
+    ${quotedGit} "$@"; printf '${output.replaceAll("'", "'\\\"'\\\"'")}' ; exit ;;
+esac
+exec ${quotedGit} "$@"
+`)
+  fs.chmodSync(shim, 0o755)
+  process.env.PATH = `${directory}:${originalPath}`
+  try { return callback() } finally {
+    process.env.PATH = originalPath
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+}
+
 function planBody(id: string): string {
   return `# Plan ${id}: Namespace fixture
 
@@ -102,6 +125,25 @@ ${planIds.map((id) => `| [${id}](${id}-namespace.md) | Namespace ${id} | P1 | S 
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-namespace-test-"))
+test("namespace inspection excludes pathless worktree records", () => {
+  const repo = path.join(root, "pathless-repo")
+  fs.mkdirSync(repo)
+  try {
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.name", "Herder Namespace Test")
+    git(repo, "config", "user.email", "herder-namespace@example.invalid")
+    fs.writeFileSync(path.join(repo, "base.txt"), "base\n")
+    git(repo, "add", "base.txt")
+    git(repo, "commit", "-q", "-m", "test: base")
+    const planDir = writePlans(repo)
+    git(repo, "branch", "herder/plans/001", "main")
+    const result = withGitShim("branch refs/heads/herder/plans/009\\0\\0", () => inspectNamespace({ repo, planDir, mode: "fire" }))
+    assert.equal(result.worktrees.some((item) => item.path === ""), false)
+    assert.equal(result.worktrees.every((item) => item.path.length > 0), true)
+  } finally { fs.rmSync(repo, { recursive: true, force: true }) }
+})
+
+
 test("Git namespace inspection rejects collisions and preserves coordination refs", () => {
 try {
   const repo = path.join(root, "repo")

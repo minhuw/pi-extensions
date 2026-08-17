@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { applyHerderReset } from "../../src/application/tools.ts";
@@ -17,6 +18,27 @@ function command(cwd: string, args: string[], allowFailure = false): { status: n
 	return { status: result.status ?? 1, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 function git(cwd: string, ...args: string[]): string { return command(cwd, args).stdout.trim(); }
+function withPathlessWorktree<T>(branch: string, callback: () => T): T {
+	const originalPath = process.env.PATH ?? "";
+	const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'");
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-shim-"));
+	const shim = path.join(directory, "git");
+	fs.writeFileSync(shim, `#!/bin/sh
+real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
+case "$*" in
+	*"worktree list --porcelain -z"*) real_git "$@"; printf 'branch refs/heads/${branch}\\0\\0'; exit ;;
+esac
+real_git "$@"
+`);
+	fs.chmodSync(shim, 0o755);
+	process.env.PATH = `${directory}:${originalPath}`;
+	try { return callback(); } finally {
+		process.env.PATH = originalPath;
+		fs.rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+
 function planBody(id: string, title: string): string {
 	return `# Plan ${id}: ${title}
 
@@ -151,6 +173,14 @@ function namespaceSnapshot(value: Fixture): string {
 
 function remove(value: Fixture): void { fs.rmSync(value.root, { recursive: true, force: true }); }
 
+test("pathless owned worktree records reject whole-set reset before mutation", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const before = namespaceSnapshot(value);
+		assert.throws(() => withPathlessWorktree(`herder/${value.planName}/001`, () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir })), /pathless worktree record/);
+		assert.equal(namespaceSnapshot(value), before);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
 test("reset removes the real Herder namespace, restores immutable statuses, preserves setup, and permits a fresh fire", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {

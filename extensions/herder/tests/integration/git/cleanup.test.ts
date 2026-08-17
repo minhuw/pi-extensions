@@ -4,10 +4,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
 import { cleanupRun } from "../../../src/daemon/git/cleanup-run.ts"
-import { parseWorktreeRecords } from "../../../src/daemon/git/namespace-inventory.ts"
+import { listHerderBranches, listWorktrees, parseWorktreeRecords } from "../../../src/daemon/git/namespace-inventory.ts"
 import { forceCleanupRun } from "../../../src/daemon/git/force-cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
@@ -16,6 +17,40 @@ function git(repo: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" })
   assert.equal(result.status, 0, result.stderr || result.stdout)
   return result.stdout.trim()
+}
+
+function withGitShim<T>(mode: "nul" | "newline" | "malformed-branch", branch: string, callback: () => T): T {
+  const originalPath = process.env.PATH ?? ""
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-git-shim-"))
+  const shim = path.join(directory, "git")
+  const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'")
+  const realGit = "real_git"
+  const pathless = `branch refs/heads/${branch}`
+  const worktreeOutput = mode === "newline"
+    ? `output=$(${realGit} "$@") && printf '%s\\n\\n${pathless}\\n\\n' "$output"`
+    : `${realGit} "$@"; printf '${pathless}\\0\\0'`
+  const branchOutput = `${realGit} "$@"; printf 'malformed branch row\\n'`
+  fs.writeFileSync(shim, `#!/bin/sh
+real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
+case "$*" in
+  *"worktree list --porcelain -z"*)
+    ${mode === "newline" ? "exit 1" : worktreeOutput}
+    exit ;;
+  *"worktree list --porcelain"*)
+    ${mode === "newline" ? `${realGit} "$@"; printf '${pathless}\\n\\n'` : `${realGit} "$@"`}
+    exit ;;
+  *"for-each-ref"*"refs/heads/${branch.slice(0, branch.lastIndexOf("/") + 1)}"*)
+    ${mode === "malformed-branch" ? branchOutput : `${realGit} "$@"`}
+    exit ;;
+esac
+real_git "$@"
+`)
+  fs.chmodSync(shim, 0o755)
+  process.env.PATH = `${directory}:${originalPath}`
+  try { return callback() } finally {
+    process.env.PATH = originalPath
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
 }
 
 function planBody(planId = "001"): string {
@@ -217,12 +252,36 @@ function runCleanup(fixture: Fixture, input: Partial<Parameters<typeof cleanupRu
   return cleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: true, includeFailed: false, deep: false, ...input })
 }
 
+test("worktree inventory retains malformed records in both formats and rejects malformed branches", () => {
+  const fixture = setup()
+  try {
+    const pathlessBranch = "herder/plans/999"
+    const nul = withGitShim("nul", pathlessBranch, () => listWorktrees(fixture.repo))
+    assert.equal(nul.some((item) => item.path === "" && item.branch === pathlessBranch), true)
+    const legacy = withGitShim("newline", pathlessBranch, () => listWorktrees(fixture.repo))
+    assert.equal(legacy.some((item) => item.path === "" && item.branch === pathlessBranch), true)
+    assert.throws(() => withGitShim("malformed-branch", pathlessBranch, () => listHerderBranches(fixture.repo, "plans")), /Cannot parse Git branch record/)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
 test("worktree parser handles modern and legacy porcelain", () => {
   const modern = "worktree /tmp/one\0HEAD abc\0branch refs/heads/main\0\0worktree /tmp/two\0HEAD def\0detached\0locked reason\0\0"
-  assert.deepEqual(parseWorktreeRecords(modern, true), [
+  const legacy = "worktree /tmp/one\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/two\nHEAD def\ndetached\nlocked reason\n\nbranch refs/heads/herder/plans/999\nunknown field\n\n"
+  assert.deepEqual(parseWorktreeRecords(legacy, false), [
     { path: "/tmp/one", branch: "main", locked: false },
     { path: "/tmp/two", branch: "", locked: true },
+    { path: "", branch: "herder/plans/999", locked: false },
   ])
+})
+
+test("cleanup ignores pathless worktree records", () => {
+  const fixture = setup()
+  try {
+    const result = withGitShim("nul", "herder/plans/999", () => runCleanup(fixture, { dryRun: false }))
+    assert.deepEqual(result.removed.map((item) => item.branch), [fixture.planBranch])
+    assert.equal(fs.existsSync(fixture.planWorktree), false)
+    assert.notEqual(git(fixture.repo, "branch", "--list", fixture.integrationBranch), "")
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
 test("ordinary cleanup removes only eligible plan artifacts and preserves the plan set", () => {
@@ -472,6 +531,16 @@ test("deep cleanup detects apply-time run-status drift before mutation", () => {
     assert.equal(git(fixture.repo, "rev-parse", fixture.planBranch), planHead)
     assert.equal(fs.existsSync(fixture.planWorktree), true)
     assert.equal(fs.existsSync(fixture.planDir), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("force cleanup ignores pathless worktree records", () => {
+  const fixture = setup()
+  try {
+    const result = withGitShim("nul", "herder/plans/999", () => forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false }))
+    assert.equal(result.destruction.integrationRemoved, true)
+    assert.equal(fs.existsSync(fixture.planWorktree), false)
+    assert.equal(git(fixture.repo, "branch", "--list", fixture.planBranch), "")
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
