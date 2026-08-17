@@ -39,71 +39,79 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.deepEqual(run("check"), { ok: true, profiles: 4 });
 	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "epic", "lightspeed"]);
 
+	const expectedProfiles: Record<string, { orchestrator: NonNullable<ResolvedProfile["orchestrator"]>; roles: Record<string, ProfileRole> }> = {
+		eclipse: {
+			orchestrator: { model: "gpt-5.6-sol", effort: "xhigh" },
+			roles: {
+				"plan-implementer": {
+					agent_type: "herder.plan-implementer",
+					model: "gpt-5.6-luna",
+					effort: "max",
+					service_tier: "fast",
+				},
+				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+				"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-sol", effort: "xhigh" },
+			},
+		},
+		poorman: {
+			orchestrator: { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" },
+			roles: {
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek-v4-flash", effort: "high" },
+				"plan-reviewer": {
+					agent_type: "herder.plan-reviewer",
+					model: "gpt-5.6-luna",
+					effort: "max",
+					service_tier: "fast",
+				},
+				"plan-judge": {
+					agent_type: "herder.plan-judge",
+					model: "gpt-5.6-luna",
+					effort: "max",
+					service_tier: "fast",
+				},
+			},
+		},
+		epic: {
+			orchestrator: { model: "claude-fable-5", effort: "high" },
+			roles: {
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5", effort: "high" },
+				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5", effort: "high" },
+			},
+		},
+		lightspeed: {
+			orchestrator: { model: "grok-4.6", effort: "xhigh" },
+			roles: {
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "grok-4.6", effort: "xhigh" },
+				"plan-reviewer": {
+					agent_type: "herder.plan-reviewer",
+					model: "gpt-5.6-luna",
+					effort: "max",
+					service_tier: "fast",
+				},
+				"plan-judge": {
+					agent_type: "herder.plan-judge",
+					model: "gpt-5.6-luna",
+					effort: "max",
+					service_tier: "fast",
+				},
+			},
+		},
+	};
+
 	const eclipse = run("resolve");
 	assert.equal(eclipse.profile, "eclipse");
 	assert.equal(eclipse.host, "pi");
-	assert.deepEqual(eclipse.orchestrator, { model: "gpt-5.6-sol", effort: "xhigh" });
-	assert.deepEqual(Object.keys(eclipse.roles), roles);
-	assert.deepEqual(eclipse.roles["plan-implementer"], {
-		agent_type: "herder.plan-implementer",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
+	assert.deepEqual(eclipse.orchestrator, expectedProfiles.eclipse.orchestrator);
+	assert.deepEqual(eclipse.roles, expectedProfiles.eclipse.roles);
 
-	const poorman = run("resolve", "--host", "pi", "--profile", "poorman");
-	assert.deepEqual(poorman.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
-	assert.equal(poorman.roles["plan-implementer"].model, "deepseek-v4-flash");
-	assert.deepEqual(poorman.roles["plan-reviewer"], {
-		agent_type: "herder.plan-reviewer",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
-	assert.deepEqual(poorman.roles["plan-judge"], {
-		agent_type: "herder.plan-judge",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
-
-	const epic = run("resolve", "--host", "pi", "--profile", "epic");
-	assert.deepEqual(epic.orchestrator, { model: "claude-fable-5", effort: "high" });
-	assert.deepEqual(epic.roles["plan-implementer"], {
-		agent_type: "herder.plan-implementer",
-		model: "claude-opus-5",
-		effort: "high",
-	});
-	assert.deepEqual(epic.roles["plan-reviewer"], {
-		agent_type: "herder.plan-reviewer",
-		model: "gpt-5.6-sol",
-		effort: "xhigh",
-	});
-	assert.deepEqual(epic.roles["plan-judge"], {
-		agent_type: "herder.plan-judge",
-		model: "claude-fable-5",
-		effort: "high",
-	});
-
-	const lightspeed = run("resolve", "--host", "pi", "--profile", "lightspeed");
-	assert.deepEqual(lightspeed.orchestrator, { model: "grok-4.6", effort: "xhigh" });
-	assert.deepEqual(lightspeed.roles["plan-implementer"], {
-		agent_type: "herder.plan-implementer",
-		model: "grok-4.6",
-		effort: "xhigh",
-	});
-	assert.deepEqual(lightspeed.roles["plan-reviewer"], {
-		agent_type: "herder.plan-reviewer",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
-	assert.deepEqual(lightspeed.roles["plan-judge"], {
-		agent_type: "herder.plan-judge",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
+	for (const name of ["poorman", "epic", "lightspeed"]) {
+		const profile = run("resolve", "--host", "pi", "--profile", name);
+		assert.equal(profile.profile, name);
+		assert.equal(profile.host, "pi");
+		assert.deepEqual(profile.orchestrator, expectedProfiles[name].orchestrator);
+		assert.deepEqual(profile.roles, expectedProfiles[name].roles);
+	}
 
 	const unsupported = spawnSync(process.execPath, [registry, "resolve", "--host", "codex"], { encoding: "utf8" });
 	assert.equal(unsupported.status, 2);

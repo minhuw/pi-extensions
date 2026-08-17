@@ -20,44 +20,28 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 const registry = path.join(packageRoot, "src/core/profile-registry.ts");
 
-test("Pi resolves profile models into three generic package agents", async () => {
-	const eclipse = await loadPiProfile(catalog, "eclipse");
-	assert.deepEqual(eclipse.orchestrator, { model: "gpt-5.6-sol", effort: "xhigh" });
-
+test("Pi resolves the poorman profile into three generic package agents", async () => {
 	const profile = await loadPiProfile(catalog, "poorman");
 	assert.equal(profile.host, "pi");
 	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
-	assert.equal(profile.roles["plan-implementer"].agent_type, "herder.plan-implementer");
-	assert.equal(profile.roles["plan-implementer"].model, "deepseek-v4-flash");
-	assert.equal(profile.roles["plan-implementer"].effort, "high");
-	assert.equal(profile.roles["plan-reviewer"].agent_type, "herder.plan-reviewer");
-	assert.equal(profile.roles["plan-reviewer"].service_tier, "fast");
-	assert.equal(profile.roles["plan-judge"].service_tier, "fast");
-
-	const epic = await loadPiProfile(catalog, "epic");
-	assert.deepEqual(epic.orchestrator, { model: "claude-fable-5", effort: "high" });
-	assert.equal(epic.roles["plan-implementer"].model, "claude-opus-5");
-	assert.equal(epic.roles["plan-implementer"].effort, "high");
-	assert.equal(epic.roles["plan-reviewer"].model, "gpt-5.6-sol");
-	assert.equal(epic.roles["plan-reviewer"].effort, "xhigh");
-	assert.equal(epic.roles["plan-judge"].model, "claude-fable-5");
-	assert.equal(epic.roles["plan-judge"].effort, "high");
-
-	const lightspeed = await loadPiProfile(catalog, "lightspeed");
-	assert.deepEqual(lightspeed.orchestrator, { model: "grok-4.6", effort: "xhigh" });
-	assert.equal(lightspeed.roles["plan-implementer"].model, "grok-4.6");
-	assert.equal(lightspeed.roles["plan-implementer"].effort, "xhigh");
-	assert.deepEqual(lightspeed.roles["plan-reviewer"], {
-		agent_type: "herder.plan-reviewer",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
-	});
-	assert.deepEqual(lightspeed.roles["plan-judge"], {
-		agent_type: "herder.plan-judge",
-		model: "gpt-5.6-luna",
-		effort: "max",
-		service_tier: "fast",
+	assert.deepEqual(profile.roles, {
+		"plan-implementer": {
+			agent_type: "herder.plan-implementer",
+			model: "deepseek-v4-flash",
+			effort: "high",
+		},
+		"plan-reviewer": {
+			agent_type: "herder.plan-reviewer",
+			model: "gpt-5.6-luna",
+			effort: "max",
+			service_tier: "fast",
+		},
+		"plan-judge": {
+			agent_type: "herder.plan-judge",
+			model: "gpt-5.6-luna",
+			effort: "max",
+			service_tier: "fast",
+		},
 	});
 
 	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
