@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
-import { buildGraph } from "../../../src/core/plans.ts";
-import { readPlanLifecycle, readPlanLifecycleGraph } from "../../../src/core/workflow.ts";
+import { buildGraph, projectLifecycle } from "../../../src/core/plans.ts";
+import { readPlanLifecycle, readPlanLifecycleGraph, summarizeRun } from "../../../src/core/workflow.ts";
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts";
 
 function planBody(id: string, title: string): string {
@@ -203,6 +203,53 @@ function runtime(runId: string, phase: StoredPlan["phase"], planId = "001"): Omi
 	};
 }
 
+test("projectLifecycle keeps normalized status projections in parity", () => {
+	const cases = [
+		{
+			name: "ready and waiting with rejected dependency",
+			records: [
+				{ id: "001", dependencies: [], status: "TODO" as const },
+				{ id: "002", dependencies: ["001"], status: "TODO" as const },
+				{ id: "003", dependencies: [], status: "IN PROGRESS" as const },
+				{ id: "004", dependencies: [], status: "BLOCKED" as const },
+				{ id: "005", dependencies: [], status: "DONE" as const },
+				{ id: "006", dependencies: [], status: "REJECTED" as const },
+				{ id: "007", dependencies: ["006"], status: "TODO" as const },
+			],
+			expect: {
+				ready: ["001"],
+				inProgress: ["003"],
+				blocked: ["004"],
+				waiting: [
+					{ id: "002", unsatisfied: ["001"], rejected: [] },
+					{ id: "007", unsatisfied: ["006"], rejected: ["006"] },
+				],
+				counts: { total: 7, done: 1, rejected: 1, actionable: 5 },
+				complete: false,
+			},
+		},
+		{
+			name: "empty input is complete",
+			records: [],
+			expect: {
+				ready: [], inProgress: [], blocked: [], waiting: [],
+				counts: { total: 0, done: 0, rejected: 0, actionable: 0 }, complete: true,
+			},
+		},
+	];
+	for (const testCase of cases) {
+		assert.deepEqual(projectLifecycle(testCase.records), testCase.expect, testCase.name);
+	}
+});
+
+test("summarizeRun maps shared lifecycle readiness back to specs", () => {
+	const first = spec("run-1", "DONE", "001");
+	const second = spec("run-1", "TODO", "002", ["001"]);
+	const overview = summarizeRun([first, second], []);
+	assert.deepEqual(overview.ready, [second]);
+	assert.equal(overview.done, 1);
+	assert.equal(overview.complete, false);
+});
 test("readPlanLifecycle falls back to README when no run exists", () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-norun-"));
 	try {

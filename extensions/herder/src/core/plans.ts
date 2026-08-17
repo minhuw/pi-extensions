@@ -45,6 +45,50 @@ const REQUIRED_INDEX_HEADERS = ["plan", "title", "priority", "effort", "depends 
 
 export type PlanStatus = "TODO" | "IN PROGRESS" | "DONE" | "BLOCKED" | "REJECTED"
 
+export interface LifecycleRecord {
+  id: string
+  dependencies: string[]
+  status: PlanStatus
+}
+
+export interface LifecycleProjection {
+  ready: string[]
+  inProgress: string[]
+  blocked: string[]
+  waiting: Array<{ id: string; unsatisfied: string[]; rejected: string[] }>
+  counts: { total: number; done: number; rejected: number; actionable: number }
+  complete: boolean
+}
+
+export function projectLifecycle(records: readonly LifecycleRecord[]): LifecycleProjection {
+  const statuses = new Map(records.map((record) => [record.id, record.status]))
+  const ready: string[] = []
+  const waiting: LifecycleProjection["waiting"] = []
+  for (const record of records) {
+    if (!ACTIONABLE.has(record.status)) continue
+    const unsatisfied = record.dependencies.filter((dependency) => statuses.get(dependency) !== "DONE")
+    const rejected = unsatisfied.filter((dependency) => statuses.get(dependency) === "REJECTED")
+    if (record.status === "TODO" && unsatisfied.length === 0) ready.push(record.id)
+    else if (unsatisfied.length > 0) waiting.push({ id: record.id, unsatisfied, rejected })
+  }
+
+  const done = records.filter((record) => record.status === "DONE").length
+  const rejected = records.filter((record) => record.status === "REJECTED").length
+  return {
+    ready,
+    inProgress: records.filter((record) => record.status === "IN PROGRESS").map((record) => record.id),
+    blocked: records.filter((record) => record.status === "BLOCKED").map((record) => record.id),
+    waiting,
+    counts: {
+      total: records.length,
+      done,
+      rejected,
+      actionable: records.filter((record) => ACTIONABLE.has(record.status)).length,
+    },
+    complete: records.every((record) => TERMINAL.has(record.status)),
+  }
+}
+
 export interface PlanRecord {
   id: string
   title: string
@@ -612,32 +656,23 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
     }
   }
 
-  const ready: string[] = []
-  const waiting: PlanGraph["waiting"] = []
-  for (const plan of plans) {
-    if (!ACTIONABLE.has(plan.status)) continue
-    const unsatisfied = plan.dependencies.filter((id) => plansById.get(id)!.status !== "DONE")
-    const rejected = unsatisfied.filter((id) => plansById.get(id)!.status === "REJECTED")
-    if (plan.status === "TODO" && unsatisfied.length === 0) ready.push(plan.id)
-    else if (unsatisfied.length > 0) waiting.push({ id: plan.id, unsatisfied, rejected })
-  }
+  const projection = projectLifecycle(plans.map((plan) => ({
+    id: plan.id,
+    dependencies: plan.dependencies,
+    status: plan.status,
+  })))
 
   return {
     planDir,
     readme,
-    counts: {
-      total: plans.length,
-      done: plans.filter((plan) => plan.status === "DONE").length,
-      rejected: plans.filter((plan) => plan.status === "REJECTED").length,
-      actionable: plans.filter((plan) => ACTIONABLE.has(plan.status)).length,
-    },
+    counts: projection.counts,
     plans,
-    ready,
-    inProgress: plans.filter((plan) => plan.status === "IN PROGRESS").map((plan) => plan.id),
-    blocked: plans.filter((plan) => plan.status === "BLOCKED").map((plan) => plan.id),
-    waiting,
+    ready: projection.ready,
+    inProgress: projection.inProgress,
+    blocked: projection.blocked,
+    waiting: projection.waiting,
     waves: buildWaves(plans),
-    complete: plans.every((plan) => TERMINAL.has(plan.status)),
+    complete: projection.complete,
     contextFile,
     contextWords,
     contextIssues,

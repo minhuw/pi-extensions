@@ -1,6 +1,6 @@
 import type { PlanPhase, WorkerRole } from "../shared/protocol.ts";
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../daemon/run-store.ts";
-import { buildGraph, type PlanGraph, type PlanStatus } from "./plans.ts";
+import { buildGraph, projectLifecycle, type LifecycleRecord, type PlanGraph, type PlanStatus } from "./plans.ts";
 
 export interface RunOverview {
 	total: number;
@@ -75,30 +75,15 @@ export function applyLifecycleToGraph(graph: PlanGraph, lifecycle: Map<string, P
 		const status = lifecycle.get(plan.id);
 		return status && status !== plan.status ? { ...plan, status } : plan;
 	});
-	const byId = new Map(plans.map((plan) => [plan.id, plan]));
-	const ready: string[] = [];
-	const waiting: PlanGraph["waiting"] = [];
-	for (const plan of plans) {
-		if (!["TODO", "IN PROGRESS", "BLOCKED"].includes(plan.status)) continue;
-		const unsatisfied = plan.dependencies.filter((id) => byId.get(id)!.status !== "DONE");
-		const rejected = unsatisfied.filter((id) => byId.get(id)!.status === "REJECTED");
-		if (plan.status === "TODO" && unsatisfied.length === 0) ready.push(plan.id);
-		else if (unsatisfied.length > 0) waiting.push({ id: plan.id, unsatisfied, rejected });
-	}
+	const projection = projectLifecycle(plans.map((plan): LifecycleRecord => ({
+		id: plan.id,
+		dependencies: plan.dependencies,
+		status: plan.status,
+	})));
 	return {
 		...graph,
 		plans,
-		ready,
-		inProgress: plans.filter((plan) => plan.status === "IN PROGRESS").map((plan) => plan.id),
-		blocked: plans.filter((plan) => plan.status === "BLOCKED").map((plan) => plan.id),
-		waiting,
-		complete: plans.every((plan) => plan.status === "DONE" || plan.status === "REJECTED"),
-		counts: {
-			total: plans.length,
-			done: plans.filter((plan) => plan.status === "DONE").length,
-			rejected: plans.filter((plan) => plan.status === "REJECTED").length,
-			actionable: plans.filter((plan) => ["TODO", "IN PROGRESS", "BLOCKED"].includes(plan.status)).length,
-		},
+		...projection,
 	};
 }
 
@@ -109,22 +94,20 @@ export function readPlanLifecycleGraph(planDir: string): PlanGraph {
 
 export function summarizeRun(specs: StoredPlanSpec[], plans: StoredPlan[]): RunOverview {
 	const runtime = new Map(plans.filter((plan) => plan.planId !== "RUN").map((plan) => [plan.planId, plan]));
-	const status = new Map(specs.map((spec) => [spec.planId, lifecycleStatus(spec, runtime.get(spec.planId) ?? null)]));
-	const ready = specs.filter((spec) =>
-		status.get(spec.planId) === "TODO"
-		&& spec.dependencies.every((dependency) => status.get(dependency) === "DONE")
-	);
-	const blocked = specs.filter((spec) => status.get(spec.planId) === "BLOCKED").map((spec) => spec.planId);
-	const done = specs.filter((spec) => status.get(spec.planId) === "DONE").length;
-	const rejected = specs.filter((spec) => status.get(spec.planId) === "REJECTED").length;
-	const inProgress = specs.filter((spec) => status.get(spec.planId) === "IN PROGRESS").length;
+	const records: LifecycleRecord[] = specs.map((spec) => ({
+		id: spec.planId,
+		dependencies: spec.dependencies,
+		status: lifecycleStatus(spec, runtime.get(spec.planId) ?? null),
+	}));
+	const projection = projectLifecycle(records);
+	const readyIds = new Set(projection.ready);
 	return {
-		total: specs.length,
-		done,
-		rejected,
-		inProgress,
-		blocked,
-		ready,
-		complete: done + rejected === specs.length,
+		total: projection.counts.total,
+		done: projection.counts.done,
+		rejected: projection.counts.rejected,
+		inProgress: projection.inProgress.length,
+		blocked: projection.blocked,
+		ready: specs.filter((spec) => readyIds.has(spec.planId)),
+		complete: projection.complete,
 	};
 }
