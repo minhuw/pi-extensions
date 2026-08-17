@@ -4,7 +4,6 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	cleanupTranscriptDisplay,
 	createCleanupTranscriptEntry,
-	type LegacyCleanupTranscriptEntry,
 } from "../../../adapters/cleanup-transcript.ts";
 import { parseCleanupArguments } from "../../../adapters/arguments.ts";
 import { runCleanupCommand } from "../../../adapters/cleanup-command.ts";
@@ -79,29 +78,21 @@ const transcriptTheme = {
 	bold: (text: string) => text,
 } as unknown as Theme;
 
-test("cleanup transcripts retain legacy finalize rendering and use v2 deep entries", () => {
-	const legacy: LegacyCleanupTranscriptEntry = {
-		version: 1,
-		mode: "standard",
-		finalize: true,
-		handoffTarget: "release",
-		preview: "eligible",
-		executed: true,
-		plannedRefs: ["base"],
-		removedRefs: ["base"],
-		integration: "removed",
-		removed: ["001"],
-		skipped: [],
-		blockers: [],
-	};
-	const legacyDisplay = cleanupTranscriptDisplay(legacy, transcriptTheme);
-	assert.match(legacyDisplay, /finalize · executed/);
-	assert.match(legacyDisplay, /handoff target: release/);
-	assert.doesNotMatch(legacyDisplay, /deep ·/);
+test("cleanup transcripts render standard, deep, and force v2 entries", () => {
+	const standard = createCleanupTranscriptEntry({ mode: "standard", preview: "eligible", executed: true, removed: ["001"] });
+	const standardDisplay = cleanupTranscriptDisplay(standard, transcriptTheme);
+	assert.match(standardDisplay, /standard · executed/);
+	assert.match(standardDisplay, /removed: 001/);
+	assert.doesNotMatch(standardDisplay, /planned refs:/);
 
-	const current = createCleanupTranscriptEntry({ mode: "deep", deep: true, preview: "eligible", executed: true });
-	assert.equal(current.version, 2);
-	assert.match(cleanupTranscriptDisplay(current, transcriptTheme), /deep · executed/);
+	const deep = createCleanupTranscriptEntry({ mode: "deep", deep: true, preview: "eligible", executed: true, plannedRefs: ["base"], removedRefs: ["base"] });
+	assert.equal(deep.version, 2);
+	const deepDisplay = cleanupTranscriptDisplay(deep, transcriptTheme);
+	assert.match(deepDisplay, /deep · executed/);
+	assert.match(deepDisplay, /planned refs: base/);
+
+	const force = createCleanupTranscriptEntry({ mode: "force", preview: "eligible", executed: true, plannedRefs: ["base"], removedRefs: ["base"] });
+	assert.match(cleanupTranscriptDisplay(force, transcriptTheme), /force · executed/);
 });
 
 test("cleanup parser is fail-closed and preserves the exact command shape", () => {
