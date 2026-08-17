@@ -2457,8 +2457,6 @@ export function openExecutionDatabase(planDir: string, { create = false, readOnl
   }
 }
 
-const openDatabase = openExecutionDatabase
-
 function requiredText(value: unknown, label: string): string {
   const normalized = String(value ?? "").trim()
   if (!normalized) fail(`${label} cannot be empty`)
@@ -2661,10 +2659,10 @@ function databaseSchemaVersion(database: Database): number {
 
 export function recordRunConfiguration(planDir: string, input: RunConfigurationInput) {
   const configuration = normalizeRunConfiguration(input)
-  const database = openDatabase(planDir, { create: true })
+  const database = openExecutionDatabase(planDir, { create: true })
   let recorded = false
   try {
-    withTransaction(database, () => {
+    withExecutionTransaction(database, () => {
       const existing = readDatabaseRunConfiguration(database)
       if (existing) {
         const comparableExisting = { profile: existing.profile, profileSha256: existing.profileSha256, host: existing.host, roles: existing.roles }
@@ -2686,7 +2684,7 @@ export function recordRunConfiguration(planDir: string, input: RunConfigurationI
 }
 
 export function readRunConfiguration(planDir: string) {
-  const database = openDatabase(planDir, { readOnly: true })
+  const database = openExecutionDatabase(planDir, { readOnly: true })
   if (!database) return { database: executionDatabasePath(planDir), schemaVersion: null, configuration: null }
   try {
     return { database: executionDatabasePath(planDir), schemaVersion: databaseSchemaVersion(database), configuration: readDatabaseRunConfiguration(database) }
@@ -2701,7 +2699,7 @@ function parseJsonColumn<T>(value: unknown, fallback: T): T {
 }
 
 export function readManagerState(planDir: string) {
-  const database = openDatabase(planDir, { readOnly: true })
+  const database = openExecutionDatabase(planDir, { readOnly: true })
   if (!database) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, integrationRepair: null, attention: null, service: null }
   try {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
@@ -3017,10 +3015,8 @@ export function withExecutionTransaction<T>(database: Database, operation: () =>
   }
 }
 
-const withTransaction = withExecutionTransaction
-
 export function initializeExecutionStore(planDir: string) {
-  const database = openDatabase(planDir, { create: true })
+  const database = openExecutionDatabase(planDir, { create: true })
   try {
     return { database: executionDatabasePath(planDir), schemaVersion: databaseSchemaVersion(database) }
   } finally {
@@ -3035,11 +3031,11 @@ export function insertUsageRecordInDatabase(database: DatabaseSync, input: Usage
 }
 
 export function recordUsageRecordInDatabase(database: DatabaseSync, input: UsageRecordInput) {
-  return withTransaction(database, () => insertUsageRecordInDatabase(database, input))
+  return withExecutionTransaction(database, () => insertUsageRecordInDatabase(database, input))
 }
 
 export function recordUsageRecord(planDir: string, input: UsageRecordInput) {
-  const database = openDatabase(planDir, { create: true })
+  const database = openExecutionDatabase(planDir, { create: true })
   try {
     const stored = recordUsageRecordInDatabase(database, input)
     return { ...stored, records: readDatabaseRecords(database), database: executionDatabasePath(planDir) }
@@ -3050,7 +3046,7 @@ export function recordUsageRecord(planDir: string, input: UsageRecordInput) {
 
 export function readUsageState(planDir: string) {
   const databaseExists = fs.existsSync(executionDatabasePath(planDir))
-  const database = openDatabase(planDir, { readOnly: true })
+  const database = openExecutionDatabase(planDir, { readOnly: true })
   let records: UsageRecord[] = []
   let runConfiguration: RunConfiguration | null = null
   let schemaVersion: number | null = null
