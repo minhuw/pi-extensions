@@ -164,6 +164,34 @@ try {
   }
   assert.equal(checkpointResume.coordinationRefs.some((item) => item.ref === numericCheckpoint), true)
 
+  const coordinationTarget = git(repo, "rev-parse", "main")
+  const unknownRef = "refs/plan-herder/plans/unknown/value"
+  const unindexedRef = "refs/plan-herder/plans/completed/999"
+  git(repo, "update-ref", unknownRef, coordinationTarget, "")
+  git(repo, "update-ref", unindexedRef, coordinationTarget, "")
+  const shapedResume = inspectNamespace({ repo, planDir, mode: "resume" })
+  assert.equal(shapedResume.ok, false)
+  assert.deepEqual(shapedResume.baseRef, {
+    ref: "refs/plan-herder/plans/base",
+    target: coordinationTarget,
+    relative: "base",
+  })
+  assert.equal(shapedResume.coordinationRefs.every((item) => Object.keys(item).sort().join(",") === "ref,relative,target"), true)
+  assert.deepEqual(shapedResume.unknownCoordinationRefs, [{
+    ref: unknownRef,
+    target: coordinationTarget,
+    relative: "unknown/value",
+  }])
+  assert.deepEqual(shapedResume.unindexedCoordinationRefs, [{
+    ref: unindexedRef,
+    target: coordinationTarget,
+    relative: "completed/999",
+  }])
+  assert.equal(shapedResume.conflicts.some((item) => item.type === "unknown-coordination-ref" && item.ref === unknownRef), true)
+  assert.equal(shapedResume.conflicts.some((item) => item.type === "unindexed-coordination-ref" && item.ref === unindexedRef), true)
+  git(repo, "update-ref", "-d", unknownRef)
+  git(repo, "update-ref", "-d", unindexedRef)
+
   const malformedCheckpoint = "refs/plan-herder/plans/checkpoints/001/generation-x-001"
   git(repo, "update-ref", malformedCheckpoint, git(repo, "rev-parse", "main"), "")
   const malformedResume = inspectNamespace({ repo, planDir, mode: "resume" })

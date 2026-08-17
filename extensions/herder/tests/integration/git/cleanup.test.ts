@@ -474,6 +474,26 @@ test("deep cleanup detects apply-time run-status drift before mutation", () => {
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
+test("force cleanup projects unknown coordination refs as base and deletes them", () => {
+  const fixture = setup()
+  try {
+    const target = git(fixture.repo, "rev-parse", "HEAD")
+    const ref = "refs/plan-herder/plans/unknown/value"
+    git(fixture.repo, "update-ref", ref, target, "")
+
+    const preview = forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: true })
+    assert.deepEqual(preview.destruction.refsPlanned.filter((item) => item.ref === ref), [
+      { ref, target, kind: "base" },
+    ])
+
+    const result = forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false })
+    assert.deepEqual(result.destruction.refsRemoved.filter((item) => item.ref === ref), [
+      { ref, target, kind: "base" },
+    ])
+    assert.notEqual(spawnSync("git", ["-C", fixture.repo, "show-ref", "--verify", ref], { encoding: "utf8" }).status, 0)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
 test("force cleanup destroys a rewritten or incomplete namespace that deep cleanup would refuse", () => {
   const fixture = setup()
   try {
