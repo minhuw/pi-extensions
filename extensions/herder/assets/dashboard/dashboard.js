@@ -7,7 +7,6 @@ const ACTIVE_PHASES = new Set([
   "gates",
   "integration",
   "repair",
-  "recovery",
   "coordination",
   "queued",
   "judge-queued",
