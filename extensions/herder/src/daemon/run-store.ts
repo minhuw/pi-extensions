@@ -831,7 +831,7 @@ export class RunStore {
 	}
 
 	private submitOperationInternal(operationId: string, kind: StoredManagerOperationKind, payload: unknown, allowInsertion: boolean): ManagerOperationReceipt {
-		if (!operationId || operationId.length > 200 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 200 characters");
+		if (!operationId || operationId.length > 206 || /[\0\r\n]/.test(operationId)) throw new Error("Manager operation ID must be one line of at most 206 characters");
 		const durablePayload = durableOperationPayload(kind, payload);
 		const canonicalPayload = canonicalEventPayload(durablePayload);
 		const identity = canonicalEventPayload({ kind, payload: durablePayload });
