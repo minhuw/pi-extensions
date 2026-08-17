@@ -16,7 +16,8 @@ import {
 } from "../../../adapters/ownership.ts";
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation,
+	requestService, stopService } from "../../../src/client/index.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
@@ -437,7 +438,7 @@ function evidence(fixture: Fixture): {
 
 async function startFixture(fixture: Fixture, hostHandle: string) {
 	const service = await ensureService(fixture.planDirectory);
-	const startedBody = await requestService(service, "/v1/start", {
+	const startedBody = await requestManagerOperation(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
@@ -450,7 +451,7 @@ async function startFixture(fixture: Fixture, hostHandle: string) {
 	assert.equal(actions.length, 1);
 	const implementer = object(actions[0]);
 	const actionId = String(implementer.actionId);
-	await requestService(service, "/v1/event", {
+	await requestManagerOperation(service, "event", {
 		eventId: `dispatch-${hostHandle}`,
 		kind: "dispatch_results",
 		dispatchResults: [{ actionId, accepted: true, hostHandle }],
@@ -463,7 +464,7 @@ async function startFixture(fixture: Fixture, hostHandle: string) {
 
 async function pauseFixture(fixture: Fixture) {
 	const service = await ensureService(fixture.planDirectory);
-	const startedBody = await requestService(service, "/v1/start", {
+	const startedBody = await requestManagerOperation(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
@@ -473,7 +474,7 @@ async function pauseFixture(fixture: Fixture) {
 	});
 	const started = object(startedBody.reply);
 	const action = object((started.actions as unknown[])[0]);
-	await requestService(service, "/v1/event", {
+	await requestManagerOperation(service, "event", {
 		eventId: "pause-dispatch",
 		kind: "dispatch_results",
 		dispatchResults: [{ actionId: String(action.actionId), accepted: false, error: "deterministic host rejection" }],
@@ -504,7 +505,7 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 	try {
 		fixture = writeBlockedAttentionFixture(root);
 		const service = await ensureService(fixture.planDirectory);
-		const started = object((await requestService(service, "/v1/start", {
+		const started = object((await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -562,7 +563,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 	try {
 		fixture = writeBlockedAttentionFixture(root);
 		const service = await ensureService(fixture.planDirectory);
-		const started = object((await requestService(service, "/v1/start", {
+		const started = object((await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
@@ -188,7 +188,7 @@ function eventId(prefix: string, kind: string, candidate: JsonRecord): string {
 }
 
 async function startRun(service: Service, fixture: Fixture, prefix: string): Promise<JsonRecord> {
-	const response = payload(await requestService(service, "/v1/start", {
+	const response = payload(await requestManagerOperation(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
@@ -203,7 +203,7 @@ async function startRun(service: Service, fixture: Fixture, prefix: string): Pro
 }
 
 async function dispatch(service: Service, candidate: JsonRecord, prefix: string): Promise<void> {
-	const response = payload(await requestService(service, "/v1/event", {
+	const response = payload(await requestManagerOperation(service, "event", {
 		eventId: eventId(prefix, "dispatch", candidate),
 		kind: "dispatch_results",
 		dispatchResults: [{
@@ -228,7 +228,7 @@ function implementerResponse(commit: string, discoveredPaths: string[] = []): st
 }
 
 async function terminal(service: Service, candidate: JsonRecord, prefix: string, responseText: string): Promise<JsonRecord> {
-	const response = payload(await requestService(service, "/v1/event", {
+	const response = payload(await requestManagerOperation(service, "event", {
 		eventId: eventId(prefix, "terminal", candidate),
 		kind: "terminals",
 		terminals: [{
@@ -504,7 +504,7 @@ test("blocking Reviewer outcomes repair directly, block early, or escalate to a 
 		assert.match(fs.readFileSync(readme, "utf8"), new RegExp(`BLOCKED — ${projectedDetail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(`BLOCKED — ${projectedDetail}`, "IN PROGRESS"));
 
-		const resumedResponse = payload(await requestService(service, "/v1/start", {
+		const resumedResponse = payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,

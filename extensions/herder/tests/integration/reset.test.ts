@@ -7,7 +7,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { applyHerderReset } from "../../src/application/tools.ts";
 import { initPlanDir, projectStatuses } from "../../src/core/plans.ts";
-import { ensureService, requestService, stopService } from "../../src/client/index.ts";
+import { ensureService, requestManagerOperation,
+	requestService, stopService } from "../../src/client/index.ts";
 import { resetHerderPlanSet } from "../../src/daemon/git/reset-plan-set.ts";
 import { canonicalWorktreeRoot, legacyWorktreeRoot } from "../../src/daemon/git/worktree-locations.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
@@ -151,7 +152,7 @@ function fixture(initialStatus = "TODO"): Fixture {
 async function initializedFixture(): Promise<Fixture> {
 	const value = fixture();
 	const service = await ensureService(value.planDir);
-	const response = await requestService(service, "/v1/start", {
+	const response = await requestManagerOperation(service, "start", {
 		mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
 	});
 	assert.equal((response.reply as Record<string, unknown>).status, "running");
@@ -206,7 +207,7 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 		const empty = new RunStore(value.planDir);
 		try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
 		const fresh = await ensureService(value.planDir);
-		const started = await requestService(fresh, "/v1/start", {
+		const started = await requestManagerOperation(fresh, "start", {
 			mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
 		});
 		assert.equal((started.reply as Record<string, unknown>).status, "running");

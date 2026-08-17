@@ -15,7 +15,8 @@ import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.t
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { compileGraphIdentity } from "../../../src/core/run-manager.ts";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation,
+	requestService, stopService } from "../../../src/client/index.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
@@ -1291,7 +1292,7 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		assert.equal(completeReply.status, "complete");
 		assert.equal(completeReply.reigniteRequest?.state, "pending");
 		appendIndependentPlan(fixture);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "adapter-reignite-stale-drift",
 			kind: "terminals",
 			terminals: [],

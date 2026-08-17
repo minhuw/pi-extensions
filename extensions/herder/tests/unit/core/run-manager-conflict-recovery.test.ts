@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
@@ -48,10 +48,10 @@ function findAction(reply: JsonRecord, planId: string, role: string): JsonRecord
 
 async function managerRequest(
 	service: Awaited<ReturnType<typeof ensureService>>,
-	endpoint: string,
+	kind: import("../../../src/shared/protocol.ts").ManagerOperationKind,
 	input: JsonRecord,
 ): Promise<JsonRecord> {
-	const response = record(await requestService(service, endpoint, input));
+	const response = record(await requestManagerOperation(service, kind, input));
 	return record(response.reply);
 }
 
@@ -238,7 +238,7 @@ const reviewerEnvelope = "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\n
 
 async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise<ConflictRun> {
 	const service = await ensureService(fixture.planDirectory);
-	const started = await managerRequest(service, "/v1/start", {
+	const started = await managerRequest(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
@@ -254,7 +254,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 	]);
 	const firstImplementer = findAction(started, "001", "plan-implementer");
 	const secondImplementer = findAction(started, "002", "plan-implementer");
-	await managerRequest(service, "/v1/event", {
+	await managerRequest(service, "event", {
 		eventId: `${prefix}-dispatch-initial`,
 		kind: "dispatch_results",
 		dispatchResults: [
@@ -265,7 +265,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 
 	const firstHead = commitValue(String(firstImplementer.worktree), 2, "test: set shared value to two");
 	const secondHead = commitValue(String(secondImplementer.worktree), 3, "test: set shared value to three");
-	let reply = await managerRequest(service, "/v1/event", {
+	let reply = await managerRequest(service, "event", {
 		eventId: `${prefix}-terminal-implementer-001`,
 		kind: "terminals",
 		terminals: [{
@@ -276,12 +276,12 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 	});
 	const firstReviewer = findAction(reply, "001", "plan-reviewer");
 	assert.equal(firstReviewer.round, 1);
-	await managerRequest(service, "/v1/event", {
+	await managerRequest(service, "event", {
 		eventId: `${prefix}-dispatch-reviewer-001`,
 		kind: "dispatch_results",
 		dispatchResults: [{ actionId: firstReviewer.actionId, accepted: true, hostHandle: `${prefix}-reviewer-001` }],
 	});
-	reply = await managerRequest(service, "/v1/event", {
+	reply = await managerRequest(service, "event", {
 		eventId: `${prefix}-terminal-reviewer-001`,
 		kind: "terminals",
 		terminals: [{
@@ -293,7 +293,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 	assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/herder/herder-plans/integration"]).stdout.trim(), firstHead);
 	assert.equal(actions(reply).some((action) => action.planId === "002"), false, "the second Implementer remains active until its terminal event");
 
-	reply = await managerRequest(service, "/v1/event", {
+	reply = await managerRequest(service, "event", {
 		eventId: `${prefix}-terminal-implementer-002`,
 		kind: "terminals",
 		terminals: [{
@@ -303,12 +303,12 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 		}],
 	});
 	const secondReviewer = findAction(reply, "002", "plan-reviewer");
-	await managerRequest(service, "/v1/event", {
+	await managerRequest(service, "event", {
 		eventId: `${prefix}-dispatch-reviewer-002`,
 		kind: "dispatch_results",
 		dispatchResults: [{ actionId: secondReviewer.actionId, accepted: true, hostHandle: `${prefix}-reviewer-002` }],
 	});
-	reply = await managerRequest(service, "/v1/event", {
+	reply = await managerRequest(service, "event", {
 		eventId: `${prefix}-terminal-reviewer-002`,
 		kind: "terminals",
 		terminals: [{
@@ -343,7 +343,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 
 async function rejectRecoveryForCapacity(run: ConflictRun, prefix: string): Promise<PlanState> {
 	const before = readPlanState(run.fixture, "002");
-	const reply = await managerRequest(run.service, "/v1/event", {
+	const reply = await managerRequest(run.service, "event", {
 		eventId: `${prefix}-reject-recovery-capacity`,
 		kind: "dispatch_results",
 		dispatchResults: [{
@@ -381,7 +381,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 		service = run.service;
 		const preservedState = await rejectRecoveryForCapacity(run, "recovery-success");
 
-		const resumed = await managerRequest(service, "/v1/start", {
+		const resumed = await managerRequest(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -399,7 +399,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 		assert.equal(replacementState.branchHead, replacementState.plan.rebase?.checkpoint);
 		assert.equal(replacementState.checkpointHead, replacementState.plan.rebase?.checkpoint);
 
-		await managerRequest(service, "/v1/event", {
+		await managerRequest(service, "event", {
 			eventId: "recovery-success-dispatch-replacement",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: replacement.actionId, accepted: true, hostHandle: "recovery-success-replacement" }],
@@ -413,7 +413,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 		assert.notEqual(rebasedHead, replacementState.plan.rebase?.checkpoint);
 		assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/herder/herder-plans/002"]).stdout.trim(), rebasedHead);
 
-		let reply = await managerRequest(service, "/v1/event", {
+		let reply = await managerRequest(service, "event", {
 			eventId: "recovery-success-terminal-replacement",
 			kind: "terminals",
 			terminals: [{
@@ -425,12 +425,12 @@ test("preserved integration conflict retries and completes guided rebase recover
 		const verificationReviewer = findAction(reply, "002", "plan-reviewer");
 		assert.equal(verificationReviewer.round, 2);
 		assert.equal(verificationReviewer.workerMode, "VERIFICATION");
-		await managerRequest(service, "/v1/event", {
+		await managerRequest(service, "event", {
 			eventId: "recovery-success-dispatch-verification-reviewer",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: verificationReviewer.actionId, accepted: true, hostHandle: "recovery-success-verification-reviewer" }],
 		});
-		reply = await managerRequest(service, "/v1/event", {
+		reply = await managerRequest(service, "event", {
 			eventId: "recovery-success-terminal-verification-reviewer",
 			kind: "terminals",
 			terminals: [{
@@ -462,7 +462,7 @@ test("altered preserved rebase is rejected before replacement dispatch", { timeo
 		service = run.service;
 		const beforeCapacity = await rejectRecoveryForCapacity(run, "recovery-tamper");
 		fs.writeFileSync(path.join(run.plan2Worktree, "src/value.mjs"), "export const value = 99\n");
-		await assert.rejects(() => managerRequest(service!, "/v1/start", {
+		await assert.rejects(() => managerRequest(service!, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,

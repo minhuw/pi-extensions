@@ -6,8 +6,10 @@ import path from "node:path";
 import test from "node:test";
 import {
 	ensureService,
+	requestManagerOperation,
 	requestService,
 	stopService,
+	pollManagerOperation,
 	submitManagerOperation,
 	waitManagerOperation,
 } from "../../../src/client/index.ts";
@@ -179,6 +181,53 @@ test("manager controls use immediate durable submission and polling", async () =
 	}
 });
 
+test("typed manager facade preserves envelopes, supplied IDs, and failures", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	try {
+		const service = await ensureService(planDirectory);
+		const stopped = await requestManagerOperation(service, "stop", {}, "facade-supplied-stop");
+		assert.equal(stopped.ok, true);
+		assert.equal((stopped.reply as Record<string, unknown>).status, "idle");
+		assert.equal((await pollManagerOperation(service, "facade-supplied-stop")).operationId, "facade-supplied-stop");
+
+		const event = { eventId: "facade-invalid-event", kind: "dispatch_results", dispatchResults: [] };
+		await assert.rejects(() => requestManagerOperation(service, "event", event), /.+/);
+		await assert.rejects(() => requestManagerOperation(service, "event", event), /.+/);
+		await assert.rejects(
+			() => requestManagerOperation(service, "event", { ...event, dispatchResults: [{ actionId: "different" }] }),
+			/replayed with different payload/,
+		);
+	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("legacy blocking control paths remain authenticated HTTP tombstones", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	try {
+		const service = await ensureService(planDirectory);
+		for (const pathname of ["/v1/start", "/v1/event", "/v1/edit", "/v1/stop"]) {
+			const response = await fetch(`http://127.0.0.1:${service.port}${pathname}`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${service.authToken}`,
+				"Content-Type": "application/json",
+			},
+			body: "{}",
+			});
+			assert.equal(response.status, 410, pathname);
+			const body = await response.json() as { error?: string };
+			assert.match(body.error ?? "", /blocking-control-endpoint-removed/);
+			assert.match(body.error ?? "", /submit \/v1\/operation and poll \/v1\/operation\?id=/);
+		}
+	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 test("ensureService replaces a prior-protocol daemon", async () => {
 	const root = planRoot();
 	const planDirectory = path.join(root, "herder-plans");

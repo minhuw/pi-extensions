@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
-import { ensureService, requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation,
+	requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { openExecutionDatabase, readManagerState } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
@@ -213,7 +214,7 @@ async function submitFinalVerification(
 		rationale: "The fixture has one complete repository test command.",
 		gates,
 	};
-	const response = payload(await requestService(service, "/v1/verification", manifest));
+	const response = payload(await requestManagerOperation(service, "verification", manifest));
 	return { reply: payload(response.reply), manifest };
 }
 
@@ -222,7 +223,7 @@ async function prepareSinglePlan(
 	fixture: { repo: string; planDirectory: string },
 	prefix: string,
 ): Promise<Record<string, unknown>> {
-	const started = payload(payload(await requestService(service, "/v1/start", {
+	const started = payload(payload(await requestManagerOperation(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
@@ -231,7 +232,7 @@ async function prepareSinglePlan(
 		dashboardUrl: service.dashboardUrl,
 	})).reply);
 	const implementer = payload((started.actions as unknown[])[0]);
-	await requestService(service, "/v1/event", {
+	await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-dispatch-implementer`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: `${prefix}-implementer` }],
 	});
@@ -239,7 +240,7 @@ async function prepareSinglePlan(
 	fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
 	git(worktree, ["add", "src/value.mjs"]);
 	git(worktree, ["commit", "-q", "-m", "fix: update fixture value"]);
-	const afterImplementer = payload(payload(await requestService(service, "/v1/event", {
+	const afterImplementer = payload(payload(await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-terminal-implementer`, kind: "terminals",
 		terminals: [{
 			actionId: implementer.actionId,
@@ -248,11 +249,11 @@ async function prepareSinglePlan(
 		}],
 	})).reply);
 	const reviewer = payload((afterImplementer.actions as unknown[])[0]);
-	await requestService(service, "/v1/event", {
+	await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-dispatch-reviewer`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: `${prefix}-reviewer` }],
 	});
-	return payload(payload(await requestService(service, "/v1/event", {
+	return payload(payload(await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-terminal-reviewer`, kind: "terminals",
 		terminals: [{
 			actionId: reviewer.actionId,
@@ -279,11 +280,11 @@ async function finishFinalReview(
 	const afterReviewer = await prepareSinglePlan(service, fixture, prefix);
 	const verified = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, prefix);
 	const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
-	await requestService(service, "/v1/event", {
+	await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-dispatch-final`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
 	});
-	return payload(payload(await requestService(service, "/v1/event", {
+	return payload(payload(await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-terminal-final`, kind: "terminals",
 		terminals: [{
 			actionId: finalReviewer.actionId,
@@ -355,7 +356,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 	);
 	try {
 		const service = await ensureService(doneFixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: doneFixture.repo,
 			planDirectory: doneFixture.planDirectory,
@@ -369,7 +370,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 		} finally {
 			store.close();
 		}
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: doneFixture.repo,
 			planDirectory: doneFixture.planDirectory,
@@ -389,7 +390,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 	);
 	try {
 		const service = await ensureService(progressFixture.planDirectory);
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: progressFixture.repo,
 			planDirectory: progressFixture.planDirectory,
@@ -408,7 +409,7 @@ test("non-terminal reconcile leaves authored README status unchanged", { timeout
 	const before = fs.readFileSync(readme, "utf8");
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -431,7 +432,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 	const readme = path.join(fixture.planDirectory, "README.md");
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		await requestService(service, "/v1/start", {
+		await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -439,7 +440,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 			maxParallel: 1,
 		});
 		assert.match(fs.readFileSync(readme, "utf8"), /\| TODO \|/);
-		const stopped = payload(payload(await requestService(service, "/v1/stop", {})).reply);
+		const stopped = payload(payload(await requestManagerOperation(service, "stop", {})).reply);
 		assert.equal(stopped.status, "stopped");
 		assert.match(fs.readFileSync(readme, "utf8"), /\| IN PROGRESS \|/);
 
@@ -447,7 +448,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 		const throwFixture = writeFixture(throwRoot);
 		try {
 			const throwService = await ensureService(throwFixture.planDirectory);
-			await requestService(throwService, "/v1/start", {
+			await requestManagerOperation(throwService, "start", {
 				mode: "fire",
 				repositoryRoot: throwFixture.repo,
 				planDirectory: throwFixture.planDirectory,
@@ -480,7 +481,7 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		let reply = payload(payload(await requestService(service, "/v1/start", {
+		let reply = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -492,12 +493,12 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 			const action = payload((reply.actions as unknown[])[0]);
 			assert.equal(action.role, "plan-implementer");
 			assert.equal(action.round, 1, "clean transport retry consumed a substantive round");
-			await requestService(service, "/v1/event", {
+			await requestManagerOperation(service, "event", {
 				eventId: `malformed-dispatch-${attempt}`,
 				kind: "dispatch_results",
 				dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: `malformed-worker-${attempt}` }],
 			});
-			reply = payload(payload(await requestService(service, "/v1/event", {
+			reply = payload(payload(await requestManagerOperation(service, "event", {
 				eventId: `malformed-terminal-${attempt}`,
 				kind: "terminals",
 				terminals: [{ actionId: action.actionId, hostHandle: `malformed-worker-${attempt}`, response: "not a role envelope" }],
@@ -515,7 +516,7 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 			const run = store.getRun()!;
 			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "transport_exhausted").length, 1);
 		} finally { store.close(); }
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		assert.equal(resumed.status, "needs_input");
@@ -549,7 +550,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.match(first.dashboardUrl, /^http:\/\/127\.0\.0\.1:\d+\/$/);
 		assert.equal((await fetch(`${first.dashboardUrl}api/health`)).status, 200);
 
-		const started = payload(await requestService(first, "/v1/start", {
+		const started = payload(await requestManagerOperation(first, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -560,7 +561,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		const startReply = payload(started.reply);
 		assert.equal(startReply.status, "running");
 		assert.equal(startReply.dashboardUrl, first.dashboardUrl, "service trusted a stale client dashboard URL");
-		await assert.rejects(() => requestService(first, "/v1/event", {
+		await assert.rejects(() => requestManagerOperation(first, "event", {
 			eventId: "invalid-kind",
 			kind: "unexpected",
 		}), /Unknown manager event kind/);
@@ -587,7 +588,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.equal(implementer.role, "plan-implementer");
 		assert.match(String(implementer.prompt), /deterministic Herder Run Manager owns/);
 
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "dispatch-implementer",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: "worker-implementer" }],
@@ -602,7 +603,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
 		git(worktree, ["add", "src/value.mjs"]);
 		git(worktree, ["commit", "-q", "-m", "fix: update fixture value"]);
-		const implementerTerminal = payload(await requestService(service, "/v1/event", {
+		const implementerTerminal = payload(await requestManagerOperation(service, "event", {
 			eventId: "terminal-implementer",
 			kind: "terminals",
 			terminals: [{
@@ -615,12 +616,12 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.equal(reviewer.role, "plan-reviewer");
 		assert.match(String(reviewer.prompt), /REVIEW_PROTOCOL_PATH: .*assets\/review\/code-review-protocol\.md/);
 
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "dispatch-reviewer",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: "worker-reviewer" }],
 		});
-		const reviewerTerminal = payload(await requestService(service, "/v1/event", {
+		const reviewerTerminal = payload(await requestManagerOperation(service, "event", {
 			eventId: "terminal-reviewer",
 			kind: "terminals",
 			terminals: [{
@@ -635,12 +636,12 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
 		assert.match(String(finalReviewer.prompt), /REVIEW_PROTOCOL_PATH: .*assets\/review\/code-review-protocol\.md/);
 
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "dispatch-final",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "worker-final" }],
 		});
-		const complete = payload(await requestService(service, "/v1/event", {
+		const complete = payload(await requestManagerOperation(service, "event", {
 			eventId: "terminal-final",
 			kind: "terminals",
 			terminals: [{
@@ -657,7 +658,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.equal(fs.readFileSync(path.join(fixture.repo, "src/value.mjs"), "utf8"), "export const value = 1\n", "user checkout source changed");
 		assert.equal(git(fixture.repo, ["show", "herder/herder-plans/integration:src/value.mjs"]).stdout, "export const value = 2\n");
 
-		const replay = payload(await requestService(service, "/v1/event", {
+		const replay = payload(await requestManagerOperation(service, "event", {
 			eventId: "terminal-final",
 			kind: "terminals",
 			terminals: [{
@@ -667,7 +668,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			}],
 		}));
 		assert.equal(payload(replay.reply).status, "complete");
-		await assert.rejects(() => requestService(service, "/v1/event", {
+		await assert.rejects(() => requestManagerOperation(service, "event", {
 			eventId: "terminal-final",
 			kind: "terminals",
 			terminals: [{ actionId: finalReviewer.actionId, hostHandle: "worker-final", interrupted: true }],
@@ -679,7 +680,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 		assert.notEqual(restarted.pid, service.pid);
 		const recovered = payload(await requestService(restarted, "/v1/status"));
 		assert.equal(payload(recovered.reply).status, "complete");
-		const resumed = payload(await requestService(restarted, "/v1/start", {
+		const resumed = payload(await requestManagerOperation(restarted, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -735,10 +736,10 @@ test("nonzero final verification failure is durable and replay-safe", { timeout:
 			store.close();
 		}
 
-		const replay = payload(await requestService(service, "/v1/verification", submitted.manifest));
+		const replay = payload(await requestManagerOperation(service, "verification", submitted.manifest));
 		assert.equal(payload(replay.reply).status, "failed");
 		assert.equal(readManagerState(fixture.planDirectory).verification?.state, "failed");
-		await assert.rejects(() => requestService(service, "/v1/verification", {
+		await assert.rejects(() => requestManagerOperation(service, "verification", {
 			...submitted.manifest,
 			rationale: "A divergent replay payload must not replace the failure evidence.",
 		}), /replayed with a different manifest/);
@@ -763,16 +764,16 @@ test("stale verification dispatch rejection cannot cancel an accepted final revi
 			rationale: "Creates the final Reviewer proposal used by both durable callers.",
 		}]);
 		const firstAction = payload((submitted.reply.actions as unknown[])[0]);
-		const replay = payload(await requestService(service, "/v1/verification", submitted.manifest));
+		const replay = payload(await requestManagerOperation(service, "verification", submitted.manifest));
 		const replayAction = payload((payload(replay.reply).actions as unknown[])[0]);
 		assert.equal(replayAction.actionId, firstAction.actionId);
 
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "verification-dispatch-replay-accepted",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: firstAction.actionId, accepted: true, hostHandle: "verification-final-winner" }],
 		});
-		const stale = payload(payload(await requestService(service, "/v1/event", {
+		const stale = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "verification-dispatch-replay-stale-rejection",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: replayAction.actionId, accepted: false, error: "duplicate preparation" }],
@@ -866,7 +867,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 			before.close();
 		}
 
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -891,12 +892,12 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 		const finalReviewer = payload((passed.reply.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "verification-replacement-dispatch-final",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "verification-replacement-final" }],
 		});
-		const complete = payload(payload(await requestService(service, "/v1/event", {
+		const complete = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "verification-replacement-terminal-final",
 			kind: "terminals",
 			terminals: [{
@@ -926,13 +927,13 @@ test("final Reviewer residual findings complete the run with a pending reignite 
 		const awaiting = await prepareSinglePlan(service, fixture, "final-reviewer-input");
 		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "final-reviewer-input");
 		const finalReviewer = payload((submitted.reply.actions as unknown[])[0]);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "final-reviewer-input-dispatch",
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "final-reviewer-input-host" }],
 		});
 		const finding = "[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] aggregate review needs input";
-		const completed = payload(payload(await requestService(service, "/v1/event", {
+		const completed = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "final-reviewer-input-terminal",
 			kind: "terminals",
 			terminals: [{
@@ -958,7 +959,7 @@ test("final Reviewer residual findings complete the run with a pending reignite 
 			assert.deepEqual(dossier?.findings, [finding]);
 			assert.equal(dossier?.requestId, reignite.requestId);
 		} finally { store.close(); }
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -990,7 +991,7 @@ test("complete pending reignite resume re-exposes the dossier after plan-graph d
 		const reignite = payload(completed.reigniteRequest);
 		assert.equal(reignite.state, "pending");
 		appendIndependentPlan(fixture);
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -1024,14 +1025,14 @@ test("final-review graph drift keeps a pending dossier unexposed until the sourc
 		const awaiting = await prepareSinglePlan(service, fixture, prefix);
 		const verified = await submitFinalVerification(service, fixture.planDirectory, awaiting, prefix);
 		const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-dispatch-final`,
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
 		});
 		appendIndependentPlan(fixture);
 		const finding = "[fr-incomplete][P1][BLOCKING][PLAN_REQUIREMENT] residual work while drifted";
-		const drifted = payload(payload(await requestService(service, "/v1/event", {
+		const drifted = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-terminal-final`,
 			kind: "terminals",
 			terminals: [{
@@ -1049,7 +1050,7 @@ test("final-review graph drift keeps a pending dossier unexposed until the sourc
 			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration);
 			assert.equal(dossier?.state, "pending");
 			assert.deepEqual(dossier?.findings, [finding]);
-			await assert.rejects(() => requestService(service, "/v1/reignite", {
+			await assert.rejects(() => requestManagerOperation(service, "reignite", {
 				requestId: dossier!.requestId,
 				requestSha256: dossier!.requestSha256,
 				state: "written",
@@ -1080,7 +1081,7 @@ test("final Reviewer approve with no findings persists a skipped reignite dossie
 			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "skipped");
 			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 0);
 		} finally { store.close(); }
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -1158,7 +1159,7 @@ test("pending reignite allocation is stable and skips an existing README", { tim
 		);
 		assert.equal(completed.status, "complete");
 		assert.equal(payload(completed.reigniteRequest).allocatedPlanDirectory, resolvedRepoPath(occupied.repo, "herder-reignite-2"));
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: occupied.repo,
 			planDirectory: occupied.planDirectory,
@@ -1250,20 +1251,20 @@ test("reignite written ack validates the allocated graph and keeps the source co
 		assert.equal(reignite.state, "pending");
 		const allocated = String(reignite.allocatedPlanDirectory);
 		assert.equal(allocated, resolvedRepoPath(fixture.repo, "herder-reignite"));
-		await assert.rejects(() => requestService(service, "/v1/reignite", {
+		await assert.rejects(() => requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
 		}), /requires graphSha256/);
 		const unshapedHash = writeFollowUpPlanDirectory(allocated, fixture, { shapeReady: false });
-		await assert.rejects(() => requestService(service, "/v1/reignite", {
+		await assert.rejects(() => requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
 			graphSha256: unshapedHash,
 		}), /shape-ready/);
 		const inProgressHash = writeFollowUpPlanDirectory(allocated, fixture, { extraStatus: "IN PROGRESS" });
-		await assert.rejects(() => requestService(service, "/v1/reignite", {
+		await assert.rejects(() => requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
@@ -1276,7 +1277,7 @@ test("reignite written ack validates the allocated graph and keeps the source co
 		}));
 		const graphSha256 = String(validated.graphSha256);
 		assert.match(graphSha256, /^[0-9a-f]{64}$/);
-		const written = payload(payload(await requestService(service, "/v1/reignite", {
+		const written = payload(payload(await requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
@@ -1312,7 +1313,7 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 		);
 		const reignite = payload(completed.reigniteRequest);
 		const allocated = String(reignite.allocatedPlanDirectory);
-		const failed = payload(payload(await requestService(service, "/v1/reignite", {
+		const failed = payload(payload(await requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "failed",
@@ -1325,7 +1326,7 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 
 		fs.mkdirSync(allocated, { recursive: true });
 		fs.writeFileSync(path.join(allocated, "README.md"), "# foreign readme\n");
-		await assert.rejects(() => requestService(service, "/v1/reignite", {
+		await assert.rejects(() => requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
@@ -1338,14 +1339,14 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 			assert.equal(run.status, "complete");
 			store.updateReigniteRequest(String(reignite.requestId), { allocatedPlanDirectory: fixture.planDirectory });
 		} finally { store.close(); }
-		await assert.rejects(() => requestService(service, "/v1/reignite", {
+		await assert.rejects(() => requestManagerOperation(service, "reignite", {
 			requestId: reignite.requestId,
 			requestSha256: reignite.requestSha256,
 			state: "written",
 			graphSha256: "a".repeat(64),
 		}), /source plan directory/);
 
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -1451,7 +1452,7 @@ test("changed-tree verification resume rejects replacement", { timeout: 30_000 }
 		assert.notEqual(changedHead, originalIntegrationHead);
 		assert.notEqual(changedTree, originalIntegrationTree);
 		assert.equal(git(integrationWorktree, ["status", "--porcelain"]).stdout.trim(), "");
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -1482,7 +1483,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 	addIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(await requestService(service, "/v1/start", {
+		const started = payload(await requestManagerOperation(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -1498,7 +1499,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 		assert.equal(payload(reply.summary).available, 0);
 		assert.equal(payload(reply.scheduler).workConserving, true);
 		assert.equal(payload(reply.scheduler).reason, "saturated");
-		const constrained = payload(payload(await requestService(service, "/v1/event", {
+		const constrained = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "capacity-limited-dispatch",
 			kind: "dispatch_results",
 			dispatchResults: [
@@ -1516,7 +1517,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 		fs.writeFileSync(path.join(firstWorktree, "src/value.mjs"), "export const value = 2\n");
 		git(firstWorktree, ["add", "src/value.mjs"]);
 		git(firstWorktree, ["commit", "-q", "-m", "fix: complete first concurrent plan"]);
-		const mixed = payload(payload(await requestService(service, "/v1/event", {
+		const mixed = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "mixed-terminal-implementer",
 			kind: "terminals",
 			terminals: [{
@@ -1534,7 +1535,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 		const mixedImplementer = mixedActions.find((action) => action.role === "plan-implementer");
 		assert.ok(mixedReviewer);
 		assert.ok(mixedImplementer);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "mixed-dispatch-review-and-implementation",
 			kind: "dispatch_results",
 			dispatchResults: [
@@ -1542,7 +1543,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 				{ actionId: mixedImplementer.actionId, accepted: true, hostHandle: "mixed-implementer" },
 			],
 		});
-		const reviewed = payload(payload(await requestService(service, "/v1/event", {
+		const reviewed = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "mixed-terminal-reviewer",
 			kind: "terminals",
 			terminals: [{
@@ -1571,10 +1572,10 @@ test("stop preserves evidence without creating attention", { timeout: 10_000 }, 
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		await requestService(service, "/v1/start", {
+		await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		});
-		const stopped = payload(await requestService(service, "/v1/stop", {}));
+		const stopped = payload(await requestManagerOperation(service, "stop", {}));
 		const reply = payload(stopped.reply);
 		assert.equal(reply.status, "stopped");
 		assert.equal(reply.attention, undefined, "stop must not create attention");
@@ -1596,7 +1597,7 @@ test("pending initial recovery attention does not block unrelated scheduling", {
 	markFirstPlanBlocked(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		assert.equal(started.status, "running");
@@ -1626,7 +1627,7 @@ test("daemon audit detects and repairs a non-work-conserving scheduler state", {
 	addIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2, dashboardUrl: service.dashboardUrl,
 		})).reply);
 		const actions = (started.actions as unknown[]).map(payload);
@@ -1667,7 +1668,7 @@ test("stable scheduler audits suppress replies while graph drift remains publish
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		assert.equal((started.actions as unknown[]).length, 1);
@@ -1695,11 +1696,11 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		let reply = payload(payload(await requestService(service, "/v1/start", {
+		let reply = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		const implementer = payload((reply.actions as unknown[])[0]);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "approval-dispatch-implementer", kind: "dispatch_results",
 			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: "approval-implementer" }],
 		});
@@ -1707,7 +1708,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
 		git(worktree, ["add", "src/value.mjs"]);
 		git(worktree, ["commit", "-q", "-m", "fix: approval fixture"]);
-		reply = payload(payload(await requestService(service, "/v1/event", {
+		reply = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "approval-terminal-implementer", kind: "terminals",
 			terminals: [{
 				actionId: implementer.actionId, hostHandle: "approval-implementer",
@@ -1715,7 +1716,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 			}],
 		})).reply);
 		const reviewer = payload((reply.actions as unknown[])[0]);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "approval-dispatch-reviewer", kind: "dispatch_results",
 			dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: "approval-reviewer" }],
 		});
@@ -1725,7 +1726,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 		store.putPlan({ ...plan, phase: "READY_TO_INTEGRATE" });
 		assert.equal(store.getApproval(run.runId, "001", plan.generation), null);
 		store.close();
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		}), /no durable approval proof/);
 		assert.equal(git(fixture.repo, ["show-ref", "--verify", "--quiet", "refs/plan-herder/herder-plans/completed/001"], true).status, 1);
@@ -1741,13 +1742,13 @@ test("active Grill rejects started plans and releases unchanged reservations", {
 	addIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		await requestService(service, "/v1/start", {
+		await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		});
-		await assert.rejects(() => requestService(service, "/v1/edit", { operation: "begin", planId: "001" }), /execution already started/);
-		const begun = payload(await requestService(service, "/v1/edit", { operation: "begin", planId: "2" }));
+		await assert.rejects(() => requestManagerOperation(service, "edit", { operation: "begin", planId: "001" }), /execution already started/);
+		const begun = payload(await requestManagerOperation(service, "edit", { operation: "begin", planId: "2" }));
 		const edit = payload(begun.edit);
-		const cancelled = payload(await requestService(service, "/v1/edit", { operation: "cancel", editToken: edit.editToken }));
+		const cancelled = payload(await requestManagerOperation(service, "edit", { operation: "cancel", editToken: edit.editToken }));
 		assert.equal(payload(cancelled.reply).planEdit, undefined);
 		const store = new RunStore(fixture.planDirectory);
 		assert.equal(store.getPlanEdit(store.getRun()!.runId), null);
@@ -1765,17 +1766,17 @@ test("active Grill reserves an unstarted plan and adopts it after current worker
 	addIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const started = payload(payload(await requestService(service, "/v1/start", {
+		const started = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		const implementer = payload((started.actions as unknown[])[0]);
 		assert.equal(implementer.planId, "001");
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "plan-edit-dispatch-implementer", kind: "dispatch_results",
 			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: "plan-edit-implementer" }],
 		});
 
-		const begun = payload(await requestService(service, "/v1/edit", { operation: "begin", planId: "002-update-other.md" }));
+		const begun = payload(await requestManagerOperation(service, "edit", { operation: "begin", planId: "002-update-other.md" }));
 		const edit = payload(begun.edit);
 		assert.equal(edit.planId, "002");
 		assert.equal(edit.state, "reserved");
@@ -1783,7 +1784,7 @@ test("active Grill reserves an unstarted plan and adopts it after current worker
 		assert.deepEqual(payload(begun.reply).planEdit, { planId: "002", state: "reserved" });
 
 		fs.appendFileSync(path.join(fixture.planDirectory, "002-update-other.md"), "\nGrill refinement: keep the other export stable and focused.\n");
-		const finished = payload(await requestService(service, "/v1/edit", { operation: "finish", editToken: edit.editToken }));
+		const finished = payload(await requestManagerOperation(service, "edit", { operation: "finish", editToken: edit.editToken }));
 		assert.deepEqual(payload(finished.reply).planEdit, { planId: "002", state: "barrier" });
 		assert.equal(payload(payload(finished.reply).scheduler).reason, "revision-barrier");
 		const beforeAdoption = new RunStore(fixture.planDirectory);
@@ -1795,7 +1796,7 @@ test("active Grill reserves an unstarted plan and adopts it after current worker
 		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
 		git(worktree, ["add", "src/value.mjs"]);
 		git(worktree, ["commit", "-q", "-m", "fix: complete work during grill"]);
-		const advanced = payload(payload(await requestService(service, "/v1/event", {
+		const advanced = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "plan-edit-terminal-implementer", kind: "terminals",
 			terminals: [{
 				actionId: implementer.actionId,
@@ -1841,10 +1842,10 @@ test("plan graph revision adopts additions while preserving exact completed evid
 		assert.match(git(fixture.repo, ["cat-file", "-p", completionRef]).stdout, /HERDER_COMPLETION_V1/);
 
 		appendIndependentPlan(fixture);
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		}), /Use revise instead of resume/);
-		const revised = payload(payload(await requestService(service, "/v1/start", {
+		const revised = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		})).reply);
 		assert.equal(payload(revised.summary).total, 2);
@@ -1859,12 +1860,12 @@ test("plan graph revision adopts additions while preserving exact completed evid
 		revisedStore.close();
 
 		const newAction = payload((revised.actions as unknown[])[0]);
-		await requestService(service, "/v1/event", {
+		await requestManagerOperation(service, "event", {
 			eventId: "revision-cancel-new-plan", kind: "dispatch_results",
 			dispatchResults: [{ actionId: newAction.actionId, accepted: false, error: "test host unavailable" }],
 		});
 		fs.appendFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "\nChanged after approval.\n");
-		await assert.rejects(() => requestService(service, "/v1/start", {
+		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		}), /changed 001 after execution started/);
 	} finally {
@@ -1917,7 +1918,7 @@ test("integration repair begin rejects a pre-authorized repair commit", { timeou
 		]).stdout;
 
 		await assert.rejects(
-			() => requestService(service, "/v1/integration-repair", begin),
+			() => requestManagerOperation(service, "integration_repair", begin),
 			/Integration repair begin integration branch changed/,
 		);
 
@@ -1969,7 +1970,7 @@ test("non-initial repair cannot recapture namespace evidence", { timeout: 60_000
 			generation: Number(initial.generation),
 			ownerSessionId: "main-session",
 		};
-		await requestService(service, "/v1/integration-repair", {
+		await requestManagerOperation(service, "integration_repair", {
 			...common,
 			operation: "begin",
 			operationId: "repair-noninitial-namespace-initial-begin",
@@ -2038,7 +2039,7 @@ test("non-initial repair cannot recapture namespace evidence", { timeout: 60_000
 		]).stdout;
 
 		service = await ensureService(fixture.planDirectory);
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -2061,7 +2062,7 @@ test("non-initial repair cannot recapture namespace evidence", { timeout: 60_000
 			classification: "code_defect",
 		};
 		await assert.rejects(
-			() => requestService(service, "/v1/integration-repair", laterBegin),
+			() => requestManagerOperation(service, "integration_repair", laterBegin),
 			/namespace evidence is unavailable/,
 		);
 
@@ -2161,7 +2162,7 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			"refs/heads/herder/herder-plans/", "refs/plan-herder/herder-plans/",
 		]).stdout, beforeForeignNamespace);
 
-		const begun = payload(payload(await requestService(service, "/v1/integration-repair", begin)).reply);
+		const begun = payload(payload(await requestManagerOperation(service, "integration_repair", begin)).reply);
 		assert.equal(begun.status, "paused");
 		const store = new RunStore(fixture.planDirectory);
 		try {
@@ -2205,12 +2206,12 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 		const interrupted = new RunStore(fixture.planDirectory);
 		interrupted.updateRun({ status: "failed", terminalDetail: "simulated crash cut" });
 		interrupted.close();
-		const replayed = payload(payload(await requestService(service, "/v1/integration-repair", begin)).reply);
+		const replayed = payload(payload(await requestManagerOperation(service, "integration_repair", begin)).reply);
 		assert.equal(replayed.status, "paused");
 
-		await requestService(service, "/v1/stop", {});
+		await requestManagerOperation(service, "stop", {});
 		await assert.rejects(
-			() => requestService(service, "/v1/integration-repair", { ...begin, operationId: "repair-begin-after-stop" }),
+			() => requestManagerOperation(service, "integration_repair", { ...begin, operationId: "repair-begin-after-stop" }),
 			/not allowed after the run is stopped/,
 		);
 	} finally {
@@ -2243,7 +2244,7 @@ test("each failed successor opens a fresh classification episode", { timeout: 60
 			generation: Number(initial.generation),
 			ownerSessionId: "main-session",
 		};
-		await requestService(service, "/v1/integration-repair", { ...common, operation: "begin", operationId: "episode-manifest-begin", classification: "manifest_error" });
+		await requestManagerOperation(service, "integration_repair", { ...common, operation: "begin", operationId: "episode-manifest-begin", classification: "manifest_error" });
 		const codeGate: VerificationGate = {
 			gateId: "value-after-code",
 			label: "value is repaired",
@@ -2267,7 +2268,7 @@ test("each failed successor opens a fresh classification episode", { timeout: 60
 		const status = payload(payload(await requestService(service, "/v1/status")).reply);
 		const successor = payload(status.integrationRepair);
 		assert.equal(String(successor.requestId), currentRequest);
-		await requestService(service, "/v1/integration-repair", {
+		await requestManagerOperation(service, "integration_repair", {
 			operation: "begin",
 			operationId: "episode-code-begin",
 			requestId: String(successor.requestId),
@@ -2337,7 +2338,7 @@ test("migrated selected repair episode replays begin and completes manifest-erro
 			ownerSessionId: "main-session",
 			classification: "manifest_error",
 		};
-		await requestService(service, "/v1/integration-repair", initialBegin);
+		await requestManagerOperation(service, "integration_repair", initialBegin);
 		const successorFailureGate: VerificationGate = {
 			gateId: "migrated-successor-failure",
 			label: "successor failing gate",
@@ -2381,7 +2382,7 @@ test("migrated selected repair episode replays begin and completes manifest-erro
 			ownerSessionId: "main-session",
 			classification: "manifest_error",
 		};
-		await requestService(service, "/v1/integration-repair", selectedBegin);
+		await requestManagerOperation(service, "integration_repair", selectedBegin);
 
 		await stopService(fixture.planDirectory);
 		const stranded = new RunStore(fixture.planDirectory);
@@ -2411,7 +2412,7 @@ test("migrated selected repair episode replays begin and completes manifest-erro
 			migrated.close();
 		}
 
-		const replayed = payload(payload(await requestService(service, "/v1/integration-repair", selectedBegin)).reply);
+		const replayed = payload(payload(await requestManagerOperation(service, "integration_repair", selectedBegin)).reply);
 		assert.equal(replayed.status, "paused");
 		const passingGate: VerificationGate = {
 			gateId: "migrated-successor-pass",
@@ -2484,7 +2485,7 @@ test("transient retry budget follows identical successor evidence", { timeout: 4
 			ownerSessionId: "main-session",
 			classification: "transient",
 		};
-		await requestService(service, "/v1/integration-repair", begin);
+		await requestManagerOperation(service, "integration_repair", begin);
 		const finish = { ...begin, operation: "finish", operationId: "transient-finish-1", observedCommit: String(initial.parentCommit) };
 		const receipt = await submitManagerOperation(service, "integration_repair", finish, finish.operationId);
 		await waitManagerOperation(service, receipt.operationId);
@@ -2545,7 +2546,7 @@ test("persisted legacy commitMessage operations fail before mutation and leave r
 			ownerSessionId: "main-session",
 			classification: "code_defect",
 		};
-		await requestService(service, "/v1/integration-repair", begin);
+		await requestManagerOperation(service, "integration_repair", begin);
 		await stopService(fixture.planDirectory);
 
 		const before = new RunStore(fixture.planDirectory);
@@ -2579,7 +2580,7 @@ test("persisted legacy commitMessage operations fail before mutation and leave r
 		} finally {
 			unchanged.close();
 		}
-		await requestService(service, "/v1/integration-repair", {
+		await requestManagerOperation(service, "integration_repair", {
 			operation: "cancel",
 			operationId: "repair-cancel-after-legacy",
 			requestId: String(repairRequest.requestId),
@@ -2617,7 +2618,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 			rationale: "Creates the failed verification that owns the repair successor.",
 		}]);
 		const predecessorRepair = payload(failed.reply.integrationRepair);
-		await requestService(service, "/v1/integration-repair", {
+		await requestManagerOperation(service, "integration_repair", {
 			operation: "begin",
 			operationId: "migrated-awaiting-successor-begin",
 			requestId: String(predecessorRepair.requestId),
@@ -2722,7 +2723,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 			migrated.close();
 		}
 
-		await requestService(service, "/v1/start", {
+		await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -2744,7 +2745,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 
 		await stopService(fixture.planDirectory);
 		service = await ensureService(fixture.planDirectory);
-		await requestService(service, "/v1/start", {
+		await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -2773,7 +2774,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 			rationale: "Creates the failed verification that owns the repair successor.",
 		}]);
 		const repairRequest = payload(failed.reply.integrationRepair);
-		await requestService(service, "/v1/integration-repair", {
+		await requestManagerOperation(service, "integration_repair", {
 			operation: "begin",
 			operationId: "repair-successor-manifest-begin",
 			requestId: String(repairRequest.requestId),
@@ -2884,7 +2885,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 		];
 		for (const replacement of replacements) {
 			await assert.rejects(
-				() => requestService(service, "/v1/verification", replacement),
+				() => requestManagerOperation(service, "verification", replacement),
 				/persisted integration repair successor manifest/,
 			);
 		}
@@ -2915,7 +2916,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 				corrupt.close();
 			}
 			await assert.rejects(
-				() => requestService(service, "/v1/verification", persistedManifest),
+				() => requestManagerOperation(service, "verification", persistedManifest),
 				corruption.expected,
 			);
 			const unchanged = new RunStore(fixture.planDirectory);
@@ -2946,7 +2947,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 			committedCorrupt.close();
 		}
 		await assert.rejects(
-			() => requestService(service, "/v1/start", {
+			() => requestManagerOperation(service, "start", {
 				mode: "resume",
 				repositoryRoot: fixture.repo,
 				planDirectory: fixture.planDirectory,
@@ -3042,7 +3043,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 			rejected.close();
 		}
 
-		await requestService(service, "/v1/verification", persistedManifest);
+		await requestManagerOperation(service, "verification", persistedManifest);
 		const accepted = new RunStore(fixture.planDirectory);
 		try {
 			const verification = accepted.getVerificationByRequestId(persistedManifest.requestId)!;
@@ -3165,7 +3166,7 @@ test("integration repair finish replays a crash after the session-authored commi
 			ownerSessionId: "main-session",
 			classification: "code_defect",
 		};
-		await requestService(service, "/v1/integration-repair", begin);
+		await requestManagerOperation(service, "integration_repair", begin);
 		await stopService(fixture.planDirectory);
 
 		const before = new RunStore(fixture.planDirectory);
@@ -3266,7 +3267,7 @@ test("invalid successor gates remain retryable after rejected finish", { timeout
 			ownerSessionId: "main-session",
 			classification: "code_defect",
 		};
-		await requestService(service, "/v1/integration-repair", begin);
+		await requestManagerOperation(service, "integration_repair", begin);
 		const integrationWorktree = String(repairRequest.integrationWorktree);
 		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\n");
 		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
@@ -3374,7 +3375,7 @@ test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }
 			ownerSessionId: "main-session",
 			classification: "code_defect",
 		};
-		await requestService(service, "/v1/integration-repair", begin);
+		await requestManagerOperation(service, "integration_repair", begin);
 		const integrationWorktree = String(repairRequest.integrationWorktree);
 		fs.writeFileSync(path.join(integrationWorktree, "src/value.mjs"), "export const value = 3\n");
 		git(integrationWorktree, ["add", "--", "src/value.mjs"]);
@@ -3443,7 +3444,7 @@ test("later repair begin rejects persisted namespace drift", { timeout: 60_000 }
 			classification: "code_defect",
 		};
 		await assert.rejects(
-			() => requestService(service, "/v1/integration-repair", laterBegin),
+			() => requestManagerOperation(service, "integration_repair", laterBegin),
 			/namespace evidence is unavailable/,
 		);
 		const after = new RunStore(fixture.planDirectory);
@@ -3486,7 +3487,7 @@ test("replacement failure cannot recapture namespace evidence from prior repair"
 			rationale: "Creates the first immutable failed verification and unclaimed repair.",
 		}]);
 		const firstRepair = payload(firstFailed.reply.integrationRepair);
-		const resumed = payload(payload(await requestService(service, "/v1/start", {
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
@@ -3541,7 +3542,7 @@ test("replacement failure cannot recapture namespace evidence from prior repair"
 		await stopService(fixture.planDirectory);
 		service = await ensureService(fixture.planDirectory);
 		await assert.rejects(
-			() => requestService(service, "/v1/integration-repair", {
+			() => requestManagerOperation(service, "integration_repair", {
 				operation: "begin",
 				operationId: "replacement-recapture-later-begin",
 				requestId: String(laterRepair.requestId),

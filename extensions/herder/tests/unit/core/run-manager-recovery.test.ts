@@ -3,11 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ensureService, requestService, stopService } from "../../../src/client/index.ts";
+import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { sha256, stableJson, type AttentionResolutionInput } from "../../../src/shared/protocol.ts";
+import { sha256, stableJson, type AttentionResolutionInput, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Fixture = { repo: string; planDirectory: string };
@@ -156,8 +156,8 @@ function attentionResolution(attention: JsonRecord, runId: string, action: strin
 	};
 }
 
-async function managerReply(service: Service, endpoint: string, input: JsonRecord): Promise<JsonRecord> {
-	return object(object(await requestService(service, endpoint, input)).reply);
+async function managerReply(service: Service, kind: ManagerOperationKind, input: JsonRecord): Promise<JsonRecord> {
+	return object(object(await requestManagerOperation(service, kind, input)).reply);
 }
 
 function cleanup(fixtureValue: Fixture): void {
@@ -170,7 +170,7 @@ test("target recovery advances a fresh generation while unrelated work remains s
 	let service: Service | undefined;
 	try {
 		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "/v1/start", {
+		const started = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
@@ -185,7 +185,7 @@ test("target recovery advances a fresh generation while unrelated work remains s
 		assert.deepEqual(actions.map((action) => action.planId), ["002"]);
 
 		const resolution = attentionResolution(attention, String(started.runId), "unchanged_retry", "The compiled target remains valid and can retry unchanged.");
-		const resolved = await managerReply(service, "/v1/event", {
+		const resolved = await managerReply(service, "event", {
 			eventId: `recovery:${sha256(stableJson(resolution))}`,
 			kind: "attention",
 			attention: resolution,
@@ -218,7 +218,7 @@ test("remaining generation-one recovery requests survive an earlier recovery", {
 	let service: Service | undefined;
 	try {
 		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "/v1/start", {
+		const started = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
@@ -237,7 +237,7 @@ test("remaining generation-one recovery requests survive an earlier recovery", {
 			store.close();
 		}
 
-		const firstResolved = await managerReply(service, "/v1/event", {
+		const firstResolved = await managerReply(service, "event", {
 			eventId: "multiple-recovery-first",
 			kind: "attention",
 			attention: attentionResolution(first, String(started.runId), "unchanged_retry", "The first blocked target remains valid."),
@@ -251,7 +251,7 @@ test("remaining generation-one recovery requests survive an earlier recovery", {
 			afterFirst.close();
 		}
 
-		const secondResolved = await managerReply(service, "/v1/event", {
+		const secondResolved = await managerReply(service, "event", {
 			eventId: "multiple-recovery-second",
 			kind: "attention",
 			attention: attentionResolution(second, String(started.runId), "unchanged_retry", "The second blocked target remains valid."),
@@ -282,7 +282,7 @@ test("exhausted target recovery deletes dirty failed execution state before resc
 		const readme = path.join(fixtureValue.planDirectory, "README.md");
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("BLOCKED — needs attention", "TODO"));
 		service = await ensureService(fixtureValue.planDirectory);
-		let reply = await managerReply(service, "/v1/start", {
+		let reply = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
@@ -293,14 +293,14 @@ test("exhausted target recovery deletes dirty failed execution state before resc
 		assert.ok(target);
 		let oldWorktree = String(target.worktree);
 		for (let round = 1; round <= 6; round += 1) {
-			await managerReply(service, "/v1/event", {
+			await managerReply(service, "event", {
 				eventId: `dirty-dispatch-${round}`,
 				kind: "dispatch_results",
 				dispatchResults: [{ actionId: target.actionId, accepted: true, hostHandle: `dirty-${round}` }],
 			});
 			oldWorktree = String(target.worktree);
 			if (round === 6) fs.writeFileSync(path.join(oldWorktree, "discarded-untracked.txt"), "discard me\n");
-			reply = await managerReply(service, "/v1/event", {
+			reply = await managerReply(service, "event", {
 				eventId: `dirty-terminal-${round}`,
 				kind: "terminals",
 				terminals: [{ actionId: target.actionId, hostHandle: `dirty-${round}`, response: "STATUS: FAILED\nCOMMITS: none\nCHECKS: none\nFILES CHANGED: none\nDISCOVERED_PATHS: none\nNOTES: bounded failure\nUSAGE: input_tokens=1; output_tokens=1; source=test-host" }],
@@ -309,7 +309,7 @@ test("exhausted target recovery deletes dirty failed execution state before resc
 		}
 		const attention = object(reply.attention);
 		assert.equal(attention.cause, "implementer_exhausted");
-		const resolved = await managerReply(service, "/v1/event", {
+		const resolved = await managerReply(service, "event", {
 			eventId: "dirty-recovery-apply",
 			kind: "attention",
 			attention: attentionResolution(attention, String(reply.runId), "unchanged_retry", "The failed target remains valid after the bounded retry budget."),
@@ -340,7 +340,7 @@ test("target-only revisions and permitted rejection produce immutable next gener
 	let service: Service | undefined;
 	try {
 		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "/v1/start", {
+		const started = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
@@ -349,7 +349,7 @@ test("target-only revisions and permitted rejection produce immutable next gener
 		});
 		const attention = object(started.attention);
 		fs.writeFileSync(path.join(fixtureValue.planDirectory, "001-blocked.md"), fs.readFileSync(path.join(fixtureValue.planDirectory, "001-blocked.md"), "utf8").replace("# Plan 001: Blocked target", "# Plan 001: Revised target"));
-		const revised = await managerReply(service, "/v1/event", {
+		const revised = await managerReply(service, "event", {
 			eventId: "recovery-revise-target",
 			kind: "attention",
 			attention: attentionResolution(attention, String(started.runId), "revise", "The target revision keeps the same graph identity and scope."),
@@ -380,7 +380,7 @@ test("target-only revisions and permitted rejection produce immutable next gener
 	service = undefined;
 	try {
 		service = await ensureService(rejectedFixture.planDirectory);
-		const started = await managerReply(service, "/v1/start", {
+		const started = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: rejectedFixture.repo,
 			planDirectory: rejectedFixture.planDirectory,
@@ -388,7 +388,7 @@ test("target-only revisions and permitted rejection produce immutable next gener
 			maxParallel: 2,
 		});
 		const attention = object(started.attention);
-		const rejected = await managerReply(service, "/v1/event", {
+		const rejected = await managerReply(service, "event", {
 			eventId: "recovery-reject-target",
 			kind: "attention",
 			attention: attentionResolution(attention, String(started.runId), "reject", "The target is not justified for this run."),
@@ -419,7 +419,7 @@ test("recovery resolution rejects a mismatched capability or Git identity before
 	let service: Service | undefined;
 	try {
 		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "/v1/start", {
+		const started = await managerReply(service, "start", {
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
@@ -429,7 +429,7 @@ test("recovery resolution rejects a mismatched capability or Git identity before
 		const attention = object(started.attention);
 		const resolution = attentionResolution(attention, String(started.runId), "unchanged_retry", "The target remains valid.");
 		await assert.rejects(
-			() => managerReply(service!, "/v1/event", { eventId: "bad-capability", kind: "attention", attention: { ...resolution, capabilityToken: "0".repeat(64) } }),
+			() => managerReply(service!, "event", { eventId: "bad-capability", kind: "attention", attention: { ...resolution, capabilityToken: "0".repeat(64) } }),
 			/capability token/,
 		);
 		const store = new RunStore(fixtureValue.planDirectory);

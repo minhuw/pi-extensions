@@ -91,28 +91,25 @@ export async function waitManagerOperation(service: StoredService, operationId: 
 	}
 }
 
-const OPERATION_PATHS: Record<string, ManagerOperationKind> = {
-	"/v1/start": "start",
-	"/v1/event": "event",
-	"/v1/edit": "edit",
-	"/v1/stop": "stop",
-	"/v1/verification": "verification",
-	"/v1/reignite": "reignite",
-	"/v1/integration-repair": "integration_repair",
-};
-
-export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
-	const kind = OPERATION_PATHS[pathname];
-	if (!kind) return rawRequest(service, pathname, input, timeoutMs);
+export async function requestManagerOperation(
+	service: StoredService,
+	kind: ManagerOperationKind,
+	input: unknown,
+	operationId?: string,
+): Promise<Record<string, unknown>> {
 	const operationInput = input ?? {};
 	const eventId = kind === "event" && operationInput && typeof operationInput === "object" && !Array.isArray(operationInput)
 		? String((operationInput as { eventId?: unknown }).eventId || "")
 		: "";
-	const operationId = eventId ? `event:${eventId}` : randomUUID();
-	const operation = await submitManagerOperation(service, kind, operationInput, operationId);
+	const durableOperationId = operationId || (eventId ? `event:${eventId}` : randomUUID());
+	const operation = await submitManagerOperation(service, kind, operationInput, durableOperationId);
 	const result = operation.state === "succeeded" ? operation.result : await waitManagerOperation(service, operation.operationId);
 	if (kind === "edit") return { ok: true, ...(result as Record<string, unknown>) };
 	return { ok: true, reply: result };
+}
+
+export async function requestService(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+	return rawRequest(service, pathname, input, timeoutMs);
 }
 
 const HEALTH_TIMEOUT_MS = 2_000;
@@ -572,7 +569,7 @@ export async function withServiceExclusion<T>(
 				const serviceStatus = String(status.status || "");
 				if (!CLEANUP_TERMINAL_STATUSES.has(serviceStatus)) {
 					if (!mayStopLiveRun(purpose)) throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
-					try { await requestService(service, "/v1/stop", {}); }
+					try { await requestManagerOperation(service, "stop", {}); }
 					catch {
 						if (purpose !== "force") throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
 						await killOwnedService(registered.pid);
