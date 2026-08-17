@@ -8,6 +8,7 @@ import {
 } from "./execution-store.ts";
 import {
 	MANAGER_PROTOCOL_VERSION,
+	ATTENTION_STATES,
 	attentionCapabilityToken,
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
@@ -1134,6 +1135,7 @@ export class RunStore {
 	}
 
 	updateAttentionState(requestId: string, state: AttentionState): StoredAttentionRequest {
+		if (!ATTENTION_STATES.includes(state)) throw new Error(`Unsupported attention state ${String(state)}`);
 		const existing = this.getAttention(requestId);
 		if (!existing) throw new Error(`Unknown attention request ${requestId}`);
 		if (existing.state === state) return existing;

@@ -2711,7 +2711,7 @@ test("migrated awaiting repair successor resumes the persisted manifest", { time
 		service = await ensureService(fixture.planDirectory);
 		const migrated = new RunStore(fixture.planDirectory);
 		try {
-			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 17);
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 18);
 			const verification = migrated.getVerificationByRequestId("migrated-awaiting-successor-request")!;
 			assert.equal(verification.state, "awaiting_manifest");
 			assert.equal(verification.manifest, null);

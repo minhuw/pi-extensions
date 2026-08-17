@@ -207,6 +207,90 @@ test("execution schema migrates version 11 reignite allocation columns", () => {
 	}
 });
 
+test("schema 17 attention rows migrate to schema 18 without losing evidence or sequence", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v17-attention-"));
+	try {
+		const database = openExecutionDatabase(planDirectory, { create: true });
+		seedManagerRun(database, "run-attention");
+		const insert = database.prepare(`INSERT INTO manager_attention_requests (
+			sequence, request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
+			kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase,
+			question, recommended_action, recovery_json, created_at, updated_at, resolved_at
+		) VALUES (?, ?, 'run-attention', ?, 1, 2, ?, ?, 'operator_attention', ?, 'reviewer_blocked', ?, ?, 'plan-reviewer', 'READY_REVIEWER', ?, ?, ?, ?, ?, ?)`);
+		for (const [sequence, state] of [[3, "pending"], [8, "awaiting_input"], [14, "editing"], [21, "resolved"]] as const) {
+			const detail = `detail-${sequence}`;
+			insert.run(sequence, `attention-${sequence}`, `plan-${sequence}`, `action-${sequence}`, "a".repeat(64), state, detail, "b".repeat(64), `question-${sequence}`, `recommended-${sequence}`, `{"sequence":${sequence}}`, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z", state === "resolved" ? "2026-08-13T00:00:01.000Z" : null);
+		}
+		database.exec("PRAGMA user_version = 17;");
+		database.close();
+		const migrated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 18);
+		assert.deepEqual(migrated.prepare("SELECT sequence, request_id, state, recovery_json FROM manager_attention_requests ORDER BY sequence").all().map((row: Record<string, unknown>) => ({ ...row })), [
+			{ sequence: 3, request_id: "attention-3", state: "pending", recovery_json: '{"sequence":3}' },
+			{ sequence: 8, request_id: "attention-8", state: "awaiting_input", recovery_json: '{"sequence":8}' },
+			{ sequence: 14, request_id: "attention-14", state: "editing", recovery_json: '{"sequence":14}' },
+			{ sequence: 21, request_id: "attention-21", state: "resolved", recovery_json: '{"sequence":21}' },
+		]);
+		const sql = String((migrated.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_attention_requests'").get() as Record<string, unknown>).sql);
+		assert.ok(sql.includes("state IN ('pending', 'awaiting_input', 'editing', 'resolved')"));
+		assert.equal((migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name IN ('manager_attention_requests_run_state', 'manager_attention_requests_unresolved_identity')").get() as Record<string, unknown>).count, 2);
+		const next = migrated.prepare(`INSERT INTO manager_attention_requests (request_id, run_id, plan_id, generation, round_number, request_sha256, kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, created_at, updated_at) VALUES ('attention-next', 'run-attention', 'plan-next', 1, 1, 'c', 'operator_attention', 'pending', 'transport_exhausted', 'd', 'e', 'plan-reviewer', 'READY_REVIEWER', 'now', 'now')`).run();
+		assert.equal(next.lastInsertRowid, 22);
+		migrated.close();
+		const repeated = openExecutionDatabase(planDirectory, { create: true });
+		assert.equal(Number((repeated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 18);
+		repeated.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("schema 17 delegated attention rows fail closed without mutation", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v17-delegated-"));
+	try {
+		const database = openExecutionDatabase(planDirectory, { create: true });
+		seedManagerRun(database, "run-delegated");
+		database.exec(`
+			DROP INDEX manager_attention_requests_run_state;
+			DROP INDEX manager_attention_requests_unresolved_identity;
+			ALTER TABLE manager_attention_requests RENAME TO manager_attention_requests_v17;
+			CREATE TABLE manager_attention_requests (
+				sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+				request_id TEXT NOT NULL UNIQUE,
+				run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+				plan_id TEXT NOT NULL,
+				generation INTEGER NOT NULL CHECK (generation > 0),
+				round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+				action_id TEXT,
+				request_sha256 TEXT NOT NULL,
+				kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
+				state TEXT NOT NULL CHECK (state IN ('pending', 'delegated', 'awaiting_input', 'editing', 'resolved')),
+				cause TEXT NOT NULL,
+				detail TEXT NOT NULL,
+				detail_sha256 TEXT NOT NULL,
+				continuation_role TEXT NOT NULL,
+				continuation_phase TEXT NOT NULL,
+				question TEXT,
+				recommended_action TEXT,
+				recovery_json TEXT,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				resolved_at TEXT
+			);
+			CREATE INDEX manager_attention_requests_run_state ON manager_attention_requests(run_id, state, plan_id, sequence);
+			CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity ON manager_attention_requests(run_id, plan_id, generation, cause) WHERE state <> 'resolved';
+			DROP TABLE manager_attention_requests_v17;
+		`);
+		database.prepare(`INSERT INTO manager_attention_requests (sequence, request_id, run_id, plan_id, generation, round_number, request_sha256, kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, created_at, updated_at) VALUES (9, 'delegated-attention', 'run-delegated', 'plan-1', 1, 1, 'a', 'operator_attention', 'delegated', 'reviewer_blocked', 'detail', 'b', 'plan-reviewer', 'READY_REVIEWER', 'now', 'now')`).run();
+		database.exec("PRAGMA user_version = 17;");
+		const beforeSql = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_attention_requests'").get() as Record<string, unknown>).sql;
+		database.close();
+		assert.throws(() => openExecutionDatabase(planDirectory, { create: true }), /Unsupported persisted attention state 'delegated'/);
+		assert.throws(() => openExecutionDatabase(planDirectory, { create: false, readOnly: true }), /Execution database schema 17 is unsupported/);
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
 test("execution schema migrates version 16 forward idempotently", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-v16-"));
 	try {

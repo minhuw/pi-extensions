@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 17
+export const EXECUTION_SCHEMA_VERSION = 18
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -635,7 +635,7 @@ const SCHEMA_9_TABLES = `
     action_id TEXT,
     request_sha256 TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'delegated', 'awaiting_input', 'editing', 'resolved')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'awaiting_input', 'editing', 'resolved')),
     cause TEXT NOT NULL,
     detail TEXT NOT NULL,
     detail_sha256 TEXT NOT NULL,
@@ -1744,6 +1744,59 @@ function applySchema16(database: Database): void {
   database.exec("PRAGMA user_version = 16;")
 }
 
+function applySchema18(database: Database): void {
+  const unsupported = database.prepare("SELECT 1 FROM manager_attention_requests WHERE state = 'delegated' LIMIT 1").get()
+  if (unsupported) fail("Unsupported persisted attention state 'delegated'; operator intervention or a fresh run database is required")
+
+  const sequenceRow = database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'manager_attention_requests'").get() as SqlRow | undefined
+  const sequence = sequenceRow?.seq === undefined ? null : Number(sequenceRow.seq)
+  database.exec(`
+    CREATE TABLE manager_attention_requests_v18 (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT NOT NULL UNIQUE,
+      run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+      plan_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+      action_id TEXT,
+      request_sha256 TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
+      state TEXT NOT NULL CHECK (state IN ('pending', 'awaiting_input', 'editing', 'resolved')),
+      cause TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      detail_sha256 TEXT NOT NULL,
+      continuation_role TEXT NOT NULL,
+      continuation_phase TEXT NOT NULL,
+      question TEXT,
+      recommended_action TEXT,
+      recovery_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    INSERT INTO manager_attention_requests_v18 (
+      sequence, request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
+      kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, question,
+      recommended_action, recovery_json, created_at, updated_at, resolved_at
+    ) SELECT
+      sequence, request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
+      kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, question,
+      recommended_action, recovery_json, created_at, updated_at, resolved_at
+    FROM manager_attention_requests;
+    DROP TABLE manager_attention_requests;
+    ALTER TABLE manager_attention_requests_v18 RENAME TO manager_attention_requests;
+    CREATE INDEX manager_attention_requests_run_state
+      ON manager_attention_requests(run_id, state, plan_id, sequence);
+    CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
+      ON manager_attention_requests(run_id, plan_id, generation, cause)
+      WHERE state <> 'resolved';
+  `)
+  if (sequence !== null) {
+    database.prepare("INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('manager_attention_requests', ?)").run(sequence)
+  }
+  database.exec("PRAGMA user_version = 18;")
+}
+
 /** Repair schema-16 rows whose selected failed-successor episode survived but whose mutable projection did not. */
 function applySchema17(database: Database): void {
   validateFailedSuccessorMigration(database)
@@ -1946,94 +1999,115 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   if (version === EXECUTION_SCHEMA_VERSION) return
   if ((version === 16 || version === 15 || version === 14 || version === 13) && !allowInitialize) return
   if (version === 6 && allowInitialize) {
-    ensureLegacyFingerprintVersion(database)
-    database.exec(`
-      CREATE TABLE manager_plan_edits (
-        run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        plan_id TEXT NOT NULL,
-        edit_token TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
-        base_graph_sha256 TEXT NOT NULL,
-        base_plan_fingerprint TEXT NOT NULL,
-        proposed_graph_sha256 TEXT,
-        proposed_plan_fingerprint TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      ${SCHEMA_9_TABLES}
-    `)
-    applySchema10(database)
-    applySchema11(database)
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      ensureLegacyFingerprintVersion(database)
+      database.exec(`
+        CREATE TABLE manager_plan_edits (
+          run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+          plan_id TEXT NOT NULL,
+          edit_token TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
+          base_graph_sha256 TEXT NOT NULL,
+          base_plan_fingerprint TEXT NOT NULL,
+          proposed_graph_sha256 TEXT,
+          proposed_plan_fingerprint TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        ${SCHEMA_9_TABLES}
+      `)
+      applySchema10(database)
+      applySchema11(database)
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 7 && allowInitialize) {
-    ensureLegacyFingerprintVersion(database)
-    database.exec(SCHEMA_9_TABLES)
-    applySchema10(database)
-    applySchema11(database)
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      ensureLegacyFingerprintVersion(database)
+      database.exec(SCHEMA_9_TABLES)
+      applySchema10(database)
+      applySchema11(database)
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 8 && allowInitialize) {
-    database.exec(SCHEMA_9_TABLES)
-    applySchema10(database)
-    applySchema11(database)
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      database.exec(SCHEMA_9_TABLES)
+      applySchema10(database)
+      applySchema11(database)
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 9 && allowInitialize) {
-    applySchema10(database)
-    applySchema11(database)
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      applySchema10(database)
+      applySchema11(database)
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 10 && allowInitialize) {
-    applySchema11(database)
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      applySchema11(database)
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 11 && allowInitialize) {
-    applySchema12(database)
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      applySchema12(database)
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 12 && allowInitialize) {
-    applySchema13(database)
-    applySchema14(database)
-    applySchema15(database)
-    applySchema16(database)
-    applySchema17(database)
-    return
+    return withSchemaMigrationTransaction(database, () => {
+      applySchema13(database)
+      applySchema14(database)
+      applySchema15(database)
+      applySchema16(database)
+      applySchema17(database)
+      applySchema18(database)
+      return
+    })
   }
   if (version === 13 && allowInitialize) {
     return withSchemaMigrationTransaction(database, () => {
@@ -2041,6 +2115,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       applySchema15(database)
       applySchema16(database)
       applySchema17(database)
+      applySchema18(database)
     })
   }
   if (version === 14 && allowInitialize) {
@@ -2048,17 +2123,25 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       applySchema15(database)
       applySchema16(database)
       applySchema17(database)
+      applySchema18(database)
     })
   }
   if (version === 15 && allowInitialize) {
     return withSchemaMigrationTransaction(database, () => {
       applySchema16(database)
       applySchema17(database)
+      applySchema18(database)
     })
   }
   if (version === 16 && allowInitialize) {
     return withSchemaMigrationTransaction(database, () => {
       applySchema17(database)
+      applySchema18(database)
+    })
+  }
+  if (version === 17 && allowInitialize) {
+    return withSchemaMigrationTransaction(database, () => {
+      applySchema18(database)
     })
   }
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
@@ -2262,6 +2345,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   applySchema15(database)
   applySchema16(database)
   applySchema17(database)
+  applySchema18(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {

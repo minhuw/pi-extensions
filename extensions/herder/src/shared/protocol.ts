@@ -108,7 +108,7 @@ export interface ManagerPlanEdit {
 }
 
 export const ATTENTION_KINDS = ["plan_recovery", "user_decision", "operator_attention"] as const;
-export const ATTENTION_STATES = ["pending", "delegated", "awaiting_input", "editing", "resolved"] as const;
+export const ATTENTION_STATES = ["pending", "awaiting_input", "editing", "resolved"] as const;
 export const ATTENTION_PATH_LIMIT = 128;
 export const ATTENTION_CAUSES = [
 	"initial_decision_blocked",

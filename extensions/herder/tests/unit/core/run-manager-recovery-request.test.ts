@@ -192,6 +192,20 @@ test("attention CRUD preserves immutable evidence, deduplicates unresolved cause
 	}
 });
 
+test("unsupported runtime attention states are rejected before SQL mutation", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-state-validation-"));
+	const store = new RunStore(planDirectory);
+	try {
+		insertRun(store, planDirectory);
+		const request = store.putAttention(recoveryRequest("001", "attention-runtime-state"));
+		assert.throws(() => store.updateAttentionState(request.requestId, "delegated" as never), /Unsupported attention state/);
+		assert.deepEqual(store.getAttention(request.requestId), request);
+	} finally {
+		store.close();
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("oversized recovery path evidence persists as a bounded hashed dossier", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-path-evidence-"));
 	const store = new RunStore(planDirectory);

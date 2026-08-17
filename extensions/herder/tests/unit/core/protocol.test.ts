@@ -122,6 +122,34 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	assert.throws(() => validateAttentionRequest({ ...request, continuation: { role: "plan-judge", phase: "UNKNOWN" } }), /request hash|continuation/);
 });
 
+test("typed attention requests accept every manager-owned state and reject delegated", () => {
+	const detail = "Attention state coverage";
+	const base = {
+		schemaVersion: 1 as const,
+		requestId: "attention-state",
+		runId: "run-1",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		actionId: "run-1:state",
+		kind: "operator_attention" as const,
+		cause: "reviewer_blocked" as const,
+		detail,
+		detailSha256: sha256(detail),
+		continuation: { role: "plan-reviewer" as const, phase: "READY_REVIEWER" as const },
+		createdAt: "2026-08-11T00:00:00.000Z",
+		updatedAt: "2026-08-11T00:00:00.000Z",
+	};
+	for (const state of ["pending", "awaiting_input", "editing"] as const) {
+		const request = { ...base, state, requestSha256: attentionRequestSha256({ ...base, state } as typeof base) };
+		assert.doesNotThrow(() => validateAttentionRequest(request));
+	}
+	const resolved = { ...base, state: "resolved" as const, resolvedAt: base.updatedAt };
+	assert.doesNotThrow(() => validateAttentionRequest({ ...resolved, requestSha256: attentionRequestSha256(resolved) }));
+	const delegatedBody = { ...base, state: "delegated" as const };
+	const delegated = { ...delegatedBody, requestSha256: attentionRequestSha256(delegatedBody as typeof base) };
+	assert.throws(() => validateAttentionRequest(delegated), /Unsupported attention state/);
+});
 test("integration repair input validation owns context-free admission rules", () => {
 	const requestId = "request-1";
 	const valid = {
