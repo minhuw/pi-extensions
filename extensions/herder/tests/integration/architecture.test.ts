@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,14 @@ import { fileURLToPath } from "node:url";
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const repositoryRoot = path.resolve(extensionRoot, "../..");
 
+test("Plans core is import-only and not a standalone CLI", () => {
+	const sourcePath = path.join(extensionRoot, "src/core/plans.ts");
+	const source = readFileSync(sourcePath, "utf8");
+	assert.doesNotMatch(source, /^#!/m);
+	assert.doesNotMatch(source, /fileURLToPath|const isMain|function takeFlag|function main\(argv|process\.(stdout|stderr|exitCode)/);
+	assert.doesNotMatch(source, /herder-plans (record-usage|bind-profile|profile|usage)/);
+	assert.equal(statSync(sourcePath).mode & 0o777, 0o644);
+});
 test("Herder is a self-contained Pi-only extension", () => {
 	const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));

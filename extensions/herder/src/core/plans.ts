@@ -1,11 +1,8 @@
-#!/usr/bin/env node
-
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { fileURLToPath } from "node:url"
 import {
   executionReport,
   initializeExecutionStore,
@@ -956,136 +953,5 @@ export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN
       ? { complete: graph.complete, counts: graph.counts }
       : { title: planRecord!.title, status: planRecord!.status, statusDetail: planRecord!.statusDetail },
     ...executionReport(state.records, plan),
-  }
-}
-
-function usage(): string {
-  return [
-    "Usage:",
-    "  herder-plans init [plan-dir] [--track] [--pretty]",
-    "  herder-plans validate [plan-dir] [--pretty]",
-    "  herder-plans shape [plan-dir] [--pretty]",
-    "  herder-plans status [plan-dir] [--pretty]",
-    "  herder-plans ready [plan-dir] [--pretty]",
-    "  herder-plans snapshot <plan-id> [plan-dir] [--pretty]",
-    "  herder-plans record-usage <plan-id|RUN> <role> [plan-dir] --attempt <id> --model <model> --effort <effort> --outcome <outcome> [--input-tokens <n|unknown>] [--cached-input-tokens <n|unknown>] [--output-tokens <n|unknown>] [--reasoning-tokens <n|unknown>] [--source <host-source|unknown>] [--round <1..6>] [--generation <id>] [--harness <name>] [--service-tier <tier>] [--started-at <iso>] [--finished-at <iso>] [--duration-ms <n>] [--pretty]",
-    "  herder-plans bind-profile [plan-dir] --profile <name> --profile-sha256 <hash> --host pi --roles-json <json> [--pretty]",
-    "  herder-plans profile [plan-dir] [--pretty]",
-    "  herder-plans usage [plan-dir] [--pretty]",
-    "  herder-plans report <plan-id|RUN> [plan-dir] [--pretty]",
-    "  herder-plans track [plan-dir] [--pretty]",
-    "  herder-plans untrack [plan-dir] [--pretty]",
-  ].join("\n")
-}
-
-function takeFlag(args: string[], name: string): string | null {
-  const index = args.indexOf(name)
-  if (index === -1) return null
-  if (index === args.length - 1) fail(`${name} requires a value`)
-  const value = args[index + 1]
-  args.splice(index, 2)
-  return value
-}
-
-function main(argv: string[]): void {
-  const args = [...argv]
-  const pretty = args.includes("--pretty")
-  const track = args.includes("--track")
-  for (const flag of ["--pretty", "--track"]) {
-    let index
-    while ((index = args.indexOf(flag)) !== -1) args.splice(index, 1)
-  }
-  const usageOptions = {
-    attempt: takeFlag(args, "--attempt"),
-    model: takeFlag(args, "--model"),
-    effort: takeFlag(args, "--effort"),
-    outcome: takeFlag(args, "--outcome"),
-    inputTokens: takeFlag(args, "--input-tokens"),
-    cachedInputTokens: takeFlag(args, "--cached-input-tokens"),
-    outputTokens: takeFlag(args, "--output-tokens"),
-    reasoningTokens: takeFlag(args, "--reasoning-tokens"),
-    source: takeFlag(args, "--source"),
-    round: takeFlag(args, "--round"),
-    generation: takeFlag(args, "--generation"),
-    harness: takeFlag(args, "--harness"),
-    serviceTier: takeFlag(args, "--service-tier"),
-    startedAt: takeFlag(args, "--started-at"),
-    finishedAt: takeFlag(args, "--finished-at"),
-    durationMs: takeFlag(args, "--duration-ms"),
-  }
-  const profileOptions = {
-    profile: takeFlag(args, "--profile"),
-    profileSha256: takeFlag(args, "--profile-sha256"),
-    host: takeFlag(args, "--host"),
-    roles: takeFlag(args, "--roles-json"),
-  }
-  const hasUsageOptions = Object.values(usageOptions).some((value) => value !== null)
-  const hasProfileOptions = Object.values(profileOptions).some((value) => value !== null)
-  const unknown = args.filter((argument) => argument.startsWith("--"))
-  if (unknown.length > 0) fail(`Unknown option: ${unknown[0]}\n${usage()}`)
-
-  const command = args.shift()
-  let result: unknown
-  if (command === "init") {
-    if (args.length > 1 || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = initPlanDir(args[0] ?? DEFAULT_PLAN_DIR, { track })
-  } else if (command === "validate" || command === "status") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = buildGraph(args[0] ?? DEFAULT_PLAN_DIR)
-  } else if (command === "shape") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = getShapeReport(args[0] ?? DEFAULT_PLAN_DIR)
-  } else if (command === "ready") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    const graph = buildGraph(args[0] ?? DEFAULT_PLAN_DIR)
-    result = {
-      planDir: graph.planDir,
-      ready: graph.ready,
-      inProgress: graph.inProgress,
-      blocked: graph.blocked,
-      waiting: graph.waiting,
-      complete: graph.complete,
-    }
-  } else if (command === "snapshot") {
-    if (args.length < 1 || args.length > 2 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = snapshotPlan(args[1] ?? DEFAULT_PLAN_DIR, args[0]!)
-  } else if (command === "record-usage") {
-    if (args.length < 2 || args.length > 3 || track
-      || hasProfileOptions || !usageOptions.attempt || !usageOptions.model || !usageOptions.effort || !usageOptions.outcome) fail(usage())
-    result = recordUsage(args[2] ?? DEFAULT_PLAN_DIR, {
-      plan: args[0],
-      role: args[1],
-      ...usageOptions,
-    })
-  } else if (command === "usage") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = getUsageReport(args[0] ?? DEFAULT_PLAN_DIR)
-  } else if (command === "report") {
-    if (args.length < 1 || args.length > 2 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = getExecutionReport(args[1] ?? DEFAULT_PLAN_DIR, args[0]!)
-  } else if (command === "bind-profile") {
-    if (args.length > 1 || track || hasUsageOptions
-      || !profileOptions.profile || !profileOptions.profileSha256 || !profileOptions.host || !profileOptions.roles) fail(usage())
-    result = bindRunProfile(args[0] ?? DEFAULT_PLAN_DIR, profileOptions)
-  } else if (command === "profile") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = getRunProfile(args[0] ?? DEFAULT_PLAN_DIR)
-  } else if (command === "track" || command === "untrack") {
-    if (args.length > 1 || track || hasUsageOptions || hasProfileOptions) fail(usage())
-    result = setTracking(args[0] ?? DEFAULT_PLAN_DIR, command === "track")
-  } else {
-    fail(usage())
-  }
-
-  process.stdout.write(`${JSON.stringify(result, null, pretty ? 2 : 0)}\n`)
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  try {
-    main(process.argv.slice(2))
-  } catch (error) {
-    process.stderr.write(`herder-plans: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = 1
   }
 }
