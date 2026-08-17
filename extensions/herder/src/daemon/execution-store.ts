@@ -1748,8 +1748,7 @@ function applySchema18(database: Database): void {
   const unsupported = database.prepare("SELECT 1 FROM manager_attention_requests WHERE state = 'delegated' LIMIT 1").get()
   if (unsupported) fail("Unsupported persisted attention state 'delegated'; operator intervention or a fresh run database is required")
 
-  const sequenceRow = database.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'manager_attention_requests'").get() as SqlRow | undefined
-  const sequence = sequenceRow?.seq === undefined ? null : Number(sequenceRow.seq)
+  database.exec("CREATE TEMP TABLE schema18_attention_sequence AS SELECT seq FROM sqlite_sequence WHERE name = 'manager_attention_requests' LIMIT 1")
   database.exec(`
     CREATE TABLE manager_attention_requests_v18 (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1790,10 +1789,11 @@ function applySchema18(database: Database): void {
     CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       ON manager_attention_requests(run_id, plan_id, generation, cause)
       WHERE state <> 'resolved';
+    DELETE FROM sqlite_sequence WHERE name = 'manager_attention_requests';
+    INSERT INTO sqlite_sequence (name, seq)
+      SELECT 'manager_attention_requests', seq FROM schema18_attention_sequence;
+    DROP TABLE schema18_attention_sequence;
   `)
-  if (sequence !== null) {
-    database.prepare("INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('manager_attention_requests', ?)").run(sequence)
-  }
   database.exec("PRAGMA user_version = 18;")
 }
 

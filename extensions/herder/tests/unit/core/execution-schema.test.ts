@@ -221,7 +221,7 @@ test("schema 17 attention rows migrate to schema 18 without losing evidence or s
 			const detail = `detail-${sequence}`;
 			insert.run(sequence, `attention-${sequence}`, `plan-${sequence}`, `action-${sequence}`, "a".repeat(64), state, detail, "b".repeat(64), `question-${sequence}`, `recommended-${sequence}`, `{"sequence":${sequence}}`, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z", state === "resolved" ? "2026-08-13T00:00:01.000Z" : null);
 		}
-		database.exec("PRAGMA user_version = 17;");
+		database.exec("UPDATE sqlite_sequence SET seq = 100 WHERE name = 'manager_attention_requests'; PRAGMA user_version = 17;");
 		database.close();
 		const migrated = openExecutionDatabase(planDirectory, { create: true });
 		assert.equal(Number((migrated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 18);
@@ -235,7 +235,7 @@ test("schema 17 attention rows migrate to schema 18 without losing evidence or s
 		assert.ok(sql.includes("state IN ('pending', 'awaiting_input', 'editing', 'resolved')"));
 		assert.equal((migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name IN ('manager_attention_requests_run_state', 'manager_attention_requests_unresolved_identity')").get() as Record<string, unknown>).count, 2);
 		const next = migrated.prepare(`INSERT INTO manager_attention_requests (request_id, run_id, plan_id, generation, round_number, request_sha256, kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, created_at, updated_at) VALUES ('attention-next', 'run-attention', 'plan-next', 1, 1, 'c', 'operator_attention', 'pending', 'transport_exhausted', 'd', 'e', 'plan-reviewer', 'READY_REVIEWER', 'now', 'now')`).run();
-		assert.equal(next.lastInsertRowid, 22);
+		assert.equal(next.lastInsertRowid, 101);
 		migrated.close();
 		const repeated = openExecutionDatabase(planDirectory, { create: true });
 		assert.equal(Number((repeated.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version), 18);
