@@ -20,7 +20,7 @@ import {
 	executeManagerOperation,
 	requestService,
 	submitManagerOperationReliable,
-	waitManagerOperation,
+	waitManagerOperationReliable,
 	withServiceExclusion,
 } from "../client/index.ts";
 import { compileGraphIdentity } from "../core/run-manager.ts";
@@ -246,15 +246,7 @@ export async function submitHerderReignite(args: JsonObject): Promise<PendingHer
 }
 
 export async function waitHerderOperation(pending: PendingHerderOperation): Promise<unknown> {
-	let service = await ensureService(pending.planDirectory);
-	for (;;) {
-		try { return await waitManagerOperation(service, pending.operationId); }
-		catch (error) {
-			const text = error instanceof Error ? error.message : String(error);
-			if (!/fetch failed|ECONNREFUSED|ECONNRESET|socket|operation-not-found/i.test(text)) throw error;
-			service = await ensureService(pending.planDirectory);
-		}
-	}
+	return waitManagerOperationReliable(pending.planDirectory, pending.operationId);
 }
 
 export type CleanupDurableStatus = "complete" | "failed" | "stopped" | "active" | "missing";

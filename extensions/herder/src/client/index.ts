@@ -602,20 +602,24 @@ function transportFailure(error: unknown): boolean {
 		|| Boolean(error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError");
 }
 
+async function withReliableService<T>(planDirectory: string, attempt: (service: StoredService) => Promise<T>): Promise<T> {
+	let service = await ensureService(planDirectory);
+	for (;;) {
+		try { return await attempt(service); }
+		catch (error) {
+			if (!transportFailure(error)) throw error;
+			service = await ensureService(planDirectory);
+		}
+	}
+}
+
 export async function submitManagerOperationReliable(
 	planDirectory: string,
 	kind: ManagerOperationKind,
 	input: unknown,
 	operationId: string = randomUUID(),
 ): Promise<ManagerOperationReceipt> {
-	let service = await ensureService(planDirectory);
-	for (;;) {
-		try { return await submitManagerOperation(service, kind, input, operationId); }
-		catch (error) {
-			if (!transportFailure(error)) throw error;
-			service = await ensureService(planDirectory);
-		}
-	}
+	return withReliableService(planDirectory, (service) => submitManagerOperation(service, kind, input, operationId));
 }
 
 export async function executeManagerOperation(
@@ -624,23 +628,16 @@ export async function executeManagerOperation(
 	input: unknown,
 	operationId: string = randomUUID(),
 ): Promise<unknown> {
-	let service = await ensureService(planDirectory);
-	let submitted = false;
-	for (;;) {
-		try {
-			if (!submitted) {
-				const receipt = await submitManagerOperation(service, kind, input, operationId);
-				submitted = true;
-				if (receipt.state === "succeeded") return receipt.result;
-				if (receipt.state === "failed") throw new Error(receipt.error || `Herder operation ${operationId} failed`);
-			}
-			return await waitManagerOperation(service, operationId);
-		} catch (error) {
-			if (!transportFailure(error)) throw error;
-			service = await ensureService(planDirectory);
-			submitted = false;
-		}
-	}
+	return withReliableService(planDirectory, async (service) => {
+		const receipt = await submitManagerOperation(service, kind, input, operationId);
+		if (receipt.state === "succeeded") return receipt.result;
+		if (receipt.state === "failed") throw new Error(receipt.error || `Herder operation ${operationId} failed`);
+		return waitManagerOperation(service, operationId);
+	});
+}
+
+export async function waitManagerOperationReliable(planDirectory: string, operationId: string): Promise<unknown> {
+	return withReliableService(planDirectory, (service) => waitManagerOperation(service, operationId));
 }
 
 export async function stopService(planDirectory: string): Promise<void> {

@@ -8,10 +8,13 @@ import {
 	ensureService,
 	requestManagerOperation,
 	requestService,
+	executeManagerOperation,
 	stopService,
 	pollManagerOperation,
 	submitManagerOperation,
+	submitManagerOperationReliable,
 	waitManagerOperation,
+	waitManagerOperationReliable,
 } from "../../../src/client/index.ts";
 import { git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
@@ -176,6 +179,73 @@ test("manager controls use immediate durable submission and polling", async () =
 		assert.equal(replay.state, "succeeded");
 		await assert.rejects(() => submitManagerOperation(service, "stop", { changed: true }, receipt.operationId), /replayed with different payload/);
 	} finally {
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reliable submission and wait recovery preserve operation identity without wait-only resubmission", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	const originalFetch = globalThis.fetch;
+	let failSubmit = true;
+	let failPoll = true;
+	let operationPosts = 0;
+	globalThis.fetch = async (input, init) => {
+		const pathname = new URL(String(input)).pathname;
+		const method = init?.method ?? "GET";
+		if (pathname === "/v1/operation" && method === "POST") {
+			operationPosts += 1;
+			if (failSubmit) {
+				failSubmit = false;
+				throw new Error("fetch failed");
+			}
+		}
+		if (pathname === "/v1/operation" && method === "GET" && failPoll) {
+			failPoll = false;
+			throw new Error("fetch failed");
+		}
+		return originalFetch(input, init);
+	};
+	try {
+		const receipt = await submitManagerOperationReliable(planDirectory, "stop", {}, "reliable-submit-test");
+		assert.equal(receipt.operationId, "reliable-submit-test");
+		assert.equal(operationPosts, 2, "submission should retry the same durable operation");
+		const result = await waitManagerOperationReliable(planDirectory, receipt.operationId) as Record<string, unknown>;
+		assert.equal(result.status, "idle");
+		assert.equal(operationPosts, 2, "wait-only recovery must not resubmit the operation");
+	} finally {
+		globalThis.fetch = originalFetch;
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+test("execute recovery replays an accepted operation with the same identity", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	const originalFetch = globalThis.fetch;
+	let loseReceipt = true;
+	let operationPosts = 0;
+	globalThis.fetch = async (input, init) => {
+		const pathname = new URL(String(input)).pathname;
+		const method = init?.method ?? "GET";
+		if (pathname === "/v1/operation" && method === "POST") {
+			operationPosts += 1;
+			const response = await originalFetch(input, init);
+			if (loseReceipt) {
+				loseReceipt = false;
+				throw new Error("fetch failed after durable acceptance");
+			}
+			return response;
+		}
+		return originalFetch(input, init);
+	};
+	try {
+		const result = await executeManagerOperation(planDirectory, "stop", {}, "execute-replay-test") as Record<string, unknown>;
+		assert.equal(result.status, "idle");
+		assert.equal(operationPosts, 2, "execution should replay the same operation after losing its receipt");
+	} finally {
+		globalThis.fetch = originalFetch;
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });
 	}
