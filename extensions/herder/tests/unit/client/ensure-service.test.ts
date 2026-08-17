@@ -251,6 +251,52 @@ test("execute recovery replays an accepted operation with the same identity", as
 	}
 });
 
+test("execute and wait-only surface durable terminal failures without reconnecting", async () => {
+	const root = planRoot();
+	const planDirectory = path.join(root, "herder-plans");
+	const originalFetch = globalThis.fetch;
+	let operationPosts = 0;
+	let operationGets = 0;
+	let healthRequests = 0;
+	const operationId = "terminal-failure-test";
+	try {
+		await ensureService(planDirectory);
+		globalThis.fetch = async (input, init) => {
+			const pathname = new URL(String(input)).pathname;
+			const method = init?.method ?? "GET";
+			if (pathname === "/health" && method === "GET") healthRequests += 1;
+			if (pathname === "/v1/operation" && method === "POST") operationPosts += 1;
+			if (pathname === "/v1/operation" && method === "GET") operationGets += 1;
+			return originalFetch(input, init);
+		};
+
+		await assert.rejects(
+			() => executeManagerOperation(planDirectory, "event", {
+				eventId: "terminal-failure-event",
+				kind: "dispatch_results",
+				dispatchResults: [],
+			}, operationId),
+			{ message: "No deterministic Herder run exists" },
+		);
+		assert.equal(operationPosts, 1, "terminal failure must not trigger a replay submission");
+		assert.equal(operationGets, 2, "execute should poll until the durable operation reaches terminal failure");
+		assert.equal(healthRequests, 1, "terminal failure must not trigger service reacquisition");
+
+		await assert.rejects(
+			() => waitManagerOperationReliable(planDirectory, operationId),
+			{ message: "No deterministic Herder run exists" },
+		);
+		assert.equal(operationPosts, 1, "wait-only terminal failure must not resubmit");
+		assert.equal(operationGets, 3, "wait-only terminal failure should poll once");
+		assert.equal(healthRequests, 2, "wait-only terminal failure must not retry service reacquisition");
+	} finally {
+		globalThis.fetch = originalFetch;
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+
 test("typed manager facade preserves envelopes, supplied IDs, and failures", async () => {
 	const root = planRoot();
 	const planDirectory = path.join(root, "herder-plans");
