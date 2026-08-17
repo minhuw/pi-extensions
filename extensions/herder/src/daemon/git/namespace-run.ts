@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process"
 import type { SpawnSyncReturns } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
-import { parseCoordinationRefRelative } from "./coordination-ref.ts"
+import { listCoordinationRefs } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 
 type NamespaceMode = "fire" | "resume" | "status"
@@ -116,21 +116,6 @@ function listNamespaceBranches(repoRoot: string, planName: string): BranchRecord
   })
 }
 
-function listCoordinationRefs(repoRoot: string, planName: string): RefRecord[] {
-  const prefix = `refs/plan-herder/${planName}/`
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname)%09%(objectname)",
-    prefix,
-  ]).stdout
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse Git coordination ref: ${JSON.stringify(line)}`)
-    const ref = line.slice(0, separator)
-    return { ref, target: line.slice(separator + 1), relative: ref.slice(prefix.length) }
-  })
-}
-
 function listWorktrees(repoRoot: string): WorktreeRecord[] {
   const output = runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout
   const records: WorktreeRecord[] = []
@@ -166,7 +151,7 @@ export function inspectNamespace(input: NamespaceInput) {
   const graph = buildGraph(planDir)
   const planIds = new Set(graph.plans.map((plan) => plan.id))
   const branches = listNamespaceBranches(repoRoot, planName)
-  const coordinationRefs = listCoordinationRefs(repoRoot, planName)
+  const coordinationRecords = listCoordinationRefs(repoRoot, planName)
   const parentConflicts = [
     "refs/heads/herder",
     `refs/heads/${namespace}`,
@@ -174,21 +159,22 @@ export function inspectNamespace(input: NamespaceInput) {
     `refs/plan-herder/${planName}`,
   ].filter((ref) => refExists(repoRoot, ref))
   const integration = branches.find((item) => item.relative === "integration") ?? null
-  const baseRef = coordinationRefs.find((item) => item.relative === "base") ?? null
+  const baseRef = coordinationRecords.find((item) => item.relative === "base") ?? null
+
   const planBranches = branches.filter((item) => /^\d{3,}$/.test(item.relative))
   const unknownBranches = branches.filter((item) => item.relative !== "integration" && !/^\d{3,}$/.test(item.relative))
   const unindexedBranches = planBranches.filter((item) => !planIds.has(item.relative))
-  const recognizedCoordinationRefs = coordinationRefs.filter((item) => parseCoordinationRefRelative(item.relative))
-  const unknownCoordinationRefs = coordinationRefs.filter((item) => !recognizedCoordinationRefs.includes(item))
+  const recognizedCoordinationRefs = coordinationRecords.filter((item) => item.identity)
+  const unknownCoordinationRefs = coordinationRecords.filter((item) => !item.identity)
   const unindexedCoordinationRefs = recognizedCoordinationRefs.filter((item) => {
-    const identity = parseCoordinationRefRelative(item.relative)
-    return identity?.plan ? !planIds.has(identity.plan) : false
+    return item.identity?.plan ? !planIds.has(item.identity.plan) : false
   })
   const invalidCompletionRefs = recognizedCoordinationRefs
-    .filter((item) => parseCoordinationRefRelative(item.relative)?.kind === "completed")
+    .filter((item) => item.identity?.kind === "completed")
     .map((item) => ({ item, proof: inspectCompletionProof(repoRoot, item.ref) }))
-    .filter(({ item, proof }) => !proof.ok || proof.payload.planId !== parseCoordinationRefRelative(item.relative)?.plan)
+    .filter(({ item, proof }) => !proof.ok || proof.payload.planId !== item.identity?.plan)
   const worktrees = listWorktrees(repoRoot)
+  const rawCoordinationRef = ({ ref, target, relative }: RefRecord) => ({ ref, target, relative })
   const namespaceBranchNames = new Set(branches.map((item) => item.branch))
   const namespaceWorktrees = worktrees.filter((item) => namespaceBranchNames.has(item.branch))
 
@@ -198,7 +184,7 @@ export function inspectNamespace(input: NamespaceInput) {
   if (input.mode === "fire") {
     conflicts.push(...parentConflicts.map((ref) => ({ type: "parent-ref", ref })))
     conflicts.push(...branches.map((item) => ({ type: "branch", branch: item.branch, head: item.head })))
-    conflicts.push(...coordinationRefs.map((item) => ({ type: "coordination-ref", ref: item.ref, target: item.target })))
+    conflicts.push(...coordinationRecords.map((item) => ({ type: "coordination-ref", ref: item.ref, target: item.target })))
     if (conflicts.length > 0) {
       ok = false
       reason = "namespace-conflict"
@@ -223,7 +209,7 @@ export function inspectNamespace(input: NamespaceInput) {
       conflicts.push({ type: "base-not-reachable", ref: baseRef.ref, target: baseRef.target, integrationHead: integration.head })
     }
     if (integration) {
-      for (const item of recognizedCoordinationRefs.filter((ref) => parseCoordinationRefRelative(ref.relative)?.kind === "completed")) {
+      for (const item of recognizedCoordinationRefs.filter((ref) => ref.identity?.kind === "completed")) {
         const proof = inspectCompletionProof(repoRoot, item.ref)
         if (proof.ok && !isAncestor(repoRoot, proof.object, integration.head)) {
           conflicts.push({ type: "completion-not-reachable", ref: item.ref, target: proof.object, integrationHead: integration.head })
@@ -246,13 +232,13 @@ export function inspectNamespace(input: NamespaceInput) {
     namespace,
     integrationBranch,
     integration,
-    baseRef,
+    baseRef: baseRef ? (({ ref, target, relative }) => ({ ref, target, relative }))(baseRef) : null,
     planBranches,
     unknownBranches,
     unindexedBranches,
-    coordinationRefs,
-    unknownCoordinationRefs,
-    unindexedCoordinationRefs,
+    coordinationRefs: coordinationRecords.map(({ ref, target, relative }) => ({ ref, target, relative })),
+    unknownCoordinationRefs: unknownCoordinationRefs.map(rawCoordinationRef),
+    unindexedCoordinationRefs: unindexedCoordinationRefs.map(rawCoordinationRef),
     invalidCompletionRefs: invalidCompletionRefs.map(({ item, proof }) => ({ ref: item.ref, target: item.target, proof })),
     worktrees: namespaceWorktrees,
     conflicts,

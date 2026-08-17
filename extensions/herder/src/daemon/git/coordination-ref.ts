@@ -3,6 +3,8 @@
 import process from "node:process"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { spawnSync } from "node:child_process"
+import type { SpawnSyncReturns } from "node:child_process"
 
 const PLAN_ID = /^\d{3,}$/
 const PLAN_NAME = /^[a-z0-9][a-z0-9._-]*$/
@@ -112,6 +114,42 @@ function takeValue(args: string[], index: number, name: string): string {
   const value = args[index + 1]
   if (!value || value.startsWith("--")) fail(`${name} requires a value`)
   return value
+}
+
+export interface CoordinationRefRecord {
+  ref: string
+  target: string
+  relative: string
+  identity: CoordinationRef | null
+}
+
+function runGit(repoRoot: string, args: string[]): SpawnSyncReturns<string> {
+  const result = spawnSync("git", ["-C", repoRoot, ...args], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  if (result.error) fail(`Cannot run git: ${result.error.message}`)
+  if (result.status !== 0) {
+    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
+  }
+  return result
+}
+
+export function listCoordinationRefs(repoRoot: string, planName: string): CoordinationRefRecord[] {
+  const prefix = `refs/plan-herder/${planName}/`
+  const output = runGit(repoRoot, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)",
+    prefix,
+  ]).stdout
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const separator = line.indexOf("\t")
+    if (separator === -1) fail(`Cannot parse coordination ref record: ${JSON.stringify(line)}`)
+    const ref = line.slice(0, separator)
+    const target = line.slice(separator + 1)
+    const relative = ref.slice(prefix.length)
+    return { ref, target, relative, identity: parseCoordinationRefRelative(relative) }
+  })
 }
 
 function main(argv: string[]): void {

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
-import { parseCoordinationRefRelative, type CoordinationRef } from "./coordination-ref.ts";
+import { listCoordinationRefs } from "./coordination-ref.ts";
 import { parseWorktreeRecords } from "./cleanup-run.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
 import { canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
@@ -16,13 +16,6 @@ export interface ForceCleanupInput {
 
 interface WorktreeRecord { path: string; branch: string; locked: boolean }
 interface BranchRecord { branch: string; head: string; relative: string }
-interface CoordinationRefRecord {
-	ref: string;
-	target: string;
-	relative: string;
-	kind: CoordinationRef["kind"] | "unknown";
-	plan: string | null;
-}
 
 function fail(message: string): never {
 	throw new Error(message);
@@ -79,24 +72,6 @@ function listPlanBranches(repoRoot: string, planName: string): BranchRecord[] {
 		if (separator === -1) fail(`Cannot parse Git branch record: ${JSON.stringify(line)}`);
 		const branch = line.slice(0, separator);
 		return { branch, head: line.slice(separator + 1), relative: branch.slice(prefix.length) };
-	});
-}
-
-function listCoordinationRefs(repoRoot: string, planName: string): CoordinationRefRecord[] {
-	const prefix = `refs/plan-herder/${planName}/`;
-	const output = runGit(repoRoot, [
-		"for-each-ref",
-		"--format=%(refname)%09%(objectname)",
-		prefix,
-	]).stdout;
-	return output.split(/\r?\n/).filter(Boolean).map((line) => {
-		const separator = line.indexOf("\t");
-		if (separator === -1) fail(`Cannot parse coordination ref record: ${JSON.stringify(line)}`);
-		const ref = line.slice(0, separator);
-		const target = line.slice(separator + 1);
-		const relative = ref.slice(prefix.length);
-		const identity = parseCoordinationRefRelative(relative);
-		return { ref, target, relative, kind: identity?.kind ?? "unknown", plan: identity?.plan ?? null };
 	});
 }
 
@@ -260,8 +235,8 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 	result.destruction.refsPlanned = refs.map((item) => ({
 		ref: item.ref,
 		target: item.target,
-		kind: item.kind === "unknown" ? "base" : item.kind,
-		...(item.plan ? { plan: item.plan } : {}),
+		kind: item.identity?.kind ?? "base",
+		...(item.identity?.plan ? { plan: item.identity.plan } : {}),
 	}));
 	result.actions = [
 		...owned.map((item) => ({
@@ -292,8 +267,8 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		result.destruction.refsRemoved.push({
 			ref: item.ref,
 			target: item.target,
-			kind: item.kind === "unknown" ? "base" : item.kind,
-			...(item.plan ? { plan: item.plan } : {}),
+			kind: item.identity?.kind ?? "base",
+			...(item.identity?.plan ? { plan: item.identity.plan } : {}),
 		});
 	}
 

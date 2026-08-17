@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
 import { RunStore } from "../run-store.ts"
-import { parseCoordinationRefRelative } from "./coordination-ref.ts"
+import { listCoordinationRefs, type CoordinationRefRecord } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 
@@ -68,13 +68,6 @@ export interface CleanupResult {
 }
 interface WorktreeRecord { path: string; branch: string; locked: boolean }
 interface BranchRecord { branch: string; head: string; relative: string }
-interface CoordinationRefRecord {
-  ref: string
-  target: string
-  relative: string
-  kind: CoordinationRef["kind"] | null
-  plan: string | null
-}
 type CompletionRefRecord = ReturnType<typeof listCompletionRefs>[number]
 
 function fail(message: string): never {
@@ -301,24 +294,6 @@ function listCompletionRefs(repoRoot: string, planName: string) {
     const relative = ref.slice(prefix.length)
     const plan = /^\d{3,}$/.test(relative) ? relative : null
     return { ref, target, relative, plan, proof: inspectCompletionProof(repoRoot, ref) }
-  })
-}
-
-function listCoordinationRefs(repoRoot: string, planName: string): CoordinationRefRecord[] {
-  const prefix = `refs/plan-herder/${planName}/`
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname)%09%(objectname)",
-    prefix,
-  ]).stdout
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse coordination ref record: ${JSON.stringify(line)}`)
-    const ref = line.slice(0, separator)
-    const target = line.slice(separator + 1)
-    const relative = ref.slice(prefix.length)
-    const identity = parseCoordinationRefRelative(relative)
-    return { ref, target, relative, kind: identity?.kind ?? null, plan: identity?.plan ?? null }
   })
 }
 
@@ -553,28 +528,28 @@ export function cleanupRun(input: CleanupInput) {
       }
     }
     for (const item of coordinationRefs) {
-      if (!item.kind) {
+      if (!item.identity) {
         destruction.blockers.push({ reason: "unrecognized-coordination-ref", ref: item.ref })
         continue
       }
       // Every plan-owned coordination ref must be tied to an indexed plan.
-      if (item.plan && !plans.has(item.plan)) {
-        destruction.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.plan })
+      if (item.identity.plan && !plans.has(item.identity.plan)) {
+        destruction.blockers.push({ reason: "coordination-ref-plan-not-indexed", ref: item.ref, plan: item.identity.plan })
         continue
       }
-      if (item.kind === "base") {
+      if (item.identity.kind === "base") {
         if (!isAncestor(repoRoot, item.target, integrationHead)) {
           destruction.blockers.push({ reason: "base-ref-not-reachable", ref: item.ref, target: item.target })
           continue
         }
-      } else if (item.kind === "completed") {
-        const plan = item.plan ? plans.get(item.plan) : undefined
+      } else if (item.identity.kind === "completed") {
+        const plan = item.identity.plan ? plans.get(item.identity.plan) : undefined
         if (!plan || planStatus(plan) !== "DONE") {
-          destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.plan ?? "" })
+          destruction.blockers.push({ reason: "completion-ref-plan-not-done", ref: item.ref, plan: item.identity.plan ?? "" })
           continue
         }
         const proof = inspectCompletionProof(repoRoot, item.ref)
-        if (!proof.ok || proof.payload.planId !== item.plan) {
+        if (!proof.ok || proof.payload.planId !== item.identity.plan) {
           destruction.blockers.push({
             reason: "completion-approval-proof-invalid",
             ref: item.ref,
@@ -587,9 +562,9 @@ export function cleanupRun(input: CleanupInput) {
           continue
         }
       }
-      destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.kind, ...(item.plan ? { plan: item.plan } : {}) })
+      destruction.refsPlanned.push({ ref: item.ref, target: item.target, kind: item.identity.kind, ...(item.identity.plan ? { plan: item.identity.plan } : {}) })
     }
-    if (!coordinationRefs.some((item) => item.kind === "base")) {
+    if (!coordinationRefs.some((item) => item.identity?.kind === "base")) {
       destruction.blockers.push({ reason: "base-ref-missing", ref: `refs/plan-herder/${planName}/base` })
     }
     if (graph.plans.some((plan) => planStatus(plan) === "DONE" && !completionProofsForRun.has(plan.id))) {
