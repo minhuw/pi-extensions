@@ -183,6 +183,18 @@ function createCompletionTag(repoRoot: string, ref: string, tagName: string, pay
 	writeCompletionProof(repoRoot, ref, payload, tagName);
 }
 
+function cherryHasOnlyEquivalent(repoRoot: string, upstream: string, head: string, limit: string): boolean {
+	const result = git(repoRoot, ["cherry", upstream, head, limit], true);
+	return result.status === 0 && result.stdout.split(/\r?\n/).filter(Boolean).every((line) => line.startsWith("-"));
+}
+
+function patchEquivalentBothWays(repoRoot: string, integrationHead: string, restackedHead: string, approvedBase: string, checkpoint: string): boolean {
+	// Approved patches may already exist in the advanced integration base, while
+	// every new restacked patch must still originate in the reviewed checkpoint.
+	return cherryHasOnlyEquivalent(repoRoot, restackedHead, checkpoint, approvedBase)
+		&& cherryHasOnlyEquivalent(repoRoot, checkpoint, restackedHead, integrationHead);
+}
+
 export class GitDriver {
 	readonly repoRoot: string;
 	readonly planDirectory: string;
@@ -717,19 +729,21 @@ export class GitDriver {
 		worktree: string;
 		approvedBase: string;
 		approvedHead: string;
+		approvedTree: string;
 		generation: number;
 		checkpointOrdinal: number;
 		approval: CompletionApprovalProof;
 	}): IntegrationResult {
 		let integrationHead = this.branchHead(this.integrationBranch);
-		let approvedHead = input.approvedHead;
+		const approvedHead = input.approvedHead;
 		const completionRef = `refs/plan-herder/${this.planName}/completed/${input.planId}`;
 		const completion = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", completionRef], true).stdout.trim();
 		if (completion) {
 			const evidence = parseCompletionTag(this.repoRoot, completionRef);
 			const expected = completionPayload(input.approval, evidence.object);
 			if (stableJson(evidence.payload) !== stableJson(expected)) throw new Error(`Completion approval proof changed for plan ${input.planId}`);
-			if (evidence.object !== integrationHead || this.branchHead(input.branch) !== evidence.object) {
+			if (evidence.object !== integrationHead || this.branchHead(input.branch) !== evidence.object
+				|| this.worktreeHead(input.worktree) !== evidence.object || this.worktreeStatus(input.worktree)) {
 				throw new Error(`Completion evidence for plan ${input.planId} is inconsistent with integration`);
 			}
 			return { status: "integrated", head: evidence.object };
@@ -737,21 +751,29 @@ export class GitDriver {
 		if (input.approval.planId !== input.planId || input.approval.generation !== input.generation) {
 			throw new Error(`Approval identity does not match plan ${input.planId} generation ${input.generation}`);
 		}
-		if (integrationHead === input.approvedHead && this.branchHead(input.branch) === input.approvedHead) {
+
+		const initialBranchHead = this.branchHead(input.branch);
+		const initialWorktreeHead = this.worktreeHead(input.worktree);
+		const untouched = initialBranchHead === approvedHead && initialWorktreeHead === approvedHead
+			&& this.worktreeTree(input.worktree) === input.approvedTree && !this.worktreeStatus(input.worktree);
+		const checkpoint = `refs/plan-herder/${this.planName}/checkpoints/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}`;
+		let checkpointTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", checkpoint], true).stdout.trim();
+
+		if (integrationHead === approvedHead && untouched) {
 			const payload = completionPayload(input.approval, integrationHead);
 			createCompletionTag(this.repoRoot, completionRef, `herder-${this.planName}-${input.planId}-generation-${input.generation}`, payload);
 			return { status: "integrated", head: integrationHead };
 		}
-		if (input.approvedBase !== integrationHead) {
-			const checkpoint = `refs/plan-herder/${this.planName}/checkpoints/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}`;
-			const checkpointTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", checkpoint], true).stdout.trim();
-			if (checkpointTarget && checkpointTarget !== approvedHead) throw new Error(`Checkpoint ${checkpoint} moved from ${approvedHead} to ${checkpointTarget}`);
-			if (!checkpointTarget) git(this.repoRoot, ["update-ref", checkpoint, approvedHead, ZERO_OID]);
+
+		if (input.approvedBase === integrationHead) {
+			if (!untouched) throw new Error(`Approved patch changed before integration for ${input.planId}`);
+		} else {
 			const metadataCandidates = ["rebase-merge", "rebase-apply"]
 				.map((name) => gitValue(input.worktree, "rev-parse", "--git-path", name))
 				.map((candidate) => path.resolve(input.worktree, candidate));
 			const metadataDir = metadataCandidates.find((candidate) => fs.existsSync(candidate));
 			if (metadataDir) {
+				if (checkpointTarget !== approvedHead) throw new Error(`Active rebase for plan ${input.planId} has no exact reviewed checkpoint`);
 				const headName = fs.readFileSync(path.join(metadataDir, "head-name"), "utf8").trim();
 				const onto = fs.readFileSync(path.join(metadataDir, "onto"), "utf8").trim();
 				const origHead = fs.readFileSync(path.join(metadataDir, "orig-head"), "utf8").trim();
@@ -766,8 +788,14 @@ export class GitDriver {
 					detachedHead: this.worktreeHead(input.worktree),
 				};
 			}
-			const branchHead = this.branchHead(input.branch);
-			if (branchHead === approvedHead) {
+
+			if (untouched) {
+				if (checkpointTarget && checkpointTarget !== approvedHead) throw new Error(`Checkpoint ${checkpoint} moved from ${approvedHead} to ${checkpointTarget}`);
+				// Seal the exact frozen state immediately before Herder mutates it.
+				if (!checkpointTarget) {
+					git(this.repoRoot, ["update-ref", checkpoint, approvedHead, ZERO_OID]);
+					checkpointTarget = approvedHead;
+				}
 				const rebase = git(input.worktree, ["rebase", "--onto", integrationHead, input.approvedBase], true);
 				if (rebase.status !== 0) {
 					return {
@@ -778,29 +806,36 @@ export class GitDriver {
 						detachedHead: this.worktreeHead(input.worktree),
 					};
 				}
-			} else if (git(this.repoRoot, ["merge-base", "--is-ancestor", integrationHead, branchHead], true).status !== 0) {
-				throw new Error(`Plan ${input.planId} branch moved without a valid restack`);
+			} else if (checkpointTarget !== approvedHead) {
+				// Never create a checkpoint retroactively around an unknown mutation.
+				throw new Error(`Approved patch changed before integration for ${input.planId}`);
 			}
-			approvedHead = this.worktreeHead(input.worktree);
-			const equivalent = git(this.repoRoot, ["cherry", approvedHead, checkpoint], true);
-			if (equivalent.status !== 0 || equivalent.stdout.split(/\r?\n/).filter(Boolean).some((line) => !line.startsWith("-"))) {
+
+			const restackedHead = this.worktreeHead(input.worktree);
+			if (this.worktreeStatus(input.worktree) || this.branchHead(input.branch) !== restackedHead
+				|| git(this.repoRoot, ["merge-base", "--is-ancestor", integrationHead, restackedHead], true).status !== 0) {
+				throw new Error(`Approved patch changed before integration for ${input.planId}`);
+			}
+			if (!patchEquivalentBothWays(this.repoRoot, integrationHead, restackedHead, input.approvedBase, checkpoint)) {
 				throw new Error(`Restacked plan ${input.planId} is not patch-equivalent to its reviewed checkpoint`);
 			}
 		}
+
+		const acceptedHead = this.worktreeHead(input.worktree);
 		git(this.integrationWorktree, ["merge", "--ff-only", input.branch]);
 		integrationHead = this.branchHead(this.integrationBranch);
-		const head = integrationHead;
-		if (head !== approvedHead) throw new Error(`Integration head mismatch for plan ${input.planId}`);
+		if (integrationHead !== acceptedHead) throw new Error(`Integration head mismatch for plan ${input.planId}`);
 		const existingCompletion = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", completionRef], true).stdout.trim();
 		if (existingCompletion) {
 			const evidence = parseCompletionTag(this.repoRoot, completionRef);
-			if (evidence.object !== head || stableJson(evidence.payload) !== stableJson(completionPayload(input.approval, head))) {
+			if (evidence.object !== integrationHead || stableJson(evidence.payload) !== stableJson(completionPayload(input.approval, integrationHead))) {
 				throw new Error(`Completion ref for plan ${input.planId} moved`);
 			}
 		} else {
-			const payload = completionPayload(input.approval, head);
+			const payload = completionPayload(input.approval, integrationHead);
 			createCompletionTag(this.repoRoot, completionRef, `herder-${this.planName}-${input.planId}-generation-${input.generation}`, payload);
 		}
-		return { status: "integrated", head };
+		return { status: "integrated", head: integrationHead };
 	}
+
 }

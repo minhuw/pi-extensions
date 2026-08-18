@@ -3059,11 +3059,6 @@ export class HerderRunManager {
 			if (!approval) throw new Error(`Plan ${plan.planId} has no durable approval proof`);
 			const completionProof = this.validateApproval(run, plan, approval);
 			driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
-			if (driver.worktreeHead(plan.worktree) !== plan.approvedHead
-				|| driver.worktreeTree(plan.worktree) !== plan.approvedTree
-				|| driver.worktreeStatus(plan.worktree)) {
-				throw new Error(`Approved patch changed before integration for ${plan.planId}`);
-			}
 			if (driver.leaseReason(plan.worktree)) throw new Error(`Approved plan ${plan.planId} is still leased`);
 			const integration = driver.integrate({
 				planId: plan.planId,
@@ -3071,6 +3066,7 @@ export class HerderRunManager {
 				worktree: plan.worktree,
 				approvedBase: plan.approvedBase,
 				approvedHead: plan.approvedHead,
+				approvedTree: plan.approvedTree,
 				generation: plan.generation,
 				checkpointOrdinal: plan.reviewPass || 1,
 				approval: completionProof,
