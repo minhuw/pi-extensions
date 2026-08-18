@@ -55,6 +55,9 @@ test("coordination references format and reject malformed values", () => {
   })
   assert.deepEqual(parseCoordinationRefRelative("base"), { kind: "base", plan: null })
   assert.deepEqual(parseCoordinationRefRelative("completed/019"), { kind: "completed", plan: "019" })
+  assert.deepEqual(parseCoordinationRefRelative("restacks/019/generation-2-012-onto"), {
+    kind: "restack-target", plan: "019", generation: "generation-2", generationNumber: "2", ordinal: "012",
+  })
   assert.deepEqual(parseCoordinationRefRelative("checkpoints/RUN/2"), { kind: "run-checkpoint", plan: null, ordinal: "2" })
 
   for (const malformed of [
@@ -103,7 +106,7 @@ test("coordination ref enumeration returns parsed identities and preserves unkno
     git(["add", "base"])
     git(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "base"])
     const target = git(["rev-parse", "HEAD"])
-    for (const relative of ["base", "completed/019", "checkpoints/019/generation-1-001", "checkpoints/RUN/2", "unknown/value"]) {
+    for (const relative of ["base", "completed/019", "checkpoints/019/generation-1-001", "checkpoints/RUN/2", "restacks/019/generation-1-001-onto", "unknown/value"]) {
       git(["update-ref", `refs/plan-herder/plans/${relative}`, target])
     }
     assert.deepEqual(listCoordinationRefs(root, "plans"), [
@@ -111,6 +114,7 @@ test("coordination ref enumeration returns parsed identities and preserves unkno
       { ref: "refs/plan-herder/plans/checkpoints/019/generation-1-001", target, relative: "checkpoints/019/generation-1-001", identity: { kind: "checkpoint", plan: "019", generation: "generation-1", generationNumber: "1", ordinal: "001", format: "generation" } },
       { ref: "refs/plan-herder/plans/checkpoints/RUN/2", target, relative: "checkpoints/RUN/2", identity: { kind: "run-checkpoint", plan: null, ordinal: "2" } },
       { ref: "refs/plan-herder/plans/completed/019", target, relative: "completed/019", identity: { kind: "completed", plan: "019" } },
+      { ref: "refs/plan-herder/plans/restacks/019/generation-1-001-onto", target, relative: "restacks/019/generation-1-001-onto", identity: { kind: "restack-target", plan: "019", generation: "generation-1", generationNumber: "1", ordinal: "001" } },
       { ref: "refs/plan-herder/plans/unknown/value", target, relative: "unknown/value", identity: null },
     ])
   } finally {

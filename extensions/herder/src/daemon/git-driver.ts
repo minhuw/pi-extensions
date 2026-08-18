@@ -826,7 +826,9 @@ export class GitDriver {
 		const untouched = initialBranchHead === approvedHead && initialWorktreeHead === approvedHead
 			&& this.worktreeTree(input.worktree) === input.approvedTree && !this.worktreeStatus(input.worktree);
 		const checkpoint = `refs/plan-herder/${this.planName}/checkpoints/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}`;
+		const restackTargetRef = `refs/plan-herder/${this.planName}/restacks/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}-onto`;
 		let checkpointTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", checkpoint], true).stdout.trim();
+		let restackTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", restackTargetRef], true).stdout.trim();
 
 		if (integrationHead === approvedHead && untouched) {
 			const payload = completionPayload(input.approval, integrationHead);
@@ -834,7 +836,7 @@ export class GitDriver {
 			return { status: "integrated", head: integrationHead };
 		}
 
-		if (input.approvedBase === integrationHead) {
+		if (input.approvedBase === integrationHead && !restackTarget) {
 			if (!untouched) throw new Error(`Approved patch changed before integration for ${input.planId}`);
 		} else {
 			const metadataCandidates = ["rebase-merge", "rebase-apply"]
@@ -846,47 +848,65 @@ export class GitDriver {
 				const headName = fs.readFileSync(path.join(metadataDir, "head-name"), "utf8").trim();
 				const onto = fs.readFileSync(path.join(metadataDir, "onto"), "utf8").trim();
 				const origHead = fs.readFileSync(path.join(metadataDir, "orig-head"), "utf8").trim();
-				if (headName !== `refs/heads/${input.branch}` || onto !== integrationHead || origHead !== approvedHead) {
+				if (headName !== `refs/heads/${input.branch}` || onto !== integrationHead || origHead !== approvedHead
+					|| (restackTarget && restackTarget !== onto)) {
 					throw new Error(`Active rebase metadata for plan ${input.planId} does not match its reviewed checkpoint`);
+				}
+				if (!restackTarget) {
+					git(this.repoRoot, ["update-ref", restackTargetRef, onto, ZERO_OID]);
+					restackTarget = onto;
 				}
 				return {
 					status: "conflict",
 					checkpointRef: checkpoint,
 					checkpoint: approvedHead,
-					onto: integrationHead,
+					onto,
 					detachedHead: this.worktreeHead(input.worktree),
 				};
 			}
 
 			if (untouched) {
 				if (checkpointTarget && checkpointTarget !== approvedHead) throw new Error(`Checkpoint ${checkpoint} moved from ${approvedHead} to ${checkpointTarget}`);
-				// Seal the exact frozen state immediately before Herder mutates it.
+				if (restackTarget && restackTarget !== integrationHead) throw new Error(`Restack target ${restackTargetRef} moved from ${integrationHead} to ${restackTarget}`);
+				// Seal both the reviewed state and exact onto target before Herder mutates Git.
 				if (!checkpointTarget) {
 					git(this.repoRoot, ["update-ref", checkpoint, approvedHead, ZERO_OID]);
 					checkpointTarget = approvedHead;
 				}
-				const rebase = git(input.worktree, ["rebase", "--onto", integrationHead, input.approvedBase], true);
+				if (!restackTarget) {
+					git(this.repoRoot, ["update-ref", restackTargetRef, integrationHead, ZERO_OID]);
+					restackTarget = integrationHead;
+				}
+				const rebase = git(input.worktree, ["rebase", "--onto", restackTarget, input.approvedBase], true);
 				if (rebase.status !== 0) {
 					return {
 						status: "conflict",
 						checkpointRef: checkpoint,
 						checkpoint: approvedHead,
-						onto: integrationHead,
+						onto: restackTarget,
 						detachedHead: this.worktreeHead(input.worktree),
 					};
 				}
 			} else if (checkpointTarget !== approvedHead) {
-				// Never create a checkpoint retroactively around an unknown mutation.
+				// Never create recovery evidence retroactively around an unknown mutation.
 				throw new Error(`Approved patch changed before integration for ${input.planId}`);
 			}
 
 			const restackedHead = this.worktreeHead(input.worktree);
+			const onto = restackTarget || integrationHead;
 			if (this.worktreeStatus(input.worktree) || this.branchHead(input.branch) !== restackedHead
-				|| git(this.repoRoot, ["merge-base", "--is-ancestor", integrationHead, restackedHead], true).status !== 0) {
+				|| git(this.repoRoot, ["merge-base", "--is-ancestor", onto, restackedHead], true).status !== 0
+				|| (integrationHead !== onto && integrationHead !== restackedHead)) {
 				throw new Error(`Approved patch changed before integration for ${input.planId}`);
 			}
-			if (!patchEquivalentBothWays(this.repoRoot, integrationHead, restackedHead, input.approvedBase, checkpoint)) {
+			if (!patchEquivalentBothWays(this.repoRoot, onto, restackedHead, input.approvedBase, checkpoint)) {
 				throw new Error(`Restacked plan ${input.planId} is not patch-equivalent to its reviewed checkpoint`);
+			}
+			if (!restackTarget) {
+				// A legacy completed restack can prove its current onto before merge; seal
+				// it now so a crash after the fast-forward remains unambiguous.
+				git(this.repoRoot, ["update-ref", restackTargetRef, onto, ZERO_OID]);
+				restackTarget = onto;
 			}
 		}
 

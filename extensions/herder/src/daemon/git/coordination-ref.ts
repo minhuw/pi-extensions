@@ -24,6 +24,7 @@ export interface CheckpointRef {
 export type CoordinationRef = CheckpointRef
   | { kind: "base"; plan: null }
   | { kind: "completed"; plan: string }
+  | { kind: "restack-target"; plan: string; generation: string; generationNumber: string; ordinal: string }
   | { kind: "run-checkpoint"; plan: null; ordinal: string }
 
 export interface FormatCheckpointInput {
@@ -75,6 +76,16 @@ export function parseCoordinationRefRelative(relative: string): CoordinationRef 
   if (value === "base") return { kind: "base", plan: null }
   const completed = value.match(/^completed\/(\d{3,})$/)
   if (completed) return { kind: "completed", plan: completed[1] }
+  const restackTarget = value.match(/^restacks\/(\d{3,})\/(generation-(\d+))-(\d+)-onto$/)
+  if (restackTarget) {
+    return {
+      kind: "restack-target",
+      plan: restackTarget[1],
+      generation: restackTarget[2],
+      generationNumber: restackTarget[3],
+      ordinal: restackTarget[4],
+    }
+  }
   const checkpoint = parseCheckpointRefRelative(value)
   if (checkpoint) return checkpoint
   const runCheckpoint = value.match(/^checkpoints\/RUN\/(\d+)$/)

@@ -26,6 +26,7 @@ interface Fixture {
 	branch: string;
 	worktree: string;
 	checkpointRef: string;
+	restackTargetRef: string;
 	completionRef: string;
 }
 
@@ -67,6 +68,7 @@ function createFixture(): Fixture {
 		branch,
 		worktree,
 		checkpointRef: `refs/plan-herder/${PLAN_NAME}/checkpoints/${PLAN_ID}/generation-${GENERATION}-001`,
+		restackTargetRef: `refs/plan-herder/${PLAN_NAME}/restacks/${PLAN_ID}/generation-${GENERATION}-001-onto`,
 		completionRef: `refs/plan-herder/${PLAN_NAME}/completed/${PLAN_ID}`,
 	};
 }
@@ -178,6 +180,27 @@ test("integrate recovers a completed manager restack crash window and completion
 	// A restart can redispatch the same integration after completion was sealed.
 	assertIntegrated(fixture.driver.integrate(input), restackedHead);
 	assert.equal(gitValue(fixture.repo, "rev-parse", `${fixture.completionRef}^{commit}`), restackedHead);
+});
+
+test("integrate recovers after the integration fast-forward but before completion evidence", (t) => {
+	const fixture = createFixture();
+	t.after(() => cleanupFixture(fixture));
+	commitFile(fixture.worktree, "settings.json", "approved\n", "approved settings");
+	git(fixture.worktree, ["commit", "--allow-empty", "-q", "-m", "record approved migration boundary"]);
+	const approved = approvedState(fixture);
+	const onto = advanceIntegration(fixture);
+	createCheckpoint(fixture, approved.head);
+	git(fixture.repo, ["update-ref", fixture.restackTargetRef, onto]);
+	const restackedHead = manuallyRestack(fixture, approved, onto);
+
+	// Simulate process death after `merge --ff-only` and before completion proof.
+	git(fixture.driver.integrationWorktree, ["merge", "--ff-only", fixture.branch]);
+	assert.equal(fixture.driver.branchHead(fixture.driver.integrationBranch), restackedHead);
+	assertMissingRef(fixture.repo, fixture.completionRef);
+
+	assertIntegrated(fixture.driver.integrate(integrationInput(fixture, approved)), restackedHead);
+	assert.equal(gitValue(fixture.repo, "rev-parse", `${fixture.completionRef}^{commit}`), restackedHead);
+	assert.equal(gitValue(fixture.repo, "rev-parse", fixture.restackTargetRef), onto);
 });
 
 test("integrate accepts a completed restack that drops a duplicate patch already in integration", (t) => {
