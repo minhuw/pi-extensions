@@ -281,6 +281,38 @@ test("integrate rejects an extra external commit after an otherwise valid comple
 	assertMissingRef(fixture.repo, fixture.completionRef);
 });
 
+test("integrate rejects a linear restack that collapses repeated approved patches", (t) => {
+	const fixture = createFixture();
+	t.after(() => cleanupFixture(fixture));
+	const firstAdd = commitFile(fixture.worktree, "repeated.txt", "approved\n", "add repeated setting");
+	const remove = (() => {
+		fs.rmSync(path.join(fixture.worktree, "repeated.txt"));
+		git(fixture.worktree, ["add", "--", "repeated.txt"]);
+		git(fixture.worktree, ["commit", "-q", "-m", "remove repeated setting"]);
+		return gitValue(fixture.worktree, "rev-parse", "HEAD");
+	})();
+	commitFile(fixture.worktree, "repeated.txt", "approved\n", "restore repeated setting");
+	const approved = approvedState(fixture);
+	const integrationHead = advanceIntegration(fixture);
+	createCheckpoint(fixture, approved.head);
+
+	// Patch-ID membership alone sees the approved add patch in `firstAdd` and can
+	// miss that the second occurrence was dropped, even though the final tree differs.
+	git(fixture.worktree, ["reset", "--hard", integrationHead]);
+	git(fixture.worktree, ["cherry-pick", firstAdd, remove]);
+	const collapsedHead = gitValue(fixture.worktree, "rev-parse", "HEAD");
+	assert.equal(fs.existsSync(path.join(fixture.worktree, "repeated.txt")), false);
+	assert.notEqual(gitValue(fixture.repo, "rev-parse", `${collapsedHead}^{tree}`), approved.tree);
+
+	assert.throws(
+		() => fixture.driver.integrate(integrationInput(fixture, approved)),
+		new RegExp(`Restacked plan ${PLAN_ID} is not patch-equivalent to its reviewed checkpoint`),
+	);
+	assert.equal(fixture.driver.branchHead(fixture.branch), collapsedHead);
+	assert.equal(fixture.driver.branchHead(fixture.driver.integrationBranch), integrationHead);
+	assertMissingRef(fixture.repo, fixture.completionRef);
+});
+
 test("integrate rejects a merge commit that hides an unauthorized tree change", (t) => {
 	const fixture = createFixture();
 	t.after(() => cleanupFixture(fixture));

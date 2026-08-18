@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { snapshotCheckout } from "./git/checkout-state.ts";
 import {
@@ -188,17 +189,73 @@ function cherryHasOnlyEquivalent(repoRoot: string, upstream: string, head: strin
 	return result.status === 0 && result.stdout.split(/\r?\n/).filter(Boolean).every((line) => line.startsWith("-"));
 }
 
+function linearCommits(repoRoot: string, range: string): string[] | null {
+	const merges = git(repoRoot, ["rev-list", "--min-parents=2", range], true);
+	if (merges.status !== 0 || merges.stdout.trim()) return null;
+	const commits = git(repoRoot, ["rev-list", "--reverse", range], true);
+	return commits.status === 0 ? commits.stdout.split(/\r?\n/).filter(Boolean) : null;
+}
+
+function commitPatchId(repoRoot: string, commit: string): string | null {
+	const patch = git(repoRoot, ["show", "--pretty=format:", "--patch", "--binary", commit], true);
+	if (patch.status !== 0) return null;
+	const result = runCommand("git", ["patch-id", "--stable"], { cwd: repoRoot, input: patch.stdout, allowFailure: true });
+	if (result.status !== 0) return null;
+	const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+	const match = lines.length === 1 ? lines[0]!.match(/^([0-9a-f]+)\s/i) : null;
+	return match?.[1]?.toLowerCase() ?? null;
+}
+
 function patchEquivalentBothWays(repoRoot: string, integrationHead: string, restackedHead: string, approvedBase: string, checkpoint: string): boolean {
-	// `git cherry` does not report merge commits, so a merge could otherwise hide
-	// an unauthorized tree change or let a reviewed merge-only change disappear.
-	for (const range of [`${approvedBase}..${checkpoint}`, `${integrationHead}..${restackedHead}`]) {
-		const merges = git(repoRoot, ["rev-list", "--min-parents=2", range], true);
-		if (merges.status !== 0 || merges.stdout.trim()) return false;
+	// `git cherry` is a useful patch-membership check, but it omits merges and
+	// collapses repeated patch IDs. Replay the exact reviewed linear sequence so
+	// recovery is also bound to patch order, multiplicity, and the resulting tree.
+	const approvedCommits = linearCommits(repoRoot, `${approvedBase}..${checkpoint}`);
+	const restackedCommits = linearCommits(repoRoot, `${integrationHead}..${restackedHead}`);
+	if (!approvedCommits || !restackedCommits) return false;
+	if (!cherryHasOnlyEquivalent(repoRoot, restackedHead, checkpoint, approvedBase)
+		|| !cherryHasOnlyEquivalent(repoRoot, checkpoint, restackedHead, integrationHead)) return false;
+
+	const container = fs.mkdtempSync(path.join(os.tmpdir(), "herder-restack-validation-"));
+	const validationRepo = path.join(container, "repo");
+	const expectedPatchIds: string[] = [];
+	try {
+		const cloned = runCommand("git", ["clone", "--quiet", "--shared", "--no-checkout", repoRoot, validationRepo], { allowFailure: true });
+		if (cloned.status !== 0) return false;
+		if (git(validationRepo, ["checkout", "--detach", "--quiet", integrationHead], true).status !== 0) return false;
+		for (const commit of approvedCommits) {
+			const replayed = git(validationRepo, ["-c", "rerere.enabled=false", "cherry-pick", "--no-commit", commit], true);
+			if (replayed.status !== 0) return false;
+			const changed = git(validationRepo, ["diff", "--cached", "--quiet", "HEAD", "--"], true).status !== 0;
+			if (!changed) {
+				git(validationRepo, ["reset", "--hard", "--quiet", "HEAD"]);
+				continue;
+			}
+			const tree = gitValue(validationRepo, "write-tree");
+			const parent = gitValue(validationRepo, "rev-parse", "HEAD");
+			const committed = runCommand("git", [
+				"-C", validationRepo,
+				"-c", "user.name=Herder Restack Validation",
+				"-c", "user.email=herder-restack-validation@invalid",
+				"commit-tree", tree, "-p", parent,
+			], {
+				input: `Herder restack validation for ${commit}\n`,
+				allowFailure: true,
+			});
+			if (committed.status !== 0 || !committed.stdout.trim()) return false;
+			const expectedCommit = committed.stdout.trim();
+			git(validationRepo, ["reset", "--hard", "--quiet", expectedCommit]);
+			const patchId = commitPatchId(validationRepo, expectedCommit);
+			if (!patchId) return false;
+			expectedPatchIds.push(patchId);
+		}
+		if (gitValue(validationRepo, "rev-parse", "HEAD^{tree}") !== gitValue(repoRoot, "rev-parse", `${restackedHead}^{tree}`)) return false;
+		const restackedPatchIds = restackedCommits.map((commit) => commitPatchId(repoRoot, commit));
+		return restackedPatchIds.every(Boolean)
+			&& stableJson(expectedPatchIds) === stableJson(restackedPatchIds);
+	} finally {
+		fs.rmSync(container, { recursive: true, force: true });
 	}
-	// Approved patches may already exist in the advanced integration base, while
-	// every new restacked patch must still originate in the reviewed checkpoint.
-	return cherryHasOnlyEquivalent(repoRoot, restackedHead, checkpoint, approvedBase)
-		&& cherryHasOnlyEquivalent(repoRoot, checkpoint, restackedHead, integrationHead);
 }
 
 export class GitDriver {
