@@ -189,6 +189,12 @@ function cherryHasOnlyEquivalent(repoRoot: string, upstream: string, head: strin
 }
 
 function patchEquivalentBothWays(repoRoot: string, integrationHead: string, restackedHead: string, approvedBase: string, checkpoint: string): boolean {
+	// `git cherry` does not report merge commits, so a merge could otherwise hide
+	// an unauthorized tree change or let a reviewed merge-only change disappear.
+	for (const range of [`${approvedBase}..${checkpoint}`, `${integrationHead}..${restackedHead}`]) {
+		const merges = git(repoRoot, ["rev-list", "--min-parents=2", range], true);
+		if (merges.status !== 0 || merges.stdout.trim()) return false;
+	}
 	// Approved patches may already exist in the advanced integration base, while
 	// every new restacked patch must still originate in the reviewed checkpoint.
 	return cherryHasOnlyEquivalent(repoRoot, restackedHead, checkpoint, approvedBase)

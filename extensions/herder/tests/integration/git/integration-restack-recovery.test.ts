@@ -281,6 +281,39 @@ test("integrate rejects an extra external commit after an otherwise valid comple
 	assertMissingRef(fixture.repo, fixture.completionRef);
 });
 
+test("integrate rejects a merge commit that hides an unauthorized tree change", (t) => {
+	const fixture = createFixture();
+	t.after(() => cleanupFixture(fixture));
+	commitFile(fixture.worktree, "settings.json", "approved\n", "approved settings");
+	const approved = approvedState(fixture);
+	const integrationHead = advanceIntegration(fixture);
+	createCheckpoint(fixture, approved.head);
+	const restackedHead = manuallyRestack(fixture, approved, integrationHead);
+
+	// `git cherry` omits merge commits. Build a merge whose tree contains an
+	// unauthorized file but whose only visible linear plan patch is approved.
+	const externalCommit = commitFile(fixture.worktree, "external.txt", "external\n", "prepare unauthorized tree");
+	const externalTree = gitValue(fixture.repo, "rev-parse", `${externalCommit}^{tree}`);
+	const mergeHead = gitValue(
+		fixture.repo,
+		"commit-tree", externalTree,
+		"-p", restackedHead,
+		"-p", integrationHead,
+		"-m", "hide unauthorized tree in merge",
+	);
+	git(fixture.worktree, ["reset", "--hard", mergeHead]);
+	assert.equal(fixture.driver.worktreeStatus(fixture.worktree), "");
+	assert.equal(gitValue(fixture.repo, "rev-list", "--count", "--min-parents=2", `${integrationHead}..${mergeHead}`), "1");
+
+	assert.throws(
+		() => fixture.driver.integrate(integrationInput(fixture, approved)),
+		new RegExp(`Restacked plan ${PLAN_ID} is not patch-equivalent to its reviewed checkpoint`),
+	);
+	assert.equal(fixture.driver.branchHead(fixture.branch), mergeHead);
+	assert.equal(fixture.driver.branchHead(fixture.driver.integrationBranch), integrationHead);
+	assertMissingRef(fixture.repo, fixture.completionRef);
+});
+
 test("integrate fails closed when completed-restack recovery finds a checkpoint at the wrong object", (t) => {
 	const fixture = createFixture();
 	t.after(() => cleanupFixture(fixture));
