@@ -1,7 +1,7 @@
 {
 	"name": "pi-extensions",
 	"version": "0.2.0",
-	"description": "Maintained Pi extensions for deterministic multi-agent execution, status telemetry, native compaction, and sub-agents",
+	"description": "Maintained Pi extensions for deterministic multi-agent execution, academic writing, status telemetry, native compaction, and sub-agents",
 	"type": "module",
 	"license": "MIT",
 	"keywords": [
@@ -11,14 +11,17 @@
 		"multi-agent",
 		"subagents",
 		"cliproxyapi",
-		"compaction"
+		"compaction",
+		"writer",
+		"academic"
 	],
 	"engines": {
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:commit && npm run test:statusline && npm run test:subagents && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder",
+		"test": "npm run test:commit && npm run test:statusline && npm run test:subagents && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder && npm run test:writer",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
+		"test:writer": "node --experimental-strip-types --test extensions/writer/tests/*.test.ts",
 		"test:statusline": "vitest run extensions/statusline-footer/tests/statusline-footer.test.ts",
 		"test:subagents": "vitest run extensions/subagents/tests/agent-widget.test.ts",
 		"test:herder": "node extensions/herder/tests/run-smoke.ts",
@@ -52,7 +55,8 @@
 			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/index.ts",
 			"./extensions/subagents/src/index.ts",
-			"./extensions/commit/index.ts"
+			"./extensions/commit/index.ts",
+			"./extensions/writer/index.ts"
 		]
 	}
 }

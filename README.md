@@ -7,6 +7,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | Extension | Description |
 | --- | --- |
 | [Commit](extensions/commit/README.md) | Create polished, self-contained Linux-style commits from the current dirty worktree. |
+| [Writer](extensions/writer/README.md) | Academic writing workflows for top-tier CS conference papers, ported from claude-writer. |
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
 | [Subagents](extensions/subagents/README.md) | Vendored Claude Code–style autonomous sub-agents (`@tintinweb/pi-subagents` v0.14.3). |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
