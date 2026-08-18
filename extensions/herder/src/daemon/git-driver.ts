@@ -196,7 +196,10 @@ function linearCommits(repoRoot: string, range: string): string[] | null {
 	return commits.status === 0 ? commits.stdout.split(/\r?\n/).filter(Boolean) : null;
 }
 
-function commitPatchId(repoRoot: string, commit: string): string | null {
+function commitPatchIdentity(repoRoot: string, commit: string): string | null {
+	const empty = git(repoRoot, ["diff", "--quiet", `${commit}^`, commit], true);
+	if (empty.status === 0) return "empty";
+	if (empty.status !== 1) return null;
 	const patch = git(repoRoot, ["show", "--pretty=format:", "--patch", "--binary", commit], true);
 	if (patch.status !== 0) return null;
 	const result = runCommand("git", ["patch-id", "--stable"], { cwd: repoRoot, input: patch.stdout, allowFailure: true });
@@ -224,10 +227,13 @@ function patchEquivalentBothWays(repoRoot: string, integrationHead: string, rest
 		if (cloned.status !== 0) return false;
 		if (git(validationRepo, ["checkout", "--detach", "--quiet", integrationHead], true).status !== 0) return false;
 		for (const commit of approvedCommits) {
+			const approvedIdentity = commitPatchIdentity(repoRoot, commit);
+			if (!approvedIdentity) return false;
 			const replayed = git(validationRepo, ["-c", "rerere.enabled=false", "cherry-pick", "--no-commit", commit], true);
 			if (replayed.status !== 0) return false;
 			const changed = git(validationRepo, ["diff", "--cached", "--quiet", "HEAD", "--"], true).status !== 0;
-			if (!changed) {
+			if (!changed && approvedIdentity !== "empty") {
+				// The approved patch is already in the advanced integration base.
 				git(validationRepo, ["reset", "--hard", "--quiet", "HEAD"]);
 				continue;
 			}
@@ -245,12 +251,12 @@ function patchEquivalentBothWays(repoRoot: string, integrationHead: string, rest
 			if (committed.status !== 0 || !committed.stdout.trim()) return false;
 			const expectedCommit = committed.stdout.trim();
 			git(validationRepo, ["reset", "--hard", "--quiet", expectedCommit]);
-			const patchId = commitPatchId(validationRepo, expectedCommit);
-			if (!patchId) return false;
-			expectedPatchIds.push(patchId);
+			const patchIdentity = commitPatchIdentity(validationRepo, expectedCommit);
+			if (!patchIdentity) return false;
+			expectedPatchIds.push(patchIdentity);
 		}
 		if (gitValue(validationRepo, "rev-parse", "HEAD^{tree}") !== gitValue(repoRoot, "rev-parse", `${restackedHead}^{tree}`)) return false;
-		const restackedPatchIds = restackedCommits.map((commit) => commitPatchId(repoRoot, commit));
+		const restackedPatchIds = restackedCommits.map((commit) => commitPatchIdentity(repoRoot, commit));
 		return restackedPatchIds.every(Boolean)
 			&& stableJson(expectedPatchIds) === stableJson(restackedPatchIds);
 	} finally {

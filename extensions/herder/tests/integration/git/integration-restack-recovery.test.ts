@@ -281,6 +281,24 @@ test("integrate rejects an extra external commit after an otherwise valid comple
 	assertMissingRef(fixture.repo, fixture.completionRef);
 });
 
+test("integrate preserves an intentionally empty approved commit during recovery", (t) => {
+	const fixture = createFixture();
+	t.after(() => cleanupFixture(fixture));
+	commitFile(fixture.worktree, "settings.json", "approved\n", "approved settings");
+	git(fixture.worktree, ["commit", "--allow-empty", "-q", "-m", "record approved migration boundary"]);
+	const approved = approvedState(fixture);
+	const integrationHead = advanceIntegration(fixture);
+	createCheckpoint(fixture, approved.head);
+	const restackedHead = manuallyRestack(fixture, approved, integrationHead);
+
+	assert.equal(gitValue(fixture.repo, "rev-list", "--count", `${integrationHead}..${restackedHead}`), "2");
+	assert.equal(git(fixture.repo, ["diff", "--quiet", `${restackedHead}^`, restackedHead], true).status, 0);
+	assert.equal(gitValue(fixture.repo, "log", "-1", "--format=%s", restackedHead), "record approved migration boundary");
+
+	assertIntegrated(fixture.driver.integrate(integrationInput(fixture, approved)), restackedHead);
+	assert.equal(fixture.driver.branchHead(fixture.driver.integrationBranch), restackedHead);
+});
+
 test("integrate rejects a linear restack that collapses repeated approved patches", (t) => {
 	const fixture = createFixture();
 	t.after(() => cleanupFixture(fixture));
