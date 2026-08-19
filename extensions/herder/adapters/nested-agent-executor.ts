@@ -9,6 +9,7 @@ import {
 	type NestedAgentModelBinding,
 } from "./role-config.ts";
 import { assistantText, decodeAssistantResult, responseActivity } from "./assistant-message.ts";
+import { messageUsageTokens, record, sessionUsageTotals } from "./usage-accounting.ts";
 
 export type HerderNestedAgentStatus = "running" | "completed" | "aborted" | "stopped" | "error";
 
@@ -111,32 +112,12 @@ interface NestedRecord {
 
 export const MAX_NESTED_CONCURRENCY_PER_ACTION = 4;
 
-function finiteCount(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
 function usageFromSession(session: NestedWorkerSession): NestedAgentUsage {
-	const stats = session.getSessionStats();
-	let reasoningTokens = 0;
-	let reasoningKnown = false;
-	for (const value of session.messages) {
-		const message = record(value);
-		if (message?.role !== "assistant") continue;
-		const reasoning = finiteCount(record(message.usage)?.reasoning);
-		if (reasoning === undefined) continue;
-		reasoningKnown = true;
-		reasoningTokens += reasoning;
-	}
+	const totals = sessionUsageTotals(session);
 	return {
-		inputTokens: stats.tokens.input,
-		cachedInputTokens: stats.tokens.cacheRead,
-		outputTokens: stats.tokens.output,
-		reasoningTokens,
-		reasoningKnown,
+		...totals,
+		reasoningTokens: totals.reasoningTokens ?? 0,
+		reasoningKnown: totals.reasoningTokens !== undefined,
 	};
 }
 
@@ -313,12 +294,7 @@ export class HerderNestedAgentScope {
 			changed = true;
 		}
 		if (event.type === "message_end" && record(event.message)?.role === "assistant") {
-			const usage = record(record(event.message)?.usage);
-			if (usage) {
-				item.snapshot.lifetimeTokens += (finiteCount(usage.input) ?? 0)
-					+ (finiteCount(usage.output) ?? 0)
-					+ (finiteCount(usage.cacheWrite) ?? 0);
-			}
+			item.snapshot.lifetimeTokens += messageUsageTokens(record(event.message)?.usage);
 			const text = assistantText(event.message);
 			if (text !== undefined) item.snapshot.responseText = text;
 			this.refreshActivity(item);

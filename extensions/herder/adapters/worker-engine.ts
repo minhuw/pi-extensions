@@ -33,6 +33,11 @@ import {
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { loadHerderPiRole } from "./role-config.ts";
 import { assistantText, finalAssistantResult, responseActivity } from "./assistant-message.ts";
+import {
+	messageUsageTokens,
+	record,
+	sessionUsageTotals,
+} from "./usage-accounting.ts";
 export { finalAssistantResult };
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
@@ -147,12 +152,14 @@ function roleFromAgentType(agentType: string): ManagerAction["role"] {
 	return role as ManagerAction["role"];
 }
 
-function finiteCount(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: number): Partial<UsageEvidence> {
+	return {
+		...sessionUsageTotals(session),
+		source: "herder pi worker session",
+		startedAt: new Date(startedAt).toISOString(),
+		finishedAt: new Date(finishedAt).toISOString(),
+		durationMs: Math.max(0, finishedAt - startedAt),
+	};
 }
 
 const SEARCHER_TOOL_NAMES = new Set(["web_search", "source_check", "fetch_content", "get_search_content"]);
@@ -187,34 +194,6 @@ function cloneNested(agent: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
 	return { ...agent, activeTools: [...agent.activeTools] };
 }
 
-function reasoningTokens(messages: readonly unknown[]): number | undefined {
-	let total = 0;
-	let known = false;
-	for (const value of messages) {
-		const assistant = record(value);
-		if (assistant?.role !== "assistant") continue;
-		const reasoning = finiteCount(record(assistant.usage)?.reasoning);
-		if (reasoning === undefined) continue;
-		known = true;
-		total += reasoning;
-	}
-	return known ? total : undefined;
-}
-
-function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: number): Partial<UsageEvidence> {
-	const stats = session.getSessionStats();
-	const reasoning = reasoningTokens(session.messages);
-	return {
-		inputTokens: stats.tokens.input,
-		cachedInputTokens: stats.tokens.cacheRead,
-		outputTokens: stats.tokens.output,
-		...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
-		source: "herder pi worker session",
-		startedAt: new Date(startedAt).toISOString(),
-		finishedAt: new Date(finishedAt).toISOString(),
-		durationMs: Math.max(0, finishedAt - startedAt),
-	};
-}
 
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
@@ -450,12 +429,6 @@ export class PiWorkerEngine {
 		worker.snapshot.contextPercent = stats.contextUsage?.percent ?? null;
 	}
 
-	private addLifetimeUsage(snapshot: Pick<PiWorkerSnapshot, "lifetimeTokens">, usage: unknown): void {
-		const value = record(usage);
-		if (!value) return;
-		snapshot.lifetimeTokens += (finiteCount(value.input) ?? 0) + (finiteCount(value.output) ?? 0) + (finiteCount(value.cacheWrite) ?? 0);
-	}
-
 	private syncTopActivity(worker: WorkerRecord): void {
 		worker.snapshot.activeTools = [...worker.activeToolCalls.values()];
 		worker.snapshot.activity = worker.snapshot.activeTools[0] ?? responseActivity(worker.snapshot.responseText);
@@ -494,7 +467,7 @@ export class PiWorkerEngine {
 			changed = true;
 		}
 		if (event.type === "message_end" && record(event.message)?.role === "assistant") {
-			this.addLifetimeUsage(worker.snapshot, record(event.message)?.usage);
+			worker.snapshot.lifetimeTokens += messageUsageTokens(record(event.message)?.usage);
 			const text = assistantText(event.message);
 			if (text !== undefined) worker.snapshot.responseText = text;
 			this.syncTopActivity(worker);
