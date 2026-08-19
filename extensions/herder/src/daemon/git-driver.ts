@@ -10,6 +10,7 @@ import {
 	verifyAssignment,
 } from "./git/assignment-bundle.ts";
 import { inspectNamespace } from "./git/namespace-run.ts";
+import { listWorktrees } from "./git/namespace-inventory.ts";
 import {
 	buildCompletionProofPayload,
 	inspectCompletionProof,
@@ -325,9 +326,7 @@ export class GitDriver {
 			}
 		}
 		const branchExists = git(this.repoRoot, ["show-ref", "--verify", "--quiet", branchRef], true).status === 0;
-		const worktreeRecord = git(this.repoRoot, ["worktree", "list", "--porcelain"]).stdout
-			.split(/(?:\r?\n){2,}/)
-			.find((block) => block.split(/\r?\n/)[0] === `worktree ${this.integrationWorktree}`);
+		const worktreeRecord = listWorktrees(this.repoRoot).find((item) => item.path === this.integrationWorktree);
 		if (!branchExists) {
 			if (worktreeRecord || fs.existsSync(this.integrationWorktree)) throw new Error(`Integration path exists without its expected branch: ${this.integrationWorktree}`);
 			ensureParent(this.integrationWorktree);
@@ -336,7 +335,7 @@ export class GitDriver {
 			if (fs.existsSync(this.integrationWorktree)) throw new Error(`Unregistered integration path exists: ${this.integrationWorktree}`);
 			ensureParent(this.integrationWorktree);
 			git(this.repoRoot, ["worktree", "add", this.integrationWorktree, this.integrationBranch]);
-		} else if (!worktreeRecord.split(/\r?\n/).includes(`branch ${branchRef}`)) {
+		} else if (worktreeRecord.branch !== this.integrationBranch) {
 			throw new Error(`Integration worktree is not attached to ${this.integrationBranch}`);
 		}
 		if (git(this.repoRoot, ["show-ref", "--verify", "--quiet", baseRef], true).status !== 0) {
@@ -365,9 +364,7 @@ export class GitDriver {
 		const worktree = path.join(this.worktreeRoot, planId);
 		const integrationHead = gitValue(this.repoRoot, "rev-parse", `refs/heads/${this.integrationBranch}`);
 		const branchExists = git(this.repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true).status === 0;
-		const worktreeRecord = git(this.repoRoot, ["worktree", "list", "--porcelain"]).stdout
-			.split(/(?:\r?\n){2,}/)
-			.find((block) => block.split(/\r?\n/)[0] === `worktree ${worktree}`);
+		const worktreeRecord = listWorktrees(this.repoRoot).find((item) => item.path === worktree);
 		if (!branchExists) {
 			if (worktreeRecord || fs.existsSync(worktree)) throw new Error(`Plan worktree path exists without its expected branch: ${worktree}`);
 			ensureParent(worktree);
@@ -376,7 +373,7 @@ export class GitDriver {
 			if (fs.existsSync(worktree)) throw new Error(`Unregistered plan worktree path exists: ${worktree}`);
 			ensureParent(worktree);
 			git(this.repoRoot, ["worktree", "add", worktree, branch]);
-		} else if (!worktreeRecord.split(/\r?\n/).includes(`branch refs/heads/${branch}`)) {
+		} else if (worktreeRecord.branch !== branch) {
 			throw new Error(`Plan worktree is not attached to ${branch}`);
 		}
 		const result = materializeAssignment({
@@ -451,14 +448,9 @@ export class GitDriver {
 	}
 
 	leaseReason(worktree: string): string | null {
-		const output = git(this.repoRoot, ["worktree", "list", "--porcelain"]).stdout;
-		for (const block of output.split(/(?:\r?\n){2,}/)) {
-			const lines = block.split(/\r?\n/);
-			if (lines[0] !== `worktree ${worktree}`) continue;
-			const lock = lines.find((line) => line === "locked" || line.startsWith("locked "));
-			return lock ? lock.slice("locked".length).trim() : null;
-		}
-		throw new Error(`Worktree is not registered: ${worktree}`);
+		const record = listWorktrees(this.repoRoot).find((item) => item.path === worktree);
+		if (!record) throw new Error(`Worktree is not registered: ${worktree}`);
+		return record.locked ? record.lockReason : null;
 	}
 
 	branchHead(branch: string): string {
