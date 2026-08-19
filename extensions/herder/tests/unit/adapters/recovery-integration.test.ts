@@ -3,8 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import type { AgentSessionEvent, ExtensionAPI, ExtensionContext, ModelRegistry, SessionStats } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { PiWorkerRequest, PiWorkerSessionFactory } from "../../../adapters/worker-engine.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
@@ -18,31 +17,18 @@ import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
-import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { GitDriver } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-
-const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
-
-const availableModels = [
-	{
-		provider: "fake",
-		id: "gpt-5.6-sol",
-		api: "openai-responses",
-		reasoning: true,
-		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-	},
-	{
-		provider: "fake",
-		id: "gpt-5.6-luna",
-		api: "openai-responses",
-		reasoning: true,
-		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-	},
-] as const;
-
-type JsonObject = Record<string, unknown>;
-
-type CapturedHandler = (event: unknown, ctx: unknown) => unknown;
+import {
+	agentRoot,
+	BaseSession,
+	CapturedExtensionAPI,
+	Deferred,
+	availableModels,
+	initFixtureRepo,
+	object,
+	withDeadline,
+} from "./helpers/harness.ts";
 
 interface Fixture {
 	root: string;
@@ -55,39 +41,20 @@ interface Warning {
 	level: string;
 }
 
-class Deferred<T = void> {
-	readonly promise: Promise<T>;
-	private resolvePromise!: (value: T | PromiseLike<T>) => void;
-
-	constructor() {
-		this.promise = new Promise<T>((resolve) => { this.resolvePromise = resolve; });
-	}
-
-	resolve(value: T): void {
-		this.resolvePromise(value);
-	}
-}
-
-function object(value: unknown): JsonObject {
-	return value as JsonObject;
-}
-
 function writeFixture(root: string): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(path.join(repo, "src"), { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Herder Adapter Recovery Test"]);
-	git(repo, ["config", "user.email", "herder-adapter-recovery@example.invalid"]);
-	fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({
-		name: "herder-adapter-recovery-fixture",
-		private: true,
-		type: "module",
-		scripts: { test: "node --test" },
-	}, null, 2)}\n`);
-	fs.writeFileSync(path.join(repo, "src", "value.mjs"), "export const value = 1\n");
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: create recovery fixture"]);
-	const originalHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+	const { repo, originalHead } = initFixtureRepo(root, {
+		name: "Herder Adapter Recovery Test",
+		email: "herder-adapter-recovery@example.invalid",
+		files: {
+			"package.json": `${JSON.stringify({
+				name: "herder-adapter-recovery-fixture",
+				private: true,
+				type: "module",
+				scripts: { test: "node --test" },
+			}, null, 2)}\n`,
+			"src/value.mjs": "export const value = 1\n",
+		},
+	});
 
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
@@ -197,83 +164,18 @@ function writeBlockedAttentionFixture(root: string): Fixture {
 	return fixture;
 }
 
-class CapturedExtensionAPI {
-	readonly handlers = new Map<string, CapturedHandler>();
-	readonly warnings: Warning[] = [];
-	readonly appendedEntries: Array<{ customType: string; data: unknown }> = [];
-	readonly messages: Array<{ customType: string; content: string; display: boolean; details?: unknown; options?: unknown }> = [];
-	readonly tools: unknown[] = [];
-	readonly commands = new Map<string, unknown>();
-
-	on(event: string, handler: CapturedHandler): void {
-		this.handlers.set(event, handler);
-	}
-
-	registerTool(tool: unknown): void {
-		this.tools.push(tool);
-	}
-
-	registerCommand(name: string, options: unknown): void {
-		this.commands.set(name, options);
-	}
-
-	registerEntryRenderer(_customType: string, _renderer: unknown): void {}
-
-	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-		const result = runCommand(command, args, { allowFailure: true });
-		return { code: result.status, stdout: result.stdout, stderr: result.stderr };
-	}
-
-	appendEntry(customType: string, data: unknown): void {
-		this.appendedEntries.push({ customType, data });
-	}
-
-	sendUserMessage(_content: unknown, _options?: unknown): void {}
-
-	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
-		this.messages.push({ ...message, ...(options === undefined ? {} : { options }) });
-	}
-
-	async invoke(event: string, ctx: ExtensionContext): Promise<unknown> {
-		const handler = this.handlers.get(event);
-		if (!handler) throw new Error(`No captured ${event} handler`);
-		return await handler({}, ctx);
-	}
-
-	command(name: string): { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } {
-		const command = this.commands.get(name) as { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } | undefined;
-		if (!command) throw new Error(`No captured ${name} command`);
-		return command;
-	}
-
-	tool(name: string): { execute: (...args: unknown[]) => Promise<unknown> } {
-		const tool = this.tools.find((candidate) => (candidate as { name?: unknown }).name === name) as { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
-		if (!tool) throw new Error(`No captured ${name} tool`);
-		return tool;
-	}
-}
-
-class PendingSession {
-	readonly sessionId: string;
-	readonly messages: unknown[] = [];
+class PendingSession extends BaseSession {
 	readonly started: Promise<void>;
-	disposed = false;
 	aborted = false;
 	prompted = false;
 	private releasePrompt!: () => void;
 	private resolveStarted!: () => void;
 	private readonly promptReleased: Promise<void>;
-	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(sessionId: string) {
-		this.sessionId = sessionId;
+		super(sessionId);
 		this.promptReleased = new Promise<void>((resolve) => { this.releasePrompt = resolve; });
 		this.started = new Promise<void>((resolve) => { this.resolveStarted = resolve; });
-	}
-
-	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
 	}
 
 	async prompt(_text: string): Promise<void> {
@@ -285,10 +187,6 @@ class PendingSession {
 	async abort(): Promise<void> {
 		this.aborted = true;
 		this.releasePrompt();
-	}
-
-	dispose(): void {
-		this.disposed = true;
 	}
 
 	getSessionStats(): SessionStats {
@@ -484,18 +382,6 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-async function withDeadline<T>(operation: Promise<T>, label: string, timeoutMs = 10_000): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
-	});
-	try {
-		return await Promise.race([operation, timeout]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
 test("main-session attention is delivered once and explicitly re-exposed after status", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
@@ -523,20 +409,20 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 		const ctx = capturedContext = restoredContext(fixture, String(started.runId), warnings);
 		await withDeadline(api.invoke("session_start", ctx), "attention session_start");
 		await withDeadline((async () => {
-			while (api.messages.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+			while (api.customMessages.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
 		})(), "attention delivery");
-		assert.equal(api.messages.length, 1);
-		assert.equal(api.messages[0]!.customType, "herder-attention-v1");
-		assert.match(api.messages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
-		assert.match(api.messages[0]!.content, /REQUEST_ID:/);
-		assert.deepEqual(api.messages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.equal(api.customMessages.length, 1);
+		assert.equal(api.customMessages[0]!.customType, "herder-attention-v1");
+		assert.match(api.customMessages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
+		assert.match(api.customMessages[0]!.content, /REQUEST_ID:/);
+		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
 
 		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		assert.equal(api.messages.length, 1, "passive settled events duplicated the attention request");
+		assert.equal(api.customMessages.length, 1, "passive settled events duplicated the attention request");
 		await api.command("herder-status").handler("herder-plans", ctx);
-		assert.equal(api.messages.length, 2);
-		assert.equal(api.messages[1]!.content, api.messages[0]!.content);
+		assert.equal(api.customMessages.length, 2);
+		assert.equal(api.customMessages[1]!.content, api.customMessages[0]!.content);
 		assert.equal(warnings.some((warning) => warning.level === "error"), false);
 
 		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
@@ -580,7 +466,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 		await withDeadline(api.invoke("session_start", ctx), "foreign attention session_start");
 		await withDeadline(api.command("herder-status").handler("herder-plans", ctx), "foreign attention status");
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		assert.equal(api.messages.length, 0);
+		assert.equal(api.customMessages.length, 0);
 
 		const before = object((await requestService(service, "/v1/status")).reply);
 		const result = object(await api.tool("herder_plan").execute(
