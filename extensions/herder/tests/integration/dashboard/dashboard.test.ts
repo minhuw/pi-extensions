@@ -8,9 +8,8 @@ import path from "node:path"
 import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { recordUsage } from "../../../src/core/plans.ts"
-import { executionDatabasePath, executionReport } from "../../../src/daemon/execution-store.ts"
-import type { UsageRecord } from "../../../src/daemon/execution-store.ts"
+import { executionDatabasePath, executionReport, recordUsageRecord } from "../../../src/daemon/execution-store.ts"
+import type { UsageRecord, UsageRecordInput } from "../../../src/daemon/execution-store.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { buildDashboardState, buildForecast, derivePlanPhase, parseLease, parseWorktreeList } from "../../../src/dashboard/dashboard-state.ts"
 import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
@@ -174,10 +173,10 @@ The fixture intentionally contains one blocked plan.
   return planDir
 }
 
-type UsageInput = Parameters<typeof recordUsage>[1]
+type UsageInput = UsageRecordInput
 
 function usage(planDir: string, input: Partial<UsageInput>): void {
-  recordUsage(planDir, {
+  recordUsageRecord(planDir, {
     model: "gpt-5.6-sol",
     effort: "xhigh",
     source: "codex-exec",

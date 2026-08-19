@@ -7,19 +7,22 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
 import {
-  bindRunProfile,
   buildGraph,
   getExecutionReport,
   getShapeReport,
-  getRunProfile,
-  getUsageReport,
   initPlanDir,
   projectStatuses,
-  recordUsage,
   setTracking,
   snapshotPlan,
 } from "../../../src/core/plans.ts"
-import { executionDatabasePath } from "../../../src/daemon/execution-store.ts"
+import {
+  executionDatabasePath,
+  readRunConfiguration,
+  readUsageState,
+  recordRunConfiguration,
+  recordUsageRecord,
+  usageReport,
+} from "../../../src/daemon/execution-store.ts"
 
 function git(root: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" })
@@ -148,7 +151,7 @@ try {
   assert.doesNotMatch(fs.readFileSync(initialized.readme, "utf8"), /## Execution usage/)
   assert.equal(fs.existsSync(executionDatabasePath(initialized.planDir)), true)
   assert.equal(fs.statSync(executionDatabasePath(initialized.planDir)).mode & 0o777, 0o600)
-  const emptyUsage = getUsageReport(initialized.planDir)
+  const emptyUsage = { ...readUsageState(initialized.planDir), ...usageReport(readUsageState(initialized.planDir).records) }
   assert.equal(emptyUsage.attempts, 0)
   assert.equal(emptyUsage.storage, "sqlite")
   const excludeFile = git(repo, "rev-parse", "--git-path", "info/exclude")
@@ -196,11 +199,11 @@ try {
       "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-luna", effort: "max" },
     },
   }
-  assert.equal(bindRunProfile(valid.planDir, runProfile).recorded, true)
-  assert.equal(bindRunProfile(valid.planDir, runProfile).recorded, false)
-  assert.deepEqual(required(getRunProfile(valid.planDir).configuration).roles, runProfile.roles)
+  assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, true)
+  assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, false)
+  assert.deepEqual(required(readRunConfiguration(valid.planDir).configuration).roles, runProfile.roles)
   expectFailure(
-    () => bindRunProfile(valid.planDir, { ...runProfile, profile: "eclipse" }),
+    () => recordRunConfiguration(valid.planDir, { ...runProfile, profile: "eclipse" }),
     /already bound to poorman/,
   )
   const implementerUsage = {
@@ -223,9 +226,9 @@ try {
     finishedAt: "2026-08-03T00:00:02Z",
     durationMs: "2000",
   }
-  assert.equal(recordUsage(valid.planDir, implementerUsage).recorded, true)
-  assert.equal(recordUsage(valid.planDir, implementerUsage).recorded, false)
-  assert.equal(recordUsage(valid.planDir, {
+  assert.equal(recordUsageRecord(valid.planDir, implementerUsage).recorded, true)
+  assert.equal(recordUsageRecord(valid.planDir, implementerUsage).recorded, false)
+  assert.equal(recordUsageRecord(valid.planDir, {
     plan: "002",
     role: "plan-reviewer",
     attempt: "run-1-002-reviewer-1",
@@ -242,7 +245,8 @@ try {
     durationMs: "3000",
   }).recorded, true)
 
-  const usage = getUsageReport(valid.planDir)
+  const usageState = readUsageState(valid.planDir)
+  const usage = { ...usageState, ...usageReport(usageState.records) }
   assert.equal(usage.attempts, 2)
   assert.deepEqual(usage.byPlan, [{
     key: "002",
@@ -273,16 +277,12 @@ try {
   assert.equal(required(planReport.runConfiguration).profile, "poorman")
   assert.deepEqual(fs.readFileSync(executionDatabasePath(valid.planDir)), databaseBeforeReports)
   expectFailure(
-    () => recordUsage(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),
+    () => recordUsageRecord(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),
     /already recorded with different values/,
   )
   expectFailure(
-    () => recordUsage(valid.planDir, { ...implementerUsage, attempt: "bad-source", source: "unknown" }),
+    () => recordUsageRecord(valid.planDir, { ...implementerUsage, attempt: "bad-source", source: "unknown" }),
     /numeric usage but an unknown source/,
-  )
-  expectFailure(
-    () => recordUsage(valid.planDir, { ...implementerUsage, attempt: "unknown-plan", plan: "999" }),
-    /is not indexed/,
   )
 
   const snapshot = snapshotPlan(valid.planDir, "2")

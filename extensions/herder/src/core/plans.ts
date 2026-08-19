@@ -6,13 +6,7 @@ import { spawnSync } from "node:child_process"
 import {
   executionReport,
   initializeExecutionStore,
-  readRunConfiguration,
   readUsageState,
-  recordRunConfiguration,
-  recordUsageRecord,
-  usageReport,
-  type RunConfigurationInput,
-  type UsageRecordInput,
 } from "../daemon/execution-store.ts"
 import { sha256 } from "../shared/protocol.ts"
 
@@ -856,7 +850,7 @@ export function snapshotPlansFromGraph(graph: PlanGraph): PlanSnapshot[] {
   return graph.plans.map((plan) => createPlanSnapshot(graph, plan, contextText, indexText))
 }
 
-export function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanSnapshot {
+function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanSnapshot {
   const id = canonicalId(inputId)
   const plan = graph.plans.find((candidate) => candidate.id === id)
   if (!plan) fail(`Plan ${id} is not indexed in ${graph.readme}`)
@@ -933,41 +927,6 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
     atomicReplaceRegularFile(readme, nextMarkdown, readmeFile.identity, readmeFile.mode)
   }
   return { planDir, projected: [...byId.keys()].sort() }
-}
-
-export function recordUsage(inputDir = DEFAULT_PLAN_DIR, input: UsageRecordInput = {}) {
-  const graph = buildGraph(inputDir)
-  const requestedPlan = String(input.plan ?? "").trim()
-  if (!requestedPlan) fail("Plan cannot be empty")
-  const plan = requestedPlan.toUpperCase() === "RUN" ? "RUN" : canonicalId(requestedPlan)
-  if (plan !== "RUN" && !graph.plans.some((candidate) => candidate.id === plan)) {
-    fail(`Plan ${plan} is not indexed in ${graph.readme}`)
-  }
-  const stored = recordUsageRecord(graph.planDir, { ...input, plan })
-  return {
-    planDir: graph.planDir,
-    readme: graph.readme,
-    database: stored.database,
-    recorded: stored.recorded,
-    record: stored.record,
-    usage: usageReport(stored.records),
-  }
-}
-
-export function getUsageReport(inputDir = DEFAULT_PLAN_DIR) {
-  const graph = buildGraph(inputDir)
-  const state = readUsageState(graph.planDir)
-  return { planDir: graph.planDir, readme: graph.readme, ...state, ...usageReport(state.records) }
-}
-
-export function bindRunProfile(inputDir = DEFAULT_PLAN_DIR, input: RunConfigurationInput = {}) {
-  const graph = buildGraph(inputDir)
-  return recordRunConfiguration(graph.planDir, input)
-}
-
-export function getRunProfile(inputDir = DEFAULT_PLAN_DIR) {
-  const graph = buildGraph(inputDir)
-  return { planDir: graph.planDir, readme: graph.readme, ...readRunConfiguration(graph.planDir) }
 }
 
 export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN") {
