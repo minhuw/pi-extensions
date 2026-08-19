@@ -81,12 +81,12 @@ The facts the executor needs, inlined — never "as discussed" or "see audit":
 
 ## Commands you will need
 
-| Purpose   | Command                  | Expected on success |
-|-----------|--------------------------|---------------------|
-| Install   | `pnpm install`           | exit 0              |
-| Typecheck | `pnpm typecheck`         | exit 0, no errors   |
-| Tests     | `pnpm test -- <filter>`  | all pass            |
-| Lint      | `pnpm lint`              | exit 0              |
+| Purpose | Command (cwd) | Expected on success |
+|---------|---------------|---------------------|
+| Install | `npm install` (repo root) | exit 0 |
+| Typecheck | `npm run typecheck` (repo root) | exit 0, no errors |
+| Full Herder suite | `npm run test:herder` (repo root) | all pass |
+| Focused tests | `node --experimental-strip-types --test tests/unit/<area>.test.ts` (`extensions/herder/`) | all pass |
 
 (Exact commands from this repo — verified during recon, not guessed.)
 
@@ -175,8 +175,8 @@ Give the reviewer the shortest evidence path:
 
 Machine-checkable; use 3–8 non-duplicative criteria. ALL must hold:
 
-- [ ] `pnpm typecheck` exits 0
-- [ ] `pnpm test` exits 0; new tests for <X> exist and pass
+- [ ] `npm run typecheck` exits 0
+- [ ] `npm run test:herder` exits 0; new tests for <X> exist and pass
 - [ ] `grep -rn "<old pattern>" src/` returns no matches
 - [ ] Every modified path is declared in scope or is a directly necessary,
   justified companion path accepted by review
