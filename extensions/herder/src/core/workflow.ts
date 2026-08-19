@@ -12,24 +12,29 @@ export interface RunOverview {
 	complete: boolean;
 }
 
+const ROLE_PHASES: Record<WorkerRole, { ready: PlanPhase; active: PlanPhase }> = {
+	"plan-implementer": { ready: "READY_IMPLEMENTER", active: "IMPLEMENTING" },
+	"plan-reviewer": { ready: "READY_REVIEWER", active: "REVIEWING" },
+	"plan-judge": { ready: "READY_JUDGE", active: "JUDGING" },
+};
+
 export function roleForPhase(phase: PlanPhase): WorkerRole | null {
-	if (phase === "READY_IMPLEMENTER") return "plan-implementer";
-	if (phase === "READY_REVIEWER") return "plan-reviewer";
-	if (phase === "READY_JUDGE") return "plan-judge";
+	for (const [role, phases] of Object.entries(ROLE_PHASES)) {
+		if (phases.ready === phase) return role as WorkerRole;
+	}
 	return null;
 }
 
 export function phaseForRole(role: WorkerRole): PlanPhase {
-	if (role === "plan-implementer") return "IMPLEMENTING";
-	if (role === "plan-reviewer") return "REVIEWING";
-	return "JUDGING";
+	const phases = ROLE_PHASES[role];
+	if (!phases) throw new Error(`Unknown worker role ${role}`);
+	return phases.active;
 }
 
 export function readyPhaseForRole(role: string): PlanPhase {
-	if (role === "plan-implementer") return "READY_IMPLEMENTER";
-	if (role === "plan-reviewer") return "READY_REVIEWER";
-	if (role === "plan-judge") return "READY_JUDGE";
-	throw new Error(`Unknown worker role ${role}`);
+	const phases = ROLE_PHASES[role as WorkerRole];
+	if (!phases) throw new Error(`Unknown worker role ${role}`);
+	return phases.ready;
 }
 
 export type PlanLifecycleStatus = PlanStatus;
