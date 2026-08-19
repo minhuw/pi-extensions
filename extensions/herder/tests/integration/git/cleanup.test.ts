@@ -279,13 +279,13 @@ test("worktree parser handles modern and legacy porcelain", () => {
   const modern = "worktree /tmp/one\0HEAD abc\0branch refs/heads/main\0\0worktree /tmp/two\0HEAD def\0detached\0locked reason\0\0"
   const legacy = "worktree /tmp/one\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/two\nHEAD def\ndetached\nlocked reason\n\nbranch refs/heads/herder/plans/999\nunknown field\n\n"
   assert.deepEqual(parseWorktreeRecords(modern, true), [
-    { path: "/tmp/one", branch: "main", locked: false },
-    { path: "/tmp/two", branch: "", locked: true },
+    { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
+    { path: "/tmp/two", branch: "", locked: true, lockReason: "reason" },
   ])
   assert.deepEqual(parseWorktreeRecords(legacy, false), [
-    { path: "/tmp/one", branch: "main", locked: false },
-    { path: "/tmp/two", branch: "", locked: true },
-    { path: "", branch: "herder/plans/999", locked: false },
+    { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
+    { path: "/tmp/two", branch: "", locked: true, lockReason: "reason" },
+    { path: "", branch: "herder/plans/999", locked: false, lockReason: null },
   ])
 })
 

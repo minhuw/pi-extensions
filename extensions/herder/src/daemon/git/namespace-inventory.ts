@@ -4,6 +4,7 @@ export interface WorktreeRecord {
   path: string
   branch: string
   locked: boolean
+  lockReason: string | null
 }
 
 export interface BranchRecord {
@@ -19,12 +20,15 @@ export function parseWorktreeRecords(output: string, nulDelimited: boolean): Wor
     ? output.split("\0\0")
     : output.split(/(?:\r?\n){2,}/)
   for (const rawRecord of rawRecords.filter((record) => record.trim())) {
-    const record: WorktreeRecord = { path: "", branch: "", locked: false }
+    const record: WorktreeRecord = { path: "", branch: "", locked: false, lockReason: null }
     const fields = nulDelimited ? rawRecord.split("\0") : rawRecord.split(/\r?\n/)
     for (const field of fields.filter(Boolean)) {
       if (field.startsWith("worktree ")) record.path = field.slice("worktree ".length)
       else if (field.startsWith("branch refs/heads/")) record.branch = field.slice("branch refs/heads/".length)
-      else if (field === "locked" || field.startsWith("locked ")) record.locked = true
+      else if (field === "locked" || field.startsWith("locked ")) {
+        record.locked = true
+        record.lockReason = field.slice("locked".length).trim()
+      }
     }
     records.push(record)
   }
