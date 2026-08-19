@@ -211,8 +211,6 @@ export function normalizeIntegrationRepairGates(input: IntegrationRepairGateProg
 	return input.candidateGates.map((gate) => ({ ...gate, argv: [...gate.argv] }));
 }
 
-export const validateIntegrationRepairGates = normalizeIntegrationRepairGates;
-
 export interface ReigniteRequestInput {
 	requestId: string;
 	runId: string;

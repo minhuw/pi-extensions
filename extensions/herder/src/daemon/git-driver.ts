@@ -74,7 +74,6 @@ export interface IntegrationRepairNamespaceEvidence {
 	refs: IntegrationRepairRef[];
 	snapshot: string;
 	sha256: string;
-	snapshotSha256: string;
 }
 
 export interface ActiveRebaseEvidence {
@@ -513,11 +512,7 @@ export class GitDriver {
 		validateIntegrationRepairRefSnapshot(refs);
 		const snapshot = stableJson(refs);
 		const snapshotSha256 = integrationRepairRefSnapshotSha256(refs);
-		return { refs, snapshot, sha256: snapshotSha256, snapshotSha256 };
-	}
-
-	captureIntegrationRepairNamespace(): IntegrationRepairNamespaceEvidence {
-		return this.readIntegrationRepairNamespace();
+		return { refs, snapshot, sha256: snapshotSha256 };
 	}
 
 	private normalizedIntegrationRepairNamespaceSnapshot(input: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence, expectedSha256: string): IntegrationRepairRef[] {
@@ -692,9 +687,6 @@ export class GitDriver {
 		/** Immutable namespace evidence captured by the successful repair begin. */
 		beginRefSnapshot?: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence;
 		beginRefSnapshotSha256?: string;
-		/** Backward-compatible aliases for callers naming the evidence namespace. */
-		namespaceSnapshot?: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence;
-		namespaceSnapshotSha256?: string;
 	}): IntegrationRepairCommitResult {
 		if (Object.prototype.hasOwnProperty.call(input, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");
 		const worktree = input.worktree ?? this.integrationWorktree;
@@ -726,8 +718,8 @@ export class GitDriver {
 		if (replayHead && replayHead !== observedCommit) throw new Error("Integration repair replay commit must equal the observed commit");
 		if (replayHead && supersededCommits.includes(replayHead)) throw new Error("Integration repair replay commit was previously superseded");
 		if (!replayHead && supersededCommits.includes(observedCommit)) throw new Error("Integration repair observed commit was previously superseded");
-		const beginRefSnapshot = input.beginRefSnapshot ?? input.namespaceSnapshot;
-		const beginRefSnapshotSha256 = input.beginRefSnapshotSha256 ?? input.namespaceSnapshotSha256;
+		const beginRefSnapshot = input.beginRefSnapshot;
+		const beginRefSnapshotSha256 = input.beginRefSnapshotSha256;
 		if (beginRefSnapshot === undefined || beginRefSnapshotSha256 === undefined) {
 			throw new Error("Integration repair begin-ref namespace evidence is required");
 		}
@@ -789,8 +781,6 @@ export class GitDriver {
 			committed: false,
 		};
 	}
-
-	acceptIntegrationRepairCommit = this.validateIntegrationRepairCommit.bind(this);
 
 	integrate(input: {
 		planId: string;
