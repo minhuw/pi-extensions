@@ -3,9 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import type {
-	AgentSessionEvent,
 	ExtensionAPI,
 	ExtensionContext,
 	ModelRegistry,
@@ -33,35 +31,20 @@ import type {
 	PiWorkerRequest,
 	PiWorkerSessionFactory,
 } from "../../../adapters/worker-engine.ts";
+import {
+	agentRoot,
+	BaseSession,
+	CapturedExtensionAPI,
+	CapturedUI,
+	Deferred,
+	availableModels,
+	initFixtureRepo,
+	object,
+	withDeadline as harnessWithDeadline,
+} from "./helpers/harness.ts";
 
-const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
-
-class Deferred<T = void> {
-	readonly promise: Promise<T>;
-	private resolvePromise!: (value: T | PromiseLike<T>) => void;
-
-	constructor() {
-		this.promise = new Promise<T>((resolve) => {
-			this.resolvePromise = resolve;
-		});
-	}
-
-	resolve(value: T): void {
-		this.resolvePromise(value);
-	}
-}
-
-async function withDeadline<T>(operation: Promise<T>, label: string, timeoutMs = 20_000): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<never>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs);
-	});
-	try {
-		return await Promise.race([operation, timeout]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
+const withDeadline = <T>(operation: Promise<T>, label: string, timeoutMs = 20_000): Promise<T> =>
+	harnessWithDeadline(operation, label, timeoutMs);
 
 interface Fixture {
 	root: string;
@@ -71,28 +54,25 @@ interface Fixture {
 }
 
 function writeFixture(root: string): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(path.join(repo, "src"), { recursive: true });
-	fs.mkdirSync(path.join(repo, "test"), { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Pi adapter integration test"]);
-	git(repo, ["config", "user.email", "pi-adapter-integration@example.invalid"]);
-	fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({
-		name: "pi-adapter-integration-fixture",
-		private: true,
-		type: "module",
-		scripts: { test: "node --test" },
-	}, null, 2)}\n`);
-	fs.writeFileSync(path.join(repo, "src", "value.mjs"), "export const value = 1\n");
-	fs.writeFileSync(path.join(repo, "test", "value.test.mjs"), `import assert from "node:assert/strict"
+	const { repo, originalHead } = initFixtureRepo(root, {
+		name: "Pi adapter integration test",
+		email: "pi-adapter-integration@example.invalid",
+		files: {
+			"package.json": `${JSON.stringify({
+				name: "pi-adapter-integration-fixture",
+				private: true,
+				type: "module",
+				scripts: { test: "node --test" },
+			}, null, 2)}\n`,
+			"src/value.mjs": "export const value = 1\n",
+			"test/value.test.mjs": `import assert from "node:assert/strict"
 import test from "node:test"
 import { value } from "../src/value.mjs"
 
 test("exports the fixture value", () => assert.equal(value, 1))
-`);
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: create adapter fixture"]);
-	const originalHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+`,
+		},
+	});
 
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
@@ -211,162 +191,6 @@ Keep this fixture deliberately small so provider and transport failures remain d
 	return { root, repo, planDirectory, originalHead };
 }
 
-interface CapturedEntry {
-	customType: string;
-	data: unknown;
-}
-
-interface CapturedNotification {
-	message: string;
-	level: string;
-}
-
-interface CapturedUserMessage {
-	content: string;
-	options?: unknown;
-}
-
-interface CapturedCustomMessage {
-	customType: string;
-	content: string;
-	display: boolean;
-	details?: unknown;
-	options?: unknown;
-}
-
-class CapturedExtensionAPI {
-	readonly commands = new Map<string, unknown>();
-	readonly tools: unknown[] = [];
-	readonly handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
-	readonly renderers: string[] = [];
-	readonly appendedEntries: CapturedEntry[] = [];
-	readonly userMessages: CapturedUserMessage[] = [];
-	readonly customMessages: CapturedCustomMessage[] = [];
-	readonly execCalls: Array<{ command: string; args: string[] }> = [];
-	private readonly userMessageWaiters: Array<{ marker: string; after: number; deferred: Deferred<CapturedUserMessage> }> = [];
-	private readonly customMessageWaiters: Array<Deferred<CapturedCustomMessage>> = [];
-
-	on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown): void {
-		this.handlers.set(event, handler);
-	}
-
-	registerCommand(name: string, options: unknown): void {
-		this.commands.set(name, options);
-	}
-
-	registerTool(tool: unknown): void {
-		this.tools.push(tool);
-	}
-
-	registerEntryRenderer(customType: string, _renderer: unknown): void {
-		this.renderers.push(customType);
-	}
-
-	appendEntry(customType: string, data: unknown): void {
-		this.appendedEntries.push({ customType, data });
-	}
-
-	sendUserMessage(content: string, options?: unknown): void {
-		const message = { content, ...(options === undefined ? {} : { options }) };
-		this.userMessages.push(message);
-		for (let index = this.userMessageWaiters.length - 1; index >= 0; index -= 1) {
-			const waiter = this.userMessageWaiters[index]!;
-			if (this.userMessages.length <= waiter.after || !content.includes(waiter.marker)) continue;
-			this.userMessageWaiters.splice(index, 1);
-			waiter.deferred.resolve(message);
-		}
-	}
-
-	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
-		const captured = { ...message, ...(options === undefined ? {} : { options }) };
-		this.customMessages.push(captured);
-		while (this.customMessageWaiters.length) this.customMessageWaiters.shift()!.resolve(captured);
-	}
-
-	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-		this.execCalls.push({ command, args: [...args] });
-		const result = runCommand(command, args, { allowFailure: true });
-		return { code: result.status, stdout: result.stdout, stderr: result.stderr };
-	}
-
-	async invoke(event: string, ctx: ExtensionContext): Promise<unknown> {
-		const handler = this.handlers.get(event);
-		if (!handler) throw new Error(`No captured ${event} handler`);
-		return await handler({}, ctx);
-	}
-
-	command(name: string): { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } {
-		const command = this.commands.get(name) as { handler: (args: string, ctx: ExtensionContext) => Promise<unknown> } | undefined;
-		if (!command) throw new Error(`No captured ${name} command`);
-		return command;
-	}
-
-	tool(name: string): { execute: (...args: unknown[]) => Promise<unknown> } {
-		const tool = this.tools.find((candidate) => (candidate as { name?: unknown }).name === name) as { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
-		if (!tool) throw new Error(`No captured ${name} tool`);
-		return tool;
-	}
-
-	async waitForUserMessage(after = 0, marker = "HERDER_MAIN_SESSION_VERIFICATION_V1"): Promise<CapturedUserMessage> {
-		const existing = this.userMessages.slice(after).find((message) => message.content.includes(marker));
-		if (existing) return existing;
-		const deferred = new Deferred<CapturedUserMessage>();
-		this.userMessageWaiters.push({ marker, after, deferred });
-		return deferred.promise;
-	}
-
-	async waitForAttentionMessage(): Promise<CapturedCustomMessage> {
-		const existing = this.customMessages.find((message) => message.customType === "herder-attention-v1");
-		if (existing) return existing;
-		const deferred = new Deferred<CapturedCustomMessage>();
-		this.customMessageWaiters.push(deferred);
-		return deferred.promise;
-	}
-}
-
-const availableModels = [
-	{
-		provider: "fake",
-		id: "gpt-5.6-sol",
-		api: "openai-responses",
-		reasoning: true,
-		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-	},
-	{
-		provider: "fake",
-		id: "gpt-5.6-luna",
-		api: "openai-responses",
-		reasoning: true,
-		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-	},
-] as const;
-
-class CapturedUI {
-	readonly notifications: CapturedNotification[] = [];
-	readonly statuses: Array<{ id: string; value: unknown }> = [];
-	readonly widgets: Array<{ id: string; value: unknown }> = [];
-	readonly theme = {
-		fg: (_color: string, value: string) => value,
-		bold: (value: string) => value,
-	};
-
-	notify(message: string, level: string): void {
-		this.notifications.push({ message, level });
-	}
-
-	setStatus(id: string, value: unknown): void {
-		this.statuses.push({ id, value });
-	}
-
-	setWidget(id: string, value: unknown): void {
-		this.widgets.push({ id, value });
-	}
-
-	async confirm(): Promise<boolean> {
-		return true;
-	}
-}
-
 function contextFor(fixture: Fixture, ui: CapturedUI): ExtensionContext {
 	const sessionEntries: unknown[] = [];
 	const sessionManager = {
@@ -399,29 +223,20 @@ function contextFor(fixture: Fixture, ui: CapturedUI): ExtensionContext {
 	} as unknown as ExtensionContext;
 }
 
-class ControlledSession {
-	readonly sessionId: string;
-	readonly messages: unknown[] = [];
+class ControlledSession extends BaseSession {
 	readonly started = new Deferred<void>();
 	readonly settled = new Deferred<void>();
 	readonly action: ManagerAction;
 	promptText = "";
 	prompted = false;
 	aborted = false;
-	disposed = false;
 	finalReviewResponse?: string;
 	private readonly gate?: Deferred<void>;
-	private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(sessionId: string, action: ManagerAction) {
-		this.sessionId = sessionId;
+		super(sessionId);
 		this.action = action;
 		if (action.role === "plan-implementer" || action.workerMode === "FINAL_AUDIT") this.gate = new Deferred<void>();
-	}
-
-	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
 	}
 
 	async prompt(text: string): Promise<void> {
@@ -447,10 +262,6 @@ class ControlledSession {
 	async abort(): Promise<void> {
 		this.aborted = true;
 		this.gate?.resolve();
-	}
-
-	dispose(): void {
-		this.disposed = true;
 	}
 
 	getSessionStats(): SessionStats {
@@ -518,10 +329,6 @@ USAGE: input_tokens=18; cached_input_tokens=2; output_tokens=9; reasoning_tokens
 		this.emit({ type: "agent_settled" });
 		this.settled.resolve();
 	}
-
-	private emit(event: AgentSessionEvent): void {
-		for (const listener of this.listeners) listener(event);
-	}
 }
 
 class CapturedWorkerFactory implements PiWorkerSessionFactory {
@@ -562,11 +369,6 @@ class CapturedWorkerFactory implements PiWorkerSessionFactory {
 		this.waiters.push({ predicate, deferred });
 		return deferred.promise;
 	}
-}
-
-function object(value: unknown): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object");
-	return value as Record<string, unknown>;
 }
 
 function toolText(value: unknown): string {
