@@ -33,11 +33,15 @@ export interface FormatCheckpointInput {
   ordinal: string | number | bigint
 }
 
-function validPlanName(value: string): boolean {
-  return PLAN_NAME.test(value)
-    && !value.includes("..")
-    && !value.endsWith(".")
-    && !value.endsWith(".lock")
+export function validatePlanName(value: unknown): string {
+  const name = String(value)
+  if (!PLAN_NAME.test(name)
+    || name.includes("..")
+    || name.endsWith(".")
+    || name.endsWith(".lock")) {
+    fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(name)}`)
+  }
+  return name
 }
 
 export function parseCheckpointRefRelative(relative: string): CheckpointRef | null {
@@ -95,7 +99,7 @@ export function formatCheckpointRef({ planName, plan, generation, ordinal }: For
   const normalizedPlan = String(plan)
   const normalizedGeneration = String(generation)
   const normalizedOrdinal = String(ordinal)
-  if (!validPlanName(normalizedPlanName)) fail(`Invalid plan-set name: ${JSON.stringify(planName)}`)
+  validatePlanName(normalizedPlanName)
   if (!PLAN_ID.test(normalizedPlan)) fail(`Invalid checkpoint plan ID: ${JSON.stringify(plan)}`)
   if (!CURRENT_GENERATION.test(normalizedGeneration)) {
     fail(`Checkpoint generation must use generation-<n>: ${JSON.stringify(generation)}`)

@@ -5,7 +5,8 @@ import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
-import { listCoordinationRefs } from "./coordination-ref.ts"
+import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts"
+export { validatePlanName } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees } from "./namespace-inventory.ts"
 import { fail, isInside, runGit, takeValue } from "./primitives.ts"
@@ -48,17 +49,6 @@ function parseArguments(argv: string[]): NamespaceInput {
   }
   if (!options.mode || !(["fire", "resume", "status"] as string[]).includes(options.mode)) fail(`Unsupported mode: ${JSON.stringify(options.mode)}`)
   return options as NamespaceInput
-}
-
-export function validatePlanName(value: unknown): string {
-  const name = String(value)
-  if (!/^[a-z0-9][a-z0-9._-]*$/.test(name)
-    || name.includes("..")
-    || name.endsWith(".")
-    || name.endsWith(".lock")) {
-    fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(value)}`)
-  }
-  return name
 }
 
 function refExists(repoRoot: string, ref: string): boolean {

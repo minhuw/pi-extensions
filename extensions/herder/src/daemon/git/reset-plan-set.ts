@@ -4,22 +4,14 @@ import { buildGraph, projectStatuses } from "../../core/plans.ts";
 import { RunStore, type StoredPlanSpec } from "../run-store.ts";
 import { clearExecutionRotationMarker } from "../execution-store.ts";
 import { listHerderBranches, listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
-import { parseCoordinationRefRelative } from "./coordination-ref.ts";
+import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import { allowedWorktreePaths, worktreeRelativeName } from "./worktree-locations.ts";
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export interface HerderResetInput { repoRoot: string; planDirectory: string }
 export interface HerderResetResult { planName: string; removedBranches: string[]; removedWorktrees: string[]; removedRefs: string[]; resetPlans: string[] }
 type Worktree = WorktreeRecord;
-type Ref = { ref: string; target: string; relative: string };
 
-function refs(repo: string, name: string): Ref[] {
-  const prefix = `refs/plan-herder/${name}/`;
-  return runGit(repo, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]).stdout.split(/\r?\n/).filter(Boolean).map((line) => {
-    const i = line.indexOf("\t"); if (i < 0) fail("Cannot parse Herder coordination namespace");
-    const ref = line.slice(0, i); return { ref, target: line.slice(i + 1), relative: ref.slice(prefix.length) };
-  });
-}
 function target(repo: string, ref: string): string | null { const r = runGit(repo, ["rev-parse", "--verify", ref], { allowFailure: true }); return r.status === 0 ? r.stdout.trim() : null; }
 function ancestor(repo: string, a: string, b: string): boolean { const r = runGit(repo, ["merge-base", "--is-ancestor", a, b], { allowFailure: true }); const status = r.status ?? 1; if (status === 0) return true; if (status === 1) return false; fail(`Cannot compare Git ancestry: ${(r.stderr || r.stdout).trim()}`); }
 function checkout(repo: string): { branch: string | null; head: string | null } { const b = runGit(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true }); const h = runGit(repo, ["rev-parse", "--verify", "HEAD"], { allowFailure: true }); return { branch: b.status === 0 ? b.stdout.trim() : null, head: h.status === 0 ? h.stdout.trim() : null }; }
@@ -72,7 +64,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const planDir = realpathIfPresent(planDirCandidate);
   if (!isInside(repo, planDir, { allowEqual: false })) fail(`Plan directory must be inside the repository: ${planDir}`);
   const name = path.basename(planDir);
-  if (!/^[a-z0-9][a-z0-9._-]*$/.test(name) || name.includes("..") || name.endsWith(".") || name.endsWith(".lock")) fail(`Invalid Herder plan-set name: ${name}`);
+  validatePlanName(name);
   const { graph, specs, run } = validateSpecs(planDir);
   if (run!.repositoryRoot !== repo || run!.planName !== name || run!.integrationBranch !== `herder/${name}/integration`) fail("Herder reset refused: execution identity does not match this repository and plan set.");
   const integration = `herder/${name}/integration`, integrationRef = `refs/heads/${integration}`, baseRef = `refs/plan-herder/${name}/base`;
@@ -85,7 +77,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const projected = projectedResetStatuses(specs);
   const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
   const allBranches = listHerderBranches(repo, name);
-  const allRefs = refs(repo, name);
+  const allRefs = listCoordinationRefs(repo, name);
   const worktrees = listWorktrees(repo);
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
@@ -102,7 +94,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
       if (branch.relative !== "integration" && !/^\d{3,}$/.test(branch.relative)) fail(`Herder reset refused unknown branch in namespace: ${branch.branch}`);
       if (branch.relative !== "integration" && !allowedPlans.has(branch.relative)) fail(`Herder reset refused branch for unknown plan: ${branch.branch}`);
     }
-    for (const ref of allRefs) if (!parseCoordinationRefRelative(ref.relative)) fail(`Herder reset refused unknown coordination ref: ${ref.ref}`);
+    for (const ref of allRefs) if (!ref.identity) fail(`Herder reset refused unknown coordination ref: ${ref.ref}`);
     const branchMap = new Map(allBranches.map((b) => [b.branch, b]));
     const integrationWorktrees = worktrees.filter((w) => w.branch === integration);
     if (integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
@@ -115,7 +107,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     }
     const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
     // Revalidate every identity immediately before the first mutation.
-    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(listWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(listCoordinationRefs(repo, name)) !== currentRefSnapshot || snapshot(listWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
     for (const w of owned) {
       if (w.locked) runGit(repo, ["worktree", "unlock", "--", w.path]);
       runGit(repo, ["worktree", "remove", "--", w.path]);

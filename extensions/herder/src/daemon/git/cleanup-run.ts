@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
 import { RunStore } from "../run-store.ts"
-import { listCoordinationRefs, type CoordinationRefRecord } from "./coordination-ref.ts"
+import { listCoordinationRefs, type CoordinationRefRecord, validatePlanName } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
@@ -66,7 +66,12 @@ export interface CleanupResult {
     planDirectory: boolean
   }
 }
-type CompletionRefRecord = ReturnType<typeof listCompletionRefs>[number]
+type CompletionRefRecord = {
+  ref: string
+  target: string
+  plan: string | null
+  proof: ReturnType<typeof inspectCompletionProof>
+}
 
 function parseArguments(argv: string[]): CleanupInput {
   const options: Partial<CleanupInput> & Pick<CleanupInput, "dryRun" | "includeFailed" | "deep" | "pretty"> = {
@@ -142,14 +147,7 @@ function canonicalPlanId(value: unknown): string {
 }
 
 function resolvePlanName(planDir: string, inputName: unknown): string {
-  const name = String(inputName ?? path.basename(planDir))
-  if (!/^[a-z0-9][a-z0-9._-]*$/.test(name)
-    || name.includes("..")
-    || name.endsWith(".")
-    || name.endsWith(".lock")) {
-    fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(name)}`)
-  }
-  return name
+  return validatePlanName(inputName ?? path.basename(planDir))
 }
 
 function planBranchSnapshot(items: BranchRecord[]): string {
@@ -201,24 +199,6 @@ function isPatchEquivalent(repoRoot: string, artifactHead: string, integrationHe
 
   const rows = runGit(repoRoot, ["cherry", integrationHead, artifactHead]).stdout.split(/\r?\n/).filter(Boolean)
   return rows.length > 0 && rows.every((row) => /^- [0-9a-f]+$/.test(row))
-}
-
-function listCompletionRefs(repoRoot: string, planName: string) {
-  const prefix = `refs/plan-herder/${planName}/completed/`
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname)%09%(objectname)",
-    prefix,
-  ]).stdout
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse completion ref record: ${JSON.stringify(line)}`)
-    const ref = line.slice(0, separator)
-    const target = line.slice(separator + 1)
-    const relative = ref.slice(prefix.length)
-    const plan = /^\d{3,}$/.test(relative) ? relative : null
-    return { ref, target, relative, plan, proof: inspectCompletionProof(repoRoot, ref) }
-  })
 }
 
 const CLEANUP_TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "stopped"])
@@ -326,7 +306,15 @@ export function cleanupRun(input: CleanupInput) {
   const planStatus = (plan: { id: string; status: string }): string => overlayStatus(plan.id, plan.status, plannedLifecycle)
   const plans = new Map(graph.plans.map((plan) => [plan.id, plan]))
   const coordinationRefs = listCoordinationRefs(repoRoot, planName)
-  const completionRefs = listCompletionRefs(repoRoot, planName)
+  const completionRefs: CompletionRefRecord[] = coordinationRefs
+    .filter((item) => item.identity?.kind === "completed")
+    .map((item) => ({
+      ref: item.ref,
+      target: item.target,
+      plan: item.identity!.plan,
+      proof: inspectCompletionProof(repoRoot, item.ref),
+    }))
+
   const completionProofsForRun = integrationHead ? completionProofs(repoRoot, integrationHead, completionRefs) : new Set<string>()
   const allPlanBranches = listHerderBranches(repoRoot, planName)
   const expectedPlanBranchSnapshot = planBranchSnapshot(allPlanBranches)

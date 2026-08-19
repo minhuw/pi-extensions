@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { listCoordinationRefs } from "./coordination-ref.ts";
+import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
 import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
@@ -14,14 +14,7 @@ export interface ForceCleanupInput {
 }
 
 function resolvePlanName(planDir: string, inputName: unknown): string {
-	const name = String(inputName ?? path.basename(planDir));
-	if (!/^[a-z0-9][a-z0-9._-]*$/.test(name)
-		|| name.includes("..")
-		|| name.endsWith(".")
-		|| name.endsWith(".lock")) {
-		fail(`Plan-set name must be a lowercase Git-safe basename: ${JSON.stringify(name)}`);
-	}
-	return name;
+	return validatePlanName(inputName ?? path.basename(planDir));
 }
 
 function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
