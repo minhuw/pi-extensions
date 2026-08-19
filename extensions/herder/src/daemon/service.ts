@@ -24,7 +24,7 @@ import {
 	type ManagerReply,
 } from "../shared/protocol.ts";
 import { EXECUTION_SCHEMA_VERSION, executionDatabasePath, openExecutionDatabase } from "./execution-store.ts";
-import type { ManagerWorkerResult } from "./manager-worker.ts";
+import type { ManagerWorkerMethod, ManagerWorkerResult } from "./manager-worker.ts";
 import { RunStore, type StoredManagerOperation } from "./run-store.ts";
 
 const LOOPBACK = "127.0.0.1";
@@ -151,7 +151,7 @@ class ManagerExecutor {
 		worker.once("exit", (code) => { if (code !== 0) crash(new Error(`Herder manager worker exited with code ${code}`)); });
 	}
 
-	async call(method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "auditScheduler" | "dashboardState", input?: unknown): Promise<unknown> {
+	async call(method: ManagerWorkerMethod, input?: unknown): Promise<unknown> {
 		if (!this.worker) {
 			const worker = new Worker(new URL("./manager-worker.ts", import.meta.url), { workerData: { planDirectory: this.planDirectory } });
 			this.attach(worker);

@@ -1,11 +1,13 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { HerderRunManager, type EventInput, type IntegrationRepairInput, type PlanEditInput, type ReigniteInput, type StartInput } from "../core/run-manager.ts";
 import { buildDashboardStateBody } from "../dashboard/dashboard-state.ts";
-import type { VerificationManifest } from "../shared/protocol.ts";
+import type { ManagerOperationKind, VerificationManifest } from "../shared/protocol.ts";
+
+export type ManagerWorkerMethod = ManagerOperationKind | "reply" | "auditScheduler" | "dashboardState";
 
 export interface ManagerWorkerCall {
 	id: number;
-	method: "reply" | "start" | "event" | "edit" | "stop" | "verification" | "reignite" | "integration_repair" | "auditScheduler" | "dashboardState";
+	method: ManagerWorkerMethod;
 	input?: unknown;
 }
 
