@@ -26,15 +26,13 @@ export function roleForPhase(phase: PlanPhase): WorkerRole | null {
 }
 
 export function phaseForRole(role: WorkerRole): PlanPhase {
-	const phases = ROLE_PHASES[role];
-	if (!phases) throw new Error(`Unknown worker role ${role}`);
-	return phases.active;
+	if (!Object.hasOwn(ROLE_PHASES, role)) throw new Error(`Unknown worker role ${role}`);
+	return ROLE_PHASES[role].active;
 }
 
 export function readyPhaseForRole(role: string): PlanPhase {
-	const phases = ROLE_PHASES[role as WorkerRole];
-	if (!phases) throw new Error(`Unknown worker role ${role}`);
-	return phases.ready;
+	if (!Object.hasOwn(ROLE_PHASES, role)) throw new Error(`Unknown worker role ${role}`);
+	return ROLE_PHASES[role as WorkerRole].ready;
 }
 
 export type PlanLifecycleStatus = PlanStatus;
