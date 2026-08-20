@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { createReadStream } from "node:fs"
 import { chmod, mkdir, mkdtemp, open, realpath, rm, stat } from "node:fs/promises"
 import path from "node:path"
+import { isInside } from "./primitives.ts"
 import process from "node:process"
 import { performance } from "node:perf_hooks"
 
@@ -86,11 +87,6 @@ function parseArguments(argv: string[]): GateArguments {
     label: safeLabel(options.label),
     command,
   }
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 const localeVariables = [

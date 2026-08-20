@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
@@ -11,6 +9,7 @@ import { sha256 } from "../../shared/protocol.ts"
 import { buildGraph, snapshotPlan, snapshotPlansFromGraph } from "../../core/plans.ts"
 import type { PlanSnapshot } from "../../core/plans.ts"
 import { parseCheckpointRefRelative } from "./coordination-ref.ts"
+import { isInside, runGit } from "./primitives.ts"
 
 export const ASSIGNMENT_SCHEMA_VERSION = 1
 export const ASSIGNMENT_KIND = "herder-plan-assignment"
@@ -84,34 +83,12 @@ function isObjectId(value: unknown): value is string {
   return /^[0-9a-f]{40,64}$/.test(String(value))
 }
 
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative !== ""
-    && relative !== ".."
-    && !relative.startsWith(`..${path.sep}`)
-    && !path.isAbsolute(relative)
-}
-
-function git(cwd: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" })
-  if (result.error) throw new Error(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    throw new Error(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
-}
-
 function gitValue(cwd: string, ...args: string[]): string {
-  return git(cwd, args).stdout.trim()
+  return runGit(cwd, args).stdout.trim()
 }
 
 function gitBuffer(cwd: string, args: string[]): Buffer {
-  const result = spawnSync("git", ["-C", cwd, ...args])
-  if (result.error) throw new Error(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${Buffer.concat([result.stderr || Buffer.alloc(0), result.stdout || Buffer.alloc(0)]).toString().trim()}`)
-  }
-  return result.stdout
+  return runGit(cwd, args, { encoding: null }).stdout
 }
 
 function canonicalGitPath(cwd: string, value: string): string {
@@ -126,7 +103,7 @@ function repositoryContext(start: string): RepositoryContext {
 }
 
 function currentBranch(worktree: string): string {
-  const result = git(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+  const result = runGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
   if (result.status !== 0 || !result.stdout.trim()) {
     throw new Error(`worktree must have a checked-out branch: ${worktree}`)
   }
@@ -182,7 +159,7 @@ function fingerprintUntracked(worktree: string): TreeFingerprint[] {
   const names = output.toString("utf8").split("\0").filter(Boolean).sort()
   return names.map((name) => {
     const absolute = path.resolve(worktree, name)
-    if (!isInside(worktree, absolute)) throw new Error(`untracked path escapes the worktree: ${name}`)
+    if (!isInside(worktree, absolute, { allowEqual: false })) throw new Error(`untracked path escapes the worktree: ${name}`)
     const status = fs.lstatSync(absolute)
     if (status.isSymbolicLink()) {
       return { path: name, type: "symlink", mode: status.mode & 0o777, sha256: sha256(fs.readlinkSync(absolute)) }
@@ -278,7 +255,7 @@ function assertKnownOptions(options: AssignmentOptions, allowed: Set<string>): v
 }
 
 function assertNoSymlinkComponents(root: string, candidate: string): void {
-  if (!isInside(root, candidate)) throw new Error(`assignment path escapes the worktree: ${candidate}`)
+  if (!isInside(root, candidate, { allowEqual: false })) throw new Error(`assignment path escapes the worktree: ${candidate}`)
   const relative = path.relative(root, candidate)
   let cursor = root
   for (const component of relative.split(path.sep)) {
@@ -299,7 +276,7 @@ function assertNoSymlinkComponents(root: string, candidate: string): void {
 
 function assertIgnored(worktree: string, bundlePath: string): string {
   const relative = path.relative(worktree, bundlePath).split(path.sep).join("/")
-  const result = git(worktree, ["check-ignore", "--quiet", "--no-index", "--", relative], { allowFailure: true })
+  const result = runGit(worktree, ["check-ignore", "--quiet", "--no-index", "--", relative], { allowFailure: true })
   if (result.status !== 0) {
     throw new Error(`assignment bundle must be Git-ignored before materialization: ${relative}`)
   }
@@ -414,7 +391,7 @@ export function materializeAssignment(options: AssignmentOptions, configuration:
   if (coordination.commonDir !== execution.commonDir) {
     throw new Error("plan directory and execution worktree do not belong to the same Git repository")
   }
-  if (!isInside(coordination.root, planDir)) throw new Error("plan directory must be inside the coordination checkout")
+  if (!isInside(coordination.root, planDir, { allowEqual: false })) throw new Error("plan directory must be inside the coordination checkout")
 
   const branch = currentBranch(execution.root)
   if (branch !== expectedBranch) throw new Error(`worktree branch mismatch: expected ${expectedBranch}, found ${branch}`)
@@ -655,7 +632,7 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     throw new Error("active-rebase verification requires the exact guided-repair Implementer lease")
   }
   const branchRef = `refs/heads/${expectedBranch}`
-  if (git(execution.root, ["check-ref-format", branchRef], { allowFailure: true }).status !== 0) {
+  if (runGit(execution.root, ["check-ref-format", branchRef], { allowFailure: true }).status !== 0) {
     throw new Error(`invalid expected plan branch: ${expectedBranch}`)
   }
   const coordinationPrefix = `refs/plan-herder/${planName}/`
@@ -664,7 +641,7 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     : null
   if (!checkpointIdentity
     || checkpointIdentity.plan !== planId
-    || git(execution.root, ["check-ref-format", expectedCheckpointRef], { allowFailure: true }).status !== 0) {
+    || runGit(execution.root, ["check-ref-format", expectedCheckpointRef], { allowFailure: true }).status !== 0) {
     throw new Error(`invalid expected Herder checkpoint ref: ${expectedCheckpointRef}`)
   }
   if (expectedPlanHead !== expectedRebaseOrigHead || expectedCheckpoint !== expectedRebaseOrigHead) {
@@ -681,7 +658,7 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     throw new Error(`assignment branch mismatch: expected ${expectedBranch}, found ${bundle.assignment.branch}`)
   }
 
-  const symbolic = git(execution.root, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true })
+  const symbolic = runGit(execution.root, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true })
   if (symbolic.status === 0 || symbolic.stdout.trim()) {
     throw new Error("active-rebase verification requires Git's detached rebase HEAD")
   }

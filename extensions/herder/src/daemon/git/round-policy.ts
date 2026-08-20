@@ -2,6 +2,7 @@
 
 import process from "node:process"
 import { pathToFileURL } from "node:url"
+import { fail } from "./primitives.ts"
 
 const REVIEW_VERDICTS = new Set(["APPROVE", "REVISE", "BLOCK"])
 const REVIEW_SCOPES = new Set(["PASS", "FAIL"])
@@ -20,10 +21,6 @@ interface ParsedPolicyArgs {
   scope?: string
   open_blockers?: string
   decision?: string
-}
-
-function fail(message: string): never {
-  throw new Error(message)
 }
 
 function parseInteger(value: string | undefined, name: string, { min = 0, max = Number.MAX_SAFE_INTEGER }: { min?: number; max?: number } = {}): number {

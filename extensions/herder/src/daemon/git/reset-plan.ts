@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
+import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";
 
@@ -56,30 +56,9 @@ export interface ResetPlanExecutionResult {
 	alreadyMissing: boolean;
 }
 
-function fail(message: string): never {
-	throw new Error(message);
-}
-
-function git(repoRoot: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
-	const result = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-	if (result.error) fail(`Cannot run git: ${result.error.message}`);
-	const status = result.status ?? 1;
-	if (status !== 0 && !allowFailure) fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout || "").trim()}`);
-	return { status, stdout: result.stdout || "", stderr: result.stderr || "" };
-}
-
-function realpathIfPresent(candidate: string): string {
-	try { return fs.realpathSync(candidate); }
-	catch { return path.resolve(candidate); }
-}
-
-function isInside(parent: string, candidate: string): boolean {
-	const relative = path.relative(parent, candidate);
-	return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
 
 function branchHead(repoRoot: string, branch: string): string | null {
-	const result = git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`], true);
+	const result = runGit(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`], { allowFailure: true });
 	return result.status === 0 ? result.stdout.trim() : null;
 }
 
@@ -92,8 +71,8 @@ function verifyExpectedNamespace(input: ResetPlanExecutionInput, repoRoot: strin
 	if (realpathIfPresent(input.integrationWorktree) === repoRoot || canonicalWorktree === repoRoot) {
 		fail("Recovery cleanup cannot remove the user checkout or integration worktree");
 	}
-	if (!isInside(worktreeRoot, worktree)) fail(`Recovery worktree escaped the manager worktree root: ${worktree}`);
-	if (!isInside(canonicalRoot, canonicalWorktree)) fail(`Recovery worktree escaped the manager worktree root: ${worktree}`);
+	if (!isInside(worktreeRoot, worktree, { allowEqual: false })) fail(`Recovery worktree escaped the manager worktree root: ${worktree}`);
+	if (!isInside(canonicalRoot, canonicalWorktree, { allowEqual: false })) fail(`Recovery worktree escaped the manager worktree root: ${worktree}`);
 	if (path.resolve(worktree) === path.resolve(input.integrationWorktree) || canonicalWorktree === realpathIfPresent(input.integrationWorktree)) fail("Recovery cleanup cannot remove the integration worktree");
 	if (fs.existsSync(worktree) && fs.lstatSync(worktree).isSymbolicLink()) {
 		fail(`Recovery worktree path is moved or symlinked: ${worktree}`);
@@ -128,12 +107,12 @@ function validateRecordedCleanup(input: ResetPlanExecutionInput, evidence: Reset
 }
 
 function removeWorktree(repoRoot: string, worktree: string): void {
-	const result = git(repoRoot, ["worktree", "remove", "--force", "--", worktree], true);
+	const result = runGit(repoRoot, ["worktree", "remove", "--force", "--", worktree], { allowFailure: true });
 	if (result.status !== 0) fail(`Cannot force-remove the recorded recovery worktree: ${(result.stderr || result.stdout).trim()}`);
 }
 
 function deleteBranch(repoRoot: string, branch: string, expectedHead: string): void {
-	const result = git(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead], true);
+	const result = runGit(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead], { allowFailure: true });
 	if (result.status !== 0) fail(`Cannot delete moved recovery branch ${branch}: ${(result.stderr || result.stdout).trim()}`);
 }
 
@@ -180,13 +159,13 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		fail(`Recovery branch moved: expected ${expectedHead}, found ${currentHead}`);
 	}
 	if (record) {
-		const actualHeadResult = git(worktree, ["rev-parse", "HEAD"], true);
+		const actualHeadResult = runGit(worktree, ["rev-parse", "HEAD"], { allowFailure: true });
 		if (actualHeadResult.status !== 0) fail(`Recovery worktree is not a readable Git checkout: ${worktree}`);
 		if (actualHeadResult.stdout.trim() !== expectedHead) {
 			fail(`Recovery worktree moved: expected ${expectedHead}, found ${actualHeadResult.stdout.trim()}`);
 		}
 		if (input.expectedTree !== null) {
-			const actualTree = git(worktree, ["rev-parse", "HEAD^{tree}"], true);
+			const actualTree = runGit(worktree, ["rev-parse", "HEAD^{tree}"], { allowFailure: true });
 			if (actualTree.status !== 0 || actualTree.stdout.trim() !== input.expectedTree) {
 				fail(`Recovery worktree tree moved: expected ${input.expectedTree}, found ${actualTree.stdout.trim()}`);
 			}

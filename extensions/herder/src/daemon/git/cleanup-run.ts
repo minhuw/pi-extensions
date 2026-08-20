@@ -3,8 +3,6 @@
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
@@ -13,6 +11,7 @@ import { listCoordinationRefs, type CoordinationRefRecord } from "./coordination
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
+import { fail, isInside, realpathIfPresent, runGit, takeValue } from "./primitives.ts"
 
 export interface CleanupInput {
   repo: string
@@ -69,28 +68,6 @@ export interface CleanupResult {
 }
 type CompletionRefRecord = ReturnType<typeof listCompletionRefs>[number]
 
-function fail(message: string): never {
-  throw new Error(message)
-}
-
-function runGit(repoRoot: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
-}
-
-function takeValue(args: string[], index: number, name: string): string {
-  const value = args[index + 1]
-  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
-  return value
-}
-
 function parseArguments(argv: string[]): CleanupInput {
   const options: Partial<CleanupInput> & Pick<CleanupInput, "dryRun" | "includeFailed" | "deep" | "pretty"> = {
     planName: null,
@@ -138,11 +115,6 @@ function refTarget(repoRoot: string, ref: string): string | null {
   return result.status === 0 ? result.stdout.trim() : null
 }
 
-function realpathIfPresent(candidate: string): string {
-  try { return fs.realpathSync(candidate) }
-  catch { return path.resolve(candidate) }
-}
-
 function assertNotUserCheckout(repoRoot: string, worktreePath: string): void {
   if (realpathIfPresent(worktreePath) === repoRoot) {
     fail(`Refusing to remove the user checkout: ${repoRoot}`)
@@ -167,11 +139,6 @@ function canonicalPlanId(value: unknown): string {
   const number = Number.parseInt(String(value), 10)
   if (!Number.isSafeInteger(number)) fail(`Invalid plan ID: ${JSON.stringify(value)}`)
   return String(number).padStart(3, "0")
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 function resolvePlanName(planDir: string, inputName: unknown): string {

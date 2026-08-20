@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { runGit } from "./primitives.ts"
 import { sha256, stableJson } from "../../shared/protocol.ts"
 
 export interface ApprovalCore {
@@ -89,24 +89,17 @@ export function writeCompletionProof(repoRoot: string, ref: string, payload: Com
     stableJson(payload),
     "",
   ].join("\n")
-  const object = git(repoRoot, ["mktag"], tag)
-  git(repoRoot, ["update-ref", ref, object, "0000000000000000000000000000000000000000"])
+  const object = runGit(repoRoot, ["mktag"], { input: tag }).stdout.trim()
+  runGit(repoRoot, ["update-ref", ref, object, "0000000000000000000000000000000000000000"])
   return { ref, object, payload }
-}
-
-function git(repoRoot: string, args: string[], input = ""): string {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", input })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error((result.stderr || result.stdout || "git failed").trim())
-  return result.stdout.trim()
 }
 
 export function inspectCompletionProof(repoRoot: string, ref: string):
   | { ok: true; ref: string; object: string; payload: CompletionProofPayload }
   | { ok: false; ref: string; error: string } {
   try {
-    if (git(repoRoot, ["cat-file", "-t", ref]) !== "tag") throw new Error("completion ref is not an approval-bearing tag")
-    const content = git(repoRoot, ["cat-file", "-p", ref])
+    if (runGit(repoRoot, ["cat-file", "-t", ref]).stdout.trim() !== "tag") throw new Error("completion ref is not an approval-bearing tag")
+    const content = runGit(repoRoot, ["cat-file", "-p", ref]).stdout.trim()
     const separator = content.indexOf("\n\n")
     if (separator === -1) throw new Error("completion tag has no proof payload")
     const headers = new Map(content.slice(0, separator).split("\n").map((line) => {

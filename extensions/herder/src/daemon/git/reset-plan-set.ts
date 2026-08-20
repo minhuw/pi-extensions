@@ -1,46 +1,36 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { buildGraph, projectStatuses } from "../../core/plans.ts";
 import { RunStore, type StoredPlanSpec } from "../run-store.ts";
 import { clearExecutionRotationMarker } from "../execution-store.ts";
 import { listHerderBranches, listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
 import { parseCoordinationRefRelative } from "./coordination-ref.ts";
 import { allowedWorktreePaths, worktreeRelativeName } from "./worktree-locations.ts";
+import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export interface HerderResetInput { repoRoot: string; planDirectory: string }
 export interface HerderResetResult { planName: string; removedBranches: string[]; removedWorktrees: string[]; removedRefs: string[]; resetPlans: string[] }
 type Worktree = WorktreeRecord;
 type Ref = { ref: string; target: string; relative: string };
 
-function fail(message: string): never { throw new Error(message); }
-function git(repo: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  if (result.error) fail(`Cannot run git: ${result.error.message}`);
-  const status = result.status ?? 1;
-  if (status !== 0 && !allowFailure) fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout || "").trim()}`);
-  return { status, stdout: result.stdout || "", stderr: result.stderr || "" };
-}
-function real(candidate: string): string { try { return fs.realpathSync(candidate); } catch { return path.resolve(candidate); } }
-function inside(parent: string, candidate: string): boolean { const r = path.relative(parent, candidate); return r !== "" && r !== ".." && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r); }
 function refs(repo: string, name: string): Ref[] {
   const prefix = `refs/plan-herder/${name}/`;
-  return git(repo, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]).stdout.split(/\r?\n/).filter(Boolean).map((line) => {
+  return runGit(repo, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]).stdout.split(/\r?\n/).filter(Boolean).map((line) => {
     const i = line.indexOf("\t"); if (i < 0) fail("Cannot parse Herder coordination namespace");
     const ref = line.slice(0, i); return { ref, target: line.slice(i + 1), relative: ref.slice(prefix.length) };
   });
 }
-function target(repo: string, ref: string): string | null { const r = git(repo, ["rev-parse", "--verify", ref], true); return r.status === 0 ? r.stdout.trim() : null; }
-function ancestor(repo: string, a: string, b: string): boolean { const r = git(repo, ["merge-base", "--is-ancestor", a, b], true); if (r.status === 0) return true; if (r.status === 1) return false; fail(`Cannot compare Git ancestry: ${(r.stderr || r.stdout).trim()}`); }
-function checkout(repo: string): { branch: string | null; head: string | null } { const b = git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], true); const h = git(repo, ["rev-parse", "--verify", "HEAD"], true); return { branch: b.status === 0 ? b.stdout.trim() : null, head: h.status === 0 ? h.stdout.trim() : null }; }
+function target(repo: string, ref: string): string | null { const r = runGit(repo, ["rev-parse", "--verify", ref], { allowFailure: true }); return r.status === 0 ? r.stdout.trim() : null; }
+function ancestor(repo: string, a: string, b: string): boolean { const r = runGit(repo, ["merge-base", "--is-ancestor", a, b], { allowFailure: true }); if (r.status === 0) return true; if (r.status === 1) return false; fail(`Cannot compare Git ancestry: ${(r.stderr || r.stdout).trim()}`); }
+function checkout(repo: string): { branch: string | null; head: string | null } { const b = runGit(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true }); const h = runGit(repo, ["rev-parse", "--verify", "HEAD"], { allowFailure: true }); return { branch: b.status === 0 ? b.stdout.trim() : null, head: h.status === 0 ? h.stdout.trim() : null }; }
 function snapshot<T>(items: T[]): string { return JSON.stringify(items); }
 function cleanWorktree(repo: string, item: Worktree): void {
   if (!fs.existsSync(item.path)) fail(`Herder reset cannot remove missing worktree: ${item.path}`);
-  if (real(item.path) === real(repo)) fail("Herder reset cannot remove the user checkout.");
-  const status = git(item.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (realpathIfPresent(item.path) === realpathIfPresent(repo)) fail("Herder reset cannot remove the user checkout.");
+  const status = runGit(item.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
   if (status.stdout !== "") fail(`Herder reset cannot remove dirty worktree: ${item.path}`);
 }
-function deleteRef(repo: string, ref: string, expected: string): void { const current = target(repo, ref); if (current !== expected) fail(`Herder reset found moved ref ${ref}; expected ${expected}, found ${current ?? "missing"}`); if (git(repo, ["update-ref", "-d", ref, expected], true).status !== 0) fail(`Herder reset could not delete moved ref ${ref}`); }
+function deleteRef(repo: string, ref: string, expected: string): void { const current = target(repo, ref); if (current !== expected) fail(`Herder reset found moved ref ${ref}; expected ${expected}, found ${current ?? "missing"}`); if (runGit(repo, ["update-ref", "-d", ref, expected], { allowFailure: true }).status !== 0) fail(`Herder reset could not delete moved ref ${ref}`); }
 function deleteBranch(repo: string, branch: string, expected: string): void { deleteRef(repo, `refs/heads/${branch}`, expected); }
 function validateSpecs(planDir: string): { graph: ReturnType<typeof buildGraph>; specs: StoredPlanSpec[]; run: ReturnType<RunStore["getRun"]> } {
   const graph = buildGraph(planDir);
@@ -75,12 +65,12 @@ function projectedResetStatuses(specs: StoredPlanSpec[]): Array<{ id: string; st
 
 /** Reset an entire initialized plan namespace. This intentionally does not use one-plan recovery cleanup. */
 export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
-  const repo = real(path.resolve(input.repoRoot));
-  if (real(git(repo, ["rev-parse", "--show-toplevel"]).stdout.trim()) !== repo) fail(`Repository root mismatch: ${repo}`);
+  const repo = realpathIfPresent(path.resolve(input.repoRoot));
+  if (realpathIfPresent(runGit(repo, ["rev-parse", "--show-toplevel"]).stdout.trim()) !== repo) fail(`Repository root mismatch: ${repo}`);
   const planDirCandidate = path.resolve(repo, input.planDirectory);
   if (!fs.existsSync(planDirCandidate) || fs.lstatSync(planDirCandidate).isSymbolicLink()) fail(`Plan directory is missing or unsafe: ${planDirCandidate}`);
-  const planDir = real(planDirCandidate);
-  if (!inside(repo, planDir)) fail(`Plan directory must be inside the repository: ${planDir}`);
+  const planDir = realpathIfPresent(planDirCandidate);
+  if (!isInside(repo, planDir, { allowEqual: false })) fail(`Plan directory must be inside the repository: ${planDir}`);
   const name = path.basename(planDir);
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(name) || name.includes("..") || name.endsWith(".") || name.endsWith(".lock")) fail(`Invalid Herder plan-set name: ${name}`);
   const { graph, specs, run } = validateSpecs(planDir);
@@ -121,14 +111,14 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
       cleanWorktree(repo, w);
       const expected = allowedWorktreePaths(repo, planDir, name, worktreeRelativeName(w.branch, name, integration));
-      if (!expected.some((candidate) => real(w.path) === real(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
+      if (!expected.some((candidate) => realpathIfPresent(w.path) === realpathIfPresent(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
     }
     const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
     // Revalidate every identity immediately before the first mutation.
     if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(refs(repo, name)) !== currentRefSnapshot || snapshot(listWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
     for (const w of owned) {
-      if (w.locked) git(repo, ["worktree", "unlock", "--", w.path]);
-      git(repo, ["worktree", "remove", "--", w.path]);
+      if (w.locked) runGit(repo, ["worktree", "unlock", "--", w.path]);
+      runGit(repo, ["worktree", "remove", "--", w.path]);
       removedWorktrees.push(w.path);
     }
     for (const b of allBranches) { deleteBranch(repo, b.branch, b.head); removedBranches.push(b.branch); }

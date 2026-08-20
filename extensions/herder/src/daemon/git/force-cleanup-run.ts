@@ -1,44 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import type { SpawnSyncReturns } from "node:child_process";
 import { listCoordinationRefs } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
 import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
+import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export interface ForceCleanupInput {
 	repo: string;
 	planDir: string;
 	planName?: string | null;
 	dryRun: boolean;
-}
-
-
-function fail(message: string): never {
-	throw new Error(message);
-}
-
-function runGit(repoRoot: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-	const result = spawnSync("git", ["-C", repoRoot, ...args], {
-		encoding: "utf8",
-		maxBuffer: 16 * 1024 * 1024,
-	});
-	if (result.error) fail(`Cannot run git: ${result.error.message}`);
-	if (result.status !== 0 && !allowFailure) {
-		fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`);
-	}
-	return result;
-}
-
-function realpathIfPresent(candidate: string): string {
-	try { return fs.realpathSync(candidate); }
-	catch { return path.resolve(candidate); }
-}
-
-function isInside(parent: string, candidate: string): boolean {
-	const relative = path.relative(parent, candidate);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function resolvePlanName(planDir: string, inputName: unknown): string {

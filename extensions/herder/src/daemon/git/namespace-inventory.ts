@@ -1,5 +1,4 @@
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
+import { fail, runGit } from "./primitives.ts"
 
 export interface WorktreeRecord {
   path: string
@@ -11,22 +10,6 @@ export interface BranchRecord {
   branch: string
   head: string
   relative: string
-}
-
-function fail(message: string): never {
-  throw new Error(message)
-}
-
-function runGit(repoRoot: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
 }
 
 /** Parse Git's porcelain worktree output without applying an ownership policy. */

@@ -3,8 +3,7 @@
 import process from "node:process"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
+import { fail, runGit, takeValue } from "./primitives.ts"
 
 const PLAN_ID = /^\d{3,}$/
 const PLAN_NAME = /^[a-z0-9][a-z0-9._-]*$/
@@ -32,10 +31,6 @@ export interface FormatCheckpointInput {
   plan: string
   generation: string
   ordinal: string | number | bigint
-}
-
-function fail(message: string): never {
-  throw new Error(message)
 }
 
 function validPlanName(value: string): boolean {
@@ -121,29 +116,11 @@ export function formatCheckpointRef({ planName, plan, generation, ordinal }: For
   }
 }
 
-function takeValue(args: string[], index: number, name: string): string {
-  const value = args[index + 1]
-  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
-  return value
-}
-
 export interface CoordinationRefRecord {
   ref: string
   target: string
   relative: string
   identity: CoordinationRef | null
-}
-
-function runGit(repoRoot: string, args: string[]): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
 }
 
 export function listCoordinationRefs(repoRoot: string, planName: string): CoordinationRefRecord[] {

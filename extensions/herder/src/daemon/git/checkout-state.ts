@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { createReadStream } from "node:fs"
 import { lstat, readlink, realpath } from "node:fs/promises"
@@ -9,6 +8,7 @@ import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { sha256 } from "../../shared/protocol.ts"
+import { fail, isInside, runGit, takeValue } from "./primitives.ts"
 
 const TOKEN_VERSION = 1
 
@@ -58,16 +58,6 @@ export interface SnapshotCheckoutInput {
   expect?: string | null
 }
 
-function fail(message: string): never {
-  throw new Error(message)
-}
-
-function takeValue(argv: string[], index: number, name: string): string {
-  const value = argv[index + 1]
-  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
-  return value
-}
-
 function parseArguments(argv: string[]): CheckoutArguments {
   const options: CheckoutArguments = { repo: null, excludes: [], expect: null, pretty: false }
   for (let index = 0; index < argv.length; index += 1) {
@@ -90,26 +80,8 @@ function usage(): string {
   return "Usage: checkout-state.ts --repo <repository-root> [--exclude <path>]... [--expect <state-token>] [--pretty]\n"
 }
 
-function runGit(repoRoot: string, args: string[], { allowStatus = [] }: { allowStatus?: number[] } = {}) {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: null,
-    maxBuffer: 64 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && (result.status === null || !allowStatus.includes(result.status))) {
-    const details = result.stderr?.length ? result.stderr : (result.stdout || Buffer.alloc(0))
-    fail(`git ${args.join(" ")} failed: ${Buffer.from(details).toString("utf8").trim()}`)
-  }
-  return result
-}
-
 function splitNul(buffer: Buffer): string[] {
   return buffer.toString("utf8").split("\0").filter(Boolean)
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
 async function resolveExcludes(repoRoot: string, values: string[]): Promise<string[]> {
@@ -117,7 +89,7 @@ async function resolveExcludes(repoRoot: string, values: string[]): Promise<stri
   for (const value of values) {
     const candidate = path.resolve(repoRoot, value)
     const canonical = await realpath(candidate)
-    if (!isInside(repoRoot, canonical)) fail(`--exclude must resolve inside the repository: ${candidate}`)
+    if (!isInside(repoRoot, canonical, { allowEqual: false })) fail(`--exclude must resolve inside the repository: ${candidate}`)
     excludes.push(path.relative(repoRoot, canonical).split(path.sep).join("/"))
   }
   return [...new Set(excludes)].sort()
@@ -129,18 +101,18 @@ function pathspecs(excludes: string[]): string[] {
 
 function gitState(repoRoot: string, excludes: string[]): GitState {
   const specs = pathspecs(excludes)
-  const head = runGit(repoRoot, ["rev-parse", "HEAD"]).stdout.toString("utf8").trim()
-  const branchResult = runGit(repoRoot, ["symbolic-ref", "-q", "HEAD"], { allowStatus: [1] })
+  const head = runGit(repoRoot, ["rev-parse", "HEAD"], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout.toString("utf8").trim()
+  const branchResult = runGit(repoRoot, ["symbolic-ref", "-q", "HEAD"], { encoding: null, maxBuffer: 64 * 1024 * 1024, allowStatus: [1] })
   const branch = branchResult.status === 0 ? branchResult.stdout.toString("utf8").trim() : null
-  const index = runGit(repoRoot, ["ls-files", "--stage", "-z", ...specs]).stdout
-  const flags = runGit(repoRoot, ["ls-files", "-v", "-z", ...specs]).stdout
+  const index = runGit(repoRoot, ["ls-files", "--stage", "-z", ...specs], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout
+  const flags = runGit(repoRoot, ["ls-files", "-v", "-z", ...specs], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout
   const status = runGit(repoRoot, [
     "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=none", ...specs,
-  ]).stdout
+  ], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout
   const dirty = runGit(repoRoot, [
     "diff-files", "--name-only", "-z", "--diff-filter=ACDMRTUXB", ...specs,
-  ]).stdout
-  const untracked = runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", ...specs]).stdout
+  ], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout
+  const untracked = runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z", ...specs], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout
   return {
     head,
     branch,
@@ -276,7 +248,7 @@ function changedComponents(expected: CheckoutPayload, current: CheckoutPayload):
 export async function snapshotCheckout(input: SnapshotCheckoutInput) {
   const repoCandidate = path.resolve(input.repo)
   const repoRoot = await realpath(repoCandidate)
-  const actualRoot = await realpath(runGit(repoRoot, ["rev-parse", "--show-toplevel"]).stdout.toString("utf8").trim())
+  const actualRoot = await realpath(runGit(repoRoot, ["rev-parse", "--show-toplevel"], { encoding: null, maxBuffer: 64 * 1024 * 1024 }).stdout.toString("utf8").trim())
   if (repoRoot !== actualRoot) fail(`--repo must be the Git repository root: ${actualRoot}`)
   const excludes = await resolveExcludes(repoRoot, input.excludes || [])
 

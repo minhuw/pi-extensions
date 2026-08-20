@@ -3,13 +3,12 @@
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { listCoordinationRefs } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees } from "./namespace-inventory.ts"
+import { fail, isInside, runGit, takeValue } from "./primitives.ts"
 
 type NamespaceMode = "fire" | "resume" | "status"
 interface NamespaceInput {
@@ -21,28 +20,6 @@ interface NamespaceInput {
 }
 interface RefRecord { ref: string; target: string; relative: string }
 type NamespaceConflict = Record<string, string>
-
-function fail(message: string): never {
-  throw new Error(message)
-}
-
-function runGit(repoRoot: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
-}
-
-function takeValue(args: string[], index: number, name: string): string {
-  const value = args[index + 1]
-  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
-  return value
-}
 
 function parseArguments(argv: string[]): NamespaceInput {
   const options: Partial<NamespaceInput> & { pretty: boolean } = {
@@ -71,11 +48,6 @@ function parseArguments(argv: string[]): NamespaceInput {
   }
   if (!options.mode || !(["fire", "resume", "status"] as string[]).includes(options.mode)) fail(`Unsupported mode: ${JSON.stringify(options.mode)}`)
   return options as NamespaceInput
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 export function validatePlanName(value: unknown): string {
