@@ -5,8 +5,16 @@ function formatCompletionFailure(_args: readonly string[], stderr: string, stdou
   return (stderr || stdout || "git failed").trim()
 }
 
+function formatCompletionSpawnError(error: Error): string {
+  return error.message
+}
+
 function runCompletionGit(repoRoot: string, args: string[], input = ""): string {
-  return runGit(repoRoot, args, { input, failureFormatter: formatCompletionFailure }).stdout.trim()
+  return runGit(repoRoot, args, {
+    input,
+    failureFormatter: formatCompletionFailure,
+    spawnErrorFormatter: formatCompletionSpawnError,
+  }).stdout.trim()
 }
 
 export interface ApprovalCore {

@@ -107,6 +107,50 @@ test("runGit supports call-site failure formatting for text and Buffer output", 
   }
 })
 
+test("runGit can preserve raw Buffer ordering for failure formatting", () => {
+  const { root, repo } = temporaryRepository()
+  const bin = path.join(root, "bin")
+  const fakeGit = path.join(bin, "git")
+  fs.mkdirSync(bin)
+  fs.writeFileSync(fakeGit, "#!/bin/sh\nprintf '\\342' >&2\nprintf '\\202\\254'\nexit 7\n")
+  fs.chmodSync(fakeGit, 0o755)
+  const originalPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`
+  try {
+    assert.throws(
+      () => runGit(repo, ["fake"], {
+        encoding: null,
+        failureBufferFormatter: (_args, stderr, stdout) => Buffer.concat([stderr, stdout]).toString("utf8").trim(),
+      }),
+      { message: "€" },
+    )
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("runGit can preserve raw spawn errors for a call site", () => {
+  const { root, repo } = temporaryRepository()
+  const originalPath = process.env.PATH
+  process.env.PATH = path.join(root, "missing-bin")
+  try {
+    assert.throws(
+      () => runGit(repo, ["fake"], { spawnErrorFormatter: (error) => error.message }),
+      { message: "spawnSync git ENOENT" },
+    )
+    assert.throws(
+      () => runGit(repo, ["fake"]),
+      { message: "Cannot run git: spawnSync git ENOENT" },
+    )
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("runGit preserves stdin and supports Buffer output", () => {
   const { root, repo } = temporaryRepository()
   try {

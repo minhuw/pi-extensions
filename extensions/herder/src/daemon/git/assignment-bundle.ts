@@ -93,7 +93,7 @@ function gitBuffer(cwd: string, args: string[]): Buffer {
   return runGit(cwd, args, {
     encoding: null,
     maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
-    failureFormatter: (commandArgs, stderr, stdout) => `git ${commandArgs.join(" ")} failed: ${(stderr + stdout).trim()}`,
+    failureBufferFormatter: (commandArgs, stderr, stdout) => `git ${commandArgs.join(" ")} failed: ${Buffer.concat([stderr, stdout]).toString().trim()}`,
   }).stdout
 }
 

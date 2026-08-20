@@ -11,6 +11,8 @@ type RunGitCommonOptions = {
   maxBuffer?: number
   input?: string | Buffer
   failureFormatter?: (args: readonly string[], stderr: string, stdout: string) => string
+  failureBufferFormatter?: (args: readonly string[], stderr: Buffer, stdout: Buffer) => string
+  spawnErrorFormatter?: (error: Error) => string
 }
 
 export type RunGitTextOptions = RunGitCommonOptions & {
@@ -45,13 +47,21 @@ export function runGit(
     ...(input === undefined ? {} : { input }),
   } as any) as SpawnSyncReturns<string> | SpawnSyncReturns<Buffer>
 
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
+  if (result.error) {
+    fail(options.spawnErrorFormatter?.(result.error) ?? `Cannot run git: ${result.error.message}`)
+  }
   if (result.status !== 0 && !allowFailure && (result.status === null || !allowStatus.includes(result.status))) {
     const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : result.stderr || ""
     const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : result.stdout || ""
-    const message = options.failureFormatter
-      ? options.failureFormatter(args, stderr, stdout)
-      : `git ${args.join(" ")} failed: ${(stderr || stdout).trim()}`
+    const message = options.encoding === null && options.failureBufferFormatter
+      ? options.failureBufferFormatter(
+        args,
+        Buffer.isBuffer(result.stderr) ? result.stderr : Buffer.from(result.stderr || "", "utf8"),
+        Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout || "", "utf8"),
+      )
+      : options.failureFormatter
+        ? options.failureFormatter(args, stderr, stdout)
+        : `git ${args.join(" ")} failed: ${(stderr || stdout).trim()}`
     fail(message)
   }
   return result
