@@ -201,7 +201,7 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		releaseServiceOwnership(ownership);
 		throw error;
 	}
-	const authToken = randomBytes(32).toString("base64url");
+	let authToken = "";
 	let dashboardUrl = "";
 	let auditTimer: NodeJS.Timeout | undefined;
 	let terminalIdleTimer: NodeJS.Timeout | undefined;
@@ -211,19 +211,76 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 	let closeService: () => Promise<void> = async () => {};
 	let backgroundQueue = Promise.resolve();
 	let drainScheduled = false;
-	const executor = new ManagerExecutor(planDirectory);
-	const store = new RunStore(planDirectory);
-	store.recoverRunningOperations();
+	let startupExecutor: ManagerExecutor | undefined;
+	let startupStore: RunStore | undefined;
+	let startupServer: http.Server | undefined;
+	let serverListening = false;
 	let dashboardRevision: number | null = null;
+	const closeServer = async (): Promise<void> => {
+		const server = startupServer;
+		if (!server || !serverListening || !server.listening) return;
+		serverListening = false;
+		try {
+			const closed = new Promise<void>((resolve) => {
+				try { server.close(() => resolve()); } catch { resolve(); }
+			});
+			try { server.closeAllConnections(); } catch {}
+			await closed;
+		} catch {}
+	};
+	const cleanupStartup = async (): Promise<void> => {
+		closing = true;
+		if (auditTimer) clearTimeout(auditTimer);
+		if (terminalIdleTimer) clearTimeout(terminalIdleTimer);
+		if (runtimeIdentityTimer) clearTimeout(runtimeIdentityTimer);
+		auditTimer = undefined;
+		terminalIdleTimer = undefined;
+		runtimeIdentityTimer = undefined;
+		try { await closeServer(); } catch {}
+		try { await backgroundQueue.catch(() => {}); } catch {}
+		if (startupExecutor) {
+			try { await startupExecutor.close(); } catch {}
+		}
+		if (startupStore) {
+			try { startupStore.close(); } catch {}
+		}
+		try { releaseServiceOwnership(ownership); } catch {}
+	};
+	try {
+		authToken = randomBytes(32).toString("base64url");
+		startupExecutor = new ManagerExecutor(planDirectory);
+		startupStore = new RunStore(planDirectory);
+		startupStore.recoverRunningOperations();
+	} catch (error) {
+		await cleanupStartup();
+		throw error;
+	}
+	if (!startupExecutor || !startupStore) {
+		await cleanupStartup();
+		throw new Error("Herder service startup did not initialize its manager resources");
+	}
+	const executor = startupExecutor;
+	const store = startupStore;
 	const updateDashboardRevision = (reply: ManagerReply): void => {
 		const snapshot = store.getSnapshotEnvelope();
 		dashboardRevision = reply.runId && snapshot ? snapshot.revision : null;
 	};
-	const dashboard = createDashboardHandler({
-		planDir: planDirectory,
-		revisionProvider: () => dashboardRevision,
-		stateBodyProvider: async () => await executor.call("dashboardState") as string,
-	});
+	let dashboard: ReturnType<typeof createDashboardHandler> | undefined;
+	try {
+		dashboard = createDashboardHandler({
+			planDir: planDirectory,
+			revisionProvider: () => dashboardRevision,
+			stateBodyProvider: async () => await executor.call("dashboardState") as string,
+		});
+	} catch (error) {
+		await cleanupStartup();
+		throw error;
+	}
+	if (!dashboard) {
+		await cleanupStartup();
+		throw new Error("Herder service startup did not initialize its dashboard");
+	}
+	const activeDashboard = dashboard;
 
 	const enqueueBackground = <T>(task: () => Promise<T>): Promise<T> => {
 		const next = backgroundQueue.then(task, task);
@@ -307,12 +364,13 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		});
 	};
 
-	const server = http.createServer((request, response) => {
+	let servicePort = 0;
+	const server = startupServer = http.createServer((request, response) => {
 		let url: URL;
 		try { url = new URL(request.url || "/", `http://${LOOPBACK}`); }
 		catch { send(response, 400, { ok: false, error: "invalid-url" }); return; }
 		if (!DIRECT_CONTROL_PATHS.has(url.pathname) && !LEGACY_BLOCKING_PATHS.has(url.pathname)) {
-			dashboard.handle(request, response);
+			activeDashboard.handle(request, response);
 			return;
 		}
 		if (request.headers.authorization !== `Bearer ${authToken}`) {
@@ -384,16 +442,19 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		}
 		send(response, 405, { ok: false, error: "method-not-allowed" });
 	});
-
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(input.dashboardPort ?? 0, LOOPBACK, () => resolve());
-	});
-	const address = server.address();
-	if (!address || typeof address === "string") throw new Error("Herder service did not receive a TCP port");
-	dashboardUrl = `http://${LOOPBACK}:${address.port}/`;
-	const close = () => new Promise<void>((resolve) => server.close(() => resolve()));
+	const activeServer = server;
 	try {
+		await new Promise<void>((resolve, reject) => {
+			activeServer.once("error", reject);
+			activeServer.listen(input.dashboardPort ?? 0, LOOPBACK, () => {
+				serverListening = true;
+				resolve();
+			});
+		});
+		const address = activeServer.address();
+		if (!address || typeof address === "string") throw new Error("Herder service did not receive a TCP port");
+		servicePort = address.port;
+		dashboardUrl = `http://${LOOPBACK}:${servicePort}/`;
 		const now = new Date().toISOString();
 		if (store.getRun()) store.updateRun({ dashboardUrl });
 		const initialReply = await executor.call("reply") as ManagerReply;
@@ -401,13 +462,11 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			store.putSnapshot(initialReply);
 			// Publish service ownership only after the status snapshot is ready, so a
 			// client cannot discover the new daemon and read the previous daemon's URL.
-			store.putService({ instanceId, pid: process.pid, port: address.port, authToken, dashboardUrl, startedAt: now });
+			store.putService({ instanceId, pid: process.pid, port: servicePort, authToken, dashboardUrl, startedAt: now });
 		});
 		updateDashboardRevision(initialReply);
 	} catch (error) {
-		store.close();
-		releaseServiceOwnership(ownership);
-		await close();
+		await cleanupStartup();
 		throw error;
 	}
 
@@ -442,32 +501,43 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		runtimeIdentityTimer.unref();
 	};
 
-	closeService = async () => {
-		if (closePromise) return closePromise;
-		closePromise = (async () => {
-			if (closing) return;
-			closing = true;
-			if (auditTimer) clearTimeout(auditTimer);
-			if (terminalIdleTimer) clearTimeout(terminalIdleTimer);
-			if (runtimeIdentityTimer) clearTimeout(runtimeIdentityTimer);
-			auditTimer = undefined;
-			terminalIdleTimer = undefined;
-			runtimeIdentityTimer = undefined;
-			await close();
-			await backgroundQueue.catch(() => {});
-			await executor.close();
-			store.close();
-			releaseServiceOwnership(ownership);
-		})();
-		return closePromise;
-	};
-	scheduleDrain();
-	scheduleAudit();
-	scheduleRuntimeIdentityWatchdog();
-	scheduleTerminalIdleShutdown();
-	process.once("SIGINT", () => void closeService());
-	process.once("SIGTERM", () => void closeService());
-	return { instanceId, port: address.port, dashboardUrl, server, close: closeService };
+	const onSigint = (): void => { void closeService(); };
+	const onSigterm = (): void => { void closeService(); };
+	try {
+		closeService = async () => {
+			if (closePromise) return closePromise;
+			closePromise = (async () => {
+				if (closing) return;
+				closing = true;
+				process.off("SIGINT", onSigint);
+				process.off("SIGTERM", onSigterm);
+				if (auditTimer) clearTimeout(auditTimer);
+				if (terminalIdleTimer) clearTimeout(terminalIdleTimer);
+				if (runtimeIdentityTimer) clearTimeout(runtimeIdentityTimer);
+				auditTimer = undefined;
+				terminalIdleTimer = undefined;
+				runtimeIdentityTimer = undefined;
+				await closeServer();
+				await backgroundQueue.catch(() => {});
+				await executor.close();
+				store.close();
+				releaseServiceOwnership(ownership);
+			})();
+			return closePromise;
+		};
+		scheduleDrain();
+		scheduleAudit();
+		scheduleRuntimeIdentityWatchdog();
+		scheduleTerminalIdleShutdown();
+		process.once("SIGINT", onSigint);
+		process.once("SIGTERM", onSigterm);
+		return { instanceId, port: servicePort, dashboardUrl, server: activeServer, close: closeService };
+	} catch (error) {
+		process.off("SIGINT", onSigint);
+		process.off("SIGTERM", onSigterm);
+		await cleanupStartup();
+		throw error;
+	}
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
