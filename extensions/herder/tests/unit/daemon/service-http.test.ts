@@ -107,7 +107,9 @@ test("control routes require the bearer token", async () => {
 			assertError(await request(harness, pathname, {}, authorization), 401, "unauthorized");
 		}
 
-		const health = bodyRecord((await request(harness, "/health")).body);
+		const healthResult = await request(harness, "/health");
+		assert.equal(healthResult.status, 200);
+		const health = bodyRecord(healthResult.body);
 		assert.equal(health.ok, true);
 	});
 });
@@ -145,10 +147,14 @@ test("unknown operation kinds are rejected at the HTTP boundary", async () => {
 test("idempotent operation replay preserves receipt identity", async () => {
 	await withHarness(async (harness) => {
 		const payload = { operationId: "replay-operation", kind: "stop", input: {} };
-		const first = bodyRecord((await request(harness, "/v1/operation", jsonRequest(payload))).body);
+		const firstResult = await request(harness, "/v1/operation", jsonRequest(payload));
+		assert.equal(firstResult.status, 202);
+		const first = bodyRecord(firstResult.body);
 		assert.equal(first.ok, true);
 		const firstReceipt = bodyRecord(first.operation);
-		const replay = bodyRecord((await request(harness, "/v1/operation", jsonRequest(payload))).body);
+		const replayResult = await request(harness, "/v1/operation", jsonRequest(payload));
+		assert.equal(replayResult.status, 202);
+		const replay = bodyRecord(replayResult.body);
 		assert.equal(replay.ok, true);
 		const replayReceipt = bodyRecord(replay.operation);
 		for (const key of ["protocolVersion", "operationId", "kind", "payloadSha256", "pollPath"]) {
