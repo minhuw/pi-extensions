@@ -1,6 +1,14 @@
 import { runGit } from "./primitives.ts"
 import { sha256, stableJson } from "../../shared/protocol.ts"
 
+function formatCompletionFailure(_args: readonly string[], stderr: string, stdout: string): string {
+  return (stderr || stdout || "git failed").trim()
+}
+
+function runCompletionGit(repoRoot: string, args: string[], input = ""): string {
+  return runGit(repoRoot, args, { input, failureFormatter: formatCompletionFailure }).stdout.trim()
+}
+
 export interface ApprovalCore {
   runId: string
   planId: string
@@ -89,8 +97,8 @@ export function writeCompletionProof(repoRoot: string, ref: string, payload: Com
     stableJson(payload),
     "",
   ].join("\n")
-  const object = runGit(repoRoot, ["mktag"], { input: tag }).stdout.trim()
-  runGit(repoRoot, ["update-ref", ref, object, "0000000000000000000000000000000000000000"])
+  const object = runCompletionGit(repoRoot, ["mktag"], tag)
+  runCompletionGit(repoRoot, ["update-ref", ref, object, "0000000000000000000000000000000000000000"])
   return { ref, object, payload }
 }
 
@@ -98,8 +106,8 @@ export function inspectCompletionProof(repoRoot: string, ref: string):
   | { ok: true; ref: string; object: string; payload: CompletionProofPayload }
   | { ok: false; ref: string; error: string } {
   try {
-    if (runGit(repoRoot, ["cat-file", "-t", ref]).stdout.trim() !== "tag") throw new Error("completion ref is not an approval-bearing tag")
-    const content = runGit(repoRoot, ["cat-file", "-p", ref]).stdout.trim()
+    if (runCompletionGit(repoRoot, ["cat-file", "-t", ref]) !== "tag") throw new Error("completion ref is not an approval-bearing tag")
+    const content = runCompletionGit(repoRoot, ["cat-file", "-p", ref])
     const separator = content.indexOf("\n\n")
     if (separator === -1) throw new Error("completion tag has no proof payload")
     const headers = new Map(content.slice(0, separator).split("\n").map((line) => {

@@ -10,6 +10,7 @@ type RunGitCommonOptions = {
   allowStatus?: readonly number[]
   maxBuffer?: number
   input?: string | Buffer
+  failureFormatter?: (args: readonly string[], stderr: string, stdout: string) => string
 }
 
 export type RunGitTextOptions = RunGitCommonOptions & {
@@ -48,7 +49,10 @@ export function runGit(
   if (result.status !== 0 && !allowFailure && (result.status === null || !allowStatus.includes(result.status))) {
     const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : result.stderr || ""
     const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : result.stdout || ""
-    fail(`git ${args.join(" ")} failed: ${(stderr || stdout).trim()}`)
+    const message = options.failureFormatter
+      ? options.failureFormatter(args, stderr, stdout)
+      : `git ${args.join(" ")} failed: ${(stderr || stdout).trim()}`
+    fail(message)
   }
   return result
 }

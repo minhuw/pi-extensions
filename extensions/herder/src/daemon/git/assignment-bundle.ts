@@ -16,6 +16,8 @@ export const ASSIGNMENT_KIND = "herder-plan-assignment"
 export const RUN_ASSIGNMENT_KIND = "herder-run-assignment"
 export const ASSIGNMENT_RELATIVE_SUFFIX = path.join(".herder", "assignment.json")
 
+const LEGACY_SPAWN_SYNC_MAX_BUFFER = 1024 * 1024
+
 type AssignmentCommand = "materialize" | "materialize-run" | "inspect-active-rebase" | "verify"
 type AssignmentOptions = Record<string, string | boolean | undefined> & { pretty?: boolean }
 
@@ -84,11 +86,15 @@ function isObjectId(value: unknown): value is string {
 }
 
 function gitValue(cwd: string, ...args: string[]): string {
-  return runGit(cwd, args).stdout.trim()
+  return runGit(cwd, args, { maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER }).stdout.trim()
 }
 
 function gitBuffer(cwd: string, args: string[]): Buffer {
-  return runGit(cwd, args, { encoding: null }).stdout
+  return runGit(cwd, args, {
+    encoding: null,
+    maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+    failureFormatter: (commandArgs, stderr, stdout) => `git ${commandArgs.join(" ")} failed: ${(stderr + stdout).trim()}`,
+  }).stdout
 }
 
 function canonicalGitPath(cwd: string, value: string): string {
@@ -103,7 +109,10 @@ function repositoryContext(start: string): RepositoryContext {
 }
 
 function currentBranch(worktree: string): string {
-  const result = runGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+  const result = runGit(worktree, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+    allowFailure: true,
+    maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+  })
   if (result.status !== 0 || !result.stdout.trim()) {
     throw new Error(`worktree must have a checked-out branch: ${worktree}`)
   }
@@ -276,7 +285,10 @@ function assertNoSymlinkComponents(root: string, candidate: string): void {
 
 function assertIgnored(worktree: string, bundlePath: string): string {
   const relative = path.relative(worktree, bundlePath).split(path.sep).join("/")
-  const result = runGit(worktree, ["check-ignore", "--quiet", "--no-index", "--", relative], { allowFailure: true })
+  const result = runGit(worktree, ["check-ignore", "--quiet", "--no-index", "--", relative], {
+    allowFailure: true,
+    maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+  })
   if (result.status !== 0) {
     throw new Error(`assignment bundle must be Git-ignored before materialization: ${relative}`)
   }
@@ -632,7 +644,10 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     throw new Error("active-rebase verification requires the exact guided-repair Implementer lease")
   }
   const branchRef = `refs/heads/${expectedBranch}`
-  if (runGit(execution.root, ["check-ref-format", branchRef], { allowFailure: true }).status !== 0) {
+  if (runGit(execution.root, ["check-ref-format", branchRef], {
+    allowFailure: true,
+    maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+  }).status !== 0) {
     throw new Error(`invalid expected plan branch: ${expectedBranch}`)
   }
   const coordinationPrefix = `refs/plan-herder/${planName}/`
@@ -641,7 +656,10 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     : null
   if (!checkpointIdentity
     || checkpointIdentity.plan !== planId
-    || runGit(execution.root, ["check-ref-format", expectedCheckpointRef], { allowFailure: true }).status !== 0) {
+    || runGit(execution.root, ["check-ref-format", expectedCheckpointRef], {
+      allowFailure: true,
+      maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+    }).status !== 0) {
     throw new Error(`invalid expected Herder checkpoint ref: ${expectedCheckpointRef}`)
   }
   if (expectedPlanHead !== expectedRebaseOrigHead || expectedCheckpoint !== expectedRebaseOrigHead) {
@@ -658,7 +676,10 @@ function activeRebaseEvidence(options: AssignmentOptions, { includeStateHash }: 
     throw new Error(`assignment branch mismatch: expected ${expectedBranch}, found ${bundle.assignment.branch}`)
   }
 
-  const symbolic = runGit(execution.root, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true })
+  const symbolic = runGit(execution.root, ["symbolic-ref", "--quiet", "HEAD"], {
+    allowFailure: true,
+    maxBuffer: LEGACY_SPAWN_SYNC_MAX_BUFFER,
+  })
   if (symbolic.status === 0 || symbolic.stdout.trim()) {
     throw new Error("active-rebase verification requires Git's detached rebase HEAD")
   }

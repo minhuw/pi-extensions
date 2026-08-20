@@ -77,6 +77,36 @@ test("runGit supports allowFailure and allowStatus", () => {
   }
 })
 
+test("runGit supports call-site failure formatting for text and Buffer output", () => {
+  const { root, repo } = temporaryRepository()
+  const bin = path.join(root, "bin")
+  const fakeGit = path.join(bin, "git")
+  fs.mkdirSync(bin)
+  fs.writeFileSync(fakeGit, "#!/bin/sh\nprintf 'STDERR-PART' >&2\nprintf 'STDOUT-PART'\nexit 7\n")
+  fs.chmodSync(fakeGit, 0o755)
+  const originalPath = process.env.PATH
+  process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`
+  try {
+    assert.throws(
+      () => runGit(repo, ["fake"], {
+        failureFormatter: (_args, stderr, stdout) => (stderr || stdout || "git failed").trim(),
+      }),
+      { message: "STDERR-PART" },
+    )
+    assert.throws(
+      () => runGit(repo, ["fake"], {
+        encoding: null,
+        failureFormatter: (_args, stderr, stdout) => (stderr + stdout).trim(),
+      }),
+      { message: "STDERR-PARTSTDOUT-PART" },
+    )
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("runGit preserves stdin and supports Buffer output", () => {
   const { root, repo } = temporaryRepository()
   try {

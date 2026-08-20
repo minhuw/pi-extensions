@@ -21,7 +21,7 @@ function refs(repo: string, name: string): Ref[] {
   });
 }
 function target(repo: string, ref: string): string | null { const r = runGit(repo, ["rev-parse", "--verify", ref], { allowFailure: true }); return r.status === 0 ? r.stdout.trim() : null; }
-function ancestor(repo: string, a: string, b: string): boolean { const r = runGit(repo, ["merge-base", "--is-ancestor", a, b], { allowFailure: true }); if (r.status === 0) return true; if (r.status === 1) return false; fail(`Cannot compare Git ancestry: ${(r.stderr || r.stdout).trim()}`); }
+function ancestor(repo: string, a: string, b: string): boolean { const r = runGit(repo, ["merge-base", "--is-ancestor", a, b], { allowFailure: true }); const status = r.status ?? 1; if (status === 0) return true; if (status === 1) return false; fail(`Cannot compare Git ancestry: ${(r.stderr || r.stdout).trim()}`); }
 function checkout(repo: string): { branch: string | null; head: string | null } { const b = runGit(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true }); const h = runGit(repo, ["rev-parse", "--verify", "HEAD"], { allowFailure: true }); return { branch: b.status === 0 ? b.stdout.trim() : null, head: h.status === 0 ? h.stdout.trim() : null }; }
 function snapshot<T>(items: T[]): string { return JSON.stringify(items); }
 function cleanWorktree(repo: string, item: Worktree): void {
