@@ -768,7 +768,14 @@ export class RunStore {
 			: openExecutionDatabase(planDirectory, { create: true, readOnly: false });
 		if (!database) throw new Error(`Herder execution database is not initialized: ${this.databasePath}`);
 		this.database = database;
-		if (!options.readOnly) this.scrubPersistedIntegrationRepairReplies();
+		if (!options.readOnly) {
+			try {
+				this.scrubPersistedIntegrationRepairReplies();
+			} catch (error) {
+				try { database.close(); } catch {}
+				throw error;
+			}
+		}
 	}
 
 	private scrubPersistedIntegrationRepairReplies(): void {
