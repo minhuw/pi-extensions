@@ -14,6 +14,15 @@ Run only Herder's deterministic suite with:
 npm run test:herder
 ```
 
+### Run one file
+
+```sh
+npm run test:herder -- extensions/herder/tests/unit/core/verification.test.ts
+npm run test:herder -- extensions/herder/tests/integration/architecture.test.ts
+```
+
+Focused runs execute only the named test files and skip typecheck.
+
 Integration tests are strict TypeScript files discovered in sorted path order. The smoke runner fails closed and prints any legacy integration `.mjs` paths, then runs the discovered files with Node's `--test-concurrency=2`; each file keeps its scenarios sequential. Unit tests run in a separate phase. To exercise dashboard server mode directly, run `node --experimental-strip-types extensions/herder/tests/integration/dashboard/dashboard.test.ts --serve`; the URL is printed as `HERDER_DASHBOARD_URL`, and SIGINT/SIGTERM shuts the server and fixture down.
 
 ## Local live Pi/Poorman setup
