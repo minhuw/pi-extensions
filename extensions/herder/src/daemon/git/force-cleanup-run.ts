@@ -5,7 +5,7 @@ import type { SpawnSyncReturns } from "node:child_process";
 import { listCoordinationRefs } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
-import { canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
+import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
 
 export interface ForceCleanupInput {
 	repo: string;
@@ -83,15 +83,19 @@ function removeLegacyWorktreeContainer(repoRoot: string, planName: string): void
 	}
 }
 
-function forceRemoveWorktree(repoRoot: string, worktreePath: string): void {
+function forceRemoveWorktree(repoRoot: string, worktreePath: string, allowedRoots: string[]): void {
 	const resolved = realpathIfPresent(worktreePath);
 	if (resolved === repoRoot) fail(`Refusing to remove the user checkout: ${repoRoot}`);
 	runGit(repoRoot, ["worktree", "unlock", "--", worktreePath], { allowFailure: true });
 	const removed = runGit(repoRoot, ["worktree", "remove", "--force", "--force", "--", worktreePath], { allowFailure: true });
 	if (removed.status !== 0) {
 		runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
-		if (fs.existsSync(worktreePath)) {
-			fs.rmSync(worktreePath, { recursive: true, force: true });
+		const fallbackPath = realpathIfPresent(worktreePath);
+		if (fallbackPath === repoRoot || !allowedRoots.some((root) => isInside(root, fallbackPath))) {
+			fail(`Refusing raw removal of worktree ${worktreePath}: resolved path ${fallbackPath} is outside allowed roots ${allowedRoots.join(", ")}`);
+		}
+		if (fs.existsSync(fallbackPath)) {
+			fs.rmSync(fallbackPath, { recursive: true, force: true });
 			runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
 		}
 		const stillListed = listWorktrees(repoRoot).some((item) => item.path && realpathIfPresent(item.path) === resolved);
@@ -180,6 +184,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		planDirectoryPresent = true;
 	}
 
+	const allowedRoots = allowedWorktreeRoots(repoRoot, planDir, planName);
 	const worktrees = listWorktrees(repoRoot);
 	const owned = ownedWorktrees(repoRoot, planDir, planName, worktrees.filter((item) => item.path));
 	const branches = listHerderBranches(repoRoot, planName);
@@ -237,7 +242,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		fail(`Force cleanup refused: ${blockers.map((item) => String(item.reason ?? "blocked")).join(", ")}`);
 	}
 
-	for (const item of owned) forceRemoveWorktree(repoRoot, item.path);
+	for (const item of owned) forceRemoveWorktree(repoRoot, item.path, allowedRoots);
 	for (const item of branches) deleteRef(repoRoot, `refs/heads/${item.branch}`);
 	for (const item of refs) {
 		deleteRef(repoRoot, item.ref);

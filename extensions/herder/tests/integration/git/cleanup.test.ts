@@ -19,7 +19,12 @@ function git(repo: string, ...args: string[]): string {
   return result.stdout.trim()
 }
 
-function withGitShim<T>(mode: "nul" | "newline" | "malformed-branch", branch: string, callback: () => T): T {
+function withGitShim<T>(
+  mode: "nul" | "newline" | "malformed-branch" | "fail-remove",
+  branch: string,
+  callback: () => T,
+  failRemovePath?: string,
+): T {
   const originalPath = process.env.PATH ?? ""
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-git-shim-"))
   const shim = path.join(directory, "git")
@@ -30,9 +35,15 @@ function withGitShim<T>(mode: "nul" | "newline" | "malformed-branch", branch: st
     ? `output=$(${realGit} "$@") && printf '%s\\n\\n${pathless}\\n\\n' "$output"`
     : `${realGit} "$@"; printf '${pathless}\\0\\0'`
   const branchOutput = `${realGit} "$@"; printf 'malformed branch row\\n'`
+  const removeFailure = mode === "fail-remove"
+    ? failRemovePath === undefined
+      ? `  *"worktree remove"*) exit 1 ;;`
+      : `  *"worktree remove"*'${failRemovePath.replaceAll("'", "'\\\''")}'*) exit 1 ;;`
+    : ""
   fs.writeFileSync(shim, `#!/bin/sh
 real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
 case "$*" in
+${removeFailure}
   *"worktree list --porcelain -z"*)
     ${mode === "newline" ? "exit 1" : worktreeOutput}
     exit ;;
@@ -586,6 +597,41 @@ test("force cleanup destroys a rewritten or incomplete namespace that deep clean
     assert.equal(fs.existsSync(fixture.integrationWorktree), false)
     assert.equal(fs.existsSync(fixture.planDir), false)
     assert.notEqual(spawnSync("git", ["-C", fixture.repo, "show-ref", "--verify", "refs/plan-herder/plans/base"], { encoding: "utf8" }).status, 0)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("force cleanup refuses raw deletion of an external branch-matching worktree", () => {
+  const fixture = setup()
+  const branch = fixture.planBranch
+  const externalWorktree = fixture.planWorktree
+  try {
+    git(fixture.repo, "worktree", "lock", "--reason", "test", externalWorktree)
+    assert.throws(
+      () => withGitShim("fail-remove", branch, () => forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false }), externalWorktree),
+      (error: unknown) => error instanceof Error && error.message.includes(externalWorktree),
+    )
+    assert.equal(fs.existsSync(externalWorktree), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test("force cleanup uses the bounded fallback for an in-root worktree", () => {
+  const fixture = setup()
+  const branch = "herder/plans/999"
+  const canonicalRoot = path.join(fixture.planDir, ".herder", "worktrees")
+  const inRootWorktree = path.join(canonicalRoot, "fallback")
+  try {
+    fs.mkdirSync(canonicalRoot, { recursive: true })
+    git(fixture.repo, "worktree", "add", "-q", "-b", branch, inRootWorktree, fixture.integrationBranch)
+    git(fixture.repo, "worktree", "lock", "--reason", "test", inRootWorktree)
+    const result = withGitShim(
+      "fail-remove",
+      branch,
+      () => forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: false }),
+      inRootWorktree,
+    )
+    assert.equal(result.destruction.planDirectoryRemoved, true)
+    assert.equal(fs.existsSync(inRootWorktree), false)
+    assert.equal(fs.existsSync(fixture.planDir), false)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
