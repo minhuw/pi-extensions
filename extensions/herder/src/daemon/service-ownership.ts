@@ -82,7 +82,7 @@ export function acquireServiceOwnership(planDirectory: string, instanceId: strin
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		const owner = startLockOwner(lockPath);
-		if (owner > 0 && processAlive(owner)) throw new Error(`Herder service ownership is already held by pid ${owner}`);
+		if (owner > 0 && serviceProcessAlive(owner)) throw new Error(`Herder service ownership is already held by pid ${owner}`);
 		try { fs.unlinkSync(lockPath); } catch {}
 		return acquireServiceOwnership(planDirectory, instanceId);
 	}
