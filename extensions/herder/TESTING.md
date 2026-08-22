@@ -98,7 +98,7 @@ do
 done
 ```
 
-`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the profile bindings `gpt-5.6-luna:max` and `deepseek-v4-flash:high` before dispatch.
+`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the exact `poorman` bindings from `assets/profiles/profiles.json` before dispatch.
 
 ## Run, limits, and artifacts
 
