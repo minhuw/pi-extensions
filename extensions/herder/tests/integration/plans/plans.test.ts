@@ -275,6 +275,7 @@ try {
   assert.equal(required(planReport.byServiceTier.find((row) => row.key === "fast")).attempts, 1)
   assert.equal(planReport.lifecycle.status, "TODO")
   assert.equal(required(planReport.runConfiguration).profile, "poorman")
+  expectFailure(() => getExecutionReport(valid.planDir, "999"), /is not indexed/)
   assert.deepEqual(fs.readFileSync(executionDatabasePath(valid.planDir)), databaseBeforeReports)
   expectFailure(
     () => recordUsageRecord(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),
