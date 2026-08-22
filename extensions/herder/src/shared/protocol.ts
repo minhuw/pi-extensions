@@ -751,53 +751,6 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 }
 
-export function validateIntegrationRepairRequest(value: unknown): asserts value is IntegrationRepairRequest {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair request must be an object");
-	const request = value as Partial<IntegrationRepairRequest>;
-	if (request.schemaVersion !== 1 || typeof request.requestId !== "string" || typeof request.requestSha256 !== "string" || typeof request.runId !== "string") throw new Error("Integration repair request identity is invalid");
-	if (!INTEGRATION_REPAIR_STATES.includes(request.state as IntegrationRepairState)) throw new Error("Integration repair request state is invalid");
-	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > 3) throw new Error("Integration repair request round is invalid");
-	if (request.maxRounds !== 3 || typeof request.capabilityToken !== "string" || request.capabilityToken !== integrationRepairCapabilityToken(request.requestId)) throw new Error("Integration repair request capability is invalid");
-	if (request.capabilityTokenSha256 !== integrationRepairCapabilityDigest(request.capabilityToken)) throw new Error("Integration repair request capability digest is invalid");
-	for (const [name, candidate, limit] of [["integrationBranch", request.integrationBranch, 512], ["integrationWorktree", request.integrationWorktree, 2_048]] as const) {
-		if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /[\0\r\n]/.test(candidate)) throw new Error(`Integration repair request ${name} is invalid`);
-	}
-	if (!Array.isArray(request.failedGates) || !Array.isArray(request.canonicalGates) || !Array.isArray(request.supersededCommits)) throw new Error("Integration repair request evidence is invalid");
-	if (request.episodeId !== undefined && (typeof request.episodeId !== "string" || !/^[0-9a-f]{64}$/i.test(request.episodeId))) throw new Error("Integration repair episode identity is invalid");
-	if (request.episodeState !== undefined && request.episodeState !== "unclassified" && !INTEGRATION_REPAIR_STATES.includes(request.episodeState as IntegrationRepairState)) throw new Error("Integration repair episode state is invalid");
-	for (const [name, candidate] of [["episodeRequestSha256", request.episodeRequestSha256], ["episodeCanonicalGatesSha256", request.episodeCanonicalGatesSha256]] as const) {
-		if (candidate !== undefined && (typeof candidate !== "string" || !/^[0-9a-f]{64}$/i.test(candidate))) throw new Error(`Integration repair ${name} is invalid`);
-	}
-	for (const [name, candidate] of [["episodeIntegrationHead", request.episodeIntegrationHead], ["episodeIntegrationTree", request.episodeIntegrationTree]] as const) {
-		if (candidate !== undefined && (typeof candidate !== "string" || !/^[0-9a-f]{40,64}$/i.test(candidate))) throw new Error(`Integration repair ${name} is invalid`);
-	}
-	if (request.acceptedCodeRounds !== undefined && (!Number.isSafeInteger(request.acceptedCodeRounds) || request.acceptedCodeRounds < 0 || request.acceptedCodeRounds > 3)) throw new Error("Integration repair accepted code rounds are invalid");
-	if (request.transientRetryUsed !== undefined && typeof request.transientRetryUsed !== "boolean") throw new Error("Integration repair transient retry evidence is invalid");
-	const episodeEvidencePresent = request.episodeId !== undefined || request.episodeRequestSha256 !== undefined || request.episodeIntegrationHead !== undefined || request.episodeIntegrationTree !== undefined || request.episodeCanonicalGatesSha256 !== undefined;
-	if (episodeEvidencePresent && (request.episodeId === undefined || request.episodeRequestSha256 === undefined || request.episodeIntegrationHead === undefined || request.episodeIntegrationTree === undefined || request.episodeCanonicalGatesSha256 === undefined)) {
-		throw new Error("Integration repair episode evidence is incomplete");
-	}
-	if (request.episodeId !== undefined && request.episodeRequestSha256 !== undefined && request.episodeIntegrationHead !== undefined && request.episodeIntegrationTree !== undefined) {
-		if (sha256(stableJson(request.canonicalGates)) !== request.episodeCanonicalGatesSha256
-			|| integrationRepairEpisodeId({
-				requestId: request.requestId,
-				requestSha256: request.episodeRequestSha256,
-				integrationHead: request.episodeIntegrationHead,
-				integrationTree: request.episodeIntegrationTree,
-				canonicalGates: request.canonicalGates,
-			}) !== request.episodeId) throw new Error("Integration repair episode identity does not match its evidence");
-	}
-	if (request.beginRefSnapshot !== undefined || request.beginRefSnapshotSha256 !== undefined) {
-		if (request.beginRefSnapshot === undefined || typeof request.beginRefSnapshotSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(request.beginRefSnapshotSha256)) {
-			throw new Error("Integration repair begin-ref snapshot evidence is incomplete");
-		}
-		validateIntegrationRepairRefSnapshot(request.beginRefSnapshot);
-		if (integrationRepairRefSnapshotSha256(request.beginRefSnapshot) !== request.beginRefSnapshotSha256) {
-			throw new Error("Integration repair begin-ref snapshot hash changed");
-		}
-	}
-}
-
 export interface ManagerReply {
 	protocolVersion: number;
 	runId: string;
