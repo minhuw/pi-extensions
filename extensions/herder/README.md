@@ -6,10 +6,11 @@ This is the maintained, Pi-first Herder implementation. The former standalone `m
 
 ## Install
 
-Install the extension collection:
+Install the extension collection and the explicitly injected Implementer extension:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
+pi install git:github.com/DietrichGebert/ponytail
 ```
 
 For development, install this repository by absolute path. No separate subagent package is required.
@@ -28,8 +29,8 @@ Herder refuses to start when Pi's active providers cannot resolve every required
 ## What Herder owns
 
 - Dependency-aware scheduling with a configurable global worker limit.
-- Clean, parentless Pi worker sessions with no inherited root transcript or nested extension runtime.
-- A package-owned, one-level nested executor for bounded delegation; see [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for its child limits and transport contract.
+- Clean, parentless Pi worker sessions: Implementers and their nested `worker` children explicitly load only Ponytail's `pi-extension/index.js`, while Reviewers and Judges remain extension-free.
+- A package-owned, one-level nested executor for bounded delegation; nested `recon` loads no extension and nested `searcher` loads only `npm:pi-web-access`. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for its child limits and transport contract.
 - One stable Herder branch and isolated Git worktree per plan, stored under `<plan-dir>/.herder/worktrees/` so they stay inside the plan set.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.

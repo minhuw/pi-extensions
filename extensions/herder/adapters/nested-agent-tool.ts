@@ -93,7 +93,8 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 			"recon and searcher use the package-owned scout binding gpt-5.6-luna at max on the fast tier. worker inherits this role's exact model, thinking level, and service tier.",
 			"Every child inherits this action's stable worktree and lifetime.",
 			"Available types: recon is repository-read-only, searcher has allowlisted remote web tools, and worker may mutate and is available only to Implementer roles.",
-			"Nested children have no Agent tool, extensions, skills, inherited conversation, scheduling, resume, or secondary worktree.",
+			"recon is extension-free; searcher loads only Herder's trusted pi-web-access package; worker loads only Ponytail's trusted pi-extension entry.",
+			"Nested children have no Agent or result tool, skills, inherited conversation, scheduling, resume, or secondary worktree.",
 		].join(" "),
 		promptSnippet: "Delegate bounded foreground or background work to a one-level Herder child",
 		promptGuidelines: [

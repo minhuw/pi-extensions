@@ -123,21 +123,32 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
 	assert.match(engine, /noExtensions: true/);
 	assert.match(engine, /additionalExtensionPaths: extensionPaths/);
+	assert.match(engine, /additionalExtensionPaths: roleExtensionPaths/);
 	assert.match(engine, /getInstalledPath\(source, "user"\)/);
 	assert.doesNotMatch(engine, /getInstalledPath\(source, "project"\)/);
-	assert.match(engine, /realpathSync\(trustedRoot\)/);
+	assert.match(engine, /realpathSync\(path\.join\(agentDir, "npm"\)\)/);
+	assert.match(engine, /realpathSync\(path\.join\(agentDir, "git"\)\)/);
+	assert.match(engine, /"pi-extension", "index\.js"/);
+	assert.match(engine, /"github\.com", "DietrichGebert", "ponytail"/);
+	assert.match(engine, /does not resolve to the exact trusted Ponytail package/);
 	assert.match(engine, /resolves outside the trusted user package store/);
+	assert.match(engine, /entry resolves outside the trusted user package/);
 	assert.match(engine, /pi install \$\{source\}/);
 	assert.match(engine, /SEARCHER_TOOL_NAMES/);
 	assert.match(engine, /input\.workflow = "none"/);
 	assert.match(engine, /Herder searcher may fetch only remote URLs/);
-	assert.match(engine, /const cacheKey = `\$\{cwd\}\\0\$\{source\}`/);
+	assert.doesNotMatch(engine, /nestedExtensionPaths|const cacheKey/);
 	assert.match(engine, /missing required tools/);
 	assert.match(engine, /noSkills: true/);
 	assert.match(engine, /noPromptTemplates: true/);
 	assert.match(engine, /noThemes: true/);
 	assert.match(engine, /noContextFiles: true/);
 	assert.match(engine, /customTools: \[\.\.\.nestedTools\]/);
+	assert.match(engine, /await child\.bindExtensions\(\{/);
+	assert.match(engine, /await session\.bindExtensions\(\{/);
+	assert.match(engine, /mode: "print"/);
+	assert.match(engine, /unexpected tools/);
+	assert.match(nestedExecutor, /await item\.session\?\.shutdown\?\.\(\)/);
 	assert.match(engine, /createNestedAgentTools/);
 	assert.doesNotMatch(engine + nestedExecutor + nestedTool, /shouldStopAfterTurn|turnLimitReached|max_turns|maxTurns/);
 	assert.match(engine, /session\.messages\.length !== 0/);
@@ -146,6 +157,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /run_in_background/);
 	assert.match(nestedTool, /name: "get_subagent_result"/);
 	assert.doesNotMatch(nestedTool, /resolvedModel|thinking:|service_tier/);
+	assert.match(roleConfig, /PONYTAIL_EXTENSION_SOURCE = "git:github\.com\/DietrichGebert\/ponytail"/);
+	assert.match(roleConfig, /role !== "plan-implementer" && extensions\.length > 0/);
 	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker"\]/);
 	assert.match(roleConfig, /\["Agent", "get_subagent_result"\]/);
 	assert.match(roleConfig, /STRICT_READ_ONLY_NESTED_TOOLS/);
@@ -174,6 +187,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
 	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
 	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content$/m);
+	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
+	assert.match(worker, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
 	await assert.rejects(() => readFile(path.join(agentDir, "nested/reviewer.md"), "utf8"), /ENOENT/);
 	const reviewProtocol = await readFile(path.join(extensionRoot, "assets/review/code-review-protocol.md"), "utf8");
 	assert.match(reviewProtocol, /Wave 1: parallel candidate detection/);
@@ -187,6 +202,11 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.match(contents, /^tools: .*Agent.*get_subagent_result/m);
 		assert.doesNotMatch(contents, /^tools: .*(?:steer_subagent|herder)/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
+		if (role === "plan-implementer") {
+			assert.match(contents, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
+		} else {
+			assert.doesNotMatch(contents, /^extensions:/m);
+		}
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly:/);
 		if (role === "plan-reviewer") {

@@ -3,6 +3,7 @@ name: plan-implementer
 package: herder
 description: Implements one Herder plan in its stable plan worktree.
 tools: read, edit, write, bash, grep, find, ls, Agent, get_subagent_result
+extensions: git:github.com/DietrichGebert/ponytail
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

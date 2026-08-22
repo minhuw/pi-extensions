@@ -85,6 +85,7 @@ export interface NestedWorkerSession {
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 	prompt(text: string, options?: { expandPromptTemplates?: boolean; source?: "extension" }): Promise<void>;
 	abort(): Promise<void>;
+	shutdown?(): Promise<void>;
 	dispose(): void;
 	getSessionStats(): SessionStats;
 }
@@ -467,9 +468,13 @@ export class HerderNestedAgentScope {
 		} finally {
 			unsubscribe();
 			detachSessionAbort();
-			item.session?.dispose();
-			detachScope();
-			detachCall();
+			try {
+				await item.session?.shutdown?.();
+			} finally {
+				item.session?.dispose();
+				detachScope();
+				detachCall();
+			}
 		}
 	}
 

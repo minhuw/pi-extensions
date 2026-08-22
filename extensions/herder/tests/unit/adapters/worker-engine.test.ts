@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import {
 	applySearcherToolPolicy,
 	applyServiceTier,
+	DefaultPiWorkerSessionFactory,
 	finalAssistantResult,
 	PiWorkerEngine,
 	trustedNestedExtensionPath,
+	trustedRoleExtensionEntry,
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
@@ -50,6 +53,12 @@ class FakeSession {
 	disposed = false;
 	aborted = false;
 	prompted = false;
+	shutdowns = 0;
+	readonly extensionRunner = {
+		emit: async (event: { type: string }) => {
+			if (event.type === "session_shutdown") this.shutdowns += 1;
+		},
+	} as unknown as AgentSession["extensionRunner"];
 	private readonly gate?: Promise<void>;
 
 	constructor(sessionId: string, inherited: unknown[] = [], gate?: Promise<void>) {
@@ -204,6 +213,140 @@ test("nested extensions resolve only inside the trusted user package store", asy
 	}
 });
 
+test("role extensions resolve only the exact entry inside the trusted user git package", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-"));
+	try {
+		const agentDir = path.join(root, "agent");
+		const installed = path.join(agentDir, "git/github.com/DietrichGebert/ponytail");
+		const entry = path.join(installed, "pi-extension/index.js");
+		await mkdir(path.dirname(entry), { recursive: true });
+		await writeFile(entry, "export default () => {};");
+		const source = "git:github.com/DietrichGebert/ponytail";
+		assert.equal(trustedRoleExtensionEntry(agentDir, installed, source), await realpath(entry));
+
+		await rm(entry);
+		await assert.rejects(
+			async () => trustedRoleExtensionEntry(agentDir, installed, source),
+			/pi install git:github\.com\/DietrichGebert\/ponytail/,
+		);
+
+		const outsideEntry = path.join(root, "outside-index.js");
+		await writeFile(outsideEntry, "export default () => {};");
+		await symlink(outsideEntry, entry, "file");
+		assert.throws(
+			() => trustedRoleExtensionEntry(agentDir, installed, source),
+			/entry resolves outside the trusted user package/,
+		);
+
+		await rm(installed, { recursive: true, force: true });
+		const siblingPackage = path.join(agentDir, "git/github.com/example/sibling");
+		await mkdir(path.join(siblingPackage, "pi-extension"), { recursive: true });
+		await writeFile(path.join(siblingPackage, "pi-extension/index.js"), "export default () => {};");
+		await mkdir(path.dirname(installed), { recursive: true });
+		await symlink(siblingPackage, installed, "dir");
+		assert.throws(
+			() => trustedRoleExtensionEntry(agentDir, installed, source),
+			/does not resolve to the exact trusted Ponytail package/,
+		);
+
+		const outsidePackage = path.join(root, "outside-package");
+		await mkdir(path.join(outsidePackage, "pi-extension"), { recursive: true });
+		await writeFile(path.join(outsidePackage, "pi-extension/index.js"), "export default () => {};");
+		const shadow = path.join(agentDir, "git/github.com/DietrichGebert/shadow");
+		await symlink(outsidePackage, shadow, "dir");
+		assert.throws(
+			() => trustedRoleExtensionEntry(agentDir, shadow, source),
+			/resolves outside the trusted user git store/,
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("production factory binds Ponytail only to Implementer sessions without widening tools", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-runtime-"));
+	try {
+		const agentDir = path.join(root, "agent");
+		const installed = path.join(agentDir, "git/github.com/DietrichGebert/ponytail");
+		const entry = path.join(installed, "pi-extension/index.js");
+		const events = path.join(root, "events.log");
+		await mkdir(path.dirname(entry), { recursive: true });
+		await writeFile(entry, `import { appendFileSync } from "node:fs";
+export default function (pi) {
+	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "start\\n"));
+	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "shutdown\\n"));
+	pi.on("before_agent_start", (event) => {
+		appendFileSync(${JSON.stringify(events)}, "before\\n");
+		return { systemPrompt: event.systemPrompt + "\\nPONYTAIL_TEST" };
+	});
+}
+`);
+		const worktree = path.join(root, "worktree");
+		const planDirectory = path.join(worktree, "herder-plans");
+		await mkdir(planDirectory, { recursive: true });
+		const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
+		const faux = fauxProvider({ provider: "test", models: [{ id: "test-model", reasoning: true }] });
+		runtime.registerNativeProvider(faux.provider);
+		const factory = new DefaultPiWorkerSessionFactory(agentRoot, agentDir);
+		factory.bindModelRegistry(new ModelRegistry(runtime));
+		const roleAction = (role: ManagerAction["role"]): ManagerAction => ({
+			...action(),
+			role,
+			agentType: `herder.${role}`,
+			model: "test/test-model",
+			effort: "high",
+			worktree,
+			assignmentPath: path.join(planDirectory, "001.md"),
+		});
+
+		for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
+			const prepared = await factory.create({ action: roleAction(role), planDirectory });
+			const session = prepared.session as AgentSession;
+			const hasPonytail = session.extensionRunner.hasHandlers("before_agent_start");
+			assert.equal(hasPonytail, role === "plan-implementer");
+			assert.deepEqual(
+				session.agent.state.tools.map((tool) => tool.name).sort(),
+				(role === "plan-implementer"
+					? ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]
+					: ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]).sort(),
+			);
+			if (role === "plan-implementer") {
+				const injected = await session.extensionRunner.emitBeforeAgentStart("task", undefined, "BASE", {} as never);
+				assert.match(injected?.systemPrompt ?? "", /BASE\nPONYTAIL_TEST/);
+			}
+			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			session.dispose();
+			await prepared.nested.stop("test cleanup");
+		}
+
+		const beforeDiscard = (await readFile(events, "utf8")).trim().split("\n");
+		const engine = new PiWorkerEngine(factory);
+		const handle = await engine.prepare({ action: roleAction("plan-implementer"), planDirectory });
+		await engine.discard(handle);
+		const afterDiscard = (await readFile(events, "utf8")).trim().split("\n");
+		assert.deepEqual(afterDiscard.slice(beforeDiscard.length), ["start", "shutdown"]);
+
+		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
+		const beforeNested = (await readFile(events, "utf8")).trim().split("\n");
+		faux.setResponses([fauxAssistantMessage("Nested worker result")]);
+		const nestedResult = await prepared.nested.run({
+			type: "worker",
+			prompt: "Implement the bounded child task",
+			description: "implement child task",
+		});
+		assert.equal(nestedResult.status, "completed");
+		assert.equal(nestedResult.output, "Nested worker result");
+		const afterNested = (await readFile(events, "utf8")).trim().split("\n");
+		assert.deepEqual(afterNested.slice(beforeNested.length), ["start", "before", "shutdown"]);
+		const parent = prepared.session as AgentSession;
+		await parent.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		parent.dispose();
+		await prepared.nested.stop("test cleanup");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
 	const factory = new FakeFactory();
 	const engine = new PiWorkerEngine(factory);
@@ -229,6 +372,7 @@ test("built-in Pi engine fails closed if a session contains inherited history", 
 	const factory = new FakeFactory(inherited);
 	const engine = new PiWorkerEngine(factory);
 	await assert.rejects(() => engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" }), /zero inherited messages/);
+	assert.equal(factory.sessions[0]!.shutdowns, 1);
 	assert.equal(factory.sessions[0]!.disposed, true);
 });
 

@@ -19,6 +19,7 @@ export interface HerderPiRoleDefinition {
 	agentType: string;
 	description: string;
 	tools: string[];
+	extensions: string[];
 	systemPrompt: string;
 }
 
@@ -48,7 +49,12 @@ const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
 	"read", "grep", "find", "ls",
 	"web_search", "source_check", "fetch_content", "get_search_content",
 ]);
-const ALLOWED_NESTED_EXTENSION_SOURCES = new Set(["npm:pi-web-access"]);
+export const PONYTAIL_EXTENSION_SOURCE = "git:github.com/DietrichGebert/ponytail";
+const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]> = {
+	recon: [],
+	searcher: ["npm:pi-web-access"],
+	worker: [PONYTAIL_EXTENSION_SOURCE],
+};
 
 function stringField(frontmatter: Record<string, unknown>, name: string, file: string): string {
 	const value = frontmatter[name];
@@ -129,11 +135,19 @@ export async function loadHerderPiRole(agentRoot: string, role: HerderRole): Pro
 	const packageName = stringField(parsed.frontmatter, "package", file);
 	if (name !== role || packageName !== "herder") throw new Error(`mismatched name or package metadata in ${file}`);
 	if (parsed.body.trim().length === 0) throw new Error(`missing system prompt in ${file}`);
+	const extensions = stringList(parsed.frontmatter.extensions);
+	if (new Set(extensions).size !== extensions.length) throw new Error(`duplicate extensions in ${file}`);
+	if (role !== "plan-implementer" && extensions.length > 0) {
+		throw new Error(`Herder role ${role} cannot request extensions in ${file}`);
+	}
+	const rejectedExtension = extensions.find((source) => source !== PONYTAIL_EXTENSION_SOURCE);
+	if (rejectedExtension) throw new Error(`Herder role ${role} requests forbidden extension ${rejectedExtension} in ${file}`);
 	return {
 		role,
 		agentType: `herder.${role}`,
 		description: stringField(parsed.frontmatter, "description", file),
 		tools: toolList(parsed.frontmatter.tools, file),
+		extensions,
 		systemPrompt: parsed.body.trim(),
 	};
 }
@@ -159,7 +173,8 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 	const tools = toolList(parsed.frontmatter.tools, file, []);
 	const extensions = stringList(parsed.frontmatter.extensions);
 	if (new Set(extensions).size !== extensions.length) throw new Error(`duplicate extensions in ${file}`);
-	const rejectedExtension = extensions.find((source) => !ALLOWED_NESTED_EXTENSION_SOURCES.has(source));
+	const allowedExtensions = NESTED_EXTENSION_SOURCES[type];
+	const rejectedExtension = extensions.find((source) => !allowedExtensions.includes(source));
 	if (rejectedExtension) throw new Error(`nested agent ${type} requests forbidden extension ${rejectedExtension} in ${file}`);
 	const readOnly = parsed.frontmatter.readOnly;
 	if (readOnly && tools.some((tool) => !STRICT_READ_ONLY_NESTED_TOOLS.has(tool))) {

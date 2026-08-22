@@ -19,8 +19,13 @@ const available = [
 
 test("Herder loads exact non-recursive Pi role definitions", async () => {
 	const implementer = await loadHerderPiRole(agentRoot, "plan-implementer");
+	const reviewer = await loadHerderPiRole(agentRoot, "plan-reviewer");
+	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
 	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail"]);
+	assert.deepEqual(reviewer.extensions, []);
+	assert.deepEqual(judge.extensions, []);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
@@ -42,6 +47,7 @@ test("Herder loads package-owned one-level nested definitions with explicit perm
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
+	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail"]);
 	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
 	for (const definition of [recon, searcher, worker]) {
 		assert.equal(definition.tools.includes("Agent"), false);
@@ -135,6 +141,56 @@ extensions: npm:untrusted-extension
 Search.
 `);
 		await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /requests forbidden extension npm:untrusted-extension/);
+
+		for (const [type, extension] of [
+			["recon", "git:github.com/DietrichGebert/ponytail"],
+			["searcher", "git:github.com/DietrichGebert/ponytail"],
+			["worker", "npm:pi-web-access"],
+		] as const) {
+			await writeFile(path.join(nestedRoot, `${type}.md`), `---
+name: ${type}
+package: herder
+kind: nested
+description: Cross-type extension
+readOnly: ${type !== "worker"}
+binding: inherit
+tools: read
+extensions: ${extension}
+---
+Test.
+`);
+			await assert.rejects(() => loadHerderNestedAgent(root, type), new RegExp(`nested agent ${type} requests forbidden extension`));
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("role loading fails closed on disallowed extension metadata", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-role-extension-"));
+	try {
+		for (const role of ["plan-reviewer", "plan-judge"] as const) {
+			await writeFile(path.join(root, `${role}.md`), `---
+name: ${role}
+package: herder
+description: Read-only role
+tools: read
+extensions: git:github.com/DietrichGebert/ponytail
+---
+Review.
+`);
+			await assert.rejects(() => loadHerderPiRole(root, role), new RegExp(`role ${role} cannot request extensions`));
+		}
+		await writeFile(path.join(root, "plan-implementer.md"), `---
+name: plan-implementer
+package: herder
+description: Implementer
+tools: read
+extensions: git:github.com/example/unknown
+---
+Implement.
+`);
+		await assert.rejects(() => loadHerderPiRole(root, "plan-implementer"), /requests forbidden extension git:github.com\/example\/unknown/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
