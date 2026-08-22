@@ -137,6 +137,9 @@ export function parseFireArguments(input: string, mode: "fire" | "resume" | "rev
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
 		if (["--profile", "--max-parallel", "--dashboard-port"].includes(argument)) {
+			if (argument === "--max-parallel" && mode === "revise") {
+				throw new Error("--max-parallel is only supported by /herder-fire and /herder-resume; /herder-revise preserves recorded parallelism.");
+			}
 			const value = valueAfter(tokens, index, argument);
 			index += 1;
 			if (argument === "--profile") {

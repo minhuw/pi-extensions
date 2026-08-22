@@ -63,6 +63,9 @@ test("attach accepts only a plan directory and dashboard port", () => {
 });
 
 test("argument validation is fail-closed", () => {
+	assert.throws(() => parseFireArguments("--max-parallel", "revise"), /only supported by \/herder-fire and \/herder-resume/);
+	assert.throws(() => parseFireArguments("--max-parallel 7", "revise"), /only supported by \/herder-fire and \/herder-resume/);
+	assert.throws(() => parseFireArguments("--max-parallel 5", "revise"), /only supported by \/herder-fire and \/herder-resume/);
 	assert.throws(() => parseFireArguments("--max-parallel 0", "fire"), /between 1 and 32/);
 	assert.throws(() => parseFireArguments("--dashboard-port 65536", "fire"), /0 through 65535/);
 	assert.throws(() => parseFireArguments("--unknown", "fire"), /Unknown option/);
