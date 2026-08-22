@@ -1616,7 +1616,7 @@ export class HerderRunManager {
 			repairId: repair.repairId,
 			repairRound: repair.round,
 		});
-		const manifest: VerificationManifest = {
+		const { manifest, manifestSha256 } = normalizeVerificationManifest(request, {
 			schemaVersion: 1,
 			requestId: request.requestId,
 			requestSha256: request.requestSha256,
@@ -1628,11 +1628,8 @@ export class HerderRunManager {
 			integrationTree: request.integrationTree,
 			rationale: prepared.rationale,
 			gates: prepared.gates,
-			...(request.predecessorRequestId ? { predecessorRequestId: request.predecessorRequestId } : {}),
-			...(request.repairId ? { repairId: request.repairId } : {}),
-			...(request.repairRound !== undefined ? { repairRound: request.repairRound } : {}),
-		};
-		return { request, manifest, gates: prepared.gates, manifestSha256: sha256(stableJson(manifest)) };
+		});
+		return { request, manifest, gates: prepared.gates, manifestSha256 };
 	}
 
 	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
@@ -2010,6 +2007,21 @@ export class HerderRunManager {
 		}
 	}
 
+	private finalizeVerificationFailure(
+		stored: StoredVerification,
+		detail: string,
+		evidence: { schemaVersion: 1; request: StoredVerification["request"]; manifestSha256: string; manifest: VerificationManifest; gates: GateResult[]; passed: boolean; finishedAt: string; error?: string },
+	): void {
+		const repair = this.store.getIntegrationRepairForRequest(stored.request.requestId);
+		this.store.transaction(() => {
+			this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
+			this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "failed", detail);
+			const paused = Boolean(repair && repair.classification === "code_defect" && repair.acceptedCodeRounds >= 3);
+			this.store.updateRun({ status: paused ? "paused" : "failed", terminalDetail: paused ? "Three accepted code-repair commits exhausted the bounded code-repair budget; awaiting explicit user choice." : detail });
+		});
+		this.projectLifecycleBestEffort();
+	}
+
 	async verification(input: VerificationManifest): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
@@ -2093,7 +2105,7 @@ export class HerderRunManager {
 				}
 			}
 			const evidence = {
-				schemaVersion: 1,
+				schemaVersion: 1 as const,
 				request: stored.request,
 				manifestSha256,
 				manifest,
@@ -2103,14 +2115,7 @@ export class HerderRunManager {
 			};
 
 			if (detail) {
-				const repair = this.store.getIntegrationRepairForRequest(stored.request.requestId);
-				this.store.transaction(() => {
-					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
-					this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "failed", detail);
-					const paused = Boolean(repair && repair.classification === "code_defect" && repair.acceptedCodeRounds >= 3);
-					this.store.updateRun({ status: paused ? "paused" : "failed", terminalDetail: paused ? "Three accepted code-repair commits exhausted the bounded code-repair budget; awaiting explicit user choice." : detail });
-				});
-				this.projectLifecycleBestEffort();
+				this.finalizeVerificationFailure(stored, detail, evidence);
 				return this.reply();
 			}
 			this.store.transaction(() => {
@@ -2123,7 +2128,7 @@ export class HerderRunManager {
 		} catch (error) {
 			const detail = `Verification execution failed: ${error instanceof Error ? error.message : String(error)}`;
 			const evidence = {
-				schemaVersion: 1,
+				schemaVersion: 1 as const,
 				request: stored.request,
 				manifestSha256,
 				manifest,
@@ -2134,14 +2139,7 @@ export class HerderRunManager {
 			};
 			const live = this.store.getVerificationByRequestId(stored.request.requestId);
 			if (live?.state === "running") {
-				const repair = this.store.getIntegrationRepairForRequest(stored.request.requestId);
-				this.store.transaction(() => {
-					this.store.finishVerification(stored.request.requestId, "failed", evidence, detail);
-					this.recordIntegrationRepairVerificationOutcome(stored.request.requestId, "failed", detail);
-					const paused = Boolean(repair && repair.classification === "code_defect" && repair.acceptedCodeRounds >= 3);
-					this.store.updateRun({ status: paused ? "paused" : "failed", terminalDetail: paused ? "Three accepted code-repair commits exhausted the bounded code-repair budget; awaiting explicit user choice." : detail });
-				});
-				this.projectLifecycleBestEffort();
+				this.finalizeVerificationFailure(stored, detail, evidence);
 			}
 			return this.reply();
 		}
