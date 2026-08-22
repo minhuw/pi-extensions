@@ -184,7 +184,7 @@ test("repair reply persistence stores only the capability digest and restores re
 		const storedSnapshot = store.database.prepare("SELECT reply_json FROM manager_snapshots WHERE singleton = 1").get() as { reply_json: string };
 		assert.equal(storedSnapshot.reply_json.includes(token), false);
 		assert.equal(storedSnapshot.reply_json.includes(integrationRepairCapabilityDigest(token)), true);
-		assert.equal((store.getSnapshot() as never as { integrationRepair: { capabilityToken?: string } }).integrationRepair.capabilityToken, token);
+		assert.equal((store.getSnapshotEnvelope()?.reply as never as { integrationRepair: { capabilityToken?: string } }).integrationRepair.capabilityToken, token);
 		store.close();
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });

@@ -989,10 +989,6 @@ export class RunStore {
 		`).run(revision, JSON.stringify(durableManagerReply(reply)), new Date().toISOString());
 	}
 
-	getSnapshot(): ManagerReply | null {
-		return this.getSnapshotEnvelope()?.reply ?? null;
-	}
-
 	getSnapshotEnvelope(): { revision: number; updatedAt: string; reply: ManagerReply } | null {
 		const row = this.database.prepare("SELECT revision, reply_json, updated_at FROM manager_snapshots WHERE singleton = 1").get() as { revision?: number; reply_json?: string; updated_at?: string } | undefined;
 		return row?.reply_json ? { revision: Number(row.revision), updatedAt: String(row.updated_at), reply: exposedManagerReply(JSON.parse(row.reply_json)) as ManagerReply } : null;
@@ -1254,11 +1250,6 @@ export class RunStore {
 
 	getIntegrationRepairEpisode(episodeId: string): StoredIntegrationRepairEpisode | null {
 		const row = this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE episode_id = ?").get(episodeId) as Record<string, unknown> | undefined;
-		return row ? rowToIntegrationRepairEpisode(row) : null;
-	}
-
-	getIntegrationRepairEpisodeForRequest(requestId: string): StoredIntegrationRepairEpisode | null {
-		const row = this.database.prepare("SELECT * FROM manager_integration_repair_episodes WHERE request_id = ? ORDER BY created_at DESC, episode_id DESC LIMIT 1").get(requestId) as Record<string, unknown> | undefined;
 		return row ? rowToIntegrationRepairEpisode(row) : null;
 	}
 
@@ -2002,10 +1993,6 @@ export class RunStore {
 		const row = this.database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? AND plan_id = ? AND generation = ?")
 			.get(runId, planId, generation) as Record<string, unknown> | undefined;
 		return row ? rowToApproval(row) : null;
-	}
-
-	getApprovals(runId: string): StoredApproval[] {
-		return (this.database.prepare("SELECT * FROM manager_approvals WHERE run_id = ? ORDER BY plan_id, generation").all(runId) as Record<string, unknown>[]).map(rowToApproval);
 	}
 
 	deleteApproval(runId: string, planId: string, generation: number): void {
