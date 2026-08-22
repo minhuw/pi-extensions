@@ -7,7 +7,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	activeModelMatches,
-	effectiveModelSupportsEffort,
 	loadPiProfile,
 	modelMatches,
 	modelSupportsEffort,
@@ -59,9 +58,6 @@ test("Pi rejects thinking levels that the resolved model cannot honor", () => {
 	};
 	assert.equal(modelSupportsEffort(grok, "high"), true);
 	assert.equal(modelSupportsEffort(grok, "max"), false);
-	assert.equal(effectiveModelSupportsEffort("proxy/grok-4.5:high", "high", [grok]), true);
-	assert.equal(effectiveModelSupportsEffort("proxy/grok-4.5:max", "max", [grok]), false);
-	assert.equal(effectiveModelSupportsEffort("other/grok-4.5:high", "high", [grok]), false);
 });
 
 test("service tiers map to exact provider request values on capable APIs only", () => {

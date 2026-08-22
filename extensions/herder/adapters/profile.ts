@@ -1,4 +1,4 @@
-import { resolvePiProfile, type PiProfileDefinition } from "../src/core/profile-registry.ts";
+import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import type { ResolvedProfile } from "../src/shared/protocol.ts";
 
 export const HERDER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
@@ -81,23 +81,6 @@ export function modelSupportsEffort(model: AvailableModel, effort: ThinkingEffor
 	return true;
 }
 
-export function effectiveModelSupportsEffort(
-	effectiveModel: string | undefined,
-	effort: ThinkingEffort,
-	available: readonly AvailableModel[],
-): boolean {
-	if (!effectiveModel) return false;
-	const suffix = `:${effort}`;
-	const fullId = effectiveModel.endsWith(suffix) ? effectiveModel.slice(0, -suffix.length) : effectiveModel;
-	const model = available.find((candidate) => {
-		const candidateFullId = candidate.fullId || (candidate.provider && candidate.id ? `${candidate.provider}/${candidate.id}` : "");
-		return candidateFullId === fullId;
-	});
-	return Boolean(model && modelSupportsEffort(model, effort));
-}
-
 export function activeModelMatches(profile: ResolvedPiProfile, active: AvailableModel | undefined): boolean {
 	return Boolean(active && modelMatches(profile.orchestrator.model, active));
 }
-
-export type { PiProfileDefinition };
