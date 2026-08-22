@@ -13,10 +13,6 @@ export interface ForceCleanupInput {
 	dryRun: boolean;
 }
 
-function resolvePlanName(planDir: string, inputName: unknown): string {
-	return validatePlanName(inputName ?? path.basename(planDir));
-}
-
 function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
 	const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true });
 	const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true });
@@ -132,7 +128,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 	if (actualRoot !== repoRoot) fail(`--repo must be the Git repository root: ${actualRoot}`);
 
 	const planCandidate = path.resolve(repoRoot, input.planDir);
-	const planName = resolvePlanName(planCandidate, input.planName);
+	const planName = validatePlanName(input.planName ?? path.basename(planCandidate));
 	const integrationBranch = `herder/${planName}/integration`;
 	const integrationRef = `refs/heads/${integrationBranch}`;
 	const integrationHeadResult = runGit(repoRoot, ["rev-parse", "--verify", integrationRef], { allowFailure: true });

@@ -146,10 +146,6 @@ function canonicalPlanId(value: unknown): string {
   return String(number).padStart(3, "0")
 }
 
-function resolvePlanName(planDir: string, inputName: unknown): string {
-  return validatePlanName(inputName ?? path.basename(planDir))
-}
-
 function planBranchSnapshot(items: BranchRecord[]): string {
   return JSON.stringify(items.map((item) => `${item.branch}\t${item.head}`).sort())
 }
@@ -255,7 +251,7 @@ export function cleanupRun(input: CleanupInput) {
   if (planDir === repoRoot) fail(`Refusing to remove the repository root: ${repoRoot}`)
   if (!isInside(repoRoot, planDir)) fail(`Plan directory must be inside the repository: ${planDir}`)
 
-  const planName = resolvePlanName(planCandidate, input.planName)
+  const planName = validatePlanName(input.planName ?? path.basename(planCandidate))
   const integrationBranch = `herder/${planName}/integration`
   runGit(repoRoot, ["check-ref-format", "--branch", integrationBranch])
   const integrationRef = `refs/heads/${integrationBranch}`
