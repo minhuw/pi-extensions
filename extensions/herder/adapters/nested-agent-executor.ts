@@ -193,13 +193,6 @@ export class HerderNestedAgentScope {
 	private readonly scopeController = new AbortController();
 	private active = 0;
 	private stopped = false;
-	private usageTotals: NestedAgentUsage = {
-		inputTokens: 0,
-		cachedInputTokens: 0,
-		outputTokens: 0,
-		reasoningTokens: 0,
-		reasoningKnown: false,
-	};
 
 	constructor(options: {
 		action: ManagerAction;
@@ -220,10 +213,6 @@ export class HerderNestedAgentScope {
 		return [...this.records.values()]
 			.map((item) => cloneSnapshot(item.snapshot))
 			.sort((left, right) => left.startedAt - right.startedAt || left.agentId.localeCompare(right.agentId));
-	}
-
-	usage(): NestedAgentUsage {
-		return { ...this.usageTotals };
 	}
 
 	usageSlices(): NestedUsageSlice[] {
@@ -438,11 +427,6 @@ export class HerderNestedAgentScope {
 			if (item.session) {
 				try { usage = usageFromSession(item.session); } catch { /* retain zero usage */ }
 			}
-			this.usageTotals.inputTokens += usage.inputTokens;
-			this.usageTotals.cachedInputTokens += usage.cachedInputTokens;
-			this.usageTotals.outputTokens += usage.outputTokens;
-			this.usageTotals.reasoningTokens += usage.reasoningTokens;
-			this.usageTotals.reasoningKnown ||= usage.reasoningKnown;
 			this.emitUpdate();
 			const result: NestedAgentResult = {
 				id: item.snapshot.agentId,
