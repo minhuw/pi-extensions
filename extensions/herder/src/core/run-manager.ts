@@ -909,52 +909,6 @@ export class HerderRunManager {
 		}
 	}
 
-	private pauseForFinalVerification(run: StoredRun, driver: GitDriver): void {
-		const existing = this.store.getVerification(run.runId, run.currentGeneration);
-		if (existing && existing.state !== "failed") {
-			if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
-			return;
-		}
-		const generation = this.store.getGeneration(run.runId, run.currentGeneration);
-		if (!generation) throw new Error(`Run generation ${run.currentGeneration} has no assignment evidence`);
-		const bytes = fs.readFileSync(generation.runAssignmentPath);
-		if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
-		if (driver.worktreeStatus(run.integrationWorktree)) throw new Error("Final verification requires a clean integration worktree");
-		const request = createVerificationRequest({
-			requestId: randomUUID(),
-			runId: run.runId,
-			generation: run.currentGeneration,
-			graphSha256: run.graphSha256,
-			runAssignmentPath: generation.runAssignmentPath,
-			runAssignmentSha256: generation.runAssignmentSha256,
-			integrationBranch: run.integrationBranch,
-			integrationWorktree: run.integrationWorktree,
-			integrationHead: driver.branchHead(run.integrationBranch),
-			integrationTree: gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}"),
-			requestedAt: new Date().toISOString(),
-		});
-		this.store.transaction(() => {
-			this.store.putVerificationRequest(request);
-			this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
-		});
-	}
-
-	private migrateLegacyFinalPlan(run: StoredRun, driver: GitDriver): void {
-		if (run.status === "complete" || this.store.getVerification(run.runId, run.currentGeneration)) return;
-		const finalPlan = this.store.getPlan(run.runId, "RUN");
-		if (!finalPlan) return;
-		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]).filter((action) => action.planId === "RUN");
-		if (active.some((action) => action.state === "dispatched")) {
-			this.store.updateRun({ status: "paused", terminalDetail: "Waiting for the legacy final Reviewer to settle before exact-tree verification." });
-			return;
-		}
-		for (const action of active) this.store.markCancelled(action.actionId, { error: "Superseded by main-session exact-tree verification" });
-		const lease = driver.leaseReason(finalPlan.worktree);
-		if (lease && active.some((action) => action.leaseReason === lease)) driver.release(finalPlan.worktree, lease);
-		this.store.deletePlan(run.runId, "RUN");
-		this.pauseForFinalVerification(this.store.getRun()!, driver);
-	}
-
 	private ensureInitialAttention(run: StoredRun): void {
 		for (const spec of this.specs(run).filter((candidate) => candidate.initialStatus === "BLOCKED")) {
 			if (this.store.getPlan(run.runId, spec.planId)) continue;
@@ -3134,6 +3088,18 @@ export class HerderRunManager {
 		if (overview.complete && activeActionCount(this.store, run.runId) === 0) {
 			const finalPlan = current.find((plan) => plan.planId === "RUN");
 			if (finalPlan?.phase === "FINAL_APPROVED") {
+				const verification = this.store.getVerification(run.runId, finalPlan.generation);
+				if (verification?.state !== "passed"
+					|| verification.request.integrationHead !== finalPlan.approvedHead
+					|| verification.request.integrationTree !== finalPlan.approvedTree) {
+					const detail = "Final completion is blocked; exact-tree verification is required.";
+					this.store.transaction(() => {
+						this.updatePlan(finalPlan, { phase: "BLOCKED", repair: [detail] });
+						this.store.updateRun({ status: "paused", terminalDetail: detail });
+					});
+					this.projectLifecycleBestEffort();
+					return this.reply();
+				}
 				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
 				this.projectLifecycleBestEffort();
 				return this.reply();
@@ -3479,8 +3445,6 @@ export class HerderRunManager {
 			scheduler: { active: 0, freeSlots: 0, runnable: 0, runnablePlanIds: [], expectedNewActions: 0, workConserving: true, reason: "inactive", checkedAt: new Date().toISOString() },
 			message: "No Herder run has started.",
 		};
-		this.migrateLegacyFinalPlan(run, this.driver(run));
-		run = this.store.getRun()!;
 		if (run.status === "running") {
 			const drift = this.graphDrift(run);
 			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });

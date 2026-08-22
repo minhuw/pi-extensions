@@ -919,6 +919,107 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 	}
 });
 
+test("persisted FINAL_APPROVED completion fails closed without matching exact-tree verification", { timeout: 60_000 }, async () => {
+	type PersistedCase = {
+		name: string;
+		expectedComplete: boolean;
+		mutate: (store: RunStore, requestId: string) => void;
+	};
+	const cases: PersistedCase[] = [
+		{
+			name: "missing verification",
+			expectedComplete: false,
+			mutate: (store, requestId) => {
+				store.database.prepare("DELETE FROM manager_verifications WHERE request_id = ?").run(requestId);
+			},
+		},
+		{
+			name: "failed verification",
+			expectedComplete: false,
+			mutate: (store, requestId) => {
+				store.database.prepare("UPDATE manager_verifications SET state = 'failed', terminal_detail = ? WHERE request_id = ?")
+					.run("Persisted verification failed before final completion.", requestId);
+			},
+		},
+		{
+			name: "head-mismatched verification",
+			expectedComplete: false,
+			mutate: (store, requestId) => {
+				store.database.prepare("UPDATE manager_verifications SET integration_head = ? WHERE request_id = ?")
+					.run("0".repeat(40), requestId);
+			},
+		},
+		{
+			name: "tree-mismatched verification",
+			expectedComplete: false,
+			mutate: (store, requestId) => {
+				store.database.prepare("UPDATE manager_verifications SET integration_tree = ? WHERE request_id = ?")
+					.run("0".repeat(40), requestId);
+			},
+		},
+		{
+			name: "matching passed verification",
+			expectedComplete: true,
+			mutate: () => {},
+		},
+	];
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-persisted-final-"));
+	const fixture = writeFixture(root);
+	const readmePath = path.join(fixture.planDirectory, "README.md");
+	const authoredReadme = fs.readFileSync(readmePath, "utf8");
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await completeSinglePlan(service, fixture, "persisted-final");
+		const persisted = new RunStore(fixture.planDirectory);
+		try {
+			const run = persisted.getRun()!;
+			const finalPlan = persisted.getPlan(run.runId, "RUN")!;
+			const verification = persisted.getVerification(run.runId, run.currentGeneration)!;
+			assert.equal(finalPlan.phase, "FINAL_APPROVED");
+			assert.equal(verification.state, "passed");
+			assert.ok(verification.manifest);
+			assert.ok(verification.manifestSha256);
+
+			for (const scenario of cases) {
+				fs.writeFileSync(readmePath, authoredReadme);
+				persisted.database.prepare("DELETE FROM manager_verifications WHERE request_id = ?").run(verification.request.requestId);
+				persisted.putVerificationRequest(verification.request);
+				persisted.startVerification(verification.request.requestId, verification.manifest!, verification.manifestSha256!);
+				persisted.finishVerification(verification.request.requestId, "passed", verification.result, verification.terminalDetail);
+				persisted.putPlan(finalPlan);
+				persisted.updateRun({ status: "running", terminalDetail: null });
+				scenario.mutate(persisted, verification.request.requestId);
+
+				const resumed = payload(payload(await requestManagerOperation(service, "start", {
+					mode: "resume",
+					repositoryRoot: fixture.repo,
+					planDirectory: fixture.planDirectory,
+					profile: "eclipse",
+				})).reply);
+				const state = readManagerState(fixture.planDirectory);
+				const storedPlan = state.plans.find((plan) => plan.planId === "RUN");
+				if (scenario.expectedComplete) {
+					assert.equal(resumed.status, "complete", scenario.name);
+					assert.equal(state.run?.status, "complete", scenario.name);
+					assert.equal(storedPlan?.phase, "FINAL_APPROVED", scenario.name);
+				} else {
+					assert.equal(resumed.status, "paused", scenario.name);
+					assert.equal(state.run?.status, "paused", scenario.name);
+					assert.equal(storedPlan?.phase, "BLOCKED", scenario.name);
+					assert.equal(storedPlan?.repair?.[0], state.run?.terminalDetail, scenario.name);
+					assert.match(String(state.run?.terminalDetail), /exact-tree verification is required/, scenario.name);
+				}
+			}
+		} finally {
+			persisted.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("final Reviewer residual findings complete the run with a pending reignite dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-input-test-"));
 	const fixture = writeFixture(root);
