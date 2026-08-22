@@ -1,38 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { realpathSync, rmSync } from "node:fs";
 import test from "node:test";
-import { git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { startHerderService } from "../../../src/daemon/service.ts";
-
-function planRoot(): string {
-	const root = mkdtempSync(path.join(os.tmpdir(), "herder-service-http-"));
-	git(root, ["init", "-q"]);
-	git(root, ["config", "user.name", "Herder Service HTTP Test"]);
-	git(root, ["config", "user.email", "herder-service-http@example.invalid"]);
-	const planDirectory = path.join(root, "herder-plans");
-	mkdirSync(planDirectory, { recursive: true });
-	writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	git(root, ["add", "."]);
-	git(root, ["commit", "-q", "-m", "test: service HTTP fixture"]);
-	return root;
-}
+import { planFixture } from "../../support/plan-fixture.ts";
 
 type ServiceHandle = Awaited<ReturnType<typeof startHerderService>>;
 
@@ -44,8 +15,8 @@ interface Harness {
 }
 
 async function withHarness(run: (harness: Harness) => Promise<void>): Promise<void> {
-	const root = planRoot();
-	const planDirectory = realpathSync(path.join(root, "herder-plans"));
+	const { root, planDirectory: fixturePlanDirectory } = planFixture({ prefix: "herder-service-http-" });
+	const planDirectory = realpathSync(fixturePlanDirectory);
 	let service: ServiceHandle | undefined;
 	try {
 		service = await startHerderService({ planDirectory, dashboardPort: 0, terminalIdleMs: 60_000 });

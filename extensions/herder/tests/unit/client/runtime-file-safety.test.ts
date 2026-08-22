@@ -10,49 +10,17 @@ import {
 	executionRotationMarkerPath,
 	openExecutionDatabase,
 } from "../../../src/daemon/execution-store.ts";
-import { git } from "../../../src/daemon/git-driver.ts";
+import { planFixture } from "../../support/plan-fixture.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
 const POSIX = process.platform !== "win32";
-
-function planRoot(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-runtime-safety-"));
-	git(root, ["init", "-q"]);
-	git(root, ["config", "user.name", "Herder Runtime Safety Test"]);
-	git(root, ["config", "user.email", "herder-runtime-safety@example.invalid"]);
-	const planDirectory = path.join(root, "herder-plans");
-	fs.mkdirSync(planDirectory, { recursive: true, mode: 0o700 });
-	fs.writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	git(root, ["add", "."]);
-	git(root, ["commit", "-q", "-m", "test: runtime file safety fixture"]);
-	return root;
-}
 
 function mode(candidate: string): number {
 	return fs.statSync(candidate).mode & 0o777;
 }
 
-function planDirectory(root: string): string {
-	return path.join(root, "herder-plans");
-}
-
 test("daemon exits when its ownership lock is replaced", { skip: !POSIX, timeout: 10_000 }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	try {
 		const service = await ensureService(directory, { runtimeIdentityCheckMs: 25 });
 		fs.unlinkSync(serviceOwnershipLockPath(directory));
@@ -70,8 +38,7 @@ test("daemon exits when its ownership lock is replaced", { skip: !POSIX, timeout
 });
 
 test("broadened execution storage rotates one active daemon for concurrent callers", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	try {
 		const initial = await ensureService(directory);
 		fs.chmodSync(executionDatabasePath(directory), 0o644);
@@ -92,8 +59,7 @@ test("broadened execution storage rotates one active daemon for concurrent calle
 });
 
 test("a first reservation fsync failure leaves exposed storage for crash-safe retry", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const markerPath = executionRotationMarkerPath(directory);
 	const originalFsync = fs.fsyncSync;
 	try {
@@ -131,8 +97,7 @@ test("a first reservation fsync failure leaves exposed storage for crash-safe re
 });
 
 test("a marker-temp failure leaves durable pending exposure state for retry", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const databasePath = executionDatabasePath(directory);
 	const markerPath = executionRotationMarkerPath(directory);
 	const originalOpen = fs.openSync;
@@ -164,8 +129,7 @@ test("a marker-temp failure leaves durable pending exposure state for retry", { 
 });
 
 test("publication during the final absence probe requires a later healthy instance", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const databasePath = executionDatabasePath(directory);
 	const markerPath = executionRotationMarkerPath(fs.realpathSync(directory));
 	const originalFetch = globalThis.fetch;
@@ -230,8 +194,7 @@ test("publication during the final absence probe requires a later healthy instan
 });
 
 test("a health failure after replacement exposure requires another healthy instance", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const initial = await ensureService(directory);
 	await stopService(directory);
 	const originalFetch = globalThis.fetch;
@@ -263,8 +226,7 @@ test("a health failure after replacement exposure requires another healthy insta
 });
 
 test("a repeated exposure during pending rotation requires a later instance", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const initial = await ensureService(directory);
 	fs.chmodSync(executionDatabasePath(directory), 0o644);
 	openExecutionDatabase(directory, { create: true })!.close();
@@ -296,8 +258,7 @@ test("a repeated exposure during pending rotation requires a later instance", { 
 });
 
 test("a service log symlink is rejected without changing its target or registering a daemon", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const runtimeDirectory = path.join(directory, ".herder");
 	const target = path.join(root, "outside-service.log");
 	const logPath = path.join(runtimeDirectory, "service.log");
@@ -319,8 +280,7 @@ test("a service log symlink is rejected without changing its target or registeri
 });
 
 test("active healthy reuse repairs a broadened service log", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const logPath = path.join(directory, ".herder", "service.log");
 	try {
 		const initial = await ensureService(directory);
@@ -335,8 +295,7 @@ test("active healthy reuse repairs a broadened service log", { skip: !POSIX }, a
 });
 
 test("a runtime directory symlink is rejected before lock mutation", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const external = fs.mkdtempSync(path.join(os.tmpdir(), "herder-runtime-external-"));
 	const staleLock = path.join(external, "service-start.lock");
 	fs.writeFileSync(staleLock, "999999\\n", { mode: 0o600 });
@@ -351,8 +310,7 @@ test("a runtime directory symlink is rejected before lock mutation", { skip: !PO
 });
 
 test("a broad regular service log is repaired before daemon startup", { skip: !POSIX }, async () => {
-	const root = planRoot();
-	const directory = planDirectory(root);
+	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const logPath = path.join(directory, ".herder", "service.log");
 	try {
 		const initial = await ensureService(directory);

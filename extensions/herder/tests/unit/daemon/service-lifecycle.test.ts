@@ -2,41 +2,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { existsSync, rmSync } from "node:fs";
 import test from "node:test";
 import { startHerderService } from "../../../src/daemon/service.ts";
-import { git } from "../../../src/daemon/git-driver.ts";
+import { planFixture } from "../../support/plan-fixture.ts";
 import { serviceOwnershipLockPath } from "../../../src/daemon/service-ownership.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-
-function planRoot(): string {
-	const root = mkdtempSync(path.join(os.tmpdir(), "herder-service-lifecycle-"));
-	git(root, ["init", "-q"]);
-	git(root, ["config", "user.name", "Herder Service Test"]);
-	git(root, ["config", "user.email", "herder-service@example.invalid"]);
-	const planDirectory = path.join(root, "herder-plans");
-	mkdirSync(planDirectory, { recursive: true });
-	writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	git(root, ["add", "."]);
-	git(root, ["commit", "-q", "-m", "test: service lifecycle fixture"]);
-	return root;
-}
 
 async function occupiedPort(): Promise<{ server: net.Server; port: number }> {
 	const server = net.createServer();
@@ -94,8 +65,7 @@ function installActiveConnectionProbe(active: { socket?: net.Socket }): () => vo
 }
 
 test("listen failure releases ownership and startup resources", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	const occupied = await occupiedPort();
 	try {
 		await assert.rejects(
@@ -117,8 +87,7 @@ test("listen failure releases ownership and startup resources", async () => {
 });
 
 test("close removes per-service signal listeners", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	const beforeSigint = process.listenerCount("SIGINT");
 	const beforeSigterm = process.listenerCount("SIGTERM");
 	let service: Awaited<ReturnType<typeof startHerderService>> | undefined;
@@ -136,8 +105,7 @@ test("close removes per-service signal listeners", async () => {
 });
 
 test("failed snapshot startup closes active connections before releasing ownership", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	const active: { socket?: net.Socket } = {};
 	const restoreServerProbe = installActiveConnectionProbe(active);
 	const originalPutSnapshot = RunStore.prototype.putSnapshot;
@@ -162,8 +130,7 @@ test("failed snapshot startup closes active connections before releasing ownersh
 });
 
 test("initial snapshot failure closes the listening server and releases ownership", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	const originalPutSnapshot = RunStore.prototype.putSnapshot;
 	RunStore.prototype.putSnapshot = (_reply: Parameters<RunStore["putSnapshot"]>[0]): void => {
 		throw new Error("forced initial snapshot failure");
@@ -186,8 +153,7 @@ test("initial snapshot failure closes the listening server and releases ownershi
 });
 
 test("scrub failure closes the constructor-owned database", () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	type StoreInternals = { scrubPersistedIntegrationRepairReplies: (this: RunStore) => void };
 	const storeInternals = RunStore.prototype as unknown as StoreInternals;
 	const originalScrub = storeInternals.scrubPersistedIntegrationRepairReplies;

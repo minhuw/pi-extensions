@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -16,36 +15,9 @@ import {
 	waitManagerOperation,
 	waitManagerOperationReliable,
 } from "../../../src/client/index.ts";
-import { git } from "../../../src/daemon/git-driver.ts";
+import { planFixture } from "../../support/plan-fixture.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { MANAGER_PROTOCOL_VERSION } from "../../../src/shared/protocol.ts";
-
-function planRoot(): string {
-	const root = mkdtempSync(path.join(os.tmpdir(), "herder-ensure-service-"));
-	git(root, ["init", "-q"]);
-	git(root, ["config", "user.name", "Herder Client Test"]);
-	git(root, ["config", "user.email", "herder-client@example.invalid"]);
-	const planDirectory = path.join(root, "herder-plans");
-	mkdirSync(planDirectory, { recursive: true });
-	writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	git(root, ["add", "."]);
-	git(root, ["commit", "-q", "-m", "test: client fixture"]);
-	return root;
-}
 
 function fakeServiceProcess(script: string): { pid: number; kill: () => void } {
 	const child = spawn(process.execPath, [script], { detached: true, stdio: "ignore" });
@@ -90,8 +62,7 @@ async function oldProtocolServiceProcess(): Promise<{ pid: number; port: number;
 }
 
 test("detached daemon startup does not invoke Orca host integration", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const command = path.join(root, "fake-orca.cjs");
 	const calls = path.join(root, "orca-calls.log");
 	writeFileSync(command, `#!/usr/bin/env node\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\n`);
@@ -114,8 +85,7 @@ test("detached daemon startup does not invoke Orca host integration", async () =
 });
 
 test("ensureService reuses one daemon for concurrent callers", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		const [first, second] = await Promise.all([ensureService(planDirectory), ensureService(planDirectory)]);
 		assert.equal(second.instanceId, first.instanceId);
@@ -130,8 +100,7 @@ test("ensureService reuses one daemon for concurrent callers", async () => {
 });
 
 test("stable scheduler audits preserve snapshots while health stays responsive", { timeout: 10_000 }, async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		const service = await ensureService(planDirectory);
 		const beforeStore = new RunStore(planDirectory);
@@ -163,8 +132,7 @@ test("stable scheduler audits preserve snapshots while health stays responsive",
 });
 
 test("manager controls use immediate durable submission and polling", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		const service = await ensureService(planDirectory);
 		const started = Date.now();
@@ -185,8 +153,7 @@ test("manager controls use immediate durable submission and polling", async () =
 });
 
 test("reliable submission and wait recovery preserve operation identity without wait-only resubmission", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const originalFetch = globalThis.fetch;
 	let failSubmit = true;
 	let failPoll = true;
@@ -221,8 +188,7 @@ test("reliable submission and wait recovery preserve operation identity without 
 	}
 });
 test("execute recovery replays an accepted operation with the same identity", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const originalFetch = globalThis.fetch;
 	let loseReceipt = true;
 	let operationPosts = 0;
@@ -252,8 +218,7 @@ test("execute recovery replays an accepted operation with the same identity", as
 });
 
 test("execute and wait-only surface durable terminal failures without reconnecting", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const originalFetch = globalThis.fetch;
 	let operationPosts = 0;
 	let operationGets = 0;
@@ -296,10 +261,8 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 	}
 });
 
-
 test("typed manager facade preserves envelopes, supplied IDs, and failures", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		const service = await ensureService(planDirectory);
 		const stopped = await requestManagerOperation(service, "stop", {}, "facade-supplied-stop");
@@ -321,8 +284,7 @@ test("typed manager facade preserves envelopes, supplied IDs, and failures", asy
 });
 
 test("legacy blocking control paths remain authenticated HTTP tombstones", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		const service = await ensureService(planDirectory);
 		for (const pathname of ["/v1/start", "/v1/event", "/v1/edit", "/v1/stop"]) {
@@ -345,8 +307,7 @@ test("legacy blocking control paths remain authenticated HTTP tombstones", async
 	}
 });
 test("ensureService replaces a prior-protocol daemon", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const old = await oldProtocolServiceProcess();
 	try {
 		registerService(planDirectory, old.pid, old.port, old.authToken);
@@ -362,8 +323,7 @@ test("ensureService replaces a prior-protocol daemon", async () => {
 });
 
 test("ensureService replaces a stale registration whose pid is dead", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	try {
 		registerService(planDirectory, 999_999_999);
 		const service = await ensureService(planDirectory, { unresponsiveGraceMs: 1_000 });
@@ -376,8 +336,7 @@ test("ensureService replaces a stale registration whose pid is dead", async () =
 });
 
 test("ensureService waits for a live owner and replaces it only after the grace period", async () => {
-	const root = planRoot();
-	const planDirectory = path.join(root, "herder-plans");
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const script = path.join(root, "herder-stub-service.js");
 	writeFileSync(script, "setInterval(() => {}, 1000);\n");
 	const stub = fakeServiceProcess(script);

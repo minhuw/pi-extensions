@@ -1,41 +1,13 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { stopService } from "../../../src/client/index.ts";
-import { git } from "../../../src/daemon/git-driver.ts";
-
-function planRoot(): { root: string; planDirectory: string } {
-	const root = mkdtempSync(path.join(os.tmpdir(), "herder-dashboard-opening-"));
-	git(root, ["init", "-q"]);
-	git(root, ["config", "user.name", "Herder Dashboard Opening Test"]);
-	git(root, ["config", "user.email", "herder-dashboard-opening@example.invalid"]);
-	const planDirectory = path.join(root, "herder-plans");
-	mkdirSync(planDirectory, { recursive: true });
-	writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	git(root, ["add", "."]);
-	git(root, ["commit", "-q", "-m", "test: dashboard opening fixture"]);
-	return { root, planDirectory };
-}
+import { planFixture } from "../../support/plan-fixture.ts";
 
 test("only explicit user-facing dashboard actions open Orca", async () => {
-	const fixture = planRoot();
+	const fixture = planFixture({ prefix: "herder-dashboard-opening-" });
 	const command = path.join(fixture.root, "fake-orca.cjs");
 	const calls = path.join(fixture.root, "orca-calls.log");
 	writeFileSync(command, `#!/usr/bin/env node\nrequire("node:fs").appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\n`);
