@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { inspectNamespace, validatePlanName } from "../../../src/daemon/git/namespace-run.ts"
 import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
+import { withTemporaryExecutableOnPath } from "../../support/temp-executable.ts"
 
 const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/namespace-run.ts")
 
@@ -28,22 +29,17 @@ function withGitShim<T>(output: string, callback: () => T): T {
   const realGitLink = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
   assert.ok(realGitLink)
   const realGit = fs.realpathSync(realGitLink)
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-namespace-shim-"))
-  const shim = path.join(directory, "git")
   const quotedGit = `'${realGit.replaceAll("'", "'\\\"'\\\"'")}'`
-  fs.writeFileSync(shim, `#!/bin/sh
+  return withTemporaryExecutableOnPath({
+    prefix: "herder-namespace-shim-",
+    script: `#!/bin/sh
 case "$*" in
   *"worktree list --porcelain -z"*)
     ${quotedGit} "$@"; printf '${output.replaceAll("'", "'\\\"'\\\"'")}' ; exit ;;
 esac
 exec ${quotedGit} "$@"
-`)
-  fs.chmodSync(shim, 0o755)
-  process.env.PATH = `${directory}:${originalPath}`
-  try { return callback() } finally {
-    process.env.PATH = originalPath
-    fs.rmSync(directory, { recursive: true, force: true })
-  }
+`,
+  }, callback)
 }
 
 function planBody(id: string): string {

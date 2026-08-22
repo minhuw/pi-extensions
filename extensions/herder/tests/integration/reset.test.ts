@@ -12,6 +12,7 @@ import { ensureService, requestManagerOperation,
 import { resetHerderPlanSet } from "../../src/daemon/git/reset-plan-set.ts";
 import { canonicalWorktreeRoot, legacyWorktreeRoot } from "../../src/daemon/git/worktree-locations.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
+import { withTemporaryExecutableOnPath } from "../support/temp-executable.ts";
 
 function command(cwd: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -22,21 +23,16 @@ function git(cwd: string, ...args: string[]): string { return command(cwd, args)
 function withPathlessWorktree<T>(branch: string, callback: () => T): T {
 	const originalPath = process.env.PATH ?? "";
 	const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'");
-	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-shim-"));
-	const shim = path.join(directory, "git");
-	fs.writeFileSync(shim, `#!/bin/sh
+	return withTemporaryExecutableOnPath({
+		prefix: "herder-reset-shim-",
+		script: `#!/bin/sh
 real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
 case "$*" in
 	*"worktree list --porcelain -z"*) real_git "$@"; printf 'branch refs/heads/${branch}\\0\\0'; exit ;;
 esac
 real_git "$@"
-`);
-	fs.chmodSync(shim, 0o755);
-	process.env.PATH = `${directory}:${originalPath}`;
-	try { return callback(); } finally {
-		process.env.PATH = originalPath;
-		fs.rmSync(directory, { recursive: true, force: true });
-	}
+`,
+	}, callback);
 }
 
 

@@ -12,6 +12,7 @@ import { listHerderBranches, listWorktrees, parseWorktreeRecords } from "../../.
 import { forceCleanupRun } from "../../../src/daemon/git/force-cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
+import { withTemporaryExecutableOnPath } from "../../support/temp-executable.ts"
 
 function git(repo: string, ...args: string[]): string {
   const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" })
@@ -26,8 +27,6 @@ function withGitShim<T>(
   failRemovePath?: string,
 ): T {
   const originalPath = process.env.PATH ?? ""
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-git-shim-"))
-  const shim = path.join(directory, "git")
   const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'")
   const realGit = "real_git"
   const pathless = `branch refs/heads/${branch}`
@@ -40,7 +39,9 @@ function withGitShim<T>(
       ? `  *"worktree remove"*) exit 1 ;;`
       : `  *"worktree remove"*'${failRemovePath.replaceAll("'", "'\\\''")}'*) exit 1 ;;`
     : ""
-  fs.writeFileSync(shim, `#!/bin/sh
+  return withTemporaryExecutableOnPath({
+    prefix: "herder-git-shim-",
+    script: `#!/bin/sh
 real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
 case "$*" in
 ${removeFailure}
@@ -55,13 +56,8 @@ ${removeFailure}
     exit ;;
 esac
 real_git "$@"
-`)
-  fs.chmodSync(shim, 0o755)
-  process.env.PATH = `${directory}:${originalPath}`
-  try { return callback() } finally {
-    process.env.PATH = originalPath
-    fs.rmSync(directory, { recursive: true, force: true })
-  }
+`,
+  }, callback)
 }
 
 function planBody(planId = "001"): string {
