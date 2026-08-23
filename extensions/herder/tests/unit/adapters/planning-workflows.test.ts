@@ -112,7 +112,7 @@ test("typed attention prompts preserve request bindings and route each variant",
 		state: "pending",
 		recovery: {
 			planFingerprint: "d".repeat(64),
-			fingerprintVersion: 1,
+			fingerprintVersion: 2,
 			planFile: "001-plan.md",
 			inScopePaths: ["src/value.mjs"],
 			inScopePathCount: 1,

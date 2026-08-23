@@ -92,6 +92,15 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	};
 	const request = { ...requestBody, requestSha256: attentionRequestSha256(requestBody) };
 	assert.doesNotThrow(() => validateAttentionRequest(request));
+	const legacyRequestBody = {
+		...requestBody,
+		recovery: { ...requestBody.recovery, fingerprintVersion: 1 },
+	};
+	const legacyRequest = {
+		...legacyRequestBody,
+		requestSha256: attentionRequestSha256(legacyRequestBody as unknown as Parameters<typeof attentionRequestSha256>[0]),
+	};
+	assert.throws(() => validateAttentionRequest(legacyRequest), /fingerprint version/);
 	const completeInScopePaths = Array.from({ length: ATTENTION_PATH_LIMIT + 1 }, (_, index) => `src/path-${index}.mjs`);
 	const boundedRecovery = {
 		...requestBody.recovery,

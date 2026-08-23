@@ -235,7 +235,7 @@ export function validateAttentionResolution(value: unknown): asserts value is At
 
 export interface AttentionRecoveryEvidence {
 	planFingerprint: string;
-	fingerprintVersion: 1 | 2;
+	fingerprintVersion: 2;
 	planFile: string;
 	inScopePaths: string[];
 	/** Full path evidence is bounded to ATTENTION_PATH_LIMIT; these bind omitted paths. */
@@ -410,7 +410,7 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 				throw new Error(`Attention recovery ${name} is invalid`);
 			}
 		}
-		if (![1, 2].includes(recovery.fingerprintVersion)
+		if (recovery.fingerprintVersion !== 2
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.planFingerprint)
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.assignmentSha256)
 			|| !/^[0-9a-f]{40,64}$/i.test(recovery.snapshotSha256)

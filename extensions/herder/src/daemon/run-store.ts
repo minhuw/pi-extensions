@@ -99,7 +99,7 @@ export interface StoredPlanSpec {
 	graphGeneration: number;
 	planId: string;
 	planFingerprint: string;
-	fingerprintVersion: 1 | 2;
+	fingerprintVersion: 2;
 	ordinal: number;
 	title: string;
 	priority: string;
@@ -704,12 +704,14 @@ function rowToPlan(row: Record<string, unknown>): StoredPlan {
 }
 
 function rowToPlanSpec(row: Record<string, unknown>): StoredPlanSpec {
+	const fingerprintVersion = Number(row.fingerprint_version);
+	if (fingerprintVersion !== 2) throw new Error("Stored plan specification fingerprint version is invalid");
 	return {
 		runId: String(row.run_id),
 		graphGeneration: Number(row.graph_generation),
 		planId: String(row.plan_id),
 		planFingerprint: String(row.plan_fingerprint),
-		fingerprintVersion: Number(row.fingerprint_version) as StoredPlanSpec["fingerprintVersion"],
+		fingerprintVersion: 2,
 		ordinal: Number(row.ordinal),
 		title: String(row.title),
 		priority: String(row.priority),

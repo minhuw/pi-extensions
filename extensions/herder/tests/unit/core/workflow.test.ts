@@ -250,6 +250,28 @@ test("summarizeRun maps shared lifecycle readiness back to specs", () => {
 	assert.equal(overview.done, 1);
 	assert.equal(overview.complete, false);
 });
+test("getPlanSpecs rejects persisted v1 fingerprint rows", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-v1-fingerprint-"));
+	try {
+		const planDir = writePlanDir(root, "TODO");
+		const store = new RunStore(planDir);
+		try {
+			const runId = createRun(store, planDir);
+			store.putPlanSpecs([spec(runId)]);
+			store.database.prepare(`
+				UPDATE manager_plan_specs
+				SET fingerprint_version = 1
+				WHERE run_id = ? AND graph_generation = 1 AND plan_id = ?
+			`).run(runId, "001");
+			assert.throws(() => store.getPlanSpecs(runId, 1), /fingerprint version/);
+		} finally {
+			store.close();
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("readPlanLifecycle falls back to README when no run exists", () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-norun-"));
 	try {

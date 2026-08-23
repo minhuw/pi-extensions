@@ -463,18 +463,14 @@ function compilePlanSpecs(input: {
 		const snapshot = snapshots[ordinal]!;
 		const assignment = compiledAssignmentEntry(snapshot);
 		const prior = previous.get(plan.id);
-		const fingerprintVersion = prior?.fingerprintVersion ?? 2;
 		const semantic = {
-			...(fingerprintVersion === 2 ? { fingerprintVersion: 2 } : {}),
+			fingerprintVersion: 2,
 			planId: plan.id,
 			title: plan.title,
 			priority: plan.priority,
 			effort: plan.effort,
 			kind: plan.kind,
 			dependencies: plan.dependencies,
-			// Preserve schema-7 fingerprint identity for existing generations without
-			// ever executing the legacy Markdown-derived commands.
-			...(fingerprintVersion === 1 ? { gateCommands: prior?.gateCommands ?? [] } : {}),
 			planFile: path.basename(plan.file),
 			assignment,
 		};
@@ -483,7 +479,7 @@ function compilePlanSpecs(input: {
 			graphGeneration: input.graphGeneration,
 			planId: plan.id,
 			planFingerprint: sha256(stableJson(semantic)),
-			fingerprintVersion,
+			fingerprintVersion: 2,
 			ordinal,
 			title: plan.title,
 			priority: plan.priority,
