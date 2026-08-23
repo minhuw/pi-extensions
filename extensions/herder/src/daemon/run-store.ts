@@ -704,8 +704,7 @@ function rowToPlan(row: Record<string, unknown>): StoredPlan {
 }
 
 function rowToPlanSpec(row: Record<string, unknown>): StoredPlanSpec {
-	const fingerprintVersion = Number(row.fingerprint_version);
-	if (fingerprintVersion !== 2) throw new Error("Stored plan specification fingerprint version is invalid");
+	if (row.fingerprint_version !== 2) throw new Error("Stored plan specification fingerprint version is invalid");
 	return {
 		runId: String(row.run_id),
 		graphGeneration: Number(row.graph_generation),

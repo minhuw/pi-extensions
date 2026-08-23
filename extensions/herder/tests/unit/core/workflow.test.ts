@@ -250,19 +250,26 @@ test("summarizeRun maps shared lifecycle readiness back to specs", () => {
 	assert.equal(overview.done, 1);
 	assert.equal(overview.complete, false);
 });
-test("getPlanSpecs rejects persisted v1 fingerprint rows", () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-v1-fingerprint-"));
+test("getPlanSpecs rejects persisted non-v2 fingerprint rows", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-fingerprint-"));
 	try {
 		const planDir = writePlanDir(root, "TODO");
 		const store = new RunStore(planDir);
 		try {
 			const runId = createRun(store, planDir);
 			store.putPlanSpecs([spec(runId)]);
+			store.database.exec("PRAGMA ignore_check_constraints = ON");
 			store.database.prepare(`
 				UPDATE manager_plan_specs
-				SET fingerprint_version = 1
+				SET fingerprint_version = ?
 				WHERE run_id = ? AND graph_generation = 1 AND plan_id = ?
-			`).run(runId, "001");
+			`).run(1, runId, "001");
+			assert.throws(() => store.getPlanSpecs(runId, 1), /fingerprint version/);
+			store.database.prepare(`
+				UPDATE manager_plan_specs
+				SET fingerprint_version = ?
+				WHERE run_id = ? AND graph_generation = 1 AND plan_id = ?
+			`).run("0x2", runId, "001");
 			assert.throws(() => store.getPlanSpecs(runId, 1), /fingerprint version/);
 		} finally {
 			store.close();
