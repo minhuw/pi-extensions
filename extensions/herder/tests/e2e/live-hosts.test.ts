@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stopService } from "../../src/client/index.ts";
-import { readManagerState } from "../../src/daemon/execution-store.ts";
+import { readManagerState } from "../../src/daemon/run-store.ts";
 
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureScript = path.join(extensionRoot, "tests/e2e/support/live-manager-fixture.ts");

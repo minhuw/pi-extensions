@@ -7,7 +7,8 @@ import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
-import { readManagerState, readUsageState } from "../../../src/daemon/execution-store.ts"
+import { readUsageState } from "../../../src/daemon/execution-store.ts"
+import { readManagerState } from "../../../src/daemon/run-store.ts"
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts"
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))

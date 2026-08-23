@@ -11,13 +11,13 @@ import {
 	executionAuthorityHandoffReady,
 	executionDatabasePath,
 	executionReport,
-	readManagerState,
 	readUsageState,
 	recordUsageRecord,
 	executionRotationMarkerIdentity,
 	executionRotationMarkerPath,
 	openExecutionDatabase,
 } from "../../../src/daemon/execution-store.ts";
+import { readManagerState } from "../../../src/daemon/run-store.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
 function seedManagerRun(
