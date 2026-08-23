@@ -732,7 +732,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastManagerMessage = displayed.message;
 		const repairBinding = bindIntegrationRepair(reply);
 		const repair = repairBinding?.request;
-		const currentMainSessionId = lastContext ? piSessionId(lastContext) : "";
+		const currentMainSessionId = repair?.ownerSessionId && lastContext ? piSessionId(lastContext) : "";
 		const recovery = classifyVerificationRecovery(repair, currentMainSessionId);
 		const verificationFailure = ( /verification/i.test(displayed.message)
 			&& (displayed.status === "failed" || recovery.actionable))
