@@ -92,7 +92,7 @@ test("live Pi/Poorman run", { skip: !enabled, timeout: timeout + 60_000 }, async
 		execFileSync(process.execPath, [fixtureScript, "create", workspace], { cwd: extensionRoot, stdio: "pipe" });
 		const fixture = JSON.parse(readFileSync(path.join(workspace, "fixture.json"), "utf8"));
 		await invokePi(fixture.repository, fixture.planDirectory, logFile);
-		execFileSync(process.execPath, [fixtureScript, "verify", workspace, "--host", "pi", "--profile", "poorman"], {
+		execFileSync(process.execPath, [fixtureScript, "verify", workspace, "--profile", "poorman"], {
 			cwd: extensionRoot,
 			stdio: "pipe",
 			timeout: 60_000,

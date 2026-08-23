@@ -14,7 +14,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "../../..")
 
 type FixtureCommand = "create" | "verify"
-interface FixtureOptions { command: FixtureCommand; workspace: string; host: string; profile: string }
+interface FixtureOptions { command: FixtureCommand; workspace: string; profile: string }
 interface RunOptions { cwd?: string; allowFailure?: boolean }
 interface FixtureRecord { repository: string; planDirectory: string; originalHead: string; pluginRoot: string }
 interface ResolvedProfileRecord {
@@ -41,19 +41,18 @@ function run(command: string, args: string[], options: RunOptions = {}): SpawnSy
 
 function parse(argv: string[]): FixtureOptions {
   const command = argv.shift()
-  if (!command || !new Set(["create", "verify"]).has(command)) fail("usage: live-manager-fixture.ts create|verify <workspace> [--host name] [--profile name]")
+  if (!command || !new Set(["create", "verify"]).has(command)) fail("usage: live-manager-fixture.ts create|verify <workspace> [--profile name]")
   const workspace = argv.shift()
   if (!workspace) fail("workspace is required")
-  const options: FixtureOptions = { command: command as FixtureCommand, workspace: path.resolve(workspace), host: "", profile: "" }
+  const options: FixtureOptions = { command: command as FixtureCommand, workspace: path.resolve(workspace), profile: "" }
   while (argv.length) {
     const option = argv.shift()
-    if (!option || !["--host", "--profile"].includes(option)) fail(`unknown option: ${option}`)
+    if (!option || option !== "--profile") fail(`unknown option: ${option}`)
     const value = argv.shift()
     if (!value) fail(`${option} requires a value`)
-    if (option === "--host") options.host = value
-    else options.profile = value
+    options.profile = value
   }
-  if (command === "verify" && (!options.host || !options.profile)) fail("verify requires --host and --profile")
+  if (command === "verify" && !options.profile) fail("verify requires --profile")
   return options
 }
 
@@ -121,7 +120,7 @@ None.
 
 ## Why this matters
 
-The fixture provides a tiny, deterministic behavioral change that every supported host can implement and independently review without dependencies or network access.
+The fixture provides a tiny, deterministic behavioral change that the Pi host can implement and independently review without dependencies or network access.
 
 ### Accepted decisions
 
@@ -212,18 +211,18 @@ Keep this fixture deliberately small so host-transport failures remain distingui
   process.stdout.write(`${JSON.stringify({ ok: true, repository, planDirectory, originalHead, pluginRoot: PLUGIN_ROOT }, null, 2)}\n`)
 }
 
-async function verifyFixture(workspace: string, host: string, profile: string): Promise<void> {
+async function verifyFixture(workspace: string, profile: string): Promise<void> {
   const fixture = JSON.parse(fs.readFileSync(path.join(workspace, "fixture.json"), "utf8")) as FixtureRecord
   const resolvedProfile = JSON.parse(run(process.execPath, [
     path.join(PLUGIN_ROOT, "src", "core", "profile-registry.ts"),
-    "resolve", "--host", host, "--profile", profile,
+    "resolve", "--profile", profile,
   ], { cwd: PLUGIN_ROOT }).stdout) as ResolvedProfileRecord
   const graph = buildGraph(fixture.planDirectory)
   assert.equal(graph.complete, true)
   assert.equal(graph.counts.done, 1)
   const manager = readManagerState(fixture.planDirectory)
   assert.equal(manager.run?.status, "complete")
-  assert.equal(manager.run?.host, host)
+  assert.equal(manager.run?.host, "pi")
   assert.equal(manager.run?.profile, profile)
   assert.equal(manager.actions.some((action) => action.role === "plan-judge"), false)
   assert.equal(manager.actions.filter((action) => action.role === "plan-implementer").length, 1)
@@ -253,22 +252,20 @@ async function verifyFixture(workspace: string, host: string, profile: string): 
   assert.match(dashboardUrl, /^https?:\/\//)
   const health = await fetch(new URL("api/health", dashboardUrl))
   assert.equal(health.status, 200)
-  if (host === "pi") {
-    assert.equal(fs.existsSync(path.join(fixture.repository, ".pi-subagents")), false)
-    const sessionRoot = path.join(fixture.planDirectory, ".herder", "pi-sessions")
-    const sessionFiles = fs.readdirSync(sessionRoot).filter((file) => file.endsWith(".jsonl"))
-    assert.equal(sessionFiles.length, 3)
-    for (const file of sessionFiles) {
-      const [firstLine] = fs.readFileSync(path.join(sessionRoot, file), "utf8").split("\n")
-      const header = JSON.parse(firstLine)
-      assert.equal(header.type, "session")
-      assert.equal(header.parentSession, undefined)
-      assert.match(header.cwd, /[/\\]\.herder[/\\]worktrees[/\\]/)
-    }
+  assert.equal(fs.existsSync(path.join(fixture.repository, ".pi-subagents")), false)
+  const sessionRoot = path.join(fixture.planDirectory, ".herder", "pi-sessions")
+  const sessionFiles = fs.readdirSync(sessionRoot).filter((file) => file.endsWith(".jsonl"))
+  assert.equal(sessionFiles.length, 3)
+  for (const file of sessionFiles) {
+    const [firstLine] = fs.readFileSync(path.join(sessionRoot, file), "utf8").split("\n")
+    const header = JSON.parse(firstLine)
+    assert.equal(header.type, "session")
+    assert.equal(header.parentSession, undefined)
+    assert.match(header.cwd, /[/\\]\.herder[/\\]worktrees[/\\]/)
   }
   process.stdout.write(`${JSON.stringify({
     ok: true,
-    host,
+    host: "pi",
     profile,
     runId: manager.run!.runId,
     dashboardUrl,
@@ -279,4 +276,4 @@ async function verifyFixture(workspace: string, host: string, profile: string): 
 
 const options = parse(process.argv.slice(2))
 if (options.command === "create") createFixture(options.workspace)
-else await verifyFixture(options.workspace, options.host, options.profile)
+else await verifyFixture(options.workspace, options.profile)
