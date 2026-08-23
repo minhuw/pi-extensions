@@ -1,6 +1,4 @@
-function record(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
+import { record } from "./usage-accounting.ts";
 
 export interface AssistantResult {
 	text?: string;

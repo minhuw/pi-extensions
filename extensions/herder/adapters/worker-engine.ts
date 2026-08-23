@@ -32,12 +32,9 @@ import {
 } from "./nested-agent-executor.ts";
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { loadHerderPiRole, PONYTAIL_EXTENSION_SOURCE } from "./role-config.ts";
-import { assistantText, finalAssistantResult, responseActivity } from "./assistant-message.ts";
-import {
-	messageUsageTokens,
-	record,
-	sessionUsageTotals,
-} from "./usage-accounting.ts";
+import { finalAssistantResult } from "./assistant-message.ts";
+import { cloneSessionSnapshot, observeSessionEvent } from "./session-telemetry.ts";
+import { record, sessionUsageTotals } from "./usage-accounting.ts";
 export { finalAssistantResult };
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
@@ -224,11 +221,6 @@ export function trustedRoleExtensionEntry(agentDir: string, installed: string, s
 	}
 	return realEntry;
 }
-
-function cloneNested(agent: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
-	return { ...agent, activeTools: [...agent.activeTools] };
-}
-
 
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
@@ -484,9 +476,8 @@ export class PiWorkerEngine {
 	snapshots(): PiWorkerSnapshot[] {
 		return [...this.workers.values()]
 			.map((worker) => ({
-				...worker.snapshot,
-				activeTools: [...worker.snapshot.activeTools],
-				children: worker.snapshot.children.map(cloneNested),
+				...cloneSessionSnapshot(worker.snapshot),
+				children: worker.snapshot.children.map(cloneSessionSnapshot),
 			}))
 			.sort((left, right) => left.startedAt - right.startedAt || left.handle.localeCompare(right.handle));
 	}
@@ -500,61 +491,6 @@ export class PiWorkerEngine {
 		for (const listener of this.updates) listener(snapshot);
 	}
 
-	private refreshContext(worker: WorkerRecord): void {
-		const stats = worker.session.getSessionStats();
-		worker.snapshot.contextPercent = stats.contextUsage?.percent ?? null;
-	}
-
-	private syncTopActivity(worker: WorkerRecord): void {
-		worker.snapshot.activeTools = [...worker.activeToolCalls.values()];
-		worker.snapshot.activity = worker.snapshot.activeTools[0] ?? responseActivity(worker.snapshot.responseText);
-	}
-
-	private observe(worker: WorkerRecord, event: AgentSessionEvent): void {
-		let changed = false;
-		if (event.type === "agent_start") {
-			worker.snapshot.status = "running";
-			changed = true;
-		} else if (event.type === "turn_start") {
-			worker.snapshot.turns += 1;
-			changed = true;
-		} else if (event.type === "message_start" && event.message.role === "assistant") {
-			delete worker.snapshot.responseText;
-			this.syncTopActivity(worker);
-		} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-			worker.snapshot.responseText = (worker.snapshot.responseText ?? "") + event.assistantMessageEvent.delta;
-			this.syncTopActivity(worker);
-			// Keep token streaming cheap; the next meaningful state/stat event emits.
-		} else if (event.type === "tool_execution_start") {
-			worker.snapshot.toolUses += 1;
-			worker.activeToolCalls.set(event.toolCallId, event.toolName);
-			this.syncTopActivity(worker);
-			changed = true;
-		} else if (event.type === "tool_execution_end") {
-			worker.activeToolCalls.delete(event.toolCallId);
-			this.syncTopActivity(worker);
-			changed = true;
-		} else if (event.type === "compaction_start") {
-			worker.snapshot.activity = "compacting";
-			changed = true;
-		} else if (event.type === "compaction_end") {
-			if (!event.aborted && event.result) worker.snapshot.compactionCount += 1;
-			this.syncTopActivity(worker);
-			changed = true;
-		}
-		if (event.type === "message_end" && record(event.message)?.role === "assistant") {
-			worker.snapshot.lifetimeTokens += messageUsageTokens(record(event.message)?.usage);
-			const text = assistantText(event.message);
-			if (text !== undefined) worker.snapshot.responseText = text;
-			this.syncTopActivity(worker);
-			this.refreshContext(worker);
-			changed = true;
-		} else if (event.type === "agent_end" || event.type === "agent_settled") {
-			this.refreshContext(worker);
-			changed = true;
-		}
-		if (changed) this.emitUpdate();
-	}
 
 	async prepare(request: PiWorkerRequest): Promise<string> {
 		if ([...this.workers.values()].some((worker) => worker.request.action.actionId === request.action.actionId)) {
@@ -607,9 +543,11 @@ export class PiWorkerEngine {
 			started: false,
 			stopRequested: false,
 		} satisfies WorkerRecord;
-		worker.unsubscribe = session.subscribe((event) => this.observe(worker, event));
+		worker.unsubscribe = session.subscribe((event) => {
+			if (observeSessionEvent(worker, event, () => { worker.snapshot.status = "running"; })) this.emitUpdate();
+		});
 		worker.unsubscribeNested = nested.onUpdate((children) => {
-			worker.snapshot.children = children.map(cloneNested);
+			worker.snapshot.children = children.map(cloneSessionSnapshot);
 			this.emitUpdate();
 		});
 		this.workers.set(handle, worker);

@@ -8,8 +8,9 @@ import {
 	type HerderNestedAgentType,
 	type NestedAgentModelBinding,
 } from "./role-config.ts";
-import { assistantText, decodeAssistantResult, responseActivity } from "./assistant-message.ts";
-import { messageUsageTokens, record, sessionUsageTotals } from "./usage-accounting.ts";
+import { decodeAssistantResult } from "./assistant-message.ts";
+import { cloneSessionSnapshot, observeSessionEvent } from "./session-telemetry.ts";
+import { sessionUsageTotals } from "./usage-accounting.ts";
 
 export type HerderNestedAgentStatus = "running" | "completed" | "aborted" | "stopped" | "error";
 
@@ -122,10 +123,6 @@ function usageFromSession(session: NestedWorkerSession): NestedAgentUsage {
 	};
 }
 
-function cloneSnapshot(snapshot: PiNestedAgentSnapshot): PiNestedAgentSnapshot {
-	return { ...snapshot, activeTools: [...snapshot.activeTools] };
-}
-
 function forwardAbort(source: AbortSignal | undefined, target: AbortController): () => void {
 	if (!source) return () => {};
 	const abort = () => target.abort(source.reason);
@@ -211,7 +208,7 @@ export class HerderNestedAgentScope {
 
 	snapshots(): PiNestedAgentSnapshot[] {
 		return [...this.records.values()]
-			.map((item) => cloneSnapshot(item.snapshot))
+			.map((item) => cloneSessionSnapshot(item.snapshot))
 			.sort((left, right) => left.startedAt - right.startedAt || left.agentId.localeCompare(right.agentId));
 	}
 
@@ -245,58 +242,6 @@ export class HerderNestedAgentScope {
 		for (const listener of this.listeners) listener(snapshots);
 	}
 
-	private refreshActivity(item: NestedRecord): void {
-		item.snapshot.activeTools = [...item.activeToolCalls.values()];
-		item.snapshot.activity = item.snapshot.activeTools[0] ?? responseActivity(item.snapshot.responseText);
-	}
-
-	private refreshContext(item: NestedRecord): void {
-		if (!item.session) return;
-		item.snapshot.contextPercent = item.session.getSessionStats().contextUsage?.percent ?? null;
-	}
-
-	private observe(item: NestedRecord, event: AgentSessionEvent): void {
-		let changed = false;
-		if (event.type === "turn_start") {
-			item.snapshot.turns += 1;
-			changed = true;
-		} else if (event.type === "message_start" && event.message.role === "assistant") {
-			delete item.snapshot.responseText;
-			this.refreshActivity(item);
-		} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-			item.snapshot.responseText = (item.snapshot.responseText ?? "") + event.assistantMessageEvent.delta;
-			this.refreshActivity(item);
-		} else if (event.type === "tool_execution_start") {
-			item.snapshot.toolUses += 1;
-			item.activeToolCalls.set(event.toolCallId, event.toolName);
-			this.refreshActivity(item);
-			changed = true;
-		} else if (event.type === "tool_execution_end") {
-			item.activeToolCalls.delete(event.toolCallId);
-			this.refreshActivity(item);
-			changed = true;
-		} else if (event.type === "compaction_start") {
-			item.snapshot.activity = "compacting";
-			changed = true;
-		} else if (event.type === "compaction_end") {
-			if (!event.aborted && event.result) item.snapshot.compactionCount += 1;
-			this.refreshActivity(item);
-			changed = true;
-		}
-		if (event.type === "message_end" && record(event.message)?.role === "assistant") {
-			item.snapshot.lifetimeTokens += messageUsageTokens(record(event.message)?.usage);
-			const text = assistantText(event.message);
-			if (text !== undefined) item.snapshot.responseText = text;
-			this.refreshActivity(item);
-			this.refreshContext(item);
-			changed = true;
-		} else if (event.type === "agent_end" || event.type === "agent_settled") {
-			this.refreshContext(item);
-			changed = true;
-		}
-		if (changed) this.emitUpdate();
-	}
-
 	async run(request: NestedAgentRunRequest, signal?: AbortSignal): Promise<NestedAgentResult> {
 		const launch = await this.launch(request, false, signal);
 		return (await this.result(launch.id, true, signal)).result!;
@@ -312,7 +257,7 @@ export class HerderNestedAgentScope {
 		if (wait && !item.result) await waitWithSignal(item.promise, signal);
 		if (item.result) item.collected = true;
 		return {
-			snapshot: cloneSnapshot(item.snapshot),
+			snapshot: cloneSessionSnapshot(item.snapshot),
 			...(item.result ? { result: item.result } : {}),
 		};
 	}
@@ -368,7 +313,7 @@ export class HerderNestedAgentScope {
 			item.promise = this.execute(item, request, definition, signal)
 				.finally(releaseConcurrency);
 			void item.promise.catch(() => {});
-			return { id, snapshot: cloneSnapshot(snapshot) };
+			return { id, snapshot: cloneSessionSnapshot(snapshot) };
 		} catch (error) {
 			releaseConcurrency();
 			throw error;
@@ -405,7 +350,9 @@ export class HerderNestedAgentScope {
 				detachSessionAbort = () => childController.signal.removeEventListener("abort", abortSession);
 			}
 			childController.signal.throwIfAborted();
-			unsubscribe = session.subscribe((event) => this.observe(item, event));
+			unsubscribe = session.subscribe((event) => {
+				if (observeSessionEvent(item, event)) this.emitUpdate();
+			});
 			await session.prompt(request.prompt, { expandPromptTemplates: false, source: "extension" });
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
