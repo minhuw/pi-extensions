@@ -49,6 +49,7 @@ import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
+import { classifyVerificationRecovery } from "./verification-recovery.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
@@ -550,16 +551,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		const repair = failure.repair;
 		const currentMainSessionId = lastContext ? piSessionId(lastContext) : "";
-		const strandedRepair = Boolean(repair && ["active", "committing", "committed", "interrupted"].includes(repair.state));
-		const ownerMismatch = Boolean(repair && (
-			(repair.ownerSessionId && repair.ownerSessionId !== currentMainSessionId)
-			|| (strandedRepair && !repair.ownerSessionId)
-		));
-		const ambiguityDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
-		const roundLimitReached = Boolean(repair && (
-			(repair.classification === "code_defect" && (repair.acceptedCodeRounds ?? repair.round) >= repair.maxRounds)
-			|| (repair.classification === "transient" && repair.transientRetryUsed && ["available", "failed"].includes(repair.state))
-		));
+		const recovery = classifyVerificationRecovery(repair, currentMainSessionId);
 		const logPath = failure.detail.match(/\(log ([^)]+)\)/)?.[1] || "the verification failure detail";
 		const verification = repair ? verificationRequests.get(repair.requestId) : undefined;
 		const integrationWorktree = repair?.integrationWorktree || verification?.integrationWorktree || "unavailable: manager did not provide the recorded integration worktree";
@@ -567,7 +559,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const integrationHead = repair ? repair.currentCommit || repair.parentCommit : "unknown";
 		const integrationTree = repair?.currentTree || verification?.integrationTree || "unknown";
 		const gateJson = (repair?.canonicalGates || repair?.failedGates || []).map((gate) => JSON.stringify(gate)).join("\n");
-		const prompt = ownerMismatch
+		const prompt = recovery.kind === "owner_mismatch"
 			? [
 				"HERDER_MAIN_SESSION_VERIFICATION_REPAIR_OWNER_V1",
 				"The recorded integration-repair capability belongs to a different main Pi session and cannot be used by this session.",
@@ -582,10 +574,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`LOG_PATH: ${logPath}`,
 				"Do not call herder_integration_repair, edit the integration worktree, or claim recovery. Ask the user to recover the former session or choose an explicit operator/corrective-plan path.",
 			].join("\n")
-			: roundLimitReached || ambiguityDecision
+			: recovery.kind === "decision_required"
 			? [
 				"HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1",
-				ambiguityDecision
+				recovery.ambiguity
 					? `The authoritative failure is durably classified as ${repair!.classification}. No writable repair capability was opened; an explicit user decision is required.`
 					: "The bounded automatic verification-recovery allowance has been exhausted. Herder has paused the run for an explicit user decision and will not open another automatic capability for this failure.",
 				`RUN_ID: ${failure.runId}`,
@@ -600,7 +592,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				"Read the recorded log and ask the user whether to stop, defer, or continue through an explicitly revised/corrective plan. Do not call herder_integration_repair begin again, do not claim success, and do not execute Herder verification commands yourself.",
 				"/herder-resume remains operator recovery for a durable paused run; ordinary deterministic defects no longer require graph revision before the bounded rounds are exhausted, but this exhausted state requires the user's choice.",
 			].join("\n")
-			: repair
+			: recovery.kind === "recoverable" && repair
 				? [
 					"HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1",
 					"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
@@ -740,22 +732,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastManagerMessage = displayed.message;
 		const repairBinding = bindIntegrationRepair(reply);
 		const repair = repairBinding?.request;
-		const actionableRepair = Boolean(repair && ["available", "failed", "paused"].includes(repair.state));
-		const strandedRepair = Boolean(repair && ["active", "committing", "committed", "interrupted"].includes(repair.state));
-		const repairOwnerMismatch = Boolean(repair && (
-			(repair.ownerSessionId && repair.ownerSessionId !== (lastContext ? piSessionId(lastContext) : ""))
-			|| (strandedRepair && !repair.ownerSessionId)
-		));
-		const repairNeedsDecision = Boolean(repair && ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(repair.classification || ""));
-		const repairAtLimit = Boolean(repair && (
-			(repair.classification === "code_defect" && (repair.acceptedCodeRounds ?? repair.round) >= repair.maxRounds)
-			|| (repair.classification === "transient" && repair.transientRetryUsed && ["available", "failed"].includes(repair.state))
-		));
+		const currentMainSessionId = lastContext ? piSessionId(lastContext) : "";
+		const recovery = classifyVerificationRecovery(repair, currentMainSessionId);
 		const verificationFailure = ( /verification/i.test(displayed.message)
-			&& (displayed.status === "failed" || actionableRepair))
-			|| Boolean(repair && actionableRepair)
-			|| repairOwnerMismatch
-			|| repairNeedsDecision;
+			&& (displayed.status === "failed" || recovery.actionable))
+			|| Boolean(repair && recovery.actionable)
+			|| recovery.ownerMismatch
+			|| recovery.ambiguity;
 		if (verificationFailure) {
 			const failureKey = `${reply.runId}:${repair?.episodeId || repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
 			pendingVerificationFailure = {
@@ -769,9 +752,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (!notifiedVerificationFailures.has(failureKey)) {
 				notifiedVerificationFailures.add(failureKey);
 				lastContext?.ui.notify(
-					repairOwnerMismatch
+					recovery.ownerMismatch
 						? `Herder final verification recovery belongs to another main session; operator recovery is required.`
-						: ((repairAtLimit || repairNeedsDecision)
+						: ((recovery.atLimit || recovery.ambiguity)
 							? `Herder final verification recovery requires an explicit user decision.`
 						: `Herder final verification failed: ${displayed.message}\nAutomatic request-bound recovery is available; Use /herder-resume for operator recovery.`),
 					"error",
