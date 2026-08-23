@@ -138,7 +138,7 @@ async function runTool(args: JsonObject): Promise<unknown> {
 }
 
 export function attentionResolutionFromArgs(args: JsonObject): AttentionResolutionInput {
-	const nested = args.resolution ?? args.attention;
+	const nested = args.attention;
 	if (nested && typeof nested === "object" && !Array.isArray(nested)) {
 		return { ...nested, schemaVersion: 1 } as AttentionResolutionInput;
 	}
@@ -149,8 +149,8 @@ export function attentionResolutionFromArgs(args: JsonObject): AttentionResoluti
 async function submitTool(args: JsonObject): Promise<unknown> {
 	const directory = planDirectory(args);
 	const kind = requiredString(args, "kind");
-	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
-	const attentionKind = kind === "attention" || kind === "attention_resolution";
+	if (!["dispatch_results", "terminals", "user_input", "attention"].includes(kind)) throw new Error(`Unknown submit kind: ${kind}`);
+	const attentionKind = kind === "attention";
 	const attentionRequestId = kind === "user_input"
 		? requiredString(args, "attentionRequestId")
 		: attentionKind ? String((attentionResolutionFromArgs(args) as { requestId?: unknown }).requestId || "") : undefined;

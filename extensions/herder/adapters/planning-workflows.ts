@@ -236,8 +236,6 @@ export function registerPiPlanningWorkflows(
 			rationale: Type.Optional(Type.String()),
 			continuation: Type.Optional(Type.Object({ role: Type.String(), phase: Type.String() })),
 			git: Type.Optional(Type.Any()),
-			gitIdentity: Type.Optional(Type.Any()),
-			recovery: Type.Optional(Type.Any()),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {

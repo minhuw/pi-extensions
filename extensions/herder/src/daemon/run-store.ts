@@ -1276,8 +1276,8 @@ export class RunStore {
 		for (const row of rows) {
 			try {
 				const payload = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
-				if (payload.kind !== "attention" && payload.kind !== "attention_resolution") continue;
-				const resolution = payload.attention ?? payload.resolution;
+				if (payload.kind !== "attention") continue;
+				const resolution = payload.attention;
 				if (!resolution || typeof resolution !== "object" || Array.isArray(resolution)) continue;
 				if (String((resolution as { requestId?: unknown }).requestId || "") !== requestId) continue;
 				const action = String((resolution as { action?: unknown }).action || "").trim().toLowerCase().replace(/[- ]+/g, "_");

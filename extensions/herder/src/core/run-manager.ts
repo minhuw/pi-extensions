@@ -106,14 +106,12 @@ interface ReigniteInput {
 
 interface EventInput {
 	eventId: string;
-	kind: "dispatch_results" | "terminals" | "user_input" | "attention" | "attention_resolution";
+	kind: "dispatch_results" | "terminals" | "user_input" | "attention";
 	dispatchResults?: DispatchResult[];
 	terminals?: TerminalEvent[];
 	userInput?: string;
 	attentionRequestId?: string;
 	attention?: AttentionResolutionInput;
-	/** Alias used by older application callers. */
-	resolution?: AttentionResolutionInput;
 }
 
 interface PlanEditInput {
@@ -206,7 +204,7 @@ function validateEventInput(input: EventInput): void {
 	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:")) {
 		throw new Error("Manager cleanup evidence event IDs are private");
 	}
-	if (!["dispatch_results", "terminals", "user_input", "attention", "attention_resolution"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
+	if (!["dispatch_results", "terminals", "user_input", "attention"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
 	if (input.kind === "dispatch_results") {
 		if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
 		const seen = new Set<string>();
@@ -232,10 +230,9 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind === "user_input" && !input.attentionRequestId) {
 		throw new Error("user_input requires attentionRequestId");
 	}
-	if (input.kind === "attention" || input.kind === "attention_resolution") {
-		const resolution = input.attention ?? input.resolution;
-		if (!resolution) throw new Error("attention requires a resolution payload");
-		validateAttentionResolution(resolution);
+	if (input.kind === "attention") {
+		if (!input.attention) throw new Error("attention requires a resolution payload");
+		validateAttentionResolution(input.attention);
 	}
 	if (input.attentionRequestId !== undefined
 		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
@@ -244,7 +241,7 @@ function validateEventInput(input: EventInput): void {
 	if (input.kind !== "user_input" && input.attentionRequestId !== undefined) {
 		throw new Error("attentionRequestId is only valid for user_input");
 	}
-	if (input.kind !== "attention" && input.kind !== "attention_resolution" && (input.attention !== undefined || input.resolution !== undefined)) {
+	if (input.kind !== "attention" && input.attention !== undefined) {
 		throw new Error("attention resolution is only valid for attention events");
 	}
 }
@@ -2200,7 +2197,7 @@ export class HerderRunManager {
 		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults ?? []));
 		else if (input.kind === "terminals") await this.applyTerminals(input.terminals ?? []);
 		else if (input.kind === "user_input") this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
-		else await this.applyAttentionResolution(input.attention ?? input.resolution!);
+		else await this.applyAttentionResolution(input.attention!);
 		const current = this.store.getRun()!;
 		const drift = this.graphDrift(current);
 		if (drift.changed) {
@@ -2750,7 +2747,7 @@ export class HerderRunManager {
 			throw new Error(`Recovery target ${attention.planId} has no blocked runtime record`);
 		}
 		const expected = recoveryIdentityFromRequest(attention);
-		const supplied = resolution.git ?? resolution.gitIdentity ?? resolution.recovery;
+		const supplied = resolution.git;
 		if (!expected || !supplied || !sameRecoveryIdentity(expected, supplied)) {
 			throw new Error(`Recovery request ${attention.requestId} is not bound to its recorded Git identity`);
 		}
@@ -3490,7 +3487,6 @@ export class HerderRunManager {
 			message: planEdit
 				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
 				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
-			...(nextAttention?.question ? { question: nextAttention.question } : {}),
 			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
