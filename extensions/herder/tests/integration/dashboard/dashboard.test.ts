@@ -13,7 +13,7 @@ import type { UsageRecord, UsageRecordInput } from "../../../src/daemon/executio
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
 import { attentionRequestSha256, sha256 } from "../../../src/shared/protocol.ts"
-import { buildDashboardState, buildForecast, derivePlanPhase, parseLease, parseWorktreeList } from "../../../src/dashboard/dashboard-state.ts"
+import { buildDashboardState, buildForecast, derivePlanPhase, parseLease } from "../../../src/dashboard/dashboard-state.ts"
 import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
 import { createDashboardServer, parseDashboardArguments } from "../../../src/dashboard/herder-dashboard.ts"
 
@@ -275,6 +275,9 @@ function createFixture() {
   const worker = path.join(root, "worker-002")
   git(repo, "worktree", "add", "-q", worker, "herder/demo/002")
   git(repo, "worktree", "lock", "--reason", "plan-herder:demo:002:plan-reviewer:demo-002-reviewer-2:review", worker)
+  const integration = path.join(root, "integration")
+  git(repo, "worktree", "add", "-q", integration, "herder/demo/integration")
+  git(repo, "worktree", "lock", integration)
   addCompletionProof(repo, "001")
   addCompletionProof(repo, "005")
   return {
@@ -508,10 +511,6 @@ async function runTests(): Promise<void> {
       task: "review",
       reason: "plan-herder:demo:002:plan-reviewer:attempt-2:review",
     })
-    assert.deepEqual(parseWorktreeList("worktree /tmp/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /tmp/worker\nHEAD def456\nbranch refs/heads/herder/demo/002\nlocked plan-herder:demo:002:plan-reviewer:a:r\n"), [
-      { path: "/tmp/repo", head: "abc123", branch: "main", detached: false, locked: false, lockReason: null },
-      { path: "/tmp/worker", head: "def456", branch: "herder/demo/002", detached: false, locked: true, lockReason: "plan-herder:demo:002:plan-reviewer:a:r" },
-    ])
     const reviewAttempt: UsageRecord = {
       attempt: "attempt-2",
       plan: "002",
@@ -594,6 +593,11 @@ async function runTests(): Promise<void> {
     assert.equal(state.accounting.tokens.reportedInputOutput, 8400)
     assert.ok(state.integration.branch)
     assert.equal(state.integration.branch.name, "herder/demo/integration")
+    assert.equal(state.integration.branch.head, git(fixture.repo, "rev-parse", "HEAD"))
+    assert.ok(state.integration.worktree)
+    assert.equal(state.integration.worktree.head, git(fixture.repo, "rev-parse", "HEAD"))
+    assert.equal(state.integration.worktree.locked, true)
+    assert.equal(state.integration.worktree.lockReason, null)
     assert.deepEqual(state.integration.completedPlans, ["001", "005"])
     const plans = new Map(state.plans.map((plan) => [plan.id, plan]))
     const plan = (id: string) => {
@@ -604,6 +608,8 @@ async function runTests(): Promise<void> {
     assert.equal(plan("001").phase, "complete")
     const reviewingPlan = plan("002")
     assert.equal(reviewingPlan.phase, "review")
+    assert.ok(reviewingPlan.worktree)
+    assert.equal(reviewingPlan.worktree.head, git(fixture.repo, "rev-parse", "herder/demo/002"))
     assert.ok(reviewingPlan.lease)
     assert.equal(reviewingPlan.lease.role, "plan-reviewer")
     assert.equal(reviewingPlan.rounds[0].attempts.length, 2)

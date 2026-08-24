@@ -8,7 +8,13 @@ import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
 import { cleanupRun } from "../../../src/daemon/git/cleanup-run.ts"
-import { listHerderBranches, listWorktrees, parseWorktreeRecords } from "../../../src/daemon/git/namespace-inventory.ts"
+import {
+  listHerderBranches,
+  listWorktreeInventory,
+  listWorktrees,
+  parseWorktreeInventory,
+  parseWorktreeRecords,
+} from "../../../src/daemon/git/namespace-inventory.ts"
 import { forceCleanupRun } from "../../../src/daemon/git/force-cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
@@ -265,22 +271,39 @@ test("worktree inventory retains malformed records in both formats and rejects m
     const pathlessBranch = "herder/plans/999"
     const nul = withGitShim("nul", pathlessBranch, () => listWorktrees(fixture.repo))
     assert.equal(nul.some((item) => item.path === "" && item.branch === pathlessBranch), true)
+    const nulInventory = withGitShim("nul", pathlessBranch, () => listWorktreeInventory(fixture.repo))
+    assert.equal(nulInventory.some((item) => item.path && item.head), true)
+    assert.equal(nulInventory.some((item) => item.path === "" && item.branch === pathlessBranch && item.head === ""), true)
     const legacy = withGitShim("newline", pathlessBranch, () => listWorktrees(fixture.repo))
     assert.equal(legacy.some((item) => item.path === "" && item.branch === pathlessBranch), true)
+    const legacyInventory = withGitShim("newline", pathlessBranch, () => listWorktreeInventory(fixture.repo))
+    assert.equal(legacyInventory.some((item) => item.path && item.head), true)
+    assert.equal(legacyInventory.some((item) => item.path === "" && item.branch === pathlessBranch && item.head === ""), true)
     assert.throws(() => withGitShim("malformed-branch", pathlessBranch, () => listHerderBranches(fixture.repo, "plans")), /Cannot parse Git branch record/)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
 test("worktree parser handles modern and legacy porcelain", () => {
-  const modern = "worktree /tmp/one\0HEAD abc\0branch refs/heads/main\0\0worktree /tmp/two\0HEAD def\0detached\0locked reason\0\0"
-  const legacy = "worktree /tmp/one\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/two\nHEAD def\ndetached\nlocked reason\n\nbranch refs/heads/herder/plans/999\nunknown field\n\n"
+  const modern = "worktree /tmp/one\0HEAD abc\0branch refs/heads/main\0\0worktree /tmp/two\0HEAD def\0detached\0locked\0\0branch refs/heads/herder/plans/999\0HEAD ghi\0\0"
+  const legacy = "worktree /tmp/one\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/two\nHEAD def\ndetached\nlocked\n\nbranch refs/heads/herder/plans/999\nHEAD ghi\nunknown field\n\n"
+  assert.deepEqual(parseWorktreeInventory(modern, true), [
+    { path: "/tmp/one", head: "abc", branch: "main", detached: false, locked: false, lockReason: null },
+    { path: "/tmp/two", head: "def", branch: "", detached: true, locked: true, lockReason: "" },
+    { path: "", head: "ghi", branch: "herder/plans/999", detached: false, locked: false, lockReason: null },
+  ])
+  assert.deepEqual(parseWorktreeInventory(legacy, false), [
+    { path: "/tmp/one", head: "abc", branch: "main", detached: false, locked: false, lockReason: null },
+    { path: "/tmp/two", head: "def", branch: "", detached: true, locked: true, lockReason: "" },
+    { path: "", head: "ghi", branch: "herder/plans/999", detached: false, locked: false, lockReason: null },
+  ])
   assert.deepEqual(parseWorktreeRecords(modern, true), [
     { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
-    { path: "/tmp/two", branch: "", locked: true, lockReason: "reason" },
+    { path: "/tmp/two", branch: "", locked: true, lockReason: "" },
+    { path: "", branch: "herder/plans/999", locked: false, lockReason: null },
   ])
   assert.deepEqual(parseWorktreeRecords(legacy, false), [
     { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
-    { path: "/tmp/two", branch: "", locked: true, lockReason: "reason" },
+    { path: "/tmp/two", branch: "", locked: true, lockReason: "" },
     { path: "", branch: "herder/plans/999", locked: false, lockReason: null },
   ])
 })

@@ -1,28 +1,19 @@
 import fs from "node:fs"
 import path from "node:path"
-import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
 import { buildGraph } from "../core/plans.ts"
 import { readPlanLifecycle } from "../core/workflow.ts"
 import { executionReport, readUsageState } from "../daemon/execution-store.ts"
 import { readManagerState } from "../daemon/run-store.ts"
 import type { UsageRecord } from "../daemon/execution-store.ts"
-import { validatePlanName } from "../daemon/git/namespace-run.ts"
+import { listCoordinationRefs, validatePlanName } from "../daemon/git/coordination-ref.ts"
 import { inspectCompletionProof } from "../daemon/git/completion-proof.ts"
+import { listHerderBranches, listWorktreeInventory } from "../daemon/git/namespace-inventory.ts"
+import { fail, isInside, runGit } from "../daemon/git/primitives.ts"
 
 export const DASHBOARD_STATE_VERSION = 2
 
 type DashboardPhase = "complete" | "rejected" | "blocked" | "waiting" | "ready" | "queued"
   | "implementation" | "review" | "judge" | "gates" | "repair" | "judge-queued" | "integration" | "coordination"
-interface RefRecord { ref: string; relative: string; target: string }
-interface WorktreeView {
-  path: string | null
-  head: string | null
-  branch: string | null
-  detached: boolean
-  locked: boolean
-  lockReason: string | null
-}
 interface LeaseView { role: string; attempt: string | null; task: string | null; reason: string }
 interface ForecastPlan {
   id: string
@@ -37,74 +28,6 @@ interface PlanView extends ForecastPlan {
 interface DashboardInput { planDir?: string; planName?: string | null }
 type DynamicRecord = Record<string, any>
 
-function fail(message: string): never {
-  throw new Error(message)
-}
-
-function runGit(repoRoot: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}): SpawnSyncReturns<string> {
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
-}
-
-function isInside(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate)
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-}
-
-function parseRefRows(output: string, prefix: string): RefRecord[] {
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const separator = line.indexOf("\t")
-    if (separator === -1) fail(`Cannot parse Git ref record: ${JSON.stringify(line)}`)
-    const ref = line.slice(0, separator)
-    return { ref, relative: ref.slice(prefix.length), target: line.slice(separator + 1) }
-  })
-}
-
-function listRefs(repoRoot: string, prefix: string): RefRecord[] {
-  const output = runGit(repoRoot, [
-    "for-each-ref",
-    "--format=%(refname)%09%(objectname)",
-    prefix,
-  ]).stdout
-  return parseRefRows(output, prefix)
-}
-
-export function parseWorktreeList(output: string): WorktreeView[] {
-  const records: WorktreeView[] = []
-  for (const block of output.split(/(?:\r?\n){2,}/).filter((item) => item.trim())) {
-    const record: WorktreeView = {
-      path: null,
-      head: null,
-      branch: null,
-      detached: false,
-      locked: false,
-      lockReason: null,
-    }
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith("worktree ")) record.path = line.slice("worktree ".length)
-      else if (line.startsWith("HEAD ")) record.head = line.slice("HEAD ".length)
-      else if (line.startsWith("branch refs/heads/")) record.branch = line.slice("branch refs/heads/".length)
-      else if (line === "detached") record.detached = true
-      else if (line === "locked" || line.startsWith("locked ")) {
-        record.locked = true
-        record.lockReason = line.slice("locked".length).trim() || null
-      }
-    }
-    if (record.path) records.push(record)
-  }
-  return records
-}
-
-function listWorktrees(repoRoot: string): WorktreeView[] {
-  return parseWorktreeList(runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout)
-}
 
 export function parseLease(reason: string | null, planName: string, planId: string): LeaseView | null {
   if (!reason) return null
@@ -322,13 +245,11 @@ export function buildDashboardState(input: DashboardInput = {}) {
     group.push(record)
     recordsByPlan.set(record.plan, group)
   }
-  const branchPrefix = `refs/heads/herder/${context.planName}/`
-  const coordinationPrefix = `refs/plan-herder/${context.planName}/`
-  const branches = listRefs(context.repoRoot, branchPrefix)
-  const coordinationRefs = listRefs(context.repoRoot, coordinationPrefix)
-  const worktrees = listWorktrees(context.repoRoot)
+  const branches = listHerderBranches(context.repoRoot, context.planName)
+  const coordinationRefs = listCoordinationRefs(context.repoRoot, context.planName)
+  const worktrees = listWorktreeInventory(context.repoRoot)
   const branchByRelative = new Map(branches.map((item) => [item.relative, item]))
-  const worktreeByBranch = new Map(worktrees.filter((item) => item.branch).map((item) => [item.branch, item]))
+  const worktreeByBranch = new Map(worktrees.filter((item) => item.path && item.branch).map((item) => [item.branch, item]))
   const completionByPlan = new Map(coordinationRefs
     .filter((item) => /^completed\/\d{3,}$/.test(item.relative))
     .map((item) => {
@@ -361,10 +282,10 @@ export function buildDashboardState(input: DashboardInput = {}) {
       dependencies: plan.dependencies,
       unsatisfied,
       ready: graph.ready.includes(plan.id),
-      branch: branch ? { name: branchName, head: branch.target, shortHead: shortSha(branch.target) } : null,
+      branch: branch ? { name: branchName, head: branch.head, shortHead: shortSha(branch.head) } : null,
       worktree: worktree ? {
         path: worktree.path,
-        head: worktree.head,
+        head: worktree.head || null,
         shortHead: shortSha(worktree.head),
         locked: worktree.locked,
       } : null,
@@ -445,15 +366,15 @@ export function buildDashboardState(input: DashboardInput = {}) {
     integration: {
       branch: integrationBranch ? {
         name: integrationName,
-        head: integrationBranch.target,
-        shortHead: shortSha(integrationBranch.target),
+        head: integrationBranch.head,
+        shortHead: shortSha(integrationBranch.head),
       } : null,
       worktree: integrationWorktree ? {
         path: integrationWorktree.path,
-        head: integrationWorktree.head,
+        head: integrationWorktree.head || null,
         shortHead: shortSha(integrationWorktree.head),
         locked: integrationWorktree.locked,
-        lockReason: integrationWorktree.lockReason,
+        lockReason: integrationWorktree.lockReason || null,
       } : null,
       completedPlans: [...completionByPlan.keys()].sort(),
       readyPlans: plans.filter((plan) => plan.phase === "integration").map((plan) => plan.id),
