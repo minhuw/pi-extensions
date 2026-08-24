@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -100,6 +101,23 @@ test("unsupported pre-18 execution schemas fail closed without mutation", () => 
 		} finally {
 			fs.rmSync(planDirectory, { recursive: true, force: true });
 		}
+	}
+});
+
+test("fresh execution schema retains the canonical schema-18 fingerprint", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-fingerprint-"));
+	try {
+		const database = openExecutionDatabase(planDirectory, { create: true });
+		const version = Number((database.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version);
+		const objects = database.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+		const fingerprint = createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex");
+		database.close();
+
+		assert.equal(version, 18);
+		assert.equal(objects.length, 36);
+		assert.equal(fingerprint, "ee34bb562da03ca105473ae5690109c222ae43aea4ff972bf389bd2b0bbc8b34");
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });
 
