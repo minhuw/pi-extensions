@@ -129,10 +129,8 @@ function appendTranscript(
 ): void {
 	if (!dependencies.appendEntry) return;
 	const result = input.applied ?? preview;
-	const handoff = destructionDetails(result);
 	const entry = createCleanupTranscriptEntry({
 		mode: modeFor(request),
-		deep: Boolean(request.deep),
 		preview: transcriptPreview(preview, input.cancelled === true),
 		executed: Boolean(input.applied?.executed),
 		plannedRefs: refLabels(result, "refsPlanned"),

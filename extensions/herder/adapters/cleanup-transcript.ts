@@ -34,7 +34,6 @@ function boundedItems(values: readonly string[] | undefined): string[] {
 
 export function createCleanupTranscriptEntry(input: {
 	mode: CleanupTranscriptMode;
-	deep?: boolean;
 	preview: CleanupTranscriptPreview;
 	executed: boolean;
 	plannedRefs?: readonly string[];
@@ -47,7 +46,7 @@ export function createCleanupTranscriptEntry(input: {
 	return {
 		version: 2,
 		mode: input.mode,
-		deep: Boolean(input.deep),
+		deep: input.mode === "deep",
 		preview: input.preview,
 		executed: Boolean(input.executed),
 		plannedRefs: boundedItems(input.plannedRefs),
