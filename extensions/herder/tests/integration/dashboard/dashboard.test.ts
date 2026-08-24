@@ -445,6 +445,120 @@ function createAttentionFixture(afterRootCreated?: (root: string) => void) {
   }
 }
 
+function createManagerLifecycleFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-dashboard-manager-lifecycle-test-"))
+  try {
+    const repo = path.join(root, "repo")
+    fs.mkdirSync(repo)
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Herder Dashboard Manager Lifecycle Test")
+    git(repo, "config", "user.email", "dashboard-manager-lifecycle@example.invalid")
+    const planDir = path.join(repo, "herder-plans")
+    fs.mkdirSync(planDir)
+    fs.writeFileSync(path.join(planDir, ".gitignore"), ".herder/\n")
+    const firstText = planBody("001", "First", "none")
+    const secondText = planBody("002", "Second", "herder-plans/001-first.md")
+    fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
+
+## Execution order & status
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|------|-------|----------|--------|------------|--------|
+| [001](001-first.md) | First | P1 | S | — | TODO |
+| [002](002-second.md) | Second | P1 | S | 001 | TODO |
+`)
+    fs.writeFileSync(path.join(planDir, "001-first.md"), firstText)
+    fs.writeFileSync(path.join(planDir, "002-second.md"), secondText)
+    fs.writeFileSync(path.join(repo, "fixture.txt"), "fixture\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "test: initialize manager lifecycle fixture")
+
+    const runId = "manager-lifecycle-run"
+    const baseCommit = git(repo, "rev-parse", "HEAD")
+    const store = new RunStore(planDir)
+    try {
+      store.createRun({
+        runId,
+        repositoryRoot: repo,
+        planDirectory: planDir,
+        planName: "demo",
+        host: "pi",
+        profileName: "eclipse",
+        profileSha256: "p".repeat(64),
+        maxParallel: 1,
+        currentGeneration: 1,
+        graphSha256: "g".repeat(64),
+        status: "running",
+        checkoutStateToken: "checkout",
+        baseCommit,
+        integrationBranch: "herder/demo/integration",
+        integrationWorktree: path.join(root, "integration"),
+      })
+      const makeSpec = (planId: string, title: string, dependencies: string[], planText: string, ordinal: number): StoredPlanSpec => ({
+        runId,
+        graphGeneration: 1,
+        planId,
+        planFingerprint: "f".repeat(64),
+        fingerprintVersion: 2,
+        ordinal,
+        title,
+        priority: "P1",
+        effort: "S",
+        kind: "behavioral",
+        dependencies,
+        initialStatus: "TODO",
+        initialStatusDetail: "",
+        gateCommands: [],
+        planFile: `${planId}-${title.toLowerCase()}.md`,
+        assignment: {
+          snapshotSha256: "s".repeat(64),
+          snapshotInputs: [],
+          plan: {
+            id: planId,
+            title,
+            kind: "behavioral",
+            parentObjective: "Exercise manager lifecycle projections",
+            dependencies,
+            inScopePaths: [`src/${planId}.mjs`],
+          },
+          planText,
+        },
+      })
+      store.putPlanSpecs([
+        makeSpec("001", "First", [], firstText, 0),
+        makeSpec("002", "Second", ["001"], secondText, 1),
+      ])
+      store.putPlan({
+        runId,
+        planId: "001",
+        generation: 1,
+        round: 1,
+        phase: "FINAL_APPROVED",
+        branch: "herder/demo/001",
+        worktree: path.join(root, "worker-001"),
+        assignmentPath: path.join(planDir, ".herder", "assignment.json"),
+        assignmentSha256: "a".repeat(64),
+        snapshotSha256: "s".repeat(64),
+        generationBase: baseCommit,
+        reviewPass: 0,
+        findings: [],
+        repair: [],
+        gates: [],
+        approvedBase: null,
+        approvedHead: null,
+        approvedTree: null,
+        rebase: null,
+      })
+    } finally {
+      store.close()
+    }
+    return { root, planDir, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
+  } catch (error) {
+    fs.rmSync(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
 async function runTests(): Promise<void> {
   const fixture = createFixture()
   try {
@@ -729,6 +843,32 @@ if (serve) {
       const plan = state.plans.find((candidate) => candidate.id === "001")
       assert.ok(plan)
       assert.deepEqual(plan.attention, fixture.expectedAttention)
+    } finally {
+      fixture.cleanup()
+    }
+  })
+  test("dashboard uses manager runtime status to unblock dependent plans", () => {
+    const fixture = createManagerLifecycleFixture()
+    try {
+      const state = buildDashboardState({ planDir: fixture.planDir, planName: "demo" })
+      assert.deepEqual(state.planSet.counts, {
+        total: 2,
+        todo: 1,
+        inProgress: 0,
+        done: 1,
+        blocked: 0,
+        rejected: 0,
+        actionable: 1,
+      })
+      const first = state.plans.find((plan) => plan.id === "001")
+      const second = state.plans.find((plan) => plan.id === "002")
+      assert.ok(first)
+      assert.ok(second)
+      assert.equal(first.status, "DONE")
+      assert.equal(second.status, "TODO")
+      assert.deepEqual(second.unsatisfied, [])
+      assert.equal(second.phase, "ready")
+      assert.deepEqual(state.planSet.ready, ["002"])
     } finally {
       fixture.cleanup()
     }

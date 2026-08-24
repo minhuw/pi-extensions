@@ -37,7 +37,10 @@ export function readyPhaseForRole(role: string): PlanPhase {
 
 export type PlanLifecycleStatus = PlanStatus;
 
-export function lifecycleStatus(spec: StoredPlanSpec, runtime: StoredPlan | null): PlanLifecycleStatus {
+export function lifecycleStatus(
+	spec: Pick<StoredPlanSpec, "initialStatus">,
+	runtime: Pick<StoredPlan, "phase"> | null,
+): PlanLifecycleStatus {
 	if (!runtime) return spec.initialStatus;
 	if (runtime.phase === "DONE" || runtime.phase === "FINAL_APPROVED") return "DONE";
 	if (runtime.phase === "BLOCKED" || runtime.phase === "NEEDS_INPUT") return "BLOCKED";
@@ -48,8 +51,7 @@ function graphLifecycle(graph: PlanGraph): Map<string, PlanLifecycleStatus> {
 	return new Map(graph.plans.map((plan) => [plan.id, plan.status]));
 }
 
-export function readPlanLifecycle(planDir: string): Map<string, PlanLifecycleStatus> {
-	const graph = buildGraph(planDir);
+export function readPlanLifecycle(planDir: string, graph = buildGraph(planDir)): Map<string, PlanLifecycleStatus> {
 	let store: RunStore | undefined;
 	try {
 		store = new RunStore(planDir, { readOnly: true });
@@ -92,7 +94,7 @@ export function applyLifecycleToGraph(graph: PlanGraph, lifecycle: Map<string, P
 
 export function readPlanLifecycleGraph(planDir: string): PlanGraph {
 	const graph = buildGraph(planDir);
-	return applyLifecycleToGraph(graph, readPlanLifecycle(planDir));
+	return applyLifecycleToGraph(graph, readPlanLifecycle(planDir, graph));
 }
 
 export function summarizeRun(specs: StoredPlanSpec[], plans: StoredPlan[]): RunOverview {

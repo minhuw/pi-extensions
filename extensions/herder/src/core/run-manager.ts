@@ -965,7 +965,7 @@ export class HerderRunManager {
 		const graph = buildGraph(this.planDirectory);
 		if (!graph.shapeReady) throw new Error("Herder plan graph is not shape-ready");
 		if (graph.plans.length === 0) throw new Error("Herder plan graph is empty");
-		const lifecycle = readPlanLifecycle(this.planDirectory);
+		const lifecycle = readPlanLifecycle(this.planDirectory, graph);
 		const adopted = graph.plans.filter((plan: { id: string }) => lifecycle.get(plan.id) === "IN PROGRESS");
 		if (adopted.length > 0) {
 			throw new Error(`Fresh deterministic runs cannot adopt prior execution state: ${adopted.map((plan: { id: string }) => `${plan.id}=${lifecycle.get(plan.id)}`).join(", ")}`);

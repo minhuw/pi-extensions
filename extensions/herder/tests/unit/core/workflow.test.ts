@@ -283,9 +283,12 @@ test("readPlanLifecycle falls back to README when no run exists", () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-lifecycle-norun-"));
 	try {
 		const planDir = writePlanDir(root, "BLOCKED — previous attempt stopped");
-		const lifecycle = readPlanLifecycle(planDir);
+		const graph = buildGraph(planDir);
+		fs.renameSync(path.join(planDir, "README.md"), path.join(planDir, "README.hidden.md"));
+		const lifecycle = readPlanLifecycle(planDir, graph);
 		assert.equal(lifecycle.get("001"), "BLOCKED");
-		assert.equal(buildGraph(planDir).plans[0]?.status, "BLOCKED");
+		assert.equal(graph.plans[0]?.status, "BLOCKED");
+		fs.renameSync(path.join(planDir, "README.hidden.md"), path.join(planDir, "README.md"));
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}

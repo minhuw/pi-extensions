@@ -262,16 +262,16 @@ export function cleanupRun(input: CleanupInput) {
   const planFilter = input.plan ? canonicalPlanId(input.plan) : null
   if (input.deep && planFilter) fail("--deep is plan-set-level and cannot be combined with --plan")
   if (planFilter && !graph.plans.some((plan) => plan.id === planFilter)) fail(`Plan ${planFilter} is not indexed in ${graph.readme}`)
-  const overlayStatus = (planId: string, fallback: string, lifecycle = readPlanLifecycle(planDir)): PlanLifecycleStatus | string =>
+  const overlayStatus = (planId: string, fallback: string, lifecycle: Map<string, PlanLifecycleStatus>): PlanLifecycleStatus | string =>
     lifecycle.get(planId) ?? fallback
-  const statusSnapshot = (value: typeof graph, lifecycle = readPlanLifecycle(planDir)): string =>
+  const statusSnapshot = (value: typeof graph, lifecycle: Map<string, PlanLifecycleStatus>): string =>
     JSON.stringify(value.plans.map((plan) => ({ id: plan.id, status: overlayStatus(plan.id, plan.status, lifecycle) })))
-  const plannedLifecycle = readPlanLifecycle(planDir)
+  const plannedLifecycle = readPlanLifecycle(planDir, graph)
   const plannedStatusSnapshot = statusSnapshot(graph, plannedLifecycle)
   const plannedRun = readCleanupRunStatus(planDir)
   const assertPlanStatusesUnchanged = (): void => {
     const current = buildGraph(planDir)
-    const currentLifecycle = readPlanLifecycle(planDir)
+    const currentLifecycle = readPlanLifecycle(planDir, current)
     if (statusSnapshot(current, currentLifecycle) !== plannedStatusSnapshot) {
       fail("Cannot clean up because plan status changed after preflight")
     }

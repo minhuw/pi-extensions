@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { buildGraph } from "../core/plans.ts"
-import { readPlanLifecycle } from "../core/workflow.ts"
+import { lifecycleStatus } from "../core/workflow.ts"
 import { executionReport, readUsageState } from "../daemon/execution-store.ts"
 import { readManagerState } from "../daemon/run-store.ts"
 import type { UsageRecord } from "../daemon/execution-store.ts"
@@ -260,8 +260,10 @@ export function buildDashboardState(input: DashboardInput = {}) {
   const runtimeById = new Map(manager.plans.map((plan) => [plan.planId, plan]))
   const activeActionById = new Map(manager.actions.filter((action) => ["proposed", "dispatched"].includes(action.state)).map((action) => [action.planId, action]))
   const sourcePlans = graph.plans as DynamicRecord[]
-  const lifecycle = readPlanLifecycle(context.planDir)
-  const statusById = new Map(sourcePlans.map((plan) => [plan.id, lifecycle.get(plan.id) ?? plan.status]))
+  const statusById = new Map(sourcePlans.map((plan) => [
+    plan.id,
+    manager.run ? lifecycleStatus({ initialStatus: plan.status }, runtimeById.get(plan.id) ?? null) : plan.status,
+  ]))
   const plans = sourcePlans.map((plan) => {
     const branch = branchByRelative.get(plan.id) ?? null
     const branchName = `herder/${context.planName}/${plan.id}`
@@ -281,7 +283,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
       statusDetail: runtimeById.get(plan.id)?.repair?.[0] ?? plan.statusDetail,
       dependencies: plan.dependencies,
       unsatisfied,
-      ready: graph.ready.includes(plan.id),
+      ready: statusById.get(plan.id) === "TODO" && unsatisfied.length === 0,
       branch: branch ? { name: branchName, head: branch.head, shortHead: shortSha(branch.head) } : null,
       worktree: worktree ? {
         path: worktree.path,

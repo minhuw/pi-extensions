@@ -317,7 +317,7 @@ function cleanupPlanId(value: string): string {
 }
 
 function graphWithLifecycle(graph: ReturnType<typeof buildGraph>): ReturnType<typeof buildGraph> {
-	return applyLifecycleToGraph(graph, readPlanLifecycle(graph.planDir));
+	return applyLifecycleToGraph(graph, readPlanLifecycle(graph.planDir, graph));
 }
 
 export function selectCleanupPlanIds(
@@ -332,7 +332,7 @@ export function selectCleanupPlanIds(
 	if (requested && !graph.plans.some((plan) => plan.id === requested)) {
 		throw new Error(`Plan ${requested} is not indexed in ${graph.readme}`);
 	}
-	const plans = graphWithLifecycle(graph).plans;
+	const plans = graph.plans;
 	if (request.deep) {
 		return {
 			selectedPlanIds: plans.map((plan) => plan.id),
@@ -353,7 +353,7 @@ export function selectCleanupPlanIds(
 }
 
 function cleanupResultStatus(result: CleanupResult, graph: ReturnType<typeof buildGraph>): CleanupPreviewOutcome["status"] {
-	const plan = result.plan ? graphWithLifecycle(graph).plans.find((candidate) => candidate.id === result.plan) : undefined;
+	const plan = result.plan ? graph.plans.find((candidate) => candidate.id === result.plan) : undefined;
 	if (plan?.status === "DONE" || plan?.status === "BLOCKED" || plan?.status === "REJECTED") return plan.status;
 	return "UNKNOWN";
 }
@@ -370,7 +370,7 @@ function cleanupReasons(preview: CleanupPreviewOutcome[]): string[] {
 }
 
 function cleanupGraphStatusSnapshot(graph: ReturnType<typeof buildGraph>): string {
-	return stableJson(graphWithLifecycle(graph).plans.map((plan) => ({ planId: plan.id, status: plan.status })));
+	return stableJson(graph.plans.map((plan) => ({ planId: plan.id, status: plan.status })));
 }
 
 function cleanupExpectedPlanStatuses(
@@ -378,7 +378,7 @@ function cleanupExpectedPlanStatuses(
 	planIds: string[],
 ): NonNullable<CleanupInput["expectedPlanStatuses"]> {
 	const expected: NonNullable<CleanupInput["expectedPlanStatuses"]> = {};
-	const plans = graphWithLifecycle(graph).plans;
+	const plans = graph.plans;
 	for (const planId of planIds) {
 		const status = plans.find((plan) => plan.id === planId)?.status;
 		if (status !== "DONE" && status !== "BLOCKED" && status !== "REJECTED") {
@@ -598,7 +598,8 @@ export async function applyHerderCleanup(
 		if (fresh.normalizedPreview !== expectedPreview.normalizedPreview) {
 			throw new Error("Cleanup preview changed after confirmation; cleanup was not applied.");
 		}
-		const graph = buildGraph(request.planDirectory);
+		const currentGraph = buildGraph(request.planDirectory);
+		const graph = applyLifecycleToGraph(currentGraph, readPlanLifecycle(request.planDirectory, currentGraph));
 		let currentSelection: ReturnType<typeof selectCleanupPlanIds>;
 		try {
 			currentSelection = selectCleanupPlanIds(graph, request);
