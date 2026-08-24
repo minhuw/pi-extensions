@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 
 export const MANAGER_PROTOCOL_VERSION = 9;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
-export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"] as const;
+export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
+export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", ...TERMINAL_RUN_STATUSES] as const;
+export function isTerminalRunStatus(status: unknown): status is typeof TERMINAL_RUN_STATUSES[number] {
+	return typeof status === "string" && TERMINAL_RUN_STATUSES.includes(status as typeof TERMINAL_RUN_STATUSES[number]);
+}
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
 export const PLAN_PHASES = [
 	"READY_IMPLEMENTER",

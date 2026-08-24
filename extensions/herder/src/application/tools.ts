@@ -26,7 +26,7 @@ import {
 import { compileGraphIdentity } from "../core/run-manager.ts";
 import { RunStore } from "../daemon/run-store.ts";
 import { applyLifecycleToGraph, readPlanLifecycle, readPlanLifecycleGraph } from "../core/workflow.ts";
-import { sha256, stableJson } from "../shared/protocol.ts";
+import { isTerminalRunStatus, sha256, stableJson } from "../shared/protocol.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -291,15 +291,13 @@ export interface CleanupApplicationDependencies {
 	withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T>;
 }
 
-const CLEANUP_TERMINAL_STATUSES = new Set<CleanupDurableStatus>(["complete", "failed", "stopped"]);
-
 export function readCleanupDurableStatus(planDirectory: string): CleanupDurableStatus {
 	let store: RunStore | undefined;
 	try {
 		store = new RunStore(planDirectory, { readOnly: true });
 		const run = store.getRun();
 		if (!run) return "missing";
-		return CLEANUP_TERMINAL_STATUSES.has(run.status as CleanupDurableStatus)
+		return isTerminalRunStatus(run.status)
 			? run.status as CleanupDurableStatus
 			: "active";
 	} catch {
@@ -407,7 +405,7 @@ function forcePreviewFromResult(
 	const preview: CleanupPreview = {
 		version: 1,
 		durableStatus,
-		terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
+		terminal: isTerminalRunStatus(durableStatus),
 		canApply: result.destruction.eligible && blockers.length === 0,
 		force: true,
 		selectedPlanIds,
@@ -505,7 +503,7 @@ async function buildCleanupPreviewSnapshot(
 	const failedPlanIds = [...new Set([...selection.failedPlanIds, ...failedActionPlanIds])].sort();
 	const blockers = cleanupReasons(outcomes);
 	if (deep) blockers.push(...outcomes.flatMap((outcome) => outcome.result.destruction.blockers.map((item) => String(item.reason ?? "deep-cleanup-blocked"))));
-	if (!CLEANUP_TERMINAL_STATUSES.has(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
+	if (!isTerminalRunStatus(durableStatus)) blockers.unshift(durableStatus === "missing" ? "run-missing" : "run-not-terminal");
 	if (!deep && !includeFailed && failedPlanIds.length > 0) blockers.push("failed-evidence-requires-include-failed");
 	const hasActions = outcomes.some((outcome) => outcome.result.actions.length > 0
 		|| (deep && (outcome.result.destruction.eligible)));
@@ -524,8 +522,8 @@ async function buildCleanupPreviewSnapshot(
 		preview: {
 			version: 1,
 			durableStatus,
-			terminal: CLEANUP_TERMINAL_STATUSES.has(durableStatus),
-			canApply: CLEANUP_TERMINAL_STATUSES.has(durableStatus) && hasActions && uniqueBlockers.length === 0,
+			terminal: isTerminalRunStatus(durableStatus),
+			canApply: isTerminalRunStatus(durableStatus) && hasActions && uniqueBlockers.length === 0,
 			force: false,
 			selectedPlanIds: selection.selectedPlanIds,
 			failedPlanIds,

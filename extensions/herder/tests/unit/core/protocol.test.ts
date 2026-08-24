@@ -11,7 +11,17 @@ import {
 	validateAttentionRequest,
 	validateIntegrationRepairInput,
 	integrationRepairCapabilityToken,
+	isTerminalRunStatus,
+	RUN_STATUSES,
+	TERMINAL_RUN_STATUSES,
 } from "../../../src/shared/protocol.ts";
+
+test("terminal run status policy is shared and fail-closed", () => {
+	assert.deepEqual(RUN_STATUSES, ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"]);
+	assert.deepEqual(TERMINAL_RUN_STATUSES, ["complete", "failed", "stopped"]);
+	for (const status of RUN_STATUSES) assert.equal(isTerminalRunStatus(status), ["complete", "failed", "stopped"].includes(status));
+	for (const status of ["unknown", undefined, "active", "missing"]) assert.equal(isTerminalRunStatus(status), false);
+});
 
 test("worker envelopes become typed deterministic results", () => {
 	const implementer = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: abcdef1\nADDRESSED: none\nCHECKS: npm test — passed\nFILES CHANGED: src/a.ts, test/a.test.ts\nDISCOVERED_PATHS: none\nNOTES: done\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=host");

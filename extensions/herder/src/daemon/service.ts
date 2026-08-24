@@ -16,6 +16,7 @@ import {
 import {
 	MANAGER_OPERATION_KINDS,
 	MANAGER_PROTOCOL_VERSION,
+	isTerminalRunStatus,
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
 	type ManagerOperationKind,
@@ -32,7 +33,6 @@ const MAX_BODY = 4 * 1024 * 1024;
 const MAX_PENDING_OPERATIONS = 32;
 const DEFAULT_TERMINAL_IDLE_MS = 30_000;
 const DEFAULT_RUNTIME_IDENTITY_CHECK_MS = 1_500;
-const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "stopped"]);
 const DIRECT_CONTROL_PATHS = new Set(["/health", "/v1/status", "/v1/operation", "/shutdown"]);
 const LEGACY_BLOCKING_PATHS = new Set(["/v1/start", "/v1/event", "/v1/edit", "/v1/stop"]);
 
@@ -297,11 +297,11 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 		clearTerminalIdleShutdown();
 		if (closing) return;
 		const run = store.getRun();
-		if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || store.countPendingOperations() !== 0) return;
+		if (!run || !isTerminalRunStatus(run.status) || store.countPendingOperations() !== 0) return;
 		terminalIdleTimer = setTimeout(() => {
 			terminalIdleTimer = undefined;
 			const current = store.getRun();
-			if (!closing && current && TERMINAL_RUN_STATUSES.has(current.status) && store.countPendingOperations() === 0) void closeService();
+			if (!closing && current && isTerminalRunStatus(current.status) && store.countPendingOperations() === 0) void closeService();
 		}, terminalIdleMs);
 		terminalIdleTimer.unref();
 	};

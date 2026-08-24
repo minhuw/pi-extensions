@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-wo
 import { Type } from "typebox";
 import {
 	attentionCapabilityToken,
+	isTerminalRunStatus,
 	type IntegrationRepairRequest,
 	type ManagerAttentionRequest,
 	type ManagerReply,
@@ -237,7 +238,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			...(lastManagerMessage ? { idleDetail: lastManagerMessage } : {}),
 			workers: engine.snapshots(),
 		});
-		orcaBusy.set("herder", !["complete", "failed", "stopped"].includes(currentState.status), ctx);
+		orcaBusy.set("herder", !isTerminalRunStatus(currentState.status), ctx);
 	};
 
 	const renderLaunching = (ctx: ExtensionContext, planDir: string, profile: string, maxParallel: number) => {
@@ -1248,7 +1249,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 	});
 
-	const activeFire = () => Boolean(currentState && !["complete", "failed", "stopped"].includes(currentState.status))
+	const activeFire = () => Boolean(currentState && !isTerminalRunStatus(currentState.status))
 		|| Boolean(currentAttention && currentAttention.state !== "resolved")
 		|| workers.size > 0
 		|| engine.snapshots().length > 0;

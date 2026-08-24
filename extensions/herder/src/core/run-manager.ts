@@ -32,6 +32,7 @@ import {
 	integrationRepairCapabilityToken,
 	integrationRepairRefSnapshotSha256,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
+	isTerminalRunStatus,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
@@ -537,7 +538,7 @@ function reigniteDirectoryHasLiveRun(directory: string): boolean {
 		const store = new RunStore(directory, { readOnly: true });
 		try {
 			const run = store.getRun();
-			return Boolean(run && !["complete", "failed", "stopped"].includes(run.status));
+			return Boolean(run && !isTerminalRunStatus(run.status));
 		} finally {
 			store.close();
 		}

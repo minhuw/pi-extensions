@@ -11,6 +11,7 @@ import { listCoordinationRefs, type CoordinationRefRecord, validatePlanName } fr
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
+import { isTerminalRunStatus } from "../../shared/protocol.ts"
 import { fail, isInside, realpathIfPresent, runGit, takeValue } from "./primitives.ts"
 
 export interface CleanupInput {
@@ -197,8 +198,6 @@ function isPatchEquivalent(repoRoot: string, artifactHead: string, integrationHe
   return rows.length > 0 && rows.every((row) => /^- [0-9a-f]+$/.test(row))
 }
 
-const CLEANUP_TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "stopped"])
-
 function readCleanupRunStatus(planDir: string): { present: boolean; status: string | null; terminal: boolean } {
   let store: RunStore | undefined
   try {
@@ -208,7 +207,7 @@ function readCleanupRunStatus(planDir: string): { present: boolean; status: stri
     return {
       present: true,
       status: run.status,
-      terminal: CLEANUP_TERMINAL_RUN_STATUSES.has(run.status),
+      terminal: isTerminalRunStatus(run.status),
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

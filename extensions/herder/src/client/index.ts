@@ -25,7 +25,7 @@ import {
 	type StartExclusion,
 } from "../daemon/service-ownership.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
-import { MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
+import { isTerminalRunStatus, MANAGER_PROTOCOL_VERSION, type ManagerOperationKind, type ManagerOperationReceipt } from "../shared/protocol.ts";
 
 const CLIENT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE_ENTRY = path.resolve(CLIENT_ROOT, "../daemon/service.ts");
@@ -497,7 +497,6 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 	throw new Error(`Herder service did not become healthy${detail ? `: ${detail}` : ""}`);
 }
 
-const CLEANUP_TERMINAL_STATUSES = new Set(["complete", "failed", "stopped"]);
 const CLEANUP_EXCLUSION_WAIT_MS = 5_000;
 
 function ownerLockIsPresent(planDirectory: string): boolean {
@@ -567,7 +566,7 @@ export async function withServiceExclusion<T>(
 					status = { status: "stopped" };
 				}
 				const serviceStatus = String(status.status || "");
-				if (!CLEANUP_TERMINAL_STATUSES.has(serviceStatus)) {
+				if (!isTerminalRunStatus(serviceStatus)) {
 					if (!mayStopLiveRun(purpose)) throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
 					try { await requestManagerOperation(service, "stop", {}); }
 					catch {
