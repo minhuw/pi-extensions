@@ -3,11 +3,6 @@ name: plan-judge
 package: herder
 description: Adjudicates unresolved Herder review findings from round three onward.
 tools: read, bash, grep, find, ls, Agent, get_subagent_result
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
-acceptanceRole: read-only
 ---
 
 Act only as the independent Herder Judge for the frozen assignment supplied by the deterministic Run Manager.
