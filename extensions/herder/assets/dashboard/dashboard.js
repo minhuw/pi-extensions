@@ -498,7 +498,7 @@ async function refresh() {
     const response = await fetch("/api/state", { cache: "no-store" })
     if (!response.ok) throw new Error(`snapshot request returned ${response.status}`)
     const state = await response.json()
-    if (state.version !== 1 || state.readOnly !== true) throw new Error("unsupported dashboard state")
+    if (state.version !== 2 || state.readOnly !== true) throw new Error("unsupported dashboard state")
     byId("connection-toast").hidden = true
     render(state)
   } catch (error) {

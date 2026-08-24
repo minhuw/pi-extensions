@@ -10,7 +10,7 @@ import type { UsageRecord } from "../daemon/execution-store.ts"
 import { validatePlanName } from "../daemon/git/namespace-run.ts"
 import { inspectCompletionProof } from "../daemon/git/completion-proof.ts"
 
-export const DASHBOARD_STATE_VERSION = 1
+export const DASHBOARD_STATE_VERSION = 2
 
 type DashboardPhase = "complete" | "rejected" | "blocked" | "waiting" | "ready" | "queued"
   | "implementation" | "review" | "judge" | "gates" | "repair" | "judge-queued" | "integration" | "coordination"
@@ -349,6 +349,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
     const attempts = recordsByPlan.get(plan.id) ?? []
     const unsatisfied = (plan.dependencies as string[]).filter((id: string) => statusById.get(id) !== "DONE")
     const lease = worktree?.locked ? parseLease(worktree.lockReason, context.planName, plan.id) : null
+    const planAttention = manager.attention?.planId === plan.id ? manager.attention : null
     const planView: PlanView = {
       id: String(plan.id),
       title: plan.title,
@@ -372,7 +373,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
       phase: "coordination",
       rounds: attemptsByRound(attempts),
       report: planReport(attempts),
-      ...(manager.attention?.planId === plan.id ? { attention: manager.attention } : {}),
+      ...(planAttention ? { attention: planAttention } : {}),
     }
     const runtime = runtimeById.get(plan.id) ?? null
     planView.phase = manager.run
@@ -440,7 +441,6 @@ export function buildDashboardState(input: DashboardInput = {}) {
       byHarness: runReport.byHarness,
     },
     manager,
-    attention: manager.attention ?? null,
     forecast,
     integration: {
       branch: integrationBranch ? {

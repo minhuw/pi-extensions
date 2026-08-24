@@ -11,6 +11,8 @@ import test from "node:test"
 import { executionDatabasePath, executionReport, recordUsageRecord } from "../../../src/daemon/execution-store.ts"
 import type { UsageRecord, UsageRecordInput } from "../../../src/daemon/execution-store.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
+import { RunStore, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
+import { attentionRequestSha256, sha256 } from "../../../src/shared/protocol.ts"
 import { buildDashboardState, buildForecast, derivePlanPhase, parseLease, parseWorktreeList } from "../../../src/dashboard/dashboard-state.ts"
 import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
 import { createDashboardServer, parseDashboardArguments } from "../../../src/dashboard/herder-dashboard.ts"
@@ -283,6 +285,162 @@ function createFixture() {
   }
 }
 
+function createAttentionFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-dashboard-attention-test-"))
+  try {
+    const repo = path.join(root, "repo")
+    fs.mkdirSync(repo)
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Herder Dashboard Attention Test")
+    git(repo, "config", "user.email", "dashboard-attention@example.invalid")
+    const planDir = path.join(repo, "herder-plans")
+    fs.mkdirSync(planDir)
+    const planName = "attention-demo"
+    const title = "Persisted dashboard decision"
+    const planText = planBody("001", title, "none")
+    fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
+
+## Execution order & status
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|------|-------|----------|--------|------------|--------|
+| [001](001-decision.md) | ${title} | P1 | S | — | BLOCKED — awaiting decision |
+`)
+    fs.writeFileSync(path.join(planDir, "001-decision.md"), planText)
+    fs.writeFileSync(path.join(repo, "fixture.txt"), "fixture\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "test: initialize dashboard attention fixture")
+
+    const runId = "attention-demo-run"
+    const baseCommit = git(repo, "rev-parse", "HEAD")
+    const store = new RunStore(planDir)
+    try {
+      store.createRun({
+        runId,
+        repositoryRoot: repo,
+        planDirectory: planDir,
+        planName,
+        host: "pi",
+        profileName: "eclipse",
+        profileSha256: "p".repeat(64),
+        maxParallel: 1,
+        currentGeneration: 1,
+        graphSha256: "g".repeat(64),
+        status: "needs_input",
+        checkoutStateToken: "checkout",
+        baseCommit,
+        integrationBranch: `herder/${planName}/integration`,
+        integrationWorktree: path.join(planDir, "integration"),
+      })
+      const spec: StoredPlanSpec = {
+        runId,
+        graphGeneration: 1,
+        planId: "001",
+        planFingerprint: "f".repeat(64),
+        fingerprintVersion: 2,
+        ordinal: 0,
+        title,
+        priority: "P1",
+        effort: "S",
+        kind: "behavioral",
+        dependencies: [],
+        initialStatus: "BLOCKED",
+        initialStatusDetail: "awaiting decision",
+        gateCommands: [],
+        planFile: "001-decision.md",
+        assignment: {
+          snapshotSha256: "s".repeat(64),
+          snapshotInputs: [],
+          plan: {
+            id: "001",
+            title,
+            kind: "behavioral",
+            parentObjective: "Exercise persisted dashboard attention",
+            dependencies: [],
+            inScopePaths: ["src/value.mjs"],
+          },
+          planText,
+        },
+      }
+      store.putPlanSpecs([spec])
+      store.putPlan({
+        runId,
+        planId: "001",
+        generation: 1,
+        round: 2,
+        phase: "NEEDS_INPUT",
+        branch: `herder/${planName}/001`,
+        worktree: path.join(root, "worker-001"),
+        assignmentPath: path.join(planDir, ".herder", "assignment.json"),
+        assignmentSha256: "a".repeat(64),
+        snapshotSha256: "s".repeat(64),
+        generationBase: baseCommit,
+        reviewPass: 0,
+        findings: [],
+        repair: [],
+        gates: [],
+        approvedBase: null,
+        approvedHead: null,
+        approvedTree: null,
+        rebase: null,
+      })
+      const detail = "The Judge needs a recorded decision."
+      const request = {
+        schemaVersion: 1,
+        requestId: "attention-001",
+        runId,
+        planId: "001",
+        generation: 1,
+        round: 2,
+        actionId: "attention-001:action",
+        kind: "user_decision",
+        state: "awaiting_input",
+        cause: "judge_needs_input",
+        detail,
+        detailSha256: sha256(detail),
+        continuation: { role: "plan-judge", phase: "READY_JUDGE" },
+        question: "Which recorded decision should the Judge use?",
+        recommendedAction: "Answer the Judge question.",
+        createdAt: "2026-08-03T00:00:00.000Z",
+        updatedAt: "2026-08-03T00:00:00.000Z",
+      } as const
+      const persisted = { ...request, requestSha256: attentionRequestSha256(request) }
+      store.putAttention(persisted)
+      return {
+        root,
+        planDir,
+        planName,
+        expectedAttention: {
+          schemaVersion: 1,
+          requestId: persisted.requestId,
+          runId: persisted.runId,
+          planId: persisted.planId,
+          generation: persisted.generation,
+          round: persisted.round,
+          actionId: persisted.actionId,
+          requestSha256: persisted.requestSha256,
+          kind: persisted.kind,
+          state: persisted.state,
+          cause: persisted.cause,
+          detail: persisted.detail,
+          detailSha256: persisted.detailSha256,
+          continuation: persisted.continuation,
+          question: persisted.question,
+          recommendedAction: persisted.recommendedAction,
+          createdAt: persisted.createdAt,
+          updatedAt: persisted.updatedAt,
+        },
+        cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+      }
+    } finally {
+      store.close()
+    }
+  } catch (error) {
+    fs.rmSync(root, { recursive: true, force: true })
+    throw error
+  }
+}
+
 async function runTests(): Promise<void> {
   const fixture = createFixture()
   try {
@@ -425,7 +583,8 @@ async function runTests(): Promise<void> {
     const statusBefore = git(fixture.repo, "status", "--porcelain=v1")
     const databaseBefore = fs.readFileSync(executionDatabasePath(fixture.planDir))
     const state = buildDashboardState({ planDir: fixture.planDir, planName: "demo" })
-    assert.equal(state.version, 1)
+    assert.equal(state.version, 2)
+    assert.equal(Object.hasOwn(state, "attention"), false)
     assert.equal(state.readOnly, true)
     assert.equal(state.planSet.name, "demo")
     assert.deepEqual(state.planSet.counts, { total: 6, todo: 2, inProgress: 1, done: 2, blocked: 1, rejected: 0, actionable: 4 })
@@ -540,5 +699,19 @@ const serve = process.argv.slice(2).includes("--serve")
 if (serve) {
   await serveFixture()
 } else {
+  test("dashboard state preserves persisted attention under manager without a root duplicate", () => {
+    const fixture = createAttentionFixture()
+    try {
+      const state = buildDashboardState({ planDir: fixture.planDir, planName: fixture.planName })
+      assert.equal(state.version, 2)
+      assert.equal(Object.hasOwn(state, "attention"), false)
+      assert.deepEqual(state.manager.attention, fixture.expectedAttention)
+      const plan = state.plans.find((candidate) => candidate.id === "001")
+      assert.ok(plan)
+      assert.deepEqual(plan.attention, fixture.expectedAttention)
+    } finally {
+      fixture.cleanup()
+    }
+  })
   test("dashboard state, host access, and HTTP behavior remain observable", runTests)
 }
