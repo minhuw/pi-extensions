@@ -237,6 +237,49 @@ test("status changes after the matched fresh preview abort before cleanup mutati
 	}
 });
 
+test("lifecycle storage failure after confirmation aborts before cleanup mutation", async () => {
+	const fixture = setup();
+	try {
+		const request: CleanupApplicationRequest = {
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDir,
+		};
+		let dryRunCalls = 0;
+		let applyCalls = 0;
+		const dependencies: CleanupApplicationDependencies = {
+			readStatus: () => "complete",
+			withExclusion: async (_planDirectory, callback) => callback(),
+			cleanupRunner: async (input) => {
+				if (input.dryRun) {
+					dryRunCalls += 1;
+					const result = mockedCleanupResult(input);
+					if (dryRunCalls === 2) {
+						const store = new RunStore(fixture.planDir);
+						try { store.database.exec("DROP TABLE manager_plan_specs"); } finally { store.close(); }
+					}
+					return result;
+				}
+				applyCalls += 1;
+				return mockedCleanupResult(input);
+			},
+		};
+		const expected = await previewHerderCleanup(request, dependencies);
+		await assert.rejects(
+			() => applyHerderCleanup(request, expected, dependencies),
+			(error: unknown) => {
+				assert.equal((error as Error).message, "Cleanup plan status or selection changed after confirmation; cleanup was not applied.");
+				return true;
+			},
+		);
+		assert.equal(dryRunCalls, 2);
+		assert.equal(applyCalls, 0);
+		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
+		assert.equal(fs.existsSync(fixture.completed), true);
+	} finally {
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
 test("failed evidence that becomes active at the execution boundary is preserved", async () => {
 	const fixture = setup();
 	try {

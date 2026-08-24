@@ -873,5 +873,24 @@ if (serve) {
       fixture.cleanup()
     }
   })
+  test("dashboard rejects invalid persisted plan specification fingerprints", () => {
+    const fixture = createManagerLifecycleFixture()
+    try {
+      const store = new RunStore(fixture.planDir)
+      try {
+        store.database.exec("PRAGMA ignore_check_constraints = ON")
+        store.database.prepare("UPDATE manager_plan_specs SET fingerprint_version = 1 WHERE run_id = ? AND graph_generation = ? AND plan_id = ?")
+          .run("manager-lifecycle-run", 1, "001")
+      } finally {
+        store.close()
+      }
+      assert.throws(
+        () => buildDashboardState({ planDir: fixture.planDir, planName: "demo" }),
+        /Stored plan specification fingerprint version is invalid/,
+      )
+    } finally {
+      fixture.cleanup()
+    }
+  })
   test("dashboard state, host access, and HTTP behavior remain observable", runTests)
 }

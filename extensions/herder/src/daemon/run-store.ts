@@ -340,13 +340,16 @@ export function readManagerState(planDir: string) {
       FROM manager_plans WHERE run_id = ? ORDER BY plan_id
     `).all(run.run_id) as SqlRow[] : []
     const specs = run ? database.prepare(`
-      SELECT graph_generation, plan_id, plan_fingerprint, ordinal, title, priority,
+      SELECT graph_generation, plan_id, plan_fingerprint, fingerprint_version, ordinal, title, priority,
         effort, kind, dependencies_json, initial_status, initial_status_detail,
         gate_commands_json, plan_file
       FROM manager_plan_specs
       WHERE run_id = ? AND graph_generation = ?
       ORDER BY ordinal, plan_id
     `).all(run.run_id, run.current_generation) as SqlRow[] : []
+    for (const spec of specs) {
+      if (spec.fingerprint_version !== 2) throw new Error("Stored plan specification fingerprint version is invalid")
+    }
     const actions = run ? database.prepare(`
       SELECT action_id, plan_id, generation, round_number, role, attempt_id,
         state, agent_type, model, effort, service_tier, worker_mode, task_name,

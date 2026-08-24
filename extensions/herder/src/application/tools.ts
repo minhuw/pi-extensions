@@ -598,10 +598,11 @@ export async function applyHerderCleanup(
 		if (fresh.normalizedPreview !== expectedPreview.normalizedPreview) {
 			throw new Error("Cleanup preview changed after confirmation; cleanup was not applied.");
 		}
-		const currentGraph = buildGraph(request.planDirectory);
-		const graph = applyLifecycleToGraph(currentGraph, readPlanLifecycle(request.planDirectory, currentGraph));
+		let graph: ReturnType<typeof buildGraph>;
 		let currentSelection: ReturnType<typeof selectCleanupPlanIds>;
 		try {
+			const currentGraph = buildGraph(request.planDirectory);
+			graph = applyLifecycleToGraph(currentGraph, readPlanLifecycle(request.planDirectory, currentGraph));
 			currentSelection = selectCleanupPlanIds(graph, request);
 		} catch {
 			throw new Error("Cleanup plan status or selection changed after confirmation; cleanup was not applied.");
