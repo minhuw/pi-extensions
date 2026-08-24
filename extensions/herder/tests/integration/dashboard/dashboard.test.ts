@@ -285,11 +285,12 @@ function createFixture() {
   }
 }
 
-function createAttentionFixture() {
+function createAttentionFixture(afterRootCreated?: (root: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-dashboard-attention-test-"))
   try {
     const repo = path.join(root, "repo")
     fs.mkdirSync(repo)
+    afterRootCreated?.(root)
     git(repo, "init", "-q")
     git(repo, "config", "user.name", "Herder Dashboard Attention Test")
     git(repo, "config", "user.email", "dashboard-attention@example.invalid")
@@ -699,6 +700,19 @@ const serve = process.argv.slice(2).includes("--serve")
 if (serve) {
   await serveFixture()
 } else {
+  test("dashboard attention fixture removes its root when setup fails", () => {
+    let root: string | undefined
+    const setupError = new Error("injected dashboard attention fixture setup failure")
+    assert.throws(
+      () => createAttentionFixture((createdRoot) => {
+        root = createdRoot
+        throw setupError
+      }),
+      (error: unknown) => error === setupError,
+    )
+    assert.ok(root)
+    assert.equal(fs.existsSync(root), false)
+  })
   test("dashboard state preserves persisted attention under manager without a root duplicate", () => {
     const fixture = createAttentionFixture()
     try {
