@@ -6,11 +6,10 @@ import path from "node:path";
 import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { WORKER_ROLES } from "../../../src/shared/protocol.ts";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const registry = path.resolve(scriptDir, "../../../src/core/profile-registry.ts");
-const roles = ["plan-implementer", "plan-reviewer", "plan-judge"];
-
 type ProfileRole = {
 	agent_type: string;
 	model: string;
@@ -104,6 +103,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.equal(eclipse.host, "pi");
 	assert.deepEqual(eclipse.orchestrator, expectedProfiles.eclipse.orchestrator);
 	assert.deepEqual(eclipse.roles, expectedProfiles.eclipse.roles);
+	assert.deepEqual(Object.keys(eclipse.roles), WORKER_ROLES);
 
 	for (const name of ["poorman", "epic", "lightspeed"]) {
 		const profile = run("resolve", "--host", "pi", "--profile", name);
@@ -111,6 +111,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 		assert.equal(profile.host, "pi");
 		assert.deepEqual(profile.orchestrator, expectedProfiles[name].orchestrator);
 		assert.deepEqual(profile.roles, expectedProfiles[name].roles);
+		assert.deepEqual(Object.keys(profile.roles), WORKER_ROLES);
 	}
 
 	const unsupported = spawnSync(process.execPath, [registry, "resolve", "--host", "codex"], { encoding: "utf8" });

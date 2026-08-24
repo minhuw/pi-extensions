@@ -4,11 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { sha256, stableJson, type ResolvedProfile, type RoleProfile, type WorkerRole } from "../shared/protocol.ts";
+import { WORKER_ROLES, sha256, stableJson, type ResolvedProfile, type RoleProfile, type WorkerRole } from "../shared/protocol.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_PROFILE_CATALOG = path.resolve(CORE_ROOT, "../../assets/profiles/profiles.json");
-const ROLES: WorkerRole[] = ["plan-implementer", "plan-reviewer", "plan-judge"];
 const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/;
 
@@ -62,14 +61,14 @@ export function loadPiProfileCatalog(file = DEFAULT_PROFILE_CATALOG): PiProfileC
 		if (unknown.length) throw new Error(`Profile ${profile.name} has unknown fields: ${unknown.join(", ")}`);
 		if (!profile.roles || typeof profile.roles !== "object" || Array.isArray(profile.roles)) throw new Error(`Profile ${profile.name} has no roles`);
 		const roleValues = profile.roles as Record<string, unknown>;
-		if (Object.keys(roleValues).length !== ROLES.length || ROLES.some((role) => !(role in roleValues))) {
-			throw new Error(`Profile ${profile.name} must define exactly ${ROLES.join(", ")}`);
+		if (Object.keys(roleValues).length !== WORKER_ROLES.length || WORKER_ROLES.some((role) => !(role in roleValues))) {
+			throw new Error(`Profile ${profile.name} must define exactly ${WORKER_ROLES.join(", ")}`);
 		}
 		return {
 			name: profile.name,
 			description: profile.description.trim(),
 			orchestrator: mapping(profile.orchestrator, `${profile.name} orchestrator`),
-			roles: Object.fromEntries(ROLES.map((role) => [role, mapping(roleValues[role], `${profile.name}/${role}`)])) as PiProfileDefinition["roles"],
+			roles: Object.fromEntries(WORKER_ROLES.map((role) => [role, mapping(roleValues[role], `${profile.name}/${role}`)])) as PiProfileDefinition["roles"],
 		};
 	});
 	if (!names.has(value.default)) throw new Error(`Unknown default profile ${JSON.stringify(value.default)}`);
@@ -87,7 +86,7 @@ export function resolvePiProfile(requested?: string, file = DEFAULT_PROFILE_CATA
 		profile_sha256: sha256(stableJson(profile)),
 		host: "pi",
 		orchestrator: profile.orchestrator,
-		roles: Object.fromEntries(ROLES.map((role) => [role, {
+		roles: Object.fromEntries(WORKER_ROLES.map((role) => [role, {
 			agent_type: `herder.${role}`,
 			...profile.roles[role],
 		}])) as ResolvedProfile["roles"],

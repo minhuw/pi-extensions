@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { integrationRepairEpisodeId, sha256, stableJson } from "../shared/protocol.ts"
+import { WORKER_ROLES, integrationRepairEpisodeId, sha256, stableJson } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -1558,7 +1558,7 @@ function normalizeRunConfiguration(input: RunConfigurationInput = {}): RunConfig
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) fail("Roles must be a JSON object")
   const roleRecords = roles as Record<string, unknown>
   const normalizedRoles: Record<string, RunRoleBinding> = {}
-  for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"]) {
+  for (const role of WORKER_ROLES) {
     const mapping = roleRecords[role] as Record<string, unknown> | undefined
     if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) fail(`Missing run role ${role}`)
     const unknownFields = Object.keys(mapping).filter((field) => !["agent_type", "model", "effort", "service_tier"].includes(field))

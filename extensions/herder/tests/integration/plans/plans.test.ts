@@ -200,6 +200,21 @@ try {
     },
   }
   assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, true)
+  const missingRoles = {
+    "plan-implementer": runProfile.roles["plan-implementer"],
+    "plan-reviewer": runProfile.roles["plan-reviewer"],
+  }
+  expectFailure(
+    () => recordRunConfiguration(valid.planDir, { ...runProfile, roles: missingRoles }),
+    /Missing run role plan-judge/,
+  )
+  expectFailure(
+    () => recordRunConfiguration(valid.planDir, {
+      ...runProfile,
+      roles: { ...runProfile.roles, unexpected: runProfile.roles["plan-judge"] },
+    }),
+    /Run roles contain an unknown role/,
+  )
   assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, false)
   assert.deepEqual(required(readRunConfiguration(valid.planDir).configuration).roles, runProfile.roles)
   expectFailure(

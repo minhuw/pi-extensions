@@ -1,8 +1,8 @@
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
-import type { ResolvedProfile } from "../src/shared/protocol.ts";
+import { WORKER_ROLES, type ResolvedProfile, type WorkerRole } from "../src/shared/protocol.ts";
 
-export const HERDER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
-export type HerderRole = (typeof HERDER_ROLES)[number];
+export const HERDER_ROLES = WORKER_ROLES;
+export type HerderRole = WorkerRole;
 export const THINKING_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingEffort = (typeof THINKING_EFFORTS)[number];
 

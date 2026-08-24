@@ -16,7 +16,7 @@ import {
 	type AgentSessionEvent,
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
-import type { ManagerAction, UsageEvidence } from "../src/shared/protocol.ts";
+import { WORKER_ROLES, type ManagerAction, type UsageEvidence, type WorkerRole } from "../src/shared/protocol.ts";
 import {
 	modelMatches,
 	modelSupportsEffort,
@@ -152,7 +152,7 @@ export function applyServiceTier(session: AgentSession, tier: string): void {
 
 function roleFromAgentType(agentType: string): ManagerAction["role"] {
 	const role = agentType.startsWith("herder.") ? agentType.slice("herder.".length) : agentType;
-	if (!new Set(["plan-implementer", "plan-reviewer", "plan-judge"]).has(role)) {
+	if (!WORKER_ROLES.includes(role as WorkerRole)) {
 		throw new Error(`Unknown Herder Pi role ${JSON.stringify(agentType)}.`);
 	}
 	return role as ManagerAction["role"];

@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	activeModelMatches,
+	HERDER_ROLES,
 	loadPiProfile,
 	modelMatches,
 	modelSupportsEffort,
@@ -14,6 +15,7 @@ import {
 	serviceTierRequestValue,
 	unavailableProfileModels,
 } from "../../../adapters/profile.ts";
+import { WORKER_ROLES } from "../../../src/shared/protocol.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
@@ -46,6 +48,10 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
 	assert.deepEqual(profile.roles, registryProfile.roles);
+});
+
+test("Pi adapter role aliases share the protocol worker-role tuple", () => {
+	assert.strictEqual(HERDER_ROLES, WORKER_ROLES);
 });
 
 test("Pi rejects thinking levels that the resolved model cannot honor", () => {
@@ -82,6 +88,31 @@ test("model checks accept provider-qualified catalog entries without substitutio
 	assert.equal(activeModelMatches(profile, available[2]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
 	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
+});
+
+test("Pi profile catalogs require exactly the canonical worker roles", async () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "herder-pi-profile-roles-"));
+	try {
+		const missing = JSON.parse(readFileSync(catalog, "utf8"));
+		delete missing.profiles[0].roles["plan-judge"];
+		const missingFixture = path.join(root, "missing.json");
+		writeFileSync(missingFixture, JSON.stringify(missing));
+		await assert.rejects(
+			() => loadPiProfile(missingFixture, "eclipse"),
+			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
+		);
+
+		const extra = JSON.parse(readFileSync(catalog, "utf8"));
+		extra.profiles[0].roles["unexpected"] = extra.profiles[0].roles["plan-judge"];
+		const extraFixture = path.join(root, "extra.json");
+		writeFileSync(extraFixture, JSON.stringify(extra));
+		await assert.rejects(
+			() => loadPiProfile(extraFixture, "eclipse"),
+			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("Pi profile catalogs reject host-specific compatibility fields", async () => {

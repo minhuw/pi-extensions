@@ -176,6 +176,23 @@ test("applyServiceTier pins every stream request and final provider payload", as
 	assert.throws(() => applyServiceTier(session as never, "flex"), /Unknown Herder service tier/);
 });
 
+test("Pi worker admission rejects unknown and mismatched role identities", async () => {
+	const factory = new DefaultPiWorkerSessionFactory(agentRoot);
+	const unknown = action("unknown-role");
+	unknown.agentType = "herder.unknown";
+	await assert.rejects(
+		() => factory.create({ action: unknown, planDirectory: "/tmp/herder-role-admission" }),
+		/Unknown Herder Pi role/,
+	);
+
+	const mismatch = action("mismatched-role");
+	mismatch.role = "plan-reviewer";
+	await assert.rejects(
+		() => factory.create({ action: mismatch, planDirectory: "/tmp/herder-role-admission" }),
+		/does not match herder\.plan-implementer/,
+	);
+});
+
 test("searcher policy is name-swap safe and blocks local fetch inputs", () => {
 	const search: { queries: string[]; workflow?: string } = { queries: ["current docs"] };
 	assert.equal(applySearcherToolPolicy("fetch_content", search), undefined);
