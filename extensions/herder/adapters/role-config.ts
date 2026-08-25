@@ -46,14 +46,21 @@ export interface HerderNestedAgentDefinition {
 }
 
 const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
-	"read", "grep", "find", "ls",
+	"read", "ffgrep", "fffind", "ls",
 	"web_search", "source_check", "fetch_content", "get_search_content",
 ]);
 export const PONYTAIL_EXTENSION_SOURCE = "git:github.com/DietrichGebert/ponytail";
+export const FFF_EXTENSION_SOURCE = "npm:@ff-labs/pi-fff";
+export const WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access";
+const ROLE_EXTENSION_SOURCES: Record<HerderRole, readonly string[]> = {
+	"plan-implementer": [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
+	"plan-reviewer": [FFF_EXTENSION_SOURCE],
+	"plan-judge": [FFF_EXTENSION_SOURCE],
+};
 const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]> = {
-	recon: [],
-	searcher: ["npm:pi-web-access"],
-	worker: [PONYTAIL_EXTENSION_SOURCE],
+	recon: [FFF_EXTENSION_SOURCE],
+	searcher: [WEB_ACCESS_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
+	worker: [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
 };
 
 function stringField(frontmatter: Record<string, unknown>, name: string, file: string): string {
@@ -137,10 +144,8 @@ export async function loadHerderPiRole(agentRoot: string, role: HerderRole): Pro
 	if (parsed.body.trim().length === 0) throw new Error(`missing system prompt in ${file}`);
 	const extensions = stringList(parsed.frontmatter.extensions);
 	if (new Set(extensions).size !== extensions.length) throw new Error(`duplicate extensions in ${file}`);
-	if (role !== "plan-implementer" && extensions.length > 0) {
-		throw new Error(`Herder role ${role} cannot request extensions in ${file}`);
-	}
-	const rejectedExtension = extensions.find((source) => source !== PONYTAIL_EXTENSION_SOURCE);
+	const allowedExtensions = ROLE_EXTENSION_SOURCES[role];
+	const rejectedExtension = extensions.find((source) => !allowedExtensions.includes(source));
 	if (rejectedExtension) throw new Error(`Herder role ${role} requests forbidden extension ${rejectedExtension} in ${file}`);
 	return {
 		role,

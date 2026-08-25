@@ -14,6 +14,7 @@ import {
 	DefaultPiWorkerSessionFactory,
 	finalAssistantResult,
 	PiWorkerEngine,
+	resolveFffToolNames,
 	trustedNestedExtensionPath,
 	trustedRoleExtensionEntry,
 	type PiWorkerRequest,
@@ -193,33 +194,81 @@ test("Pi worker admission rejects unknown and mismatched role identities", async
 	);
 });
 
-test("searcher policy is name-swap safe and blocks local fetch inputs", () => {
-	const search: { queries: string[]; workflow?: string } = { queries: ["current docs"] };
-	assert.equal(applySearcherToolPolicy("fetch_content", search), undefined);
-	assert.equal(search.workflow, "none");
-	const remote: { url: string; workflow?: string } = { url: "https://example.com" };
-	assert.equal(applySearcherToolPolicy("web_search", remote), undefined);
-	assert.equal(remote.workflow, "none");
-	assert.deepEqual(applySearcherToolPolicy("web_search", { url: "file:///tmp/secret" }), {
-		block: true,
-		reason: "Herder searcher may fetch only remote URLs.",
-	});
-	assert.deepEqual(applySearcherToolPolicy("unexpected", {}), {
-		block: true,
-		reason: "Herder searcher cannot call unexpected tool unexpected.",
-	});
+test("searcher policy is name-swap safe and confines local searches to the assigned worktree", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-searcher-policy-"));
+	try {
+		const worktree = path.join(root, "worktree");
+		const sibling = path.join(root, "sibling");
+		await mkdir(path.join(worktree, "src"), { recursive: true });
+		await mkdir(sibling);
+		await symlink(sibling, path.join(worktree, "escape"), "dir");
+		const search: { queries: string[]; workflow?: string } = { queries: ["current docs"] };
+		assert.equal(applySearcherToolPolicy("fetch_content", search, worktree), undefined);
+		assert.equal(search.workflow, "none");
+		const remote: { url: string; workflow?: string } = { url: "https://example.com" };
+		assert.equal(applySearcherToolPolicy("web_search", remote, worktree), undefined);
+		assert.equal(remote.workflow, "none");
+		assert.deepEqual(applySearcherToolPolicy("web_search", { url: "file:///tmp/secret" }, worktree), {
+			block: true,
+			reason: "Herder searcher may fetch only remote URLs.",
+		});
+		for (const tool of ["fffind", "ffgrep", "find", "grep"]) {
+			const local = { path: "src", workflow: "unchanged" };
+			assert.equal(applySearcherToolPolicy(tool, local, worktree), undefined);
+			assert.equal(local.workflow, "unchanged");
+			assert.deepEqual(applySearcherToolPolicy(tool, { cursor: "opaque" }, worktree), {
+				block: true,
+				reason: "Herder searcher disables cross-call FFF cursors to preserve worktree confinement.",
+			});
+			for (const escaped of ["..", "../sibling", sibling, "~/secret", "escape/secret"]) {
+				assert.deepEqual(applySearcherToolPolicy(tool, { path: escaped }, worktree), {
+					block: true,
+					reason: "Herder searcher may search only inside its assigned worktree.",
+				});
+			}
+		}
+		assert.deepEqual(applySearcherToolPolicy("unexpected", {}, worktree), {
+			block: true,
+			reason: "Herder searcher cannot call unexpected tool unexpected.",
+		});
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
-test("nested extensions resolve only inside the trusted user package store", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "herder-nested-extension-"));
+test("FFF tool resolution accepts default and override package modes", () => {
+	const tools = ["read", "ffgrep", "fffind"];
+	const extension = (names: string[]) => ({ tools: new Map(names.map((name) => [name, {}])) });
+	assert.deepEqual(resolveFffToolNames(tools, [extension(["ffgrep", "fffind"])]), tools);
+	assert.deepEqual(resolveFffToolNames(tools, [extension(["grep", "find"])]), ["read", "grep", "find"]);
+	assert.throws(() => resolveFffToolNames(tools, [extension([])]), /did not register its required find and grep tools/);
+});
+
+test("npm extensions resolve only from their exact trusted user package paths", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-npm-extension-"));
 	try {
 		const agentDir = path.join(root, "agent");
-		const trustedPackage = path.join(agentDir, "npm/node_modules/pi-web-access");
+		const web = path.join(agentDir, "npm/node_modules/pi-web-access");
+		const fff = path.join(agentDir, "npm/node_modules/@ff-labs/pi-fff");
+		await mkdir(web, { recursive: true });
+		await mkdir(fff, { recursive: true });
+		assert.equal(trustedNestedExtensionPath(agentDir, web, "npm:pi-web-access"), await realpath(web));
+		assert.equal(trustedNestedExtensionPath(agentDir, fff, "npm:@ff-labs/pi-fff"), await realpath(fff));
+
+		const sibling = path.join(agentDir, "npm/node_modules/shadow");
+		await mkdir(sibling);
+		assert.throws(
+			() => trustedNestedExtensionPath(agentDir, sibling, "npm:pi-web-access"),
+			/does not resolve to its exact trusted package path/,
+		);
+		assert.throws(
+			() => trustedNestedExtensionPath(agentDir, web, "npm:@ff-labs/pi-fff"),
+			/does not resolve to its exact trusted package path/,
+		);
+
 		const outsidePackage = path.join(root, "outside/pi-web-access");
-		await mkdir(trustedPackage, { recursive: true });
 		await mkdir(outsidePackage, { recursive: true });
-		assert.equal(trustedNestedExtensionPath(agentDir, trustedPackage, "npm:pi-web-access"), await realpath(trustedPackage));
-		const shadow = path.join(agentDir, "npm/node_modules/shadow");
+		const shadow = path.join(agentDir, "npm/node_modules/outside-shadow");
 		await symlink(outsidePackage, shadow, "dir");
 		assert.throws(
 			() => trustedNestedExtensionPath(agentDir, shadow, "npm:pi-web-access"),
@@ -280,21 +329,42 @@ test("role extensions resolve only the exact entry inside the trusted user git p
 	}
 });
 
-test("production factory binds Ponytail only to Implementer sessions without widening tools", async () => {
+test("production factory loads exact role extensions and nested worker extensions without widening tools", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-runtime-"));
 	try {
 		const agentDir = path.join(root, "agent");
-		const installed = path.join(agentDir, "git/github.com/DietrichGebert/ponytail");
-		const entry = path.join(installed, "pi-extension/index.js");
+		const ponytail = path.join(agentDir, "git/github.com/DietrichGebert/ponytail/pi-extension/index.js");
+		const fff = path.join(agentDir, "npm/node_modules/@ff-labs/pi-fff");
 		const events = path.join(root, "events.log");
-		await mkdir(path.dirname(entry), { recursive: true });
-		await writeFile(entry, `import { appendFileSync } from "node:fs";
+		await mkdir(path.dirname(ponytail), { recursive: true });
+		await writeFile(ponytail, `import { appendFileSync } from "node:fs";
 export default function (pi) {
-	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "start\\n"));
-	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "shutdown\\n"));
+	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "ponytail-start\\n"));
+	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "ponytail-shutdown\\n"));
 	pi.on("before_agent_start", (event) => {
-		appendFileSync(${JSON.stringify(events)}, "before\\n");
+		appendFileSync(${JSON.stringify(events)}, "ponytail-before\\n");
 		return { systemPrompt: event.systemPrompt + "\\nPONYTAIL_TEST" };
+	});
+}
+`);
+		await mkdir(fff, { recursive: true });
+		await writeFile(path.join(fff, "package.json"), JSON.stringify({
+			name: "@ff-labs/pi-fff",
+			type: "module",
+			pi: { extensions: ["./index.js"] },
+		}));
+		await writeFile(path.join(fff, "index.js"), `import { appendFileSync } from "node:fs";
+const parameters = { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] };
+export default function (pi) {
+	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "fff-start\\n"));
+	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "fff-shutdown\\n"));
+	const names = process.env.PI_FFF_MODE === "override" ? ["find", "grep"] : ["fffind", "ffgrep"];
+	for (const name of names) pi.registerTool({
+		name,
+		label: name,
+		description: name,
+		parameters,
+		async execute() { return { content: [{ type: "text", text: "fixture" }] }; },
 	});
 }
 `);
@@ -324,8 +394,8 @@ export default function (pi) {
 			assert.deepEqual(
 				session.agent.state.tools.map((tool) => tool.name).sort(),
 				(role === "plan-implementer"
-					? ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]
-					: ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]).sort(),
+					? ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]
+					: ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]).sort(),
 			);
 			if (role === "plan-implementer") {
 				const injected = await session.extensionRunner.emitBeforeAgentStart("task", undefined, "BASE", {} as never);
@@ -341,7 +411,7 @@ export default function (pi) {
 		const handle = await engine.prepare({ action: roleAction("plan-implementer"), planDirectory });
 		await engine.discard(handle);
 		const afterDiscard = (await readFile(events, "utf8")).trim().split("\n");
-		assert.deepEqual(afterDiscard.slice(beforeDiscard.length), ["start", "shutdown"]);
+		assert.deepEqual(afterDiscard.slice(beforeDiscard.length).sort(), ["fff-shutdown", "fff-start", "ponytail-shutdown", "ponytail-start"]);
 
 		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
 		const beforeNested = (await readFile(events, "utf8")).trim().split("\n");
@@ -354,11 +424,34 @@ export default function (pi) {
 		assert.equal(nestedResult.status, "completed");
 		assert.equal(nestedResult.output, "Nested worker result");
 		const afterNested = (await readFile(events, "utf8")).trim().split("\n");
-		assert.deepEqual(afterNested.slice(beforeNested.length), ["start", "before", "shutdown"]);
+		assert.deepEqual(afterNested.slice(beforeNested.length).sort(), ["fff-shutdown", "fff-start", "ponytail-before", "ponytail-shutdown", "ponytail-start"]);
 		const parent = prepared.session as AgentSession;
 		await parent.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		parent.dispose();
 		await prepared.nested.stop("test cleanup");
+
+		const previousFffMode = process.env.PI_FFF_MODE;
+		process.env.PI_FFF_MODE = "override";
+		try {
+			const overridden = await factory.create({ action: roleAction("plan-reviewer"), planDirectory });
+			const overriddenSession = overridden.session as AgentSession;
+			assert.deepEqual(
+				overriddenSession.agent.state.tools.map((tool) => tool.name).sort(),
+				["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"].sort(),
+			);
+			await overriddenSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			overriddenSession.dispose();
+			await overridden.nested.stop("test cleanup");
+		} finally {
+			if (previousFffMode === undefined) delete process.env.PI_FFF_MODE;
+			else process.env.PI_FFF_MODE = previousFffMode;
+		}
+
+		await rm(fff, { recursive: true, force: true });
+		await assert.rejects(
+			() => factory.create({ action: roleAction("plan-reviewer"), planDirectory }),
+			/Install it explicitly with: pi install npm:@ff-labs\/pi-fff/,
+		);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

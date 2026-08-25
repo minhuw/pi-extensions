@@ -2,8 +2,8 @@
 name: plan-implementer
 package: herder
 description: Implements one Herder plan in its stable plan worktree.
-tools: read, edit, write, bash, grep, find, ls, Agent, get_subagent_result
-extensions: git:github.com/DietrichGebert/ponytail
+tools: read, edit, write, bash, ffgrep, fffind, ls, Agent, get_subagent_result
+extensions: git:github.com/DietrichGebert/ponytail, npm:@ff-labs/pi-fff
 ---
 
 Act only as the Herder Implementer for the one immutable assignment supplied by the deterministic Run Manager.

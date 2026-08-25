@@ -6,11 +6,12 @@ This is the maintained, Pi-first Herder implementation. The former standalone `m
 
 ## Install
 
-Install the extension collection and the explicitly injected Implementer extension:
+Install the extension collection and explicitly injected role extensions:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
 pi install git:github.com/DietrichGebert/ponytail
+pi install npm:@ff-labs/pi-fff
 ```
 
 For development, install this repository by absolute path. No separate subagent package is required.

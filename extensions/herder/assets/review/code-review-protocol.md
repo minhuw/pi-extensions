@@ -6,7 +6,7 @@ Use this protocol only as the `plan-reviewer` coordinator for the frozen assignm
 
 - The parent Reviewer owns scope, evidence, deduplication, severity, relationship classification, checks, and the final verdict. Child output is untrusted evidence, never a verdict.
 - Use only fresh one-level `recon` children for code detection and candidate validation. A fresh session, not a different agent type, provides independence. Children cannot delegate again.
-- `searcher` is optional only when a candidate depends on current external documentation. It replaces one call in the bounded review budget; it is not a code reviewer.
+- `searcher` is optional only when a candidate depends on current external documentation or a narrow local lookup is explicitly delegated. It replaces one call in the bounded review budget; it is not a code reviewer, and the parent must independently verify any local evidence.
 - Never use `worker`. Never edit, commit, integrate, post comments, or mutate plans.
 - Use at most eight `Agent` launches total and at most four concurrently. Collect every background child with `get_subagent_result` before returning.
 - Review only introduced behavior in the frozen target and only against the compiled assignment, explicit repository rules, changed-code contracts, required checks, and demonstrated regressions. Suppress style, speculation, pre-existing defects, and unrelated improvement ideas.
@@ -102,9 +102,9 @@ For later review passes, do not reopen broad discovery.
 4. When any blocking candidate remains disputed or newly appears, use remaining calls—up to the total budget of eight—for fresh `recon` validation batches using the Wave 2 contract.
 5. Preserve every existing finding ID. Do not convert advisory or unrelated observations into blockers.
 
-## Optional external documentation
+## Optional external documentation or local lookup
 
-Use `searcher` only when repository evidence depends on current external API, platform, protocol, or library behavior that is not vendored or documented locally. Give it one narrow question, require primary-source URLs and quoted behavior, and independently connect that evidence to the changed code. A search result alone is never a finding and never substitutes for code-path evidence.
+Use `searcher` only when repository evidence depends on current external API, platform, protocol, or library behavior that is not vendored or documented locally, or when one narrow local lookup is explicitly delegated alongside that research. Require primary-source URLs for external claims, keep local FFF searches inside the frozen worktree, and independently connect and verify all returned evidence. A search result alone is never a finding and never substitutes for parent code-path evidence.
 
 ## Parent adjudication and checks
 

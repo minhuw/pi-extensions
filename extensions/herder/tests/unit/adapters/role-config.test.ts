@@ -22,10 +22,11 @@ test("Herder loads exact non-recursive Pi role definitions", async () => {
 	const reviewer = await loadHerderPiRole(agentRoot, "plan-reviewer");
 	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
-	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
-	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail"]);
-	assert.deepEqual(reviewer.extensions, []);
-	assert.deepEqual(judge.extensions, []);
+	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail", "npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(reviewer.extensions, ["npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(judge.extensions, ["npm:@ff-labs/pi-fff"]);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
@@ -34,21 +35,21 @@ test("Herder loads package-owned one-level nested definitions with explicit perm
 	const recon = await loadHerderNestedAgent(agentRoot, "recon");
 	const searcher = await loadHerderNestedAgent(agentRoot, "searcher");
 	const worker = await loadHerderNestedAgent(agentRoot, "worker");
-	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
-	assert.deepEqual(recon.extensions, []);
+	assert.deepEqual(recon.tools, ["read", "ffgrep", "fffind", "ls"]);
+	assert.deepEqual(recon.extensions, ["npm:@ff-labs/pi-fff"]);
 	assert.equal(recon.readOnly, true);
 	assert.equal(recon.binding, "own");
 	assert.deepEqual(recon.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 	assert.equal(searcher.readOnly, true);
 	assert.equal(searcher.binding, "own");
 	assert.deepEqual(searcher.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
-	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
-	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content"]);
+	assert.deepEqual(searcher.extensions, ["npm:pi-web-access", "npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content", "fffind", "ffgrep"]);
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
-	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail"]);
-	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
+	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail", "npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls"]);
 	for (const definition of [recon, searcher, worker]) {
 		assert.equal(definition.tools.includes("Agent"), false);
 		assert.equal(definition.tools.includes("get_subagent_result"), false);
@@ -179,7 +180,7 @@ extensions: git:github.com/DietrichGebert/ponytail
 ---
 Review.
 `);
-			await assert.rejects(() => loadHerderPiRole(root, role), new RegExp(`role ${role} cannot request extensions`));
+			await assert.rejects(() => loadHerderPiRole(root, role), new RegExp(`role ${role} requests forbidden extension`));
 		}
 		await writeFile(path.join(root, "plan-implementer.md"), `---
 name: plan-implementer

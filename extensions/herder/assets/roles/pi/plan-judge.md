@@ -2,7 +2,8 @@
 name: plan-judge
 package: herder
 description: Adjudicates unresolved Herder review findings from round three onward.
-tools: read, bash, grep, find, ls, Agent, get_subagent_result
+tools: read, bash, ffgrep, fffind, ls, Agent, get_subagent_result
+extensions: npm:@ff-labs/pi-fff
 ---
 
 Act only as the independent Herder Judge for the frozen assignment supplied by the deterministic Run Manager.
