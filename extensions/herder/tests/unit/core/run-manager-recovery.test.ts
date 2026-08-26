@@ -413,6 +413,105 @@ test("target-only revisions and permitted rejection produce immutable next gener
 	}
 });
 
+test("recovery rejects target-only graph identity drift before mutating state", { timeout: 45_000 }, async () => {
+	const cases: Array<{ name: string; mutate: (value: Fixture) => void; expected: RegExp }> = [
+		{
+			name: "sibling content",
+			mutate: (value) => {
+				const file = path.join(value.planDirectory, "002-ready.md");
+				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("# Plan 002: Unrelated ready plan", "# Plan 002: Revised sibling"));
+			},
+			expected: /Recovery revision changed sibling plan 002/,
+		},
+		{
+			name: "target filename",
+			mutate: (value) => {
+				fs.renameSync(path.join(value.planDirectory, "001-blocked.md"), path.join(value.planDirectory, "001-renamed.md"));
+				const readme = path.join(value.planDirectory, "README.md");
+				fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("[001](001-blocked.md)", "[001](001-renamed.md)"));
+			},
+			expected: /Recovery target 001 cannot change its identity, filename, or dependencies/,
+		},
+		{
+			name: "target dependency",
+			mutate: (value) => {
+				const readme = path.join(value.planDirectory, "README.md");
+				fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(
+					"| [001](001-blocked.md) | Blocked target | P1 | S | — | BLOCKED — needs attention |",
+					"| [001](001-blocked.md) | Blocked target | P1 | S | 002 | BLOCKED — needs attention |",
+				));
+				const file = path.join(value.planDirectory, "001-blocked.md");
+				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- **Depends on**: none", "- **Depends on**: 002"));
+			},
+			expected: /Recovery target 001 cannot change its identity, filename, or dependencies/,
+		},
+	];
+
+	for (const scenario of cases) {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-graph-drift-"));
+		const fixtureValue = fixture(root);
+		let service: Service | undefined;
+		try {
+			service = await ensureService(fixtureValue.planDirectory);
+			const started = await managerReply(service, "start", {
+				mode: "fire",
+				repositoryRoot: fixtureValue.repo,
+				planDirectory: fixtureValue.planDirectory,
+				profile: "eclipse",
+				maxParallel: 2,
+			});
+			const attention = object(started.attention);
+			const beforeStore = new RunStore(fixtureValue.planDirectory);
+			let before: string;
+			try {
+				const run = beforeStore.getRun();
+				assert.ok(run);
+				before = stableJson({
+					currentGeneration: run.currentGeneration,
+					generations: beforeStore.getGenerations(run.runId),
+					attentionRequests: beforeStore.getAttentionRequests(run.runId),
+					siblingSpec: beforeStore.getPlanSpecs(run.runId).find((spec) => spec.planId === "002"),
+					siblingPlan: beforeStore.getPlan(run.runId, "002"),
+					siblingActions: beforeStore.getActions(run.runId).filter((action) => action.planId === "002"),
+				});
+			} finally {
+				beforeStore.close();
+			}
+
+			scenario.mutate(fixtureValue);
+			await assert.rejects(
+				() => managerReply(service!, "event", {
+					eventId: `recovery-graph-drift-${scenario.name.replaceAll(" ", "-")}`,
+					kind: "attention",
+					attention: attentionResolution(attention, String(started.runId), "unchanged_retry", "The recorded target evidence must remain immutable."),
+				}),
+				scenario.expected,
+				scenario.name,
+			);
+
+			const afterStore = new RunStore(fixtureValue.planDirectory);
+			try {
+				const run = afterStore.getRun();
+				assert.ok(run);
+				assert.equal(stableJson({
+					currentGeneration: run.currentGeneration,
+					generations: afterStore.getGenerations(run.runId),
+					attentionRequests: afterStore.getAttentionRequests(run.runId),
+					siblingSpec: afterStore.getPlanSpecs(run.runId).find((spec) => spec.planId === "002"),
+					siblingPlan: afterStore.getPlan(run.runId, "002"),
+					siblingActions: afterStore.getActions(run.runId).filter((action) => action.planId === "002"),
+				}), before, scenario.name);
+			} finally {
+				afterStore.close();
+			}
+		} finally {
+			if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
+			cleanup(fixtureValue);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
 test("recovery resolution rejects a mismatched capability or Git identity before mutation", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-binding-"));
 	const fixtureValue = fixture(root);

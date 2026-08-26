@@ -309,6 +309,37 @@ function sameRecoverySpecIdentity(left: StoredPlanSpec, right: StoredPlanSpec): 
 		&& stableJson(left.assignment) === stableJson(right.assignment);
 }
 
+function validateTargetOnlyGraph(
+	priorSpecs: StoredPlanSpec[],
+	nextSpecs: StoredPlanSpec[],
+	targetPlanId: string,
+	graphLabel: string,
+	targetLabel: string,
+): { prior: StoredPlanSpec; target: StoredPlanSpec } {
+	const prior = priorSpecs.find((spec) => spec.planId === targetPlanId);
+	if (!prior) throw new Error(`${targetLabel} ${targetPlanId} has no recorded specification`);
+	const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
+	const next = new Map(nextSpecs.map((spec) => [spec.planId, spec]));
+	if (current.size !== next.size || [...current.keys()].some((planId) => !next.has(planId))) {
+		throw new Error(`${graphLabel} cannot change the plan graph topology`);
+	}
+	const target = next.get(targetPlanId);
+	if (!target) throw new Error(`${targetLabel} ${targetPlanId} is missing from the revised graph`);
+	for (const oldSpec of priorSpecs) {
+		const newSpec = next.get(oldSpec.planId)!;
+		if (oldSpec.planId === targetPlanId) {
+			if (!sameRecoveryGraphIdentity(oldSpec, newSpec)) {
+				throw new Error(`${targetLabel} ${targetPlanId} cannot change its identity, filename, or dependencies`);
+			}
+			continue;
+		}
+		if (!sameRecoveryGraphIdentity(oldSpec, newSpec) || oldSpec.planFingerprint !== newSpec.planFingerprint) {
+			throw new Error(`${graphLabel} changed sibling plan ${oldSpec.planId}`);
+		}
+	}
+	return { prior, target };
+}
+
 function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
 	if (request.kind !== "plan_recovery") return null;
 	return {
@@ -1590,32 +1621,7 @@ export class HerderRunManager {
 		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
 	): { compiled: { specs: StoredPlanSpec[]; graphSha256: string }; nextSpecs: StoredPlanSpec[] } {
 		const priorSpecs = this.specs(run);
-		const prior = priorSpecs.find((spec) => spec.planId === planId);
-		if (!prior) throw new Error(`Rework target ${planId} has no recorded specification`);
-		const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
-		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
-		if (current.size !== next.size || [...current.keys()].some((id) => !next.has(id))) {
-			throw new Error("Rework cannot change the plan graph topology");
-		}
-		const target = next.get(planId);
-		if (!target) throw new Error(`Rework target ${planId} is missing from the revised graph`);
-		for (const oldSpec of priorSpecs) {
-			const newSpec = next.get(oldSpec.planId)!;
-			if (oldSpec.planId === planId) {
-				if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFile !== newSpec.planFile || !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
-					|| newSpec.assignment.plan.id !== oldSpec.assignment.plan.id
-					|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
-					throw new Error(`Rework target ${planId} cannot change its identity, filename, or dependencies`);
-				}
-				continue;
-			}
-			if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFingerprint !== newSpec.planFingerprint || oldSpec.planFile !== newSpec.planFile
-				|| !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
-				|| oldSpec.assignment.plan.id !== newSpec.assignment.plan.id
-				|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
-				throw new Error(`Rework changed sibling plan ${oldSpec.planId}`);
-			}
-		}
+		const { prior, target } = validateTargetOnlyGraph(priorSpecs, compiled.specs, planId, "Rework", "Rework target");
 		if (target.planFingerprint === prior.planFingerprint) throw new Error(`Reserved plan ${planId} has not changed; cancel the edit instead`);
 		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Rework");
 		return {
@@ -3416,7 +3422,6 @@ export class HerderRunManager {
 			throw new Error(`Recovery request ${attention.requestId} no longer matches its immutable target specification`);
 		}
 		const priorSpecs = run.currentGeneration === attention.generation ? recordedSpecs : currentSpecs;
-		const prior = priorSpecs.find((spec) => spec.planId === attention.planId)!;
 		const plan = this.store.getPlan(run.runId, attention.planId);
 		if (plan && (plan.generation !== attention.generation || plan.round !== attention.round)) {
 			throw new Error(`Recovery request ${attention.requestId} does not match the target runtime generation and round`);
@@ -3468,30 +3473,7 @@ export class HerderRunManager {
 		if (activeTargetActions.length > 0) throw new Error(`Recovery target ${attention.planId} still owns active worker actions`);
 
 		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
-		const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
-		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
-		if (current.size !== next.size || [...current.keys()].some((planId) => !next.has(planId))) {
-			throw new Error("Recovery revision cannot change the plan graph topology");
-		}
-		const target = next.get(attention.planId);
-		if (!target) throw new Error(`Recovery target ${attention.planId} is missing from the revised graph`);
-		for (const oldSpec of priorSpecs) {
-			const newSpec = next.get(oldSpec.planId)!;
-			if (oldSpec.planId === attention.planId) {
-				if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFile !== newSpec.planFile || !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
-					|| newSpec.assignment.plan.id !== oldSpec.assignment.plan.id
-					|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
-					throw new Error(`Recovery target ${attention.planId} cannot change its identity, filename, or dependencies`);
-				}
-				continue;
-			}
-			if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFingerprint !== newSpec.planFingerprint || oldSpec.planFile !== newSpec.planFile
-				|| !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
-				|| oldSpec.assignment.plan.id !== newSpec.assignment.plan.id
-				|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
-				throw new Error(`Recovery revision changed sibling plan ${oldSpec.planId}`);
-			}
-		}
+		const { prior, target } = validateTargetOnlyGraph(priorSpecs, compiled.specs, attention.planId, "Recovery revision", "Recovery target");
 		const targetChanged = target.planFingerprint !== prior.planFingerprint;
 		if (action === "unchanged_retry" && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
 		if (action === "revise" && !targetChanged) throw new Error("Target revision did not change the compiled target content");

@@ -255,6 +255,7 @@ test("rework discards an exhausted plan and reschedules round 1 without touching
 		try {
 			const run = before.getRun()!;
 			siblingBefore = stableJson({
+				siblingFingerprint: before.getPlanSpecs(run.runId).find((spec) => spec.planId === "002")?.planFingerprint,
 				plan: before.getPlan(run.runId, "002"),
 				action: before.getAction(String(sibling.actionId)),
 			});
@@ -347,6 +348,7 @@ test("rework discards an exhausted plan and reschedules round 1 without touching
 			assert.match(store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001")?.assignment.planText || "", /Rewritten target/);
 			assert.ok(store.getAttentionRequests(run.runId).every((request) => request.planId !== "001" || request.state === "resolved"));
 			assert.equal(stableJson({
+				siblingFingerprint: store.getPlanSpecs(run.runId).find((spec) => spec.planId === "002")?.planFingerprint,
 				plan: store.getPlan(run.runId, "002"),
 				action: store.getAction(String(sibling.actionId)),
 			}), siblingBefore);
