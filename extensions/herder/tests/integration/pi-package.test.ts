@@ -16,8 +16,15 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.deepEqual(manifest.engines, { node: ">=22.19.0" });
 	assert.deepEqual(lock.packages[""].engines, { node: ">=22.19.0" });
 	assert.match(rootReadme, /Node >=22\.19\.0/);
+	assert.match(rootReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
+	assert.match(rootReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
+	assert.match(rootReadme, /pi install npm:@ff-labs\/pi-fff/);
+	assert.match(rootReadme, /pi install npm:pi-web-access/);
 	assert.match(herderReadme, /Node >=22\.19\.0/);
+	assert.match(herderReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
+	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(herderReadme, /pi install npm:@ff-labs\/pi-fff/);
+	assert.match(herderReadme, /pi install npm:pi-web-access/);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.match(herderReadme, /^## Planning and execution commands$/m);
 	const expectedCommandNames = [
