@@ -53,6 +53,19 @@ test("Pi profile vocabulary uses the canonical worker-role and effort tuples", (
 	assert.deepEqual(THINKING_EFFORTS, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 });
 
+test("Pi profile catalogs normalize singleton service tiers", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "herder-pi-profile-tier-"));
+	try {
+		const modified = JSON.parse(readFileSync(catalog, "utf8"));
+		modified.profiles[0].orchestrator.service_tier = ["fast"];
+		const fixture = path.join(root, "profiles.json");
+		writeFileSync(fixture, JSON.stringify(modified));
+		assert.equal(resolvePiProfile("eclipse", fixture).orchestrator.service_tier, "fast");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Pi rejects thinking levels that the resolved model cannot honor", () => {
 	const grok = {
 		provider: "proxy",

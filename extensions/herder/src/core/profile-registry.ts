@@ -37,7 +37,7 @@ function mapping(value: unknown, label: string): Omit<RoleProfile, "agent_type">
 	if (typeof record.effort !== "string" || !THINKING_EFFORTS.includes(record.effort as ThinkingEffort)) {
 		throw new Error(`${label} has an invalid effort`);
 	}
-	const serviceTier = record.service_tier;
+	const serviceTier = record.service_tier === undefined ? undefined : String(record.service_tier);
 	if (serviceTier !== undefined && serviceTier !== "fast" && serviceTier !== "standard") {
 		throw new Error(`${label} has an invalid service tier`);
 	}
