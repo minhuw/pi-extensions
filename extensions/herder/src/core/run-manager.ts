@@ -1727,17 +1727,11 @@ export class HerderRunManager {
 		return base;
 	}
 
-	private ensureReworkedPlanRuntime(run: StoredRun, planId: string, expectedHead = this.generationBase(run)): StoredPlan {
-		const existing = this.store.getPlan(run.runId, planId);
-		if (existing) {
-			if (existing.generation !== run.currentGeneration || existing.round !== 1) throw new Error(`Reworked plan ${planId} runtime identity changed`);
-			return existing;
-		}
-		const spec = this.spec(run, planId);
-		const execution = this.driver(run).ensurePlanWorktree(planId, spec.assignment, expectedHead);
+	private ensureFreshPlanRuntime(run: StoredRun, spec: StoredPlanSpec, expectedHead?: string): StoredPlan {
+		const execution = this.driver(run).ensurePlanWorktree(spec.planId, spec.assignment, expectedHead);
 		return this.store.putPlan({
 			runId: run.runId,
-			planId,
+			planId: spec.planId,
 			generation: spec.graphGeneration,
 			round: 1,
 			phase: "READY_IMPLEMENTER",
@@ -1756,6 +1750,15 @@ export class HerderRunManager {
 			approvedTree: null,
 			rebase: null,
 		});
+	}
+
+	private ensureReworkedPlanRuntime(run: StoredRun, planId: string, expectedHead = this.generationBase(run)): StoredPlan {
+		const existing = this.store.getPlan(run.runId, planId);
+		if (existing) {
+			if (existing.generation !== run.currentGeneration || existing.round !== 1) throw new Error(`Reworked plan ${planId} runtime identity changed`);
+			return existing;
+		}
+		return this.ensureFreshPlanRuntime(run, this.spec(run, planId), expectedHead);
 	}
 
 	private async applyRework(run: StoredRun, edit: StoredPlanEdit): Promise<ManagerReply> {
@@ -3878,28 +3881,7 @@ export class HerderRunManager {
 			const planId = spec.planId;
 			if (planId === reservedPlanId) continue;
 			if (this.store.getPlan(run.runId, planId)) continue;
-			const execution = driver.ensurePlanWorktree(planId, spec.assignment);
-			const plan = this.store.putPlan({
-				runId: run.runId,
-				planId,
-				generation: spec.graphGeneration,
-				round: 1,
-				phase: "READY_IMPLEMENTER",
-				branch: execution.branch,
-				worktree: execution.worktree,
-				assignmentPath: execution.assignment.bundlePath,
-				assignmentSha256: execution.assignment.bundleSha256,
-				snapshotSha256: execution.assignment.snapshotSha256,
-				generationBase: execution.assignment.generationBase,
-				reviewPass: 0,
-				findings: [],
-				repair: [],
-				gates: [],
-				approvedBase: null,
-				approvedHead: null,
-				approvedTree: null,
-				rebase: null,
-			});
+			const plan = this.ensureFreshPlanRuntime(run, spec);
 			this.createAction(run, plan, "plan-implementer", profile, driver);
 			occupied += 1;
 		}

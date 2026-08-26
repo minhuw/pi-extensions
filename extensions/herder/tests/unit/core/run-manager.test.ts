@@ -1600,6 +1600,44 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 		assert.equal(payload(reply.summary).available, 0);
 		assert.equal(payload(reply.scheduler).workConserving, true);
 		assert.equal(payload(reply.scheduler).reason, "saturated");
+		const runtimeStore = new RunStore(fixture.planDirectory);
+		try {
+			const run = runtimeStore.getRun()!;
+			const integrationHead = git(fixture.repo, ["rev-parse", `refs/heads/${run.integrationBranch}`]).stdout.trim();
+			assert.equal(integrationHead, fixture.originalHead);
+			for (const action of actions) {
+				const planId = String(action.planId);
+				const plan = runtimeStore.getPlan(run.runId, planId);
+				const spec = runtimeStore.getPlanSpecs(run.runId).find((candidate) => candidate.planId === planId);
+				assert.ok(plan);
+				assert.ok(spec);
+				assert.equal(plan.generation, run.currentGeneration);
+				assert.equal(plan.round, 1);
+				assert.equal(plan.phase, "IMPLEMENTING");
+				assert.equal(action.role, "plan-implementer");
+				assert.equal(action.generation, plan.generation);
+				assert.equal(action.round, plan.round);
+				assert.equal(action.branch, plan.branch);
+				assert.equal(action.worktree, plan.worktree);
+				assert.equal(action.assignmentPath, plan.assignmentPath);
+				assert.equal(action.assignmentSha256, plan.assignmentSha256);
+				assert.equal(plan.reviewPass, 0);
+				assert.deepEqual(plan.findings, []);
+				assert.deepEqual(plan.repair, []);
+				assert.deepEqual(plan.gates, []);
+				assert.equal(plan.approvedBase, null);
+				assert.equal(plan.approvedHead, null);
+				assert.equal(plan.approvedTree, null);
+				assert.equal(plan.rebase, null);
+				assert.equal(plan.generationBase, integrationHead);
+				assert.equal(plan.snapshotSha256, spec.assignment.snapshotSha256);
+				const bundle = JSON.parse(fs.readFileSync(plan.assignmentPath, "utf8")) as { snapshotSha256: string; assignment: { branch: string; generationBase: string } };
+				assert.equal(sha256(fs.readFileSync(plan.assignmentPath)), plan.assignmentSha256);
+				assert.equal(bundle.snapshotSha256, plan.snapshotSha256);
+				assert.equal(bundle.assignment.branch, plan.branch);
+				assert.equal(bundle.assignment.generationBase, integrationHead);
+			}
+		} finally { runtimeStore.close(); }
 		const constrained = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "capacity-limited-dispatch",
 			kind: "dispatch_results",
