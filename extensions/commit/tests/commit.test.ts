@@ -834,7 +834,7 @@ test("failed dispatch handshakes restore tools and tombstone late agent starts",
 	assert.deepEqual(activeSets.at(-1)?.sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"].sort());
 });
 
-test("structured commit_git operations stage and commit a real dirty worktree", async () => {
+test("structured commit_git operations honor trusted clean filters", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "commit-git-tool-"));
 	try {
 		git(root, ["init", "-q"]);
@@ -843,6 +843,9 @@ test("structured commit_git operations stage and commit a real dirty worktree", 
 		await writeFile(path.join(root, "value.txt"), "one\n");
 		git(root, ["add", "--", "value.txt"]);
 		git(root, ["commit", "-q", "-m", "test: establish baseline", "-m", "Create the baseline used by the structured commit tool test."]);
+		git(root, ["config", "filter.canonical.clean", "sed 's/two/canonical/'"]);
+		git(root, ["config", "filter.canonical.smudge", "cat"]);
+		await writeFile(path.join(root, ".git", "info", "attributes"), "value.txt filter=canonical\n");
 		const hookMarker = path.join(root, "hook-ran");
 		const quotedMarker = `'${hookMarker.replaceAll("'", "'\\''")}'`;
 		for (const hook of ["pre-commit", "prepare-commit-msg", "post-commit", "post-index-change", "reference-transaction"]) {
@@ -885,7 +888,7 @@ test("structured commit_git operations stage and commit a real dirty worktree", 
 		assert.equal(read.content[0].text, "two\n");
 		const diff = await gitTool!.execute("diff", { operation: "diff", scope: "unstaged" }, undefined, undefined, ctx);
 		assert.match(diff.content[0].text, /-one/);
-		assert.match(diff.content[0].text, /\+two/);
+		assert.match(diff.content[0].text, /\+canonical/);
 		await gitTool!.execute("stage", { operation: "stage", paths: ["value.txt"] }, undefined, undefined, ctx);
 		await gitTool!.execute("status-staged", { operation: "status" }, undefined, undefined, ctx);
 		await gitTool!.execute("diff-staged", { operation: "diff", scope: "staged" }, undefined, undefined, ctx);
@@ -901,6 +904,7 @@ test("structured commit_git operations stage and commit a real dirty worktree", 
 		const shown = await gitTool!.execute("show", { operation: "show" }, undefined, undefined, ctx);
 		assert.match(shown.content[0].text, /commit: exercise structured git operations/);
 		assert.equal(git(root, ["log", "-1", "--format=%B"]).trimEnd(), "commit: exercise structured git operations\n\nExercise the structured commit path without generic shell access.");
+		assert.equal(git(root, ["show", "HEAD:value.txt"]), "canonical\n");
 		await assert.rejects(() => access(hookMarker));
 		assert.equal(git(root, ["-c", `core.hooksPath=${os.devNull}`, "status", "--porcelain"]), "");
 		handlers.get("agent_settled")!();
