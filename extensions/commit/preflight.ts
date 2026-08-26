@@ -805,9 +805,6 @@ function preflightError(issues: PreflightIssue[]): Error {
 }
 
 async function assertSafeGitConfiguration(pi: Pick<ExtensionAPI, "exec">, repositoryRoot: string): Promise<void> {
-	const filters = await execGuardedGit(pi, repositoryRoot, ["config", "--null", "--get-regexp", "^filter\\..*\\.(clean|process)$"], GIT_STATUS_TIMEOUT_MS, "Git filter configuration inspection");
-	if (![0, 1].includes(filters.code)) throw gitFailure(filters.stderr, "Could not inspect configured Git filters.");
-	if (filters.code === 0 && filters.stdout) throw new Error("/commit refuses repositories with command-valued Git clean/process filters.");
 	const promisor = await execGuardedGit(
 		pi,
 		repositoryRoot,

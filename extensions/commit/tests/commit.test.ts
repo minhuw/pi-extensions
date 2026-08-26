@@ -203,10 +203,10 @@ test("dirty trusted worktrees pass redacting preflight and dispatch through the 
 		{ command: "git", args: guardedGitArguments(fakeSubdirectory, ["rev-parse", "--show-toplevel"]) },
 		{ command: "git", args: guardedGitArguments(fakeSubdirectory, ["rev-parse", "--absolute-git-dir"]) },
 		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["rev-parse", "--absolute-git-dir"]) },
-		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["config", "--null", "--get-regexp", "^filter\\..*\\.(clean|process)$"]) },
 		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["config", "--null", "--get-regexp", "^(extensions\\.partialclone|remote\\..*\\.(promisor|partialclonefilter))$"]) },
 		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["ls-files", "-u", "-z"]) },
 		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["rev-parse", "--absolute-git-dir"]) },
+		{ command: "git", args: guardedGitArguments(fakeRepositoryRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none"]) },
 	]);
 	assert.ok(calls.some((call) => call.args.includes("status") && call.args.includes("--porcelain=v1")));
 	assert.equal(calls.filter((call) => call.args.includes("symbolic-ref") && call.args.includes("HEAD")).length, 2);
@@ -1418,17 +1418,23 @@ test("in-progress Git operations are rejected before model dispatch", async () =
 	}
 });
 
-test("command-valued Git filters are rejected before model dispatch", async () => {
+test("trusted command-valued Git filters are allowed before model dispatch", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "commit-filter-config-"));
 	try {
 		git(root, ["init", "-q"]);
-		git(root, ["config", "filter.danger.clean", "touch should-not-run"]);
-		await writeFile(path.join(root, "value.txt"), "dirty\n");
+		git(root, ["config", "user.name", "Commit Test"]);
+		git(root, ["config", "user.email", "commit-test@example.invalid"]);
+		git(root, ["config", "filter.upper.clean", "tr '[:lower:]' '[:upper:]'"]);
+		git(root, ["config", "filter.upper.smudge", "cat"]);
+		await writeFile(path.join(root, ".gitattributes"), "value.txt filter=upper\n");
+		await writeFile(path.join(root, "value.txt"), "one\n");
+		git(root, ["add", "--", ".gitattributes", "value.txt"]);
+		git(root, ["commit", "-q", "-m", "test: establish filtered baseline", "-m", "Create a baseline using the trusted clean filter."]);
+		await writeFile(path.join(root, "value.txt"), "two\n");
 		let submitted = false;
-		const pi = piFor({ exec: localExec, onUserMessage: () => { submitted = true; } });
-		await assert.rejects(() => launchCommitWorkflow(pi, context({ cwd: root })), /command-valued Git clean\/process filters/);
-		assert.equal(submitted, false);
-		await assert.rejects(() => access(path.join(root, "should-not-run")));
+		const result = await launchCommitWorkflow(piFor({ exec: localExec, onUserMessage: () => { submitted = true; } }), context({ cwd: root }));
+		assert.equal(result.submitted, true);
+		assert.equal(submitted, true);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

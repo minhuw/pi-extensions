@@ -23,6 +23,7 @@ The command runs in the current Pi session so the agent may use relevant convers
 - injects an authoritative command-scoped policy and temporarily exposes only extension-owned `commit_list`, `commit_read`, and structured `commit_git` operations;
 - derives pageable path listings from Git's tracked/untracked inventory and reads files through identity-checked, no-follow file handles;
 - fingerprints dirty state plus symbolic branch identity before model-visible reads and Git operations, rejecting interrupted Git output and same-OID branch switches;
+- honors trusted repository clean/process filters during ordinary Git inspection and staging, then reviews and secret-scans the resulting canonical blobs;
 - captures staged inspection from an immutable private index snapshot and exposes staged, unstaged, and untracked changes through bounded pages with no fixed total diff limit;
 - groups dirty work into the smallest coherent commit series, including very large worktrees;
 - runs Git diff checks while reporting repository hooks and arbitrary checks as not run;
