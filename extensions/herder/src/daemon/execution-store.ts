@@ -1144,7 +1144,7 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
         graph_generation INTEGER NOT NULL CHECK (graph_generation > 0),
         plan_id TEXT NOT NULL,
         plan_fingerprint TEXT NOT NULL,
-        fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK (fingerprint_version IN (1, 2)),
+        fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK (fingerprint_version = 2),
         ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
         title TEXT NOT NULL,
         priority TEXT NOT NULL,

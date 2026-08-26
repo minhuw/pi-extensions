@@ -110,12 +110,24 @@ test("fresh execution schema retains the canonical schema-18 fingerprint", () =>
 		const database = openExecutionDatabase(planDirectory, { create: true });
 		const version = Number((database.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version);
 		const objects = database.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+		const planSpecTable = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_plan_specs'").get() as { sql?: unknown } | undefined;
+		assert.match(String(planSpecTable?.sql), /fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK \(fingerprint_version = 2\)/);
+		seedManagerRun(database, "run-fingerprint");
+		assert.throws(() => database.prepare(`
+			INSERT INTO manager_plan_specs (
+				run_id, graph_generation, plan_id, plan_fingerprint, fingerprint_version, ordinal,
+				title, priority, effort, kind, dependencies_json, initial_status, initial_status_detail,
+				gate_commands_json, plan_file, assignment_json
+			) VALUES (?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+			"run-fingerprint", "001", "f".repeat(64), 1, "Plan", "P1", "S", "mechanical", "[]", "TODO", "", "[]", "001.md", "{}",
+		), /CHECK constraint failed: fingerprint_version = 2/);
 		const fingerprint = createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex");
 		database.close();
 
 		assert.equal(version, 18);
 		assert.equal(objects.length, 36);
-		assert.equal(fingerprint, "ee34bb562da03ca105473ae5690109c222ae43aea4ff972bf389bd2b0bbc8b34");
+		assert.equal(fingerprint, "33b038b8d3860296598e35e7c3cb15319eddff6622fb884ff1e07e76645864ab");
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
