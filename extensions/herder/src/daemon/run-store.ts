@@ -297,10 +297,34 @@ export interface StoredIntegrationRepairAudit {
 export type StoredAttentionRequest = AttentionRequest & { sequence: number };
 export type AttentionCleanupStep = ResetPlanCleanupEvidence["step"];
 export type AttentionCleanupIdentity = Omit<ResetPlanCleanupEvidence, "evidenceId" | "step" | "state">;
+export type PlanEditOutcomeOperation = "finish" | "cancel";
 
 const ATTENTION_CLEANUP_INTENT_KIND = "manager_attention_cleanup_intent";
 const ATTENTION_CLEANUP_COMPLETE_KIND = "manager_attention_cleanup_complete";
 const ATTENTION_CLEANUP_EVENT_PREFIX = "manager-attention-cleanup:";
+const PLAN_EDIT_SNAPSHOT_KIND = "manager_plan_edit_snapshot";
+const PLAN_EDIT_CONFIRM_KIND = "manager_plan_edit_confirmation";
+const PLAN_EDIT_OUTCOME_KIND = "manager_plan_edit_outcome";
+export const PLAN_EDIT_EVENT_PREFIX = "manager-plan-edit:";
+
+function planEditEvidencePayload(runId: string, editToken: string, planId: string, operation: "confirm" | PlanEditOutcomeOperation, edit?: StoredPlanEdit): Record<string, unknown> {
+	return {
+		schemaVersion: 1,
+		kind: operation === "confirm" ? PLAN_EDIT_CONFIRM_KIND : PLAN_EDIT_OUTCOME_KIND,
+		runId,
+		editToken,
+		planId,
+		operation,
+		...(operation === "confirm" ? {
+			proposedGraphSha256: edit?.proposedGraphSha256,
+			proposedPlanFingerprint: edit?.proposedPlanFingerprint,
+		} : {}),
+	};
+}
+
+function planEditEventId(editToken: string, operation: "confirm" | PlanEditOutcomeOperation, planId: string): string {
+	return `${PLAN_EDIT_EVENT_PREFIX}${editToken}:${operation}:${planId}`;
+}
 
 function attentionCleanupPayload(identity: AttentionCleanupIdentity, step: AttentionCleanupStep, state: "prepared" | "completed"): Record<string, unknown> {
 	return {
@@ -1174,7 +1198,7 @@ export class RunStore {
 					continue;
 				}
 			}
-			const replaySafe = operation.kind === "event" || operation.kind === "stop" || operation.kind === "reignite" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
+			const replaySafe = operation.kind === "event" || operation.kind === "edit" || operation.kind === "stop" || operation.kind === "reignite" || (operation.kind === "start" && ["fire", "resume"].includes(mode));
 			if (replaySafe) {
 				this.database.prepare("UPDATE manager_operations SET state = 'accepted', updated_at = ? WHERE operation_id = ?")
 					.run(new Date().toISOString(), operation.operationId);
@@ -2024,14 +2048,20 @@ export class RunStore {
 		return this.getPlanEdit(input.runId)!;
 	}
 
-	putPlanEditBarrier(runId: string, proposedGraphSha256: string, proposedPlanFingerprint: string): StoredPlanEdit {
+	putPlanEditBarrier(runId: string, editToken: string, proposedGraphSha256: string, proposedPlanFingerprint: string): StoredPlanEdit {
 		const edit = this.getPlanEdit(runId);
-		if (!edit) throw new Error("No Herder plan edit reservation exists");
+		if (!edit || edit.editToken !== editToken) throw new Error("Plan edit token does not match the active reservation");
+		if (edit.state === "barrier") {
+			if (edit.proposedGraphSha256 !== proposedGraphSha256 || edit.proposedPlanFingerprint !== proposedPlanFingerprint) {
+				throw new Error(`Prepared plan ${edit.planId} changed after its revision barrier was requested`);
+			}
+			return edit;
+		}
 		this.database.prepare(`
 			UPDATE manager_plan_edits
 			SET state = 'barrier', proposed_graph_sha256 = ?, proposed_plan_fingerprint = ?, updated_at = ?
-			WHERE run_id = ?
-		`).run(proposedGraphSha256, proposedPlanFingerprint, new Date().toISOString(), runId);
+			WHERE run_id = ? AND edit_token = ? AND state = 'reserved'
+		`).run(proposedGraphSha256, proposedPlanFingerprint, new Date().toISOString(), runId, editToken);
 		return this.getPlanEdit(runId)!;
 	}
 
@@ -2298,14 +2328,99 @@ export class RunStore {
 		return this.getApproval(input.runId, input.planId, input.generation)!;
 	}
 
+	recordPlanEditSnapshot(runId: string, editToken: string, planId: string, snapshotSha256: string): void {
+		if (!/^[0-9a-f-]{36}$/i.test(editToken) || !/^\d{3,}$/.test(planId) || !/^[0-9a-f]{64}$/i.test(snapshotSha256)) throw new Error("Plan edit snapshot evidence is invalid");
+		const eventId = `${PLAN_EDIT_EVENT_PREFIX}${editToken}:snapshot:${planId}`;
+		const canonical = canonicalEventPayload({ schemaVersion: 1, kind: PLAN_EDIT_SNAPSHOT_KIND, runId, editToken, planId, snapshotSha256: snapshotSha256.toLowerCase() });
+		const row = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		if (row) {
+			if (String(row.run_id) !== runId || String(row.kind) !== PLAN_EDIT_SNAPSHOT_KIND || String(row.payload_sha256) !== canonical.sha256) throw new Error(`Plan edit snapshot evidence ${eventId} changed`);
+			return;
+		}
+		this.database.prepare("INSERT INTO manager_events (event_id, run_id, kind, payload_sha256, created_at) VALUES (?, ?, ?, ?, ?)")
+			.run(eventId, runId, PLAN_EDIT_SNAPSHOT_KIND, canonical.sha256, new Date().toISOString());
+	}
+
+	hasPlanEditSnapshot(runId: string, editToken: string, planId: string): boolean {
+		const row = this.database.prepare("SELECT run_id, kind FROM manager_events WHERE event_id = ?").get(`${PLAN_EDIT_EVENT_PREFIX}${editToken}:snapshot:${planId}`) as Record<string, unknown> | undefined;
+		return Boolean(row && String(row.run_id) === runId && String(row.kind) === PLAN_EDIT_SNAPSHOT_KIND);
+	}
+
+	validatePlanEditSnapshot(runId: string, editToken: string, planId: string, snapshotSha256: string): void {
+		const eventId = `${PLAN_EDIT_EVENT_PREFIX}${editToken}:snapshot:${planId}`;
+		const row = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		const canonical = canonicalEventPayload({ schemaVersion: 1, kind: PLAN_EDIT_SNAPSHOT_KIND, runId, editToken, planId, snapshotSha256: snapshotSha256.toLowerCase() });
+		if (!row || String(row.run_id) !== runId || String(row.kind) !== PLAN_EDIT_SNAPSHOT_KIND || String(row.payload_sha256) !== canonical.sha256) {
+			throw new Error(`Plan edit snapshot evidence ${eventId} is missing or changed`);
+		}
+	}
+
+	private recordPlanEditEvidence(edit: StoredPlanEdit, operation: "confirm" | PlanEditOutcomeOperation): void {
+		if (!/^[0-9a-f-]{36}$/i.test(edit.editToken) || !/^\d{3,}$/.test(edit.planId)) throw new Error("Plan edit evidence identity is invalid");
+		if (operation === "confirm" && (edit.state !== "barrier" || !edit.proposedGraphSha256 || !edit.proposedPlanFingerprint)) {
+			throw new Error("Only a prepared plan edit can be confirmed");
+		}
+		const eventId = planEditEventId(edit.editToken, operation, edit.planId);
+		const kind = operation === "confirm" ? PLAN_EDIT_CONFIRM_KIND : PLAN_EDIT_OUTCOME_KIND;
+		const canonical = canonicalEventPayload(planEditEvidencePayload(edit.runId, edit.editToken, edit.planId, operation, edit));
+		const row = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		if (row) {
+			if (String(row.run_id) !== edit.runId || String(row.kind) !== kind || String(row.payload_sha256) !== canonical.sha256) {
+				throw new Error(`Plan edit evidence ${eventId} changed`);
+			}
+			return;
+		}
+		this.database.prepare(`
+			INSERT INTO manager_events (event_id, run_id, kind, payload_sha256, created_at)
+			VALUES (?, ?, ?, ?, ?)
+		`).run(eventId, edit.runId, kind, canonical.sha256, new Date().toISOString());
+	}
+
+	recordPlanEditConfirmation(edit: StoredPlanEdit): void {
+		this.recordPlanEditEvidence(edit, "confirm");
+	}
+
+	hasPlanEditConfirmation(edit: StoredPlanEdit): boolean {
+		if (edit.state !== "barrier" || !edit.proposedGraphSha256 || !edit.proposedPlanFingerprint) return false;
+		const eventId = planEditEventId(edit.editToken, "confirm", edit.planId);
+		const row = this.database.prepare("SELECT run_id, kind, payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
+		if (!row) return false;
+		const canonical = canonicalEventPayload(planEditEvidencePayload(edit.runId, edit.editToken, edit.planId, "confirm", edit));
+		if (String(row.run_id) !== edit.runId || String(row.kind) !== PLAN_EDIT_CONFIRM_KIND || String(row.payload_sha256) !== canonical.sha256) {
+			throw new Error(`Plan edit confirmation ${eventId} changed`);
+		}
+		return true;
+	}
+
+	recordPlanEditOutcome(edit: StoredPlanEdit, operation: PlanEditOutcomeOperation): void {
+		this.recordPlanEditEvidence(edit, operation);
+	}
+
+	getPlanEditOutcome(runId: string, editToken: string, operation: PlanEditOutcomeOperation): { planId: string; operation: PlanEditOutcomeOperation; rework: boolean } | null {
+		if (!/^[0-9a-f-]{36}$/i.test(editToken)) throw new Error("Plan edit token is invalid");
+		const prefix = `${PLAN_EDIT_EVENT_PREFIX}${editToken}:${operation}:`;
+		const rows = this.database.prepare("SELECT event_id, kind, payload_sha256 FROM manager_events WHERE run_id = ? AND event_id LIKE ? ORDER BY event_id").all(runId, `${prefix}%`) as Record<string, unknown>[];
+		if (rows.length === 0) return null;
+		if (rows.length !== 1) throw new Error(`Plan edit ${editToken} has ambiguous ${operation} evidence`);
+		const eventId = String(rows[0]!.event_id);
+		const planId = eventId.slice(prefix.length);
+		if (!/^\d{3,}$/.test(planId) || eventId !== planEditEventId(editToken, operation, planId)) throw new Error(`Plan edit ${editToken} has invalid ${operation} evidence`);
+		const canonical = canonicalEventPayload(planEditEvidencePayload(runId, editToken, planId, operation));
+		if (String(rows[0]!.kind) !== PLAN_EDIT_OUTCOME_KIND || String(rows[0]!.payload_sha256) !== canonical.sha256) {
+			throw new Error(`Plan edit ${editToken} ${operation} evidence changed`);
+		}
+		return { planId, operation, rework: this.hasPlanEditSnapshot(runId, editToken, planId) };
+	}
+
 	readEvent(eventId: string): { payloadSha256: string } | null {
 		const row = this.database.prepare("SELECT payload_sha256 FROM manager_events WHERE event_id = ?").get(eventId) as Record<string, unknown> | undefined;
 		return row ? { payloadSha256: String(row.payload_sha256) } : null;
 	}
 
 	recordEvent(runId: string, eventId: string, kind: string, payload: unknown): void {
-		if (eventId.startsWith(ATTENTION_CLEANUP_EVENT_PREFIX) || eventId.startsWith("attention-cleanup:") || kind === ATTENTION_CLEANUP_INTENT_KIND || kind === ATTENTION_CLEANUP_COMPLETE_KIND) {
-			throw new Error("Manager cleanup evidence is private and cannot be submitted as a public event");
+		if (eventId.startsWith(ATTENTION_CLEANUP_EVENT_PREFIX) || eventId.startsWith("attention-cleanup:") || eventId.startsWith(PLAN_EDIT_EVENT_PREFIX)
+			|| kind === ATTENTION_CLEANUP_INTENT_KIND || kind === ATTENTION_CLEANUP_COMPLETE_KIND || kind === PLAN_EDIT_SNAPSHOT_KIND || kind === PLAN_EDIT_CONFIRM_KIND || kind === PLAN_EDIT_OUTCOME_KIND) {
+			throw new Error("Manager private evidence cannot be submitted as a public event");
 		}
 		const canonical = canonicalEventPayload(payload);
 		const existing = this.readEvent(eventId);

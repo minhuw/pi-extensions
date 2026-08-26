@@ -36,6 +36,7 @@ export interface ResetPlanExecutionInput {
 	worktree: string;
 	expectedHead: string | null;
 	expectedTree: string | null;
+	additionalRefs?: Array<{ ref: string; target: string }>;
 	/** Exact request/run identity expected for any replay evidence. */
 	cleanupIdentity?: ResetPlanCleanupIdentity;
 	/** Typed manager-owned progress from an earlier interrupted apply. */
@@ -111,9 +112,21 @@ function removeWorktree(repoRoot: string, worktree: string): void {
 	if (result.status !== 0) fail(`Cannot force-remove the recorded recovery worktree: ${(result.stderr || result.stdout).trim()}`);
 }
 
-function deleteBranch(repoRoot: string, branch: string, expectedHead: string): void {
-	const result = runGit(repoRoot, ["update-ref", "-d", `refs/heads/${branch}`, expectedHead], { allowFailure: true });
-	if (result.status !== 0) fail(`Cannot delete moved recovery branch ${branch}: ${(result.stderr || result.stdout).trim()}`);
+function deleteBranch(repoRoot: string, branch: string, expectedHead: string, additionalRefs: Array<{ ref: string; target: string }> = []): void {
+	const commands = [
+		"start",
+		`delete refs/heads/${branch} ${expectedHead}`,
+		...additionalRefs.map((record) => `delete ${record.ref} ${record.target}`),
+		"prepare",
+		"commit",
+		"",
+	].join("\n");
+	const result = runGit(repoRoot, ["update-ref", "--stdin"], { input: commands, allowFailure: true });
+	if (result.status !== 0) fail(`Cannot delete moved recovery branch or transient refs for ${branch}: ${(result.stderr || result.stdout).trim()}`);
+}
+
+function additionalRefsMissing(repoRoot: string, refs: Array<{ ref: string; target: string }> = []): boolean {
+	return refs.every((record) => runGit(repoRoot, ["show-ref", "--verify", "--quiet", record.ref], { allowFailure: true }).status === 1);
 }
 
 /**
@@ -129,6 +142,15 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 	validateRecordedCleanup(input, input.recordedCleanup);
 	if (realpathIfPresent(repoRoot) !== repoRoot) fail(`Recovery repository root is not canonical: ${repoRoot}`);
 	verifyExpectedNamespace({ ...input, worktree, integrationWorktree }, repoRoot, worktreeRoot, worktree);
+	const branchIdentity = input.branch.match(/^herder\/([^/]+)\/(\d{3,})$/)!;
+	const refPrefix = `refs/plan-herder/${branchIdentity[1]}/`;
+	const seenRefs = new Set<string>();
+	for (const record of input.additionalRefs ?? []) {
+		if (!record.ref.startsWith(refPrefix) || !/^[0-9a-f]{40,64}$/i.test(record.target) || seenRefs.has(record.ref)) {
+			fail(`Recovery transient ref identity is invalid: ${record.ref}`);
+		}
+		seenRefs.add(record.ref);
+	}
 
 	const records = listWorktrees(repoRoot);
 	const canonicalWorktree = realpathIfPresent(worktree);
@@ -175,6 +197,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 	const recordedStep = input.recordedCleanup?.step;
 	const fullyMissing = currentHead === null && !record && !fs.existsSync(worktree);
 	if (fullyMissing) {
+		if (!additionalRefsMissing(repoRoot, input.additionalRefs)) fail(`Recovery transient refs remain after branch cleanup: ${input.branch}`);
 		if (input.expectedHead === null) {
 			return { branch: input.branch, worktree, removedWorktree: false, deletedBranch: false, alreadyMissing: true };
 		}
@@ -212,8 +235,8 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		input.onComplete?.("worktree_removed");
 	}
 	if (recordedStep !== "branch_deleted") input.onPrepare?.("branch_deleted");
-	deleteBranch(repoRoot, input.branch, expectedHead);
-	if (branchHead(repoRoot, input.branch) !== null) fail(`Recovery branch remains after CAS deletion: ${input.branch}`);
+	deleteBranch(repoRoot, input.branch, expectedHead, input.additionalRefs);
+	if (branchHead(repoRoot, input.branch) !== null || !additionalRefsMissing(repoRoot, input.additionalRefs)) fail(`Recovery branch or transient refs remain after CAS deletion: ${input.branch}`);
 	input.onProgress?.("branch_deleted");
 	input.onComplete?.("branch_deleted");
 	return { branch: input.branch, worktree, removedWorktree: Boolean(record), deletedBranch: true, alreadyMissing: false };

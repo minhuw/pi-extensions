@@ -1804,7 +1804,7 @@ function timestampRange(records: UsageRecord[]) {
   }
 }
 
-export function executionReport(records: UsageRecord[], selector = "RUN") {
+export function executionReport<T extends UsageRecord>(records: T[], selector = "RUN") {
   const selected = selector === "RUN" ? records : records.filter((record) => record.plan === selector)
   const roundSet = new Set<number>()
   let interruptions = 0

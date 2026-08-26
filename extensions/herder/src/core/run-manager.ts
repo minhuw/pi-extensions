@@ -6,6 +6,7 @@ import { decideJudge, decideReview } from "../daemon/git/round-policy.ts";
 import { compiledAssignmentEntry } from "../daemon/git/assignment-bundle.ts";
 import {
 	buildGraph,
+	planIndexReworkLayout,
 	projectStatuses,
 	snapshotPlansFromGraph,
 } from "./plans.ts";
@@ -20,6 +21,7 @@ import {
 	runCommand,
 	type CompletionApprovalProof,
 	type GateResult,
+	type PlanTransientRef,
 } from "../daemon/git-driver.ts";
 import {
 	ATTENTION_PATH_LIMIT,
@@ -62,6 +64,7 @@ import {
 	type WorkerRole,
 } from "../shared/protocol.ts";
 import {
+	PLAN_EDIT_EVENT_PREFIX,
 	RunStore,
 	type StoredAction,
 	type StoredApproval,
@@ -116,9 +119,10 @@ interface EventInput {
 }
 
 interface PlanEditInput {
-	operation: "begin" | "finish" | "cancel";
+	operation: "begin" | "prepare" | "confirm" | "finish" | "cancel";
 	planId?: string;
 	editToken?: string;
+	intent?: "rework";
 }
 
 interface PlanEditReply {
@@ -202,8 +206,8 @@ function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
 	}
-	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:")) {
-		throw new Error("Manager cleanup evidence event IDs are private");
+	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:") || input.eventId.startsWith(PLAN_EDIT_EVENT_PREFIX)) {
+		throw new Error("Manager private evidence event IDs are private");
 	}
 	if (!["dispatch_results", "terminals", "user_input", "attention"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
 	if (input.kind === "dispatch_results") {
@@ -255,9 +259,14 @@ function normalizePlanId(value: string | undefined): string {
 }
 
 function validatePlanEditInput(input: PlanEditInput): void {
-	if (!input || !["begin", "finish", "cancel"].includes(input.operation)) throw new Error("Plan edit operation must be begin, finish, or cancel");
-	if (input.operation === "begin") normalizePlanId(input.planId);
-	else if (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken)) throw new Error("Plan edit token is required");
+	if (!input || !["begin", "prepare", "confirm", "finish", "cancel"].includes(input.operation)) throw new Error("Plan edit operation must be begin, prepare, confirm, finish, or cancel");
+	if (input.intent !== undefined && input.intent !== "rework") throw new Error("Plan edit intent must be rework when provided");
+	if (input.intent === "rework" && input.operation !== "begin") throw new Error("Plan rework intent is only valid when beginning a reservation");
+	if (input.operation === "begin") {
+		normalizePlanId(input.planId);
+		if (input.intent === "rework" && (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken))) throw new Error("Plan rework begin requires an edit token");
+		if (input.editToken !== undefined && (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken))) throw new Error("Plan edit token is invalid");
+	} else if (typeof input.editToken !== "string" || !/^[0-9a-f-]{36}$/i.test(input.editToken)) throw new Error("Plan edit token is required");
 }
 
 function normalizeAttentionAction(value: string): AttentionResolutionAction {
@@ -349,9 +358,7 @@ function safeName(value: string): string {
 }
 
 function graphInputSha256(planDirectory: string): string {
-	const files = fs.readdirSync(planDirectory)
-		.filter((name) => name === "README.md" || name === "CONTEXT.md" || /^\d{3,}-.*\.md$/i.test(name))
-		.sort();
+	const files = planGraphFiles(planDirectory);
 	const hash = createHash("sha256");
 	for (const name of files) {
 		hash.update(name);
@@ -360,6 +367,273 @@ function graphInputSha256(planDirectory: string): string {
 		hash.update("\0");
 	}
 	return hash.digest("hex");
+}
+
+interface ReworkGraphSnapshot {
+	schemaVersion: 1;
+	runId: string;
+	planId: string;
+	editToken: string;
+	expectedHead: string;
+	expectedTree: string;
+	targetPlanFile: string;
+	transientRefs: PlanTransientRef[];
+	files: Array<{ name: string; mode: number; contentBase64: string }>;
+}
+
+function isPlanGraphFile(name: string): boolean {
+	return name === "README.md" || name === "CONTEXT.md" || /^\d{3,}-.*\.md$/i.test(path.basename(name));
+}
+
+function planGraphFiles(planDirectory: string, directory = planDirectory): string[] {
+	const files: string[] = [];
+	for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+		if (directory === planDirectory && entry.name === ".herder") continue;
+		const candidate = path.join(directory, entry.name);
+		if (entry.isSymbolicLink()) throw new Error(`Plan graph path must not be a symlink: ${candidate}`);
+		if (entry.isDirectory()) {
+			files.push(...planGraphFiles(planDirectory, candidate));
+			continue;
+		}
+		if (!entry.isFile()) continue;
+		const relative = path.relative(planDirectory, candidate);
+		if ((directory === planDirectory && (entry.name === "README.md" || entry.name === "CONTEXT.md")) || /^\d{3,}-.*\.md$/i.test(entry.name)) files.push(relative);
+	}
+	return files.sort();
+}
+
+function assertPlanGraphRelative(name: string): void {
+	if (!name || path.isAbsolute(name) || name === ".." || name.startsWith(`..${path.sep}`) || !isPlanGraphFile(name)
+		|| ((name === "README.md" || name === "CONTEXT.md") && path.dirname(name) !== ".")) throw new Error(`Unsafe plan graph path: ${name}`);
+}
+
+function safeEditToken(editToken: string): string {
+	if (!/^[0-9a-f-]{36}$/i.test(editToken)) throw new Error("Plan edit token is invalid");
+	return editToken.toLowerCase();
+}
+
+function ensurePrivateDirectory(candidate: string): void {
+	try { fs.mkdirSync(candidate, { mode: 0o700 }); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+	const stat = fs.lstatSync(candidate);
+	if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Plan edit runtime path must be a real directory: ${candidate}`);
+	fs.chmodSync(candidate, 0o700);
+}
+
+function fsyncDirectory(candidate: string): void {
+	const descriptor = fs.openSync(candidate, fs.constants.O_RDONLY);
+	try { fs.fsyncSync(descriptor); }
+	finally { fs.closeSync(descriptor); }
+}
+
+function readRegularBytes(candidate: string, label: string): { bytes: Buffer; mode: number } {
+	if (!fs.constants.O_NOFOLLOW) throw new Error(`Safe ${label} opening is unavailable`);
+	const named = fs.lstatSync(candidate);
+	if (named.isSymbolicLink() || !named.isFile()) throw new Error(`${label} must be a regular file: ${candidate}`);
+	const descriptor = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+	try {
+		const opened = fs.fstatSync(descriptor);
+		if (!opened.isFile() || opened.dev !== named.dev || opened.ino !== named.ino) throw new Error(`${label} changed while opening: ${candidate}`);
+		return { bytes: fs.readFileSync(descriptor), mode: opened.mode & 0o7777 };
+	} finally { fs.closeSync(descriptor); }
+}
+
+function reworkSnapshotPath(planDirectory: string, editToken: string): string {
+	return path.join(planDirectory, ".herder", "plan-edits", `${safeEditToken(editToken)}.json`);
+}
+
+function captureReworkSnapshot(run: StoredRun, planId: string, editToken: string, expectedHead: string, expectedTree: string, targetPlanFile: string, transientRefs: PlanTransientRef[]): { snapshot: ReworkGraphSnapshot; sha256: string } {
+	const runtimeDirectory = path.join(run.planDirectory, ".herder");
+	ensurePrivateDirectory(runtimeDirectory);
+	const snapshotDirectory = path.join(runtimeDirectory, "plan-edits");
+	ensurePrivateDirectory(snapshotDirectory);
+	const names = planGraphFiles(run.planDirectory);
+	if (!names.includes("README.md")) throw new Error("Plan edit snapshot requires README.md");
+	const files = names.map((name) => {
+		assertPlanGraphRelative(name);
+		const file = readRegularBytes(path.join(run.planDirectory, name), "plan graph file");
+		return { name, mode: file.mode, contentBase64: file.bytes.toString("base64") };
+	});
+	assertPlanGraphRelative(targetPlanFile);
+	const snapshot: ReworkGraphSnapshot = { schemaVersion: 1, runId: run.runId, planId, editToken: safeEditToken(editToken), expectedHead, expectedTree, targetPlanFile, transientRefs, files };
+	const json = stableJson(snapshot);
+	const target = reworkSnapshotPath(run.planDirectory, editToken);
+	const temporary = path.join(snapshotDirectory, `.${safeEditToken(editToken)}.${process.pid}.tmp`);
+	let descriptor: number | undefined;
+	try {
+		descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+		fs.writeFileSync(descriptor, json);
+		fs.fsyncSync(descriptor);
+		fs.closeSync(descriptor);
+		descriptor = undefined;
+		fs.renameSync(temporary, target);
+		fsyncDirectory(snapshotDirectory);
+	} catch (error) {
+		if (descriptor !== undefined) try { fs.closeSync(descriptor); } catch {}
+		try { fs.unlinkSync(temporary); } catch {}
+		throw error;
+	}
+	return { snapshot, sha256: sha256(json) };
+}
+
+function readReworkSnapshotFile(run: StoredRun, edit: StoredPlanEdit): { snapshot: ReworkGraphSnapshot; sha256: string } {
+	ensurePrivateDirectory(path.join(run.planDirectory, ".herder"));
+	ensurePrivateDirectory(path.join(run.planDirectory, ".herder", "plan-edits"));
+	const file = readRegularBytes(reworkSnapshotPath(run.planDirectory, edit.editToken), "plan edit snapshot");
+	if (file.mode !== 0o600) throw new Error("Plan edit snapshot must have private mode 0600");
+	let snapshot: ReworkGraphSnapshot;
+	try { snapshot = JSON.parse(file.bytes.toString("utf8")) as ReworkGraphSnapshot; }
+	catch { throw new Error("Plan edit snapshot is not valid JSON"); }
+	if (stableJson(snapshot) !== file.bytes.toString("utf8") || snapshot.schemaVersion !== 1 || snapshot.runId !== run.runId
+		|| snapshot.planId !== edit.planId || snapshot.editToken !== safeEditToken(edit.editToken)
+		|| !/^[0-9a-f]{40,64}$/i.test(snapshot.expectedHead)
+		|| !/^[0-9a-f]{40,64}$/i.test(snapshot.expectedTree)
+		|| typeof snapshot.targetPlanFile !== "string"
+		|| !Array.isArray(snapshot.transientRefs)
+		|| !Array.isArray(snapshot.files) || snapshot.files.length === 0) {
+		throw new Error("Plan edit snapshot identity is invalid");
+	}
+	assertPlanGraphRelative(snapshot.targetPlanFile);
+	if (!snapshot.files.some((entry) => entry.name === snapshot.targetPlanFile)) throw new Error("Plan edit snapshot target file is missing");
+	if (snapshot.transientRefs.some((entry, index) => !entry || typeof entry.ref !== "string" || typeof entry.target !== "string"
+		|| !/^[0-9a-f]{40,64}$/i.test(entry.target) || (index > 0 && snapshot.transientRefs[index - 1]!.ref >= entry.ref))) {
+		throw new Error("Plan edit snapshot transient refs are invalid");
+	}
+	const names = snapshot.files.map((entry) => entry.name);
+	if (!names.includes("README.md") || names.some((name) => {
+		try { assertPlanGraphRelative(name); return false; } catch { return true; }
+	})
+		|| names.some((name, index) => index > 0 && names[index - 1]! >= name)) throw new Error("Plan edit snapshot file set is invalid");
+	for (const entry of snapshot.files) {
+		if (!Number.isSafeInteger(entry.mode) || entry.mode < 0 || entry.mode > 0o7777 || typeof entry.contentBase64 !== "string"
+			|| Buffer.from(entry.contentBase64, "base64").toString("base64") !== entry.contentBase64) throw new Error(`Plan edit snapshot entry ${entry.name} is invalid`);
+	}
+	return { snapshot, sha256: sha256(stableJson(snapshot)) };
+}
+
+function readReworkSnapshot(run: StoredRun, edit: StoredPlanEdit, store: RunStore): ReworkGraphSnapshot {
+	const file = readReworkSnapshotFile(run, edit);
+	store.validatePlanEditSnapshot(run.runId, edit.editToken, edit.planId, file.sha256);
+	return file.snapshot;
+}
+
+function restoreReworkSnapshot(run: StoredRun, edit: StoredPlanEdit, store: RunStore): void {
+	const snapshot = readReworkSnapshot(run, edit, store);
+	const current = planGraphFiles(run.planDirectory);
+	for (const name of current) readRegularBytes(path.join(run.planDirectory, name), "current plan graph file");
+	const retained = new Set(snapshot.files.map((entry) => entry.name));
+	const temporaries: Array<{ temporary: string; target: string }> = [];
+	try {
+		for (const [index, entry] of snapshot.files.entries()) {
+			const temporary = path.join(run.planDirectory, `.herder-plan-edit-${safeEditToken(edit.editToken)}-${index}.tmp`);
+			try {
+				const stale = fs.lstatSync(temporary);
+				if (stale.isSymbolicLink() || !stale.isFile()) throw new Error(`Plan edit restore temporary is unsafe: ${temporary}`);
+				fs.unlinkSync(temporary);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			const descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+			try {
+				fs.writeFileSync(descriptor, Buffer.from(entry.contentBase64, "base64"));
+				fs.fchmodSync(descriptor, entry.mode);
+				fs.fsyncSync(descriptor);
+			} finally { fs.closeSync(descriptor); }
+			temporaries.push({ temporary, target: path.join(run.planDirectory, entry.name) });
+		}
+		for (const name of current) if (!retained.has(name)) fs.unlinkSync(path.join(run.planDirectory, name));
+		for (const entry of temporaries) {
+			fs.mkdirSync(path.dirname(entry.target), { recursive: true });
+			fs.renameSync(entry.temporary, entry.target);
+		}
+		fsyncDirectory(run.planDirectory);
+	} finally {
+		for (const entry of temporaries) try { fs.unlinkSync(entry.temporary); } catch {}
+	}
+}
+
+function deleteReworkSnapshotBestEffort(planDirectory: string, editToken: string): void {
+	try {
+		const candidate = reworkSnapshotPath(planDirectory, editToken);
+		const stat = fs.lstatSync(candidate);
+		if (!stat.isSymbolicLink() && stat.isFile()) fs.unlinkSync(candidate);
+	} catch {}
+}
+
+function pruneReworkSnapshots(planDirectory: string, retainedEditToken?: string): void {
+	const directory = path.join(planDirectory, ".herder", "plan-edits");
+	try {
+		for (const name of fs.readdirSync(directory)) {
+			if (!/^[0-9a-f-]{36}\.json$/i.test(name) || name === `${retainedEditToken?.toLowerCase()}.json`) continue;
+			const candidate = path.join(directory, name);
+			const stat = fs.lstatSync(candidate);
+			if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Plan edit snapshot path is unsafe: ${candidate}`);
+			fs.unlinkSync(candidate);
+		}
+		fsyncDirectory(directory);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+}
+
+function reworkIndexLayout(markdown: string): { lines: string[]; newline: "\n" | "\r\n"; rows: Array<{ lineIndex: number; planId: string; statusStart: number; statusEnd: number }> } {
+	const parsed = planIndexReworkLayout(markdown, "Herder plan index");
+	return {
+		lines: parsed.lines,
+		newline: parsed.newline,
+		rows: parsed.rows.map((row) => {
+			const line = parsed.lines[row.lineIndex]!;
+			const first = line.search(/\S|$/);
+			const lastMatch = line.match(/\s*$/);
+			const last = lastMatch ? line.length - lastMatch[0].length : line.length;
+			const bodyStart = line[first] === "|" ? first + 1 : first;
+			const bodyEnd = line[last - 1] === "|" ? last - 1 : last;
+			const separators: number[] = [];
+			for (let cursor = bodyStart; cursor < bodyEnd; cursor += 1) if (line[cursor] === "|") separators.push(cursor);
+			const boundaries = [bodyStart, ...separators, bodyEnd];
+			if (parsed.statusColumn >= boundaries.length - 1) throw new Error("Herder plan index status column is invalid");
+			return {
+				...row,
+				statusStart: boundaries[parsed.statusColumn]!,
+				statusEnd: boundaries[parsed.statusColumn + 1]!,
+			};
+		}),
+	};
+}
+
+function normalizeReworkReadme(markdown: string, targetPlanId: string): string {
+	const layout = reworkIndexLayout(markdown);
+	for (const row of layout.rows) {
+		const line = layout.lines[row.lineIndex]!;
+		layout.lines[row.lineIndex] = row.planId === targetPlanId
+			? `| <HERDER_REWORK_TARGET_${targetPlanId}> |`
+			: `${line.slice(0, row.statusStart)} <HERDER_LIFECYCLE> ${line.slice(row.statusEnd)}`;
+	}
+	return layout.lines.join(layout.newline);
+}
+
+function validateReworkGraphFiles(run: StoredRun, snapshot: ReworkGraphSnapshot, targetPlanFile: string): void {
+	const currentNames = planGraphFiles(run.planDirectory);
+	const expectedNames = snapshot.files.map((entry) => entry.name);
+	if (!sameStringArray(currentNames, expectedNames)) throw new Error("Rework cannot add, remove, or rename plan graph files");
+	for (const entry of snapshot.files) {
+		const current = readRegularBytes(path.join(run.planDirectory, entry.name), "plan graph file");
+		if (current.mode !== entry.mode) throw new Error(`Rework changed the mode of ${entry.name}`);
+		if (entry.name === targetPlanFile) continue;
+		const original = Buffer.from(entry.contentBase64, "base64");
+		if (entry.name === "README.md") {
+			if (normalizeReworkReadme(original.toString("utf8"), snapshot.planId) !== normalizeReworkReadme(current.bytes.toString("utf8"), snapshot.planId)) {
+				throw new Error(`Rework changed README content outside plan ${snapshot.planId} and lifecycle status cells`);
+			}
+		} else if (!current.bytes.equals(original)) {
+			throw new Error(`Rework changed sibling graph file ${entry.name}`);
+		}
+	}
+}
+
+function crashReworkForTest(point: "after_snapshot" | "after_git_cleanup" | "after_adoption"): void {
+	if (process.env.HERDER_TEST_REWORK_CRASH_AT !== point) return;
+	process.kill(process.pid, "SIGKILL");
 }
 
 function activeActions(store: RunStore, runId: string): StoredAction[] {
@@ -377,8 +651,8 @@ function workerMode(plan: StoredPlan, role: WorkerRole): ManagerAction["workerMo
 	return "ADJUDICATE";
 }
 
-function attemptOrdinal(store: RunStore, runId: string, planId: string, role: string): number {
-	return store.countActions(runId, { planId, role }) + 1;
+function attemptOrdinal(store: RunStore, runId: string, planId: string, generation: number, role: string): number {
+	return store.countActions(runId, { planId, generation, role }) + 1;
 }
 
 function requiredRole(profile: ResolvedProfile, role: WorkerRole) {
@@ -921,13 +1195,17 @@ export class HerderRunManager {
 		}
 	}
 
-	private projectLifecycle(run: StoredRun): void {
+	private projectLifecycle(run: StoredRun, changedAfter?: string): void {
 		const plans = this.store.getPlans(run.runId);
 		const runtime = new Map(plans.map((plan) => [plan.planId, plan]));
 		const attentionDetails = new Map(this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })
 			.map((request) => [request.planId, request.detail]));
 		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
-		projectStatuses(this.planDirectory, this.specs(run).filter((spec) => spec.planId !== reservedPlanId).map((spec) => {
+		projectStatuses(this.planDirectory, this.specs(run).filter((spec) => {
+			if (spec.planId === reservedPlanId) return false;
+			if (!changedAfter) return true;
+			return Boolean(runtime.get(spec.planId)?.updatedAt && runtime.get(spec.planId)!.updatedAt > changedAfter);
+		}).map((spec) => {
 			const plan = runtime.get(spec.planId) ?? null;
 			const status = lifecycleStatus(spec, plan);
 			const rawDetail = plan?.phase === "BLOCKED" || plan?.phase === "NEEDS_INPUT"
@@ -1144,7 +1422,7 @@ export class HerderRunManager {
 		run: StoredRun,
 		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
 		detail: string,
-		clearPlanEdit = false,
+		completedEdit?: StoredPlanEdit,
 	): void {
 		const driver = this.driver(run);
 		const namespace = driver.inspectNamespace("resume");
@@ -1164,7 +1442,10 @@ export class HerderRunManager {
 				runSnapshotSha256: assignment.snapshotSha256,
 			});
 			this.store.deletePlan(run.runId, "RUN");
-			if (clearPlanEdit) this.store.deletePlanEdit(run.runId);
+			if (completedEdit) {
+				this.store.recordPlanEditOutcome(completedEdit, "finish");
+				this.store.deletePlanEdit(run.runId);
+			}
 			this.store.updateRun({
 				status: "running",
 				terminalDetail: detail,
@@ -1223,26 +1504,403 @@ export class HerderRunManager {
 			run,
 			compiled,
 			`Adopted Grill revision for plan ${edit.planId} as graph generation ${nextGeneration}.`,
-			true,
+			edit,
 		);
+	}
+
+	private reservedEditIsRework(run: StoredRun, planId: string): boolean {
+		return Boolean(this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId }) > 0);
+	}
+
+	private reworkGitHeads(driver: GitDriver, plan: StoredPlan): { expectedHead: string; expectedTree: string } {
+		return { expectedHead: driver.worktreeHead(plan.worktree), expectedTree: driver.worktreeTree(plan.worktree) };
+	}
+
+	private planCommitIsIntegrated(run: StoredRun, driver: GitDriver, plan: StoredPlan): boolean {
+		const integrationHead = driver.branchHead(run.integrationBranch);
+		let branchHead: string | null = null;
+		try { branchHead = driver.branchHead(plan.branch); } catch { /* A missing branch is handled by exact cleanup validation. */ }
+		return [plan.approvedHead, branchHead]
+			.some((candidate) => Boolean(candidate && candidate !== plan.generationBase && driver.isAncestor(candidate, integrationHead)));
+	}
+
+	private assertNoNewActivePathOverlap(run: StoredRun, priorSpecs: StoredPlanSpec[], prior: StoredPlanSpec, target: StoredPlanSpec, label: string): void {
+		const activePaths = this.store.getActions(run.runId, ["proposed", "dispatched"])
+			.filter((candidate) => candidate.planId !== prior.planId)
+			.flatMap((candidate) => priorSpecs.find((spec) => spec.planId === candidate.planId)?.assignment.plan.inScopePaths ?? []);
+		if (activePaths.length === 0) return;
+		const activePathSet = new Set(activePaths);
+		const oldTargetPaths = new Set(prior.assignment.plan.inScopePaths);
+		const newOverlap = target.assignment.plan.inScopePaths.filter((candidate) => activePathSet.has(candidate));
+		const priorOverlap = [...oldTargetPaths].filter((candidate) => activePathSet.has(candidate));
+		if (newOverlap.some((candidate) => !oldTargetPaths.has(candidate)) || (prior.planFingerprint !== target.planFingerprint && priorOverlap.length === 0 && newOverlap.length > 0)) {
+			throw new Error(`${label} target ${prior.planId} introduces an unordered overlap with active work: ${newOverlap.join(", ")}`);
+		}
+	}
+
+	private assertReworkEligible(run: StoredRun, planId: string): StoredPlan {
+		if (planId === "RUN") throw new Error("The final RUN audit cannot be reworked");
+		if (!["running", "failed", "needs_input"].includes(run.status)) {
+			throw new Error(`Cannot rework a plan while Herder is ${run.status}`);
+		}
+		this.spec(run, planId);
+		const plan = this.store.getPlan(run.runId, planId);
+		if (!plan && this.store.countActions(run.runId, { planId }) === 0) {
+			throw new Error(`Plan ${planId} has not started; use /herder-grill --plan`);
+		}
+		if (!plan) throw new Error(`Plan ${planId} has no runtime record to rework`);
+		const driver = this.driver(run);
+		if (plan.phase === "DONE" || plan.phase === "FINAL_APPROVED" || driver.hasPlanCompletionProof(planId) || this.planCommitIsIntegrated(run, driver, plan)) {
+			throw new Error(`Plan ${planId} is already integrated; create a corrective plan instead of reworking it.`);
+		}
+		if (!["BLOCKED", "NEEDS_INPUT"].includes(plan.phase)) {
+			throw new Error(`Plan ${planId} is ${plan.phase}, not a blocked or exhausted plan`);
+		}
+		const specs = this.specs(run);
+		const downstream = new Set([planId]);
+		for (let changed = true; changed;) {
+			changed = false;
+			for (const candidate of specs) {
+				if (downstream.has(candidate.planId)) continue;
+				if (candidate.dependencies.some((dependency) => downstream.has(dependency))
+					|| candidate.assignment.plan.dependencies.some((dependency) => downstream.has(dependency))) {
+					downstream.add(candidate.planId);
+					changed = true;
+				}
+			}
+		}
+		for (const other of specs) {
+			if (other.planId === planId || !downstream.has(other.planId)) continue;
+			const runtime = this.store.getPlan(run.runId, other.planId);
+			const lifecycle = lifecycleStatus(other, runtime);
+			if (lifecycle === "DONE" || driver.hasPlanCompletionProof(other.planId) || (runtime && this.planCommitIsIntegrated(run, driver, runtime))) {
+				throw new Error(`Plan ${planId} cannot be reworked because integrated downstream plan ${other.planId} depends on it. Create a corrective plan instead.`);
+			}
+			if (this.store.countActions(run.runId, { planId: other.planId, states: ["proposed", "dispatched"] }) > 0
+				|| (runtime && runtime.phase !== "BLOCKED" && runtime.phase !== "NEEDS_INPUT")) {
+				throw new Error(`Plan ${planId} cannot be reworked because active downstream plan ${other.planId} depends on it. Create a corrective plan instead.`);
+			}
+		}
+		return plan;
+	}
+
+	private validateReworkGraph(
+		run: StoredRun,
+		planId: string,
+		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
+	): { compiled: { specs: StoredPlanSpec[]; graphSha256: string }; nextSpecs: StoredPlanSpec[] } {
+		const priorSpecs = this.specs(run);
+		const prior = priorSpecs.find((spec) => spec.planId === planId);
+		if (!prior) throw new Error(`Rework target ${planId} has no recorded specification`);
+		const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
+		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
+		if (current.size !== next.size || [...current.keys()].some((id) => !next.has(id))) {
+			throw new Error("Rework cannot change the plan graph topology");
+		}
+		const target = next.get(planId);
+		if (!target) throw new Error(`Rework target ${planId} is missing from the revised graph`);
+		for (const oldSpec of priorSpecs) {
+			const newSpec = next.get(oldSpec.planId)!;
+			if (oldSpec.planId === planId) {
+				if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFile !== newSpec.planFile || !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+					|| newSpec.assignment.plan.id !== oldSpec.assignment.plan.id
+					|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+					throw new Error(`Rework target ${planId} cannot change its identity, filename, or dependencies`);
+				}
+				continue;
+			}
+			if (oldSpec.ordinal !== newSpec.ordinal || oldSpec.planFingerprint !== newSpec.planFingerprint || oldSpec.planFile !== newSpec.planFile
+				|| !sameStringArray(oldSpec.dependencies, newSpec.dependencies)
+				|| oldSpec.assignment.plan.id !== newSpec.assignment.plan.id
+				|| !sameStringArray(oldSpec.assignment.plan.dependencies, newSpec.assignment.plan.dependencies)) {
+				throw new Error(`Rework changed sibling plan ${oldSpec.planId}`);
+			}
+		}
+		if (target.planFingerprint === prior.planFingerprint) throw new Error(`Reserved plan ${planId} has not changed; cancel the edit instead`);
+		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Rework");
+		return {
+			compiled,
+			nextSpecs: compiled.specs.map((spec) => spec.planId === planId
+				? { ...spec, initialStatus: "TODO" as StoredPlanSpec["initialStatus"], initialStatusDetail: "" }
+				: spec),
+		};
+	}
+
+	private reworkCleanupIdentity(run: StoredRun, plan: StoredPlan, edit: StoredPlanEdit, snapshot: ReworkGraphSnapshot) {
+		const expectedHead = snapshot.expectedHead;
+		const expectedTree = snapshot.expectedTree;
+		return {
+			runId: run.runId,
+			requestId: edit.editToken,
+			requestSha256: sha256(stableJson({
+				kind: "plan_rework",
+				editToken: edit.editToken,
+				planId: edit.planId,
+				generation: plan.generation,
+				round: plan.round,
+				assignmentPath: plan.assignmentPath,
+				assignmentSha256: plan.assignmentSha256,
+				snapshotSha256: plan.snapshotSha256,
+				generationBase: plan.generationBase,
+				branch: plan.branch,
+				worktree: plan.worktree,
+				expectedHead,
+				expectedTree,
+				transientRefs: snapshot.transientRefs,
+			})),
+			planId: edit.planId,
+			generation: plan.generation,
+			round: plan.round,
+			assignmentPath: plan.assignmentPath,
+			assignmentSha256: plan.assignmentSha256,
+			snapshotSha256: plan.snapshotSha256,
+			generationBase: plan.generationBase,
+			branch: plan.branch,
+			worktree: plan.worktree,
+			expectedHead,
+			expectedTree,
+		};
+	}
+
+	private async validatePreparedRework(run: StoredRun, edit: StoredPlanEdit): Promise<{
+		plan: StoredPlan;
+		driver: GitDriver;
+		snapshot: ReworkGraphSnapshot;
+		validation: ReturnType<HerderRunManager["validateReworkGraph"]>;
+		cleanupIdentity: ReturnType<HerderRunManager["reworkCleanupIdentity"]>;
+	}> {
+		if (this.store.countActions(run.runId, { planId: edit.planId, states: ["proposed", "dispatched"] }) > 0) {
+			throw new Error(`Plan ${edit.planId} still owns active worker actions; settle them before preparing rework`);
+		}
+		const plan = this.assertReworkEligible(run, edit.planId);
+		const driver = this.driver(run);
+		await driver.verifyCheckout(run.checkoutStateToken);
+		const snapshot = readReworkSnapshot(run, edit, this.store);
+		validateReworkGraphFiles(run, snapshot, snapshot.targetPlanFile);
+		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
+		const currentTarget = compiled.graph.plans.find((candidate) => candidate.id === edit.planId);
+		if (!currentTarget || path.relative(run.planDirectory, currentTarget.file) !== snapshot.targetPlanFile) {
+			throw new Error(`Rework target ${edit.planId} cannot change its linked plan file`);
+		}
+		const validation = this.validateReworkGraph(run, edit.planId, compiled);
+		if (edit.state === "barrier" && (edit.proposedGraphSha256 !== validation.compiled.graphSha256
+			|| edit.proposedPlanFingerprint !== validation.nextSpecs.find((spec) => spec.planId === edit.planId)?.planFingerprint)) {
+			throw new Error(`Prepared plan ${edit.planId} changed after its revision barrier was requested`);
+		}
+		const cleanupIdentity = this.reworkCleanupIdentity(run, plan, edit, snapshot);
+		const cleanupEvidence = this.store.getAttentionCleanupEvidence(cleanupIdentity);
+		if (!cleanupEvidence) {
+			driver.assertPlanTransientRefs(edit.planId, snapshot.transientRefs);
+			const current = this.reworkGitHeads(driver, plan);
+			if (current.expectedHead !== snapshot.expectedHead || current.expectedTree !== snapshot.expectedTree) {
+				throw new Error(`Plan ${edit.planId} Git identity changed after rework began`);
+			}
+		} else {
+			const currentRefs = driver.planTransientRefs(edit.planId);
+			if (stableJson(currentRefs) !== stableJson(snapshot.transientRefs) && currentRefs.length !== 0) {
+				throw new Error(`Plan ${edit.planId} transient refs changed during rework replay`);
+			}
+		}
+		return { plan, driver, snapshot, validation, cleanupIdentity };
+	}
+
+	private async prepareRework(run: StoredRun, edit: StoredPlanEdit): Promise<StoredPlanEdit> {
+		const { validation } = await this.validatePreparedRework(run, edit);
+		const target = validation.nextSpecs.find((spec) => spec.planId === edit.planId)!;
+		return this.store.putPlanEditBarrier(run.runId, edit.editToken, validation.compiled.graphSha256, target.planFingerprint);
+	}
+
+	private generationBase(run: StoredRun): string {
+		const generation = this.store.getGeneration(run.runId, run.currentGeneration);
+		if (!generation) throw new Error(`Run generation ${run.currentGeneration} has no assignment evidence`);
+		const bytes = fs.readFileSync(generation.runAssignmentPath);
+		if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
+		const parsed = JSON.parse(bytes.toString("utf8")) as { assignment?: { generationBase?: unknown } };
+		const base = typeof parsed.assignment?.generationBase === "string" ? parsed.assignment.generationBase : "";
+		if (!/^[0-9a-f]{40,64}$/i.test(base)) throw new Error(`Run generation ${run.currentGeneration} assignment has no valid base`);
+		return base;
+	}
+
+	private ensureReworkedPlanRuntime(run: StoredRun, planId: string, expectedHead = this.generationBase(run)): StoredPlan {
+		const existing = this.store.getPlan(run.runId, planId);
+		if (existing) {
+			if (existing.generation !== run.currentGeneration || existing.round !== 1) throw new Error(`Reworked plan ${planId} runtime identity changed`);
+			return existing;
+		}
+		const spec = this.spec(run, planId);
+		const execution = this.driver(run).ensurePlanWorktree(planId, spec.assignment, expectedHead);
+		return this.store.putPlan({
+			runId: run.runId,
+			planId,
+			generation: spec.graphGeneration,
+			round: 1,
+			phase: "READY_IMPLEMENTER",
+			branch: execution.branch,
+			worktree: execution.worktree,
+			assignmentPath: execution.assignment.bundlePath,
+			assignmentSha256: execution.assignment.bundleSha256,
+			snapshotSha256: execution.assignment.snapshotSha256,
+			generationBase: execution.assignment.generationBase,
+			reviewPass: 0,
+			findings: [],
+			repair: [],
+			gates: [],
+			approvedBase: null,
+			approvedHead: null,
+			approvedTree: null,
+			rebase: null,
+		});
+	}
+
+	private async applyRework(run: StoredRun, edit: StoredPlanEdit): Promise<ManagerReply> {
+		if (edit.state !== "barrier" || !edit.proposedGraphSha256 || !edit.proposedPlanFingerprint) throw new Error(`Plan ${edit.planId} rework must be prepared before finish`);
+		if (!this.store.hasPlanEditConfirmation(edit)) throw new Error(`Plan ${edit.planId} rework must be confirmed before finish`);
+		const { plan, driver, snapshot, validation, cleanupIdentity } = await this.validatePreparedRework(run, edit);
+		try {
+			const lease = driver.leaseReason(plan.worktree);
+			if (lease) throw new Error(`Plan ${plan.planId} worktree is still leased after worker settlement: ${lease}`);
+		} catch (error) {
+			if (!/not registered/i.test(error instanceof Error ? error.message : String(error))) throw error;
+		}
+		const nextGeneration = run.currentGeneration + 1;
+		const integrationHead = driver.branchHead(run.integrationBranch);
+		const assignment = driver.materializeRunAssignment(integrationHead, validation.nextSpecs.map((spec) => spec.assignment), nextGeneration);
+		const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
+		driver.resetPlanExecution({
+			branch: plan.branch,
+			worktree: plan.worktree,
+			expectedHead: snapshot.expectedHead,
+			expectedTree: snapshot.expectedTree,
+			additionalRefs: snapshot.transientRefs,
+			cleanupIdentity,
+			recordedCleanup: recordedCleanup ?? undefined,
+			onPrepare: (step) => this.store.recordAttentionCleanupStep(cleanupIdentity, step),
+			onProgress: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
+			onComplete: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
+		});
+		if (driver.planTransientRefs(edit.planId).length > 0) throw new Error(`Plan ${edit.planId} transient refs remain after rework cleanup`);
+		crashReworkForTest("after_git_cleanup");
+		this.store.transaction(() => {
+			this.store.putPlanSpecs(validation.nextSpecs);
+			this.store.putGeneration({
+				runId: run.runId,
+				generation: nextGeneration,
+				graphSha256: validation.compiled.graphSha256,
+				parentGeneration: run.currentGeneration,
+				runAssignmentPath: assignment.bundlePath,
+				runAssignmentSha256: assignment.bundleSha256,
+				runSnapshotSha256: assignment.snapshotSha256,
+			});
+			this.store.deletePlan(run.runId, edit.planId);
+			for (const request of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) {
+				if (request.planId === edit.planId) this.store.resolveAttention(request.requestId);
+			}
+			this.store.recordPlanEditOutcome(edit, "finish");
+			this.store.deletePlanEdit(run.runId);
+			this.store.updateRun({
+				currentGeneration: nextGeneration,
+				graphSha256: validation.compiled.graphSha256,
+				status: this.store.getNextInputAttention(run.runId) ? "needs_input" : "running",
+				terminalDetail: `Reworked plan ${edit.planId} as graph generation ${nextGeneration}.`,
+			});
+		});
+		this.cacheSpecs(validation.nextSpecs);
+		crashReworkForTest("after_adoption");
+		const adoptedRun = this.store.getRun()!;
+		this.ensureReworkedPlanRuntime(adoptedRun, edit.planId, integrationHead);
+		deleteReworkSnapshotBestEffort(run.planDirectory, edit.editToken);
+		const reply = await this.reconcile(boundProfile(adoptedRun, this.store));
+		this.projectLifecycle(this.store.getRun()!);
+		return reply;
 	}
 
 	async edit(input: PlanEditInput): Promise<PlanEditReply> {
 		validatePlanEditInput(input);
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
+		if (input.operation !== "begin") {
+			const editToken = input.editToken!;
+			if (input.operation === "finish" || input.operation === "cancel") {
+				const outcome = this.store.getPlanEditOutcome(run.runId, editToken, input.operation);
+				if (outcome) {
+					if (input.operation === "finish" && outcome.rework && !this.store.getPlan(run.runId, outcome.planId) && !this.store.getPlanEdit(run.runId)) {
+						this.cacheSpecs(this.store.getPlanSpecs(run.runId));
+						this.ensureReworkedPlanRuntime(run, outcome.planId);
+					}
+					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
+					const reply = input.operation === "finish" && (run.status === "running" || run.status === "needs_input")
+						? await this.reconcile(boundProfile(run, this.store))
+						: this.reply();
+					if (input.operation === "finish" && outcome.rework) this.projectLifecycle(this.store.getRun()!);
+					return { edit: { planId: outcome.planId, state: input.operation === "finish" ? "barrier" : "reserved" }, reply };
+				}
+				const opposite = this.store.getPlanEditOutcome(run.runId, editToken, input.operation === "finish" ? "cancel" : "finish");
+				if (opposite) throw new Error(`Plan edit ${editToken} was already ${opposite.operation === "finish" ? "finished" : "cancelled"}`);
+			}
+		}
 		if (input.operation === "begin") {
-			if (run.status !== "running") throw new Error(`Active Grill requires a running Herder Fire run; current status is ${run.status}`);
 			const planId = normalizePlanId(input.planId);
+			const rework = input.intent === "rework";
+			if (!rework && run.status !== "running") throw new Error(`Active Grill requires a running Herder Fire run; current status is ${run.status}`);
 			const existing = this.store.getPlanEdit(run.runId);
 			if (existing) {
 				if (existing.planId !== planId) throw new Error(`Plan ${existing.planId} already has the active Grill reservation`);
-				if (existing.state !== "reserved") throw new Error(`Plan ${planId} is already waiting at the revision barrier`);
+				const hadExecution = this.reservedEditIsRework(run, planId);
+				if (rework && !hadExecution) throw new Error(`Plan ${planId} is reserved for Grill; cancel that edit before reworking`);
+				if (!rework && hadExecution) throw new Error(`Plan ${planId} is reserved for rework; continue with /herder-rework or cancel the reservation`);
+				if (rework) readReworkSnapshot(run, existing, this.store);
 				return { edit: { planId, state: existing.state, editToken: existing.editToken }, reply: this.reply() };
 			}
 			const drift = this.graphDrift(run);
 			if (drift.changed) throw new Error(`${drift.detail} Resolve graph drift before starting Grill.`);
 			const spec = this.spec(run, planId);
+			if (rework) {
+				const plan = this.assertReworkEligible(run, planId);
+				const driver = this.driver(run);
+				await driver.verifyCheckout(run.checkoutStateToken);
+				const editToken = input.editToken ?? randomUUID();
+				pruneReworkSnapshots(run.planDirectory, editToken);
+				const pendingEdit: StoredPlanEdit = {
+					runId: run.runId,
+					planId,
+					editToken,
+					state: "reserved",
+					baseGraphSha256: run.graphSha256,
+					basePlanFingerprint: spec.planFingerprint,
+					proposedGraphSha256: null,
+					proposedPlanFingerprint: null,
+					createdAt: "",
+					updatedAt: "",
+				};
+				let snapshotSha256: string;
+				try {
+					const snapshotPath = reworkSnapshotPath(run.planDirectory, editToken);
+					if (fs.existsSync(snapshotPath)) snapshotSha256 = readReworkSnapshotFile(run, pendingEdit).sha256;
+					else {
+						const heads = this.reworkGitHeads(driver, plan);
+						const graphPlan = buildGraph(run.planDirectory).plans.find((candidate) => candidate.id === planId);
+						if (!graphPlan) throw new Error(`Rework target ${planId} is missing from the current graph`);
+						const targetPlanFile = path.relative(run.planDirectory, graphPlan.file);
+						snapshotSha256 = captureReworkSnapshot(run, planId, editToken, heads.expectedHead, heads.expectedTree, targetPlanFile, driver.planTransientRefs(planId)).sha256;
+					}
+				} catch (error) {
+					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
+					throw error;
+				}
+				crashReworkForTest("after_snapshot");
+				let edit: StoredPlanEdit;
+				try {
+					edit = this.store.transaction(() => {
+						const reserved = this.store.putPlanEdit(pendingEdit);
+						this.store.recordPlanEditSnapshot(run!.runId, editToken, planId, snapshotSha256);
+						return reserved;
+					});
+				} catch (error) {
+					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
+					throw error;
+				}
+				return { edit: { planId, state: edit.state, editToken: edit.editToken }, reply: this.reply() };
+			}
 			if (!["TODO", "BLOCKED"].includes(spec.initialStatus)) throw new Error(`Plan ${planId} is ${spec.initialStatus}, not an unstarted editable plan`);
 			if (this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId }) > 0) {
 				throw new Error(`Plan ${planId} cannot be grilled because execution already started`);
@@ -1260,16 +1918,42 @@ export class HerderRunManager {
 
 		const edit = this.store.getPlanEdit(run.runId);
 		if (!edit || edit.editToken !== input.editToken) throw new Error("Plan edit token does not match the active Grill reservation");
+		const rework = this.reservedEditIsRework(run, edit.planId);
+		if (input.operation === "prepare") {
+			if (!rework) throw new Error("Explicit prepare is only valid for plan rework");
+			const barrier = await this.prepareRework(run, edit);
+			return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
+		}
+		if (input.operation === "confirm") {
+			if (!rework || edit.state !== "barrier") throw new Error("Only a prepared plan rework can be confirmed");
+			await this.validatePreparedRework(run, edit);
+			this.store.recordPlanEditConfirmation(edit);
+			return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply("revision-barrier") };
+		}
 		if (input.operation === "cancel") {
-			const compiled = this.compileCurrentGraph(run);
-			if (compiled.graphSha256 !== edit.baseGraphSha256) throw new Error(`Plan ${edit.planId} changed; restore the reserved graph or finish the edit before cancelling`);
-			this.store.deletePlanEdit(run.runId);
+			if (rework) {
+				if (this.store.hasPlanEditConfirmation(edit)) throw new Error(`Confirmed plan ${edit.planId} rework must finish or replay; it can no longer be cancelled`);
+				restoreReworkSnapshot(run, edit, this.store);
+				this.projectLifecycle(run, edit.createdAt);
+			} else {
+				const compiled = this.compileCurrentGraph(run);
+				if (compiled.graphSha256 !== edit.baseGraphSha256) throw new Error(`Plan ${edit.planId} changed; restore the reserved graph or finish the edit before cancelling`);
+			}
+			this.store.transaction(() => {
+				this.store.recordPlanEditOutcome(edit, "cancel");
+				this.store.deletePlanEdit(run!.runId);
+			});
+			if (rework) deleteReworkSnapshotBestEffort(run.planDirectory, edit.editToken);
 			return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply() };
+		}
+		if (rework) {
+			const reply = await this.applyRework(run, edit);
+			return { edit: { planId: edit.planId, state: "barrier" }, reply };
 		}
 		if (run.status !== "running") throw new Error(`Cannot finish a Grill revision while Herder is ${run.status}`);
 
 		const { compiled, target } = this.compiledReservedEdit(run, edit);
-		const barrier = this.store.putPlanEditBarrier(run.runId, compiled.graphSha256, target.planFingerprint);
+		const barrier = this.store.putPlanEditBarrier(run.runId, edit.editToken, compiled.graphSha256, target.planFingerprint);
 		if (activeActionCount(this.store, run.runId) === 0) {
 			await this.driver(run).verifyCheckout(run.checkoutStateToken);
 			this.adoptReservedEdit(run, barrier);
@@ -2814,18 +3498,7 @@ export class HerderRunManager {
 		if (["unchanged_retry", "reject"].includes(action) && !(resolution.rationale || "").trim()) {
 			throw new Error(`${action === "reject" ? "Recovery rejection" : "Unchanged recovery"} requires a non-empty rationale`);
 		}
-		const activePaths = this.store.getActions(run.runId, ["proposed", "dispatched"])
-			.map((candidate) => priorSpecs.find((spec) => spec.planId === candidate.planId)?.assignment.plan.inScopePaths ?? [])
-			.flat();
-		if (activePaths.length > 0) {
-			const activePathSet = new Set(activePaths);
-			const oldTargetPaths = new Set(prior.assignment.plan.inScopePaths);
-			const newOverlap = target.assignment.plan.inScopePaths.filter((candidate) => activePathSet.has(candidate));
-			const priorOverlap = [...oldTargetPaths].filter((candidate) => activePathSet.has(candidate));
-			if (newOverlap.some((candidate) => !oldTargetPaths.has(candidate)) || (targetChanged && priorOverlap.length === 0 && newOverlap.length > 0)) {
-				throw new Error(`Recovery target ${attention.planId} introduces an unordered overlap with active work: ${newOverlap.join(", ")}`);
-			}
-		}
+		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Recovery");
 		const rejected = action === "reject" || action === "cancel";
 		const nextSpecs: StoredPlanSpec[] = compiled.specs.map((spec) => spec.planId === attention.planId
 			? {
@@ -3068,7 +3741,7 @@ export class HerderRunManager {
 		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
-			if (activeActionCount(this.store, run.runId) > 0) {
+			if (this.reservedEditIsRework(run, pendingEdit.planId) || activeActionCount(this.store, run.runId) > 0) {
 				await driver.verifyCheckout(run.checkoutStateToken);
 				return this.reply("revision-barrier");
 			}
@@ -3207,6 +3880,7 @@ export class HerderRunManager {
 		const plans = this.store.getPlans(run.runId);
 		for (const plan of plans.sort((a, b) => a.planId.localeCompare(b.planId))) {
 			if (occupied >= run.maxParallel) break;
+			if (plan.planId === reservedPlanId) continue;
 			if (owned.has(plan.planId)) continue;
 			const role = roleForPhase(plan.phase);
 			if (!role) continue;
@@ -3251,7 +3925,7 @@ export class HerderRunManager {
 
 	private createAction(run: StoredRun, plan: StoredPlan, role: WorkerRole, profile: ResolvedProfile, driver: GitDriver): StoredAction {
 		const mapping = requiredRole(profile, role);
-		const ordinal = attemptOrdinal(this.store, run.runId, plan.planId, role);
+		const ordinal = attemptOrdinal(this.store, run.runId, plan.planId, plan.generation, role);
 		const attemptId = `${plan.planId}-g${plan.generation}-r${plan.round}-${role.replace("plan-", "")}-${ordinal}`;
 		const actionId = `${run.runId}:${attemptId}`;
 		const taskName = safeName(`herder-${plan.planId}-${role.replace("plan-", "")}-r${plan.round}-${ordinal}`);
@@ -3445,9 +4119,9 @@ export class HerderRunManager {
 		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
 		const proposed = active.filter((action) => action.state === "proposed");
-		const nextAttention = this.store.getNextAttention(run.runId);
-		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const planEdit = this.store.getPlanEdit(run.runId);
+		const nextAttention = planEdit ? null : this.store.getNextAttention(run.runId);
+		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
 		const integrationRepair = verification ? this.integrationRepairForVerification(verification) : null;
 		const exposedIntegrationRepair = verification && (verification.state === "failed" || Boolean(integrationRepair))

@@ -75,10 +75,14 @@ async function planTool(args: JsonObject): Promise<unknown> {
 		const { operation: _operation, planDirectory: _planDirectory, ...resolution } = args;
 		return submitTool({ planDirectory: directory, kind: "attention", ...resolution, schemaVersion: 1 });
 	}
-	if (["begin_edit", "finish_edit", "cancel_edit"].includes(operation)) {
+	if (["begin_edit", "prepare_edit", "confirm_edit", "finish_edit", "cancel_edit"].includes(operation)) {
+		const editOperation = operation.replace(/_edit$/, "") as "begin" | "prepare" | "confirm" | "finish" | "cancel";
 		return executeManagerOperation(directory, "edit", {
-			operation: operation === "begin_edit" ? "begin" : operation === "finish_edit" ? "finish" : "cancel",
-			...(operation === "begin_edit" ? { planId: requiredString(args, "planId") } : { editToken: requiredString(args, "editToken") }),
+			operation: editOperation,
+			...(editOperation === "begin" ? {
+				planId: requiredString(args, "planId"),
+				...(args.intent === "rework" ? { intent: "rework", editToken: randomUUID() } : {}),
+			} : { editToken: requiredString(args, "editToken") }),
 		});
 	}
 	if (operation === "init") return initPlanDir(directory, { track: args.track === true });

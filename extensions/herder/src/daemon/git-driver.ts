@@ -16,6 +16,7 @@ import {
 	inspectCompletionProof,
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
+import { listCoordinationRefs } from "./git/coordination-ref.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
@@ -83,6 +84,11 @@ export interface ActiveRebaseEvidence {
 	onto: string;
 	detachedHead: string;
 	rebaseStateSha256?: string;
+}
+
+export interface PlanTransientRef {
+	ref: string;
+	target: string;
 }
 
 export interface CompletionApprovalProof {
@@ -359,10 +365,10 @@ export class GitDriver {
 		};
 	}
 
-	ensurePlanWorktree(planId: string, compiled: StoredPlanSpec["assignment"]): { branch: string; worktree: string; assignment: AssignmentEvidence } {
+	ensurePlanWorktree(planId: string, compiled: StoredPlanSpec["assignment"], expectedHead?: string): { branch: string; worktree: string; assignment: AssignmentEvidence } {
 		const branch = `herder/${this.planName}/${planId}`;
 		const worktree = path.join(this.worktreeRoot, planId);
-		const integrationHead = gitValue(this.repoRoot, "rev-parse", `refs/heads/${this.integrationBranch}`);
+		const integrationHead = expectedHead ?? gitValue(this.repoRoot, "rev-parse", `refs/heads/${this.integrationBranch}`);
 		const branchExists = git(this.repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true).status === 0;
 		const worktreeRecord = listWorktrees(this.repoRoot).find((item) => item.path === worktree);
 		if (!branchExists) {
@@ -561,6 +567,7 @@ export class GitDriver {
 		worktree: string;
 		expectedHead: string | null;
 		expectedTree: string | null;
+		additionalRefs?: PlanTransientRef[];
 		cleanupIdentity?: ResetPlanCleanupIdentity;
 		recordedCleanup?: ResetPlanCleanupEvidence;
 		onPrepare?: (step: ResetPlanCleanupStep) => void;
@@ -573,6 +580,39 @@ export class GitDriver {
 			integrationWorktree: this.integrationWorktree,
 			...input,
 		});
+	}
+
+	hasPlanCompletionProof(planId: string): boolean {
+		return git(this.repoRoot, ["show-ref", "--verify", "--quiet", `refs/plan-herder/${this.planName}/completed/${planId}`], true).status === 0;
+	}
+
+	isAncestor(ancestor: string, descendant: string): boolean {
+		const result = git(this.repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], true);
+		if (result.status === 0) return true;
+		if (result.status === 1) return false;
+		throw new Error(`Cannot compare Git ancestry for ${ancestor} and ${descendant}: ${(result.stderr || result.stdout).trim()}`);
+	}
+
+	planTransientRefs(planId: string): PlanTransientRef[] {
+		const targetPrefix = new RegExp(`^(?:checkpoints|restacks|completed)/${planId}(?:/|$)`);
+		const refs: PlanTransientRef[] = [];
+		for (const record of listCoordinationRefs(this.repoRoot, this.planName)) {
+			const identity = record.identity;
+			if (!identity) {
+				if (targetPrefix.test(record.relative)) throw new Error(`Plan ${planId} has an unrecognized manager ref: ${record.ref}`);
+				continue;
+			}
+			if (!("plan" in identity) || identity.plan !== planId) continue;
+			if (identity.kind === "completed") throw new Error(`Plan ${planId} still has completion evidence; create a corrective plan instead of reworking it.`);
+			if (identity.kind === "checkpoint" || identity.kind === "restack-target") refs.push({ ref: record.ref, target: record.target });
+		}
+		return refs.sort((left, right) => left.ref.localeCompare(right.ref));
+	}
+
+	assertPlanTransientRefs(planId: string, expected: PlanTransientRef[]): void {
+		if (stableJson(this.planTransientRefs(planId)) !== stableJson(expected)) {
+			throw new Error(`Plan ${planId} transient refs changed after rework began`);
+		}
 	}
 
 	runVerificationGates(requestId: string, worktree: string, gates: VerificationGate[]): GateResult[] {
