@@ -308,29 +308,14 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		return await this.runtime().getAvailable();
 	}
 
-	private resolveNestedExtensionPaths(sources: readonly string[], cwd: string): string[] {
+	private resolveExtensionPaths(sources: readonly string[], cwd: string, owner: "role" | "nested"): string[] {
 		if (sources.length === 0) return [];
 		const settingsManager = SettingsManager.create(cwd, this.agentDir);
 		const packageManager = new DefaultPackageManager({ cwd, agentDir: this.agentDir, settingsManager });
 		return sources.map((source) => {
 			const installed = packageManager.getInstalledPath(source, "user");
 			if (!installed || !existsSync(installed)) {
-				throw new Error(`Herder nested extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
-			}
-			return source === PONYTAIL_EXTENSION_SOURCE
-				? trustedRoleExtensionEntry(this.agentDir, installed, source)
-				: trustedNestedExtensionPath(this.agentDir, installed, source);
-		});
-	}
-
-	private resolveRoleExtensionPaths(sources: readonly string[], cwd: string): string[] {
-		if (sources.length === 0) return [];
-		const settingsManager = SettingsManager.create(cwd, this.agentDir);
-		const packageManager = new DefaultPackageManager({ cwd, agentDir: this.agentDir, settingsManager });
-		return sources.map((source) => {
-			const installed = packageManager.getInstalledPath(source, "user");
-			if (!installed || !existsSync(installed)) {
-				throw new Error(`Herder role extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
+				throw new Error(`Herder ${owner} extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
 			}
 			return source === PONYTAIL_EXTENSION_SOURCE
 				? trustedRoleExtensionEntry(this.agentDir, installed, source)
@@ -373,7 +358,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			createSession: async ({ id, definition: childDefinition, binding, signal }) => {
 				signal.throwIfAborted();
 				const childModel = resolveBinding(binding.model, binding.effort, binding.serviceTier);
-				const extensionPaths = this.resolveNestedExtensionPaths(childDefinition.extensions, request.action.worktree);
+				const extensionPaths = this.resolveExtensionPaths(childDefinition.extensions, request.action.worktree, "nested");
 				const childRoot = path.join(nestedRoot, id);
 				await mkdir(childRoot, { recursive: true, mode: 0o700 });
 				signal.throwIfAborted();
@@ -455,7 +440,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 
 		const sessionManager = SessionManager.create(request.action.worktree, sessionRoot);
 		if (sessionManager.getHeader()?.parentSession) throw new Error("Herder Pi workers cannot inherit a parent session.");
-		const roleExtensionPaths = this.resolveRoleExtensionPaths(definition.extensions, request.action.worktree);
+		const roleExtensionPaths = this.resolveExtensionPaths(definition.extensions, request.action.worktree, "role");
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: request.action.worktree,
 			agentDir: this.agentDir,

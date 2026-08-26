@@ -447,10 +447,34 @@ export default function (pi) {
 			else process.env.PI_FFF_MODE = previousFffMode;
 		}
 
-		await rm(fff, { recursive: true, force: true });
+		const missingNestedParent = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
+		try {
+			await rm(fff, { recursive: true, force: true });
+			const missingNested = await missingNestedParent.nested.run({
+				type: "worker",
+				prompt: "Inspect the bounded child task",
+				description: "inspect child task",
+			});
+			assert.equal(missingNested.status, "error");
+			assert.match(
+				missingNested.error ?? "",
+				/Herder nested extension npm:@ff-labs\/pi-fff is not installed.*pi install npm:@ff-labs\/pi-fff/,
+			);
+		} finally {
+			const missingNestedSession = missingNestedParent.session as AgentSession;
+			await missingNestedSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			missingNestedSession.dispose();
+			await missingNestedParent.nested.stop("test cleanup");
+		}
+
 		await assert.rejects(
 			() => factory.create({ action: roleAction("plan-reviewer"), planDirectory }),
-			/Install it explicitly with: pi install npm:@ff-labs\/pi-fff/,
+			/Herder role extension npm:@ff-labs\/pi-fff is not installed.*pi install npm:@ff-labs\/pi-fff/,
+		);
+		await rm(path.dirname(path.dirname(ponytail)), { recursive: true, force: true });
+		await assert.rejects(
+			() => factory.create({ action: roleAction("plan-implementer"), planDirectory }),
+			/Herder role extension git:github\.com\/DietrichGebert\/ponytail is not installed.*pi install git:github\.com\/DietrichGebert\/ponytail/,
 		);
 	} finally {
 		await rm(root, { recursive: true, force: true });
