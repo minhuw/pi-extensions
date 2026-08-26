@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Check } from "typebox/value";
 import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "../../../adapters/run-guidance.ts";
 import { validateAttentionResolution } from "../../../src/shared/protocol.ts";
@@ -159,6 +160,48 @@ test("attention tool inputs round-trip with the fixed resolution schema", () => 
 	assert.equal(resolution.action, "answer");
 });
 
+test("rework finish handled by the ownership hook is not submitted twice", async () => {
+	const root = await fixture();
+	const tools: Array<{ name?: string; executionMode?: string; parameters?: unknown; execute?: (...args: any[]) => Promise<unknown> }> = [];
+	const pi = {
+		registerCommand: () => {},
+		registerTool: (tool: { name?: string; executionMode?: string; parameters?: unknown; execute?: (...args: any[]) => Promise<unknown> }) => { tools.push(tool); },
+	} as unknown as ExtensionAPI;
+	let handled = 0;
+	try {
+		registerPiPlanningWorkflows(pi, root, async () => path.dirname(root), {
+			assertMutationAllowed: () => {},
+			beforePlanOperation: async () => {
+				handled += 1;
+				return { handled: true, result: { edit: { planId: "001", state: "barrier" }, reply: { status: "running" } } };
+			},
+		});
+		const tool = tools.find((candidate) => candidate.name === "herder_plan");
+		assert.ok(tool?.execute);
+		assert.equal(tool.executionMode, "sequential");
+		assert.doesNotMatch(JSON.stringify(tool.parameters), /"intent"/);
+		assert.equal((tool.parameters as { additionalProperties?: boolean }).additionalProperties, false);
+		assert.equal(Check(tool.parameters as never, {
+			operation: "begin_edit",
+			planDirectory: root,
+			planId: "001",
+			intent: "rework",
+		}), false);
+		const result = await tool.execute(
+			"finish",
+			{ operation: "finish_edit", planDirectory: root, editToken: "00000000-0000-0000-0000-000000000001" },
+			undefined,
+			undefined,
+			{ isProjectTrusted: () => true } as ExtensionCommandContext,
+		) as { isError?: boolean; details?: { result?: unknown } };
+		assert.equal(result.isError, undefined);
+		assert.equal(handled, 1);
+		assert.deepEqual(result.details?.result, { edit: { planId: "001", state: "barrier" }, reply: { status: "running" } });
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("attention authorization runs before the deterministic manager mutation", async () => {
 	const root = await fixture();
 	const tools: Array<{ name?: string; execute?: (...args: any[]) => Promise<unknown> }> = [];
@@ -251,6 +294,35 @@ test("Pi agentic planning commands inject the packaged skill into the current se
 		assert.equal(waited, true);
 		assert.match(submitted, /^<skill name="herder-simplify"/);
 		assert.match(submitted, /\n\nquick deletion$/);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("planning launch failures cannot strand a prepared workflow", async () => {
+	const root = await fixture();
+	let prepared = false;
+	let rolledBack = false;
+	try {
+		await assert.rejects(() => launchPlanningWorkflow(
+			{ sendUserMessage: () => {} },
+			{ isProjectTrusted: () => true, waitForIdle: async () => { throw new Error("idle wait failed"); } } as unknown as ExtensionCommandContext,
+			root,
+			"simplify",
+			"",
+			async () => { prepared = true; return {}; },
+		), /idle wait failed/);
+		assert.equal(prepared, false);
+
+		await assert.rejects(() => launchPlanningWorkflow(
+			{ sendUserMessage: () => { throw new Error("prompt send failed"); } },
+			{ isProjectTrusted: () => true, waitForIdle: async () => {} } as unknown as ExtensionCommandContext,
+			root,
+			"simplify",
+			"",
+			async () => ({ rollback: async () => { rolledBack = true; } }),
+		), /prompt send failed/);
+		assert.equal(rolledBack, true);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

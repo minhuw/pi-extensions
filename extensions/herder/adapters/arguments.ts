@@ -31,6 +31,7 @@ export const HERDER_CLEANUP_COMMAND_USAGE = [
 ].join("\n");
 
 export const HERDER_RESET_COMMAND_USAGE = "Usage:\n  /herder-reset [plan-dir]";
+export const HERDER_REWORK_COMMAND_USAGE = "Usage:\n  /herder-rework <plan-id> [plan-dir]";
 
 export interface ResetCommandOptions { planDir: string }
 
@@ -239,6 +240,24 @@ export function parseResetArguments(input: string): ResetCommandOptions {
 	if (tokens.length > 1) throw new Error(`${HERDER_RESET_COMMAND_USAGE}`);
 	if (tokens[0]?.startsWith("--")) throw new Error(`Unknown option: ${tokens[0]}\n${HERDER_RESET_COMMAND_USAGE}`);
 	return { planDir: tokens[0] ?? "herder-plans" };
+}
+
+export interface ReworkCommandOptions {
+	planId: string;
+	planDir?: string;
+}
+
+export function parseReworkArguments(input: string): ReworkCommandOptions {
+	const tokens = tokenizeArguments(input);
+	if (tokens.length < 1 || tokens.length > 2) throw new Error(HERDER_REWORK_COMMAND_USAGE);
+	const unknown = tokens.find((token) => token.startsWith("--"));
+	if (unknown) throw new Error(`Unknown option: ${unknown}\n${HERDER_REWORK_COMMAND_USAGE}`);
+	const [planId, planDir] = tokens as [string, string?];
+	const basename = planId.split(/[/\\]/).pop() ?? planId;
+	if (!/^\d+$/.test(planId) && !/^\d{3,}-/.test(basename)) {
+		throw new Error(`Plan ID must be a numeric ID or NNN-*.md path.\n${HERDER_REWORK_COMMAND_USAGE}`);
+	}
+	return { planId, ...(planDir ? { planDir } : {}) };
 }
 
 

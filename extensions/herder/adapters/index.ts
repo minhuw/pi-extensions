@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	attentionCapabilityToken,
@@ -31,6 +31,7 @@ import {
 	parseGrillPlanTarget,
 	parsePlanDirArguments,
 	parseResetArguments,
+	parseReworkArguments,
 	type AttachOptions,
 	type FireOptions,
 } from "./arguments.ts";
@@ -47,9 +48,10 @@ import {
 import { HERDER_ATTENTION_MESSAGE, attentionMessageDetails, buildAttentionPrompt } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
-import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
+import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
+import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
 import { classifyVerificationRecovery } from "./verification-recovery.ts";
 import {
 	acquireAdapterOwnership,
@@ -88,6 +90,7 @@ interface WorkerBinding {
 	managerRunId: string;
 	planDir: string;
 	sessionEpoch: number;
+	planId?: string;
 	transcript?: HerderWorkerInputEntry;
 }
 
@@ -174,6 +177,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let lastSummary: PlanSummary | undefined;
 	let lastManagerMessage: string | undefined;
 	let currentAttention: ManagerAttentionRequest | undefined;
+	let currentPlanEdit: { planId: string; state: string } | undefined;
+	let currentReworkEdit: ReworkEditBinding | undefined;
 	let attentionHint: string | undefined;
 	let attentionDrain = Promise.resolve();
 	const deferredAttention = new Set<string>();
@@ -316,6 +321,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		await Promise.all(activeWorkers.map((worker) => engine.stop(worker.handle).catch(() => {})));
 		currentState = undefined;
 		currentAttention = undefined;
+		currentPlanEdit = undefined;
+		currentReworkEdit = undefined;
 		attentionHint = undefined;
 		deferredAttention.clear();
 		lastSummary = undefined;
@@ -694,6 +701,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			currentState = undefined;
 			pendingVerificationFailure = undefined;
 			currentAttention = undefined;
+			currentPlanEdit = undefined;
+			currentReworkEdit = undefined;
 			attentionHint = undefined;
 			deferredAttention.clear();
 			lastSummary = undefined;
@@ -708,6 +717,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			return;
 		}
 		currentAttention = ownsRun(reply.planDirectory, reply.runId) ? reply.attention : undefined;
+		currentPlanEdit = ownsRun(reply.planDirectory, reply.runId) ? reply.planEdit : undefined;
 		if (!currentAttention || attentionHint !== currentAttention.requestId) attentionHint = undefined;
 		const previous = currentState;
 		const now = Date.now();
@@ -779,6 +789,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				managerRunId: reply.runId,
 				planDir: reply.planDirectory,
 				sessionEpoch,
+				planId: active.planId,
 			});
 		}
 		render();
@@ -856,6 +867,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						managerRunId: reply.runId,
 						planDir: reply.planDirectory,
 						sessionEpoch: epoch,
+						planId: action.planId,
 						transcript: createWorkerInputEntry(action, handle),
 					});
 					results.push({ actionId: action.actionId, accepted: true, hostHandle: handle });
@@ -1189,6 +1201,191 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return result;
 	};
 
+	const processPlanningManagerReply = async (
+		value: unknown,
+		epoch: number,
+		context?: { attentionAction?: string; planOperation?: "finish_edit" | "cancel_edit" },
+	): Promise<ManagerReply | undefined> => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const action = context?.attentionAction?.trim().toLowerCase().replace(/[- ]+/g, "_");
+		if (action === "defer") {
+			const reply = value as ManagerReply;
+			if (reply.attention) deferredAttention.add(reply.attention.requestId);
+		} else if (action && currentAttention) {
+			deferredAttention.delete(currentAttention.requestId);
+		}
+		assertSessionActive(epoch);
+		const reply = value as ManagerReply;
+		assertOwnership(reply.planDirectory, reply.runId);
+		const recover = context?.planOperation === "finish_edit" && currentReworkEdit?.recoverOnFinish === true;
+		updateFromReply(reply);
+		const nextReworkEdit = reworkBindingAfterReply(currentReworkEdit, context?.planOperation, reply);
+		const dispatched = recover ? await recoverInterruptedWorkers(reply, epoch) : await dispatchReply(reply, epoch);
+		currentReworkEdit = nextReworkEdit;
+		await requestAttentionDrain();
+		return dispatched;
+	};
+
+	const processReworkCancellation = async (reply: ManagerReply, binding: ReworkEditBinding, epoch: number, ctx: ExtensionContext): Promise<void> => {
+		if (!binding.recoverOnFinish) {
+			await processPlanningManagerReply(reply, epoch, { planOperation: "cancel_edit" });
+			return;
+		}
+		try {
+			assertSessionActive(epoch);
+			assertOwnership(reply.planDirectory, reply.runId);
+			updateFromReply(reply);
+			currentReworkEdit = reworkBindingAfterReply(currentReworkEdit, "cancel_edit", reply);
+		} finally {
+			await clearCurrentStateForPlanDirectory(binding.planDirectory, ctx);
+		}
+	};
+
+	const settleTargetWorkers = async (
+		binding: { planDirectory: string; planId: string },
+		epoch: number,
+	): Promise<void> => {
+		if (!currentState) return;
+		const target = [...workers.values()].filter((worker) => worker.planId === binding.planId
+			&& path.resolve(worker.planDir) === binding.planDirectory
+			&& worker.sessionEpoch === epoch);
+		if (target.length === 0) return;
+		const interrupted: TerminalEvent[] = target.map((worker) => ({
+			actionId: worker.actionId,
+			hostHandle: worker.handle,
+			interrupted: true,
+			error: "Pi user requested Herder rework",
+		}));
+		for (const worker of target) {
+			if (worker.transcript) appendWorkerEntry(HERDER_WORKER_OUTPUT_ENTRY, createWorkerOutputEntry(worker.transcript, {
+				actionId: worker.actionId,
+				hostHandle: worker.handle,
+				interrupted: true,
+				error: "Pi user requested Herder rework",
+			}));
+			workers.delete(worker.handle);
+		}
+		await Promise.all(target.map((worker) => engine.stop(worker.handle).catch(() => {})));
+		const reply = await postEventReliable(binding.planDirectory, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
+		assertOwnership(reply.planDirectory, reply.runId);
+		updateFromReply(reply);
+	};
+
+	const acquireReworkOwnership = async (planDir: string, repoRoot: string, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
+		if (currentState) {
+			if (path.resolve(currentState.planDir) !== planDir) throw new Error(`This Pi session already owns ${currentState.planDir}.`);
+			if (ownsRun(planDir, currentState.runId)) return undefined;
+		}
+		const snapshot = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
+		if (snapshot.status === "idle") throw new Error(`No Herder run is recorded in ${planDir}.`);
+		if (snapshot.status === "complete") throw new Error(`Herder run ${snapshot.runId} is complete; create a corrective plan instead.`);
+		if (!["running", "needs_input", "failed"].includes(snapshot.status)) {
+			throw new Error(`Herder run ${snapshot.runId} is ${snapshot.status} and cannot be reworked.`);
+		}
+		if (!snapshot.profileName) throw new Error(`Herder run ${snapshot.runId} did not report its immutable profile.`);
+		const profile = await resolveProfile(ctx, snapshot.profileName);
+		await preflight(ctx, profile);
+		assertSessionActive(epoch);
+		let acquired: AdapterOwnership | undefined;
+		try {
+			await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				acquired = await claimOwnership(planDir, snapshot.runId, ctx, epoch);
+				const fresh = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
+				if (fresh.runId !== snapshot.runId || fresh.profileName !== snapshot.profileName) throw new Error("Herder run changed while acquiring rework ownership.");
+				if (!["running", "needs_input", "failed"].includes(fresh.status)) throw new Error(`Herder run ${fresh.runId} changed to ${fresh.status}.`);
+				assertOwnership(fresh.planDirectory, fresh.runId);
+				updateFromReply(fresh, profile.profile, "attach", undefined, repoRoot);
+			});
+			return acquired;
+		} catch (error) {
+			releaseNewOwnership(acquired, epoch);
+			throw error;
+		}
+	};
+
+	const rework = async (args: string, ctx: ExtensionContext): Promise<string> => {
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder rework.");
+		const parsed = parseReworkArguments(args);
+		const epoch = sessionEpoch;
+		assertSessionActive(epoch);
+		const repoRoot = await repositoryRoot(ctx);
+		assertSessionActive(epoch);
+		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir ?? currentState?.planDir ?? "herder-plans");
+		let acquiredForRework: AdapterOwnership | undefined;
+		let binding: ReworkEditBinding | undefined;
+		const cancelReservation = async (): Promise<void> => {
+			if (!binding || !sessionActive(epoch) || !currentState || !ownsRun(planDir, currentState.runId)) return;
+			await enqueueManager(async () => {
+				assertSessionActive(epoch);
+				assertOwnership(planDir, currentState!.runId);
+				const activeBinding = binding!;
+				const cancelled = await invokeHerderTool("herder_plan", {
+					operation: "cancel_edit",
+					planDirectory: planDir,
+					editToken: activeBinding.editToken,
+				}) as Record<string, unknown>;
+				await processReworkCancellation(unwrapReply(cancelled), activeBinding, epoch, ctx);
+			});
+		};
+		try {
+			await launchPlanningWorkflow(pi, ctx as ExtensionCommandContext, PACKAGE_ROOT, "grill", `--plan ${parsed.planId}`, async () => {
+				acquiredForRework = await acquireReworkOwnership(planDir, repoRoot, ctx, epoch);
+				assertSessionActive(epoch);
+				assertOwnership(planDir, currentState!.runId);
+				let reserved: Record<string, unknown>;
+				try {
+					reserved = await enqueueManager(async () => {
+						assertSessionActive(epoch);
+						assertOwnership(planDir, currentState!.runId);
+						return await invokeHerderTool("herder_plan", {
+							operation: "begin_edit",
+							planDirectory: planDir,
+							planId: parsed.planId,
+							intent: "rework",
+						}) as Record<string, unknown>;
+					});
+				} catch (error) {
+					if (acquiredForRework) await clearCurrentStateForPlanDirectory(planDir, ctx);
+					throw error;
+				}
+				const edit = reserved.edit as Record<string, unknown> | undefined;
+				const editToken = typeof edit?.editToken === "string" ? edit.editToken : "";
+				const planId = typeof edit?.planId === "string" ? edit.planId : parsed.planId;
+				if (!editToken) throw new Error("Herder manager did not return a plan edit token.");
+				const priorRecovery = currentReworkEdit?.planDirectory === planDir && currentReworkEdit.editToken === editToken
+					? currentReworkEdit.recoverOnFinish
+					: false;
+				binding = { planDirectory: planDir, planId, editToken, recoverOnFinish: Boolean(acquiredForRework || priorRecovery) };
+				currentReworkEdit = binding;
+				if (reserved.reply && typeof reserved.reply === "object") {
+					const reply = reserved.reply as ManagerReply;
+					assertOwnership(reply.planDirectory, reply.runId);
+					updateFromReply(reply);
+				}
+				return {
+					runtimeContext: [
+						"HERDER_ACTIVE_PLAN_REWORK_V1",
+						`PLAN_ID: ${planId}`,
+						`PLAN_DIRECTORY: ${planDir}`,
+						`EDIT_TOKEN: ${editToken}`,
+						"The manager has reserved this blocked or exhausted plan. Existing execution is untouched until finish_edit.",
+						"Edit only the reserved plan and necessary index fields. Preserve its ID, filename, and dependencies.",
+						"Do not add, remove, or change another plan.",
+						"After the rewrite passes shape and validation, call herder_plan with operation finish_edit, this planDirectory, and editToken when the operator directs completion. The host presents the destructive confirmation.",
+						"If Grill is cancelled or no files were changed, call herder_plan with operation cancel_edit instead. Cancellation restores the pre-interview graph and leaves existing execution untouched.",
+						"Never call /herder-revise, /herder-reset, Git, or SQLite for this path.",
+					].join("\n"),
+					rollback: cancelReservation,
+				};
+			});
+		} catch (error) {
+			await cancelReservation().catch(() => {});
+			if (acquiredForRework || binding?.recoverOnFinish) await clearCurrentStateForPlanDirectory(planDir, ctx);
+			throw error;
+		}
+		return `Reserved plan ${binding!.planId} for rework. Grill will rewrite it; finish_edit discards the current execution after confirmation.`;
+	};
 
 	const stop = async (): Promise<string> => {
 		if (!currentState) return "No active Herder run.";
@@ -1240,6 +1437,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerCommand("herder-dashboard", { description: "Open the manager-hosted Herder dashboard.", handler: command((args, ctx) => dashboard(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-cleanup", { description: "Preview and confirm Herder cleanup. Use --force to destroy a plan set unconditionally.", handler: command(cleanup) });
 	pi.registerCommand("herder-reset", { description: "Reset a Herder plan set to its pre-initialized execution state.", handler: command(reset) });
+	pi.registerCommand("herder-rework", {
+		description: "Rewrite a blocked or exhausted non-integrated plan and rerun it from the current integration HEAD.",
+		handler: async (args, ctx) => {
+			lastContext = ctx;
+			try { ctx.ui.notify(await rework(args, ctx), "info"); }
+			catch (error) { ctx.ui.notify(message(error), "error"); }
+		},
+	});
 	pi.registerCommand("herder-stop", {
 		description: "Stop active Herder workers and preserve repository state.",
 		handler: async (_args, ctx) => {
@@ -1251,6 +1456,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const activeFire = () => Boolean(currentState && !isTerminalRunStatus(currentState.status))
 		|| Boolean(currentAttention && currentAttention.state !== "resolved")
+		|| Boolean(currentPlanEdit)
 		|| workers.size > 0
 		|| engine.snapshots().length > 0;
 	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, {
@@ -1271,6 +1477,62 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				|| input.round !== request.round) {
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
+		},
+		beforePlanOperation: async (operation, params, ctx) => {
+			if (operation !== "finish_edit" && operation !== "cancel_edit") return;
+			const requestedBinding = currentReworkEdit;
+			if (!requestedBinding) return;
+			if (!currentState || path.resolve(currentState.planDir) !== requestedBinding.planDirectory) {
+				throw new Error("Herder rework edit has no matching active run state.");
+			}
+			const epoch = sessionEpoch;
+			const runId = currentState.runId;
+			return enqueueManager(async () => {
+				const binding = currentReworkEdit;
+				if (!binding || binding.planDirectory !== requestedBinding.planDirectory || binding.editToken !== requestedBinding.editToken) {
+					return undefined;
+				}
+				assertSessionActive(epoch);
+				assertOwnership(binding.planDirectory, runId);
+				if (operation === "cancel_edit") {
+					if (params.planDirectory !== binding.planDirectory || params.editToken !== binding.editToken) throw new Error("Herder rework cancel is not bound to this exact plan directory and edit token.");
+					const result = await invokeHerderTool("herder_plan", {
+						operation: "cancel_edit",
+						planDirectory: binding.planDirectory,
+						editToken: binding.editToken,
+					}) as Record<string, unknown>;
+					await processReworkCancellation(unwrapReply(result), binding, epoch, ctx);
+					return { handled: true as const, result };
+				}
+				if (!binding.finishPending) await prepareReworkFinish(binding, params, ctx, {
+					edit: async (editOperation: ReworkEditOperation) => {
+						assertSessionActive(epoch);
+						assertOwnership(binding.planDirectory, runId);
+						const result = await invokeHerderTool("herder_plan", {
+							operation: editOperation,
+							planDirectory: binding.planDirectory,
+							editToken: binding.editToken,
+						}) as Record<string, unknown>;
+						if (editOperation === "cancel_edit") await processReworkCancellation(unwrapReply(result), binding, epoch, ctx);
+						else await processPlanningManagerReply(unwrapReply(result), epoch);
+					},
+					settle: async () => {
+						assertSessionActive(epoch);
+						assertOwnership(binding.planDirectory, runId);
+						await settleTargetWorkers(binding, epoch);
+					},
+				});
+				binding.finishPending = true;
+				assertSessionActive(epoch);
+				assertOwnership(binding.planDirectory, runId);
+				const result = await invokeHerderTool("herder_plan", {
+					operation: "finish_edit",
+					planDirectory: binding.planDirectory,
+					editToken: binding.editToken,
+				}) as Record<string, unknown>;
+				await processPlanningManagerReply(unwrapReply(result), epoch, { planOperation: "finish_edit" });
+				return { handled: true as const, result };
+			});
 		},
 		prepareWorkflow: async (skill, args, ctx) => {
 			const target = skill === "grill" ? parseGrillPlanTarget(args) : null;
@@ -1318,40 +1580,22 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				].join("\n"),
 				rollback: async () => {
 					if (!sessionActive(epoch) || !currentState || !ownsRun(planDir, currentState.runId)) return;
-					const cancelled = await enqueueManager(async () => {
+					await enqueueManager(async () => {
 						assertSessionActive(epoch);
 						assertOwnership(planDir, currentState!.runId);
-						return await invokeHerderTool("herder_plan", {
+						const cancelled = await invokeHerderTool("herder_plan", {
 							operation: "cancel_edit",
 							planDirectory: planDir,
 							editToken,
 						}) as Record<string, unknown>;
+						await processPlanningManagerReply(cancelled.reply, epoch, { planOperation: "cancel_edit" });
 					});
-					if (cancelled.reply && typeof cancelled.reply === "object") {
-						const reply = cancelled.reply as ManagerReply;
-						assertOwnership(reply.planDirectory, reply.runId);
-						updateFromReply(reply);
-					}
 				},
 			};
 		},
 		handleManagerReply: async (value, context) => {
-			if (!value || typeof value !== "object" || Array.isArray(value)) return;
 			const epoch = sessionEpoch;
-			const action = context?.attentionAction?.trim().toLowerCase().replace(/[- ]+/g, "_");
-			if (action === "defer") {
-				const reply = value as ManagerReply;
-				if (reply.attention) deferredAttention.add(reply.attention.requestId);
-			} else if (action && currentAttention) {
-				deferredAttention.delete(currentAttention.requestId);
-			}
-			await enqueueManager(async () => {
-				assertSessionActive(epoch);
-				const reply = value as ManagerReply;
-				assertOwnership(reply.planDirectory, reply.runId);
-				updateFromReply(reply);
-				await dispatchReply(reply, epoch);
-			});
+			await enqueueManager(() => processPlanningManagerReply(value, epoch, context));
 		},
 	});
 
@@ -1772,6 +2016,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		currentAttention = undefined;
+		currentPlanEdit = undefined;
+		currentReworkEdit = undefined;
 		pendingVerificationFailure = undefined;
 		sendingVerificationFailure = false;
 		deliveredVerificationFailureFollowUps.clear();
@@ -1795,6 +2041,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 						throw new Error(`Persisted Herder run ${restored.runId} does not match manager run ${reply.runId || "idle"}; refusing recovery.`);
 					}
 					const shouldOwn = ["initializing", "running", "paused", "needs_input"].includes(reply.status)
+						|| Boolean(reply.planEdit)
 						|| (reply.status === "failed" && (Boolean(reply.attention && reply.attention.state !== "resolved") || /verification/i.test(reply.message)));
 					if (shouldOwn) {
 						if (!reply.profileName || (restored.profile !== "unknown" && reply.profileName !== restored.profile)) {
@@ -1845,6 +2092,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		promptedVerifications.clear();
 		promptedReignites.clear();
 		currentAttention = undefined;
+		currentPlanEdit = undefined;
+		currentReworkEdit = undefined;
 		deferredAttention.clear();
 		lastContext = undefined;
 	});

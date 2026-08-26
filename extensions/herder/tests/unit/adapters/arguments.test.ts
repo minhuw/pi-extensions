@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseAttachArguments, parseCleanupArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, parseResetArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
+import { parseAttachArguments, parseCleanupArguments, parseFireArguments, parseGrillPlanTarget, parsePlanCommandArguments, parsePlanDirArguments, parseResetArguments, parseReworkArguments, tokenizeArguments } from "../../../adapters/arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "../../../adapters/paths.ts";
 
 test("tokenizes shell-style plan paths without invoking a shell", () => {
@@ -26,6 +26,15 @@ test("reset accepts an optional plan directory and rejects options", () => {
 	assert.deepEqual(parseResetArguments("custom-plans"), { planDir: "custom-plans" });
 	assert.throws(() => parseResetArguments("one two"), /Usage/);
 	assert.throws(() => parseResetArguments("--force"), /Unknown option/);
+});
+test("rework requires a plan id and an optional plan directory", () => {
+	assert.deepEqual(parseReworkArguments("009"), { planId: "009" });
+	assert.deepEqual(parseReworkArguments("9 herder-plans"), { planId: "9", planDir: "herder-plans" });
+	assert.deepEqual(parseReworkArguments("009-blocked.md custom-plans"), { planId: "009-blocked.md", planDir: "custom-plans" });
+	assert.throws(() => parseReworkArguments(""), /Usage/);
+	assert.throws(() => parseReworkArguments("009 extra leftover"), /Usage/);
+	assert.throws(() => parseReworkArguments("--plan 009"), /Unknown option/);
+	assert.throws(() => parseReworkArguments("not-a-plan"), /numeric ID/);
 });
 test("fire defaults to a five-worker pool and an ephemeral dashboard port", () => {
 	assert.deepEqual(parseFireArguments("", "fire"), {

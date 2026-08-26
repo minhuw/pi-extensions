@@ -35,6 +35,7 @@ export interface PreparedPlanningWorkflow {
 
 export interface PiPlanningManagerReplyContext {
 	attentionAction?: string;
+	planOperation?: "finish_edit" | "cancel_edit";
 }
 
 export interface PiPlanningRuntime {
@@ -54,6 +55,11 @@ export interface PiPlanningRuntime {
 		argumentsText: string,
 		ctx: ExtensionCommandContext,
 	) => Promise<PreparedPlanningWorkflow>;
+	beforePlanOperation?: (
+		operation: string,
+		params: { planDirectory: string; editToken?: string },
+		ctx: ExtensionContext,
+	) => Promise<{ handled: true; result: unknown } | undefined>;
 	handleManagerReply?: (reply: unknown, context?: PiPlanningManagerReplyContext) => Promise<void>;
 }
 
@@ -150,7 +156,8 @@ export function formatPlanCommandResult(request: PlanCommandOptions, value: unkn
 	if (request.operation === "report") {
 		const tokens = result.tokens as JsonObject | undefined;
 		const timing = result.timing as JsonObject | undefined;
-		return `Herder report ${result.plan ?? request.planId}: ${count(result.attempts)} attempts · ${count(result.interruptions)} interruptions · ${count(tokens?.reportedInputOutput)} reported tokens · ${timing?.attemptDurationMs ?? "unknown"} ms attempt time.`;
+		const superseded = count(result.supersededAttempts);
+		return `Herder report ${result.plan ?? request.planId}: ${count(result.attempts)} attempts · ${superseded} superseded · ${count(result.interruptions)} interruptions · ${count(tokens?.reportedInputOutput)} reported tokens · ${timing?.attemptDurationMs ?? "unknown"} ms attempt time.`;
 	}
 	return JSON.stringify(value, null, 2);
 }
@@ -211,6 +218,7 @@ export function registerPiPlanningWorkflows(
 	pi.registerTool({
 		name: "herder_plan",
 		label: "Herder Plan",
+		executionMode: "sequential",
 		description: "Initialize, validate, shape, inspect, snapshot, report, coordinate a reserved Herder plan edit, or resolve one request-bound attention item.",
 		parameters: Type.Object({
 			operation: Type.Union([
@@ -236,7 +244,7 @@ export function registerPiPlanningWorkflows(
 			rationale: Type.Optional(Type.String()),
 			continuation: Type.Optional(Type.Object({ role: Type.String(), phase: Type.String() })),
 			git: Type.Optional(Type.Any()),
-		}),
+		}, { additionalProperties: false }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
 				return { content: [{ type: "text" as const, text: "Trust this project before using Herder plan operations." }], isError: true, details: {} };
@@ -247,6 +255,9 @@ export function registerPiPlanningWorkflows(
 				const planDirectory = params.operation === "init"
 					? resolvePlanDirectoryTarget(repoRoot, params.planDirectory)
 					: resolvePlanDirectory(repoRoot, params.planDirectory);
+				const handled = params.operation === "finish_edit" || params.operation === "cancel_edit"
+					? await runtime.beforePlanOperation?.(params.operation, { planDirectory, editToken: params.editToken }, ctx)
+					: undefined;
 				if (params.operation === "attention") {
 					runtime.assertAttentionAllowed?.({
 						planDirectory,
@@ -259,10 +270,31 @@ export function registerPiPlanningWorkflows(
 						round: params.round,
 					});
 				}
-				const result = await invokeHerderTool("herder_plan", { ...params, planDirectory });
-				if (result && typeof result === "object" && !Array.isArray(result)) {
+				const applicationParams = {
+					operation: params.operation,
+					planDirectory,
+					...(params.schemaVersion !== undefined ? { schemaVersion: params.schemaVersion } : {}),
+					...(params.planId !== undefined ? { planId: params.planId } : {}),
+					...(params.editToken !== undefined ? { editToken: params.editToken } : {}),
+					...(params.track !== undefined ? { track: params.track } : {}),
+					...(params.requestId !== undefined ? { requestId: params.requestId } : {}),
+					...(params.requestSha256 !== undefined ? { requestSha256: params.requestSha256 } : {}),
+					...(params.capabilityToken !== undefined ? { capabilityToken: params.capabilityToken } : {}),
+					...(params.runId !== undefined ? { runId: params.runId } : {}),
+					...(params.generation !== undefined ? { generation: params.generation } : {}),
+					...(params.round !== undefined ? { round: params.round } : {}),
+					...(params.action !== undefined ? { action: params.action } : {}),
+					...(params.answer !== undefined ? { answer: params.answer } : {}),
+					...(params.rationale !== undefined ? { rationale: params.rationale } : {}),
+					...(params.continuation !== undefined ? { continuation: params.continuation } : {}),
+					...(params.git !== undefined ? { git: params.git } : {}),
+				};
+				const result = handled?.result ?? await invokeHerderTool("herder_plan", applicationParams);
+				if (!handled && result && typeof result === "object" && !Array.isArray(result)) {
 					const reply = (result as JsonObject).reply;
-					if (params.operation === "finish_edit") await runtime.handleManagerReply?.(reply);
+					if (params.operation === "finish_edit" || params.operation === "cancel_edit") {
+						await runtime.handleManagerReply?.(reply, { planOperation: params.operation });
+					}
 					if (params.operation === "attention") {
 						await runtime.handleManagerReply?.(reply, {
 							attentionAction: typeof params.action === "string" ? params.action : undefined,

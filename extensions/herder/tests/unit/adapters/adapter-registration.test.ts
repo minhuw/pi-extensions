@@ -111,6 +111,7 @@ test("adapter registration exposes the complete live surface", () => {
 		"herder-plans",
 		"herder-reset",
 		"herder-resume",
+		"herder-rework",
 		"herder-revise",
 		"herder-simplify",
 		"herder-status",
@@ -138,6 +139,8 @@ test("adapter registration exposes the complete live surface", () => {
 		const properties = record(schema.properties);
 		assert.equal(record(properties.planDirectory).type, "string");
 	}
+	const planProperties = record(record(api.tool("herder_plan").parameters).properties);
+	assert.equal(Object.hasOwn(planProperties, "intent"), false, "rework intent must remain command-only");
 });
 
 test("run tools enforce trust before repository work", async () => {

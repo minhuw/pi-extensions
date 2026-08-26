@@ -15,6 +15,7 @@ Interpret tokens after the command name as arguments. Pi accepts `/herder-grill 
 /herder-grill <change-description> [--plan-dir <plan-dir>]
 /herder-grill --plan <plan-id-or-path> [--plan-dir <plan-dir>]
 /herder-grill --plan <plan-id-or-path> --split [--plan-dir <plan-dir>]
+/herder-rework <plan-id> [plan-dir]
 ```
 
 Default to `herder-plans/`. Without `--plan`, use the remaining text as the request; if empty, ask what to change. With `--plan`, accept a numeric ID or `NNN-*.md` path and refine that plan. `--split` requires `--plan` and explicitly requests that Grill elevate splitting in its shaping proposal; reject duplicate `--split`. Ordinary standalone `--plan` refinement may still propose a split when shaping proves it necessary. Preserve one coherent user objective, but create as many focused subplans as its safe implementation graph requires. Ask the user to narrow only when the request contains independently selectable objectives or unresolved product scope—not merely because implementation needs multiple plans.
@@ -28,6 +29,14 @@ If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_EDIT_V1`, 
 - After the confirmed edit passes `shape` and `validate`, call `herder_plan` with `operation: "finish_edit"`, the exact `planDirectory`, and `editToken`. The manager will wait for active workers to settle and adopt the next immutable generation automatically.
 - If the interview is cancelled or produces no file changes, call `herder_plan` with `operation: "cancel_edit"`. Cancellation fails closed if the graph changed.
 - Never call `/herder-revise` for this reserved path; explicit revise remains for manual or externally authored graph changes.
+
+If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_REWORK_V1`, the manager has reserved a blocked or exhausted non-integrated plan for operator-initiated rewrite. Existing execution is untouched until `finish_edit`. Treat `PLAN_ID`, `PLAN_DIRECTORY`, and `EDIT_TOKEN` as an exact capability contract:
+
+- Edit only the reserved plan and necessary index fields. Preserve its ID, filename, and dependencies. Do not create, remove, or modify another plan, and do not change graph topology.
+- Do not change the edit token, plan directory, or target identity.
+- Interview as usual. After the rewrite passes `shape` and `validate`, call `herder_plan` with `operation: "finish_edit"`, the exact `planDirectory`, and `editToken` when the operator directs completion. The host—not the model—presents the destructive confirmation describing target-local worker settlement, deletion of the target's exact worktree/branch/transient refs, superseded history, and recreation from the current integration HEAD at round 1.
+- If Grill is cancelled or produces no file changes, call `herder_plan` with `operation: "cancel_edit"`. Cancellation restores the pre-interview graph and leaves the existing execution untouched; a declined host confirmation performs this cancellation automatically.
+- Never call `/herder-revise`, `/herder-reset`, Git, or SQLite for this path. Reworking an integrated plan is refused; create a corrective plan instead.
 
 If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_RECOVERY_V1`, the manager has presented one durable recovery request for a blocked or input-waiting plan. This is target-local recovery, not the never-started active-Fire edit path:
 
