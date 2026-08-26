@@ -144,8 +144,26 @@ async function managerReply(service: Service, kind: ManagerOperationKind, input:
 	return object(object(await requestManagerOperation(service, kind, input)).reply);
 }
 
-function cleanup(value: Fixture): void {
-	fs.rmSync(`${value.repo}-herder-worktrees`, { recursive: true, force: true });
+async function withFixture<T>(prefix: string, callback: (service: Service, value: Fixture) => Promise<T>): Promise<T> {
+	const previousCrashAt = process.env.HERDER_TEST_REWORK_CRASH_AT;
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-rework-${prefix}-`));
+	let value: Fixture | undefined;
+	try {
+		value = fixture(root);
+		const service = await ensureService(value.planDirectory);
+		return await callback(service, value);
+	} finally {
+		try {
+			if (value) {
+				await stopService(value.planDirectory).catch(() => {});
+				fs.rmSync(`${value.repo}-herder-worktrees`, { recursive: true, force: true });
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+		} finally {
+			if (previousCrashAt === undefined) delete process.env.HERDER_TEST_REWORK_CRASH_AT;
+			else process.env.HERDER_TEST_REWORK_CRASH_AT = previousCrashAt;
+		}
+	}
 }
 
 function failedImplementer(hostHandle: string): JsonRecord {
@@ -230,12 +248,7 @@ async function replayInterruptedEdit(value: Fixture, operationId: string, input:
 	return { service, result: object(await requestManagerOperation(service, "edit", input, operationId)) };
 }
 
-test("rework discards an exhausted plan and reschedules round 1 without touching the sibling", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-happy-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("rework discards an exhausted plan and reschedules round 1 without touching the sibling", { timeout: 60_000 }, async () => withFixture("happy", async (service, value) => {
 		const started = await startRun(service, value);
 		await assert.rejects(() => managerReply(service!, "event", {
 			eventId: "manager-plan-edit:external",
@@ -396,20 +409,10 @@ test("rework discards an exhausted plan and reschedules round 1 without touching
 		assert.ok(fresh);
 		assert.match(String(fresh.attemptId), /-g2-r1-implementer-1$/);
 		await assert.doesNotReject(() => requestManagerOperation(service!, "edit", { operation: "finish", editToken: edit.editToken }));
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("cancelling rework before finish leaves execution untouched", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-cancel-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
+test("cancelling rework before finish leaves execution untouched", { timeout: 60_000 }, async () => withFixture("cancel", async (service, value) => {
 		fs.writeFileSync(path.join(value.planDirectory, "CONTEXT.md"), "# Herder Plan-Set Context\n\n## Objective\n\nPreserve exact shared context during rework cancellation.\n");
-		service = await ensureService(value.planDirectory);
 		const started = await startRun(service, value);
 		const exhausted = await failTargetRounds(service, started, "rework-cancel");
 		const begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
@@ -428,7 +431,6 @@ test("cancelling rework before finish leaves execution untouched", { timeout: 60
 		fs.writeFileSync(path.join(value.planDirectory, "003-created.md"), writePlan("003", "Created during interview", "src/created.mjs"));
 		fs.writeFileSync(path.join(value.planDirectory, "README.md"), "malformed interview index\n");
 		await stopService(value.planDirectory);
-		service = undefined;
 		const replay = await replayInterruptedEdit(value, "rework-cancel-interrupted", { operation: "cancel", editToken });
 		service = replay.service;
 		await requestManagerOperation(service, "edit", { operation: "cancel", editToken });
@@ -449,25 +451,15 @@ test("cancelling rework before finish leaves execution untouched", { timeout: 60
 		} finally {
 			store.close();
 		}
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("cancelling rework restores a nested target plan", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-nested-cancel-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
+test("cancelling rework restores a nested target plan", { timeout: 60_000 }, async () => withFixture("nested-cancel", async (service, value) => {
 		const nested = path.join(value.planDirectory, "nested");
 		fs.mkdirSync(nested);
 		const target = path.join(nested, "001-target.md");
 		fs.renameSync(path.join(value.planDirectory, "001-target.md"), target);
 		const readme = path.join(value.planDirectory, "README.md");
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("[001](001-target.md)", "[001](nested/001-target.md)"));
-		service = await ensureService(value.planDirectory);
 		const started = await startRun(service, value);
 		await failTargetRounds(service, started, "rework-nested-cancel");
 		const edgeLess = fs.readFileSync(readme, "utf8").split(/\r?\n/).map((line) => line.startsWith("|") ? line.slice(1, -1).trim() : line).join("\r\n");
@@ -499,19 +491,9 @@ test("cancelling rework restores a nested target plan", { timeout: 60_000 }, asy
 			assert.equal(store.getPlan(run.runId, "001")?.generation, 2);
 			assert.match(store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001")?.assignment.planText || "", /Rewritten nested target/);
 		} finally { store.close(); }
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("rework finish without a rewrite and integrated plans fail closed", { timeout: 90_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-refuse-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("rework finish without a rewrite and integrated plans fail closed", { timeout: 90_000 }, async () => withFixture("refuse", async (service, value) => {
 		const started = await startRun(service, value);
 		const exhausted = await failTargetRounds(service, started, "rework-refuse");
 		const begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
@@ -560,19 +542,9 @@ test("rework finish without a rewrite and integrated plans fail closed", { timeo
 			() => requestManagerOperation(service!, "edit", { operation: "begin", planId: "002", intent: "rework", editToken: randomUUID() }),
 			/already integrated|corrective plan/,
 		);
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("rework rejects sibling README edits and transient ref drift before deletion", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-drift-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("rework rejects sibling README edits and transient ref drift before deletion", { timeout: 60_000 }, async () => withFixture("drift", async (service, value) => {
 		const started = await startRun(service, value);
 		const exhausted = await failTargetRounds(service, started, "rework-drift");
 		let begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
@@ -597,20 +569,10 @@ test("rework rejects sibling README edits and transient ref drift before deletio
 		);
 		assert.equal(git(value.repo, ["show-ref", "--verify", "--quiet", ref], true).status, 0);
 		await requestManagerOperation(service, "edit", { operation: "cancel", editToken });
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("runtime-less DONE downstream plans refuse rework", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-downstream-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
+test("runtime-less DONE downstream plans refuse rework", { timeout: 60_000 }, async () => withFixture("downstream", async (service, value) => {
 		markSiblingDoneDownstream(value);
-		service = await ensureService(value.planDirectory);
 		const started = await startRun(service, value);
 		await failTargetRounds(service, started, "rework-downstream");
 		const store = new RunStore(value.planDirectory);
@@ -623,18 +585,9 @@ test("runtime-less DONE downstream plans refuse rework", { timeout: 60_000 }, as
 			() => requestManagerOperation(service!, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }),
 			/integrated downstream plan 002/,
 		);
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("transitive integrated downstream plans refuse rework", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-transitive-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
+test("transitive integrated downstream plans refuse rework", { timeout: 60_000 }, async () => withFixture("transitive", async (service, value) => {
 		const readme = path.join(value.planDirectory, "README.md");
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8")
 			.replace("| [002](002-sibling.md) | Unrelated sibling | P1 | S | — | TODO |", "| [002](002-sibling.md) | Unrelated sibling | P1 | S | 001 | BLOCKED — waiting for root |\n| [003](003-downstream.md) | Integrated descendant | P1 | S | 002 | DONE |"));
@@ -642,26 +595,15 @@ test("transitive integrated downstream plans refuse rework", { timeout: 60_000 }
 			.replace("- **Depends on**: none", "- **Depends on**: herder-plans/001-*.md"));
 		fs.writeFileSync(path.join(value.planDirectory, "003-downstream.md"), writePlan("003", "Integrated descendant", "src/other.mjs")
 			.replace("- **Depends on**: none", "- **Depends on**: herder-plans/002-*.md"));
-		service = await ensureService(value.planDirectory);
 		const started = await startRun(service, value);
 		await failTargetRounds(service, started, "rework-transitive");
 		await assert.rejects(
 			() => requestManagerOperation(service!, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }),
 			/integrated downstream plan 003/,
 		);
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("rework recreates runtime and supersedes history even when sibling work fills the pool", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-capacity-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("rework recreates runtime and supersedes history even when sibling work fills the pool", { timeout: 60_000 }, async () => withFixture("capacity", async (service, value) => {
 		const started = await startRun(service, value, 1);
 		const exhausted = await failTargetRounds(service, started, "rework-capacity");
 		const sibling = object((exhausted.reply.actions as unknown[]).map(object).find((action) => action.planId === "002"));
@@ -689,23 +631,12 @@ test("rework recreates runtime and supersedes history even when sibling work fil
 			assert.equal(fs.existsSync(target.worktree), true);
 			assert.ok(getExecutionReport(value.planDirectory, "001").records.every((record) => record.superseded));
 		} finally { store.close(); }
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
-test("daemon replays rework begin with the same snapshot identity", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-begin-crash-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("daemon replays rework begin with the same snapshot identity", { timeout: 60_000 }, async () => withFixture("begin-crash", async (service, value) => {
 		const started = await startRun(service, value);
 		await failTargetRounds(service, started, "rework-begin-crash");
 		await stopService(value.planDirectory);
-		service = undefined;
 		const editToken = randomUUID();
 		const operationId = "rework-begin-crash";
 		process.env.HERDER_TEST_REWORK_CRASH_AT = "after_snapshot";
@@ -719,21 +650,11 @@ test("daemon replays rework begin with the same snapshot identity", { timeout: 6
 		assert.equal(object(replayed.edit).editToken, editToken);
 		await requestManagerOperation(service, "edit", { operation: "cancel", editToken });
 		assert.doesNotMatch(fs.readFileSync(path.join(value.planDirectory, "README.md"), "utf8"), /Post-crash external change/);
-	} finally {
-		delete process.env.HERDER_TEST_REWORK_CRASH_AT;
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
 
 test("daemon crashes replay the original rework finish operation", { timeout: 120_000 }, async () => {
 	for (const point of ["after_git_cleanup", "after_adoption"] as const) {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-rework-daemon-crash-${point}-`));
-		const value = fixture(root);
-		let service: Service | undefined;
-		try {
-			service = await ensureService(value.planDirectory);
+		await withFixture(`daemon-crash-${point}`, async (service, value) => {
 			const started = await startRun(service, value);
 			await failTargetRounds(service, started, `rework-daemon-${point}`);
 			const begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
@@ -741,7 +662,6 @@ test("daemon crashes replay the original rework finish operation", { timeout: 12
 			rewriteTarget(value);
 			await prepareAndConfirm(service, editToken);
 			await stopService(value.planDirectory);
-			service = undefined;
 
 			process.env.HERDER_TEST_REWORK_CRASH_AT = point;
 			service = await ensureService(value.planDirectory);
@@ -760,21 +680,11 @@ test("daemon crashes replay the original rework finish operation", { timeout: 12
 				assert.equal(store.getPlan(run.runId, "001")?.round, 1);
 				assert.equal(store.getOperation(operationId)?.state, "succeeded");
 			} finally { store.close(); }
-		} finally {
-			delete process.env.HERDER_TEST_REWORK_CRASH_AT;
-			if (service) await stopService(value.planDirectory).catch(() => {});
-			cleanup(value);
-			fs.rmSync(root, { recursive: true, force: true });
-		}
+		});
 	}
 });
 
-test("replaying rework finish after Git cleanup evidence completes the transaction", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-rework-replay-"));
-	const value = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(value.planDirectory);
+test("replaying rework finish after Git cleanup evidence completes the transaction", { timeout: 60_000 }, async () => withFixture("replay", async (service, value) => {
 		const started = await startRun(service, value);
 		const exhausted = await failTargetRounds(service, started, "rework-replay");
 		const begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
@@ -848,7 +758,6 @@ test("replaying rework finish after Git cleanup evidence completes the transacti
 		} finally { driftManager.close(); }
 		git(value.repo, ["update-ref", "-d", driftRef]);
 		await stopService(value.planDirectory);
-		service = undefined;
 		const replay = await replayInterruptedEdit(value, "rework-finish-interrupted", { operation: "finish", editToken });
 		service = replay.service;
 		const finished = object(replay.result.reply);
@@ -863,9 +772,4 @@ test("replaying rework finish after Git cleanup evidence completes the transacti
 		} finally {
 			after.close();
 		}
-	} finally {
-		if (service) await stopService(value.planDirectory).catch(() => {});
-		cleanup(value);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	}));
