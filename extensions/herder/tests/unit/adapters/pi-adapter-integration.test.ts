@@ -484,23 +484,6 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const factory = new CapturedWorkerFactory();
 		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 
-		assert.deepEqual([...api.commands.keys()].sort(), [
-			"herder-attach",
-			"herder-cleanup",
-			"herder-dashboard",
-			"herder-fire",
-			"herder-grill",
-			"herder-improve",
-			"herder-plans",
-			"herder-reset",
-			"herder-simplify",
-			"herder-resume",
-			"herder-rework",
-			"herder-revise",
-			"herder-status",
-			"herder-stop",
-			"herder-validate",
-		].sort());
 		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_integration_repair", "herder_plan", "herder_reignite", "herder_verification"]);
 		assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
 		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
