@@ -71,6 +71,12 @@ function record(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+function toolProperty(api: CapturedExtensionAPI, toolName: string, propertyName: string): Record<string, unknown> {
+	const schema = record(api.tool(toolName).parameters);
+	const properties = record(schema.properties);
+	return record(properties[propertyName]);
+}
+
 async function rejectsMessage(operation: () => Promise<unknown>, expected: string): Promise<void> {
 	await assert.rejects(operation, (error: unknown) => error instanceof Error && error.message === expected);
 }
@@ -141,6 +147,30 @@ test("adapter registration exposes the complete live surface", () => {
 	}
 	const planProperties = record(record(api.tool("herder_plan").parameters).properties);
 	assert.equal(Object.hasOwn(planProperties, "intent"), false, "rework intent must remain command-only");
+});
+
+test("verification gate arrays share one schema contract", () => {
+	const api = captureAdapter();
+	const arrays = [
+		toolProperty(api, "herder_verification", "gates"),
+		toolProperty(api, "herder_integration_repair", "gates"),
+		toolProperty(api, "herder_integration_repair", "gateAdditions"),
+	];
+
+	for (const array of arrays) {
+		assert.equal(array.type, "array");
+		assert.equal(array.maxItems, 32);
+	}
+	const items = arrays.map((array) => record(array.items));
+	for (const item of items.slice(1)) assert.deepEqual(item, items[0]);
+
+	assert.deepEqual(items[0].required, ["gateId", "label", "cwd", "argv", "rationale"]);
+	const properties = record(items[0].properties);
+	assert.equal(record(properties.argv).minItems, 1);
+	assert.equal(record(properties.argv).maxItems, 64);
+	assert.equal(record(properties.timeoutMs).minimum, 1_000);
+	assert.equal(record(properties.timeoutMs).maximum, 7_200_000);
+	assert.equal(record(properties.cwd).description, "Tree-relative path inside the integration worktree. Use '.' for the worktree root. Absolute paths are invalid.");
 });
 
 test("run tools enforce trust before repository work", async () => {

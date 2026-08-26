@@ -145,6 +145,15 @@ function rejectLegacyIntegrationRepairCommitMessage(value: unknown): void {
 	}
 }
 
+const verificationGateSchema = Type.Object({
+	gateId: Type.String(),
+	label: Type.String(),
+	cwd: Type.String({ description: "Tree-relative path inside the integration worktree. Use '.' for the worktree root. Absolute paths are invalid." }),
+	argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
+	rationale: Type.String(),
+});
+
 function activeModelLabel(ctx: ExtensionContext): string {
 	return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 }
@@ -1672,22 +1681,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			])),
 			rationale: Type.Optional(Type.String()),
 			detail: Type.Optional(Type.String()),
-			gates: Type.Optional(Type.Array(Type.Object({
-				gateId: Type.String(),
-				label: Type.String(),
-				cwd: Type.String({ description: "Tree-relative path inside the integration worktree; absolute paths are invalid." }),
-				argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
-				timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
-				rationale: Type.String(),
-			}), { maxItems: 32 })),
-			gateAdditions: Type.Optional(Type.Array(Type.Object({
-				gateId: Type.String(),
-				label: Type.String(),
-				cwd: Type.String({ description: "Tree-relative path inside the integration worktree; absolute paths are invalid." }),
-				argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
-				timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
-				rationale: Type.String(),
-			}), { maxItems: 32 })),
+			gates: Type.Optional(Type.Array(verificationGateSchema, { maxItems: 32 })),
+			gateAdditions: Type.Optional(Type.Array(verificationGateSchema, { maxItems: 32 })),
 			allowedPaths: Type.Optional(Type.Array(Type.String(), { maxItems: 256 })),
 			observedCommit: Type.Optional(Type.String({ description: "The clean session-authored integration-worktree HEAD observed immediately before finish." })),
 		}, { additionalProperties: false }),
@@ -1798,14 +1793,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planDirectory: Type.String(),
 			requestId: Type.String(),
 			rationale: Type.String(),
-			gates: Type.Array(Type.Object({
-				gateId: Type.String(),
-				label: Type.String(),
-				cwd: Type.String({ description: "Tree-relative path inside the integration worktree. Use '.' for the worktree root. Absolute paths are invalid." }),
-				argv: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
-				timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 7_200_000 })),
-				rationale: Type.String(),
-			}), { maxItems: 32 }),
+			gates: Type.Array(verificationGateSchema, { maxItems: 32 }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const epoch = sessionEpoch;
