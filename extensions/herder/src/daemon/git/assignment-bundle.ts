@@ -1,10 +1,7 @@
-#!/usr/bin/env node
-
 import { randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { sha256 } from "../../shared/protocol.ts"
 import { buildGraph, snapshotPlan, snapshotPlansFromGraph } from "../../core/plans.ts"
 import type { PlanSnapshot } from "../../core/plans.ts"
@@ -19,8 +16,7 @@ export const ASSIGNMENT_RELATIVE_SUFFIX = path.join(".herder", "assignment.json"
 
 const LEGACY_SPAWN_SYNC_MAX_BUFFER = 1024 * 1024
 
-type AssignmentCommand = "materialize" | "materialize-run" | "inspect-active-rebase" | "verify"
-type AssignmentOptions = Record<string, string | boolean | undefined> & { pretty?: boolean }
+type AssignmentOptions = Record<string, string | boolean | undefined>
 
 interface SnapshotInputFingerprint { kind: string; name: string; sha256: string }
 interface TreeFingerprint {
@@ -224,28 +220,6 @@ function activeRebaseMetadata(worktree: string): {
   }
 }
 
-function parseArguments(argv: string[]): { command: AssignmentCommand; options: AssignmentOptions } {
-  const command = argv.shift()
-  if (!command || !["materialize", "materialize-run", "inspect-active-rebase", "verify"].includes(command)) {
-    throw new Error("usage: assignment-bundle.ts materialize|materialize-run|inspect-active-rebase|verify [options]")
-  }
-  const options: AssignmentOptions = { pretty: false }
-  while (argv.length > 0) {
-    const argument = argv.shift()
-    if (argument === "--pretty") {
-      options.pretty = true
-      continue
-    }
-    if (!argument?.startsWith("--")) throw new Error(`unknown argument: ${argument}`)
-    const value = argv.shift()
-    if (!value || value.startsWith("--")) throw new Error(`${argument} requires a value`)
-    const key = argument.slice(2).replace(/-([a-z])/g, (_: string, letter: string) => letter.toUpperCase())
-    if (Object.hasOwn(options, key)) throw new Error(`${argument} may be provided only once`)
-    options[key] = value
-  }
-  return { command: command as AssignmentCommand, options }
-}
-
 function requireOption(options: AssignmentOptions, name: string): string {
   const value = options[name]
   if (!value) {
@@ -370,7 +344,6 @@ export function compiledAssignmentEntry(snapshot: PlanSnapshot): CompiledAssignm
 export function materializeAssignment(options: AssignmentOptions, configuration: MaterializeConfiguration = {}) {
   const { run = false, entries: compiledEntries = null, runGeneration = 1 } = configuration
   const allowed = new Set([
-    "pretty",
     "planDir",
     "worktree",
     "expectedBranch",
@@ -513,7 +486,7 @@ export function verifyAssignment(options: AssignmentOptions) {
   const verificationMode = options.verificationMode || "branch"
   if (verificationMode === "active-rebase") return verifyActiveRebase(options)
   if (verificationMode !== "branch") throw new Error(`unknown verification mode: ${verificationMode}`)
-  assertKnownOptions(options, new Set(["pretty", "worktree", "bundle", "expectedBundleSha256", "verificationMode"]))
+  assertKnownOptions(options, new Set(["worktree", "bundle", "expectedBundleSha256", "verificationMode"]))
   const worktreeInput = fs.realpathSync(path.resolve(requireOption(options, "worktree")))
   const execution = repositoryContext(worktreeInput)
   if (worktreeInput !== execution.root) throw new Error(`--worktree must be the Git worktree root: ${execution.root}`)
@@ -574,7 +547,6 @@ function readVerifiedBundle(worktree: string, options: AssignmentOptions): {
 
 function activeRebaseAllowedOptions({ includeStateHash }: { includeStateHash: boolean }): Set<string> {
   const allowed = new Set([
-    "pretty",
     "worktree",
     "bundle",
     "expectedBundleSha256",
@@ -818,26 +790,3 @@ export function verifyActiveRebase(options: AssignmentOptions) {
     rebaseStateSha256: evidence.rebaseStateSha256,
   }
 }
-
-function print(result: unknown, pretty = false): void {
-  process.stdout.write(`${JSON.stringify(result, null, pretty ? 2 : 0)}\n`)
-}
-
-function main(): void {
-  let parsed: { command: AssignmentCommand; options: AssignmentOptions } | undefined
-  try {
-    parsed = parseArguments(process.argv.slice(2))
-    const result = parsed.command === "verify"
-      ? verifyAssignment(parsed.options)
-      : parsed.command === "inspect-active-rebase"
-        ? inspectActiveRebase(parsed.options)
-        : materializeAssignment(parsed.options, { run: parsed.command === "materialize-run" })
-    print(result, parsed.options.pretty)
-  } catch (error) {
-    print({ ok: false, error: error instanceof Error ? error.message : String(error) }, parsed?.options?.pretty)
-    process.exitCode = 1
-  }
-}
-
-const invokedAsScript = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
-if (invokedAsScript) main()

@@ -1,9 +1,5 @@
-#!/usr/bin/env node
-
 import fs from "node:fs"
 import path from "node:path"
-import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { readPlanLifecycle, type PlanLifecycleStatus } from "../../core/workflow.ts"
 import { RunStore } from "../run-store.ts"
@@ -12,7 +8,7 @@ import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
 import { isTerminalRunStatus } from "../../shared/protocol.ts"
-import { fail, isInside, realpathIfPresent, runGit, takeValue } from "./primitives.ts"
+import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts"
 
 export interface CleanupInput {
   repo: string
@@ -24,12 +20,11 @@ export interface CleanupInput {
   deep: boolean
   force?: boolean
   expectedPlanStatuses?: Record<string, "DONE" | "BLOCKED" | "REJECTED">
-  /** Deterministic race injection for integration tests. Not populated by CLI callers. */
+  /** Deterministic race injection for integration tests. */
   testHooks?: {
     beforeMutation?: () => void
     beforeIntegrationDeletion?: () => void
   }
-  pretty?: boolean
 }
 
 export interface CleanupDetail {
@@ -72,48 +67,6 @@ type CompletionRefRecord = {
   target: string
   plan: string | null
   proof: ReturnType<typeof inspectCompletionProof>
-}
-
-function parseArguments(argv: string[]): CleanupInput {
-  const options: Partial<CleanupInput> & Pick<CleanupInput, "dryRun" | "includeFailed" | "deep" | "pretty"> = {
-    planName: null,
-    plan: null,
-    dryRun: false,
-    includeFailed: false,
-    deep: false,
-    pretty: false,
-  }
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (["--dry-run", "--include-failed", "--deep", "--pretty"].includes(argument)) {
-      if (argument === "--dry-run") options.dryRun = true
-      else if (argument === "--include-failed") options.includeFailed = true
-      else if (argument === "--deep") options.deep = true
-      else options.pretty = true
-      continue
-    }
-    if (argument === "--finalize" || argument === "--handoff-target") {
-      fail(`${argument} was removed; use --deep for destructive plan-set cleanup`)
-    }
-    if (["--repo", "--plan-dir", "--plan-name", "--plan"].includes(argument)) {
-      const value = takeValue(argv, index, argument)
-      index += 1
-      if (argument === "--repo") options.repo = value
-      else if (argument === "--plan-dir") options.planDir = value
-      else if (argument === "--plan-name") options.planName = value
-      else options.plan = value
-      continue
-    }
-    fail(`Unknown argument: ${argument}`)
-  }
-  for (const [name, value] of [
-    ["--repo", options.repo],
-    ["--plan-dir", options.planDir],
-  ]) {
-    if (!value) fail(`${name} is required`)
-  }
-  if (options.deep && options.plan) fail("--deep is plan-set-level and cannot be combined with --plan")
-  return options as CleanupInput
 }
 
 function refTarget(repoRoot: string, ref: string): string | null {
@@ -607,21 +560,5 @@ export function cleanupRun(input: CleanupInput) {
       coordinationRefs: destruction.requested && destruction.eligible && !input.dryRun ? null : `refs/plan-herder/${planName}/`,
       planDirectory: !destruction.planDirectoryRemoved,
     },
-  }
-}
-
-function main(argv: string[]): void {
-  const options = parseArguments(argv)
-  const result = cleanupRun(options)
-  process.stdout.write(`${JSON.stringify(result, null, options.pretty ? 2 : 0)}\n`)
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  try {
-    main(process.argv.slice(2))
-  } catch (error) {
-    process.stderr.write(`herder-cleanup: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = 1
   }
 }

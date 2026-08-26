@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,11 +14,11 @@ import {
 	serviceTierRequestValue,
 	unavailableProfileModels,
 } from "../../../adapters/profile.ts";
+import { resolvePiProfile } from "../../../src/core/profile-registry.ts";
 import { WORKER_ROLES } from "../../../src/shared/protocol.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
-const registry = path.join(packageRoot, "src/core/profile-registry.ts");
 
 test("Pi resolves the poorman profile into three generic package agents", async () => {
 	const profile = await loadPiProfile(catalog, "poorman");
@@ -45,7 +44,7 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 		},
 	});
 
-	const registryProfile = JSON.parse(execFileSync(process.execPath, [registry, "resolve", "--host", "pi", "--profile", "poorman"], { encoding: "utf8" }));
+	const registryProfile = resolvePiProfile("poorman", catalog);
 	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
 	assert.deepEqual(profile.roles, registryProfile.roles);
 });

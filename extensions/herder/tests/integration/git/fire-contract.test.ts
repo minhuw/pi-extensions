@@ -2,29 +2,28 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { decideJudge, decideReview } from "../../../src/daemon/git/round-policy.ts";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const gateRunner = path.resolve(scriptDir, "../../../src/daemon/git/run-gate.ts");
-const roundPolicy = path.resolve(scriptDir, "../../../src/daemon/git/round-policy.ts");
 const pluginRoot = path.resolve(scriptDir, "../../..");
 const root = await mkdtemp(path.join(tmpdir(), "herder-fire-test-"));
 
 test("Fire policy and gate execution remain isolated and fail-closed", async () => {
 try {
-  const policy = (...args: string[]) => JSON.parse(execFileSync(process.execPath, [roundPolicy, ...args], { encoding: "utf8" }));
-  assert.equal(policy("review", "--round", "1", "--verdict", "APPROVE", "--scope", "PASS", "--open-blockers", "0").action, "READY_TO_INTEGRATE");
-  assert.equal(policy("review", "--round", "2", "--verdict", "REVISE", "--scope", "PASS", "--open-blockers", "1").action, "REPAIR_DIRECT");
-  assert.equal(policy("review", "--round", "3", "--verdict", "REVISE", "--scope", "PASS", "--open-blockers", "1").action, "JUDGE");
-  assert.equal(policy("judge", "--round", "3", "--decision", "REPAIR").nextRound, 4);
-  assert.equal(policy("judge", "--round", "6", "--decision", "REPAIR").action, "BLOCKED_ROUND_LIMIT");
-  assert.notEqual(spawnSync(process.execPath, [roundPolicy, "judge", "--round", "2", "--decision", "DONE"]).status, 0);
+  assert.equal(decideReview({ round: 1, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }).action, "READY_TO_INTEGRATE");
+  assert.equal(decideReview({ round: 2, verdict: "REVISE", scope: "PASS", openBlockers: 1 }).action, "REPAIR_DIRECT");
+  assert.equal(decideReview({ round: 3, verdict: "REVISE", scope: "PASS", openBlockers: 1 }).action, "JUDGE");
+  assert.equal(decideJudge({ round: 3, decision: "REPAIR" }).nextRound, 4);
+  assert.equal(decideJudge({ round: 6, decision: "REPAIR" }).action, "BLOCKED_ROUND_LIMIT");
+  assert.throws(() => decideJudge({ round: 2, decision: "DONE" }), /between 3 and 6/);
 
   for (const roleFile of ["plan-implementer.md", "plan-reviewer.md", "plan-judge.md"]) {
     const role = await readFile(path.join(pluginRoot, "assets", "roles", "contracts", roleFile), "utf8");

@@ -1,24 +1,12 @@
-#!/usr/bin/env node
-
 import { createHash } from "node:crypto"
 import { createReadStream } from "node:fs"
 import { lstat, readlink, realpath } from "node:fs/promises"
 import type { BigIntStats } from "node:fs"
 import path from "node:path"
-import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { sha256 } from "../../shared/protocol.ts"
-import { fail, isInside, runGit, takeValue } from "./primitives.ts"
+import { fail, isInside, runGit } from "./primitives.ts"
 
 const TOKEN_VERSION = 1
-
-interface CheckoutArguments {
-  repo: string | null
-  excludes: string[]
-  expect: string | null
-  pretty: boolean
-  help?: boolean
-}
 
 interface GitState {
   head: string
@@ -56,28 +44,6 @@ export interface SnapshotCheckoutInput {
   repo: string
   excludes?: string[]
   expect?: string | null
-}
-
-function parseArguments(argv: string[]): CheckoutArguments {
-  const options: CheckoutArguments = { repo: null, excludes: [], expect: null, pretty: false }
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (argument === "--pretty") options.pretty = true
-    else if (["--repo", "--exclude", "--expect"].includes(argument)) {
-      const value = takeValue(argv, index, argument)
-      index += 1
-      if (argument === "--repo") options.repo = value
-      else if (argument === "--exclude") options.excludes.push(value)
-      else options.expect = value
-    } else if (["--help", "-h"].includes(argument)) options.help = true
-    else fail(`Unknown argument: ${argument}`)
-  }
-  if (!options.help && !options.repo) fail("--repo is required")
-  return options
-}
-
-function usage(): string {
-  return "Usage: checkout-state.ts --repo <repository-root> [--exclude <path>]... [--expect <state-token>] [--pretty]\n"
 }
 
 function splitNul(buffer: Buffer): string[] {
@@ -286,30 +252,5 @@ export async function snapshotCheckout(input: SnapshotCheckoutInput) {
     expectedFingerprint: sha256(JSON.stringify(expected)),
     changedComponents: changes,
     summary,
-  }
-}
-
-function print(result: unknown, pretty: boolean): void {
-  process.stdout.write(`${JSON.stringify(result, null, pretty ? 2 : 0)}\n`)
-}
-
-async function main(argv: string[]): Promise<void> {
-  const options = parseArguments(argv)
-  if (options.help) {
-    process.stdout.write(usage())
-    return
-  }
-  const result = await snapshotCheckout({ repo: options.repo!, excludes: options.excludes, expect: options.expect })
-  print(result, options.pretty)
-  if (!result.ok) process.exitCode = 2
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  try {
-    await main(process.argv.slice(2))
-  } catch (error) {
-    print({ ok: false, mode: "error", error: error instanceof Error ? error.message : String(error) }, process.argv.includes("--pretty"))
-    process.exitCode = 1
   }
 }

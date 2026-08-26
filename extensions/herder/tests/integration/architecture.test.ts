@@ -15,6 +15,31 @@ test("Plans core is import-only and not a standalone CLI", () => {
 	assert.doesNotMatch(source, /herder-plans (record-usage|bind-profile|profile|usage)/);
 	assert.equal(statSync(sourcePath).mode & 0o777, 0o644);
 });
+
+test("internal profile and Git helpers are import-only", () => {
+	const importOnly = [
+		"src/core/profile-registry.ts",
+		"src/daemon/git/assignment-bundle.ts",
+		"src/daemon/git/checkout-state.ts",
+		"src/daemon/git/cleanup-run.ts",
+		"src/daemon/git/coordination-ref.ts",
+		"src/daemon/git/namespace-run.ts",
+		"src/daemon/git/round-policy.ts",
+	];
+	const retainedEntrypoints = [
+		"src/daemon/service.ts",
+		"src/dashboard/herder-dashboard.ts",
+		"src/daemon/git/run-gate.ts",
+	];
+	for (const relative of retainedEntrypoints) assert.equal(existsSync(path.join(extensionRoot, relative)), true, relative);
+	for (const relative of importOnly) {
+		const sourcePath = path.join(extensionRoot, relative);
+		const source = readFileSync(sourcePath, "utf8");
+		assert.doesNotMatch(source, /^#!/m);
+		assert.doesNotMatch(source, /runCli|parseArguments|parseArgs|function main\(|export function main|const (?:isMain|isEntrypoint|invokedAsScript)|process\.(?:argv|stdout|stderr|exitCode)|\bpretty\b/);
+		assert.equal(statSync(sourcePath).mode & 0o777, 0o644, relative);
+	}
+});
 test("Herder is a self-contained Pi-only extension", () => {
 	const manifest = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));

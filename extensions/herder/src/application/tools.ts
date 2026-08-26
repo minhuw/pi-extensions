@@ -459,7 +459,6 @@ async function buildCleanupPreviewSnapshot(
 			dryRun: true,
 			includeFailed,
 			deep: true,
-			pretty: false,
 		});
 		outcomes.push({
 			planId: result.plan ?? "RUN",
@@ -476,7 +475,6 @@ async function buildCleanupPreviewSnapshot(
 				dryRun: true,
 				includeFailed: includeFailed && (status === "BLOCKED" || status === "REJECTED"),
 				deep: false,
-				pretty: false,
 			});
 			outcomes.push({ planId, status: status === "DONE" || status === "BLOCKED" || status === "REJECTED" ? status : "UNKNOWN", result });
 		}
@@ -488,7 +486,6 @@ async function buildCleanupPreviewSnapshot(
 				dryRun: true,
 				includeFailed: false,
 				deep: false,
-				pretty: false,
 			});
 			outcomes.push({
 				planId: result.plan ?? "RUN",
@@ -632,7 +629,6 @@ export async function applyHerderCleanup(
 				includeFailed: request.deep === true || Boolean(request.includeFailed),
 				deep: true,
 				expectedPlanStatuses,
-				pretty: false,
 			});
 			const previewOutcome = fresh.outcomes[0];
 			applied.push({
@@ -652,7 +648,6 @@ export async function applyHerderCleanup(
 					includeFailed: fresh.failedPlanIds.includes(outcome.planId),
 					deep: false,
 					expectedPlanStatuses,
-					pretty: false,
 				});
 				applied.push({ ...outcome, result });
 			}

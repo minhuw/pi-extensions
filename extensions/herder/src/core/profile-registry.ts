@@ -1,8 +1,5 @@
-#!/usr/bin/env node
-
 import fs from "node:fs";
 import path from "node:path";
-import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { WORKER_ROLES, sha256, stableJson, type ResolvedProfile, type RoleProfile, type WorkerRole } from "../shared/protocol.ts";
 
@@ -91,36 +88,4 @@ export function resolvePiProfile(requested?: string, file = DEFAULT_PROFILE_CATA
 			...profile.roles[role],
 		}])) as ResolvedProfile["roles"],
 	};
-}
-
-function runCli(argv: string[]): unknown {
-	const command = argv.shift();
-	const prettyIndex = argv.indexOf("--pretty");
-	const pretty = prettyIndex !== -1;
-	if (pretty) argv.splice(prettyIndex, 1);
-	const profileIndex = argv.indexOf("--profile");
-	const requested = profileIndex === -1 ? undefined : argv[profileIndex + 1];
-	if (profileIndex !== -1) argv.splice(profileIndex, 2);
-	const hostIndex = argv.indexOf("--host");
-	if (hostIndex !== -1) {
-		if (argv[hostIndex + 1] !== "pi") throw new Error("Herder now supports only the Pi host");
-		argv.splice(hostIndex, 2);
-	}
-	if (argv.length) throw new Error(`Unknown profile arguments: ${argv.join(" ")}`);
-	if (command === "resolve") return { value: resolvePiProfile(requested), pretty };
-	const catalog = loadPiProfileCatalog();
-	if (command === "check") return { value: { ok: true, profiles: catalog.profiles.length }, pretty };
-	if (command === "list") return { value: catalog.profiles.map((profile) => ({ name: profile.name, description: profile.description, sha256: sha256(stableJson(profile)) })), pretty };
-	throw new Error("Usage: profile-registry.ts list|check|resolve [--profile name] [--pretty]");
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
-	try {
-		const result = runCli(process.argv.slice(2)) as { value: unknown; pretty: boolean };
-		process.stdout.write(`${JSON.stringify(result.value, null, result.pretty ? 2 : 0)}\n`);
-	} catch (error) {
-		process.stderr.write(`herder-profile: ${error instanceof Error ? error.message : String(error)}\n`);
-		process.exitCode = 2;
-	}
 }

@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import path from "node:path";
-import process from "node:process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { WORKER_ROLES } from "../../../src/shared/protocol.ts";
-
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const registry = path.resolve(scriptDir, "../../../src/core/profile-registry.ts");
+import { loadPiProfileCatalog, resolvePiProfile } from "../../../src/core/profile-registry.ts";
+import { sha256, stableJson, WORKER_ROLES } from "../../../src/shared/protocol.ts";
 type ProfileRole = {
 	agent_type: string;
 	model: string;
@@ -24,19 +18,28 @@ type ResolvedProfile = {
 	orchestrator?: { model: string; effort: string; service_tier?: string };
 };
 
-type ProfileSummary = { name: string };
+type ProfileSummary = { name: string; description: string; sha256: string };
 type ProfileCheck = { ok: boolean; profiles: number };
 
 function run(command: "check"): ProfileCheck;
 function run(command: "list"): ProfileSummary[];
-function run(command: "resolve", ...args: string[]): ResolvedProfile;
-function run(...args: string[]): unknown {
-	return JSON.parse(execFileSync(process.execPath, [registry, ...args], { encoding: "utf8" }));
+function run(command: "resolve", requested?: string): ResolvedProfile;
+function run(command: "check" | "list" | "resolve", requested?: string): unknown {
+	const catalog = loadPiProfileCatalog();
+	if (command === "check") return { ok: true, profiles: catalog.profiles.length };
+	if (command === "list") return catalog.profiles.map((profile) => ({
+		name: profile.name,
+		description: profile.description,
+		sha256: sha256(stableJson(profile)),
+	}));
+	return resolvePiProfile(requested);
 }
 
 test("profile registry exposes the supported Pi profiles", () => {
 	assert.deepEqual(run("check"), { ok: true, profiles: 4 });
-	assert.deepEqual(run("list").map((profile) => profile.name), ["eclipse", "poorman", "epic", "lightspeed"]);
+	const listed = run("list");
+	assert.deepEqual(listed.map((profile) => profile.name), ["eclipse", "poorman", "epic", "lightspeed"]);
+	for (const profile of listed) assert.equal(profile.sha256, resolvePiProfile(profile.name).profile_sha256);
 
 	const expectedProfiles: Record<string, { orchestrator: NonNullable<ResolvedProfile["orchestrator"]>; roles: Record<string, ProfileRole> }> = {
 		eclipse: {
@@ -106,7 +109,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.deepEqual(Object.keys(eclipse.roles), WORKER_ROLES);
 
 	for (const name of ["poorman", "epic", "lightspeed"]) {
-		const profile = run("resolve", "--host", "pi", "--profile", name);
+		const profile = run("resolve", name);
 		assert.equal(profile.profile, name);
 		assert.equal(profile.host, "pi");
 		assert.deepEqual(profile.orchestrator, expectedProfiles[name].orchestrator);
@@ -114,7 +117,5 @@ test("profile registry exposes the supported Pi profiles", () => {
 		assert.deepEqual(Object.keys(profile.roles), WORKER_ROLES);
 	}
 
-	const unsupported = spawnSync(process.execPath, [registry, "resolve", "--host", "codex"], { encoding: "utf8" });
-	assert.equal(unsupported.status, 2);
-	assert.match(unsupported.stderr, /supports only the Pi host/);
+	assert.throws(() => run("resolve", "codex"), /Unknown Herder profile/);
 });

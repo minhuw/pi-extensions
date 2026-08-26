@@ -7,12 +7,10 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { initPlanDir, snapshotPlan } from "../../../src/core/plans.ts"
+import { inspectActiveRebase, materializeAssignment, verifyAssignment } from "../../../src/daemon/git/assignment-bundle.ts"
 import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url))
-const assignmentManager = path.resolve(scriptDir, "../../../src/daemon/git/assignment-bundle.ts")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-assignment-test-"))
 
 type AssignmentResult = {
@@ -43,18 +41,8 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.trim()
 }
 
-function assignment(args: string[], expectedStatus = 0): AssignmentResult {
-  const result = spawnSync(process.execPath, [assignmentManager, ...args], { encoding: "utf8" })
-  assert.equal(result.status, expectedStatus, result.stderr || result.stdout)
-  return JSON.parse(result.stdout)
-}
-
-function replaceOption(args: string[], flag: string, value: string): string[] {
-  const copy = [...args]
-  const index = copy.indexOf(flag)
-  assert.notEqual(index, -1, `missing fixture option ${flag}`)
-  copy[index + 1] = value
-  return copy
+function assignment(call: () => unknown): AssignmentResult {
+  return call() as AssignmentResult
 }
 
 function planBody(): string {
@@ -173,15 +161,14 @@ try {
   for (const track of [false, true]) {
     const name = track ? "tracked" : "local"
     const fixture = createFixture(name, { track })
-    const materialized = assignment([
-      "materialize",
-      "--plan", "001",
-      "--plan-dir", fixture.planDir,
-      "--worktree", fixture.worktree,
-      "--expected-branch", fixture.branch,
-      "--expected-head", fixture.head,
-      "--expected-snapshot-sha256", fixture.snapshot.snapshotSha256,
-    ])
+    const materialized = assignment(() => materializeAssignment({
+      plan: "001",
+      planDir: fixture.planDir,
+      worktree: fixture.worktree,
+      expectedBranch: fixture.branch,
+      expectedHead: fixture.head,
+      expectedSnapshotSha256: fixture.snapshot.snapshotSha256,
+    }))
 
     assert.equal(materialized.ok, true)
     assert.equal(materialized.scope, "001")
@@ -208,34 +195,31 @@ try {
     assert.equal(bundleBytes.includes(Buffer.from(fixture.repo)), false)
     assert.equal(fs.statSync(materialized.bundlePath).mode & 0o222, 0)
 
-    const rematerialized = assignment([
-      "materialize",
-      "--plan", "001",
-      "--plan-dir", fixture.planDir,
-      "--worktree", fixture.worktree,
-      "--expected-branch", fixture.branch,
-      "--expected-head", fixture.head,
-      "--expected-snapshot-sha256", fixture.snapshot.snapshotSha256,
-    ])
+    const rematerialized = assignment(() => materializeAssignment({
+      plan: "001",
+      planDir: fixture.planDir,
+      worktree: fixture.worktree,
+      expectedBranch: fixture.branch,
+      expectedHead: fixture.head,
+      expectedSnapshotSha256: fixture.snapshot.snapshotSha256,
+    }))
     assert.equal(rematerialized.bundleSha256, materialized.bundleSha256)
 
-    const verified = assignment([
-      "verify",
-      "--worktree", fixture.worktree,
-      "--bundle", materialized.bundlePath,
-      "--expected-bundle-sha256", materialized.bundleSha256,
-    ])
+    const verified = assignment(() => verifyAssignment({
+      worktree: fixture.worktree,
+      bundle: materialized.bundlePath,
+      expectedBundleSha256: materialized.bundleSha256,
+    }))
     assert.equal(verified.ok, true)
     assert.equal(verified.scope, "001")
     assert.equal(verified.bundleSha256, materialized.bundleSha256)
 
-    const runMaterialized = assignment([
-      "materialize-run",
-      "--plan-dir", fixture.planDir,
-      "--worktree", fixture.worktree,
-      "--expected-branch", fixture.branch,
-      "--expected-head", fixture.head,
-    ])
+    const runMaterialized = assignment(() => materializeAssignment({
+      planDir: fixture.planDir,
+      worktree: fixture.worktree,
+      expectedBranch: fixture.branch,
+      expectedHead: fixture.head,
+    }, { run: true }))
     assert.equal(runMaterialized.scope, "RUN")
     assert.equal(runMaterialized.relativePath, "herder-plans/.herder/run-assignment-generation-1.json")
     const runBundle = JSON.parse(fs.readFileSync(runMaterialized.bundlePath, "utf8"))
@@ -245,61 +229,53 @@ try {
     assert.equal(runBundle.plans[0].plan.id, "001")
     assert.equal(runBundle.plans[0].planText, fixture.snapshot.planText)
     assert.equal(JSON.stringify(runBundle).includes(fixture.repo), false)
-    const runVerified = assignment([
-      "verify",
-      "--worktree", fixture.worktree,
-      "--bundle", runMaterialized.bundlePath,
-      "--expected-bundle-sha256", runMaterialized.bundleSha256,
-    ])
+    const runVerified = assignment(() => verifyAssignment({
+      worktree: fixture.worktree,
+      bundle: runMaterialized.bundlePath,
+      expectedBundleSha256: runMaterialized.bundleSha256,
+    }))
     assert.equal(runVerified.scope, "RUN")
     assert.equal(runVerified.snapshotSha256, runMaterialized.snapshotSha256)
 
-    const runRematerialized = assignment([
-      "materialize-run",
-      "--plan-dir", fixture.planDir,
-      "--worktree", fixture.worktree,
-      "--expected-branch", fixture.branch,
-      "--expected-head", fixture.head,
-    ])
+    const runRematerialized = assignment(() => materializeAssignment({
+      planDir: fixture.planDir,
+      worktree: fixture.worktree,
+      expectedBranch: fixture.branch,
+      expectedHead: fixture.head,
+    }, { run: true }))
     assert.equal(runRematerialized.bundleSha256, runMaterialized.bundleSha256)
 
     fs.chmodSync(materialized.bundlePath, 0o644)
     fs.appendFileSync(materialized.bundlePath, " ")
     fs.chmodSync(materialized.bundlePath, 0o444)
-    const tampered = assignment([
-      "verify",
-      "--worktree", fixture.worktree,
-      "--bundle", materialized.bundlePath,
-      "--expected-bundle-sha256", materialized.bundleSha256,
-    ], 1)
-    assert.match(tampered.error, /hash mismatch/)
+    assert.throws(() => verifyAssignment({
+      worktree: fixture.worktree,
+      bundle: materialized.bundlePath,
+      expectedBundleSha256: materialized.bundleSha256,
+    }), /hash mismatch/)
 
     fs.chmodSync(materialized.bundlePath, 0o644)
     fs.writeFileSync(materialized.bundlePath, bundleBytes)
     fs.chmodSync(materialized.bundlePath, 0o444)
     git(fixture.worktree, "switch", "-q", "-c", `${fixture.branch}-wrong`)
-    const wrongBranch = assignment([
-      "verify",
-      "--worktree", fixture.worktree,
-      "--bundle", materialized.bundlePath,
-      "--expected-bundle-sha256", materialized.bundleSha256,
-    ], 1)
-    assert.match(wrongBranch.error, /assignment branch mismatch/)
+    assert.throws(() => verifyAssignment({
+      worktree: fixture.worktree,
+      bundle: materialized.bundlePath,
+      expectedBundleSha256: materialized.bundleSha256,
+    }), /assignment branch mismatch/)
   }
 
   const stale = createFixture("stale", { track: false })
   const staleSnapshot = `${"0".repeat(63)}1`
   assert.notEqual(staleSnapshot, stale.snapshot.snapshotSha256)
-  const staleResult = assignment([
-    "materialize",
-    "--plan", "001",
-    "--plan-dir", stale.planDir,
-    "--worktree", stale.worktree,
-    "--expected-branch", stale.branch,
-    "--expected-head", stale.head,
-    "--expected-snapshot-sha256", staleSnapshot,
-  ], 1)
-  assert.match(staleResult.error, /plan snapshot mismatch/)
+  assert.throws(() => materializeAssignment({
+    plan: "001",
+    planDir: stale.planDir,
+    worktree: stale.worktree,
+    expectedBranch: stale.branch,
+    expectedHead: stale.head,
+    expectedSnapshotSha256: staleSnapshot,
+  }), /plan snapshot mismatch/)
   assert.equal(fs.existsSync(path.join(stale.worktree, "herder-plans", ".herder", "assignment.json")), false)
 
   const symlinked = createFixture("symlinked", { track: false })
@@ -307,16 +283,14 @@ try {
   fs.mkdirSync(outside)
   fs.mkdirSync(path.join(symlinked.worktree, "herder-plans"))
   fs.symlinkSync(outside, path.join(symlinked.worktree, "herder-plans", ".herder"))
-  const symlinkResult = assignment([
-    "materialize",
-    "--plan", "001",
-    "--plan-dir", symlinked.planDir,
-    "--worktree", symlinked.worktree,
-    "--expected-branch", symlinked.branch,
-    "--expected-head", symlinked.head,
-    "--expected-snapshot-sha256", symlinked.snapshot.snapshotSha256,
-  ], 1)
-  assert.match(symlinkResult.error, /contains a symlink/)
+  assert.throws(() => materializeAssignment({
+    plan: "001",
+    planDir: symlinked.planDir,
+    worktree: symlinked.worktree,
+    expectedBranch: symlinked.branch,
+    expectedHead: symlinked.head,
+    expectedSnapshotSha256: symlinked.snapshot.snapshotSha256,
+  }), /contains a symlink/)
   assert.equal(fs.readdirSync(outside).length, 0)
 
   const unignoredRepo = path.join(root, "unignored")
@@ -335,27 +309,24 @@ try {
   const unignoredBranch = "herder/unignored/001"
   git(unignoredRepo, "worktree", "add", "-q", "-b", unignoredBranch, unignoredWorktree, unignoredHead)
   const unignoredSnapshot = snapshotPlan(unignoredPlanDir, "001")
-  const unignoredResult = assignment([
-    "materialize",
-    "--plan", "001",
-    "--plan-dir", unignoredPlanDir,
-    "--worktree", unignoredWorktree,
-    "--expected-branch", unignoredBranch,
-    "--expected-head", unignoredHead,
-    "--expected-snapshot-sha256", unignoredSnapshot.snapshotSha256,
-  ], 1)
-  assert.match(unignoredResult.error, /must be Git-ignored/)
+  assert.throws(() => materializeAssignment({
+    plan: "001",
+    planDir: unignoredPlanDir,
+    worktree: unignoredWorktree,
+    expectedBranch: unignoredBranch,
+    expectedHead: unignoredHead,
+    expectedSnapshotSha256: unignoredSnapshot.snapshotSha256,
+  }), /must be Git-ignored/)
 
   const rebase = createFixture("rebase", { track: false })
-  const rebaseAssignment = assignment([
-    "materialize",
-    "--plan", "001",
-    "--plan-dir", rebase.planDir,
-    "--worktree", rebase.worktree,
-    "--expected-branch", rebase.branch,
-    "--expected-head", rebase.head,
-    "--expected-snapshot-sha256", rebase.snapshot.snapshotSha256,
-  ])
+  const rebaseAssignment = assignment(() => materializeAssignment({
+    plan: "001",
+    planDir: rebase.planDir,
+    worktree: rebase.worktree,
+    expectedBranch: rebase.branch,
+    expectedHead: rebase.head,
+    expectedSnapshotSha256: rebase.snapshot.snapshotSha256,
+  }))
   fs.writeFileSync(path.join(rebase.worktree, "src", "worker.mjs"), "export const ready = 'plan'\n")
   git(rebase.worktree, "add", "src/worker.mjs")
   git(rebase.worktree, "commit", "-qm", "Implement plan change")
@@ -379,22 +350,22 @@ try {
   const leaseReason = "plan-herder:rebase:001:Implementer:attempt-5:guided-repair"
   git(rebase.repo, "worktree", "lock", "--reason", leaseReason, rebase.worktree)
 
-  const activeArgs = [
-    "--worktree", rebase.worktree,
-    "--bundle", rebaseAssignment.bundlePath,
-    "--expected-bundle-sha256", rebaseAssignment.bundleSha256,
-    "--expected-worktree", fs.realpathSync(rebase.worktree),
-    "--expected-branch", rebase.branch,
-    "--expected-worker-mode", "GUIDED_REPAIR",
-    "--expected-detached-head", detachedHead,
-    "--expected-rebase-onto", onto,
-    "--expected-rebase-orig-head", planHead,
-    "--expected-plan-head", planHead,
-    "--expected-checkpoint-ref", checkpointRef,
-    "--expected-checkpoint", planHead,
-    "--expected-lease-reason", leaseReason,
-  ]
-  const inspected = assignment(["inspect-active-rebase", ...activeArgs])
+  const activeOptions = {
+    worktree: rebase.worktree,
+    bundle: rebaseAssignment.bundlePath,
+    expectedBundleSha256: rebaseAssignment.bundleSha256,
+    expectedWorktree: fs.realpathSync(rebase.worktree),
+    expectedBranch: rebase.branch,
+    expectedWorkerMode: "GUIDED_REPAIR",
+    expectedDetachedHead: detachedHead,
+    expectedRebaseOnto: onto,
+    expectedRebaseOrigHead: planHead,
+    expectedPlanHead: planHead,
+    expectedCheckpointRef: checkpointRef,
+    expectedCheckpoint: planHead,
+    expectedLeaseReason: leaseReason,
+  }
+  const inspected = assignment(() => inspectActiveRebase(activeOptions))
   assert.equal(inspected.verificationMode, "active-rebase")
   assert.equal(inspected.workerMode, "GUIDED_REPAIR")
   assert.equal(inspected.branch, rebase.branch)
@@ -407,103 +378,74 @@ try {
   assert.deepEqual(inspected.conflicts, ["src/worker.mjs"])
   assert.match(inspected.rebaseStateSha256, /^[0-9a-f]{64}$/)
 
-  const activeVerified = assignment([
-    "verify",
-    "--verification-mode", "active-rebase",
-    ...activeArgs,
-    "--expected-rebase-state-sha256", inspected.rebaseStateSha256,
-  ])
+  const activeVerified = assignment(() => verifyAssignment({
+    verificationMode: "active-rebase",
+    ...activeOptions,
+    expectedRebaseStateSha256: inspected.rebaseStateSha256,
+  }))
   assert.equal(activeVerified.ok, true)
   assert.equal(activeVerified.verificationMode, "active-rebase")
   assert.equal(activeVerified.rebaseStateSha256, inspected.rebaseStateSha256)
 
-  const ordinaryDetached = assignment([
-    "verify",
-    "--worktree", rebase.worktree,
-    "--bundle", rebaseAssignment.bundlePath,
-    "--expected-bundle-sha256", rebaseAssignment.bundleSha256,
-  ], 1)
-  assert.match(ordinaryDetached.error, /checked-out branch/)
+  assert.throws(() => verifyAssignment({
+    worktree: rebase.worktree,
+    bundle: rebaseAssignment.bundlePath,
+    expectedBundleSha256: rebaseAssignment.bundleSha256,
+  }), /checked-out branch/)
 
-  const wrongWorktree = assignment([
-    "inspect-active-rebase",
-    ...replaceOption(activeArgs, "--expected-worktree", fs.realpathSync(rebase.repo)),
-  ], 1)
-  assert.match(wrongWorktree.error, /worktree mismatch/)
-
-  const wrongOnto = assignment([
-    "inspect-active-rebase",
-    ...replaceOption(activeArgs, "--expected-rebase-onto", rebase.head),
-  ], 1)
-  assert.match(wrongOnto.error, /onto mismatch/)
-
-  const wrongCheckpoint = assignment([
-    "inspect-active-rebase",
-    ...replaceOption(activeArgs, "--expected-checkpoint", rebase.head),
-  ], 1)
-  assert.match(wrongCheckpoint.error, /checkpoint.*same pre-restack commit/)
-
-  const wrongAssignmentHash = assignment([
-    "inspect-active-rebase",
-    ...replaceOption(activeArgs, "--expected-bundle-sha256", "0".repeat(64)),
-  ], 1)
-  assert.match(wrongAssignmentHash.error, /hash mismatch/)
+  assert.throws(() => inspectActiveRebase({ ...activeOptions, expectedWorktree: fs.realpathSync(rebase.repo) }), /worktree mismatch/)
+  assert.throws(() => inspectActiveRebase({ ...activeOptions, expectedRebaseOnto: rebase.head }), /onto mismatch/)
+  assert.throws(() => inspectActiveRebase({ ...activeOptions, expectedCheckpoint: rebase.head }), /checkpoint.*same pre-restack commit/)
+  assert.throws(() => inspectActiveRebase({ ...activeOptions, expectedBundleSha256: "0".repeat(64) }), /hash mismatch/)
 
   const metadataDir = path.resolve(rebase.worktree, git(rebase.worktree, "rev-parse", "--git-path", "rebase-merge"))
   const headNamePath = path.join(metadataDir, "head-name")
   const headName = fs.readFileSync(headNamePath)
   fs.writeFileSync(headNamePath, "refs/heads/herder/rebase/wrong\n")
-  const wrongHeadName = assignment(["inspect-active-rebase", ...activeArgs], 1)
-  assert.match(wrongHeadName.error, /head-name mismatch/)
+  assert.throws(() => inspectActiveRebase(activeOptions), /head-name mismatch/)
   fs.writeFileSync(headNamePath, headName)
 
   git(rebase.repo, "update-ref", `refs/heads/${rebase.branch}`, onto, planHead)
-  const movedPlanBranch = assignment(["inspect-active-rebase", ...activeArgs], 1)
-  assert.match(movedPlanBranch.error, /plan branch moved/)
+  assert.throws(() => inspectActiveRebase(activeOptions), /plan branch moved/)
   git(rebase.repo, "update-ref", `refs/heads/${rebase.branch}`, planHead, onto)
 
   const unrelated = createFixture("unrelated-detached", { track: false })
-  const unrelatedAssignment = assignment([
-    "materialize",
-    "--plan", "001",
-    "--plan-dir", unrelated.planDir,
-    "--worktree", unrelated.worktree,
-    "--expected-branch", unrelated.branch,
-    "--expected-head", unrelated.head,
-    "--expected-snapshot-sha256", unrelated.snapshot.snapshotSha256,
-  ])
+  const unrelatedAssignment = assignment(() => materializeAssignment({
+    plan: "001",
+    planDir: unrelated.planDir,
+    worktree: unrelated.worktree,
+    expectedBranch: unrelated.branch,
+    expectedHead: unrelated.head,
+    expectedSnapshotSha256: unrelated.snapshot.snapshotSha256,
+  }))
   const unrelatedCheckpoint = "refs/plan-herder/unrelated-detached/checkpoints/001/0-1"
   const unrelatedLease = "plan-herder:unrelated-detached:001:Implementer:attempt-1:guided-repair"
   git(unrelated.repo, "update-ref", unrelatedCheckpoint, unrelated.head, "")
   git(unrelated.worktree, "switch", "--detach", "-q")
   git(unrelated.repo, "worktree", "lock", "--reason", unrelatedLease, unrelated.worktree)
-  const noRebaseMetadata = assignment([
-    "inspect-active-rebase",
-    "--worktree", unrelated.worktree,
-    "--bundle", unrelatedAssignment.bundlePath,
-    "--expected-bundle-sha256", unrelatedAssignment.bundleSha256,
-    "--expected-worktree", fs.realpathSync(unrelated.worktree),
-    "--expected-branch", unrelated.branch,
-    "--expected-worker-mode", "GUIDED_REPAIR",
-    "--expected-detached-head", unrelated.head,
-    "--expected-rebase-onto", unrelated.head,
-    "--expected-rebase-orig-head", unrelated.head,
-    "--expected-plan-head", unrelated.head,
-    "--expected-checkpoint-ref", unrelatedCheckpoint,
-    "--expected-checkpoint", unrelated.head,
-    "--expected-lease-reason", unrelatedLease,
-  ], 1)
-  assert.match(noRebaseMetadata.error, /requires active Git rebase metadata/)
+  assert.throws(() => inspectActiveRebase({
+    worktree: unrelated.worktree,
+    bundle: unrelatedAssignment.bundlePath,
+    expectedBundleSha256: unrelatedAssignment.bundleSha256,
+    expectedWorktree: fs.realpathSync(unrelated.worktree),
+    expectedBranch: unrelated.branch,
+    expectedWorkerMode: "GUIDED_REPAIR",
+    expectedDetachedHead: unrelated.head,
+    expectedRebaseOnto: unrelated.head,
+    expectedRebaseOrigHead: unrelated.head,
+    expectedPlanHead: unrelated.head,
+    expectedCheckpointRef: unrelatedCheckpoint,
+    expectedCheckpoint: unrelated.head,
+    expectedLeaseReason: unrelatedLease,
+  }), /requires active Git rebase metadata/)
 
   fs.writeFileSync(path.join(rebase.worktree, "src", "worker.mjs"), "export const ready = 'resolved'\n")
   git(rebase.worktree, "add", "src/worker.mjs")
-  const changedConflictState = assignment([
-    "verify",
-    "--verification-mode", "active-rebase",
-    ...activeArgs,
-    "--expected-rebase-state-sha256", inspected.rebaseStateSha256,
-  ], 1)
-  assert.match(changedConflictState.error, /requires preserved unresolved conflicts|state mismatch/)
+  assert.throws(() => verifyAssignment({
+    verificationMode: "active-rebase",
+    ...activeOptions,
+    expectedRebaseStateSha256: inspected.rebaseStateSha256,
+  }), /requires preserved unresolved conflicts|state mismatch/)
 
   const continueResult = spawnSync("git", ["-C", rebase.worktree, "rebase", "--continue"], {
     encoding: "utf8",
@@ -512,12 +454,11 @@ try {
   assert.equal(continueResult.status, 0, continueResult.stderr || continueResult.stdout)
   assert.equal(git(rebase.worktree, "symbolic-ref", "--quiet", "--short", "HEAD"), rebase.branch)
   assert.equal(git(rebase.worktree, "status", "--porcelain=v1", "--untracked-files=all"), "")
-  const attachedAfterContinue = assignment([
-    "verify",
-    "--worktree", rebase.worktree,
-    "--bundle", rebaseAssignment.bundlePath,
-    "--expected-bundle-sha256", rebaseAssignment.bundleSha256,
-  ])
+  const attachedAfterContinue = assignment(() => verifyAssignment({
+    worktree: rebase.worktree,
+    bundle: rebaseAssignment.bundlePath,
+    expectedBundleSha256: rebaseAssignment.bundleSha256,
+  }))
   assert.equal(attachedAfterContinue.verificationMode, "branch")
   assert.equal(attachedAfterContinue.branch, rebase.branch)
 

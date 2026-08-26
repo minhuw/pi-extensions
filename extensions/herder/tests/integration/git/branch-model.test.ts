@@ -7,13 +7,11 @@ import path from "node:path"
 import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { fileURLToPath } from "node:url"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
+import { cleanupRun } from "../../../src/daemon/git/cleanup-run.ts"
 import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
 import { inspectNamespace } from "../../../src/daemon/git/namespace-run.ts"
 import { projectStatuses } from "../../../src/core/plans.ts"
-
-const cleanup = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/cleanup-run.ts")
 
 function run(command: string, args: string[], { cwd, input, allowFailure = false }: { cwd?: string; input?: string; allowFailure?: boolean } = {}) {
   const result = spawnSync(command, args, { cwd, input, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
@@ -189,14 +187,14 @@ try {
   assert.equal(resumed.coordinationRefs.some((item) => item.ref === checkpointRef), true)
   assert.equal(resumed.coordinationRefs.some((item) => item.ref === completionRef), true)
 
-  const cleanupResult = run(process.execPath, [
-    cleanup,
-    "--repo", repo,
-    "--plan-dir", planDir,
-    "--plan", "001",
-    "--pretty",
-  ], { cwd: repo })
-  const cleaned = JSON.parse(cleanupResult.stdout) as { removed: Array<{ branch: string }> }
+  const cleaned = cleanupRun({
+    repo,
+    planDir,
+    plan: "001",
+    dryRun: false,
+    includeFailed: false,
+    deep: false,
+  })
   assert.deepEqual(cleaned.removed.map((item) => item.branch), [planBranch])
   assert.equal(git(repo, "branch", "--list", planBranch), "")
   assert.notEqual(git(repo, "branch", "--list", integrationBranch), "")

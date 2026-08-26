@@ -1,15 +1,11 @@
-#!/usr/bin/env node
-
 import fs from "node:fs"
 import path from "node:path"
-import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { buildGraph } from "../../core/plans.ts"
 import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts"
 export { validatePlanName } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktrees } from "./namespace-inventory.ts"
-import { fail, isInside, runGit, takeValue } from "./primitives.ts"
+import { fail, isInside, runGit } from "./primitives.ts"
 
 type NamespaceMode = "fire" | "resume" | "status"
 interface NamespaceInput {
@@ -17,39 +13,9 @@ interface NamespaceInput {
   planDir: string
   planName?: string | null
   mode: NamespaceMode
-  pretty?: boolean
 }
 interface RefRecord { ref: string; target: string; relative: string }
 type NamespaceConflict = Record<string, string>
-
-function parseArguments(argv: string[]): NamespaceInput {
-  const options: Partial<NamespaceInput> & { pretty: boolean } = {
-    planName: null,
-    pretty: false,
-  }
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (argument === "--pretty") {
-      options.pretty = true
-      continue
-    }
-    if (["--repo", "--plan-dir", "--plan-name", "--mode"].includes(argument)) {
-      const value = takeValue(argv, index, argument)
-      index += 1
-      if (argument === "--repo") options.repo = value
-      else if (argument === "--plan-dir") options.planDir = value
-      else if (argument === "--plan-name") options.planName = value
-      else options.mode = value as NamespaceMode
-      continue
-    }
-    fail(`Unknown argument: ${argument}`)
-  }
-  for (const [name, value] of [["--repo", options.repo], ["--plan-dir", options.planDir], ["--mode", options.mode]]) {
-    if (!value) fail(`${name} is required`)
-  }
-  if (!options.mode || !(["fire", "resume", "status"] as string[]).includes(options.mode)) fail(`Unsupported mode: ${JSON.stringify(options.mode)}`)
-  return options as NamespaceInput
-}
 
 function refExists(repoRoot: string, ref: string): boolean {
   return runGit(repoRoot, ["show-ref", "--verify", "--quiet", ref], { allowFailure: true }).status === 0
@@ -173,22 +139,5 @@ export function inspectNamespace(input: NamespaceInput) {
     invalidCompletionRefs: invalidCompletionRefs.map(({ item, proof }) => ({ ref: item.ref, target: item.target, proof })),
     worktrees: namespaceWorktrees,
     conflicts,
-  }
-}
-
-function main(argv: string[]): void {
-  const options = parseArguments(argv)
-  const result = inspectNamespace(options)
-  process.stdout.write(`${JSON.stringify(result, null, options.pretty ? 2 : 0)}\n`)
-  if (!result.ok) process.exitCode = 2
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  try {
-    main(process.argv.slice(2))
-  } catch (error) {
-    process.stderr.write(`herder-fire-namespace: ${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = 1
   }
 }

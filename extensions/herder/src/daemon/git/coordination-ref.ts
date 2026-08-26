@@ -1,9 +1,4 @@
-#!/usr/bin/env node
-
-import process from "node:process"
-import path from "node:path"
-import { fileURLToPath } from "node:url"
-import { fail, runGit, takeValue } from "./primitives.ts"
+import { fail, runGit } from "./primitives.ts"
 
 const PLAN_ID = /^\d{3,}$/
 const PLAN_NAME = /^[a-z0-9][a-z0-9._-]*$/
@@ -142,40 +137,4 @@ export function listCoordinationRefs(repoRoot: string, planName: string): Coordi
     const relative = ref.slice(prefix.length)
     return { ref, target, relative, identity: parseCoordinationRefRelative(relative) }
   })
-}
-
-function main(argv: string[]): void {
-  const command = argv.shift()
-  if (command !== "format-checkpoint") {
-    fail("usage: coordination-ref.ts format-checkpoint --plan-name <name> --plan <id> --generation generation-<n> --ordinal <n> [--pretty]")
-  }
-  const options: Partial<Record<"planName" | "plan" | "generation" | "ordinal", string>> & { pretty: boolean } = { pretty: false }
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]
-    if (argument === "--pretty") {
-      options.pretty = true
-      continue
-    }
-    if (!["--plan-name", "--plan", "--generation", "--ordinal"].includes(argument)) {
-      fail(`Unknown argument: ${argument}`)
-    }
-    const key = argument.slice(2).replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase()) as "planName" | "plan" | "generation" | "ordinal"
-    options[key] = takeValue(argv, index, argument)
-    index += 1
-  }
-  for (const name of ["planName", "plan", "generation", "ordinal"] as const) {
-    if (!options[name]) fail(`--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} is required`)
-  }
-  const result = { ok: true, command, ...formatCheckpointRef(options as FormatCheckpointInput) }
-  process.stdout.write(`${JSON.stringify(result, null, options.pretty ? 2 : 0)}\n`)
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-if (isMain) {
-  try {
-    main(process.argv.slice(2))
-  } catch (error) {
-    process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`)
-    process.exitCode = 1
-  }
 }

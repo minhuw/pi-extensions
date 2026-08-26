@@ -6,22 +6,15 @@ import type { SpawnSyncReturns } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
-import { fileURLToPath } from "node:url"
 import { readUsageState } from "../../../src/daemon/execution-store.ts"
 import { readManagerState } from "../../../src/daemon/run-store.ts"
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts"
-
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
-const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "../../..")
+import { resolvePiProfile } from "../../../src/core/profile-registry.ts"
 
 type FixtureCommand = "create" | "verify"
 interface FixtureOptions { command: FixtureCommand; workspace: string; profile: string }
 interface RunOptions { cwd?: string; allowFailure?: boolean }
-interface FixtureRecord { repository: string; planDirectory: string; originalHead: string; pluginRoot: string }
-interface ResolvedProfileRecord {
-  roles: Record<string, { model: string; effort: string; service_tier?: string }>
-}
-
+interface FixtureRecord { repository: string; planDirectory: string; originalHead: string }
 function fail(message: string): never {
   throw new Error(message)
 }
@@ -208,16 +201,13 @@ Keep this fixture deliberately small so host-transport failures remain distingui
   const graph = buildGraph(planDirectory)
   assert.equal(graph.shapeReady, true)
   assert.deepEqual(graph.ready, ["001"])
-  fs.writeFileSync(path.join(workspace, "fixture.json"), `${JSON.stringify({ repository, planDirectory, originalHead, pluginRoot: PLUGIN_ROOT }, null, 2)}\n`)
-  process.stdout.write(`${JSON.stringify({ ok: true, repository, planDirectory, originalHead, pluginRoot: PLUGIN_ROOT }, null, 2)}\n`)
+  fs.writeFileSync(path.join(workspace, "fixture.json"), `${JSON.stringify({ repository, planDirectory, originalHead }, null, 2)}\n`)
+  process.stdout.write(`${JSON.stringify({ ok: true, repository, planDirectory, originalHead }, null, 2)}\n`)
 }
 
 async function verifyFixture(workspace: string, profile: string): Promise<void> {
   const fixture = JSON.parse(fs.readFileSync(path.join(workspace, "fixture.json"), "utf8")) as FixtureRecord
-  const resolvedProfile = JSON.parse(run(process.execPath, [
-    path.join(PLUGIN_ROOT, "src", "core", "profile-registry.ts"),
-    "resolve", "--profile", profile,
-  ], { cwd: PLUGIN_ROOT }).stdout) as ResolvedProfileRecord
+  const resolvedProfile = resolvePiProfile(profile)
   const graph = buildGraph(fixture.planDirectory)
   assert.equal(graph.complete, true)
   assert.equal(graph.counts.done, 1)

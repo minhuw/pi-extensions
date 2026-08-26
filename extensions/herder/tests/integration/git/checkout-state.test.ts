@@ -5,12 +5,9 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import process from "node:process"
 import test from "node:test"
-import { fileURLToPath } from "node:url"
+import { snapshotCheckout } from "../../../src/daemon/git/checkout-state.ts"
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url))
-const guard = path.resolve(scriptDir, "../../../src/daemon/git/checkout-state.ts")
 const root = await mkdtemp(path.join(tmpdir(), "herder-checkout-state-test-"))
 const repo = path.join(root, "repo")
 const planDir = path.join(repo, "herder-plans")
@@ -35,9 +32,8 @@ function git(...args: string[]): string {
   return run("git", ["-C", repo, ...args]).stdout.trim()
 }
 
-function checkoutState(args: string[] = [], expectedStatus = 0): CheckoutState {
-  const result = run(process.execPath, [guard, "--repo", repo, "--exclude", planDir, ...args], { expectedStatus })
-  return JSON.parse(result.stdout) as CheckoutState
+async function checkoutState(expect?: string): Promise<CheckoutState> {
+  return (await snapshotCheckout({ repo, excludes: [planDir], expect })) as unknown as CheckoutState
 }
 
 test("checkout state captures and detects user-owned changes", async () => {
@@ -57,7 +53,7 @@ try {
   git("add", "staged.txt")
   await writeFile(path.join(repo, "notes.txt"), "untracked user note\n")
 
-  const captured = checkoutState(["--pretty"])
+  const captured = await checkoutState()
   assert.equal(captured.ok, true)
   assert.equal(captured.mode, "capture")
   assert.match(captured.fingerprint, /^[a-f0-9]{64}$/)
@@ -65,45 +61,46 @@ try {
   assert.equal(captured.summary.trackedContentCount, 1)
   assert.equal(captured.summary.untrackedContentCount, 1)
 
-  const unchanged = checkoutState(["--expect", captured.stateToken])
+  const unchanged = await checkoutState(captured.stateToken)
   assert.equal(unchanged.ok, true)
   assert.deepEqual(unchanged.changedComponents, [])
 
   await writeFile(path.join(planDir, "README.md"), "IN PROGRESS\n")
-  const excludedPlanChange = checkoutState(["--expect", captured.stateToken])
+  const excludedPlanChange = await checkoutState(captured.stateToken)
   assert.equal(excludedPlanChange.ok, true)
 
   await writeFile(path.join(repo, "tracked.txt"), "worker overwrote existing dirty content\n")
-  const changedTracked = checkoutState(["--expect", captured.stateToken], 2)
+  const changedTracked = await checkoutState(captured.stateToken)
   assert.equal(changedTracked.ok, false)
   assert.ok(changedTracked.changedComponents.includes("trackedContentSha256"))
   await writeFile(path.join(repo, "tracked.txt"), "tracked user change\n")
-  assert.equal(checkoutState(["--expect", captured.stateToken]).ok, true)
+  assert.equal((await checkoutState(captured.stateToken)).ok, true)
 
   await writeFile(path.join(repo, "notes.txt"), "worker overwrote existing untracked content\n")
-  const changedUntracked = checkoutState(["--expect", captured.stateToken], 2)
+  const changedUntracked = await checkoutState(captured.stateToken)
   assert.equal(changedUntracked.ok, false)
   assert.ok(changedUntracked.changedComponents.includes("untrackedContentSha256"))
   await writeFile(path.join(repo, "notes.txt"), "untracked user note\n")
-  assert.equal(checkoutState(["--expect", captured.stateToken]).ok, true)
+  assert.equal((await checkoutState(captured.stateToken)).ok, true)
 
   await writeFile(path.join(repo, "staged.txt"), "worker replaced staged content\n")
   git("add", "staged.txt")
-  const changedIndex = checkoutState(["--expect", captured.stateToken], 2)
+  const changedIndex = await checkoutState(captured.stateToken)
   assert.equal(changedIndex.ok, false)
   assert.ok(changedIndex.changedComponents.includes("indexSha256"))
   await writeFile(path.join(repo, "staged.txt"), "staged user change\n")
   git("add", "staged.txt")
-  assert.equal(checkoutState(["--expect", captured.stateToken]).ok, true)
+  assert.equal((await checkoutState(captured.stateToken)).ok, true)
 
   await writeFile(path.join(repo, "new-note.txt"), "new untracked file\n")
-  const addedUntracked = checkoutState(["--expect", captured.stateToken], 2)
+  const addedUntracked = await checkoutState(captured.stateToken)
   assert.equal(addedUntracked.ok, false)
   assert.ok(addedUntracked.changedComponents.includes("untrackedContentCount"))
 
-  const malformed = checkoutState(["--expect", "not-a-token"], 1)
-  assert.equal(malformed.ok, false)
-  assert.match(malformed.error, /valid checkout state token/)
+  await assert.rejects(
+    () => snapshotCheckout({ repo, excludes: [planDir], expect: "not-a-token" }),
+    /valid checkout state token/,
+  )
 
   process.stdout.write("herder Fire checkout-state tests passed\n")
 } finally {

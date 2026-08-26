@@ -7,12 +7,9 @@ import path from "node:path"
 import process from "node:process"
 import test from "node:test"
 import { spawnSync } from "node:child_process"
-import { fileURLToPath } from "node:url"
 import { inspectNamespace, validatePlanName } from "../../../src/daemon/git/namespace-run.ts"
 import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
 import { withTemporaryExecutableOnPath } from "../../support/temp-executable.ts"
-
-const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/daemon/git/namespace-run.ts")
 
 function run(command: string, args: string[], { cwd, allowFailure = false }: { cwd?: string; allowFailure?: boolean } = {}) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
@@ -253,16 +250,9 @@ try {
   assert.equal(parentConflict.ok, false)
   assert.deepEqual(parentConflict.conflicts, [{ type: "parent-ref", ref: "refs/heads/herder/blocked" }])
 
-  const cli = run(process.execPath, [
-    script,
-    "--repo", repo,
-    "--plan-dir", planDir,
-    "--mode", "fire",
-    "--pretty",
-  ], { cwd: repo, allowFailure: true })
-  assert.equal(cli.status, 2)
-  assert.equal(JSON.parse(cli.stdout).reason, "namespace-conflict")
-  assert.equal(cli.stderr, "")
+  const direct = inspectNamespace({ repo, planDir, mode: "fire" })
+  assert.equal(direct.ok, false)
+  assert.equal(direct.reason, "namespace-conflict")
 
   console.log("herder Fire namespace tests passed")
 } finally {
