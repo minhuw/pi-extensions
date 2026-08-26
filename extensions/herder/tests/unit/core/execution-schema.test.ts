@@ -312,6 +312,7 @@ test("private database replacement publishes only inside the shared authority ep
 	const originalOpen = fs.openSync;
 	const mutableFs = fs as unknown as { lstatSync: typeof fs.lstatSync };
 	const templatePath = path.join(os.tmpdir(), `herder-execution-private-template-${process.pid}-${Date.now()}.sqlite3`);
+	let displacedPath = "";
 	try {
 		openExecutionDatabase(planDirectory, { create: true }).close();
 		const databasePath = executionDatabasePath(planDirectory);
@@ -325,7 +326,8 @@ test("private database replacement publishes only inside the shared authority ep
 			if (String(candidate) === databasePath) {
 				databaseObservations += 1;
 				if (!replaced && databaseObservations === 2) {
-					fs.unlinkSync(databasePath);
+					displacedPath = `${databasePath}.displaced`;
+					fs.renameSync(databasePath, displacedPath);
 					fs.copyFileSync(templatePath, databasePath);
 					fs.chmodSync(databasePath, 0o600);
 					replaced = true;
@@ -349,6 +351,7 @@ test("private database replacement publishes only inside the shared authority ep
 		mutableFs.lstatSync = originalLstat;
 		fs.openSync = originalOpen;
 		fs.rmSync(templatePath, { force: true });
+		if (displacedPath) fs.rmSync(displacedPath, { force: true });
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });
