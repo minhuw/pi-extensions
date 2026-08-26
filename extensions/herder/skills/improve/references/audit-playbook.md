@@ -52,7 +52,7 @@ Look for the algorithmic and architectural wins, not micro-optimizations.
 The goal is not a percentage — it's *which untested code is dangerous*.
 
 - Map the critical paths (money, auth, data mutation, the feature the repo exists for) and check which have zero or trivial coverage.
-- Modules with high churn (git log) + no tests = top refactor risk; flag as "characterization tests first" candidates.
+- Modules with high churn (git log) + no tests are refactor-risk signals. Do not plan characterization tests unless they protect or unblock a specific, already-bounded code change.
 - Existing test quality: tests that assert nothing meaningful, heavy mocking that tests the mocks, snapshot tests nobody reads, flaky patterns (real timers, real network, order dependence).
 - Missing test layers: unit-only suites with zero integration coverage on API boundaries, or the inverse (slow E2E for what a unit test would catch).
 - Verification infrastructure: is there a one-command way to know the codebase works? If not, that's finding #1 and a prerequisite plan for any risky change.
@@ -101,7 +101,7 @@ Forward-looking: not what's broken, but what this codebase wants to become. **Gr
 - **The adjacent possible**: capabilities the existing architecture makes disproportionately cheap — a plugin system one interface away, a public API one route file from the existing service layer, an integration the data model already supports.
 - **Friction worth productizing**: things users of this project evidently do by hand around it (visible in docs, examples, issues) that the project could absorb.
 
-Direction findings use the standard format with two adaptations: **Impact** is product/user value (who wants this and why now), and **Confidence** reflects how grounded the evidence is — not certainty that it's the right call. Strategy belongs to the maintainer; the advisor's job is grounded options with honest trade-offs. Effort estimates here are coarser; say so. Plans for selected direction findings are usually a *design/spike plan* (investigate, prototype, define the API, list open questions) rather than a build-everything plan — scope them that way.
+Direction findings use the standard format with two adaptations: **Impact** is product/user value (who wants this and why now), and **Confidence** reflects how grounded the evidence is — not certainty that it's the right call. Strategy belongs to the maintainer; the advisor's job is grounded options with honest trade-offs. Effort estimates here are coarser; say so. Investigate unfinished intent, stubs, and stated-but-undelivered promises in this session until the remaining work is a bounded implementation, an explicit keep, or a Grill question. Do not write a design/spike plan whose job is to figure that out.
 
 ---
 
@@ -116,15 +116,17 @@ Every finding, from every category and every subagent, comes back in this shape:
 - **Impact**: What goes wrong / what's being paid because of this. Concrete: "every order-list render issues 1+N queries", not "suboptimal".
 - **Effort**: S (hours) / M (a day-ish) / L (multi-day) — for the *fix*, including tests.
 - **Risk**: What the fix could break; LOW/MED/HIGH plus one line why.
-- **Confidence**: HIGH (read the code, certain) / MED (strong signal, needs verification) / LOW (smell, needs investigation). LOW-confidence findings may be reported but get an "investigate" plan, not a "fix" plan.
+- **Confidence**: HIGH (read the code, certain) / MED (strong signal, remaining unknowns named). Do not return LOW as a finding: finish the investigation, then either raise confidence, reject it, or route a product question to Grill.
 - **Fix sketch**: 1–3 sentences. Not the plan — just enough to judge effort honestly.
 ```
+
+Unresolved leads are not findings. If an audit pass cannot close the claim, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm, using additional read-only subagents when leads are independent. Leads never become plans.
 
 ## Prioritization rubric
 
 Order findings by **leverage = impact ÷ effort, discounted by confidence and fix-risk**. Tiebreakers:
 
-1. Anything that unblocks other findings (verification baseline, characterization tests) floats up.
+1. Work that unblocks a selected, already-bounded finding floats up. Characterization tests qualify only when tied to that concrete change.
 2. Security findings with HIGH confidence float above equivalent-leverage non-security findings.
 3. Prefer findings whose fix has a clean verification story — executor models succeed at those.
 4. "Not worth doing" is a valid verdict; record it with one line of reasoning so the user knows it was considered.

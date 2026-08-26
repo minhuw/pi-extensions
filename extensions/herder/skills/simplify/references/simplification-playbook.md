@@ -2,7 +2,7 @@
 
 Use this playbook to find codebase-wide reductions that preserve supported behavior. Simplicity is not a line-count contest. Prefer fewer independent concepts, execution paths, states, dependencies, public knobs, ownership boundaries, and places that must change together.
 
-A simplification finding requires both a demonstrated maintenance cost and evidence that the proposed reduction is safe. If the repository cannot prove that safety, report a characterization or investigation prerequisite rather than a deletion.
+A simplification finding requires both a demonstrated maintenance cost and evidence that the proposed reduction is safe. Close remaining purpose and reachability questions during the audit. If the repository still cannot prove safety, keep the complexity or route the product question to Grill; do not emit an investigation finding or plan.
 
 ---
 
@@ -49,7 +49,7 @@ Look for maintained code with no supported path to execution or use:
 - For published libraries, treat exported API as reachable unless an explicit breaking-change decision exists.
 - For flags or compatibility layers, identify the repository's removal criterion and evidence that it is met.
 
-If a candidate is probably dead but dynamic or external reachability is unresolved, recommend a spike, telemetry step, deprecation plan, or characterization test—not immediate deletion.
+If a candidate looks dead, finish the reachability trace in this session. If external or dynamic reachability still cannot be closed (published API, unknown consumers, reflection you cannot exhaust), keep it or ask Grill about deprecation; do not plan a research task.
 
 ---
 
@@ -148,7 +148,7 @@ Every supported choice creates maintenance work. Look for surface that has no cu
 - several libraries for one concern; and
 - configuration values that are constant in all repository-owned environments.
 
-Narrowing public surface can be breaking even when repository-local search finds no caller. Require explicit evidence of ownership and compatibility. If external usage cannot be known, plan deprecation or telemetry rather than silent removal.
+Narrowing public surface can be breaking even when repository-local search finds no caller. Require explicit evidence of ownership and compatibility. If external usage cannot be known, keep the surface or route deprecation to Grill rather than silent removal.
 
 Prefer deleting unused choices, deriving values, and keeping concrete types until real variants exist. Do not erase domain types that prevent invalid states or make contracts clearer merely to reduce declarations.
 
@@ -237,7 +237,7 @@ Every audit pass returns findings in this exact shape:
 ```markdown
 ### [SIM-NN] Imperative reduction title
 
-- **Kind**: DELETE | CONSOLIDATE | FLATTEN | NARROW | REHOME | INVESTIGATE
+- **Kind**: DELETE | CONSOLIDATE | FLATTEN | NARROW | REHOME
 - **Evidence**: `path/file.ts:123` — verified fact. Repeat for 2–5 strongest locations and name relevant symbols/callers.
 - **Current purpose**: Why this code exists today, including accepted boundaries or the best-supported explanation from history.
 - **Maintenance cost**: The concrete burden: duplicate fixes, broad change surface, extra states, dependency/API support, navigation, or regression risk.
@@ -248,8 +248,10 @@ Every audit pass returns findings in this exact shape:
 - **Verification**: Focused positive checks plus a negative completeness check; name characterization prerequisites.
 - **Effort**: S (hours) | M (day-ish) | L (multi-day), including tests and migration work.
 - **Risk**: LOW | MED | HIGH — what could regress and why.
-- **Confidence**: HIGH | MED | LOW — confidence in both the problem and the safety proof. LOW becomes an investigation plan, never direct deletion.
+- **Confidence**: HIGH | MED — confidence in both the problem and the safety proof. Do not return LOW as a finding: finish the investigation, then either raise confidence, keep the complexity, or route a product question to Grill.
 ```
+
+Unresolved leads are not findings. If an audit pass cannot close purpose or reachability, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm. Leads never become plans.
 
 ## Prioritization rubric
 
@@ -257,7 +259,7 @@ Rank by **maintenance leverage = durable maintained surface removed or localized
 
 Tiebreakers:
 
-1. Characterization or baseline work that safely unlocks several reductions comes first.
+1. Characterization tests tied to selected, already-bounded reductions—or a concrete fix for broken or missing verification infrastructure—come first.
 2. Proven deletion of an entire path, dependency, flag family, or duplicate implementation outranks cosmetic control-flow cleanup.
 3. Prefer reductions with a small semantic boundary and strong positive plus negative verification.
 4. Prefer convergence on an existing repository standard over introducing a new pattern.

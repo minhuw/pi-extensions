@@ -74,11 +74,25 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	}
 	const improve = await readFile(path.join(extensionRoot, "skills/improve/SKILL.md"), "utf8");
 	const simplify = await readFile(path.join(extensionRoot, "skills/simplify/SKILL.md"), "utf8");
+	const auditPlaybook = await readFile(path.join(extensionRoot, "skills/improve/references/audit-playbook.md"), "utf8");
 	const simplificationPlaybook = await readFile(path.join(extensionRoot, "skills/simplify/references/simplification-playbook.md"), "utf8");
 	assert.doesNotMatch(improve, /closing-the-loop|`plan <description>`|`review-plan <file>`|`execute(?: \[<plan>\])?`|`reconcile`|`--issues`/);
+	assert.match(improve, /Finish investigation in this session \(main session; subagents for independent read-only passes\)/);
+	assert.match(improve, /Resolve every unresolved lead in this session before the table, using additional read-only subagents/);
+	assert.match(improve, /characterization tests only when they protect or unblock a specific, already-bounded code change/);
+	assert.match(improve, /Do not write investigation or spike plans/);
+	assert.match(auditPlaybook, /Do not plan characterization tests unless they protect or unblock a specific, already-bounded code change/);
+	assert.match(auditPlaybook, /Leads never become plans/);
+	assert.doesNotMatch(auditPlaybook, /get an "investigate" plan/);
+
 	assert.match(simplify, /references\/simplification-playbook\.md/);
 	assert.match(simplify, /plans\/references\/plan-format\.md/);
+	assert.match(simplify, /Finish that investigation in this session/);
+	assert.match(simplify, /Resolve every unresolved lead in this session before the table, using additional read-only subagents/);
 	assert.match(simplify, /If `herder-plans\/README\.md` exists, do not call `init`/);
+	assert.match(simplify, /never write an investigation or spike plan/);
+	assert.doesNotMatch(simplificationPlaybook, /INVESTIGATE/);
+	assert.match(simplificationPlaybook, /Characterization tests tied to selected, already-bounded reductions/);
 	assert.match(simplify, /operation: "snapshot"/);
 	assert.match(simplify, /operation: "shape"/);
 	assert.match(simplificationPlaybook, /^## Finding format$/m);
