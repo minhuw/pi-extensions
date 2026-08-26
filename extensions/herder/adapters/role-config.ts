@@ -2,20 +2,23 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import {
-	HERDER_ROLES,
-	THINKING_EFFORTS,
 	modelMatches,
 	modelSupportsEffort,
 	modelSupportsServiceTier,
 	type AvailableModel,
-	type HerderRole,
-	type ResolvedPiProfile,
-	type ThinkingEffort,
 } from "./profile.ts";
-import type { ManagerAction } from "../src/shared/protocol.ts";
+import {
+	THINKING_EFFORTS,
+	WORKER_ROLES,
+	type ManagerAction,
+	type ResolvedProfile,
+	type ServiceTier,
+	type ThinkingEffort,
+	type WorkerRole,
+} from "../src/shared/protocol.ts";
 
 export interface HerderPiRoleDefinition {
-	role: HerderRole;
+	role: WorkerRole;
 	agentType: string;
 	description: string;
 	tools: string[];
@@ -31,7 +34,7 @@ export type HerderNestedBinding = typeof HERDER_NESTED_BINDINGS[number];
 export interface NestedAgentModelBinding {
 	model: string;
 	effort: ThinkingEffort;
-	serviceTier?: "fast" | "standard";
+	serviceTier?: ServiceTier;
 }
 
 export interface HerderNestedAgentDefinition {
@@ -52,7 +55,7 @@ const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
 export const PONYTAIL_EXTENSION_SOURCE = "git:github.com/DietrichGebert/ponytail";
 export const FFF_EXTENSION_SOURCE = "npm:@ff-labs/pi-fff";
 export const WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access";
-const ROLE_EXTENSION_SOURCES: Record<HerderRole, readonly string[]> = {
+const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {
 	"plan-implementer": [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
 	"plan-reviewer": [FFF_EXTENSION_SOURCE],
 	"plan-judge": [FFF_EXTENSION_SOURCE],
@@ -86,7 +89,7 @@ function optionalMapping(frontmatter: Record<string, unknown>, file: string): Ne
 	if (typeof frontmatter.model !== "string" || frontmatter.model.trim().length === 0) {
 		throw new Error(`missing model in ${file}`);
 	}
-	if (typeof frontmatter.effort !== "string" || !(THINKING_EFFORTS as readonly string[]).includes(frontmatter.effort)) {
+	if (typeof frontmatter.effort !== "string" || !THINKING_EFFORTS.includes(frontmatter.effort as ThinkingEffort)) {
 		throw new Error(`invalid effort in ${file}`);
 	}
 	const serviceTier = frontmatter.service_tier;
@@ -135,7 +138,7 @@ function toolList(value: unknown, file: string, allowedNestedTools: readonly str
 	return normalized;
 }
 
-export async function loadHerderPiRole(agentRoot: string, role: HerderRole): Promise<HerderPiRoleDefinition> {
+export async function loadHerderPiRole(agentRoot: string, role: WorkerRole): Promise<HerderPiRoleDefinition> {
 	const file = path.join(agentRoot, `${role}.md`);
 	const parsed = parseFrontmatter<Record<string, unknown>>(await readFile(file, "utf8"));
 	const name = stringField(parsed.frontmatter, "name", file);
@@ -199,12 +202,12 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 
 export async function validateHerderRoleAgents(
 	agentRoot: string,
-	profile: ResolvedPiProfile,
+	profile: ResolvedProfile,
 	availableModels: readonly AvailableModel[],
 ): Promise<void> {
 	const nested = await Promise.all(HERDER_NESTED_AGENT_TYPES.map((type) => loadHerderNestedAgent(agentRoot, type)));
 	for (const definition of nested) validateOwnBinding(definition, availableModels);
-	for (const role of HERDER_ROLES) {
+	for (const role of WORKER_ROLES) {
 		const mapping = profile.roles[role];
 		const definition = await loadHerderPiRole(agentRoot, role);
 		if (mapping.agent_type !== definition.agentType) {

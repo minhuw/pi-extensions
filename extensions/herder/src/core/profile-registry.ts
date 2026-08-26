@@ -1,17 +1,26 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WORKER_ROLES, sha256, stableJson, type ResolvedProfile, type RoleProfile, type WorkerRole } from "../shared/protocol.ts";
+import {
+	THINKING_EFFORTS,
+	WORKER_ROLES,
+	sha256,
+	stableJson,
+	type ResolvedProfile,
+	type RoleProfile,
+	type ServiceTier,
+	type ThinkingEffort,
+	type WorkerRole,
+} from "../shared/protocol.ts";
 
 const CORE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_PROFILE_CATALOG = path.resolve(CORE_ROOT, "../../assets/profiles/profiles.json");
-const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/;
 
 export interface PiProfileDefinition {
 	name: string;
 	description: string;
-	orchestrator: { model: string; effort: string; service_tier?: string };
+	orchestrator: Omit<RoleProfile, "agent_type">;
 	roles: Record<WorkerRole, Omit<RoleProfile, "agent_type">>;
 }
 
@@ -21,20 +30,23 @@ export interface PiProfileCatalog {
 	profiles: PiProfileDefinition[];
 }
 
-function mapping(value: unknown, label: string): { model: string; effort: string; service_tier?: string } {
+function mapping(value: unknown, label: string): Omit<RoleProfile, "agent_type"> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
 	const record = value as Record<string, unknown>;
 	if (typeof record.model !== "string" || !MODEL_PATTERN.test(record.model)) throw new Error(`${label} has an invalid model`);
-	if (typeof record.effort !== "string" || !EFFORTS.has(record.effort)) throw new Error(`${label} has an invalid effort`);
-	if (record.service_tier !== undefined && !["fast", "standard"].includes(String(record.service_tier))) {
+	if (typeof record.effort !== "string" || !THINKING_EFFORTS.includes(record.effort as ThinkingEffort)) {
+		throw new Error(`${label} has an invalid effort`);
+	}
+	const serviceTier = record.service_tier;
+	if (serviceTier !== undefined && serviceTier !== "fast" && serviceTier !== "standard") {
 		throw new Error(`${label} has an invalid service tier`);
 	}
 	const unknown = Object.keys(record).filter((key) => !["model", "effort", "service_tier"].includes(key));
 	if (unknown.length) throw new Error(`${label} has unknown fields: ${unknown.join(", ")}`);
 	return {
 		model: record.model,
-		effort: record.effort,
-		...(record.service_tier ? { service_tier: String(record.service_tier) } : {}),
+		effort: record.effort as ThinkingEffort,
+		...(serviceTier !== undefined ? { service_tier: serviceTier as ServiceTier } : {}),
 	};
 }
 

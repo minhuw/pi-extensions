@@ -379,8 +379,8 @@ function boundProfile(run: StoredRun, store: RunStore): ResolvedProfile {
 		profile: binding.profile,
 		profile_sha256: binding.profileSha256,
 		host: binding.host,
-		orchestrator: { model: "bound-by-host", effort: "bound-by-host" },
-		roles: binding.roles,
+		orchestrator: { model: "bound-by-host", effort: "bound-by-host" as ResolvedProfile["orchestrator"]["effort"] },
+		roles: binding.roles as ResolvedProfile["roles"],
 	};
 }
 

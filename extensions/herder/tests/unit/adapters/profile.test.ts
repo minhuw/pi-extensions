@@ -6,7 +6,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	activeModelMatches,
-	HERDER_ROLES,
 	loadPiProfile,
 	modelMatches,
 	modelSupportsEffort,
@@ -15,7 +14,7 @@ import {
 	unavailableProfileModels,
 } from "../../../adapters/profile.ts";
 import { resolvePiProfile } from "../../../src/core/profile-registry.ts";
-import { WORKER_ROLES } from "../../../src/shared/protocol.ts";
+import { THINKING_EFFORTS, WORKER_ROLES } from "../../../src/shared/protocol.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
@@ -49,8 +48,9 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 	assert.deepEqual(profile.roles, registryProfile.roles);
 });
 
-test("Pi adapter role aliases share the protocol worker-role tuple", () => {
-	assert.strictEqual(HERDER_ROLES, WORKER_ROLES);
+test("Pi profile vocabulary uses the canonical worker-role and effort tuples", () => {
+	assert.deepEqual(WORKER_ROLES, ["plan-implementer", "plan-reviewer", "plan-judge"]);
+	assert.deepEqual(THINKING_EFFORTS, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 });
 
 test("Pi rejects thinking levels that the resolved model cannot honor", () => {
@@ -96,7 +96,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		delete missing.profiles[0].roles["plan-judge"];
 		const missingFixture = path.join(root, "missing.json");
 		writeFileSync(missingFixture, JSON.stringify(missing));
-		await assert.rejects(
+		assert.throws(
 			() => loadPiProfile(missingFixture, "eclipse"),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
@@ -105,7 +105,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		extra.profiles[0].roles["unexpected"] = extra.profiles[0].roles["plan-judge"];
 		const extraFixture = path.join(root, "extra.json");
 		writeFileSync(extraFixture, JSON.stringify(extra));
-		await assert.rejects(
+		assert.throws(
 			() => loadPiProfile(extraFixture, "eclipse"),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
@@ -121,7 +121,7 @@ test("Pi profile catalogs reject host-specific compatibility fields", async () =
 		modified.profiles[0].hosts = ["codex"];
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		await assert.rejects(() => loadPiProfile(fixture, "eclipse"), /unknown fields: hosts/);
+		assert.throws(() => loadPiProfile(fixture, "eclipse"), /unknown fields: hosts/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

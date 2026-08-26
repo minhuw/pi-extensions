@@ -1,26 +1,11 @@
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
-import { WORKER_ROLES, type ResolvedProfile, type WorkerRole } from "../src/shared/protocol.ts";
+import { WORKER_ROLES, type ResolvedProfile, type ThinkingEffort } from "../src/shared/protocol.ts";
 
-export const HERDER_ROLES = WORKER_ROLES;
-export type HerderRole = WorkerRole;
-export const THINKING_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type ThinkingEffort = (typeof THINKING_EFFORTS)[number];
+export type ResolvedPiProfile = ResolvedProfile;
+export type { ThinkingEffort };
 
-export interface RoleMapping {
-	agent_type: string;
-	model: string;
-	effort: ThinkingEffort;
-	service_tier?: "fast" | "standard";
-}
-
-export type ResolvedPiProfile = Omit<ResolvedProfile, "orchestrator" | "roles"> & {
-	host: "pi";
-	orchestrator: { model: string; effort: ThinkingEffort; service_tier?: "fast" | "standard" };
-	roles: Record<HerderRole, RoleMapping>;
-};
-
-export async function loadPiProfile(catalogPath: string, requested?: string): Promise<ResolvedPiProfile> {
-	return resolvePiProfile(requested, catalogPath) as ResolvedPiProfile;
+export function loadPiProfile(catalogPath: string, requested?: string): ResolvedProfile {
+	return resolvePiProfile(requested, catalogPath);
 }
 
 export interface AvailableModel {
@@ -63,10 +48,10 @@ export function modelMatches(requested: string, candidate: AvailableModel): bool
 
 export const HERDER_OWN_NESTED_MODEL = "gpt-5.6-luna";
 
-export function unavailableProfileModels(profile: ResolvedPiProfile, available: readonly AvailableModel[]): string[] {
+export function unavailableProfileModels(profile: ResolvedProfile, available: readonly AvailableModel[]): string[] {
 	const required = new Set([
 		profile.orchestrator.model,
-		...HERDER_ROLES.map((role) => profile.roles[role].model),
+		...WORKER_ROLES.map((role) => profile.roles[role].model),
 		HERDER_OWN_NESTED_MODEL,
 	]);
 	return [...required].filter((model) => !available.some((candidate) => modelMatches(model, candidate)));
@@ -81,6 +66,6 @@ export function modelSupportsEffort(model: AvailableModel, effort: ThinkingEffor
 	return true;
 }
 
-export function activeModelMatches(profile: ResolvedPiProfile, active: AvailableModel | undefined): boolean {
+export function activeModelMatches(profile: ResolvedProfile, active: AvailableModel | undefined): boolean {
 	return Boolean(active && modelMatches(profile.orchestrator.model, active));
 }

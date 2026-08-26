@@ -8,6 +8,7 @@ export function isTerminalRunStatus(status: unknown): status is typeof TERMINAL_
 	return typeof status === "string" && TERMINAL_RUN_STATUSES.includes(status as typeof TERMINAL_RUN_STATUSES[number]);
 }
 export const WORKER_ROLES = ["plan-implementer", "plan-reviewer", "plan-judge"] as const;
+export const THINKING_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const PLAN_PHASES = [
 	"READY_IMPLEMENTER",
 	"IMPLEMENTING",
@@ -24,23 +25,25 @@ export const PLAN_PHASES = [
 
 export type RunStatus = typeof RUN_STATUSES[number];
 export type WorkerRole = typeof WORKER_ROLES[number];
+export type ThinkingEffort = typeof THINKING_EFFORTS[number];
 export type PlanPhase = typeof PLAN_PHASES[number];
 export type HostName = "pi";
+export type ServiceTier = "fast" | "standard";
 
 export interface RoleProfile {
 	agent_type: string;
 	model: string;
-	effort: string;
-	service_tier?: string;
+	effort: ThinkingEffort;
+	service_tier?: ServiceTier;
 }
 
 export interface ResolvedProfile {
-	schema_version: number;
+	schema_version: 1;
 	profile: string;
 	profile_sha256: string;
 	host: HostName;
-	orchestrator: { model: string; effort: string; service_tier?: string };
-	roles: Record<string, RoleProfile>;
+	orchestrator: Omit<RoleProfile, "agent_type">;
+	roles: Record<WorkerRole, RoleProfile>;
 }
 
 export interface ManagerAction {

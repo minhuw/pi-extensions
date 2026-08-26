@@ -10,6 +10,7 @@ import { readUsageState } from "../../../src/daemon/execution-store.ts"
 import { readManagerState } from "../../../src/daemon/run-store.ts"
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts"
 import { resolvePiProfile } from "../../../src/core/profile-registry.ts"
+import type { WorkerRole } from "../../../src/shared/protocol.ts"
 
 type FixtureCommand = "create" | "verify"
 interface FixtureOptions { command: FixtureCommand; workspace: string; profile: string }
@@ -221,7 +222,7 @@ async function verifyFixture(workspace: string, profile: string): Promise<void> 
   assert.equal(manager.actions.length, 3)
   assert.equal(manager.actions.every((action) => action.state === "terminal"), true)
   assert.equal(manager.actions.every((action) => {
-    const expected = resolvedProfile.roles[action.role]
+    const expected = resolvedProfile.roles[action.role as WorkerRole]
     return expected
       && action.model === expected.model
       && action.effort === expected.effort
