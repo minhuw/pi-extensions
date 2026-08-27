@@ -31,12 +31,15 @@ test("internal profile and Git helpers are import-only", () => {
 		"src/dashboard/herder-dashboard.ts",
 		"src/daemon/git/run-gate.ts",
 	];
+	const importOnlyForbiddenPattern = /runCli|parseArguments|parseArgs|function main\(|export function main|const (?:isMain|isEntrypoint|invokedAsScript)|process\.(?:argv|stdout|stderr|exitCode)|process\.exit\s*\(|console\.(?:log|info|warn|error|debug)\s*\(|\bpretty\b/;
+	assert.match("process.exit(1)", importOnlyForbiddenPattern);
+	assert.match('console.error("failure")', importOnlyForbiddenPattern);
 	for (const relative of retainedEntrypoints) assert.equal(existsSync(path.join(extensionRoot, relative)), true, relative);
 	for (const relative of importOnly) {
 		const sourcePath = path.join(extensionRoot, relative);
 		const source = readFileSync(sourcePath, "utf8");
 		assert.doesNotMatch(source, /^#!/m);
-		assert.doesNotMatch(source, /runCli|parseArguments|parseArgs|function main\(|export function main|const (?:isMain|isEntrypoint|invokedAsScript)|process\.(?:argv|stdout|stderr|exitCode)|\bpretty\b/);
+		assert.doesNotMatch(source, importOnlyForbiddenPattern);
 		assert.equal(statSync(sourcePath).mode & 0o777, 0o644, relative);
 	}
 });
