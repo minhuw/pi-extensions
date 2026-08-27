@@ -28,16 +28,13 @@ test("coordination references format and reject malformed values", () => {
     plan: "009",
     generation: "generation-1",
     ordinal: "001",
-    format: "generation",
   })
 
   assert.deepEqual(parseCheckpointRefRelative("checkpoints/019/generation-1-001"), {
     kind: "checkpoint",
     plan: "019",
     generation: "generation-1",
-    generationNumber: "1",
     ordinal: "001",
-    format: "generation",
   })
   for (const plan of ["009", "019", "020", "021"]) {
     assert.equal(parseCheckpointRefRelative(`checkpoints/${plan}/generation-1-001`)?.plan, plan)
@@ -46,14 +43,12 @@ test("coordination references format and reject malformed values", () => {
     kind: "checkpoint",
     plan: "019",
     generation: "0",
-    generationNumber: "0",
     ordinal: "1",
-    format: "numeric-legacy",
   })
   assert.deepEqual(parseCoordinationRefRelative("base"), { kind: "base", plan: null })
   assert.deepEqual(parseCoordinationRefRelative("completed/019"), { kind: "completed", plan: "019" })
   assert.deepEqual(parseCoordinationRefRelative("restacks/019/generation-2-012-onto"), {
-    kind: "restack-target", plan: "019", generation: "generation-2", generationNumber: "2", ordinal: "012",
+    kind: "restack-target", plan: "019", generation: "generation-2", ordinal: "012",
   })
   assert.deepEqual(parseCoordinationRefRelative("checkpoints/RUN/2"), { kind: "run-checkpoint", plan: null, ordinal: "2" })
 
@@ -104,10 +99,10 @@ test("coordination ref enumeration returns parsed identities and preserves unkno
     }
     assert.deepEqual(listCoordinationRefs(root, "plans"), [
       { ref: "refs/plan-herder/plans/base", target, relative: "base", identity: { kind: "base", plan: null } },
-      { ref: "refs/plan-herder/plans/checkpoints/019/generation-1-001", target, relative: "checkpoints/019/generation-1-001", identity: { kind: "checkpoint", plan: "019", generation: "generation-1", generationNumber: "1", ordinal: "001", format: "generation" } },
+      { ref: "refs/plan-herder/plans/checkpoints/019/generation-1-001", target, relative: "checkpoints/019/generation-1-001", identity: { kind: "checkpoint", plan: "019", generation: "generation-1", ordinal: "001" } },
       { ref: "refs/plan-herder/plans/checkpoints/RUN/2", target, relative: "checkpoints/RUN/2", identity: { kind: "run-checkpoint", plan: null, ordinal: "2" } },
       { ref: "refs/plan-herder/plans/completed/019", target, relative: "completed/019", identity: { kind: "completed", plan: "019" } },
-      { ref: "refs/plan-herder/plans/restacks/019/generation-1-001-onto", target, relative: "restacks/019/generation-1-001-onto", identity: { kind: "restack-target", plan: "019", generation: "generation-1", generationNumber: "1", ordinal: "001" } },
+      { ref: "refs/plan-herder/plans/restacks/019/generation-1-001-onto", target, relative: "restacks/019/generation-1-001-onto", identity: { kind: "restack-target", plan: "019", generation: "generation-1", ordinal: "001" } },
       { ref: "refs/plan-herder/plans/unknown/value", target, relative: "unknown/value", identity: null },
     ])
   } finally {

@@ -17,7 +17,7 @@ import {
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
 import { isInside, runGit } from "./git/primitives.ts";
-import { listCoordinationRefs } from "./git/coordination-ref.ts";
+import { formatCheckpointRef, listCoordinationRefs } from "./git/coordination-ref.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
@@ -853,7 +853,12 @@ export class GitDriver {
 		const initialWorktreeHead = this.worktreeHead(input.worktree);
 		const untouched = initialBranchHead === approvedHead && initialWorktreeHead === approvedHead
 			&& this.worktreeTree(input.worktree) === input.approvedTree && !this.worktreeStatus(input.worktree);
-		const checkpoint = `refs/plan-herder/${this.planName}/checkpoints/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}`;
+		const checkpoint = formatCheckpointRef({
+			planName: this.planName,
+			plan: input.planId,
+			generation: `generation-${input.generation}`,
+			ordinal: input.checkpointOrdinal,
+		}).ref;
 		const restackTargetRef = `refs/plan-herder/${this.planName}/restacks/${input.planId}/generation-${input.generation}-${String(input.checkpointOrdinal).padStart(3, "0")}-onto`;
 		let checkpointTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", checkpoint], true).stdout.trim();
 		let restackTarget = git(this.repoRoot, ["rev-parse", "--verify", "--quiet", restackTargetRef], true).stdout.trim();

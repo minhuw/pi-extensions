@@ -8,9 +8,7 @@ export interface CheckpointRef {
   kind: "checkpoint"
   plan: string
   generation: string
-  generationNumber?: string
   ordinal: string
-  format: "generation" | "numeric-legacy"
   ref?: string
   relative?: string
 }
@@ -18,7 +16,7 @@ export interface CheckpointRef {
 export type CoordinationRef = CheckpointRef
   | { kind: "base"; plan: null }
   | { kind: "completed"; plan: string }
-  | { kind: "restack-target"; plan: string; generation: string; generationNumber: string; ordinal: string }
+  | { kind: "restack-target"; plan: string; generation: string; ordinal: string }
   | { kind: "run-checkpoint"; plan: null; ordinal: string }
 
 export interface FormatCheckpointInput {
@@ -46,9 +44,7 @@ export function parseCheckpointRefRelative(relative: string): CheckpointRef | nu
       kind: "checkpoint",
       plan: current[1],
       generation: current[2],
-      generationNumber: current[3],
       ordinal: current[4],
-      format: "generation",
     }
   }
   const numeric = String(relative).match(/^checkpoints\/(\d{3,})\/(\d+)-(\d+)$/)
@@ -57,9 +53,7 @@ export function parseCheckpointRefRelative(relative: string): CheckpointRef | nu
       kind: "checkpoint",
       plan: numeric[1],
       generation: numeric[2],
-      generationNumber: numeric[2],
       ordinal: numeric[3],
-      format: "numeric-legacy",
     }
   }
   return null
@@ -76,7 +70,6 @@ export function parseCoordinationRefRelative(relative: string): CoordinationRef 
       kind: "restack-target",
       plan: restackTarget[1],
       generation: restackTarget[2],
-      generationNumber: restackTarget[3],
       ordinal: restackTarget[4],
     }
   }
@@ -89,7 +82,7 @@ export function parseCoordinationRefRelative(relative: string): CoordinationRef 
   return null
 }
 
-export function formatCheckpointRef({ planName, plan, generation, ordinal }: FormatCheckpointInput): CheckpointRef & { ref: string; relative: string; format: "generation" } {
+export function formatCheckpointRef({ planName, plan, generation, ordinal }: FormatCheckpointInput): CheckpointRef & { ref: string; relative: string } {
   const normalizedPlanName = String(planName)
   const normalizedPlan = String(plan)
   const normalizedGeneration = String(generation)
@@ -111,7 +104,6 @@ export function formatCheckpointRef({ planName, plan, generation, ordinal }: For
     plan: normalizedPlan,
     generation: normalizedGeneration,
     ordinal: canonicalOrdinal,
-    format: "generation",
   }
 }
 
