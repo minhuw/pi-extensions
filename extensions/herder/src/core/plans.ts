@@ -2,13 +2,13 @@ import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { randomUUID } from "node:crypto"
-import { spawnSync } from "node:child_process"
 import {
   executionReport,
   initializeExecutionStore,
   readUsageState,
 } from "../daemon/execution-store.ts"
 import { readManagerState } from "../daemon/run-store.ts"
+import { isInside, runGit } from "../daemon/git/primitives.ts"
 import { sha256 } from "../shared/protocol.ts"
 
 const DEFAULT_PLAN_DIR = "herder-plans"
@@ -328,11 +328,6 @@ function wordCount(value: unknown): number {
   return trimmed ? trimmed.split(/\s+/).length : 0
 }
 
-function isInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child)
-  return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative)
-}
-
 function resolvePlanFile(planDir: string, planCell: string, id: string): string {
   const link = extractLink(planCell)
   if (link) {
@@ -341,7 +336,7 @@ function resolvePlanFile(planDir: string, planCell: string, id: string): string 
     }
     const withoutFragment = link.split("#", 1)[0]
     const resolved = path.resolve(planDir, decodeURIComponent(withoutFragment))
-    if (!isInside(planDir, resolved) || path.extname(resolved).toLowerCase() !== ".md") {
+    if (!isInside(planDir, resolved, { allowEqual: false }) || path.extname(resolved).toLowerCase() !== ".md") {
       fail(`Plan ${id} link escapes the plan directory or is not Markdown: ${JSON.stringify(link)}`)
     }
     if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
@@ -352,7 +347,7 @@ function resolvePlanFile(planDir: string, planCell: string, id: string): string 
     }
     const realPlanDir = fs.realpathSync(planDir)
     const realResolved = fs.realpathSync(resolved)
-    if (!isInside(realPlanDir, realResolved)) {
+    if (!isInside(realPlanDir, realResolved, { allowEqual: false })) {
       fail(`Plan ${id} resolves outside the plan directory through a symlink: ${resolved}`)
     }
     return resolved
@@ -365,7 +360,7 @@ function resolvePlanFile(planDir: string, planCell: string, id: string): string 
     fail(`Plan ${id} must resolve to exactly one ${id}-*.md file; found ${matches.length}`)
   }
   const resolved = matches[0]
-  if (!fs.statSync(resolved).isFile() || !isInside(fs.realpathSync(planDir), fs.realpathSync(resolved))) {
+  if (!fs.statSync(resolved).isFile() || !isInside(fs.realpathSync(planDir), fs.realpathSync(resolved), { allowEqual: false })) {
     fail(`Plan ${id} resolves outside the plan directory or is not a file: ${resolved}`)
   }
   return resolved
@@ -562,7 +557,7 @@ function sharedContextPath(planDir: string): string | null {
   if (!fs.statSync(file).isFile()) fail(`${file} must be a regular Markdown file`)
   const realPlanDir = fs.realpathSync(planDir)
   const realFile = fs.realpathSync(file)
-  if (!isInside(realPlanDir, realFile)) fail(`${file} resolves outside the plan directory`)
+  if (!isInside(realPlanDir, realFile, { allowEqual: false })) fail(`${file} resolves outside the plan directory`)
   return file
 }
 
@@ -694,15 +689,6 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
   }
 }
 
-function runGit(startDir: string, args: string[], { allowFailure = false }: { allowFailure?: boolean } = {}) {
-  const result = spawnSync("git", ["-C", startDir, ...args], { encoding: "utf8" })
-  if (result.error) fail(`Cannot run git: ${result.error.message}`)
-  if (result.status !== 0 && !allowFailure) {
-    fail(`git ${args.join(" ")} failed: ${(result.stderr || result.stdout).trim()}`)
-  }
-  return result
-}
-
 interface RepositoryContext { repoRoot: string; planDir: string; relative: string; excludeFile: string; ignorePattern: string }
 
 function repoContext(planDir: string): RepositoryContext {
@@ -710,7 +696,7 @@ function repoContext(planDir: string): RepositoryContext {
   const repoRoot = runGit(start, ["rev-parse", "--show-toplevel"]).stdout.trim()
   const resolvedRoot = fs.realpathSync(repoRoot)
   const resolvedPlanDir = fs.existsSync(planDir) ? fs.realpathSync(planDir) : path.resolve(planDir)
-  if (!isInside(resolvedRoot, resolvedPlanDir)) {
+  if (!isInside(resolvedRoot, resolvedPlanDir, { allowEqual: false })) {
     fail(`Plan directory must be inside the Git repository: ${resolvedPlanDir}`)
   }
   const relative = path.relative(resolvedRoot, resolvedPlanDir).split(path.sep).join("/")

@@ -16,6 +16,7 @@ import {
 	inspectCompletionProof,
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
+import { isInside, runGit } from "./git/primitives.ts";
 import { listCoordinationRefs } from "./git/coordination-ref.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
@@ -138,7 +139,13 @@ export function runCommand(command: string, args: string[], options: {
 }
 
 export function git(repo: string, args: string[], allowFailure = false): { status: number; stdout: string; stderr: string } {
-	return runCommand("git", ["-C", repo, ...args], { allowFailure });
+	const result = runGit(repo, args, {
+		allowFailure,
+		maxBuffer: 64 * 1024 * 1024,
+		failureFormatter: (commandArgs, stderr, stdout) => `git ${commandArgs.join(" ")} failed: ${compact(stderr || stdout || "no output")}`,
+		spawnErrorFormatter: (error) => `git failed to start: ${error.message}`,
+	});
+	return { status: result.status ?? 1, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 
 export function gitValue(repo: string, ...args: string[]): string {
@@ -167,11 +174,6 @@ function ensureParent(candidate: string): void {
 
 function realRepositoryRoot(repoRoot: string): string {
 	return fs.realpathSync(gitValue(repoRoot, "rev-parse", "--show-toplevel"));
-}
-
-function isInside(parent: string, candidate: string): boolean {
-	const relative = path.relative(parent, candidate);
-	return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 function completionPayload(approval: CompletionApprovalProof, integratedHead: string): CompletionTagPayload {
@@ -208,7 +210,11 @@ function commitPatchIdentity(repoRoot: string, commit: string): string | null {
 	if (empty.status !== 1) return null;
 	const patch = git(repoRoot, ["show", "--pretty=format:", "--patch", "--binary", commit], true);
 	if (patch.status !== 0) return null;
-	const result = runCommand("git", ["patch-id", "--stable"], { cwd: repoRoot, input: patch.stdout, allowFailure: true });
+	const result = runGit(repoRoot, ["patch-id", "--stable"], {
+		input: patch.stdout,
+		allowFailure: true,
+		maxBuffer: 64 * 1024 * 1024,
+	});
 	if (result.status !== 0) return null;
 	const lines = result.stdout.split(/\r?\n/).filter(Boolean);
 	const match = lines.length === 1 ? lines[0]!.match(/^([0-9a-f]+)\s/i) : null;
@@ -245,14 +251,14 @@ function patchEquivalentBothWays(repoRoot: string, integrationHead: string, rest
 			}
 			const tree = gitValue(validationRepo, "write-tree");
 			const parent = gitValue(validationRepo, "rev-parse", "HEAD");
-			const committed = runCommand("git", [
-				"-C", validationRepo,
+			const committed = runGit(validationRepo, [
 				"-c", "user.name=Herder Restack Validation",
 				"-c", "user.email=herder-restack-validation@invalid",
 				"commit-tree", tree, "-p", parent,
 			], {
 				input: `Herder restack validation for ${commit}\n`,
 				allowFailure: true,
+				maxBuffer: 64 * 1024 * 1024,
 			});
 			if (committed.status !== 0 || !committed.stdout.trim()) return false;
 			const expectedCommit = committed.stdout.trim();
@@ -289,7 +295,7 @@ export class GitDriver {
 		this.repoRoot = fs.realpathSync(input.repoRoot);
 		if (realRepositoryRoot(this.repoRoot) !== this.repoRoot) throw new Error(`Repository root mismatch: ${this.repoRoot}`);
 		this.planDirectory = fs.realpathSync(input.planDirectory);
-		if (!isInside(this.repoRoot, this.planDirectory)) throw new Error(`Plan directory must be inside the repository: ${this.planDirectory}`);
+		if (!isInside(this.repoRoot, this.planDirectory, { allowEqual: false })) throw new Error(`Plan directory must be inside the repository: ${this.planDirectory}`);
 		this.planName = input.planName;
 		this.helperRoot = input.helperRoot;
 		const canonicalRoot = canonicalWorktreeRoot(this.planDirectory);
@@ -624,11 +630,11 @@ export class GitDriver {
 			}
 			const canonicalWorktree = fs.realpathSync(worktree);
 			const requestedCwd = path.resolve(worktree, gate.cwd);
-			if (requestedCwd !== canonicalWorktree && !isInside(canonicalWorktree, requestedCwd)) {
+			if (requestedCwd !== canonicalWorktree && !isInside(canonicalWorktree, requestedCwd, { allowEqual: false })) {
 				throw new Error(`Verification gate ${gate.gateId} cwd escapes the integration worktree`);
 			}
 			const cwd = fs.realpathSync(requestedCwd);
-			if (cwd !== canonicalWorktree && !isInside(canonicalWorktree, cwd)) {
+			if (cwd !== canonicalWorktree && !isInside(canonicalWorktree, cwd, { allowEqual: false })) {
 				throw new Error(`Verification gate ${gate.gateId} cwd resolves outside the integration worktree`);
 			}
 			const command = path.basename(gate.argv[0] || "").toLowerCase();
