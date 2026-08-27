@@ -18,6 +18,7 @@ import {
 import {
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
+	submitHerderEvent,
 	readLiveRunFreshness,
 	submitHerderIntegrationRepair,
 	submitHerderReignite,
@@ -810,7 +811,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
 		const event = input as Record<string, unknown>;
-		return unwrapReply(await invokeHerderTool("herder_submit", { planDirectory: planDir, ...event }) as Record<string, unknown>);
+		return unwrapReply(await submitHerderEvent({ planDirectory: planDir, ...event }) as Record<string, unknown>);
 	};
 
 	const managerTransportRetriable = (error: unknown): boolean => {

@@ -231,6 +231,10 @@ export function prepareHerderVerificationManifest(request: VerificationRequest, 
 	return normalizeVerificationManifest(request, manifest).manifest;
 }
 
+export async function submitHerderEvent(args: JsonObject): Promise<unknown> {
+	return submitTool(args);
+}
+
 export async function submitHerderVerification(args: JsonObject): Promise<PendingHerderOperation> {
 	const directory = planDirectory(args);
 	const receipt = await submitManagerOperationReliable(directory, "verification", args.manifest, String(args.operationId || randomUUID()));
@@ -670,13 +674,13 @@ export async function applyHerderReset(
 	return runExclusion(request.planDirectory, () => resetHerderPlanSet(request));
 }
 
-export function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown>;
-export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_submit" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown> {
+export function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown>;
+export async function invokeHerderTool(name: "herder_plan" | "herder_run" | "herder_verification" | "herder_integration_repair" | "herder_reignite", args: JsonObject): Promise<unknown> {
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} requires an arguments object`);
 	if (name === "herder_plan") return planTool(args);
 	if (name === "herder_run") return runTool(args);
 	if (name === "herder_verification") return verificationTool(args);
 	if (name === "herder_integration_repair") return integrationRepairTool(args);
 	if (name === "herder_reignite") return reigniteTool(args);
-	return submitTool(args);
+	throw new Error(`Unknown Herder tool: ${name}`);
 }

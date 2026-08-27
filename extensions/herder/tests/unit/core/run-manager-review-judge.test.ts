@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { invokeHerderTool } from "../../../src/application/tools.ts";
+import { submitHerderEvent } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
@@ -698,14 +698,14 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 			before.store.close();
 		}
 
-		const publicSubmission = payload(await invokeHerderTool("herder_submit", {
+		const publicSubmission = payload(await submitHerderEvent({
 			planDirectory: fixture.planDirectory,
 			kind: "user_input",
 			attentionRequestId: attention.requestId,
 			userInput: "Use only the declared repair contract.",
 		}));
 		const resumed = payload(publicSubmission.reply);
-		const publicReplay = payload(await invokeHerderTool("herder_submit", {
+		const publicReplay = payload(await submitHerderEvent({
 			planDirectory: fixture.planDirectory,
 			kind: "user_input",
 			attentionRequestId: attention.requestId,
