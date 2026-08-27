@@ -3,7 +3,7 @@ import path from "node:path";
 import { buildGraph, projectStatuses } from "../../core/plans.ts";
 import { RunStore, type StoredPlanSpec } from "../run-store.ts";
 import { clearExecutionRotationMarker } from "../execution-store.ts";
-import { listHerderBranches, listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
+import { listHerderBranches, listWorktreeInventory, type WorktreeRecord } from "./namespace-inventory.ts";
 import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import { allowedWorktreePaths, worktreeRelativeName } from "./worktree-locations.ts";
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
@@ -78,7 +78,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
   const allBranches = listHerderBranches(repo, name);
   const allRefs = listCoordinationRefs(repo, name);
-  const worktrees = listWorktrees(repo);
+  const worktrees = listWorktreeInventory(repo);
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   const removedWorktrees: string[] = [];
@@ -107,7 +107,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     }
     const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
     // Revalidate every identity immediately before the first mutation.
-    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(listCoordinationRefs(repo, name)) !== currentRefSnapshot || snapshot(listWorktrees(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(listCoordinationRefs(repo, name)) !== currentRefSnapshot || snapshot(listWorktreeInventory(repo)) !== currentWorktreeSnapshot || JSON.stringify(checkout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
     for (const w of owned) {
       if (w.locked) runGit(repo, ["worktree", "unlock", "--", w.path]);
       runGit(repo, ["worktree", "remove", "--", w.path]);

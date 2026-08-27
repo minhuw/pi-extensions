@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
-import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
+import { listHerderBranches, listWorktreeInventory, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
 import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
@@ -59,7 +59,7 @@ function forceRemoveWorktree(repoRoot: string, worktreePath: string, allowedRoot
 			fs.rmSync(fallbackPath, { recursive: true, force: true });
 			runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
 		}
-		const stillListed = listWorktrees(repoRoot).some((item) => item.path && realpathIfPresent(item.path) === resolved);
+		const stillListed = listWorktreeInventory(repoRoot).some((item) => item.path && realpathIfPresent(item.path) === resolved);
 		if (stillListed) {
 			fail(`Cannot force-remove worktree ${worktreePath}: ${(removed.stderr || removed.stdout).trim()}`);
 		}
@@ -146,7 +146,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 	}
 
 	const allowedRoots = allowedWorktreeRoots(repoRoot, planDir, planName);
-	const worktrees = listWorktrees(repoRoot);
+	const worktrees = listWorktreeInventory(repoRoot);
 	const owned = ownedWorktrees(repoRoot, planDir, planName, worktrees.filter((item) => item.path));
 	const branches = listHerderBranches(repoRoot, planName);
 	const refs = listCoordinationRefs(repoRoot, planName);
@@ -217,7 +217,7 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 
 	const remainingBranches = listHerderBranches(repoRoot, planName);
 	const remainingRefs = listCoordinationRefs(repoRoot, planName);
-	const remainingWorktrees = ownedWorktrees(repoRoot, planDir, planName, listWorktrees(repoRoot).filter((item) => item.path));
+	const remainingWorktrees = ownedWorktrees(repoRoot, planDir, planName, listWorktreeInventory(repoRoot).filter((item) => item.path));
 	if (remainingBranches.length > 0 || remainingRefs.length > 0 || remainingWorktrees.length > 0) {
 		fail(`Force cleanup left Herder artifacts: ${[
 			...remainingBranches.map((item) => item.branch),

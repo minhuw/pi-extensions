@@ -49,20 +49,6 @@ export function parseWorktreeInventory(output: string, nulDelimited: boolean): W
   return records
 }
 
-function legacyWorktreeRecord(record: WorktreeInventoryRecord): WorktreeRecord {
-  return {
-    path: record.path,
-    branch: record.branch,
-    locked: record.locked,
-    lockReason: record.lockReason,
-  }
-}
-
-/** Parse Git's porcelain worktree output into the legacy destructive-caller shape. */
-export function parseWorktreeRecords(output: string, nulDelimited: boolean): WorktreeRecord[] {
-  return parseWorktreeInventory(output, nulDelimited).map(legacyWorktreeRecord)
-}
-
 /** List all worktree inventory records, retaining malformed/pathless records for callers to classify. */
 export function listWorktreeInventory(repoRoot: string): WorktreeInventoryRecord[] {
   const nulResult = runGit(repoRoot, ["worktree", "list", "--porcelain", "-z"], { allowFailure: true })
@@ -70,11 +56,6 @@ export function listWorktreeInventory(repoRoot: string): WorktreeInventoryRecord
 
   // Git 2.34 and older do not support `git worktree list -z`.
   return parseWorktreeInventory(runGit(repoRoot, ["worktree", "list", "--porcelain"]).stdout, false)
-}
-
-/** List all raw worktree records in the legacy destructive-caller shape. */
-export function listWorktrees(repoRoot: string): WorktreeRecord[] {
-  return listWorktreeInventory(repoRoot).map(legacyWorktreeRecord)
 }
 
 /** List the Herder branch namespace while rejecting malformed ref rows. */

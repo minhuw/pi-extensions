@@ -10,7 +10,7 @@ import {
 	verifyAssignment,
 } from "./git/assignment-bundle.ts";
 import { inspectNamespace } from "./git/namespace-run.ts";
-import { listWorktrees } from "./git/namespace-inventory.ts";
+import { listWorktreeInventory } from "./git/namespace-inventory.ts";
 import {
 	buildCompletionProofPayload,
 	inspectCompletionProof,
@@ -338,7 +338,7 @@ export class GitDriver {
 			}
 		}
 		const branchExists = git(this.repoRoot, ["show-ref", "--verify", "--quiet", branchRef], true).status === 0;
-		const worktreeRecord = listWorktrees(this.repoRoot).find((item) => item.path === this.integrationWorktree);
+		const worktreeRecord = listWorktreeInventory(this.repoRoot).find((item) => item.path === this.integrationWorktree);
 		if (!branchExists) {
 			if (worktreeRecord || fs.existsSync(this.integrationWorktree)) throw new Error(`Integration path exists without its expected branch: ${this.integrationWorktree}`);
 			ensureParent(this.integrationWorktree);
@@ -376,7 +376,7 @@ export class GitDriver {
 		const worktree = path.join(this.worktreeRoot, planId);
 		const integrationHead = expectedHead ?? gitValue(this.repoRoot, "rev-parse", `refs/heads/${this.integrationBranch}`);
 		const branchExists = git(this.repoRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], true).status === 0;
-		const worktreeRecord = listWorktrees(this.repoRoot).find((item) => item.path === worktree);
+		const worktreeRecord = listWorktreeInventory(this.repoRoot).find((item) => item.path === worktree);
 		if (!branchExists) {
 			if (worktreeRecord || fs.existsSync(worktree)) throw new Error(`Plan worktree path exists without its expected branch: ${worktree}`);
 			ensureParent(worktree);
@@ -460,7 +460,7 @@ export class GitDriver {
 	}
 
 	leaseReason(worktree: string): string | null {
-		const record = listWorktrees(this.repoRoot).find((item) => item.path === worktree);
+		const record = listWorktreeInventory(this.repoRoot).find((item) => item.path === worktree);
 		if (!record) throw new Error(`Worktree is not registered: ${worktree}`);
 		return record.locked ? record.lockReason : null;
 	}

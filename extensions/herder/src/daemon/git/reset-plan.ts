@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { listWorktrees, type WorktreeRecord } from "./namespace-inventory.ts";
+import { listWorktreeInventory, type WorktreeRecord } from "./namespace-inventory.ts";
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";
@@ -152,7 +152,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		seenRefs.add(record.ref);
 	}
 
-	const records = listWorktrees(repoRoot);
+	const records = listWorktreeInventory(repoRoot);
 	const canonicalWorktree = realpathIfPresent(worktree);
 	const record = records.find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
 	const branchRecord = records.find((candidate) => candidate.branch === input.branch);
@@ -225,7 +225,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 		}
 		if (recordedStep !== "worktree_removed" && recordedStep !== "branch_deleted") input.onPrepare?.("worktree_removed");
 		removeWorktree(repoRoot, worktree);
-		const afterRemoval = listWorktrees(repoRoot).find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
+		const afterRemoval = listWorktreeInventory(repoRoot).find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
 		if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);
 		input.onProgress?.("worktree_removed");
 		input.onComplete?.("worktree_removed");

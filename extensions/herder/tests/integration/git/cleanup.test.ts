@@ -11,9 +11,7 @@ import { cleanupRun } from "../../../src/daemon/git/cleanup-run.ts"
 import {
   listHerderBranches,
   listWorktreeInventory,
-  listWorktrees,
   parseWorktreeInventory,
-  parseWorktreeRecords,
 } from "../../../src/daemon/git/namespace-inventory.ts"
 import { forceCleanupRun } from "../../../src/daemon/git/force-cleanup-run.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
@@ -268,13 +266,9 @@ test("worktree inventory retains malformed records in both formats and rejects m
   const fixture = setup()
   try {
     const pathlessBranch = "herder/plans/999"
-    const nul = withGitShim("nul", pathlessBranch, () => listWorktrees(fixture.repo))
-    assert.equal(nul.some((item) => item.path === "" && item.branch === pathlessBranch), true)
     const nulInventory = withGitShim("nul", pathlessBranch, () => listWorktreeInventory(fixture.repo))
     assert.equal(nulInventory.some((item) => item.path && item.head), true)
     assert.equal(nulInventory.some((item) => item.path === "" && item.branch === pathlessBranch && item.head === ""), true)
-    const legacy = withGitShim("newline", pathlessBranch, () => listWorktrees(fixture.repo))
-    assert.equal(legacy.some((item) => item.path === "" && item.branch === pathlessBranch), true)
     const legacyInventory = withGitShim("newline", pathlessBranch, () => listWorktreeInventory(fixture.repo))
     assert.equal(legacyInventory.some((item) => item.path && item.head), true)
     assert.equal(legacyInventory.some((item) => item.path === "" && item.branch === pathlessBranch && item.head === ""), true)
@@ -294,16 +288,6 @@ test("worktree parser handles modern and legacy porcelain", () => {
     { path: "/tmp/one", head: "abc", branch: "main", detached: false, locked: false, lockReason: null },
     { path: "/tmp/two", head: "def", branch: "", detached: true, locked: true, lockReason: "" },
     { path: "", head: "ghi", branch: "herder/plans/999", detached: false, locked: false, lockReason: null },
-  ])
-  assert.deepEqual(parseWorktreeRecords(modern, true), [
-    { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
-    { path: "/tmp/two", branch: "", locked: true, lockReason: "" },
-    { path: "", branch: "herder/plans/999", locked: false, lockReason: null },
-  ])
-  assert.deepEqual(parseWorktreeRecords(legacy, false), [
-    { path: "/tmp/one", branch: "main", locked: false, lockReason: null },
-    { path: "/tmp/two", branch: "", locked: true, lockReason: "" },
-    { path: "", branch: "herder/plans/999", locked: false, lockReason: null },
   ])
 })
 

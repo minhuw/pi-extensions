@@ -6,7 +6,7 @@ import { RunStore } from "../run-store.ts"
 import { listCoordinationRefs, type CoordinationRefRecord, validatePlanName } from "./coordination-ref.ts"
 import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
-import { listHerderBranches, listWorktrees, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
+import { listHerderBranches, listWorktreeInventory, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
 import { isTerminalRunStatus } from "../../shared/protocol.ts"
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts"
 
@@ -268,7 +268,7 @@ export function cleanupRun(input: CleanupInput) {
   const expectedPlanBranchSnapshot = planBranchSnapshot(allPlanBranches)
   const expectedCoordinationRefSnapshot = coordinationRefSnapshot(coordinationRefs)
   const expectedCheckout = currentCheckout(repoRoot)
-  const initialWorktrees = listWorktrees(repoRoot).filter((item) => item.path)
+  const initialWorktrees = listWorktreeInventory(repoRoot).filter((item) => item.path)
   const expectedWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, false)
   const expectedIntegrationWorktreeSnapshot = worktreeSnapshot(initialWorktrees, `herder/${planName}`, true)
   const worktrees = new Map(initialWorktrees.filter((item) => item.path && item.branch).map((item) => [item.branch, item]))
@@ -453,7 +453,7 @@ export function cleanupRun(input: CleanupInput) {
       if (planBranchSnapshot(listHerderBranches(repoRoot, planName)) !== expectedPlanBranchSnapshot) {
         fail("Deep cleanup plan branch namespace changed after preflight")
       }
-      const currentWorktrees = listWorktrees(repoRoot).filter((item) => item.path)
+      const currentWorktrees = listWorktreeInventory(repoRoot).filter((item) => item.path)
       if (worktreeSnapshot(currentWorktrees, `herder/${planName}`, false) !== expectedWorktreeSnapshot) {
         fail("Deep cleanup plan worktree namespace changed after preflight")
       }
@@ -489,7 +489,7 @@ export function cleanupRun(input: CleanupInput) {
     }
     if (input.deep) {
       const remainingBranches = listHerderBranches(repoRoot, planName).filter((item) => item.relative !== "integration")
-      const remainingWorktrees = listWorktrees(repoRoot).filter((item) => item.path && item.branch.startsWith(`herder/${planName}/`) && item.branch !== integrationBranch)
+      const remainingWorktrees = listWorktreeInventory(repoRoot).filter((item) => item.path && item.branch.startsWith(`herder/${planName}/`) && item.branch !== integrationBranch)
       if (remainingBranches.length > 0 || remainingWorktrees.length > 0) {
         fail(`Cannot deep-clean while plan namespace artifacts remain: ${[
           ...remainingBranches.map((item) => item.branch),

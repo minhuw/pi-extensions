@@ -4,7 +4,7 @@ import { buildGraph } from "../../core/plans.ts"
 import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts"
 export { validatePlanName } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
-import { listHerderBranches, listWorktrees } from "./namespace-inventory.ts"
+import { listHerderBranches, listWorktreeInventory } from "./namespace-inventory.ts"
 import { fail, isInside, runGit } from "./primitives.ts"
 
 type NamespaceMode = "fire" | "resume" | "status"
@@ -70,7 +70,7 @@ export function inspectNamespace(input: NamespaceInput) {
     .filter((item) => item.identity?.kind === "completed")
     .map((item) => ({ item, proof: inspectCompletionProof(repoRoot, item.ref) }))
     .filter(({ item, proof }) => !proof.ok || proof.payload.planId !== item.identity?.plan)
-  const worktrees = listWorktrees(repoRoot).filter((item) => item.path)
+  const worktrees = listWorktreeInventory(repoRoot).filter((item) => item.path)
   const rawCoordinationRef = ({ ref, target, relative }: RefRecord) => ({ ref, target, relative })
   const namespaceBranchNames = new Set(branches.map((item) => item.branch))
   const namespaceWorktrees = worktrees.filter((item) => namespaceBranchNames.has(item.branch))

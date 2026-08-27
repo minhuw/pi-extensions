@@ -6,7 +6,7 @@ import { sha256 } from "../../shared/protocol.ts"
 import { buildGraph, snapshotPlan, snapshotPlansFromGraph } from "../../core/plans.ts"
 import type { PlanSnapshot } from "../../core/plans.ts"
 import { parseCheckpointRefRelative } from "./coordination-ref.ts"
-import { listWorktrees } from "./namespace-inventory.ts"
+import { listWorktreeInventory } from "./namespace-inventory.ts"
 import { isInside, runGit } from "./primitives.ts"
 
 export const ASSIGNMENT_SCHEMA_VERSION = 1
@@ -182,7 +182,7 @@ function fingerprintUntracked(worktree: string): TreeFingerprint[] {
 }
 
 function worktreeLeaseReason(worktree: string): string | null {
-  const record = listWorktrees(worktree).find((item) => item.path === worktree)
+  const record = listWorktreeInventory(worktree).find((item) => item.path === worktree)
   if (!record) throw new Error(`expected stable plan worktree is not registered: ${worktree}`)
   return record.locked ? record.lockReason : null
 }
