@@ -151,6 +151,16 @@ test("adapter registration exposes the complete live surface", () => {
 
 test("verification gate arrays share one schema contract", () => {
 	const api = captureAdapter();
+	const verificationSchema = record(api.tool("herder_verification").parameters);
+	const repairSchema = record(api.tool("herder_integration_repair").parameters);
+	const verificationRequired = verificationSchema.required;
+	const repairRequired = repairSchema.required;
+	assert.ok(Array.isArray(verificationRequired));
+	assert.ok(Array.isArray(repairRequired));
+	assert.ok(verificationRequired.includes("gates"));
+	assert.equal(repairRequired.includes("gates"), false);
+	assert.equal(repairRequired.includes("gateAdditions"), false);
+
 	const arrays = [
 		toolProperty(api, "herder_verification", "gates"),
 		toolProperty(api, "herder_integration_repair", "gates"),
@@ -164,10 +174,27 @@ test("verification gate arrays share one schema contract", () => {
 	const items = arrays.map((array) => record(array.items));
 	for (const item of items.slice(1)) assert.deepEqual(item, items[0]);
 
+	assert.equal(items[0].type, "object");
+	assert.deepEqual(Object.keys(record(items[0].properties)).sort(), [
+		"argv",
+		"cwd",
+		"gateId",
+		"label",
+		"rationale",
+		"timeoutMs",
+	].sort());
 	assert.deepEqual(items[0].required, ["gateId", "label", "cwd", "argv", "rationale"]);
 	const properties = record(items[0].properties);
-	assert.equal(record(properties.argv).minItems, 1);
-	assert.equal(record(properties.argv).maxItems, 64);
+	assert.equal(record(properties.gateId).type, "string");
+	assert.equal(record(properties.label).type, "string");
+	assert.equal(record(properties.cwd).type, "string");
+	assert.equal(record(properties.rationale).type, "string");
+	const argv = record(properties.argv);
+	assert.equal(argv.type, "array");
+	assert.equal(record(argv.items).type, "string");
+	assert.equal(record(properties.timeoutMs).type, "integer");
+	assert.equal(argv.minItems, 1);
+	assert.equal(argv.maxItems, 64);
 	assert.equal(record(properties.timeoutMs).minimum, 1_000);
 	assert.equal(record(properties.timeoutMs).maximum, 7_200_000);
 	assert.equal(record(properties.cwd).description, "Tree-relative path inside the integration worktree. Use '.' for the worktree root. Absolute paths are invalid.");
