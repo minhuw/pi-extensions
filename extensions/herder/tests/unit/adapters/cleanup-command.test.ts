@@ -6,7 +6,6 @@ import {
 	createCleanupTranscriptEntry,
 	type CleanupTranscriptEntry,
 } from "../../../adapters/cleanup-transcript.ts";
-import { parseCleanupArguments } from "../../../adapters/arguments.ts";
 import { runCleanupCommand } from "../../../adapters/cleanup-command.ts";
 import type { CleanupApplyResult, CleanupPreview } from "../../../src/application/tools.ts";
 import type { CleanupResult } from "../../../src/daemon/git/cleanup-run.ts";
@@ -117,28 +116,6 @@ test("cleanup transcripts derive depth from all modes and render v2 entries", ()
 	const historicalDisplay = cleanupTranscriptDisplay(historical, transcriptTheme);
 	assert.match(historicalDisplay, /deep · executed/);
 	assert.match(historicalDisplay, /planned refs: base/);
-});
-
-test("cleanup parser is fail-closed and preserves the exact command shape", () => {
-	assert.deepEqual(parseCleanupArguments("custom-plans --plan 7 --include-failed"), {
-		planDir: "custom-plans",
-		planId: "7",
-		includeFailed: true,
-		deep: false,
-		force: false,
-	});
-	assert.deepEqual(parseCleanupArguments("--deep --include-failed"), { planDir: "herder-plans", includeFailed: true, deep: true, force: false });
-	assert.deepEqual(parseCleanupArguments("--force"), { planDir: "herder-plans", includeFailed: false, deep: false, force: true });
-	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false, deep: false, force: false });
-	assert.throws(() => parseCleanupArguments("--plan 7 --plan 8"), /more than once/);
-	assert.throws(() => parseCleanupArguments("--deep --deep"), /more than once/);
-	assert.throws(() => parseCleanupArguments("--force --force"), /more than once/);
-	assert.throws(() => parseCleanupArguments("--finalize"), /use --deep/);
-	assert.throws(() => parseCleanupArguments("--handoff-target release"), /use --deep/);
-	assert.throws(() => parseCleanupArguments("--deep --plan 7"), /cannot be combined/);
-	assert.throws(() => parseCleanupArguments("--force --deep"), /cannot be combined/);
-	assert.throws(() => parseCleanupArguments("--include-failed --unknown"), /Unknown option/);
-	assert.throws(() => parseCleanupArguments("--plan TODO"), /numeric/);
 });
 
 test("failed evidence requires a second confirmation and applies only after both succeed", async () => {

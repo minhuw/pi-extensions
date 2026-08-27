@@ -83,12 +83,20 @@ test("argument validation is fail-closed", () => {
 });
 
 test("cleanup accepts ordinary, deep, and force modes and rejects removed destructive options", () => {
+	assert.deepEqual(parseCleanupArguments(""), { planDir: "herder-plans", includeFailed: false, deep: false, force: false });
 	assert.deepEqual(parseCleanupArguments("plans --plan 7 --include-failed"), { planDir: "plans", planId: "7", includeFailed: true, deep: false, force: false });
 	assert.deepEqual(parseCleanupArguments("plans --deep"), { planDir: "plans", includeFailed: false, deep: true, force: false });
+	assert.deepEqual(parseCleanupArguments("--deep --include-failed"), { planDir: "herder-plans", includeFailed: true, deep: true, force: false });
 	assert.deepEqual(parseCleanupArguments("plans --force"), { planDir: "plans", includeFailed: false, deep: false, force: true });
+	assert.deepEqual(parseCleanupArguments("--force"), { planDir: "herder-plans", includeFailed: false, deep: false, force: true });
+	assert.throws(() => parseCleanupArguments("--plan 7 --plan 8"), /more than once/);
+	assert.throws(() => parseCleanupArguments("--deep --deep"), /more than once/);
+	assert.throws(() => parseCleanupArguments("--force --force"), /more than once/);
 	assert.throws(() => parseCleanupArguments("--deep --plan 7"), /plan-set-level/);
 	assert.throws(() => parseCleanupArguments("--force --deep"), /cannot be combined/);
 	assert.throws(() => parseCleanupArguments("--force --plan 7"), /cannot be combined/);
+	assert.throws(() => parseCleanupArguments("--include-failed --unknown"), /Unknown option/);
+	assert.throws(() => parseCleanupArguments("--plan TODO"), /numeric/);
 	assert.throws(() => parseCleanupArguments("--finalize"), /use --deep/);
 	assert.throws(() => parseCleanupArguments("--handoff-target main"), /use --deep/);
 });
