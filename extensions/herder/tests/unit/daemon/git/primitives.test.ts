@@ -3,7 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { fail, isInside, realpathIfPresent, runGit, takeValue } from "../../../../src/daemon/git/primitives.ts"
+import { fail, isInside, realpathIfPresent, runGit } from "../../../../src/daemon/git/primitives.ts"
 
 function temporaryRepository(): { root: string; repo: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-git-primitives-"))
@@ -21,12 +21,6 @@ test("isInside handles containment edges and strict descendants", () => {
   assert.equal(isInside(root, path.join(root, "..", "escape")), false)
   assert.equal(isInside(root, `${root}-sibling`), false)
   assert.equal(isInside(root, root, { allowEqual: false }), false)
-})
-
-test("takeValue rejects missing and flag values", () => {
-  assert.equal(takeValue(["--name", "value"], 0, "--name"), "value")
-  assert.throws(() => takeValue(["--name"], 0, "--name"), /--name requires a value/)
-  assert.throws(() => takeValue(["--name", "--other"], 0, "--name"), /--name requires a value/)
 })
 
 test("realpathIfPresent falls back for missing paths", () => {

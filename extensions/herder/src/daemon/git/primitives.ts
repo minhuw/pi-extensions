@@ -73,12 +73,6 @@ export function isInside(parent: string, candidate: string, { allowEqual = true 
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
-export function takeValue(args: string[], index: number, name: string): string {
-  const value = args[index + 1]
-  if (!value || value.startsWith("--")) fail(`${name} requires a value`)
-  return value
-}
-
 export function realpathIfPresent(candidate: string): string {
   try { return fs.realpathSync(candidate) }
   catch { return path.resolve(candidate) }
