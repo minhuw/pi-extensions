@@ -1199,7 +1199,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const parsed = parseResetArguments(args);
 		const repoRoot = await repositoryRoot(ctx);
 		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
-		const result = await runResetCommand(parsed, {
+		const result = await runResetCommand({
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),

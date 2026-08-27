@@ -4,7 +4,7 @@ import { formatResetResult, runResetCommand } from "../../../adapters/reset-comm
 
 test("reset command asks for confirmation before applying and formats the result", async () => {
 	const calls: string[] = [];
-	const message = await runResetCommand("custom-plans", {
+	const message = await runResetCommand({
 		repositoryRoot: "/repo",
 		planDirectory: "/repo/custom-plans",
 		confirm: async (title, body) => {
@@ -23,7 +23,7 @@ test("reset command asks for confirmation before applying and formats the result
 
 test("reset command cancellation never invokes the reset application", async () => {
 	let applied = false;
-	const message = await runResetCommand("", {
+	const message = await runResetCommand({
 		repositoryRoot: "/repo",
 		planDirectory: "/repo/herder-plans",
 		confirm: async () => false,

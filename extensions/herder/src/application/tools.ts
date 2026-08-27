@@ -664,10 +664,8 @@ export async function applyHerderCleanup(
 }
 
 
-export interface ResetApplicationRequest extends HerderResetInput {}
-
 export async function applyHerderReset(
-	request: ResetApplicationRequest,
+	request: HerderResetInput,
 	dependencies: { withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T> } = {},
 ): Promise<HerderResetResult> {
 	const runExclusion = dependencies.withExclusion ?? ((planDirectory, callback) => withServiceExclusion(planDirectory, callback, { purpose: "reset" }));
