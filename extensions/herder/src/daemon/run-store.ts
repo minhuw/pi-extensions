@@ -108,7 +108,6 @@ export interface StoredPlanSpec {
 	dependencies: string[];
 	initialStatus: "TODO" | "DONE" | "BLOCKED" | "REJECTED";
 	initialStatusDetail: string;
-	gateCommands: string[];
 	planFile: string;
 	assignment: {
 		snapshotSha256: string;
@@ -366,7 +365,7 @@ export function readManagerState(planDir: string) {
     const specs = run ? database.prepare(`
       SELECT graph_generation, plan_id, plan_fingerprint, fingerprint_version, ordinal, title, priority,
         effort, kind, dependencies_json, initial_status, initial_status_detail,
-        gate_commands_json, plan_file
+        plan_file
       FROM manager_plan_specs
       WHERE run_id = ? AND graph_generation = ?
       ORDER BY ordinal, plan_id
@@ -492,7 +491,6 @@ export function readManagerState(planDir: string) {
         dependencies: parseJsonColumn(spec.dependencies_json, []),
         initialStatus: spec.initial_status,
         initialStatusDetail: spec.initial_status_detail,
-        gateCommands: parseJsonColumn(spec.gate_commands_json, []),
         planFile: spec.plan_file,
       })),
       plans: plans.map((plan) => ({
@@ -746,7 +744,6 @@ function rowToPlanSpec(row: Record<string, unknown>): StoredPlanSpec {
 		dependencies: parseJson(String(row.dependencies_json), []),
 		initialStatus: String(row.initial_status) as StoredPlanSpec["initialStatus"],
 		initialStatusDetail: String(row.initial_status_detail),
-		gateCommands: parseJson(String(row.gate_commands_json), []),
 		planFile: String(row.plan_file),
 		assignment: JSON.parse(String(row.assignment_json)) as StoredPlanSpec["assignment"],
 	};
@@ -1990,7 +1987,7 @@ export class RunStore {
 				input.runId, input.graphGeneration, input.planId, input.planFingerprint, input.fingerprintVersion,
 				input.ordinal, input.title, input.priority, input.effort,
 				input.kind, JSON.stringify(input.dependencies), input.initialStatus, input.initialStatusDetail,
-				JSON.stringify(input.gateCommands), input.planFile, JSON.stringify(input.assignment),
+				"[]", input.planFile, JSON.stringify(input.assignment),
 			);
 		}
 	}

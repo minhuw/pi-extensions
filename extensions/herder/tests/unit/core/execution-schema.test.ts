@@ -76,6 +76,47 @@ test("legacy forwarded_url is ignored by service projections and cleared on writ
 	}
 });
 
+test("legacy plan gate commands are unread and cleared on write", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-plan-spec-"));
+	try {
+		const seeded = openExecutionDatabase(planDirectory, { create: true });
+		seedManagerRun(seeded, "run-plan-spec");
+		seeded.prepare(`
+			INSERT INTO manager_plan_specs (
+				run_id, graph_generation, plan_id, plan_fingerprint, fingerprint_version, ordinal,
+				title, priority, effort, kind, dependencies_json, initial_status, initial_status_detail,
+				gate_commands_json, plan_file, assignment_json
+			) VALUES (?, 1, '001', ?, 2, 0, 'Legacy plan', 'P1', 'M', 'mechanical', '[]', 'TODO', '', ?, '001-legacy.md', ?)
+		`).run(
+			"run-plan-spec",
+			"f".repeat(64),
+			JSON.stringify(["npm test"]),
+			JSON.stringify({ id: "001" }),
+		);
+		seeded.close();
+
+		const store = new RunStore(planDirectory);
+		try {
+			const specs = store.getPlanSpecs("run-plan-spec", 1);
+			assert.equal(specs.length, 1);
+			assert.equal(Object.hasOwn(specs[0]!, "gateCommands"), false);
+			const projection = readManagerState(planDirectory);
+			assert.equal(projection.specs.length, 1);
+			assert.equal(Object.hasOwn(projection.specs[0]!, "gateCommands"), false);
+			store.putPlanSpecs(specs);
+		} finally {
+			store.close();
+		}
+
+		const written = openExecutionDatabase(planDirectory, { create: true });
+		const row = written.prepare("SELECT gate_commands_json FROM manager_plan_specs WHERE run_id = ? AND plan_id = ?").get("run-plan-spec", "001") as Record<string, unknown>;
+		assert.equal(row.gate_commands_json, "[]");
+		written.close();
+	} finally {
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
 test("unsupported pre-18 execution schemas fail closed without mutation", () => {
 	for (const version of [6, 13, 17]) {
 		const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `herder-execution-schema-unsupported-${version}-`));

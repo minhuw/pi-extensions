@@ -794,9 +794,6 @@ function compilePlanSpecs(input: {
 			dependencies: plan.dependencies,
 			initialStatus: prior?.initialStatus ?? plan.status as StoredPlanSpec["initialStatus"],
 			initialStatusDetail: prior?.initialStatusDetail ?? plan.statusDetail,
-			// Compatibility evidence only. Natural-language plans are not executable
-			// configuration; final gates come from the main session.
-			gateCommands: prior?.gateCommands ?? [],
 			planFile: semantic.planFile,
 			assignment,
 		} satisfies StoredPlanSpec;

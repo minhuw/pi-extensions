@@ -228,7 +228,6 @@ function writeOverlay(
     dependencies: [],
     initialStatus: input.initialStatus ?? "TODO",
     initialStatusDetail: "",
-    gateCommands: [],
     planFile: `${input.planId}-cleanup-fixture.md`,
     assignment: {
       snapshotSha256: "f".repeat(64),

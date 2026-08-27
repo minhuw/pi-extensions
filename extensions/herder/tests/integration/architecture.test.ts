@@ -82,4 +82,5 @@ test("runtime and profiles expose only Pi host behavior", () => {
 	assert.match(manager, /assets.*roles.*contracts/);
 	assert.match(manager, /assets.*review.*code-review-protocol/);
 	assert.doesNotMatch(manager, /extractGateCommands|runGates\(/);
+	assert.doesNotMatch(manager, /gateCommands/);
 });

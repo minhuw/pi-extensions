@@ -161,7 +161,6 @@ function spec(
 		dependencies,
 		initialStatus,
 		initialStatusDetail: initialStatus === "BLOCKED" ? "waiting on a decision" : "",
-		gateCommands: [],
 		planFile: `${planId}-${title.toLowerCase()}.md`,
 		assignment: {
 			snapshotSha256: "s".repeat(64),

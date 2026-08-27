@@ -271,7 +271,6 @@ test("manager projection preserves populated manager domains", () => {
 			dependencies: ["002"],
 			initialStatus: "TODO",
 			initialStatusDetail: "waiting",
-			gateCommands: ["npm test"],
 			planFile: "001-projection.md",
 		}],
 			plans: [{

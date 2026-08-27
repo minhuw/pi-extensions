@@ -350,7 +350,6 @@ function createAttentionFixture(afterRootCreated?: (root: string) => void) {
         dependencies: [],
         initialStatus: "BLOCKED",
         initialStatusDetail: "awaiting decision",
-        gateCommands: [],
         planFile: "001-decision.md",
         assignment: {
           snapshotSha256: "s".repeat(64),
@@ -508,7 +507,6 @@ function createManagerLifecycleFixture() {
         dependencies,
         initialStatus: "TODO",
         initialStatusDetail: "",
-        gateCommands: [],
         planFile: `${planId}-${title.toLowerCase()}.md`,
         assignment: {
           snapshotSha256: "s".repeat(64),
