@@ -66,6 +66,19 @@ test("Pi profile catalogs normalize singleton service tiers", () => {
 	}
 });
 
+test("Pi profile catalogs reject unsupported effort values", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "herder-pi-profile-effort-"));
+	try {
+		const modified = JSON.parse(readFileSync(catalog, "utf8"));
+		modified.profiles[0].orchestrator.effort = "bogus";
+		const fixture = path.join(root, "profiles.json");
+		writeFileSync(fixture, JSON.stringify(modified));
+		assert.throws(() => loadPiProfile(fixture, "eclipse"), /invalid effort/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("Pi rejects thinking levels that the resolved model cannot honor", () => {
 	const grok = {
 		provider: "proxy",
