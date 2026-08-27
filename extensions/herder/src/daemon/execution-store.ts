@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { WORKER_ROLES, integrationRepairEpisodeId, sha256, stableJson } from "../shared/protocol.ts"
+import { WORKER_ROLES } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -578,32 +578,192 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
   database.exec("PRAGMA synchronous = FULL")
 }
 
-const SCHEMA_9_TABLES = `
-  CREATE TABLE IF NOT EXISTS manager_operations (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation_id TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite')),
-    payload_json TEXT NOT NULL,
-    payload_sha256 TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    result_json TEXT,
-    error TEXT,
-    accepted_at TEXT NOT NULL,
-    started_at TEXT,
-    finished_at TEXT,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
-
-  CREATE TABLE IF NOT EXISTS manager_snapshots (
+function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
+  const row = database.prepare("PRAGMA user_version").get() as SqlRow
+  const version = Number(row.user_version)
+  if (version === EXECUTION_SCHEMA_VERSION) return
+  if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
+  if (!allowInitialize) fail("Execution database has no initialized schema")
+  database.exec(`
+CREATE TABLE attempts (
+        attempt_id TEXT PRIMARY KEY NOT NULL,
+        plan_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        model TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+        cached_input_tokens INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+        output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+        reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+        source TEXT NOT NULL,
+        round_number INTEGER CHECK (round_number IS NULL OR round_number BETWEEN 1 AND 6),
+        generation TEXT,
+        harness TEXT,
+        service_tier TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+        nested_usage_json TEXT,
+        recorded_at TEXT NOT NULL
+      );
+CREATE TABLE run_configuration (
+        singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+        profile_name TEXT NOT NULL,
+        profile_sha256 TEXT NOT NULL,
+        host TEXT NOT NULL,
+        roles_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      );
+CREATE TABLE manager_runs (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        repository_root TEXT NOT NULL,
+        plan_directory TEXT NOT NULL,
+        plan_name TEXT NOT NULL,
+        host TEXT NOT NULL CHECK (host = 'pi'),
+        profile_name TEXT NOT NULL,
+        profile_sha256 TEXT NOT NULL,
+        max_parallel INTEGER NOT NULL CHECK (max_parallel > 0),
+        current_generation INTEGER NOT NULL CHECK (current_generation > 0),
+        graph_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('initializing', 'running', 'paused', 'needs_input', 'complete', 'failed', 'stopped')),
+        checkout_state_token TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        integration_branch TEXT NOT NULL,
+        integration_worktree TEXT NOT NULL,
+        dashboard_url TEXT,
+        terminal_detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+CREATE TABLE manager_generations (
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        graph_sha256 TEXT NOT NULL,
+        parent_generation INTEGER,
+        run_assignment_path TEXT NOT NULL,
+        run_assignment_sha256 TEXT NOT NULL,
+        run_snapshot_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, generation)
+      );
+CREATE TABLE manager_plans (
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        phase TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        worktree TEXT NOT NULL,
+        assignment_path TEXT NOT NULL,
+        assignment_sha256 TEXT NOT NULL,
+        snapshot_sha256 TEXT NOT NULL,
+        generation_base TEXT NOT NULL,
+        review_pass INTEGER NOT NULL DEFAULT 0 CHECK (review_pass >= 0),
+        findings_json TEXT NOT NULL DEFAULT '[]',
+        repair_json TEXT NOT NULL DEFAULT '[]',
+        gate_json TEXT NOT NULL DEFAULT '[]',
+        approved_base TEXT,
+        approved_head TEXT,
+        approved_tree TEXT,
+        rebase_json TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, plan_id)
+      );
+CREATE TABLE manager_events (
+        event_id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+CREATE TABLE manager_actions (
+        action_id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        role TEXT NOT NULL,
+        attempt_id TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state IN ('proposed', 'dispatched', 'terminal', 'cancelled')),
+        agent_type TEXT NOT NULL,
+        model TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        service_tier TEXT,
+        worker_mode TEXT NOT NULL,
+        task_name TEXT NOT NULL,
+        lease_reason TEXT NOT NULL,
+        host_handle TEXT,
+        result_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+CREATE TABLE manager_service (
+        singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+        instance_id TEXT NOT NULL,
+        pid INTEGER NOT NULL CHECK (pid > 0),
+        port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+        auth_token TEXT NOT NULL,
+        dashboard_url TEXT NOT NULL,
+        forwarded_url TEXT,
+        started_at TEXT NOT NULL
+      );
+CREATE TABLE manager_plan_specs (
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        graph_generation INTEGER NOT NULL CHECK (graph_generation > 0),
+        plan_id TEXT NOT NULL,
+        plan_fingerprint TEXT NOT NULL,
+        fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK (fingerprint_version = 2),
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        title TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        dependencies_json TEXT NOT NULL,
+        initial_status TEXT NOT NULL CHECK (initial_status IN ('TODO', 'DONE', 'BLOCKED', 'REJECTED')),
+        initial_status_detail TEXT NOT NULL,
+        gate_commands_json TEXT NOT NULL,
+        plan_file TEXT NOT NULL,
+        assignment_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, graph_generation, plan_id)
+      );
+CREATE TABLE manager_plan_edits (
+        run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        edit_token TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
+        base_graph_sha256 TEXT NOT NULL,
+        base_plan_fingerprint TEXT NOT NULL,
+        proposed_graph_sha256 TEXT,
+        proposed_plan_fingerprint TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+CREATE TABLE manager_approvals (
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        reviewer_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
+        decision_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
+        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge')),
+        assignment_sha256 TEXT NOT NULL,
+        approved_base TEXT NOT NULL,
+        approved_head TEXT NOT NULL,
+        approved_tree TEXT NOT NULL,
+        review_result_sha256 TEXT NOT NULL,
+        decision_result_sha256 TEXT NOT NULL,
+        proof_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, plan_id, generation)
+      );
+CREATE TABLE manager_snapshots (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
     revision INTEGER NOT NULL CHECK (revision > 0),
     reply_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS manager_verifications (
+CREATE TABLE manager_verifications (
     request_id TEXT PRIMARY KEY NOT NULL,
     run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
     generation INTEGER NOT NULL CHECK (generation > 0),
@@ -622,41 +782,8 @@ const SCHEMA_9_TABLES = `
     terminal_detail TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS manager_verifications_run_generation ON manager_verifications(run_id, generation, created_at);
-
-  CREATE TABLE IF NOT EXISTS manager_attention_requests (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id TEXT NOT NULL UNIQUE,
-    run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-    plan_id TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation > 0),
-    round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
-    action_id TEXT,
-    request_sha256 TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'awaiting_input', 'editing', 'resolved')),
-    cause TEXT NOT NULL,
-    detail TEXT NOT NULL,
-    detail_sha256 TEXT NOT NULL,
-    continuation_role TEXT NOT NULL,
-    continuation_phase TEXT NOT NULL,
-    question TEXT,
-    recommended_action TEXT,
-    recovery_json TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    resolved_at TEXT
-  );
-  CREATE INDEX IF NOT EXISTS manager_attention_requests_run_state
-    ON manager_attention_requests(run_id, state, plan_id, sequence);
-  CREATE UNIQUE INDEX IF NOT EXISTS manager_attention_requests_unresolved_identity
-    ON manager_attention_requests(run_id, plan_id, generation, cause)
-    WHERE state <> 'resolved';
-`
-
-const SCHEMA_11_TABLES = `
-  CREATE TABLE IF NOT EXISTS manager_reignite_requests (
+  , predecessor_request_id TEXT, repair_id TEXT, repair_round INTEGER);
+CREATE TABLE manager_reignite_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
     generation INTEGER NOT NULL CHECK (generation > 0),
@@ -676,12 +803,7 @@ const SCHEMA_11_TABLES = `
     detail TEXT,
     created_at TEXT NOT NULL
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS manager_reignite_requests_run_generation
-    ON manager_reignite_requests(run_id, generation);
-`
-
-const SCHEMA_13_TABLES = `
-  CREATE TABLE IF NOT EXISTS manager_integration_repairs (
+CREATE TABLE manager_integration_repairs (
     repair_id TEXT PRIMARY KEY NOT NULL,
     run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
     generation INTEGER NOT NULL CHECK (generation > 0),
@@ -709,28 +831,33 @@ const SCHEMA_13_TABLES = `
     detail TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS manager_integration_repairs_run_request
-    ON manager_integration_repairs(run_id, request_id);
-  CREATE INDEX IF NOT EXISTS manager_integration_repairs_run_state
-    ON manager_integration_repairs(run_id, state, generation, round_number);
-
-  CREATE TABLE IF NOT EXISTS manager_integration_repair_audits (
+  , begin_ref_snapshot_json TEXT, begin_ref_snapshot_sha256 TEXT, accepted_code_rounds INTEGER NOT NULL DEFAULT 0 CHECK (accepted_code_rounds BETWEEN 0 AND 3), current_episode_id TEXT);
+CREATE TABLE manager_integration_repair_audits (
     audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
     repair_id TEXT NOT NULL REFERENCES manager_integration_repairs(repair_id) ON DELETE CASCADE,
     operation_id TEXT NOT NULL,
     action TEXT NOT NULL,
     payload_sha256 TEXT NOT NULL,
     evidence_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
+    created_at TEXT NOT NULL, episode_id TEXT,
     UNIQUE(repair_id, operation_id, action)
   );
-  CREATE INDEX IF NOT EXISTS manager_integration_repair_audits_repair
-    ON manager_integration_repair_audits(repair_id, audit_id);
-`
-
-const SCHEMA_15_TABLES = `
-  CREATE TABLE IF NOT EXISTS manager_integration_repair_episodes (
+CREATE TABLE "manager_operations" (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite', 'integration_repair', 'repair')),
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        result_json TEXT,
+        error TEXT,
+        accepted_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+CREATE TABLE manager_integration_repair_episodes (
     episode_id TEXT PRIMARY KEY NOT NULL,
     repair_id TEXT NOT NULL REFERENCES manager_integration_repairs(repair_id) ON DELETE CASCADE,
     request_id TEXT NOT NULL,
@@ -750,111 +877,7 @@ const SCHEMA_15_TABLES = `
     closed_at TEXT,
     UNIQUE(repair_id, request_id)
   );
-  CREATE INDEX IF NOT EXISTS manager_integration_repair_episodes_repair
-    ON manager_integration_repair_episodes(repair_id, created_at, episode_id);
-  CREATE INDEX IF NOT EXISTS manager_integration_repair_episodes_evidence
-    ON manager_integration_repair_episodes(repair_id, integration_head, integration_tree, canonical_gates_sha256, transient_used);
-`
-
-function parseMigrationRecord(value: unknown): SqlRow {
-  if (typeof value !== "string" || value.length === 0) return {}
-  try {
-    const parsed = JSON.parse(value)
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as SqlRow : {}
-  } catch {
-    return {}
-  }
-}
-
-function applySchema15(database: Database): void {
-  const repairColumns = database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>
-  if (!repairColumns.some((column) => column.name === "accepted_code_rounds")) {
-    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN accepted_code_rounds INTEGER NOT NULL DEFAULT 0 CHECK (accepted_code_rounds BETWEEN 0 AND 3);")
-  }
-  if (!repairColumns.some((column) => column.name === "current_episode_id")) {
-    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN current_episode_id TEXT;")
-  }
-  const auditColumns = database.prepare("PRAGMA table_info(manager_integration_repair_audits)").all() as Array<{ name: string }>
-  if (!auditColumns.some((column) => column.name === "episode_id")) {
-    database.exec("ALTER TABLE manager_integration_repair_audits ADD COLUMN episode_id TEXT;")
-  }
-  database.exec(SCHEMA_15_TABLES)
-
-  const rows = database.prepare(`
-    SELECT r.*, v.integration_head AS verification_head, v.integration_tree AS verification_tree, v.manifest_json AS verification_manifest_json
-    FROM manager_integration_repairs r
-    LEFT JOIN manager_verifications v ON v.request_id = r.request_id
-  `).all() as SqlRow[]
-  const insert = database.prepare(`
-    INSERT OR IGNORE INTO manager_integration_repair_episodes (
-      episode_id, repair_id, request_id, request_sha256, integration_head, integration_tree,
-      canonical_gates_json, canonical_gates_sha256, classification, state,
-      operation_id, operation_payload_sha256, transient_used, transient_use_evidence_sha256,
-      created_at, updated_at, closed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, NULL)
-  `)
-  const updateCurrent = database.prepare("UPDATE manager_integration_repairs SET current_episode_id = ? WHERE repair_id = ?")
-  const updateAudits = database.prepare("UPDATE manager_integration_repair_audits SET episode_id = ? WHERE repair_id = ? AND episode_id IS NULL")
-  for (const row of rows) {
-    const currentEpisodeId = row.current_episode_id === null || row.current_episode_id === undefined ? "" : String(row.current_episode_id)
-    if (currentEpisodeId) {
-      updateAudits.run(currentEpisodeId, String(row.repair_id))
-      continue
-    }
-    const requestId = String(row.request_id)
-    const requestSha256 = String(row.request_sha256)
-    const integrationHead = String(row.verification_head || row.parent_commit)
-    const integrationTree = String(row.verification_tree || row.current_tree || row.parent_commit)
-    const rowCanonicalGatesJson = String(row.canonical_gates_json || "[]")
-    let rowCanonicalGates: unknown = []
-    try { rowCanonicalGates = JSON.parse(rowCanonicalGatesJson) } catch { rowCanonicalGates = [] }
-    // A schema-14 row may seed a provisional episode from mutable repair gates.
-    // Prefer the durable current verification manifest so audit replay starts with canonical evidence.
-    const verificationManifest = parseMigrationRecord(row.verification_manifest_json)
-    const canonicalGates = Array.isArray(verificationManifest.gates)
-      ? verificationManifest.gates
-      : Array.isArray(rowCanonicalGates) ? rowCanonicalGates : []
-    const canonicalGatesJson = JSON.stringify(canonicalGates)
-    const canonicalGatesSha256 = Array.isArray(verificationManifest.gates)
-      ? sha256(stableJson(canonicalGates))
-      : String(row.canonical_gates_sha256)
-    const episodeId = integrationRepairEpisodeId({
-      requestId,
-      requestSha256,
-      integrationHead,
-      integrationTree,
-      canonicalGates: Array.isArray(canonicalGates) ? canonicalGates as never[] : [],
-    })
-    const now = String(row.updated_at || row.created_at || new Date().toISOString())
-    insert.run(
-      episodeId,
-      String(row.repair_id),
-      requestId,
-      requestSha256,
-      integrationHead,
-      integrationTree,
-      canonicalGatesJson,
-      canonicalGatesSha256,
-      row.classification === null || row.classification === undefined ? null : String(row.classification),
-      String(row.state),
-      row.operation_id === null || row.operation_id === undefined ? null : String(row.operation_id),
-      row.operation_payload_sha256 === null || row.operation_payload_sha256 === undefined ? null : String(row.operation_payload_sha256),
-      now,
-      now,
-    )
-    updateCurrent.run(episodeId, String(row.repair_id))
-    updateAudits.run(episodeId, String(row.repair_id))
-  }
-  database.exec("PRAGMA user_version = 15;")
-}
-
-function applySchema18(database: Database): void {
-  const unsupported = database.prepare("SELECT 1 FROM manager_attention_requests WHERE state = 'delegated' LIMIT 1").get()
-  if (unsupported) fail("Unsupported persisted attention state 'delegated'; operator intervention or a fresh run database is required")
-
-  database.exec("CREATE TEMP TABLE schema18_attention_sequence AS SELECT seq FROM sqlite_sequence WHERE name = 'manager_attention_requests' LIMIT 1")
-  database.exec(`
-    CREATE TABLE manager_attention_requests_v18 (
+CREATE TABLE "manager_attention_requests" (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       request_id TEXT NOT NULL UNIQUE,
       run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
@@ -877,329 +900,34 @@ function applySchema18(database: Database): void {
       updated_at TEXT NOT NULL,
       resolved_at TEXT
     );
-    INSERT INTO manager_attention_requests_v18 (
-      sequence, request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
-      kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, question,
-      recommended_action, recovery_json, created_at, updated_at, resolved_at
-    ) SELECT
-      sequence, request_id, run_id, plan_id, generation, round_number, action_id, request_sha256,
-      kind, state, cause, detail, detail_sha256, continuation_role, continuation_phase, question,
-      recommended_action, recovery_json, created_at, updated_at, resolved_at
-    FROM manager_attention_requests;
-    DROP TABLE manager_attention_requests;
-    ALTER TABLE manager_attention_requests_v18 RENAME TO manager_attention_requests;
-    CREATE INDEX manager_attention_requests_run_state
+CREATE INDEX attempts_plan_id ON attempts(plan_id);
+CREATE UNIQUE INDEX manager_runs_plan_directory ON manager_runs(plan_directory);
+CREATE INDEX manager_plans_phase ON manager_plans(run_id, phase, plan_id);
+CREATE INDEX manager_events_run ON manager_events(run_id, created_at, event_id);
+CREATE INDEX manager_actions_run_state ON manager_actions(run_id, state, plan_id);
+CREATE UNIQUE INDEX manager_plan_specs_ordinal ON manager_plan_specs(run_id, graph_generation, ordinal);
+CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
+CREATE INDEX manager_verifications_run_generation ON manager_verifications(run_id, generation, created_at);
+CREATE UNIQUE INDEX manager_reignite_requests_run_generation
+    ON manager_reignite_requests(run_id, generation);
+CREATE UNIQUE INDEX manager_integration_repairs_run_request
+    ON manager_integration_repairs(run_id, request_id);
+CREATE INDEX manager_integration_repairs_run_state
+    ON manager_integration_repairs(run_id, state, generation, round_number);
+CREATE INDEX manager_integration_repair_audits_repair
+    ON manager_integration_repair_audits(repair_id, audit_id);
+CREATE INDEX manager_operations_state_sequence ON manager_operations(state, sequence);
+CREATE INDEX manager_integration_repair_episodes_repair
+    ON manager_integration_repair_episodes(repair_id, created_at, episode_id);
+CREATE INDEX manager_integration_repair_episodes_evidence
+    ON manager_integration_repair_episodes(repair_id, integration_head, integration_tree, canonical_gates_sha256, transient_used);
+CREATE INDEX manager_attention_requests_run_state
       ON manager_attention_requests(run_id, state, plan_id, sequence);
-    CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
+CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       ON manager_attention_requests(run_id, plan_id, generation, cause)
       WHERE state <> 'resolved';
-    DELETE FROM sqlite_sequence WHERE name = 'manager_attention_requests';
-    INSERT INTO sqlite_sequence (name, seq)
-      SELECT 'manager_attention_requests', seq FROM schema18_attention_sequence;
-    DROP TABLE schema18_attention_sequence;
+PRAGMA user_version = 18;
   `)
-  database.exec("PRAGMA user_version = 18;")
-}
-
-function applySchema12(database: Database): void {
-  const columns = database.prepare("PRAGMA table_info(manager_reignite_requests)").all() as Array<{ name: string }>
-  if (!columns.some((column) => column.name === "allocated_plan_directory")) {
-    database.exec("ALTER TABLE manager_reignite_requests ADD COLUMN allocated_plan_directory TEXT;")
-  }
-  if (!columns.some((column) => column.name === "detail")) {
-    database.exec("ALTER TABLE manager_reignite_requests ADD COLUMN detail TEXT;")
-  }
-  const operationsSql = String((database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_operations'").get() as { sql?: string } | undefined)?.sql || "")
-  if (operationsSql && !operationsSql.includes("'reignite'")) {
-    database.exec(`
-      CREATE TABLE manager_operations_v12 (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation_id TEXT NOT NULL UNIQUE,
-        kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite')),
-        payload_json TEXT NOT NULL,
-        payload_sha256 TEXT NOT NULL,
-        state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
-        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-        result_json TEXT,
-        error TEXT,
-        accepted_at TEXT NOT NULL,
-        started_at TEXT,
-        finished_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      INSERT INTO manager_operations_v12 (
-        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
-        result_json, error, accepted_at, started_at, finished_at, updated_at
-      ) SELECT
-        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
-        result_json, error, accepted_at, started_at, finished_at, updated_at
-      FROM manager_operations;
-      DROP TABLE manager_operations;
-      ALTER TABLE manager_operations_v12 RENAME TO manager_operations;
-      CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
-    `)
-  }
-  database.exec("PRAGMA user_version = 12;")
-}
-
-function applySchema13(database: Database): void {
-  database.exec(SCHEMA_13_TABLES)
-  const verificationColumns = database.prepare("PRAGMA table_info(manager_verifications)").all() as Array<{ name: string }>
-  const addVerificationColumn = (name: string, definition: string): void => {
-    if (!verificationColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE manager_verifications ADD COLUMN ${name} ${definition};`)
-  }
-  addVerificationColumn("predecessor_request_id", "TEXT")
-  addVerificationColumn("repair_id", "TEXT")
-  addVerificationColumn("repair_round", "INTEGER")
-
-  const operationsSql = String((database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'manager_operations'").get() as { sql?: string } | undefined)?.sql || "")
-  if (operationsSql && (!operationsSql.includes("'integration_repair'") || !operationsSql.includes("'repair'"))) {
-    database.exec(`
-      CREATE TABLE manager_operations_v13 (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation_id TEXT NOT NULL UNIQUE,
-        kind TEXT NOT NULL CHECK (kind IN ('start', 'event', 'edit', 'stop', 'verification', 'reignite', 'integration_repair', 'repair')),
-        payload_json TEXT NOT NULL,
-        payload_sha256 TEXT NOT NULL,
-        state TEXT NOT NULL CHECK (state IN ('accepted', 'running', 'succeeded', 'failed')),
-        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-        result_json TEXT,
-        error TEXT,
-        accepted_at TEXT NOT NULL,
-        started_at TEXT,
-        finished_at TEXT,
-        updated_at TEXT NOT NULL
-      );
-      INSERT INTO manager_operations_v13 (
-        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
-        result_json, error, accepted_at, started_at, finished_at, updated_at
-      ) SELECT
-        sequence, operation_id, kind, payload_json, payload_sha256, state, attempt_count,
-        result_json, error, accepted_at, started_at, finished_at, updated_at
-      FROM manager_operations;
-      DROP TABLE manager_operations;
-      ALTER TABLE manager_operations_v13 RENAME TO manager_operations;
-      CREATE INDEX IF NOT EXISTS manager_operations_state_sequence ON manager_operations(state, sequence);
-    `)
-  }
-  database.exec("PRAGMA user_version = 13;")
-}
-
-function applySchema14(database: Database): void {
-  const columns = database.prepare("PRAGMA table_info(manager_integration_repairs)").all() as Array<{ name: string }>
-  if (!columns.some((column) => column.name === "begin_ref_snapshot_json")) {
-    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN begin_ref_snapshot_json TEXT;")
-  }
-  if (!columns.some((column) => column.name === "begin_ref_snapshot_sha256")) {
-    database.exec("ALTER TABLE manager_integration_repairs ADD COLUMN begin_ref_snapshot_sha256 TEXT;")
-  }
-  database.exec("PRAGMA user_version = 14;")
-}
-
-function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
-  const row = database.prepare("PRAGMA user_version").get() as SqlRow
-  const version = Number(row.user_version)
-  if (version === EXECUTION_SCHEMA_VERSION) return
-  if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
-  if (!allowInitialize) fail("Execution database has no initialized schema")
-  database.exec(`
-      CREATE TABLE attempts (
-        attempt_id TEXT PRIMARY KEY NOT NULL,
-        plan_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        model TEXT NOT NULL,
-        effort TEXT NOT NULL,
-        outcome TEXT NOT NULL,
-        input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
-        cached_input_tokens INTEGER CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
-        output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
-        reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
-        source TEXT NOT NULL,
-        round_number INTEGER CHECK (round_number IS NULL OR round_number BETWEEN 1 AND 6),
-        generation TEXT,
-        harness TEXT,
-        service_tier TEXT,
-        started_at TEXT,
-        finished_at TEXT,
-        duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
-        nested_usage_json TEXT,
-        recorded_at TEXT NOT NULL
-      );
-      CREATE INDEX attempts_plan_id ON attempts(plan_id);
-
-      CREATE TABLE run_configuration (
-        singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-        profile_name TEXT NOT NULL,
-        profile_sha256 TEXT NOT NULL,
-        host TEXT NOT NULL,
-        roles_json TEXT NOT NULL,
-        recorded_at TEXT NOT NULL
-      );
-
-      CREATE TABLE manager_runs (
-        run_id TEXT PRIMARY KEY NOT NULL,
-        repository_root TEXT NOT NULL,
-        plan_directory TEXT NOT NULL,
-        plan_name TEXT NOT NULL,
-        host TEXT NOT NULL CHECK (host = 'pi'),
-        profile_name TEXT NOT NULL,
-        profile_sha256 TEXT NOT NULL,
-        max_parallel INTEGER NOT NULL CHECK (max_parallel > 0),
-        current_generation INTEGER NOT NULL CHECK (current_generation > 0),
-        graph_sha256 TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('initializing', 'running', 'paused', 'needs_input', 'complete', 'failed', 'stopped')),
-        checkout_state_token TEXT NOT NULL,
-        base_commit TEXT NOT NULL,
-        integration_branch TEXT NOT NULL,
-        integration_worktree TEXT NOT NULL,
-        dashboard_url TEXT,
-        terminal_detail TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE UNIQUE INDEX manager_runs_plan_directory ON manager_runs(plan_directory);
-
-      CREATE TABLE manager_generations (
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        generation INTEGER NOT NULL CHECK (generation > 0),
-        graph_sha256 TEXT NOT NULL,
-        parent_generation INTEGER,
-        run_assignment_path TEXT NOT NULL,
-        run_assignment_sha256 TEXT NOT NULL,
-        run_snapshot_sha256 TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (run_id, generation)
-      );
-
-      CREATE TABLE manager_plans (
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        plan_id TEXT NOT NULL,
-        generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
-        phase TEXT NOT NULL,
-        branch TEXT NOT NULL,
-        worktree TEXT NOT NULL,
-        assignment_path TEXT NOT NULL,
-        assignment_sha256 TEXT NOT NULL,
-        snapshot_sha256 TEXT NOT NULL,
-        generation_base TEXT NOT NULL,
-        review_pass INTEGER NOT NULL DEFAULT 0 CHECK (review_pass >= 0),
-        findings_json TEXT NOT NULL DEFAULT '[]',
-        repair_json TEXT NOT NULL DEFAULT '[]',
-        gate_json TEXT NOT NULL DEFAULT '[]',
-        approved_base TEXT,
-        approved_head TEXT,
-        approved_tree TEXT,
-        rebase_json TEXT,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (run_id, plan_id)
-      );
-      CREATE INDEX manager_plans_phase ON manager_plans(run_id, phase, plan_id);
-
-      CREATE TABLE manager_events (
-        event_id TEXT PRIMARY KEY NOT NULL,
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        kind TEXT NOT NULL,
-        payload_sha256 TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX manager_events_run ON manager_events(run_id, created_at, event_id);
-
-      CREATE TABLE manager_actions (
-        action_id TEXT PRIMARY KEY NOT NULL,
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        plan_id TEXT NOT NULL,
-        generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
-        role TEXT NOT NULL,
-        attempt_id TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL CHECK (state IN ('proposed', 'dispatched', 'terminal', 'cancelled')),
-        agent_type TEXT NOT NULL,
-        model TEXT NOT NULL,
-        effort TEXT NOT NULL,
-        service_tier TEXT,
-        worker_mode TEXT NOT NULL,
-        task_name TEXT NOT NULL,
-        lease_reason TEXT NOT NULL,
-        host_handle TEXT,
-        result_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX manager_actions_run_state ON manager_actions(run_id, state, plan_id);
-
-      CREATE TABLE manager_service (
-        singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-        instance_id TEXT NOT NULL,
-        pid INTEGER NOT NULL CHECK (pid > 0),
-        port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
-        auth_token TEXT NOT NULL,
-        dashboard_url TEXT NOT NULL,
-        forwarded_url TEXT,
-        started_at TEXT NOT NULL
-      );
-
-      CREATE TABLE manager_plan_specs (
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        graph_generation INTEGER NOT NULL CHECK (graph_generation > 0),
-        plan_id TEXT NOT NULL,
-        plan_fingerprint TEXT NOT NULL,
-        fingerprint_version INTEGER NOT NULL DEFAULT 2 CHECK (fingerprint_version = 2),
-        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-        title TEXT NOT NULL,
-        priority TEXT NOT NULL,
-        effort TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        dependencies_json TEXT NOT NULL,
-        initial_status TEXT NOT NULL CHECK (initial_status IN ('TODO', 'DONE', 'BLOCKED', 'REJECTED')),
-        initial_status_detail TEXT NOT NULL,
-        gate_commands_json TEXT NOT NULL,
-        plan_file TEXT NOT NULL,
-        assignment_json TEXT NOT NULL,
-        PRIMARY KEY (run_id, graph_generation, plan_id)
-      );
-      CREATE UNIQUE INDEX manager_plan_specs_ordinal ON manager_plan_specs(run_id, graph_generation, ordinal);
-
-      CREATE TABLE manager_plan_edits (
-        run_id TEXT PRIMARY KEY NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        plan_id TEXT NOT NULL,
-        edit_token TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL CHECK (state IN ('reserved', 'barrier')),
-        base_graph_sha256 TEXT NOT NULL,
-        base_plan_fingerprint TEXT NOT NULL,
-        proposed_graph_sha256 TEXT,
-        proposed_plan_fingerprint TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE manager_approvals (
-        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
-        plan_id TEXT NOT NULL,
-        generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
-        reviewer_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
-        decision_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
-        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge')),
-        assignment_sha256 TEXT NOT NULL,
-        approved_base TEXT NOT NULL,
-        approved_head TEXT NOT NULL,
-        approved_tree TEXT NOT NULL,
-        review_result_sha256 TEXT NOT NULL,
-        decision_result_sha256 TEXT NOT NULL,
-        proof_sha256 TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (run_id, plan_id, generation)
-      );
-      CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
-      ${SCHEMA_9_TABLES}
-      ${SCHEMA_11_TABLES}
-  `)
-  applySchema12(database)
-  applySchema13(database)
-  applySchema14(database)
-  applySchema15(database)
-  applySchema18(database)
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
