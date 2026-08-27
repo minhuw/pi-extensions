@@ -83,10 +83,10 @@ The facts the executor needs, inlined — never "as discussed" or "see audit":
 
 | Purpose | Command (cwd) | Expected on success |
 |---------|---------------|---------------------|
-| Install | `npm install` (repo root) | exit 0 |
+| Install | `npm ci` (repo root) | exit 0 |
 | Typecheck | `npm run typecheck` (repo root) | exit 0, no errors |
 | Full Herder suite | `npm run test:herder` (repo root) | all pass |
-| Focused tests | `node --experimental-strip-types --test tests/unit/<area>.test.ts` (`extensions/herder/`) | all pass |
+| Focused tests | `npm run test:herder -- extensions/herder/tests/unit/<area>.test.ts` (repo root) | all pass |
 
 (Exact commands from this repo — verified during recon, not guessed.)
 

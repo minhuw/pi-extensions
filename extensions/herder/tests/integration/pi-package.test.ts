@@ -13,6 +13,7 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	const rootReadme = await readFile(path.join(repositoryRoot, "README.md"), "utf8");
 	const herderReadme = await readFile(path.join(extensionRoot, "README.md"), "utf8");
 	const adapterReadme = await readFile(path.join(extensionRoot, "adapters/README.md"), "utf8");
+	const planTemplate = await readFile(path.join(extensionRoot, "skills/plans/references/plan-template.md"), "utf8");
 	assert.deepEqual(manifest.engines, { node: ">=22.19.0" });
 	assert.deepEqual(lock.packages[""].engines, { node: ">=22.19.0" });
 	assert.match(rootReadme, /Node >=22\.19\.0/);
@@ -25,6 +26,9 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(herderReadme, /pi install npm:@ff-labs\/pi-fff/);
 	assert.match(herderReadme, /pi install npm:pi-web-access/);
+	assert.match(planTemplate, /npm ci/);
+	assert.doesNotMatch(planTemplate, /npm install/);
+	assert.match(planTemplate, /npm run test:herder --/);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.match(herderReadme, /^## Planning and execution commands$/m);
 	const expectedCommandNames = [
