@@ -458,7 +458,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			throw new Error(`Herder role extensions failed to load: ${roleExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
 		}
 		const roleTools = resolveFffToolNames(definition.tools, roleExtensions.extensions);
-		const nestedTools = createNestedAgentTools(request.action, nested);
+		const nestedTools = createNestedAgentTools(nested);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
 			agentDir: this.agentDir,

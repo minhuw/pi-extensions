@@ -8,7 +8,7 @@ import {
 	HerderNestedAgentScope,
 	type NestedWorkerSession,
 } from "../../../adapters/nested-agent-executor.ts";
-import { createNestedAgentTool, createNestedAgentTools } from "../../../adapters/nested-agent-tool.ts";
+import { createNestedAgentTools } from "../../../adapters/nested-agent-tool.ts";
 
 const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../assets/roles/pi");
 
@@ -123,7 +123,7 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 
 test("nested Agent runs one package-owned foreground recon child with the scout binding", async () => {
 	const { value, sessions } = scope();
-	const tool = createNestedAgentTool(action(), value);
+	const [tool] = createNestedAgentTools(value);
 	const result = await tool.execute("call", params(), undefined, undefined, undefined as never);
 	assert.match(resultText(result), /^Agent completed \(↻1 · 1 tool · 16t · /);
 	assert.equal(sessions.length, 1);
@@ -177,7 +177,7 @@ test("nested results keep a distinct no-result diagnostic and complete empty con
 
 test("background children return IDs and must be collected through the scoped result tool", async () => {
 	const { value } = scope();
-	const [agentTool, resultTool] = createNestedAgentTools(action(), value);
+	const [agentTool, resultTool] = createNestedAgentTools(value);
 	assert.equal(agentTool.executionMode, "parallel");
 	assert.equal(resultTool.executionMode, "parallel");
 	const launched = await agentTool.execute("background", params({ run_in_background: true }), undefined, undefined, undefined as never);
@@ -200,7 +200,7 @@ test("each role may run four children concurrently and rejects a fifth", async (
 			return session;
 		},
 	});
-	const [agentTool] = createNestedAgentTools(action(), value);
+	const [agentTool] = createNestedAgentTools(value);
 	for (let index = 0; index < 4; index += 1) {
 		await agentTool.execute(`background-${index}`, params({ run_in_background: true }), undefined, undefined, undefined as never);
 	}
@@ -237,7 +237,7 @@ test("closing a parent action aborts, settles, and disposes an in-flight child",
 
 test("nested worker inherits the parent action binding", async () => {
 	const { value } = scope();
-	const tool = createNestedAgentTool(action(), value);
+	const [tool] = createNestedAgentTools(value);
 	await tool.execute("call", params({ subagent_type: "worker" }), undefined, undefined, undefined as never);
 	const snapshot = value.snapshots()[0]!;
 	assert.equal(snapshot.type, "worker");
@@ -249,7 +249,7 @@ test("nested worker inherits the parent action binding", async () => {
 test("Reviewer and Judge reject the mutation-capable package worker", async () => {
 	for (const role of ["plan-reviewer", "plan-judge"] as const) {
 		const { value } = scope(role);
-		const tool = createNestedAgentTool(action(role), value);
+		const [tool] = createNestedAgentTools(value);
 		await assert.rejects(
 			() => tool.execute("call", params({ subagent_type: "worker" }), undefined, undefined, undefined as never),
 			/may delegate only to package-owned read-only nested agent types/,
@@ -259,7 +259,7 @@ test("Reviewer and Judge reject the mutation-capable package worker", async () =
 
 test("nested Agent rejects unknown types and enforces the per-worker call cap", async () => {
 	const { value, sessions } = scope();
-	const tool = createNestedAgentTool(action(), value);
+	const [tool] = createNestedAgentTools(value);
 	await assert.rejects(
 		() => tool.execute("unknown", params({ subagent_type: "foreign" }), undefined, undefined, undefined as never),
 		/Unknown Herder nested agent type/,

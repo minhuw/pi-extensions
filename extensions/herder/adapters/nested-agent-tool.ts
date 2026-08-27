@@ -1,6 +1,5 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ManagerAction } from "../src/shared/protocol.ts";
 import {
 	HerderNestedAgentScope,
 	MAX_NESTED_CONCURRENCY_PER_ACTION,
@@ -81,7 +80,7 @@ function snapshotLine(snapshot: PiNestedAgentSnapshot): string {
 }
 
 /** Create the one-level Agent and result tools scoped to a single Herder action. */
-export function createNestedAgentTools(action: ManagerAction, scope: HerderNestedAgentScope) {
+export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 	let calls = 0;
 	const agentTool = defineTool({
 		name: "Agent",
@@ -186,9 +185,4 @@ export function createNestedAgentTools(action: ManagerAction, scope: HerderNeste
 	});
 
 	return [agentTool, resultTool] as const;
-}
-
-/** Compatibility helper for tests and callers that need only the Agent tool. */
-export function createNestedAgentTool(action: ManagerAction, scope: HerderNestedAgentScope) {
-	return createNestedAgentTools(action, scope)[0];
 }
