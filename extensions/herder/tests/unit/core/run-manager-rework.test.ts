@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { getExecutionReport } from "../../../src/core/plans.ts";
+import { getExecutionReport } from "../../../src/core/plan-report.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { recordUsageRecord } from "../../../src/daemon/execution-store.ts";

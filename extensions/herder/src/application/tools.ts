@@ -3,12 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import {
 	buildGraph,
-	getExecutionReport,
 	getShapeReport,
 	initPlanDir,
 	setTracking,
 	snapshotPlan,
 } from "../core/plans.ts";
+import { getExecutionReport } from "../core/plan-report.ts";
 import { cleanupRun, type CleanupInput, type CleanupResult } from "../daemon/git/cleanup-run.ts";
 import { forceCleanupRun, type ForceCleanupInput } from "../daemon/git/force-cleanup-run.ts";
 import { resetHerderPlanSet, type HerderResetInput, type HerderResetResult } from "../daemon/git/reset-plan-set.ts";

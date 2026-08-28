@@ -8,13 +8,13 @@ import { spawnSync } from "node:child_process"
 import test from "node:test"
 import {
   buildGraph,
-  getExecutionReport,
   getShapeReport,
   initPlanDir,
   projectStatuses,
   setTracking,
   snapshotPlan,
 } from "../../../src/core/plans.ts"
+import { getExecutionReport } from "../../../src/core/plan-report.ts"
 import {
   executionDatabasePath,
   readRunConfiguration,
@@ -291,6 +291,9 @@ try {
   assert.equal(planReport.lifecycle.status, "TODO")
   assert.equal(required(planReport.runConfiguration).profile, "poorman")
   expectFailure(() => getExecutionReport(valid.planDir, "999"), /is not indexed/)
+  assert.equal(getExecutionReport(valid.planDir, "0002").lifecycle.status, "TODO")
+  expectFailure(() => getExecutionReport(valid.planDir, "missing"), /Cannot find a numeric plan ID in plan ID: "missing"/)
+  expectFailure(() => getExecutionReport(valid.planDir, "9007199254740992"), /Invalid plan ID in plan ID: "9007199254740992"/)
   assert.deepEqual(fs.readFileSync(executionDatabasePath(valid.planDir)), databaseBeforeReports)
   expectFailure(
     () => recordUsageRecord(valid.planDir, { ...implementerUsage, outcome: "FAILED" }),
