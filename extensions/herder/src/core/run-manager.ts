@@ -2782,6 +2782,8 @@ export class HerderRunManager {
 			if (stored.state === "passed") {
 				if (run.status !== "running") this.store.updateRun({ status: "running", terminalDetail: "Recovering passed verification." });
 				run = this.store.getRun()!;
+				const refreshed = this.refreshReply();
+				if (refreshed.status !== "running") return refreshed;
 				return this.reconcile(boundProfile(run, this.store));
 			}
 			return this.reply();
@@ -2847,6 +2849,8 @@ export class HerderRunManager {
 				this.store.updateRun({ status: "running", terminalDetail: "Final verification passed; preparing the aggregate audit." });
 			});
 			run = this.store.getRun()!;
+			const refreshed = this.refreshReply();
+			if (refreshed.status !== "running") return refreshed;
 			return this.reconcile(boundProfile(run, this.store));
 		} catch (error) {
 			const detail = `Verification execution failed: ${error instanceof Error ? error.message : String(error)}`;

@@ -1844,6 +1844,34 @@ test("startup and exact event replay publish graph drift without waiting for the
 	}
 });
 
+test("final verification pauses on graph drift before proposing the aggregate audit", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-graph-drift-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "verification-graph-drift");
+		appendIndependentPlan(fixture);
+		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-graph-drift", [{
+			gateId: "verification-graph-drift-pass",
+			label: "verification graph drift pass",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(0)"],
+			rationale: "Passes verification while the authored graph is stale.",
+		}]);
+		assert.equal(submitted.reply.status, "paused");
+		assert.equal((submitted.reply.actions as unknown[]).length, 0);
+		assert.match(String(submitted.reply.message), /Plan graph changed after generation \d+;/);
+		const state = readManagerState(fixture.planDirectory);
+		assert.equal(state.run?.status, "paused");
+		assert.equal(state.verification?.state, "passed");
+		assert.equal(state.actions?.some((action) => action.planId === "RUN" || action.workerMode === "FINAL_AUDIT"), false);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("changed-tree verification resume rejects replacement", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-drift-test-"));
 	const fixture = writeFixture(root);
