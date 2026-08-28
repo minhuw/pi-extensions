@@ -3869,7 +3869,7 @@ export class HerderRunManager {
 			this.projectLifecycleBestEffort();
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
-		return this.reply(options.schedule === false ? "host-backpressure" : undefined);
+		return this.refreshReply(options.schedule === false ? "host-backpressure" : undefined);
 	}
 
 	async auditScheduler(): Promise<ManagerReply>;

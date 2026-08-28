@@ -12,7 +12,7 @@ import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
@@ -1704,6 +1704,36 @@ test("status snapshots revalidate live complete state before exposing a reignite
 		assert.equal(stale.reigniteRequest, undefined);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("reconcile refreshes graph drift after scheduling before publication", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reconcile-drift-race-test-"));
+	const fixture = writeFixture(root);
+	const manager = new HerderRunManager(fixture.planDirectory);
+	try {
+		const internals = manager as unknown as { schedule: (profile: ResolvedProfile) => Promise<void> };
+		const originalSchedule = internals.schedule;
+		internals.schedule = async (profile) => {
+			await originalSchedule.call(manager, profile);
+			appendIndependentPlan(fixture);
+		};
+
+		const started = await manager.start({
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		assert.equal(started.status, "paused");
+		assert.equal(manager.store.getRun()?.status, "paused");
+		assert.match(started.message, /Plan graph changed after generation \d+;/);
+		assert.equal(started.actions.length, 1, "paused replies retain proposed actions as evidence");
+	} finally {
+		manager.close();
 		fs.rmSync(root, { recursive: true, force: true });
 		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
