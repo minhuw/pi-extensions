@@ -13,6 +13,7 @@ import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
 import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { appendIndependentPlan } from "../../support/independent-plan.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -136,21 +137,6 @@ Keep this fixture deliberately small so control-plane failures remain distinguis
 	return { repo, planDirectory, originalHead };
 }
 
-function addIndependentPlan(fixture: { planDirectory: string }): void {
-	const readmePath = path.join(fixture.planDirectory, "README.md");
-	const readme = fs.readFileSync(readmePath, "utf8").replace(
-		"| [001](001-update-value.md) | Update the fixture value | P1 | S | — | TODO |",
-		"| [001](001-update-value.md) | Update the fixture value | P1 | S | — | TODO |\n| [002](002-update-other.md) | Update the other fixture value | P1 | S | — | TODO |",
-	);
-	fs.writeFileSync(readmePath, readme);
-	const second = fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
-		.replaceAll("Plan 001", "Plan 002")
-		.replaceAll("fixture value", "other fixture value")
-		.replaceAll("src/value.mjs", "src/other.mjs")
-		.replaceAll("`value`", "`other`");
-	fs.writeFileSync(path.join(fixture.planDirectory, "002-update-other.md"), second);
-}
-
 function markFirstPlanBlocked(fixture: { planDirectory: string }): void {
 	const readmePath = path.join(fixture.planDirectory, "README.md");
 	const readme = fs.readFileSync(readmePath, "utf8").replace(
@@ -160,20 +146,24 @@ function markFirstPlanBlocked(fixture: { planDirectory: string }): void {
 	fs.writeFileSync(readmePath, readme);
 }
 
-function appendIndependentPlan(fixture: { planDirectory: string }): void {
-	const readmePath = path.join(fixture.planDirectory, "README.md");
-	const readme = fs.readFileSync(readmePath, "utf8").replace(
-		/(\| \[001\]\(001-update-value\.md\).*\|\n)/,
-		"$1| [002](002-update-other.md) | Update the other fixture value | P1 | S | — | TODO |\n",
-	);
-	fs.writeFileSync(readmePath, readme);
-	const second = fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
-		.replaceAll("Plan 001", "Plan 002")
-		.replaceAll("fixture value", "other fixture value")
-		.replaceAll("src/value.mjs", "src/other.mjs")
-		.replaceAll("`value`", "`other`");
-	fs.writeFileSync(path.join(fixture.planDirectory, "002-update-other.md"), second);
-}
+test("independent plan helper rejects a missing index anchor before writing the clone", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-independent-plan-anchor-test-"));
+	const planDirectory = path.join(root, "herder-plans");
+	fs.mkdirSync(planDirectory, { recursive: true });
+	fs.writeFileSync(path.join(planDirectory, "README.md"), "# Herder Plans\n");
+	fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), "# Plan 001\n");
+	const readme = fs.readFileSync(path.join(planDirectory, "README.md"), "utf8");
+	try {
+		assert.throws(
+			() => appendIndependentPlan({ planDirectory }),
+			/README is missing the 001-update-value\.md index row/,
+		);
+		assert.equal(fs.existsSync(path.join(planDirectory, "002-update-other.md")), false);
+		assert.equal(fs.readFileSync(path.join(planDirectory, "README.md"), "utf8"), readme);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
 
 function payload(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
@@ -676,7 +666,7 @@ test("mixed manager events fail for recorded and interrupted operations", { time
 test("manager events retain unknown keys and multi-result dispatch behavior", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-event-extra-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
@@ -1984,7 +1974,7 @@ test("changed-tree verification resume rejects replacement", { timeout: 30_000 }
 test("one manager fills the role-agnostic worker pool across independent plans", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-pool-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(await requestManagerOperation(service, "start", {
@@ -2135,7 +2125,7 @@ test("stop preserves evidence without creating attention", { timeout: 10_000 }, 
 test("pending initial recovery attention does not block unrelated scheduling", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-attention-scheduling-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	markFirstPlanBlocked(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
@@ -2166,7 +2156,7 @@ test("pending initial recovery attention does not block unrelated scheduling", {
 test("daemon audit detects and repairs a non-work-conserving scheduler state", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-conservation-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
@@ -2222,7 +2212,7 @@ test("stable scheduler audits suppress replies while graph drift remains publish
 			assert.equal(await manager.auditScheduler({ includeReply: false }), null);
 			assert.ok(await manager.auditScheduler(), "default scheduler audits must remain reply-returning");
 
-			addIndependentPlan(fixture);
+			appendIndependentPlan(fixture);
 			const driftReply = await manager.auditScheduler({ includeReply: false });
 			assert.ok(driftReply, "graph-drift pause must publish a reply");
 			assert.equal(driftReply.status, "paused");
@@ -2281,7 +2271,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 test("active Grill rejects started plans and releases unchanged reservations", { timeout: 10_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-guard-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		await requestManagerOperation(service, "start", {
@@ -2305,7 +2295,7 @@ test("active Grill rejects started plans and releases unchanged reservations", {
 test("active Grill reserves an unstarted plan and adopts it after current workers settle", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-test-"));
 	const fixture = writeFixture(root);
-	addIndependentPlan(fixture);
+	appendIndependentPlan(fixture);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {

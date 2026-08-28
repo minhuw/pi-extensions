@@ -11,6 +11,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
+import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { compileGraphIdentity } from "../../../src/core/run-manager.ts";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
@@ -388,21 +389,6 @@ function fieldValue(prompt: string, name: string): string {
 	const match = prompt.match(new RegExp(`^${name}: (.+)$`, "m"));
 	if (!match) throw new Error(`Prompt did not contain ${name}`);
 	return match[1]!;
-}
-
-function appendIndependentPlan(fixture: Fixture): void {
-	const readmePath = path.join(fixture.planDirectory, "README.md");
-	const readme = fs.readFileSync(readmePath, "utf8").replace(
-		/(\| \[001\]\(001-update-value\.md\).*\|\n)/,
-		"$1| [002](002-update-other.md) | Update the other fixture value | P1 | S | — | TODO |\n",
-	);
-	fs.writeFileSync(readmePath, readme);
-	const second = fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
-		.replaceAll("Plan 001", "Plan 002")
-		.replaceAll("fixture value", "other fixture value")
-		.replaceAll("src/value.mjs", "src/other.mjs")
-		.replaceAll("`value`", "`other`");
-	fs.writeFileSync(path.join(fixture.planDirectory, "002-update-other.md"), second);
 }
 
 function writeAdapterFollowUpPlan(directory: string, fixture: Fixture): string {
