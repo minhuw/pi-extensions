@@ -1392,7 +1392,7 @@ export class HerderRunManager {
 			throw new Error(`Resume must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
 		}
 		if (run.status === "complete" && this.store.getReigniteRequest(run.runId, run.currentGeneration)?.state === "pending") {
-			return this.reply();
+			return this.refreshReply();
 		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
@@ -2916,7 +2916,7 @@ export class HerderRunManager {
 		const previous = this.store.readEvent(input.eventId);
 		if (previous) {
 			if (previous.payloadSha256 !== canonical.sha256) throw new Error(`Event ${input.eventId} was replayed with different payload`);
-			return this.reply();
+			return this.refreshReply();
 		}
 		const profile = boundProfile(run, this.store);
 		let schedule = true;
@@ -3788,7 +3788,7 @@ export class HerderRunManager {
 				}
 				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
 				this.projectLifecycleBestEffort();
-				return this.reply();
+				return this.refreshReply();
 			}
 			if (!finalPlan) {
 				const generation = this.store.getGeneration(run.runId, run.currentGeneration);
@@ -4096,8 +4096,22 @@ export class HerderRunManager {
 		return compiled;
 	}
 
-	reply(suppression?: "host-backpressure" | "revision-barrier"): ManagerReply {
+	refreshReply(suppression?: "host-backpressure" | "revision-barrier"): ManagerReply {
 		let run = this.store.getRun();
+		if (!run) return this.reply(suppression);
+		if (run.status === "running") {
+			const drift = this.graphDrift(run);
+			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
+		}
+		if (run.status === "complete") {
+			const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+			if (reignite?.state === "pending") this.ensureReigniteAllocation(run, reignite);
+		}
+		return this.reply(suppression);
+	}
+
+	reply(suppression?: "host-backpressure" | "revision-barrier"): ManagerReply {
+		const run = this.store.getRun();
 		if (!run) return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
 			runId: "",
@@ -4111,10 +4125,6 @@ export class HerderRunManager {
 			scheduler: { active: 0, freeSlots: 0, runnable: 0, runnablePlanIds: [], expectedNewActions: 0, workConserving: true, reason: "inactive", checkedAt: new Date().toISOString() },
 			message: "No Herder run has started.",
 		};
-		if (run.status === "running") {
-			const drift = this.graphDrift(run);
-			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
-		}
 		const plans = this.store.getPlans(run.runId);
 		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
@@ -4127,10 +4137,7 @@ export class HerderRunManager {
 		const exposedIntegrationRepair = verification && (verification.state === "failed" || Boolean(integrationRepair))
 			? this.integrationRepairRequest(verification, integrationRepair)
 			: undefined;
-		const storedReignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
-		const reignite = run.status === "complete" && storedReignite?.state === "pending"
-			? this.ensureReigniteAllocation(run, storedReignite)
-			: storedReignite;
+		const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,

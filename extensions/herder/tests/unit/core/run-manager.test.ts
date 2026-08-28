@@ -1668,6 +1668,17 @@ test("status snapshots revalidate live complete state before exposing a reignite
 		);
 		assert.equal(completed.status, "complete");
 		assert.equal(payload(completed.reigniteRequest).state, "pending");
+		const stableStatus = await requestService(service, "/v1/status");
+		const stableRun = new RunStore(fixture.planDirectory);
+		const stableRunBefore = stableRun.getRun()!;
+		stableRun.close();
+		const stableEntries = fs.readdirSync(fixture.repo).sort();
+		const repeatedStatus = await requestService(service, "/v1/status");
+		assert.deepEqual(repeatedStatus.reply, stableStatus.reply);
+		const stableRunAfter = new RunStore(fixture.planDirectory);
+		try { assert.equal(stableRunAfter.getRun()?.updatedAt, stableRunBefore.updatedAt); }
+		finally { stableRunAfter.close(); }
+		assert.deepEqual(fs.readdirSync(fixture.repo).sort(), stableEntries);
 		appendIndependentPlan(fixture);
 		const queued = await submitManagerOperation(service, "event", {
 			eventId: "reignite-stale-status-drift",
@@ -1701,6 +1712,131 @@ test("status snapshots revalidate live complete state before exposing a reignite
 		const stale = payload(payload(await requestService(service, "/v1/status")).reply);
 		assert.equal(stale.status, "paused");
 		assert.equal(stale.reigniteRequest, undefined);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("reply is pure until an explicit refresh handles graph drift", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reply-pure-drift-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		});
+		await stopService(fixture.planDirectory);
+		appendIndependentPlan(fixture);
+		const manager = new HerderRunManager(fixture.planDirectory);
+		try {
+			const before = manager.store.getRun()!;
+			const entries = fs.readdirSync(fixture.repo).sort();
+			const serialized = manager.reply();
+			assert.equal(serialized.status, "running");
+			assert.deepEqual(manager.store.getRun(), before);
+			assert.deepEqual(fs.readdirSync(fixture.repo).sort(), entries);
+			const refreshed = manager.refreshReply();
+			assert.equal(refreshed.status, "paused");
+			assert.match(refreshed.message, /Plan graph changed after generation \d+;/);
+		} finally { manager.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("complete pending reignite allocation refreshes at startup and resume boundaries", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-refresh-allocation-test-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"refresh-allocation",
+			"VERDICT: REVISE\nFINDINGS: [refresh-1][P1][BLOCKING][PLAN_REQUIREMENT] residual work\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Residual work belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		const request = payload(completed.reigniteRequest);
+		const allocated = String(request.allocatedPlanDirectory);
+		assert.equal(completed.status, "complete");
+		assert.equal(fs.existsSync(allocated), true);
+		await stopService(fixture.planDirectory);
+
+		let store = new RunStore(fixture.planDirectory);
+		try { store.updateReigniteRequest(String(request.requestId), { allocatedPlanDirectory: null }); }
+		finally { store.close(); }
+		fs.rmSync(allocated, { recursive: true, force: true });
+		const manager = new HerderRunManager(fixture.planDirectory);
+		try {
+			const before = manager.store.getRun()!;
+			const entries = fs.readdirSync(fixture.repo).sort();
+			const serialized = manager.reply();
+			assert.equal(serialized.status, "complete");
+			assert.equal(payload(serialized.reigniteRequest).allocatedPlanDirectory, undefined);
+			assert.deepEqual(manager.store.getRun(), before);
+			assert.deepEqual(fs.readdirSync(fixture.repo).sort(), entries);
+			const refreshed = manager.refreshReply();
+			assert.equal(payload(refreshed.reigniteRequest).allocatedPlanDirectory, allocated);
+			assert.deepEqual(manager.store.getRun(), before);
+			assert.equal(payload(manager.refreshReply().reigniteRequest).allocatedPlanDirectory, allocated);
+			assert.deepEqual(fs.readdirSync(fixture.repo).sort(), [...entries, path.basename(allocated)].sort());
+		} finally { manager.close(); }
+
+		store = new RunStore(fixture.planDirectory);
+		try { store.updateReigniteRequest(String(request.requestId), { allocatedPlanDirectory: null }); }
+		finally { store.close(); }
+		fs.rmSync(allocated, { recursive: true, force: true });
+		service = await ensureService(fixture.planDirectory);
+		const startup = payload(payload(await requestService(service, "/v1/status")).reply);
+		assert.equal(startup.status, "complete");
+		assert.equal(payload(startup.reigniteRequest).allocatedPlanDirectory, allocated);
+
+		store = new RunStore(fixture.planDirectory);
+		try { store.updateReigniteRequest(String(request.requestId), { allocatedPlanDirectory: null }); }
+		finally { store.close(); }
+		fs.rmSync(allocated, { recursive: true, force: true });
+		const resumed = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse",
+		})).reply);
+		assert.equal(resumed.status, "complete");
+		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, allocated);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("startup and exact event replay publish graph drift without waiting for the scheduler", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-refresh-replay-test-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		const action = payload((started.actions as unknown[])[0]);
+		const event = {
+			eventId: "refresh-replay-dispatch",
+			kind: "dispatch_results" as const,
+			dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: "refresh-replay-worker" }],
+		};
+		await requestManagerOperation(service, "event", event);
+		await stopService(fixture.planDirectory);
+		appendIndependentPlan(fixture);
+		service = await ensureService(fixture.planDirectory);
+		const startup = payload(payload(await requestService(service, "/v1/status")).reply);
+		assert.equal(startup.status, "paused");
+
+		const store = new RunStore(fixture.planDirectory);
+		try { store.updateRun({ status: "running", terminalDetail: null }); }
+		finally { store.close(); }
+		const replay = payload(payload(await requestManagerOperation(service, "event", event, "refresh-replay-operation")).reply);
+		assert.equal(replay.status, "paused");
+		assert.equal(readManagerState(fixture.planDirectory).run?.status, "paused");
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });

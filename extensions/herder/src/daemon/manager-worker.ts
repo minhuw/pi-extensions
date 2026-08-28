@@ -37,7 +37,7 @@ let queue = Promise.resolve();
 async function handle(call: ManagerWorkerCall): Promise<void> {
 	try {
 		let result: unknown;
-		if (call.method === "reply") result = manager.reply();
+		if (call.method === "reply") result = manager.refreshReply();
 		else if (call.method === "start") result = await manager.start(call.input as StartInput);
 		else if (call.method === "event") result = await manager.event(call.input as EventInput);
 		else if (call.method === "edit") result = await manager.edit(call.input as PlanEditInput);
