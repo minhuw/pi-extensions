@@ -108,15 +108,43 @@ interface ReigniteInput {
 	detail?: string;
 }
 
-interface EventInput {
-	eventId: string;
-	kind: "dispatch_results" | "terminals" | "user_input" | "attention";
-	dispatchResults?: DispatchResult[];
-	terminals?: TerminalEvent[];
-	userInput?: string;
-	attentionRequestId?: string;
-	attention?: AttentionResolutionInput;
-}
+type EventInput =
+	| {
+		eventId: string;
+		kind: "dispatch_results";
+		dispatchResults: DispatchResult[];
+		terminals?: never;
+		userInput?: never;
+		attentionRequestId?: never;
+		attention?: never;
+	}
+	| {
+		eventId: string;
+		kind: "terminals";
+		terminals: TerminalEvent[];
+		dispatchResults?: never;
+		userInput?: never;
+		attentionRequestId?: never;
+		attention?: never;
+	}
+	| {
+		eventId: string;
+		kind: "user_input";
+		userInput: string;
+		attentionRequestId: string;
+		dispatchResults?: never;
+		terminals?: never;
+		attention?: never;
+	}
+	| {
+		eventId: string;
+		kind: "attention";
+		attention: AttentionResolutionInput;
+		dispatchResults?: never;
+		terminals?: never;
+		userInput?: never;
+		attentionRequestId?: never;
+	};
 
 interface PlanEditInput {
 	operation: "begin" | "prepare" | "confirm" | "finish" | "cancel";
@@ -202,6 +230,14 @@ function validateStartInput(input: StartInput): void {
 	}
 }
 
+type EventPayloadKey = "dispatchResults" | "terminals" | "userInput" | "attentionRequestId" | "attention";
+
+function rejectEventInputKeys(input: EventInput, keys: readonly EventPayloadKey[]): void {
+	for (const key of keys) {
+		if (Object.hasOwn(input, key)) throw new Error(`Manager event ${key} is not valid for ${input.kind} events`);
+	}
+}
+
 function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
@@ -209,45 +245,48 @@ function validateEventInput(input: EventInput): void {
 	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:") || input.eventId.startsWith(PLAN_EDIT_EVENT_PREFIX)) {
 		throw new Error("Manager private evidence event IDs are private");
 	}
-	if (!["dispatch_results", "terminals", "user_input", "attention"].includes(input.kind)) throw new Error(`Unknown manager event kind: ${String(input.kind)}`);
-	if (input.kind === "dispatch_results") {
-		if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
-		const seen = new Set<string>();
-		for (const result of input.dispatchResults) {
-			if (!result || typeof result.actionId !== "string" || typeof result.accepted !== "boolean") throw new Error("Invalid dispatch result");
-			if (seen.has(result.actionId)) throw new Error(`Duplicate dispatch result for ${result.actionId}`);
-			seen.add(result.actionId);
-			if (result.accepted && (typeof result.hostHandle !== "string" || result.hostHandle.length === 0)) throw new Error(`Accepted action ${result.actionId} has no host handle`);
+	switch (input.kind) {
+		case "dispatch_results": {
+			rejectEventInputKeys(input, ["terminals", "userInput", "attentionRequestId", "attention"]);
+			if (!Array.isArray(input.dispatchResults)) throw new Error("dispatch_results requires an array");
+			const seen = new Set<string>();
+			for (const result of input.dispatchResults) {
+				if (!result || typeof result.actionId !== "string" || typeof result.accepted !== "boolean") throw new Error("Invalid dispatch result");
+				if (seen.has(result.actionId)) throw new Error(`Duplicate dispatch result for ${result.actionId}`);
+				seen.add(result.actionId);
+				if (result.accepted && (typeof result.hostHandle !== "string" || result.hostHandle.length === 0)) throw new Error(`Accepted action ${result.actionId} has no host handle`);
+			}
+			return;
 		}
-	}
-	if (input.kind === "terminals") {
-		if (!Array.isArray(input.terminals)) throw new Error("terminals requires an array");
-		const seen = new Set<string>();
-		for (const terminal of input.terminals) {
-			if (!terminal || typeof terminal.actionId !== "string" || terminal.actionId.length === 0) throw new Error("Invalid terminal event");
-			if (seen.has(terminal.actionId)) throw new Error(`Duplicate terminal event for ${terminal.actionId}`);
-			seen.add(terminal.actionId);
+		case "terminals": {
+			rejectEventInputKeys(input, ["dispatchResults", "userInput", "attentionRequestId", "attention"]);
+			if (!Array.isArray(input.terminals)) throw new Error("terminals requires an array");
+			const seen = new Set<string>();
+			for (const terminal of input.terminals) {
+				if (!terminal || typeof terminal.actionId !== "string" || terminal.actionId.length === 0) throw new Error("Invalid terminal event");
+				if (seen.has(terminal.actionId)) throw new Error(`Duplicate terminal event for ${terminal.actionId}`);
+				seen.add(terminal.actionId);
+			}
+			return;
 		}
-	}
-	if (input.kind === "user_input" && (typeof input.userInput !== "string" || input.userInput.trim().length === 0)) {
-		throw new Error("user_input requires non-empty text");
-	}
-	if (input.kind === "user_input" && !input.attentionRequestId) {
-		throw new Error("user_input requires attentionRequestId");
-	}
-	if (input.kind === "attention") {
-		if (!input.attention) throw new Error("attention requires a resolution payload");
-		validateAttentionResolution(input.attention);
-	}
-	if (input.attentionRequestId !== undefined
-		&& (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId))) {
-		throw new Error("attentionRequestId must be a bounded single-line identifier");
-	}
-	if (input.kind !== "user_input" && input.attentionRequestId !== undefined) {
-		throw new Error("attentionRequestId is only valid for user_input");
-	}
-	if (input.kind !== "attention" && input.attention !== undefined) {
-		throw new Error("attention resolution is only valid for attention events");
+		case "user_input": {
+			rejectEventInputKeys(input, ["dispatchResults", "terminals", "attention"]);
+			if (typeof input.userInput !== "string" || input.userInput.trim().length === 0) {
+				throw new Error("user_input requires non-empty text");
+			}
+			if (!input.attentionRequestId) throw new Error("user_input requires attentionRequestId");
+			if (typeof input.attentionRequestId !== "string" || input.attentionRequestId.length === 0 || input.attentionRequestId.length > 200 || /[\0\r\n]/.test(input.attentionRequestId)) {
+				throw new Error("attentionRequestId must be a bounded single-line identifier");
+			}
+			return;
+		}
+		case "attention":
+			rejectEventInputKeys(input, ["dispatchResults", "terminals", "userInput", "attentionRequestId"]);
+			if (!input.attention) throw new Error("attention requires a resolution payload");
+			validateAttentionResolution(input.attention);
+			return;
+		default:
+			throw new Error(`Unknown manager event kind: ${String((input as { kind?: unknown }).kind)}`);
 	}
 }
 
@@ -2881,10 +2920,10 @@ export class HerderRunManager {
 		}
 		const profile = boundProfile(run, this.store);
 		let schedule = true;
-		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults ?? []));
-		else if (input.kind === "terminals") await this.applyTerminals(input.terminals ?? []);
-		else if (input.kind === "user_input") this.applyUserInput(input.userInput!, input.eventId, input.attentionRequestId);
-		else await this.applyAttentionResolution(input.attention!);
+		if (input.kind === "dispatch_results") schedule = !(await this.applyDispatchResults(input.dispatchResults));
+		else if (input.kind === "terminals") await this.applyTerminals(input.terminals);
+		else if (input.kind === "user_input") this.applyUserInput(input.userInput, input.eventId, input.attentionRequestId);
+		else await this.applyAttentionResolution(input.attention);
 		const current = this.store.getRun()!;
 		const drift = this.graphDrift(current);
 		if (drift.changed) {

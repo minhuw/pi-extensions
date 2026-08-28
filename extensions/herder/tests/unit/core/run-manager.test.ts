@@ -528,6 +528,198 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 	}
 });
 
+test("manager events reject mixed payloads before replay or mutation", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-event-union-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		})).reply);
+		const runId = String(started.runId);
+		const attention = {
+			schemaVersion: 1,
+			requestId: "mixed-request",
+			requestSha256: "a".repeat(64),
+			capabilityToken: "b".repeat(64),
+			runId,
+			planId: "001",
+			generation: 1,
+			round: 1,
+			action: "defer",
+		};
+		const variants = [
+			{ kind: "dispatch_results", payload: { kind: "dispatch_results", dispatchResults: [] }, siblings: ["terminals", "userInput", "attentionRequestId", "attention"] },
+			{ kind: "terminals", payload: { kind: "terminals", terminals: [] }, siblings: ["dispatchResults", "userInput", "attentionRequestId", "attention"] },
+			{ kind: "user_input", payload: { kind: "user_input", userInput: "answer", attentionRequestId: "mixed-request" }, siblings: ["dispatchResults", "terminals", "attention"] },
+			{ kind: "attention", payload: { kind: "attention", attention }, siblings: ["dispatchResults", "terminals", "userInput", "attentionRequestId"] },
+		] as const;
+		const siblingValues: Record<string, unknown> = {
+			dispatchResults: [],
+			terminals: [],
+			userInput: "sibling text",
+			attentionRequestId: "sibling-request",
+			attention,
+		};
+		const beforeStore = new RunStore(fixture.planDirectory);
+		const beforeRun = beforeStore.getRun()!;
+		const beforePlans = beforeStore.getPlans(runId);
+		const beforeActions = beforeStore.getActions(runId);
+		beforeStore.close();
+
+		for (const variant of variants) {
+			for (const sibling of variant.siblings) {
+				const eventId = `mixed-fresh-${variant.kind}-${sibling}`;
+				const event = { eventId, ...variant.payload, [sibling]: siblingValues[sibling] };
+				await assert.rejects(
+					() => requestManagerOperation(service, "event", event),
+					/not valid/,
+				);
+				const afterStore = new RunStore(fixture.planDirectory);
+				try {
+					assert.deepEqual(afterStore.getRun(), beforeRun, eventId);
+					assert.deepEqual(afterStore.getPlans(runId), beforePlans, eventId);
+					assert.deepEqual(afterStore.getActions(runId), beforeActions, eventId);
+					assert.equal(afterStore.readEvent(eventId), null, eventId);
+				} finally {
+					afterStore.close();
+				}
+			}
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("mixed manager events fail for recorded and interrupted operations", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-event-recovery-test-"));
+	const fixture = writeFixture(root);
+	try {
+		let service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		})).reply);
+		const runId = String(started.runId);
+		const historical = {
+			eventId: "mixed-historical",
+			kind: "dispatch_results",
+			dispatchResults: [],
+			terminals: [],
+		};
+		const beforeStore = new RunStore(fixture.planDirectory);
+		const beforeRun = beforeStore.getRun()!;
+		const beforePlans = beforeStore.getPlans(runId);
+		const beforeActions = beforeStore.getActions(runId);
+		beforeStore.recordEvent(runId, historical.eventId, historical.kind, historical);
+		beforeStore.close();
+
+		const historicalReceipt = await submitManagerOperation(service, "event", historical, "mixed-historical-operation");
+		await assert.rejects(() => waitManagerOperation(service, historicalReceipt.operationId), /not valid/);
+		const historicalCheck = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(historicalCheck.getOperation(historicalReceipt.operationId)?.state, "failed");
+			assert.ok(historicalCheck.readEvent(historical.eventId));
+			assert.deepEqual(historicalCheck.getRun(), beforeRun);
+			assert.deepEqual(historicalCheck.getPlans(runId), beforePlans);
+			assert.deepEqual(historicalCheck.getActions(runId), beforeActions);
+		} finally {
+			historicalCheck.close();
+		}
+
+		await stopService(fixture.planDirectory);
+		const interrupted = {
+			eventId: "mixed-interrupted",
+			kind: "terminals",
+			terminals: [],
+			dispatchResults: [],
+		};
+		const stranded = new RunStore(fixture.planDirectory);
+		try {
+			stranded.submitOperation("mixed-interrupted-operation", "event", interrupted);
+			assert.equal(stranded.claimNextOperation()?.state, "running");
+		} finally {
+			stranded.close();
+		}
+
+		service = await ensureService(fixture.planDirectory);
+		await assert.rejects(() => waitManagerOperation(service, "mixed-interrupted-operation"), /not valid/);
+		const recovered = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(recovered.getOperation("mixed-interrupted-operation")?.state, "failed");
+			assert.equal(recovered.readEvent(interrupted.eventId), null);
+			const recoveredRun = recovered.getRun()!;
+			const { dashboardUrl: _recoveredDashboardUrl, updatedAt: _recoveredUpdatedAt, ...recoveredState } = recoveredRun;
+			const { dashboardUrl: _beforeDashboardUrl, updatedAt: _beforeUpdatedAt, ...beforeState } = beforeRun;
+			assert.deepEqual(recoveredState, beforeState);
+			assert.deepEqual(recovered.getPlans(runId), beforePlans);
+			assert.deepEqual(recovered.getActions(runId), beforeActions);
+		} finally {
+			recovered.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("manager events retain unknown keys and multi-result dispatch behavior", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-event-extra-test-"));
+	const fixture = writeFixture(root);
+	addIndependentPlan(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+			maxParallel: 2,
+		})).reply);
+		const actions = (started.actions as unknown[]).map(payload);
+		assert.equal(actions.length, 2);
+		const event = {
+			eventId: "multi-dispatch-with-extra",
+			kind: "dispatch_results",
+			dispatchResults: actions.map((action, index) => ({
+				actionId: action.actionId,
+				accepted: true,
+				hostHandle: `multi-worker-${index}`,
+			})),
+			metadata: { source: "unknown-key-test" },
+		};
+		await requestManagerOperation(service, "event", event, "multi-dispatch-with-extra-first");
+		const firstStore = new RunStore(fixture.planDirectory);
+		try {
+			const runId = String(started.runId);
+			for (const action of actions) assert.equal(firstStore.getAction(String(action.actionId))?.state, "dispatched");
+			assert.equal(firstStore.readEvent(event.eventId)?.payloadSha256, sha256(stableJson(event)));
+			assert.equal(firstStore.getRun()?.runId, runId);
+		} finally {
+			firstStore.close();
+		}
+		await requestManagerOperation(service, "event", event, "multi-dispatch-with-extra-replay");
+		await assert.rejects(
+			() => requestManagerOperation(service, "event", { ...event, metadata: { source: "changed" } }, "multi-dispatch-with-extra-conflict"),
+			/replayed with different payload/,
+		);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("persistent service drives a complete deterministic run and reuses its process", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-test-"));
 	const fixture = writeFixture(root);
