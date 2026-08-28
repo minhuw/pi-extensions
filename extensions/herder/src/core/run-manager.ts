@@ -2780,6 +2780,7 @@ export class HerderRunManager {
 				if (namespaceError) throw new Error(namespaceError);
 			}
 			if (stored.state === "passed") {
+				if (run.status === "complete") return this.reply();
 				if (run.status !== "running") this.store.updateRun({ status: "running", terminalDetail: "Recovering passed verification." });
 				run = this.store.getRun()!;
 				const refreshed = this.refreshReply();

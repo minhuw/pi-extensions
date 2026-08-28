@@ -1810,6 +1810,53 @@ test("complete pending reignite allocation refreshes at startup and resume bound
 	}
 });
 
+test("complete verification replay preserves a pending reignite dossier after plan-graph drift", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-verification-replay-complete-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(
+			service,
+			fixture,
+			"verification-replay-complete",
+			"VERDICT: REVISE\nFINDINGS: [vr-1][P1][BLOCKING][PLAN_REQUIREMENT] follow-up work\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Follow-up work belongs in a later plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+		);
+		const reignite = payload(completed.reigniteRequest);
+		assert.equal(completed.status, "complete");
+		assert.equal(reignite.state, "pending");
+		const before = new RunStore(fixture.planDirectory);
+		let manifest;
+		try {
+			const run = before.getRun()!;
+			const verification = before.getVerification(run.runId, run.currentGeneration)!;
+			assert.equal(verification.state, "passed");
+			manifest = verification.manifest!;
+		} finally { before.close(); }
+
+		appendIndependentPlan(fixture);
+		const replay = payload(payload(await requestManagerOperation(service, "verification", manifest, "verification-replay-complete-fresh")).reply);
+		assert.equal(replay.status, "complete");
+		assert.equal(payload(replay.reigniteRequest).requestId, reignite.requestId);
+		assert.equal(payload(replay.reigniteRequest).state, "pending");
+
+		const acknowledged = payload(payload(await requestManagerOperation(service, "reignite", {
+			requestId: reignite.requestId,
+			requestSha256: reignite.requestSha256,
+			state: "failed",
+			detail: "Follow-up graph writing remains pending after verification replay.",
+		})).reply);
+		assert.equal(acknowledged.status, "complete");
+		assert.equal(payload(acknowledged.reigniteRequest).state, "pending");
+		const store = new RunStore(fixture.planDirectory);
+		try { assert.equal(store.getRun()?.status, "complete"); }
+		finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("startup and exact event replay publish graph drift without waiting for the scheduler", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-refresh-replay-test-"));
 	const fixture = writeFixture(root);
