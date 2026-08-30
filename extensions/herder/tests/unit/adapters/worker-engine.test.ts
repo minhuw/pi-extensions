@@ -329,12 +329,17 @@ test("role extensions resolve only the exact entry inside the trusted user git p
 	}
 });
 
-test("production factory loads exact role extensions and nested worker extensions without widening tools", async () => {
+test("production factory loads exact role and nested extensions after deferred tool registration", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-runtime-"));
+	const previousSyncRegistration = process.env.HERDER_TEST_FFF_SYNC;
+	const previousPair = process.env.HERDER_TEST_FFF_PAIR;
+	delete process.env.HERDER_TEST_FFF_SYNC;
+	delete process.env.HERDER_TEST_FFF_PAIR;
 	try {
 		const agentDir = path.join(root, "agent");
 		const ponytail = path.join(agentDir, "git/github.com/DietrichGebert/ponytail/pi-extension/index.js");
 		const fff = path.join(agentDir, "npm/node_modules/@ff-labs/pi-fff");
+		const web = path.join(agentDir, "npm/node_modules/pi-web-access");
 		const events = path.join(root, "events.log");
 		await mkdir(path.dirname(ponytail), { recursive: true });
 		await writeFile(ponytail, `import { appendFileSync } from "node:fs";
@@ -356,23 +361,57 @@ export default function (pi) {
 		await writeFile(path.join(fff, "index.js"), `import { appendFileSync } from "node:fs";
 const parameters = { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] };
 export default function (pi) {
-	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "fff-start\\n"));
+	const registerTools = () => {
+		const pair = process.env.PI_FFF_MODE === "override" ? ["find", "grep"] : ["fffind", "ffgrep"];
+		const names = process.env.HERDER_TEST_FFF_PAIR === "partial" ? pair.slice(0, 1) : pair;
+		for (const name of [...names, "unexpected_fff_tool"]) pi.registerTool({
+			name,
+			label: name,
+			description: name,
+			parameters,
+			async execute() { return { content: [{ type: "text", text: "fixture" }] }; },
+		});
+	};
+	if (process.env.HERDER_TEST_FFF_SYNC === "1") registerTools();
+	pi.on("session_start", () => {
+		appendFileSync(${JSON.stringify(events)}, "fff-start\\n");
+		if (process.env.HERDER_TEST_FFF_SYNC !== "1") registerTools();
+	});
 	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "fff-shutdown\\n"));
-	const names = process.env.PI_FFF_MODE === "override" ? ["find", "grep"] : ["fffind", "ffgrep"];
-	for (const name of names) pi.registerTool({
+}
+`);
+		await mkdir(web, { recursive: true });
+		await writeFile(path.join(web, "package.json"), JSON.stringify({
+			name: "pi-web-access",
+			type: "module",
+			pi: { extensions: ["./index.js"] },
+		}));
+		await writeFile(path.join(web, "index.js"), `import { appendFileSync } from "node:fs";
+const parameters = { type: "object", properties: {} };
+export default function (pi) {
+	for (const name of ["web_search", "source_check", "fetch_content", "get_search_content", "unexpected_web_tool"]) pi.registerTool({
 		name,
 		label: name,
 		description: name,
 		parameters,
 		async execute() { return { content: [{ type: "text", text: "fixture" }] }; },
 	});
+	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "web-start\\n"));
+	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "web-shutdown\\n"));
 }
 `);
 		const worktree = path.join(root, "worktree");
 		const planDirectory = path.join(worktree, "herder-plans");
 		await mkdir(planDirectory, { recursive: true });
 		const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
-		const faux = fauxProvider({ provider: "test", models: [{ id: "test-model", reasoning: true }] });
+		const faux = fauxProvider({
+			api: "openai-responses",
+			provider: "test",
+			models: [{ id: "test-model", reasoning: true }, { id: "gpt-5.6-luna", reasoning: true }],
+		});
+		Object.assign(faux.getModel("gpt-5.6-luna")!, {
+			thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+		});
 		runtime.registerNativeProvider(faux.provider);
 		const factory = new DefaultPiWorkerSessionFactory(agentRoot, agentDir);
 		factory.bindModelRegistry(new ModelRegistry(runtime));
@@ -414,17 +453,44 @@ export default function (pi) {
 		assert.deepEqual(afterDiscard.slice(beforeDiscard.length).sort(), ["fff-shutdown", "fff-start", "ponytail-shutdown", "ponytail-start"]);
 
 		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
-		const beforeNested = (await readFile(events, "utf8")).trim().split("\n");
-		faux.setResponses([fauxAssistantMessage("Nested worker result")]);
-		const nestedResult = await prepared.nested.run({
-			type: "worker",
-			prompt: "Implement the bounded child task",
-			description: "implement child task",
-		});
-		assert.equal(nestedResult.status, "completed");
-		assert.equal(nestedResult.output, "Nested worker result");
-		const afterNested = (await readFile(events, "utf8")).trim().split("\n");
-		assert.deepEqual(afterNested.slice(beforeNested.length).sort(), ["fff-shutdown", "fff-start", "ponytail-before", "ponytail-shutdown", "ponytail-start"]);
+		const nestedCases = [
+			{ type: "recon", tools: ["read", "ffgrep", "fffind", "ls"], events: ["fff-shutdown", "fff-start"] },
+			{ type: "searcher", tools: ["web_search", "source_check", "fetch_content", "get_search_content", "fffind", "ffgrep"], events: ["fff-shutdown", "fff-start", "web-shutdown", "web-start"] },
+			{ type: "worker", tools: ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls"], events: ["fff-shutdown", "fff-start", "ponytail-before", "ponytail-shutdown", "ponytail-start"] },
+		] as const;
+		for (const nestedCase of nestedCases) {
+			const beforeNested = (await readFile(events, "utf8")).trim().split("\n");
+			let providerTools: string[] = [];
+			faux.setResponses([(context) => {
+				providerTools = (context.tools ?? []).map((tool) => tool.name).sort();
+				return fauxAssistantMessage(`Nested ${nestedCase.type} result`);
+			}]);
+			const nestedResult = await prepared.nested.run({
+				type: nestedCase.type,
+				prompt: `Run the bounded ${nestedCase.type} task`,
+				description: `${nestedCase.type} child task`,
+			});
+			assert.equal(nestedResult.status, "completed");
+			assert.equal(nestedResult.output, `Nested ${nestedCase.type} result`);
+			assert.deepEqual(providerTools, [...nestedCase.tools].sort());
+			const afterNested = (await readFile(events, "utf8")).trim().split("\n");
+			assert.deepEqual(afterNested.slice(beforeNested.length).sort(), [...nestedCase.events].sort());
+		}
+		const beforeFailedNested = (await readFile(events, "utf8")).trim().split("\n");
+		process.env.HERDER_TEST_FFF_PAIR = "partial";
+		try {
+			const failedNested = await prepared.nested.run({
+				type: "recon",
+				prompt: "Fail closed with an incomplete FFF pair",
+				description: "reject incomplete FFF pair",
+			});
+			assert.equal(failedNested.status, "error");
+			assert.match(failedNested.error ?? "", /did not register its required find and grep tools/);
+		} finally {
+			delete process.env.HERDER_TEST_FFF_PAIR;
+		}
+		const afterFailedNested = (await readFile(events, "utf8")).trim().split("\n");
+		assert.deepEqual(afterFailedNested.slice(beforeFailedNested.length).sort(), ["fff-shutdown", "fff-start"]);
 		const parent = prepared.session as AgentSession;
 		await parent.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		parent.dispose();
@@ -439,6 +505,18 @@ export default function (pi) {
 				overriddenSession.agent.state.tools.map((tool) => tool.name).sort(),
 				["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"].sort(),
 			);
+			let overrideProviderTools: string[] = [];
+			faux.setResponses([(context) => {
+				overrideProviderTools = (context.tools ?? []).map((tool) => tool.name).sort();
+				return fauxAssistantMessage("Nested override result");
+			}]);
+			const overrideNested = await overridden.nested.run({
+				type: "recon",
+				prompt: "Inspect with override tools",
+				description: "inspect override tools",
+			});
+			assert.equal(overrideNested.status, "completed");
+			assert.deepEqual(overrideProviderTools, ["read", "grep", "find", "ls"].sort());
 			await overriddenSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			overriddenSession.dispose();
 			await overridden.nested.stop("test cleanup");
@@ -446,6 +524,34 @@ export default function (pi) {
 			if (previousFffMode === undefined) delete process.env.PI_FFF_MODE;
 			else process.env.PI_FFF_MODE = previousFffMode;
 		}
+
+		process.env.HERDER_TEST_FFF_SYNC = "1";
+		try {
+			const synchronous = await factory.create({ action: roleAction("plan-reviewer"), planDirectory });
+			const synchronousSession = synchronous.session as AgentSession;
+			assert.deepEqual(
+				synchronousSession.agent.state.tools.map((tool) => tool.name).sort(),
+				["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"].sort(),
+			);
+			await synchronousSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			synchronousSession.dispose();
+			await synchronous.nested.stop("test cleanup");
+		} finally {
+			delete process.env.HERDER_TEST_FFF_SYNC;
+		}
+
+		const beforeIncompletePair = (await readFile(events, "utf8")).trim().split("\n");
+		process.env.HERDER_TEST_FFF_PAIR = "partial";
+		try {
+			await assert.rejects(
+				() => factory.create({ action: roleAction("plan-reviewer"), planDirectory }),
+				/did not register its required find and grep tools/,
+			);
+		} finally {
+			delete process.env.HERDER_TEST_FFF_PAIR;
+		}
+		const afterIncompletePair = (await readFile(events, "utf8")).trim().split("\n");
+		assert.deepEqual(afterIncompletePair.slice(beforeIncompletePair.length).sort(), ["fff-shutdown", "fff-start"]);
 
 		const missingNestedParent = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
 		try {
@@ -477,6 +583,10 @@ export default function (pi) {
 			/Herder role extension git:github\.com\/DietrichGebert\/ponytail is not installed.*pi install git:github\.com\/DietrichGebert\/ponytail/,
 		);
 	} finally {
+		if (previousSyncRegistration === undefined) delete process.env.HERDER_TEST_FFF_SYNC;
+		else process.env.HERDER_TEST_FFF_SYNC = previousSyncRegistration;
+		if (previousPair === undefined) delete process.env.HERDER_TEST_FFF_PAIR;
+		else process.env.HERDER_TEST_FFF_PAIR = previousPair;
 		await rm(root, { recursive: true, force: true });
 	}
 });

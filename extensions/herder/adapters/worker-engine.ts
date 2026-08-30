@@ -235,6 +235,17 @@ export function resolveFffToolNames(
 	return tools.map((tool) => tool === "fffind" || tool === "ffgrep" ? names[tool] : tool);
 }
 
+function initialFffToolNames(
+	tools: readonly string[],
+	extensions: readonly { tools: ReadonlyMap<string, unknown> }[],
+): string[] {
+	try {
+		return resolveFffToolNames(tools, extensions);
+	} catch {
+		return [...new Set([...tools, "find", "grep"])];
+	}
+}
+
 function isWithin(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
 	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
@@ -387,7 +398,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 				if (childExtensions.errors.length > 0) {
 					throw new Error(`Herder nested extensions failed to load: ${childExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
 				}
-				const childTools = resolveFffToolNames(childDefinition.tools, childExtensions.extensions);
+				const initialChildTools = initialFffToolNames(childDefinition.tools, childExtensions.extensions);
 				signal.throwIfAborted();
 				const { session: child } = await createAgentSession({
 					cwd: request.action.worktree,
@@ -395,7 +406,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					modelRuntime: runtime,
 					model: childModel as Model<any>,
 					thinkingLevel: binding.effort as ThinkingLevel,
-					tools: childTools,
+					tools: initialChildTools,
 					resourceLoader: childLoader,
 					sessionManager: childManager,
 				});
@@ -407,6 +418,8 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 						},
 					});
 					signal.throwIfAborted();
+					const childTools = resolveFffToolNames(childDefinition.tools, childExtensions.extensions);
+					child.setActiveToolsByName(childTools);
 					if (child.messages.length !== 0) throw new Error("Herder nested agent session was not created with clean history.");
 					const activeChildTools = new Set(child.agent.state.tools.map((tool) => tool.name));
 					const missingChildTools = childTools.filter((tool) => !activeChildTools.has(tool));
@@ -457,7 +470,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		if (roleExtensions.errors.length > 0) {
 			throw new Error(`Herder role extensions failed to load: ${roleExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
 		}
-		const roleTools = resolveFffToolNames(definition.tools, roleExtensions.extensions);
+		const initialRoleTools = initialFffToolNames(definition.tools, roleExtensions.extensions);
 		const nestedTools = createNestedAgentTools(nested);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
@@ -465,7 +478,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			modelRuntime: runtime,
 			model: model as Model<any>,
 			thinkingLevel: request.action.effort as ThinkingLevel,
-			tools: roleTools,
+			tools: initialRoleTools,
 			customTools: [...nestedTools],
 			resourceLoader,
 			sessionManager,
@@ -477,6 +490,8 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					throw new Error(`Herder role extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
 				},
 			});
+			const roleTools = resolveFffToolNames(definition.tools, roleExtensions.extensions);
+			session.setActiveToolsByName(roleTools);
 			if (session.messages.length !== 0) throw new Error("Herder Pi worker session was not created with clean history.");
 			const activeTools = new Set(session.agent.state.tools.map((tool) => tool.name));
 			const missingTools = roleTools.filter((tool) => !activeTools.has(tool));
