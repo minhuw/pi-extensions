@@ -3701,7 +3701,7 @@ export class HerderRunManager {
 				}
 				break;
 			}
-			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: gitValue(plan.worktree, "rev-parse", "HEAD^{tree}"), rebase: null });
+			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: driver.worktreeTree(plan.worktree), rebase: null });
 		}
 	}
 
@@ -3756,7 +3756,7 @@ export class HerderRunManager {
 				if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
 				const assignment = JSON.parse(bytes.toString("utf8")) as { snapshotSha256: string; assignment: { generationBase: string } };
 				const integrationHead = driver.branchHead(run.integrationBranch);
-				const integrationTree = gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}");
+				const integrationTree = driver.worktreeTree(run.integrationWorktree);
 				const verification = this.store.getVerification(run.runId, run.currentGeneration);
 				if (!verification) {
 					const request = createVerificationRequest({
