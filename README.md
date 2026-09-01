@@ -53,8 +53,8 @@ Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite
 
 ```bash
 npm ci
-npm test
-npm run typecheck
+npm test        # full suite; includes the full TypeScript check
+# or, for a quick standalone check: npm run typecheck
 ```
 
 ## License
