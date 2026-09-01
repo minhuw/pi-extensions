@@ -1,9 +1,11 @@
+import { RUN_STATUSES, type RunStatus } from "../src/shared/protocol.ts";
+
 export const HERDER_STATE_ENTRY = "herder-pi-run-v1";
 
 export interface HerderRunState {
 	version: 1;
 	mode: "fire" | "resume" | "revise" | "attach";
-	status: "initializing" | "running" | "paused" | "needs_input" | "complete" | "failed" | "stopped";
+	status: RunStatus;
 	runId: string;
 	/** Session-local hint only; SQLite remains authoritative for attention state. */
 	attentionRequestId?: string;
@@ -43,7 +45,7 @@ function isRunState(value: unknown): value is HerderRunState {
 		&& typeof state.startedAt === "number"
 		&& typeof state.updatedAt === "number"
 		&& ["fire", "resume", "revise", "attach"].includes(state.mode || "")
-		&& ["initializing", "running", "paused", "needs_input", "complete", "failed", "stopped"].includes(state.status || "");
+		&& RUN_STATUSES.some((status) => status === state.status);
 }
 
 export function restoreLastRun(entries: readonly unknown[]): HerderRunState | undefined {

@@ -3,10 +3,14 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type TLiteral } from "typebox";
 import {
 	attentionCapabilityToken,
+	INTEGRATION_REPAIR_CLASSIFICATIONS,
+	INTEGRATION_REPAIR_OPERATIONS,
 	isTerminalRunStatus,
+	type IntegrationRepairClassification,
+	type IntegrationRepairOperation,
 	type IntegrationRepairRequest,
 	type ManagerAttentionRequest,
 	type ManagerReply,
@@ -1662,7 +1666,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		description: "Classify one failed final-verification attempt and perform only the request-bound integration repair begin, finish, or cancel transition.",
 		parameters: Type.Object({
 			planDirectory: Type.String(),
-			operation: Type.Union([Type.Literal("begin"), Type.Literal("finish"), Type.Literal("cancel")]),
+			operation: Type.Union(INTEGRATION_REPAIR_OPERATIONS.map((operation) => Type.Literal(operation)) as [
+				TLiteral<IntegrationRepairOperation>,
+				...TLiteral<IntegrationRepairOperation>[],
+			]),
 			requestId: Type.String(),
 			requestSha256: Type.String(),
 			capabilityToken: Type.String(),
@@ -1671,14 +1678,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			runId: Type.Optional(Type.String()),
 			generation: Type.Optional(Type.Integer({ minimum: 1 })),
 			repairId: Type.Optional(Type.String()),
-			classification: Type.Optional(Type.Union([
-				Type.Literal("code_defect"),
-				Type.Literal("transient"),
-				Type.Literal("manifest_error"),
-				Type.Literal("design_ambiguity"),
-				Type.Literal("scope_ambiguity"),
-				Type.Literal("credential"),
-				Type.Literal("product_ambiguity"),
+			classification: Type.Optional(Type.Union(INTEGRATION_REPAIR_CLASSIFICATIONS.map((classification) => Type.Literal(classification)) as [
+				TLiteral<IntegrationRepairClassification>,
+				...TLiteral<IntegrationRepairClassification>[],
 			])),
 			rationale: Type.Optional(Type.String()),
 			detail: Type.Optional(Type.String()),

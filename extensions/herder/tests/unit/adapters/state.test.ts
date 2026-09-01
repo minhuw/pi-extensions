@@ -18,6 +18,7 @@ test("session restoration uses the newest valid Herder entry", () => {
 	assert.deepEqual(restoreLastRun([
 		{ type: "custom", customType: HERDER_STATE_ENTRY, data: { nope: true } },
 		{ type: "custom", customType: HERDER_STATE_ENTRY, data: state },
+		{ type: "custom", customType: HERDER_STATE_ENTRY, data: { ...state, status: "unknown" } },
 	]), state);
 });
 

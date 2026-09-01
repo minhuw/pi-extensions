@@ -1,5 +1,6 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import type { RunStatus } from "../src/shared/protocol.ts";
 import type { PiNestedAgentSnapshot, PiWorkerSnapshot } from "./worker-engine.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -34,7 +35,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
 };
 
 export interface HerderWidgetModel {
-	status: "initializing" | "running" | "paused" | "needs_input" | "complete" | "failed" | "stopped";
+	status: RunStatus;
 	profile: string;
 	maxParallel: number;
 	planName: string;

@@ -149,6 +149,33 @@ test("adapter registration exposes the complete live surface", () => {
 	assert.equal(Object.hasOwn(planProperties, "intent"), false, "rework intent must remain command-only");
 });
 
+test("repair schemas preserve ordered vocabularies and optionality", () => {
+	const api = captureAdapter();
+	const schema = record(api.tool("herder_integration_repair").parameters);
+	const properties = record(schema.properties);
+	assert.deepEqual(properties.operation, {
+		anyOf: [
+			{ type: "string", const: "begin" },
+			{ type: "string", const: "finish" },
+			{ type: "string", const: "cancel" },
+		],
+	});
+	assert.deepEqual(properties.classification, {
+		anyOf: [
+			{ type: "string", const: "code_defect" },
+			{ type: "string", const: "transient" },
+			{ type: "string", const: "manifest_error" },
+			{ type: "string", const: "design_ambiguity" },
+			{ type: "string", const: "scope_ambiguity" },
+			{ type: "string", const: "credential" },
+			{ type: "string", const: "product_ambiguity" },
+		],
+	});
+	assert.ok(Array.isArray(schema.required));
+	assert.ok(schema.required.includes("operation"));
+	assert.equal(schema.required.includes("classification"), false);
+});
+
 test("verification gate arrays share one schema contract", () => {
 	const api = captureAdapter();
 	const verificationSchema = record(api.tool("herder_verification").parameters);
