@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
-import { git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { sha256, stableJson, type AttentionResolutionInput, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
 
@@ -105,15 +105,13 @@ function writeUnrelatedPlan(): string {
 }
 
 function fixture(root: string, options: { secondBlocked?: boolean } = {}): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo, { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Recovery Test"]);
-	git(repo, ["config", "user.email", "recovery@example.invalid"]);
-	fs.mkdirSync(path.join(repo, "src"));
-	fs.writeFileSync(path.join(repo, "src/value.mjs"), "export const value = 1\n");
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: add recovery fixture"]);
+	const { repo } = initFixtureRepo(root, {
+		name: "Recovery Test",
+		email: "recovery@example.invalid",
+		files: {
+			"src/value.mjs": "export const value = 1\n",
+		},
+	});
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
 	const secondStatus = options.secondBlocked ? "BLOCKED — needs attention" : "TODO";

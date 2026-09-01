@@ -15,6 +15,7 @@ import {
 } from "../../../adapters/ownership.ts";
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
 import { GitDriver } from "../../../src/daemon/git-driver.ts";
@@ -25,7 +26,6 @@ import {
 	CapturedExtensionAPI,
 	Deferred,
 	availableModels,
-	initFixtureRepo,
 	object,
 	withDeadline,
 } from "./helpers/harness.ts";

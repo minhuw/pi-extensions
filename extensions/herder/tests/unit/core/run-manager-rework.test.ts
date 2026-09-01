@@ -6,11 +6,12 @@ import path from "node:path";
 import test from "node:test";
 import { getExecutionReport } from "../../../src/core/plan-report.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { recordUsageRecord } from "../../../src/daemon/execution-store.ts";
 import { ensureService, requestManagerOperation, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { fileURLToPath } from "node:url";
-import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { sha256, stableJson, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
 
@@ -106,16 +107,14 @@ Keep the target-local rework evidence exact.
 }
 
 function fixture(root: string): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo, { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Rework Test"]);
-	git(repo, ["config", "user.email", "rework@example.invalid"]);
-	fs.mkdirSync(path.join(repo, "src"));
-	fs.writeFileSync(path.join(repo, "src/value.mjs"), "export const value = 1\n");
-	fs.writeFileSync(path.join(repo, "src/other.mjs"), "export const other = 1\n");
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: add rework fixture"]);
+	const { repo } = initFixtureRepo(root, {
+		name: "Rework Test",
+		email: "rework@example.invalid",
+		files: {
+			"src/value.mjs": "export const value = 1\n",
+			"src/other.mjs": "export const other = 1\n",
+		},
+	});
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
 	fs.writeFileSync(path.join(planDirectory, "README.md"), `# Rework plans

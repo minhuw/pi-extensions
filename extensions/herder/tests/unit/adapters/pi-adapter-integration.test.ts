@@ -12,6 +12,7 @@ import type {
 import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
@@ -39,7 +40,6 @@ import {
 	CapturedUI,
 	Deferred,
 	availableModels,
-	initFixtureRepo,
 	object,
 	withDeadline as harnessWithDeadline,
 } from "./helpers/harness.ts";

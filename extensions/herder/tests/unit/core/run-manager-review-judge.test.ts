@@ -6,8 +6,9 @@ import test from "node:test";
 import { submitHerderEvent } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
-import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -123,22 +124,15 @@ function records(value: unknown): JsonRecord[] {
 }
 
 function writeFixture(root: string): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo, { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Herder Transition Test"]);
-	git(repo, ["config", "user.email", "herder-transition@example.invalid"]);
-	fs.mkdirSync(path.join(repo, "src"));
-	fs.mkdirSync(path.join(repo, "test"));
-	fs.writeFileSync(
-		path.join(repo, "package.json"),
-		`${JSON.stringify({ name: "herder-transition-fixture", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
-	);
-	fs.writeFileSync(path.join(repo, "src/value.mjs"), "export const value = 1\n");
-	fs.writeFileSync(path.join(repo, "test/value.test.mjs"), `import assert from "node:assert/strict"\nimport test from "node:test"\nimport { value } from "../src/value.mjs"\ntest("value", () => assert.ok(Number.isInteger(value)))\n`);
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: add transition fixture"]);
-	const originalHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+	const { repo, originalHead } = initFixtureRepo(root, {
+		name: "Herder Transition Test",
+		email: "herder-transition@example.invalid",
+		files: {
+			"package.json": `${JSON.stringify({ name: "herder-transition-fixture", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
+			"src/value.mjs": "export const value = 1\n",
+			"test/value.test.mjs": `import assert from "node:assert/strict"\nimport test from "node:test"\nimport { value } from "../src/value.mjs"\ntest("value", () => assert.ok(Number.isInteger(value)))\n`,
+		},
+	});
 
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);

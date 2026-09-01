@@ -8,30 +8,27 @@ import { ensureService, requestManagerOperation,
 	requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
-import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
 import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { planFixture } from "../../support/plan-fixture.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo, { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Herder Runtime Test"]);
-	git(repo, ["config", "user.email", "herder-runtime@example.invalid"]);
-	fs.mkdirSync(path.join(repo, "src"));
-	fs.mkdirSync(path.join(repo, "test"));
-	fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "herder-runtime-fixture", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`);
-	fs.writeFileSync(path.join(repo, "src/value.mjs"), "export const value = 1\n");
-	fs.writeFileSync(path.join(repo, "src/other.mjs"), "export const other = 1\n");
-	fs.writeFileSync(path.join(repo, "test/value.test.mjs"), `import assert from "node:assert/strict"\nimport test from "node:test"\nimport { value } from "../src/value.mjs"\ntest("value", () => assert.equal(value, 2))\n`);
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: add runtime fixture"]);
-	const originalHead = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+	const { repo, originalHead } = initFixtureRepo(root, {
+		name: "Herder Runtime Test",
+		email: "herder-runtime@example.invalid",
+		files: {
+			"package.json": `${JSON.stringify({ name: "herder-runtime-fixture", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
+			"src/value.mjs": "export const value = 1\n",
+			"src/other.mjs": "export const other = 1\n",
+			"test/value.test.mjs": `import assert from "node:assert/strict"\nimport test from "node:test"\nimport { value } from "../src/value.mjs"\ntest("value", () => assert.equal(value, 2))\n`,
+		},
+	});
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
 	fs.writeFileSync(path.join(planDirectory, "README.md"), `# Herder Plans

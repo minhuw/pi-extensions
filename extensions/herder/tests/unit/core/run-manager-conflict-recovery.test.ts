@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
-import { git, runCommand } from "../../../src/daemon/git-driver.ts";
+import { initFixtureRepo } from "../../support/fixture-repo.ts";
+import { git } from "../../../src/daemon/git-driver.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -143,17 +144,14 @@ Keep the two independent fixture patches deliberately small and conflicting.
 }
 
 function writeFixture(root: string): Fixture {
-	const repo = path.join(root, "repo");
-	fs.mkdirSync(repo, { recursive: true });
-	runCommand("git", ["init", "-q", repo]);
-	git(repo, ["config", "user.name", "Conflict Recovery Test"]);
-	git(repo, ["config", "user.email", "conflict-recovery@example.invalid"]);
-	fs.mkdirSync(path.join(repo, "src"));
-	fs.writeFileSync(path.join(repo, "package.json"), `${JSON.stringify({ name: "conflict-recovery-fixture", private: true, type: "module" }, null, 2)}\n`);
-	fs.writeFileSync(path.join(repo, "src/value.mjs"), "export const value = 1\n");
-	git(repo, ["add", "."]);
-	git(repo, ["commit", "-q", "-m", "test: add shared value fixture"]);
-	const baseCommit = git(repo, ["rev-parse", "HEAD"]).stdout.trim();
+	const { repo, originalHead: baseCommit } = initFixtureRepo(root, {
+		name: "Conflict Recovery Test",
+		email: "conflict-recovery@example.invalid",
+		files: {
+			"package.json": `${JSON.stringify({ name: "conflict-recovery-fixture", private: true, type: "module" }, null, 2)}\n`,
+			"src/value.mjs": "export const value = 1\n",
+		},
+	});
 
 	const planDirectory = path.join(repo, "herder-plans");
 	initPlanDir(planDirectory);
