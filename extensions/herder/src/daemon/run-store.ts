@@ -3,8 +3,11 @@ import type { DatabaseSync } from "node:sqlite";
 import type { ResetPlanCleanupEvidence } from "./git/reset-plan.ts";
 import {
 	executionDatabasePath,
+	insertUsageRecordInDatabase,
 	openExecutionDatabase,
+	recordUsageRecordInDatabase,
 	withExecutionTransaction,
+	type UsageRecordInput,
 } from "./execution-store.ts";
 import {
 	MANAGER_PROTOCOL_VERSION,
@@ -1090,6 +1093,16 @@ export class RunStore {
 
 	transaction<T>(operation: () => T): T {
 		return withExecutionTransaction(this.database, operation);
+	}
+
+	/** Insert usage into an open caller-owned transaction. */
+	insertUsageInTransaction(input: UsageRecordInput): void {
+		insertUsageRecordInDatabase(this.database, input);
+	}
+
+	/** Record usage in a transaction owned by this store. */
+	recordUsage(input: UsageRecordInput): void {
+		recordUsageRecordInDatabase(this.database, input);
 	}
 
 	getRun(): StoredRun | null {

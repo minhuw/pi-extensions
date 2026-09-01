@@ -9,11 +9,7 @@ import {
 	projectStatuses,
 } from "./plans.ts";
 import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
-import {
-	insertUsageRecordInDatabase,
-	recordRunConfiguration,
-	recordUsageRecordInDatabase,
-} from "../daemon/execution-store.ts";
+import { recordRunConfiguration } from "../daemon/execution-store.ts";
 import {
 	GitDriver,
 	gitValue,
@@ -2933,7 +2929,7 @@ export class HerderRunManager {
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown terminal action ${terminal.actionId}`);
 			if (action.state === "terminal") {
 				const record = storedTerminalRecord(action);
-				if (record) this.recordTerminalUsage(run, action, record);
+				if (record) this.store.recordUsage(this.terminalUsageInput(run, action, record));
 				const completedPlan = this.store.getPlan(run.runId, action.planId);
 				if (completedPlan && driver.leaseReason(completedPlan.worktree) === action.leaseReason) driver.release(completedPlan.worktree, action.leaseReason);
 				continue;
@@ -2979,7 +2975,7 @@ export class HerderRunManager {
 				if (transition.attention) this.store.putAttention(transition.attention);
 				this.store.putPlan(transition.plan);
 				if (transition.runUpdate) this.store.updateRun(transition.runUpdate);
-				this.recordTerminalUsage(run, action, record, true);
+				this.store.insertUsageInTransaction(this.terminalUsageInput(run, action, record));
 			});
 			driver.release(plan.worktree, action.leaseReason);
 		}
@@ -2987,9 +2983,9 @@ export class HerderRunManager {
 		if (!recoveryWasDirty) this.terminalSideEffectsDirty = false;
 	}
 
-	private recordTerminalUsage(run: StoredRun, action: StoredAction, record: StoredTerminalRecord, inTransaction = false): void {
+	private terminalUsageInput(run: StoredRun, action: StoredAction, record: StoredTerminalRecord) {
 		const usage = record.usage;
-		const input = {
+		return {
 			plan: action.planId,
 			role: action.role,
 			attempt: action.attemptId,
@@ -3010,8 +3006,6 @@ export class HerderRunManager {
 			durationMs: usage.durationMs,
 			nestedUsage: usage.nested,
 		};
-		if (inTransaction) insertUsageRecordInDatabase(this.store.database, input);
-		else recordUsageRecordInDatabase(this.store.database, input);
 	}
 
 	private retryImplementerTransport(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
@@ -3615,7 +3609,7 @@ export class HerderRunManager {
 		for (const action of this.store.getTerminalActionsMissingUsage(run.runId)) {
 			const record = storedTerminalRecord(action);
 			if (!record) throw new Error(`Terminal action ${action.actionId} has no durable result envelope`);
-			this.recordTerminalUsage(run, action, record);
+			this.store.recordUsage(this.terminalUsageInput(run, action, record));
 		}
 		const terminalLeases = this.store.getTerminalLeaseReasons(run.runId);
 		for (const plan of this.store.getPlans(run.runId)) {

@@ -162,6 +162,109 @@ function cleanup(fixtureValue: Fixture): void {
 	fs.rmSync(`${fixtureValue.repo}-herder-worktrees`, { recursive: true, force: true });
 }
 
+function semanticUsage(store: RunStore, attemptId: string): JsonRecord {
+	const row = store.database.prepare(`
+		SELECT attempt_id, plan_id, role, model, effort, outcome,
+			input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, source,
+			round_number, generation, harness, service_tier,
+			started_at, finished_at, duration_ms, nested_usage_json
+		FROM attempts WHERE attempt_id = ?
+	`).get(attemptId) as JsonRecord | undefined;
+	assert.ok(row);
+	return row;
+}
+
+test("restart backfills terminal usage without duplicating the attempt", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-terminal-usage-recovery-"));
+	const fixtureValue = fixture(root);
+	let service: Service | undefined;
+	try {
+		const readme = path.join(fixtureValue.planDirectory, "README.md");
+		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(
+			"| [001](001-blocked.md) | Blocked target | P1 | S | — | BLOCKED — needs attention |",
+			"| [001](001-blocked.md) | Blocked target | P1 | S | — | TODO |",
+		));
+		service = await ensureService(fixtureValue.planDirectory);
+		const started = await managerReply(service, "start", {
+			mode: "fire",
+			repositoryRoot: fixtureValue.repo,
+			planDirectory: fixtureValue.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		const action = object((started.actions as unknown[])[0]);
+		await managerReply(service, "event", {
+			eventId: "terminal-usage-dispatch",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: "terminal-usage-worker" }],
+		});
+		await managerReply(service, "event", {
+			eventId: "terminal-usage-terminal",
+			kind: "terminals",
+			terminals: [{
+				actionId: action.actionId,
+				hostHandle: "terminal-usage-worker",
+				response: "STATUS: FAILED\nCOMMITS: none\nCHECKS: none\nFILES CHANGED: none\nDISCOVERED_PATHS: none\nNOTES: bounded failure\nUSAGE: input_tokens=7; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=test-host",
+			}],
+		});
+
+		await stopService(fixtureValue.planDirectory);
+		service = undefined;
+		let expected: JsonRecord;
+		let attemptId: string;
+		const stoppedStore = new RunStore(fixtureValue.planDirectory);
+		try {
+			const run = stoppedStore.getRun();
+			assert.ok(run);
+			const terminal = stoppedStore.getAction(String(action.actionId));
+			assert.equal(terminal?.state, "terminal");
+			assert.ok(terminal);
+			attemptId = terminal.attemptId;
+			expected = semanticUsage(stoppedStore, attemptId);
+			assert.equal(Number((stoppedStore.database.prepare("SELECT COUNT(*) AS count FROM attempts").get() as JsonRecord).count), 1);
+			stoppedStore.database.prepare("DELETE FROM attempts WHERE attempt_id = ?").run(attemptId);
+			assert.equal(stoppedStore.database.prepare("SELECT attempt_id FROM attempts WHERE attempt_id = ?").get(attemptId), undefined);
+		} finally {
+			stoppedStore.close();
+		}
+
+		service = await ensureService(fixtureValue.planDirectory);
+		const resumed = await managerReply(service, "start", {
+			mode: "resume",
+			repositoryRoot: fixtureValue.repo,
+			planDirectory: fixtureValue.planDirectory,
+			profile: "eclipse",
+			maxParallel: 1,
+		});
+		assert.equal(resumed.status, "running");
+		const recoveredStore = new RunStore(fixtureValue.planDirectory);
+		try {
+			assert.deepEqual(semanticUsage(recoveredStore, attemptId), expected);
+			assert.equal(Number((recoveredStore.database.prepare("SELECT COUNT(*) AS count FROM attempts").get() as JsonRecord).count), 1);
+		} finally {
+			recoveredStore.close();
+		}
+
+		const reconciled = await managerReply(service, "event", {
+			eventId: "terminal-usage-reconcile-again",
+			kind: "terminals",
+			terminals: [],
+		});
+		assert.equal(reconciled.status, "running");
+		const finalStore = new RunStore(fixtureValue.planDirectory);
+		try {
+			assert.deepEqual(semanticUsage(finalStore, attemptId), expected);
+			assert.equal(Number((finalStore.database.prepare("SELECT COUNT(*) AS count FROM attempts").get() as JsonRecord).count), 1);
+		} finally {
+			finalStore.close();
+		}
+	} finally {
+		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
+		cleanup(fixtureValue);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("target recovery advances a fresh generation while unrelated work remains schedulable", { timeout: 45_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-"));
 	const fixtureValue = fixture(root);
