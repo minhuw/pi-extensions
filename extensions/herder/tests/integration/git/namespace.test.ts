@@ -7,8 +7,8 @@ import path from "node:path"
 import process from "node:process"
 import test from "node:test"
 import { spawnSync } from "node:child_process"
-import { inspectNamespace, validatePlanName } from "../../../src/daemon/git/namespace-run.ts"
-import { formatCheckpointRef } from "../../../src/daemon/git/coordination-ref.ts"
+import { inspectNamespace } from "../../../src/daemon/git/namespace-run.ts"
+import { formatCheckpointRef, validatePlanName } from "../../../src/daemon/git/coordination-ref.ts"
 import { withTemporaryExecutableOnPath } from "../../support/temp-executable.ts"
 
 function run(command: string, args: string[], { cwd, allowFailure = false }: { cwd?: string; allowFailure?: boolean } = {}) {
