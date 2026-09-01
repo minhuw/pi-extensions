@@ -11,7 +11,7 @@ import { invokeHerderTool } from "../src/application/tools.ts";
 import { parsePlanCommandArguments, type PlanCommandOptions } from "./arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 
-export const PI_PLANNING_WORKFLOWS = [
+const PI_PLANNING_WORKFLOWS = [
 	{ command: "herder-improve", skill: "improve", skillName: "herder-improve", mode: "session", description: "Audit this repository and shape verified findings into Herder plans." },
 	{ command: "herder-simplify", skill: "simplify", skillName: "herder-simplify", mode: "session", description: "Find evidence-backed codebase reductions and shape them into Herder plans." },
 	{ command: "herder-grill", skill: "grill", skillName: "herder-grill", mode: "session", description: "Clarify one objective and write a confirmed Herder plan graph." },
@@ -19,26 +19,26 @@ export const PI_PLANNING_WORKFLOWS = [
 	{ command: "herder-plans", skill: "plans", skillName: "herder-plans", mode: "direct", description: "Run deterministic Herder plan graph operations." },
 ] as const;
 
-export type PiPlanningSkill = (typeof PI_PLANNING_WORKFLOWS)[number]["skill"];
+type PiPlanningSkill = (typeof PI_PLANNING_WORKFLOWS)[number]["skill"];
 type JsonObject = Record<string, any>;
 
-export interface PiPlanCommandExecution {
+interface PiPlanCommandExecution {
 	request: PlanCommandOptions;
 	result: unknown;
 	message: string;
 }
 
-export interface PreparedPlanningWorkflow {
+interface PreparedPlanningWorkflow {
 	runtimeContext?: string;
 	rollback?: () => Promise<void>;
 }
 
-export interface PiPlanningManagerReplyContext {
+interface PiPlanningManagerReplyContext {
 	attentionAction?: string;
 	planOperation?: "finish_edit" | "cancel_edit";
 }
 
-export interface PiPlanningRuntime {
+interface PiPlanningRuntime {
 	assertMutationAllowed: () => void;
 	assertAttentionAllowed?: (input: {
 		planDirectory: string;
