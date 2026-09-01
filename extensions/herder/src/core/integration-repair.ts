@@ -35,7 +35,7 @@ export type IntegrationRepairDependencies = {
 	driver: (run: StoredRun) => GitDriver;
 	reply: () => ManagerReply;
 	verification: (manifest: VerificationManifest) => Promise<ManagerReply>;
-	updateRun: (input: Parameters<RunStore["updateRun"]>[0]) => StoredRun;
+	updateRun: (input: { status?: StoredRun["status"]; terminalDetail?: string | null }) => void;
 };
 
 type PreparedRepairGateProgram = {
