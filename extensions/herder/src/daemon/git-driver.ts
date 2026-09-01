@@ -24,6 +24,7 @@ import type { StoredPlanSpec } from "./run-store.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
 import {
 	integrationRepairRefSnapshotSha256,
+	normalizeIntegrationRepairRefSnapshotEvidence,
 	stableJson,
 	validateIntegrationRepairRefSnapshot,
 	type IntegrationRepairRef,
@@ -520,19 +521,8 @@ export class GitDriver {
 	}
 
 	private normalizedIntegrationRepairNamespaceSnapshot(input: string | IntegrationRepairRef[] | IntegrationRepairNamespaceEvidence, expectedSha256: string): IntegrationRepairRef[] {
-		let value: unknown = input;
-		if (typeof input === "string") {
-			try { value = JSON.parse(input); } catch { throw new Error("Integration repair begin-ref snapshot is not valid JSON"); }
-		} else if (!Array.isArray(input) && input && typeof input === "object" && "refs" in input) {
-			value = input.refs;
-		}
-		validateIntegrationRepairRefSnapshot(value);
-		const snapshot = stableJson(value);
-		if (snapshot !== (typeof input === "string" ? input : stableJson(value))) throw new Error("Integration repair begin-ref snapshot is not canonical");
-		if (!/^[0-9a-f]{64}$/i.test(expectedSha256) || integrationRepairRefSnapshotSha256(value) !== expectedSha256.toLowerCase()) {
-			throw new Error("Integration repair begin-ref snapshot hash changed");
-		}
-		return value;
+		const value = typeof input === "string" || Array.isArray(input) ? input : input.refs;
+		return normalizeIntegrationRepairRefSnapshotEvidence(value, expectedSha256).refs;
 	}
 
 	private assertIntegrationRepairNamespaceContinuity(baseline: IntegrationRepairRef[], current: IntegrationRepairRef[]): void {

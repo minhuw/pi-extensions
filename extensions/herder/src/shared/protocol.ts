@@ -662,6 +662,41 @@ export function validateIntegrationRepairRefSnapshot(value: unknown): asserts va
 	}
 }
 
+export interface IntegrationRepairRefSnapshotEvidence {
+	refs: IntegrationRepairRef[];
+	json: string;
+	sha256: string;
+}
+
+export function normalizeIntegrationRepairRefSnapshotEvidence(input: string | IntegrationRepairRef[], expectedSha256: unknown): IntegrationRepairRefSnapshotEvidence {
+	let refs: IntegrationRepairRef[];
+	let json: string;
+	if (typeof input === "string") {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(input);
+		} catch {
+			throw new Error("Integration repair begin-ref snapshot is not valid JSON");
+		}
+		validateIntegrationRepairRefSnapshot(parsed);
+		refs = parsed;
+		json = stableJson(refs);
+		if (json !== input) throw new Error("Integration repair begin-ref snapshot is not canonical");
+	} else {
+		validateIntegrationRepairRefSnapshot(input);
+		refs = input;
+		json = stableJson(refs);
+	}
+	if (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(expectedSha256)) {
+		throw new Error("Integration repair begin-ref snapshot hash is invalid");
+	}
+	const normalizedSha256 = expectedSha256.toLowerCase();
+	if (integrationRepairRefSnapshotSha256(refs) !== normalizedSha256) {
+		throw new Error("Integration repair begin-ref snapshot hash changed");
+	}
+	return { refs, json, sha256: normalizedSha256 };
+}
+
 /** A deterministic capability bound to exactly one failed verification request. */
 export function integrationRepairCapabilityToken(requestId: string): string {
 	return sha256(`herder-integration-repair-capability:${requestId}`);

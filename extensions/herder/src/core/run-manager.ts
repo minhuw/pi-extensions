@@ -32,8 +32,8 @@ import {
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
-	integrationRepairRefSnapshotSha256,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
+	normalizeIntegrationRepairRefSnapshotEvidence,
 	isTerminalRunStatus,
 	normalizeUsage,
 	parseWorkerResult,
@@ -41,7 +41,6 @@ import {
 	stableJson,
 	validateAttentionResolution,
 	validateIntegrationRepairInput,
-	validateIntegrationRepairRefSnapshot,
 	type AttentionCause,
 	type AttentionGitIdentity,
 	type AttentionRecoveryEvidence,
@@ -209,17 +208,7 @@ function repairBeginRefSnapshot(repair: StoredIntegrationRepair): IntegrationRep
 	if (!repair.beginRefSnapshot || !repair.beginRefSnapshotSha256) {
 		throw new Error("Integration repair begin namespace evidence is unavailable; cancel and restart the repair");
 	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(repair.beginRefSnapshot);
-	} catch {
-		throw new Error("Integration repair begin namespace evidence is corrupt; cancel and restart the repair");
-	}
-	validateIntegrationRepairRefSnapshot(parsed);
-	if (stableJson(parsed) !== repair.beginRefSnapshot || integrationRepairRefSnapshotSha256(parsed) !== repair.beginRefSnapshotSha256.toLowerCase()) {
-		throw new Error("Integration repair begin namespace evidence hash changed; cancel and restart the repair");
-	}
-	return parsed;
+	return normalizeIntegrationRepairRefSnapshotEvidence(repair.beginRefSnapshot, repair.beginRefSnapshotSha256).refs;
 }
 
 function validateStartInput(input: StartInput): void {

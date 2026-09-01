@@ -14,11 +14,10 @@ import {
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
 	integrationRepairEpisodeId,
-	integrationRepairRefSnapshotSha256,
+	normalizeIntegrationRepairRefSnapshotEvidence,
 	sha256,
 	stableJson,
 	validateAttentionRequest,
-	validateIntegrationRepairRefSnapshot,
 	type AttentionRequest,
 	type AttentionRequestInput,
 	type AttentionState,
@@ -617,19 +616,8 @@ function normalizeBeginRefSnapshot(snapshot: string | null | undefined, snapshot
 		if (snapshotSha256 !== null && snapshotSha256 !== undefined && snapshotSha256 !== "") throw new Error("Integration repair begin-ref snapshot hash is missing its snapshot");
 		return { json: null, sha256: null };
 	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(snapshot);
-	} catch {
-		throw new Error("Integration repair begin-ref snapshot is not valid JSON");
-	}
-	validateIntegrationRepairRefSnapshot(parsed);
-	const json = stableJson(parsed);
-	if (json !== snapshot) throw new Error("Integration repair begin-ref snapshot is not canonical");
-	if (typeof snapshotSha256 !== "string" || !/^[0-9a-f]{64}$/i.test(snapshotSha256)) throw new Error("Integration repair begin-ref snapshot hash is invalid");
-	const normalizedSha256 = snapshotSha256.toLowerCase();
-	if (integrationRepairRefSnapshotSha256(parsed) !== normalizedSha256) throw new Error("Integration repair begin-ref snapshot hash changed");
-	return { json, sha256: normalizedSha256 };
+	const evidence = normalizeIntegrationRepairRefSnapshotEvidence(snapshot, snapshotSha256);
+	return { json: evidence.json, sha256: evidence.sha256 };
 }
 
 function durableOperationPayload(kind: StoredManagerOperationKind, payload: unknown): unknown {

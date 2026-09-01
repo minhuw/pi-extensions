@@ -4,6 +4,8 @@ import {
 	ATTENTION_PATH_LIMIT,
 	attentionRequestSha256,
 	canonicalEventPayload,
+	integrationRepairRefSnapshotSha256,
+	normalizeIntegrationRepairRefSnapshotEvidence,
 	normalizeUsage,
 	parseWorkerResult,
 	sha256,
@@ -14,6 +16,7 @@ import {
 	isTerminalRunStatus,
 	RUN_STATUSES,
 	TERMINAL_RUN_STATUSES,
+	type IntegrationRepairRef,
 } from "../../../src/shared/protocol.ts";
 
 test("terminal run status policy is shared and fail-closed", () => {
@@ -191,6 +194,34 @@ test("integration repair input validation owns context-free admission rules", ()
 	assert.throws(() => validateIntegrationRepairInput({ ...valid, gates: Array.from({ length: 33 }, () => ({})) }), /gates are invalid/);
 	assert.throws(() => validateIntegrationRepairInput({ ...valid, observedCommit: "not-a-commit" }), /observed commit is invalid/);
 });
+test("integration repair ref snapshots normalize strings and arrays with one evidence rule", () => {
+	const refs: IntegrationRepairRef[] = [
+		{ ref: "refs/heads/herder/demo/main", target: "a".repeat(40) },
+		{ ref: "refs/plan-herder/demo/work", target: "b".repeat(64) },
+	];
+	const json = stableJson(refs);
+	const hash = integrationRepairRefSnapshotSha256(refs);
+	const fromString = normalizeIntegrationRepairRefSnapshotEvidence(json, hash.toUpperCase());
+	assert.deepEqual(fromString.refs, refs);
+	assert.equal(fromString.json, json);
+	assert.equal(fromString.sha256, hash);
+	const fromArray = normalizeIntegrationRepairRefSnapshotEvidence(
+		refs.map(({ ref, target }) => ({ target, ref })),
+		hash,
+	);
+	assert.deepEqual(fromArray.refs, refs);
+	assert.equal(fromArray.json, json);
+	assert.equal(fromArray.sha256, hash);
+
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence("{", hash), /not valid JSON/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence("{}", hash), /must be an array/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence(JSON.stringify(refs, null, 2), hash), /not canonical/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence(refs, undefined), /hash is invalid/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence(refs, "not-a-hash"), /hash is invalid/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence(refs, "0".repeat(64)), /hash changed/);
+	assert.throws(() => normalizeIntegrationRepairRefSnapshotEvidence([{ ref: "refs/demo", target: "invalid" }], hash), /target is invalid/);
+});
+
 test("malformed envelopes and payload-changing replay identities fail closed", () => {
 	assert.throws(() => parseWorkerResult("plan-reviewer", "VERDICT: MAYBE"), /missing SCOPE|Invalid Reviewer/);
 	assert.throws(() => parseWorkerResult("plan-judge", "DECISION: DONE\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: none\nQUESTION: none"), /cannot retain authorized blockers/);
