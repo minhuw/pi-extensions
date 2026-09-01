@@ -3,6 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
+import { withTemporaryExecutableOnPath } from "../../../support/temp-executable.ts"
 import { fail, isInside, realpathIfPresent, runGit } from "../../../../src/daemon/git/primitives.ts"
 
 function temporaryRepository(): { root: string; repo: string } {
@@ -73,54 +74,46 @@ test("runGit supports allowFailure and allowStatus", () => {
 
 test("runGit supports call-site failure formatting for text and Buffer output", () => {
   const { root, repo } = temporaryRepository()
-  const bin = path.join(root, "bin")
-  const fakeGit = path.join(bin, "git")
-  fs.mkdirSync(bin)
-  fs.writeFileSync(fakeGit, "#!/bin/sh\nprintf 'STDERR-PART' >&2\nprintf 'STDOUT-PART'\nexit 7\n")
-  fs.chmodSync(fakeGit, 0o755)
-  const originalPath = process.env.PATH
-  process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`
   try {
-    assert.throws(
-      () => runGit(repo, ["fake"], {
-        failureFormatter: (_args, stderr, stdout) => (stderr || stdout || "git failed").trim(),
-      }),
-      { message: "STDERR-PART" },
-    )
-    assert.throws(
-      () => runGit(repo, ["fake"], {
-        encoding: null,
-        failureFormatter: (_args, stderr, stdout) => (stderr + stdout).trim(),
-      }),
-      { message: "STDERR-PARTSTDOUT-PART" },
-    )
+    withTemporaryExecutableOnPath({
+      prefix: "herder-fake-git-",
+      script: "#!/bin/sh\nprintf 'STDERR-PART' >&2\nprintf 'STDOUT-PART'\nexit 7\n",
+    }, () => {
+      assert.throws(
+        () => runGit(repo, ["fake"], {
+          failureFormatter: (_args, stderr, stdout) => (stderr || stdout || "git failed").trim(),
+        }),
+        { message: "STDERR-PART" },
+      )
+      assert.throws(
+        () => runGit(repo, ["fake"], {
+          encoding: null,
+          failureFormatter: (_args, stderr, stdout) => (stderr + stdout).trim(),
+        }),
+        { message: "STDERR-PARTSTDOUT-PART" },
+      )
+    })
   } finally {
-    if (originalPath === undefined) delete process.env.PATH
-    else process.env.PATH = originalPath
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
 test("runGit can preserve raw Buffer ordering for failure formatting", () => {
   const { root, repo } = temporaryRepository()
-  const bin = path.join(root, "bin")
-  const fakeGit = path.join(bin, "git")
-  fs.mkdirSync(bin)
-  fs.writeFileSync(fakeGit, "#!/bin/sh\nprintf '\\342' >&2\nprintf '\\202\\254'\nexit 7\n")
-  fs.chmodSync(fakeGit, 0o755)
-  const originalPath = process.env.PATH
-  process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ""}`
   try {
-    assert.throws(
-      () => runGit(repo, ["fake"], {
-        encoding: null,
-        failureBufferFormatter: (_args, stderr, stdout) => Buffer.concat([stderr, stdout]).toString("utf8").trim(),
-      }),
-      { message: "€" },
-    )
+    withTemporaryExecutableOnPath({
+      prefix: "herder-fake-git-",
+      script: "#!/bin/sh\nprintf '\\342' >&2\nprintf '\\202\\254'\nexit 7\n",
+    }, () => {
+      assert.throws(
+        () => runGit(repo, ["fake"], {
+          encoding: null,
+          failureBufferFormatter: (_args, stderr, stdout) => Buffer.concat([stderr, stdout]).toString("utf8").trim(),
+        }),
+        { message: "€" },
+      )
+    })
   } finally {
-    if (originalPath === undefined) delete process.env.PATH
-    else process.env.PATH = originalPath
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
