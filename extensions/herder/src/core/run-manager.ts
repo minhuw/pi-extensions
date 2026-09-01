@@ -32,6 +32,7 @@ import {
 	integrationRepairCapabilityDigest,
 	integrationRepairCapabilityToken,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
+	normalizeIntegrationRepairInput,
 	normalizeIntegrationRepairRefSnapshotEvidence,
 	isTerminalRunStatus,
 	normalizeUsage,
@@ -2290,8 +2291,9 @@ export class HerderRunManager {
 		return { request, manifest, gates: prepared.gates, manifestSha256 };
 	}
 
-	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
-		validateIntegrationRepairInput(input);
+	async integrationRepair(wireInput: IntegrationRepairInput): Promise<ManagerReply> {
+		validateIntegrationRepairInput(wireInput);
+		const input = normalizeIntegrationRepairInput(wireInput);
 		const operationId = input.operationId || `integration-repair:${input.operation}:${input.requestId}`;
 		const inputHash = repairInputHash(input);
 		const verification = this.repairVerificationForInput(input);
@@ -2319,7 +2321,6 @@ export class HerderRunManager {
 			if (!decisionOnly && !["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Integration repair classification is not an automatic recovery path");
 			if (verification.state !== "failed") throw new Error("Integration repair begin requires a failed verification attempt");
 			const ownerSessionId = input.ownerSessionId;
-			if (!ownerSessionId) throw new Error("Integration repair begin requires the owning main session ID");
 			const currentClassification = repair?.episodeClassification ?? null;
 			if (currentClassification && currentClassification !== classification) throw new Error("Integration repair classification cannot change within a classification episode");
 			if (repair && this.repairBeginAuditMatches(repair, operationId, inputHash)) {

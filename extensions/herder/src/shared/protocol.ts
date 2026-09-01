@@ -772,6 +772,41 @@ export interface IntegrationRepairInput {
 	observedCommit?: string;
 }
 
+export interface IntegrationRepairBeginInput extends IntegrationRepairInput {
+	operation: "begin";
+	ownerSessionId: string;
+	classification: IntegrationRepairClassification | string;
+}
+
+export interface IntegrationRepairFinishInput extends IntegrationRepairInput {
+	operation: "finish";
+	ownerSessionId: string;
+	observedCommit?: string;
+}
+
+export interface IntegrationRepairCancelInput extends IntegrationRepairInput {
+	operation: "cancel";
+	ownerSessionId: string;
+}
+
+export type NormalizedIntegrationRepairInput =
+	| IntegrationRepairBeginInput
+	| IntegrationRepairFinishInput
+	| IntegrationRepairCancelInput;
+
+export function normalizeIntegrationRepairInput(input: IntegrationRepairInput): NormalizedIntegrationRepairInput {
+	if (!input.ownerSessionId) {
+		if (input.operation === "begin") throw new Error("Integration repair begin requires the owning main session ID");
+		throw new Error("Integration repair owner session does not match the request-bound capability");
+	}
+	if (input.operation === "begin") {
+		if (!input.classification) throw new Error("Integration repair classification is invalid");
+		return { ...input, operation: "begin", ownerSessionId: input.ownerSessionId, classification: input.classification };
+	}
+	if (input.operation === "finish") return { ...input, operation: "finish", ownerSessionId: input.ownerSessionId };
+	return { ...input, operation: "cancel", ownerSessionId: input.ownerSessionId };
+}
+
 export function validateIntegrationRepairInput(value: unknown): asserts value is IntegrationRepairInput {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair input must be an object");
 	if (Object.prototype.hasOwnProperty.call(value, "commitMessage")) throw new Error("Integration repair commitMessage is not accepted; the owning session must author the commit");

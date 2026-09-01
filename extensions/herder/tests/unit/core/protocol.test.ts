@@ -11,6 +11,7 @@ import {
 	sha256,
 	stableJson,
 	validateAttentionRequest,
+	normalizeIntegrationRepairInput,
 	validateIntegrationRepairInput,
 	integrationRepairCapabilityToken,
 	isTerminalRunStatus,
@@ -194,6 +195,49 @@ test("integration repair input validation owns context-free admission rules", ()
 	assert.throws(() => validateIntegrationRepairInput({ ...valid, gates: Array.from({ length: 33 }, () => ({})) }), /gates are invalid/);
 	assert.throws(() => validateIntegrationRepairInput({ ...valid, observedCommit: "not-a-commit" }), /observed commit is invalid/);
 });
+test("integration repair inputs narrow by operation without changing the wire admission", () => {
+	const requestId = "request-1";
+	const wireBase = {
+		schemaVersion: 1 as const,
+		requestId,
+		requestSha256: "a".repeat(64),
+		capabilityToken: integrationRepairCapabilityToken(requestId),
+	};
+	for (const operation of ["begin", "finish", "cancel"] as const) {
+		const ownerless = { ...wireBase, operation };
+		assert.doesNotThrow(() => validateIntegrationRepairInput(ownerless));
+		assert.throws(
+			() => normalizeIntegrationRepairInput(ownerless),
+			operation === "begin" ? /owning main session ID/ : /owner session does not match/,
+		);
+	}
+
+	const unclassified = { ...wireBase, operation: "begin" as const, ownerSessionId: "session-1" };
+	assert.doesNotThrow(() => validateIntegrationRepairInput(unclassified));
+	assert.throws(() => normalizeIntegrationRepairInput(unclassified), /classification is invalid/);
+
+	const common = {
+		...wireBase,
+		operationId: "operation-1",
+		repairId: "repair-1",
+		runId: "run-1",
+		generation: 1,
+		ownerSessionId: "session-1",
+		rationale: "repair rationale",
+		detail: "repair detail",
+		gates: [],
+		gateAdditions: [],
+		allowedPaths: ["src/value.mjs"],
+	};
+	const begin = { ...common, operation: "begin" as const, classification: "code_defect", observedCommit: "b".repeat(40) };
+	const finish = { ...common, operation: "finish" as const };
+	const cancel = { ...common, operation: "cancel" as const };
+	assert.deepEqual(normalizeIntegrationRepairInput(begin), begin);
+	assert.deepEqual(normalizeIntegrationRepairInput(finish), finish);
+	assert.deepEqual(normalizeIntegrationRepairInput(cancel), cancel);
+	assert.equal("observedCommit" in normalizeIntegrationRepairInput(finish), false);
+});
+
 test("integration repair ref snapshots normalize strings and arrays with one evidence rule", () => {
 	const refs: IntegrationRepairRef[] = [
 		{ ref: "refs/heads/herder/demo/main", target: "a".repeat(40) },

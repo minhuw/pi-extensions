@@ -2521,6 +2521,85 @@ test("integration repair begin rejects a pre-authorized repair commit", { timeou
 	}
 });
 
+test("integration repair cancelled finish is an authenticated no-op", { timeout: 35_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-cancelled-finish-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const afterReviewer = await prepareSinglePlan(service, fixture, "repair-cancelled-finish");
+		const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, "repair-cancelled-finish", [{
+			gateId: "failing-gate",
+			label: "deliberate failure",
+			cwd: ".",
+			argv: [process.execPath, "-e", "process.exit(1)"],
+			rationale: "Creates the repair used to characterize terminal finish behavior.",
+		}]);
+		const repair = payload(failed.reply.integrationRepair);
+		const common = {
+			requestId: String(repair.requestId),
+			requestSha256: String(repair.requestSha256),
+			capabilityToken: String(repair.capabilityToken),
+			runId: String(repair.runId),
+			generation: Number(repair.generation),
+			ownerSessionId: "main-session",
+		};
+		const begin = { ...common, operation: "begin" as const, operationId: "repair-cancelled-finish-begin", classification: "transient" };
+		await requestManagerOperation(service, "integration_repair", begin);
+
+		await assert.rejects(
+			() => requestManagerOperation(service, "integration_repair", {
+				...common,
+				operation: "finish" as const,
+				operationId: "repair-active-finish-without-commit",
+			}),
+			/observed integration commit identity/,
+		);
+
+		const cancel = { ...common, operation: "cancel" as const, operationId: "repair-cancelled-finish-cancel" };
+		const cancelled = payload(payload(await requestManagerOperation(service, "integration_repair", cancel)).reply);
+		assert.equal(cancelled.status, "paused");
+
+		const before = new RunStore(fixture.planDirectory);
+		const beforeRepair = before.getIntegrationRepairForRequest(String(repair.requestId))!;
+		const beforeEpisodes = before.getIntegrationRepairEpisodes(beforeRepair.repairId);
+		const beforeAudits = before.getIntegrationRepairAudits(beforeRepair.repairId);
+		const beforeRun = before.getRun()!;
+		assert.equal(beforeRepair.state, "cancelled");
+		before.close();
+
+		await assert.rejects(
+			() => requestManagerOperation(service, "integration_repair", {
+				...common,
+				operation: "finish" as const,
+				operationId: "repair-cancelled-finish-wrong-owner",
+				ownerSessionId: "other-session",
+			}),
+			/owner session does not match/,
+		);
+		const finished = payload(payload(await requestManagerOperation(service, "integration_repair", {
+			...common,
+			operation: "finish" as const,
+			operationId: "repair-cancelled-finish-no-commit",
+		})).reply);
+		assert.equal(finished.status, "paused");
+
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			const afterRepair = after.getIntegrationRepair(beforeRepair.repairId)!;
+			assert.deepEqual(afterRepair, beforeRepair);
+			assert.deepEqual(after.getIntegrationRepairEpisodes(afterRepair.repairId), beforeEpisodes);
+			assert.deepEqual(after.getIntegrationRepairAudits(afterRepair.repairId), beforeAudits);
+			assert.deepEqual(after.getRun(), beforeRun);
+		} finally {
+			after.close();
+		}
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("non-initial repair cannot recapture namespace evidence", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-noninitial-namespace-"));
 	const fixture = writeFixture(root);
