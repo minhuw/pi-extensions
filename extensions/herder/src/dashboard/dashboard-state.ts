@@ -68,34 +68,49 @@ function outcomeContains(record: UsageRecord | null, words: string[]): boolean {
   return words.some((word) => outcome.includes(word))
 }
 
-export function derivePlanPhase(
-  plan: { status: string; unsatisfied: string[] },
-  attempts: UsageRecord[],
-  lease: LeaseView | null,
-  completion: unknown,
-): DashboardPhase {
-  if (completion || plan.status === "DONE") return "complete"
-  if (plan.status === "REJECTED") return "rejected"
-  if (plan.status === "BLOCKED") return "blocked"
-  if (lease) return rolePhase(lease.role)
-  if (plan.status === "TODO") return plan.unsatisfied.length > 0 ? "waiting" : "ready"
-  const latest = latestRecord(attempts)
-  if (!latest) return "queued"
-  const role = String(latest.role).toLowerCase()
-  if (role.includes("implementer")) {
-    return outcomeContains(latest, ["COMPLETE", "SUCCESS", "DONE"]) ? "gates" : "repair"
-  }
-  if (role.includes("reviewer")) {
-    if (outcomeContains(latest, ["APPROVE"])) return "integration"
-    return Number(latest.round ?? 0) >= 3 ? "judge-queued" : "repair"
-  }
-  if (role.includes("judge")) {
-    return outcomeContains(latest, ["DONE", "APPROVE"]) ? "integration" : "repair"
-  }
-  return "coordination"
+type LegacyPlanPhaseObservation = {
+  source: "legacy"
+  plan: { status: string; unsatisfied: string[] }
+  attempts: UsageRecord[]
+  lease: LeaseView | null
+  completion: unknown
 }
 
-export function managerPlanPhase(spec: DynamicRecord, runtime: DynamicRecord | null, activeAction: DynamicRecord | null, unsatisfied: string[]): DashboardPhase {
+type ManagerPlanPhaseObservation = {
+  source: "manager"
+  spec: { initialStatus: string }
+  runtime: { phase: string; round?: number | null } | null
+  activeAction: object | null
+  unsatisfied: string[]
+}
+
+export type PlanPhaseObservation = LegacyPlanPhaseObservation | ManagerPlanPhaseObservation
+
+export function classifyPlanPhase(observation: PlanPhaseObservation): DashboardPhase {
+  if (observation.source === "legacy") {
+    const { plan, attempts, lease, completion } = observation
+    if (completion || plan.status === "DONE") return "complete"
+    if (plan.status === "REJECTED") return "rejected"
+    if (plan.status === "BLOCKED") return "blocked"
+    if (lease) return rolePhase(lease.role)
+    if (plan.status === "TODO") return plan.unsatisfied.length > 0 ? "waiting" : "ready"
+    const latest = latestRecord(attempts)
+    if (!latest) return "queued"
+    const role = String(latest.role).toLowerCase()
+    if (role.includes("implementer")) {
+      return outcomeContains(latest, ["COMPLETE", "SUCCESS", "DONE"]) ? "gates" : "repair"
+    }
+    if (role.includes("reviewer")) {
+      if (outcomeContains(latest, ["APPROVE"])) return "integration"
+      return Number(latest.round ?? 0) >= 3 ? "judge-queued" : "repair"
+    }
+    if (role.includes("judge")) {
+      return outcomeContains(latest, ["DONE", "APPROVE"]) ? "integration" : "repair"
+    }
+    return "coordination"
+  }
+
+  const { spec, runtime, activeAction, unsatisfied } = observation
   if (!runtime) {
     if (spec.initialStatus === "DONE") return "complete"
     if (spec.initialStatus === "REJECTED") return "rejected"
@@ -108,7 +123,7 @@ export function managerPlanPhase(spec: DynamicRecord, runtime: DynamicRecord | n
   if (["READY_JUDGE", "JUDGING"].includes(runtime.phase)) return activeAction ? "judge" : "judge-queued"
   if (["READY_REVIEWER", "REVIEWING"].includes(runtime.phase)) return "review"
   if (["READY_IMPLEMENTER", "IMPLEMENTING"].includes(runtime.phase)) {
-    if (runtime.round > 1 && !activeAction) return "repair"
+    if ((runtime.round ?? 0) > 1 && !activeAction) return "repair"
     return activeAction ? "implementation" : "ready"
   }
   return "coordination"
@@ -287,9 +302,23 @@ export function buildDashboardState(input: DashboardInput = {}) {
       ...(planAttention ? { attention: planAttention } : {}),
     }
     const runtime = runtimeById.get(plan.id) ?? null
-    planView.phase = manager.run
-      ? managerPlanPhase(plan, runtime, activeActionById.get(plan.id) ?? null, unsatisfied)
-      : derivePlanPhase(planView, attempts, lease, completion)
+    const activeAction = activeActionById.get(plan.id) ?? null
+    const observation: PlanPhaseObservation = manager.run
+      ? {
+        source: "manager",
+        spec: { initialStatus: plan.status },
+        runtime: runtime ? { phase: runtime.phase, round: runtime.round } : null,
+        activeAction,
+        unsatisfied,
+      }
+      : {
+        source: "legacy",
+        plan: { status: planView.status, unsatisfied },
+        attempts,
+        lease,
+        completion,
+      }
+    planView.phase = classifyPlanPhase(observation)
     return planView
   })
   const integrationBranch = branchByRelative.get("integration") ?? null

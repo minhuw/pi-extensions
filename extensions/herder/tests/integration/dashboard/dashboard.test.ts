@@ -13,7 +13,7 @@ import type { UsageRecord, UsageRecordInput } from "../../../src/daemon/executio
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
 import { attentionRequestSha256, sha256 } from "../../../src/shared/protocol.ts"
-import { buildDashboardState, buildForecast, derivePlanPhase, parseLease } from "../../../src/dashboard/dashboard-state.ts"
+import { buildDashboardState, buildForecast, classifyPlanPhase, parseLease, type PlanPhaseObservation } from "../../../src/dashboard/dashboard-state.ts"
 import { detectDashboardEnvironment, enableDashboardHostAccess, resolveOrcaCommand, runHostCommand } from "../../../src/dashboard/dashboard-host.ts"
 import { createDashboardServer, parseDashboardArguments } from "../../../src/dashboard/herder-dashboard.ts"
 
@@ -550,6 +550,19 @@ function createManagerLifecycleFixture() {
     } finally {
       store.close()
     }
+    usage(planDir, {
+      attempt: "demo-002-legacy-implementer-1",
+      plan: "002",
+      role: "plan-implementer",
+      outcome: "COMPLETE",
+      round: "1",
+      startedAt: "2026-08-03T00:00:00Z",
+      finishedAt: "2026-08-03T00:02:00Z",
+    })
+    addCompletionProof(repo, "002")
+    const legacyWorktree = path.join(root, "worker-002")
+    git(repo, "worktree", "add", "-q", "-b", "herder/demo/002", legacyWorktree, "HEAD")
+    git(repo, "worktree", "lock", "--reason=plan-herder:demo:002:plan-implementer:legacy", legacyWorktree)
     return { root, planDir, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
   } catch (error) {
     fs.rmSync(root, { recursive: true, force: true })
@@ -644,18 +657,69 @@ async function runTests(): Promise<void> {
       durationMs: null,
       nestedUsage: [],
     }
-    assert.equal(derivePlanPhase(
-      { status: "IN PROGRESS", unsatisfied: [] },
-      [reviewAttempt],
-      null,
-      null,
-    ), "judge-queued")
-    assert.equal(derivePlanPhase(
-      { status: "IN PROGRESS", unsatisfied: [] },
-      [],
-      { role: "plan-judge", attempt: null, task: null, reason: "test" },
-      null,
-    ), "judge")
+    const legacyAttempt = (role: string, outcome: string, round = 1): UsageRecord => ({
+      ...reviewAttempt,
+      role,
+      outcome,
+      round,
+    })
+    const legacyCases: Array<{
+      observation: Extract<PlanPhaseObservation, { source: "legacy" }>
+      expected: ReturnType<typeof classifyPlanPhase>
+    }> = [
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: null, completion: {} }, expected: "complete" },
+      { observation: { source: "legacy", plan: { status: "DONE", unsatisfied: [] }, attempts: [], lease: null, completion: null }, expected: "complete" },
+      { observation: { source: "legacy", plan: { status: "REJECTED", unsatisfied: [] }, attempts: [], lease: null, completion: null }, expected: "rejected" },
+      { observation: { source: "legacy", plan: { status: "BLOCKED", unsatisfied: [] }, attempts: [], lease: null, completion: null }, expected: "blocked" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: { role: "plan-implementer", attempt: null, task: null, reason: "test" }, completion: null }, expected: "implementation" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: { role: "plan-reviewer", attempt: null, task: null, reason: "test" }, completion: null }, expected: "review" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: { role: "plan-judge", attempt: null, task: null, reason: "test" }, completion: null }, expected: "judge" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: { role: "other", attempt: null, task: null, reason: "test" }, completion: null }, expected: "coordination" },
+      { observation: { source: "legacy", plan: { status: "TODO", unsatisfied: ["001"] }, attempts: [], lease: null, completion: null }, expected: "waiting" },
+      { observation: { source: "legacy", plan: { status: "TODO", unsatisfied: [] }, attempts: [], lease: null, completion: null }, expected: "ready" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [], lease: null, completion: null }, expected: "queued" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-implementer", "SUCCESS")], lease: null, completion: null }, expected: "gates" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-implementer", "REVISE")], lease: null, completion: null }, expected: "repair" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-reviewer", "APPROVE")], lease: null, completion: null }, expected: "integration" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-reviewer", "REVISE", 2)], lease: null, completion: null }, expected: "repair" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-reviewer", "REVISE", 3)], lease: null, completion: null }, expected: "judge-queued" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-judge", "DONE")], lease: null, completion: null }, expected: "integration" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("plan-judge", "REJECT")], lease: null, completion: null }, expected: "repair" },
+      { observation: { source: "legacy", plan: { status: "IN PROGRESS", unsatisfied: [] }, attempts: [legacyAttempt("other", "DONE")], lease: null, completion: null }, expected: "coordination" },
+    ]
+    for (const testCase of legacyCases) {
+      assert.equal(classifyPlanPhase(testCase.observation), testCase.expected)
+    }
+
+    const managerCases: Array<{
+      observation: Extract<PlanPhaseObservation, { source: "manager" }>
+      expected: ReturnType<typeof classifyPlanPhase>
+    }> = [
+      { observation: { source: "manager", spec: { initialStatus: "DONE" }, runtime: null, activeAction: null, unsatisfied: [] }, expected: "complete" },
+      { observation: { source: "manager", spec: { initialStatus: "REJECTED" }, runtime: null, activeAction: null, unsatisfied: [] }, expected: "rejected" },
+      { observation: { source: "manager", spec: { initialStatus: "BLOCKED" }, runtime: null, activeAction: null, unsatisfied: [] }, expected: "blocked" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: null, activeAction: null, unsatisfied: ["001"] }, expected: "waiting" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: null, activeAction: null, unsatisfied: [] }, expected: "ready" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "DONE" }, activeAction: null, unsatisfied: [] }, expected: "complete" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "FINAL_APPROVED" }, activeAction: null, unsatisfied: [] }, expected: "complete" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "BLOCKED" }, activeAction: null, unsatisfied: [] }, expected: "blocked" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "NEEDS_INPUT" }, activeAction: null, unsatisfied: [] }, expected: "blocked" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_TO_INTEGRATE" }, activeAction: null, unsatisfied: [] }, expected: "integration" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_JUDGE" }, activeAction: {}, unsatisfied: [] }, expected: "judge" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "JUDGING" }, activeAction: null, unsatisfied: [] }, expected: "judge-queued" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_REVIEWER" }, activeAction: null, unsatisfied: [] }, expected: "review" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "REVIEWING" }, activeAction: null, unsatisfied: [] }, expected: "review" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_IMPLEMENTER", round: 2 }, activeAction: null, unsatisfied: [] }, expected: "repair" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_IMPLEMENTER", round: 2 }, activeAction: {}, unsatisfied: [] }, expected: "implementation" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "IMPLEMENTING", round: 1 }, activeAction: {}, unsatisfied: [] }, expected: "implementation" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "READY_IMPLEMENTER", round: 1 }, activeAction: null, unsatisfied: [] }, expected: "ready" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "IMPLEMENTING", round: 2 }, activeAction: null, unsatisfied: [] }, expected: "repair" },
+      { observation: { source: "manager", spec: { initialStatus: "TODO" }, runtime: { phase: "OTHER" }, activeAction: null, unsatisfied: [] }, expected: "coordination" },
+      { observation: { source: "manager", spec: { initialStatus: "DONE" }, runtime: { phase: "READY_IMPLEMENTER", round: 1 }, activeAction: null, unsatisfied: [] }, expected: "ready" },
+    ]
+    for (const testCase of managerCases) {
+      assert.equal(classifyPlanPhase(testCase.observation), testCase.expected)
+    }
     assert.deepEqual(buildForecast([], executionReport([])), {
       finished: 0,
       unfinished: 0,
@@ -866,6 +930,9 @@ if (serve) {
       assert.equal(first.status, "DONE")
       assert.equal(second.status, "TODO")
       assert.deepEqual(second.unsatisfied, [])
+      assert.equal(second.report.attempts, 1)
+      assert.equal(second.lease?.role, "plan-implementer")
+      assert.ok(second.completion)
       assert.equal(second.phase, "ready")
       assert.deepEqual(state.planSet.ready, ["002"])
     } finally {
