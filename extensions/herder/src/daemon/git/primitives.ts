@@ -67,6 +67,22 @@ export function runGit(
   return result
 }
 
+export function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
+  const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+  const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true })
+  return {
+    branch: branch.status === 0 ? branch.stdout.trim() : null,
+    head: head.status === 0 ? head.stdout.trim() : null,
+  }
+}
+
+export function isAncestor(repoRoot: string, ancestor: string, descendant: string): boolean {
+  const result = runGit(repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], { allowFailure: true })
+  if (result.status === 0) return true
+  if (result.status === 1) return false
+  fail(`Cannot compare ${ancestor} with ${descendant}: ${(result.stderr || result.stdout).trim()}`)
+}
+
 export function isInside(parent: string, candidate: string, { allowEqual = true }: { allowEqual?: boolean } = {}): boolean {
   const relative = path.relative(parent, candidate)
   if (relative === "") return allowEqual

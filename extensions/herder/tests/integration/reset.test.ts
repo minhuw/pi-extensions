@@ -178,6 +178,25 @@ test("pathless owned worktree records reject whole-set reset before mutation", {
 		assert.equal(namespaceSnapshot(value), before);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
+test("interrupted ancestry probes reject whole-set reset before mutation", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const before = namespaceSnapshot(value);
+		const originalPath = process.env.PATH ?? "";
+		const realPath = originalPath.replaceAll("'", "'\\\"'\\\"'");
+		assert.throws(() => withTemporaryExecutableOnPath({
+			prefix: "herder-reset-sigterm-",
+			script: `#!/bin/sh
+real_git() { PATH='${realPath}'; export PATH; command git "$@"; }
+case "$*" in
+	*"merge-base --is-ancestor"*) kill -TERM $$ ;;
+esac
+real_git "$@"
+`,
+		}, () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir })), /Cannot compare/);
+		assert.equal(namespaceSnapshot(value), before);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
 test("reset removes the real Herder namespace, restores immutable statuses, preserves setup, and permits a fresh fire", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {

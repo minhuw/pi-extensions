@@ -4,22 +4,13 @@ import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
 import { listHerderBranches, listWorktreeInventory, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
 import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
-import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
+import { currentCheckout, fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export interface ForceCleanupInput {
 	repo: string;
 	planDir: string;
 	planName?: string | null;
 	dryRun: boolean;
-}
-
-function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
-	const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true });
-	const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true });
-	return {
-		branch: branch.status === 0 ? branch.stdout.trim() : null,
-		head: head.status === 0 ? head.stdout.trim() : null,
-	};
 }
 
 function ownedWorktrees(repoRoot: string, planDir: string, planName: string, records: WorktreeRecord[]): WorktreeRecord[] {

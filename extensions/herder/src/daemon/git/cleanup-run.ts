@@ -8,7 +8,7 @@ import type { CoordinationRef } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktreeInventory, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts"
 import { isTerminalRunStatus } from "../../shared/protocol.ts"
-import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts"
+import { currentCheckout, fail, isAncestor, isInside, realpathIfPresent, runGit } from "./primitives.ts"
 
 export interface CleanupInput {
   repo: string
@@ -115,26 +115,10 @@ function worktreeSnapshot(items: WorktreeRecord[], namespace: string, includeInt
     .sort())
 }
 
-function currentCheckout(repoRoot: string): { branch: string | null; head: string | null } {
-  const branch = runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
-  const head = runGit(repoRoot, ["rev-parse", "--verify", "HEAD"], { allowFailure: true })
-  return {
-    branch: branch.status === 0 ? branch.stdout.trim() : null,
-    head: head.status === 0 ? head.stdout.trim() : null,
-  }
-}
-
 function planBranchIdentity(relative: string): { plan: string; kind: "plan" } | null {
   const match = relative.match(/^(\d{3,})$/)
   if (!match) return null
   return { plan: match[1]!, kind: "plan" }
-}
-
-function isAncestor(repoRoot: string, ancestor: string, descendant: string): boolean {
-  const result = runGit(repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], { allowFailure: true })
-  if (result.status === 0) return true
-  if (result.status === 1) return false
-  fail(`Cannot compare ${ancestor} with ${descendant}: ${(result.stderr || result.stdout).trim()}`)
 }
 
 function isPatchEquivalent(repoRoot: string, artifactHead: string, integrationHead: string): boolean {

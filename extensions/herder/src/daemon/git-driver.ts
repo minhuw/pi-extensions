@@ -16,7 +16,7 @@ import {
 	inspectCompletionProof,
 	writeCompletionProof,
 } from "./git/completion-proof.ts";
-import { isInside, runGit } from "./git/primitives.ts";
+import { isAncestor as isAncestorProbe, isInside, runGit } from "./git/primitives.ts";
 import { formatCheckpointRef, listCoordinationRefs } from "./git/coordination-ref.ts";
 import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanupIdentity, type ResetPlanCleanupStep, type ResetPlanExecutionResult } from "./git/reset-plan.ts";
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
@@ -583,10 +583,7 @@ export class GitDriver {
 	}
 
 	isAncestor(ancestor: string, descendant: string): boolean {
-		const result = git(this.repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], true);
-		if (result.status === 0) return true;
-		if (result.status === 1) return false;
-		throw new Error(`Cannot compare Git ancestry for ${ancestor} and ${descendant}: ${(result.stderr || result.stdout).trim()}`);
+		return isAncestorProbe(this.repoRoot, ancestor, descendant);
 	}
 
 	planTransientRefs(planId: string): PlanTransientRef[] {

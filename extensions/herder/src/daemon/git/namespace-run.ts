@@ -5,7 +5,7 @@ import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts"
 export { validatePlanName } from "./coordination-ref.ts"
 import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktreeInventory } from "./namespace-inventory.ts"
-import { fail, isInside, runGit } from "./primitives.ts"
+import { fail, isAncestor, isInside, runGit } from "./primitives.ts"
 
 type NamespaceMode = "fire" | "resume"
 interface NamespaceInput {
@@ -19,13 +19,6 @@ type NamespaceConflict = Record<string, string>
 
 function refExists(repoRoot: string, ref: string): boolean {
   return runGit(repoRoot, ["show-ref", "--verify", "--quiet", ref], { allowFailure: true }).status === 0
-}
-
-function isAncestor(repoRoot: string, ancestor: string, descendant: string): boolean {
-  const result = runGit(repoRoot, ["merge-base", "--is-ancestor", ancestor, descendant], { allowFailure: true })
-  if (result.status === 0) return true
-  if (result.status === 1) return false
-  fail(`Cannot compare ${ancestor} with ${descendant}: ${(result.stderr || result.stdout).trim()}`)
 }
 
 export function inspectNamespace(input: NamespaceInput) {
