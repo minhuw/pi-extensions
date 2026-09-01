@@ -1,4 +1,4 @@
-import { buildGraph } from "./plans.ts"
+import { buildGraph, canonicalId } from "./plans.ts"
 import { executionReport, readUsageState } from "../daemon/execution-store.ts"
 import { readManagerState } from "../daemon/run-store.ts"
 
@@ -6,14 +6,6 @@ const DEFAULT_PLAN_DIR = "herder-plans"
 
 function fail(message: string): never {
   throw new Error(message)
-}
-
-function canonicalId(value: unknown, context = "plan ID"): string {
-  const match = String(value).match(/\b(\d+)\b/)
-  if (!match) fail(`Cannot find a numeric plan ID in ${context}: ${JSON.stringify(value)}`)
-  const numeric = Number.parseInt(match[1]!, 10)
-  if (!Number.isSafeInteger(numeric)) fail(`Invalid plan ID in ${context}: ${JSON.stringify(value)}`)
-  return String(numeric).padStart(3, "0")
 }
 
 export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN") {

@@ -275,7 +275,7 @@ function isSeparatorRow(cells: string[]): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s/g, "")))
 }
 
-function canonicalId(value: unknown, context = "plan ID"): string {
+export function canonicalId(value: unknown, context = "plan ID"): string {
   const match = String(value).match(/\b(\d+)\b/)
   if (!match) fail(`Cannot find a numeric plan ID in ${context}: ${JSON.stringify(value)}`)
   const numeric = Number.parseInt(match[1]!, 10)
