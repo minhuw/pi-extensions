@@ -3628,6 +3628,17 @@ export class HerderRunManager {
 		this.recoverTerminalSideEffects(run, driver);
 		this.ensureInitialAttention(run);
 
+		await this.integrateReadyPlans(run, driver);
+		const edit = await this.adoptPendingEditBarrier(run, driver);
+		if (edit.reply) return edit.reply;
+		run = edit.run;
+		const audit = await this.prepareFinalAuditHandoff(run, driver);
+		if (audit.reply) return audit.reply;
+		run = audit.run;
+		return this.scheduleAndSettle(run, driver, profile, options);
+	}
+
+	private async integrateReadyPlans(run: StoredRun, driver: GitDriver): Promise<void> {
 		for (const plan of this.store.getPlans(run.runId).filter((candidate) => candidate.phase === "READY_TO_INTEGRATE").sort((a, b) => a.planId.localeCompare(b.planId))) {
 			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree) throw new Error(`Plan ${plan.planId} has no approved integration surface`);
 			const approval = this.store.getApproval(run.runId, plan.planId, plan.generation);
@@ -3690,20 +3701,32 @@ export class HerderRunManager {
 				}
 				break;
 			}
-			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: driver.worktreeTree(plan.worktree), rebase: null });
+			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: gitValue(plan.worktree, "rev-parse", "HEAD^{tree}"), rebase: null });
 		}
+	}
 
+	private async adoptPendingEditBarrier(
+		run: StoredRun,
+		driver: GitDriver,
+	): Promise<{ run: StoredRun; reply?: ManagerReply }> {
 		run = this.store.getRun()!;
-		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
+		if (run.status !== "running" && run.status !== "needs_input") return { run, reply: this.reply() };
 		const pendingEdit = this.store.getPlanEdit(run.runId);
 		if (pendingEdit?.state === "barrier") {
 			if (this.reservedEditIsRework(run, pendingEdit.planId) || activeActionCount(this.store, run.runId) > 0) {
 				await driver.verifyCheckout(run.checkoutStateToken);
-				return this.reply("revision-barrier");
+				return { run, reply: this.reply("revision-barrier") };
 			}
 			this.adoptReservedEdit(run, pendingEdit);
 			run = this.store.getRun()!;
 		}
+		return { run };
+	}
+
+	private async prepareFinalAuditHandoff(
+		run: StoredRun,
+		driver: GitDriver,
+	): Promise<{ run: StoredRun; reply?: ManagerReply }> {
 		const current = this.store.getPlans(run.runId);
 		const overview = summarizeRun(this.specs(run), current);
 		if (overview.complete && activeActionCount(this.store, run.runId) === 0) {
@@ -3719,11 +3742,11 @@ export class HerderRunManager {
 						this.store.updateRun({ status: "paused", terminalDetail: detail });
 					});
 					this.projectLifecycleBestEffort();
-					return this.reply();
+					return { run, reply: this.reply() };
 				}
 				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
 				this.projectLifecycleBestEffort();
-				return this.refreshReply();
+				return { run, reply: this.refreshReply() };
 			}
 			if (!finalPlan) {
 				const generation = this.store.getGeneration(run.runId, run.currentGeneration);
@@ -3733,7 +3756,7 @@ export class HerderRunManager {
 				if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
 				const assignment = JSON.parse(bytes.toString("utf8")) as { snapshotSha256: string; assignment: { generationBase: string } };
 				const integrationHead = driver.branchHead(run.integrationBranch);
-				const integrationTree = driver.worktreeTree(run.integrationWorktree);
+				const integrationTree = gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}");
 				const verification = this.store.getVerification(run.runId, run.currentGeneration);
 				if (!verification) {
 					const request = createVerificationRequest({
@@ -3753,11 +3776,11 @@ export class HerderRunManager {
 						this.store.putVerificationRequest(request);
 						this.store.updateRun({ status: "paused", terminalDetail: MAIN_SESSION_VERIFICATION_PAUSE_DETAIL });
 					});
-					return this.reply();
+					return { run, reply: this.reply() };
 				}
 				if (verification.state !== "passed") {
 					if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: verification.terminalDetail || "Waiting for final verification." });
-					return this.reply();
+					return { run, reply: this.reply() };
 				}
 				if (verification.request.integrationHead !== integrationHead || verification.request.integrationTree !== integrationTree) {
 					throw new Error("Passed verification no longer matches the integration branch");
@@ -3785,7 +3808,15 @@ export class HerderRunManager {
 				});
 			}
 		}
+		return { run };
+	}
 
+	private async scheduleAndSettle(
+		run: StoredRun,
+		driver: GitDriver,
+		profile: ResolvedProfile,
+		options: { schedule?: boolean },
+	): Promise<ManagerReply> {
 		if (options.schedule !== false) {
 			await this.schedule(profile);
 			const scheduler = this.schedulerState(this.store.getRun()!);
