@@ -23,7 +23,7 @@ import {
 	waitManagerOperationReliable,
 	withServiceExclusion,
 } from "../client/index.ts";
-import { compileGraphIdentity } from "../core/run-manager.ts";
+import { compileGraphIdentity } from "../core/plan-identity.ts";
 import { RunStore } from "../daemon/run-store.ts";
 import { applyLifecycleToGraph, readPlanLifecycle, readPlanLifecycleGraph } from "../core/workflow.ts";
 import { isTerminalRunStatus, sha256, stableJson } from "../shared/protocol.ts";

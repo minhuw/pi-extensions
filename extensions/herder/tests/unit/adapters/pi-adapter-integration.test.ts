@@ -12,7 +12,7 @@ import type {
 import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
-import { compileGraphIdentity } from "../../../src/core/run-manager.ts";
+import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";

@@ -10,10 +10,12 @@ import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
-import { allocateUnusedReigniteDirectory, compileGraphIdentity, HerderRunManager } from "../../../src/core/run-manager.ts";
+import { allocateUnusedReigniteDirectory, HerderRunManager } from "../../../src/core/run-manager.ts";
+import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
 import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
+import { planFixture } from "../../support/plan-fixture.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const repo = path.join(root, "repo");
@@ -168,6 +170,18 @@ test("independent plan helper rejects a missing index anchor before writing the 
 function payload(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
+
+test("empty plan graph keeps its graph identity", () => {
+	const fixture = planFixture({ prefix: "herder-plan-identity-golden-" });
+	try {
+		assert.equal(
+			compileGraphIdentity(buildGraph(fixture.planDirectory)),
+			"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+		);
+	} finally {
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
 
 type VerificationSubmission = {
 	reply: Record<string, unknown>;
