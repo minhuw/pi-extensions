@@ -7,7 +7,7 @@ import { inspectCompletionProof } from "./completion-proof.ts"
 import { listHerderBranches, listWorktreeInventory } from "./namespace-inventory.ts"
 import { fail, isInside, runGit } from "./primitives.ts"
 
-type NamespaceMode = "fire" | "resume" | "status"
+type NamespaceMode = "fire" | "resume"
 interface NamespaceInput {
   repo: string
   planDir: string

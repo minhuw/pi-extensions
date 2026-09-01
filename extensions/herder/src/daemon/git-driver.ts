@@ -318,7 +318,7 @@ export class GitDriver {
 		if (!result.ok) throw new Error(`Checkout changed since the run checkpoint: ${result.changedComponents?.join(", ") ?? "unknown"}`);
 	}
 
-	inspectNamespace(mode: "fire" | "resume" | "status") {
+	inspectNamespace(mode: "fire" | "resume") {
 		return inspectNamespace({
 			repo: this.repoRoot,
 			planDir: this.planDirectory,
