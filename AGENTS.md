@@ -33,7 +33,7 @@ Run commands from the repository root with Node `>=22.19.0`.
 
 ## Live E2E warning
 
-`npm run test:e2e:herder` runs the provider-backed Herder fixture, spends real model/provider credits, and requires `HERDER_LIVE_E2E=1` plus provider credentials. Run it only when a human explicitly asks; it is not part of the default `npm test` gate. Read the [Herder testing guide](extensions/herder/TESTING.md) first.
+`npm run test:e2e:herder` runs the provider-backed Herder fixture, spends real model/provider credits, and requires provider credentials (the script sets `HERDER_LIVE_E2E=1` itself; only a direct `node --test` invocation must pass the flag manually). Run it only when a human explicitly asks; it is not part of the default `npm test` gate. Read the [Herder testing guide](extensions/herder/TESTING.md) first.
 
 ## Conventions
 

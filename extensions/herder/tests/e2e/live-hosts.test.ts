@@ -19,7 +19,7 @@ const timeout = Number(process.env.HERDER_E2E_TIMEOUT_MS || 30 * 60_000);
 const stallTimeout = Number(process.env.HERDER_E2E_STALL_TIMEOUT_MS || 8 * 60_000);
 
 function liveEnvironment(): NodeJS.ProcessEnv {
-	const environment: NodeJS.ProcessEnv = { ...process.env, HERDER_LIVE_E2E_CHILD: "1" };
+	const environment: NodeJS.ProcessEnv = { ...process.env };
 	delete environment.NODE_TEST_CONTEXT;
 	return environment;
 }
