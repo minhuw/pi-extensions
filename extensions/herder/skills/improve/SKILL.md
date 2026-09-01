@@ -76,6 +76,8 @@ Use characterization tests only when they protect or unblock a specific, already
 
 Create one or more focused plans per selected finding using the complete shared template. Update only the human-readable index order, dependencies, and status; never inspect or alter manager-owned execution-accounting data.
 
+After authoring, follow the Producer self-review in [plan-template.md](../plans/references/plan-template.md). Then call `herder_plan` with `operation: "shape"`; resolve every issue and unordered overlap, then call `herder_plan` with `operation: "validate"`. Never invoke a bundled script. Repeat the snapshot review and semantic self-review before rerunning the gates after any plan or shared `CONTEXT.md` change.
+
 Defer or reject unsupported assumptions; route unresolved product intent through Grill instead of inventing it.
 
 ## Invocation Variants
