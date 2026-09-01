@@ -236,7 +236,7 @@ function patchEquivalentBothWays(repoRoot: string, integrationHead: string, rest
 	const validationRepo = path.join(container, "repo");
 	const expectedPatchIds: string[] = [];
 	try {
-		const cloned = runCommand("git", ["clone", "--quiet", "--shared", "--no-checkout", repoRoot, validationRepo], { allowFailure: true });
+		const cloned = git(repoRoot, ["clone", "--quiet", "--shared", "--no-checkout", repoRoot, validationRepo], true);
 		if (cloned.status !== 0) return false;
 		if (git(validationRepo, ["checkout", "--detach", "--quiet", integrationHead], true).status !== 0) return false;
 		for (const commit of approvedCommits) {
