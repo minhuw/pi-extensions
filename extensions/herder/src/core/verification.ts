@@ -11,6 +11,7 @@ import {
 	type VerificationRequest,
 	type IntegrationRepairClassification,
 } from "../shared/protocol.ts";
+import { isInside } from "../daemon/git/primitives.ts";
 
 /**
  * Path kinds in Herder verification:
@@ -55,11 +56,6 @@ function sha(value: unknown, label: string): string {
 	const text = oneLine(value, label, 64).toLowerCase();
 	if (!/^[0-9a-f]{40,64}$/.test(text)) throw new Error(`${label} must be a hexadecimal Git or SHA-256 identity`);
 	return text;
-}
-
-function inside(parent: string, candidate: string): boolean {
-	const relative = path.relative(parent, candidate);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 export function createVerificationRequest(input: VerificationRequestInput): VerificationRequest {
@@ -112,7 +108,7 @@ export function normalizeVerificationGates(integrationWorktree: string, input: V
 		}
 		// TreeRelative only: resolve against the frozen LocationRoot, never accept a host path.
 		const resolvedCwd = fs.realpathSync(path.resolve(worktree, cwd));
-		if (!inside(worktree, resolvedCwd)) throw new Error(`Verification gate ${gateId} cwd escapes the integration worktree`);
+		if (!isInside(worktree, resolvedCwd)) throw new Error(`Verification gate ${gateId} cwd escapes the integration worktree`);
 		if (!Array.isArray(gate.argv) || gate.argv.length < 1 || gate.argv.length > MAX_ARGUMENTS) {
 			throw new Error(`Verification gate ${gateId} argv must contain 1 through ${MAX_ARGUMENTS} arguments`);
 		}

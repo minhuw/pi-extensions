@@ -40,6 +40,7 @@ import {
 import { finalAssistantResult } from "./assistant-message.ts";
 import { cloneSessionSnapshot, observeSessionEvent } from "./session-telemetry.ts";
 import { record, sessionUsageTotals } from "./usage-accounting.ts";
+import { isInside } from "../src/daemon/git/primitives.ts";
 export { finalAssistantResult };
 
 export type PiWorkerStatus = "prepared" | "running" | "stopping";
@@ -183,14 +184,14 @@ function searchPathStaysWithinWorktree(worktree: string, rawPath: string): boole
 	try {
 		const lexicalRoot = path.resolve(worktree);
 		const candidate = path.resolve(lexicalRoot, value);
-		if (!isWithin(lexicalRoot, candidate)) return false;
+		if (!isInside(lexicalRoot, candidate)) return false;
 		let existing = candidate;
 		while (!existsSync(existing)) {
 			const parent = path.dirname(existing);
 			if (parent === existing) return false;
 			existing = parent;
 		}
-		return isWithin(realpathSync(lexicalRoot), realpathSync(existing));
+		return isInside(realpathSync(lexicalRoot), realpathSync(existing));
 	} catch {
 		return false;
 	}
@@ -246,11 +247,6 @@ function initialFffToolNames(
 	}
 }
 
-function isWithin(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
 export function trustedNestedExtensionPath(agentDir: string, installed: string, source: string): string {
 	const packagePath = source === WEB_ACCESS_EXTENSION_SOURCE
 		? ["pi-web-access"]
@@ -258,7 +254,7 @@ export function trustedNestedExtensionPath(agentDir: string, installed: string, 
 	if (!packagePath) throw new Error(`Herder npm extension ${source} is not allowed.`);
 	const realRoot = realpathSync(path.join(agentDir, "npm"));
 	const realInstalled = realpathSync(installed);
-	if (!isWithin(realRoot, realInstalled)) {
+	if (!isInside(realRoot, realInstalled)) {
 		throw new Error(`Herder npm extension ${source} resolves outside the trusted user package store.`);
 	}
 	if (realInstalled !== path.join(realRoot, "node_modules", ...packagePath)) {
@@ -272,7 +268,7 @@ export function trustedRoleExtensionEntry(agentDir: string, installed: string, s
 	if (source !== PONYTAIL_EXTENSION_SOURCE) throw new Error(`Herder role extension ${source} is not allowed.`);
 	const realRoot = realpathSync(path.join(agentDir, "git"));
 	const realInstalled = realpathSync(installed);
-	if (!isWithin(realRoot, realInstalled)) {
+	if (!isInside(realRoot, realInstalled)) {
 		throw new Error(`Herder role extension ${source} resolves outside the trusted user git store.`);
 	}
 	const expectedPackage = path.join(realRoot, "github.com", "DietrichGebert", "ponytail");
@@ -284,7 +280,7 @@ export function trustedRoleExtensionEntry(agentDir: string, installed: string, s
 		throw new Error(`Herder role extension ${source} is missing pi-extension/index.js. Reinstall it explicitly with: ${installCommand}`);
 	}
 	const realEntry = realpathSync(entry);
-	if (!isWithin(realInstalled, realEntry) || !isWithin(realRoot, realEntry)) {
+	if (!isInside(realInstalled, realEntry) || !isInside(realRoot, realEntry)) {
 		throw new Error(`Herder role extension ${source} entry resolves outside the trusted user package.`);
 	}
 	return realEntry;
