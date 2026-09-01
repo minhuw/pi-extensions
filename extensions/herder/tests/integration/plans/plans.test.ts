@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process"
 import test from "node:test"
 import {
   buildGraph,
+  buildWaves,
   getShapeReport,
   initPlanDir,
   projectStatuses,
@@ -339,6 +340,13 @@ Keep shared fixture facts in one compiled snapshot input.
   expectFailure(
     () => buildGraph(writeFixture(path.join(root, "cycle"), { cycle: true })),
     /Dependency cycle/,
+  )
+  expectFailure(
+    () => buildWaves([
+      { id: "001", dependencies: ["002"] },
+      { id: "002", dependencies: ["001"] },
+    ]),
+    /Cannot build dependency waves; the graph contains a cycle/,
   )
 
   const missingColumn = writeFixture(path.join(root, "missing-column"))

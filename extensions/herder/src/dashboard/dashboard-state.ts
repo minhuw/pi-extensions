@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import { buildGraph } from "../core/plans.ts"
+import { buildGraph, buildWaves } from "../core/plans.ts"
 import { lifecycleStatus } from "../core/workflow.ts"
 import { executionReport, readUsageState } from "../daemon/execution-store.ts"
 import { readManagerState } from "../daemon/run-store.ts"
@@ -204,18 +204,6 @@ function resolveContext(inputDir: string, inputPlanName?: string | null) {
   return { planDir, planName, repoRoot }
 }
 
-function dependencyWaves(plans: Array<{ id: string; dependencies: string[] }>): string[][] {
-  const remaining = new Map(plans.map((plan) => [plan.id, new Set(plan.dependencies)]))
-  const waves: string[][] = []
-  while (remaining.size > 0) {
-    const wave = [...remaining].filter(([, dependencies]) => [...dependencies].every((id) => !remaining.has(id))).map(([id]) => id).sort()
-    if (wave.length === 0) fail("Compiled plan specification contains a dependency cycle")
-    waves.push(wave)
-    for (const id of wave) remaining.delete(id)
-  }
-  return waves
-}
-
 export function buildDashboardState(input: DashboardInput = {}) {
   const context = resolveContext(input.planDir ?? "herder-plans", input.planName)
   const manager = readManagerState(context.planDir)
@@ -234,7 +222,7 @@ export function buildDashboardState(input: DashboardInput = {}) {
     })),
     ready: [],
     shapeReady: true,
-    waves: dependencyWaves(manager.specs.map((spec) => ({ id: spec.planId, dependencies: spec.dependencies }))),
+    waves: buildWaves(manager.specs.map((spec) => ({ id: spec.planId, dependencies: spec.dependencies }))),
     warnings: [],
   } : buildGraph(context.planDir)
   const usage = readUsageState(context.planDir)

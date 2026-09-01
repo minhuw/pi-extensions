@@ -858,6 +858,7 @@ if (serve) {
         rejected: 0,
         actionable: 1,
       })
+      assert.deepEqual(state.planSet.waves, [["001"], ["002"]])
       const first = state.plans.find((plan) => plan.id === "001")
       const second = state.plans.find((plan) => plan.id === "002")
       assert.ok(first)

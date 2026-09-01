@@ -514,7 +514,7 @@ function detectCycle(plansById: Map<string, PlanRecord>): string[] | null {
   return null
 }
 
-function buildWaves(plans: PlanRecord[]): string[][] {
+export function buildWaves(plans: ReadonlyArray<{ id: string; dependencies: string[] }>): string[][] {
   const remaining = new Map(plans.map((plan) => [plan.id, new Set(plan.dependencies)]))
   const waves: string[][] = []
   while (remaining.size > 0) {
