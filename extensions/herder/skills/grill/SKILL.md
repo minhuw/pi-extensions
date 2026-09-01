@@ -48,12 +48,10 @@ If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_RECOVERY_V
 
 ## Prepare
 
-Resolve the Herder extension root as two directories above this skill. Before planning, read:
+Resolve the Herder extension root as two directories above this skill. Before planning, read both canonical plan references completely:
 
-```text
-<herder-root>/skills/plans/references/plan-format.md
-<herder-root>/skills/plans/references/plan-template.md
-```
+- [plan-format.md](../plans/references/plan-format.md)
+- [plan-template.md](../plans/references/plan-template.md)
 
 Use Pi's native `herder_plan` tool for plan operations. Never invoke a bundled plan script.
 
@@ -87,8 +85,6 @@ If the user accepts your recommendations wholesale, fill unresolved choices but 
 
 After decisions settle and before confirmation, build an impact graph from the objective to affected packages, writable files and symbols, public contracts, callers, tests, migrations, documentation, and verification commands. Partition it at safe integration points.
 
-A normal subplan targets one independently verifiable invariant, one package or bounded subsystem, one focused verification command, and at most one public-contract or migration transition. Split multiple outcomes, packages, caller cohorts, or transitions. Prefer characterization tests, additive adapters or schema expansions, bounded migrations, and compatibility cleanup. Every subplan must leave required gates passing; never split by layer when the intermediate state is broken. File and line counts are never scope or reviewability criteria.
-
 Give each proposed node:
 
 - one outcome and parent objective;
@@ -97,21 +93,15 @@ Give each proposed node:
 - explicit consumed/provided dependency guarantees;
 - a focused verification command and safe intermediate state.
 
-For a `mechanical` plan, name the deterministic transformation and its completeness proof. If the impact graph cannot be bounded to credible paths and semantic boundaries, propose a spike or characterization/seam plan first.
+If the impact graph cannot be bounded to credible paths and semantic boundaries, propose a spike or characterization/seam plan first.
 
-Producers name every credible path. A discovered companion must directly support the original outcome, stay inside the declared bounded subsystem, add no new public transition, avoid unordered plan overlap, and be justified for review. Work that cannot satisfy those conditions needs a new or reshaped plan; path count alone never does.
-
-Keep each local plan compact: target 500–900 words and never exceed 1,200. State each fact once, omit non-load-bearing code excerpts, and use plan-set context for genuinely repeated facts. A long explanation is evidence that the node needs a sharper boundary, not a reason to waive the prose budget.
-
-Allocate IDs and dependency order centrally before drafting. For a standalone existing-plan split:
+For a standalone existing-plan split:
 
 - Preserve the original target ID for an appropriate first replacement node when the target's initial guarantee remains a coherent first slice; otherwise retain the ID for the closest faithful replacement and explain the mapping at confirmation.
 - Allocate every new ID monotonically from the plan set's central next-ID sequence. Never derive IDs independently or reuse removed IDs.
 - Identify every downstream consumer of the old target's complete guarantee. Make those consumers depend on the terminal replacement node or nodes that collectively provide that same guarantee, rather than merely on the preserved first node.
 - Order overlapping scopes and compatibility transitions explicitly. Every intermediate graph state must be buildable, testable, and semantically valid; add characterization, additive compatibility, migration, or cleanup nodes when needed rather than leaving a broken midpoint.
 - Change or remove existing sibling nodes only when their scope or dependency contract is directly affected by decomposing the target. Preserve unrelated graph content exactly.
-
-Independent nodes may be researched or drafted concurrently when the host safely supports it, but only the root producer writes plan files and the index, preventing ID and dependency races.
 
 ## Confirm, Write, Shape, Validate
 
@@ -123,8 +113,7 @@ After explicit confirmation:
 2. For standalone `--plan`, apply only the confirmed target refinement or split: preserve or rewrite the target as approved, create/remove/update directly affected siblings, update the index and shared context, and rewrite dependencies needed to preserve the old complete guarantee. Preserve the target ID and filename where the confirmed graph has an appropriate replacement node; any exception must have been explicitly confirmed. Under `HERDER_ACTIVE_PLAN_EDIT_V1`, edit only the reserved target and necessary index fields—never perform graph-wide splitting.
 3. Create or update plan-set `CONTEXT.md` only when multiple plans reuse verified facts. Make each compiled snapshot self-contained for an executor without this conversation. Integrate decisions into the template rather than appending an interview transcript; remove resolved placeholders and superseded language.
 4. Change status only through the manager. Reopen a decision-blocked plan with `transition <id> TODO` only when reopening was confirmed.
-5. Reread every draft and compiled `snapshot` from disk and complete the template's Producer self-review. Clarify only confirmed intent. If review exposes a missing product decision, unsafe split, material approach/scope choice, or incoherent graph, resume the one-question interview and reconfirm before rewriting.
-6. Run `shape <plan-dir> --pretty`; resolve every new-plan shape issue and every unordered write-scope overlap.
-7. Run `validate <plan-dir> --pretty` after semantic review. Repair mechanical errors, repeating semantic review when meaning changes.
+
+Clarify only confirmed intent. If review exposes a missing product decision, unsafe split, material approach/scope choice, or incoherent graph, resume the one-question interview and reconfirm before rewriting.
 
 Never modify source code or project documentation. Report plan IDs, graph/waves, incorporated decisions, shared context, documentation obligations, changed files, shape result, and validation result. Offer Fire as the next action; never start it automatically.

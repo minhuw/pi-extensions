@@ -71,6 +71,8 @@ The executor receives the repository and the compiled snapshot, not the Grill in
 
 Partition an objective into a dependency DAG before drafting prose. A normal subplan targets one independently verifiable invariant, one package or bounded subsystem, one focused verification command, and at most one public-contract or migration transition. File and line counts are descriptive only and never determine plan shape or reviewability.
 
+Allocate all monotonic IDs and dependency edges centrally before drafting; only the root producer writes plans and the index.
+
 Target 500–900 words and require at most 1,200 words in each local plan. Shared `CONTEXT.md` is capped at 1,600 words. The manager includes local line/word counts in `shape`, marks larger content shape-incomplete, and leaves legacy content readable with warnings. Compact plans state each fact once and include only evidence needed to locate, implement, and verify their bounded outcome.
 
 Split when work contains multiple observable outcomes, independently releasable caller cohorts, ownership/package boundaries, more than one public transition, or no focused verification command. Every cut must leave integration valid. Prefer additive seams: characterize current behavior, add an adapter or expansion, migrate bounded caller groups, then remove compatibility code. Do not split by architectural layer when an intermediate layer cannot pass required gates.

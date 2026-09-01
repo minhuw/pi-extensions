@@ -94,7 +94,7 @@ Keep important "keep" decisions and rejected candidates in a private audit ledge
 
 ## 4. Write Plans
 
-Read both canonical plan references, resolve the Herder extension root, and resolve the absolute `herder-plans` directory.
+Resolve the Herder extension root and the absolute `herder-plans` directory.
 
 - If `herder-plans/README.md` exists, do not call `init`; call `herder_plan` with `operation: "validate"` and reconcile the existing graph without changing its tracking policy.
 - If the directory is absent or contains no plan content, call `herder_plan` with `operation: "init"`. Use local tracking by default unless the user explicitly requested tracked plans.
@@ -111,11 +111,9 @@ Shape each selected finding as a reduction graph before drafting: affected packa
 
 Do not author `spike` or investigation plans. Reachability, history, and ownership questions are planner work in Recon, Audit, and Vet. If they remain unanswerable from the repository, keep the code or route the product decision to Grill.
 
-A normal subplan targets one independently verifiable reduction, one package or bounded subsystem, one focused verification command, and at most one public-contract or migration transition. Every intermediate state must pass required gates. Do not split mechanically by layer or file count, and do not create abstractions merely to make a plan look smaller.
+Do not create abstractions merely to make a plan look smaller.
 
-A `mechanical` plan must name its deterministic transformation and completeness proof, such as zero imports, zero manifest references, or zero occurrences outside fixtures. Deleting behavior based on an uncertain caller search is not mechanical. Name every credible path; an implementation-discovered companion is allowed only when directly necessary inside the same bounded subsystem and when it adds no unplanned public transition or unordered-plan overlap.
-
-Target 500–900 words and never exceed 1,200 words per local plan. State each fact once, omit non-load-bearing excerpts, and move only genuinely repeated verified facts into shared context. Allocate all monotonic IDs and dependency edges centrally before drafting. Independent nodes may be researched or drafted concurrently, but workers return draft text only; the root producer alone writes plans and the index.
+Deleting behavior based on an uncertain caller search is not mechanical.
 
 Each plan must use the complete shared template and include:
 
@@ -129,13 +127,7 @@ Each plan must use the complete shared template and include:
 
 Put only verified facts repeated by multiple plans in `herder-plans/CONTEXT.md`; compiled snapshots, not sibling files or the audit transcript, must provide complete executor context. Update only human-readable plan rows, dependency notes, and considered/rejected rationale in the index; never inspect or alter manager-owned execution-accounting data.
 
-Reread every authored plan from disk. For each new or changed plan ID, call `herder_plan` with `operation: "snapshot"` and review the returned compiled `planText` as an executor with zero session or sibling-plan context. If shared `CONTEXT.md` changes, refresh and reread every affected snapshot. Complete the template's Producer self-review, repair defects supported by evidence, and defer unsupported behavior, support-window, or product choices to Grill.
-
-Run the shape report next:
-
-Call `herder_plan` with `operation: "shape"` and resolve every new-plan shape issue or unordered write-scope overlap.
-
-Then call `herder_plan` with `operation: "validate"`. Never invoke a bundled script. If any repair changes a plan or shared context, repeat snapshot review, shape, and validation before finishing.
+Defer unsupported behavior, support-window, or product choices to Grill. Use `herder_plan` with `operation: "snapshot"` and `operation: "shape"` for the corresponding manager operations; never invoke a bundled script.
 
 ## Invocation Variants
 

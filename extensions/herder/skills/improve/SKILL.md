@@ -18,7 +18,10 @@ Act as a senior advisor, not an implementer: understand the repository, identify
 
 ## Load References
 
-Read [references/audit-playbook.md](references/audit-playbook.md) before auditing. Load the [shared plan template](../plans/references/plan-template.md) only after findings are selected.
+Read [references/audit-playbook.md](references/audit-playbook.md) before auditing. After findings are selected and before authoring, read both canonical plan references completely:
+
+- [plan-format.md](../plans/references/plan-format.md)
+- [plan-template.md](../plans/references/plan-template.md)
 
 ## 1. Recon
 
@@ -61,31 +64,19 @@ Present direction separately: two to four grounded options with evidence and tra
 
 ## 4. Write Plans
 
-Read the shared template, resolve the Herder extension root, and initialize the backlog:
+Resolve the Herder extension root and initialize the backlog:
 
 Call `herder_plan` with `operation: "init"` and the absolute `herder-plans` directory.
 
 Before writing, record `git rev-parse --short HEAD`. Reconcile an existing index, keep IDs monotonic, skip existing/rejected findings, and mark superseded plans stale. Reopen every cited file yourself; subagent excerpts and line numbers are leads, never plan evidence.
 
-First shape every selected finding into an impact graph: affected packages, writable paths and symbols, contracts/callers, tests, migrations, documentation, and safe integration points. One finding may produce several dependent subplans. A normal subplan targets one independently verifiable invariant, one package or bounded subsystem, one focused verification command, and at most one public-contract or migration transition. File and line counts are never scope or reviewability criteria.
+First shape every selected finding into an impact graph: affected packages, writable paths and symbols, contracts/callers, tests, migrations, documentation, and safe integration points. One finding may produce several dependent subplans.
 
-Split multiple outcomes, packages, caller cohorts, or public transitions. Use characterization tests only when they protect or unblock a specific, already-bounded code change; then prefer additive compatibility seams or schema expansion, bounded migrations, and cleanup. Every subplan must leave required gates passing. Do not split by architectural layer when the intermediate state is broken. A `mechanical` plan must name its deterministic transformation and completeness proof. Uncertain semantic boundaries stay planner work until they are bounded; then write the fix. Do not guess a broad change and do not author `spike` or investigation plans.
+Use characterization tests only when they protect or unblock a specific, already-bounded code change; then prefer additive compatibility seams or schema expansion, bounded migrations, and cleanup. Uncertain semantic boundaries stay planner work until they are bounded; then write the fix. Do not guess a broad change and do not author `spike` or investigation plans.
 
-Target 500–900 words and never exceed 1,200 words per local plan. State each fact once, omit non-load-bearing excerpts, and move only genuinely repeated verified facts into shared context. If a plan cannot be concise without losing executability, sharpen or split its outcome before drafting.
+Create one or more focused plans per selected finding using the complete shared template. Update only the human-readable index order, dependencies, and status; never inspect or alter manager-owned execution-accounting data.
 
-Allocate all monotonic IDs and dependency edges centrally before drafting. Independent nodes may be researched or drafted concurrently, but workers return draft text only; the root producer alone writes plans and the index. This prevents ID, overlap, and dependency races.
-
-Create one or more focused plans per selected finding using the complete shared template. Every plan declares `Kind`, `Parent objective`, `## Dependency contract`, and `## Review map`. Name every credible path; Fire may accept an implementation-discovered companion only when it is directly necessary inside the same bounded subsystem and adds no unplanned public transition or unordered-plan overlap. Put only verified facts repeated by multiple plans in `herder-plans/CONTEXT.md`; compiled snapshots, not sibling files or the audit transcript, must supply complete executor context. Update only the human-readable index order, dependencies, and status; never inspect or alter manager-owned execution-accounting data.
-
-Reread each plan and compiled snapshot from disk and complete the template's Producer self-review before manager validation. Repair semantic defects supported by evidence. Defer or reject unsupported assumptions; route unresolved product intent through Grill instead of inventing it. Run the shape report first and resolve every new-plan shape issue and unordered write-scope overlap:
-
-Call `herder_plan` with `operation: "shape"` and resolve every reported shape issue or unordered write-scope overlap.
-
-Then run:
-
-Call `herder_plan` with `operation: "validate"`. Never invoke a bundled script.
-
-Repair mechanical errors and repeat semantic review when a repair changes meaning.
+Defer or reject unsupported assumptions; route unresolved product intent through Grill instead of inventing it.
 
 ## Invocation Variants
 

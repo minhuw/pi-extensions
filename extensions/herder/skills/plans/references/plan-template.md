@@ -270,7 +270,7 @@ After `/herder-plans init`, edit the descriptive and plan-index sections in plac
 
 ## Producer self-review — required before validation
 
-After writing a draft, reread the saved plan from disk as if the planning session were unavailable. Check every item before running the Plans manager's mechanical validation:
+After writing or changing a plan or shared `CONTEXT.md`, reread every authored plan from disk. For each new or changed plan ID, call `herder_plan` with `operation: "snapshot"` and review the returned compiled `planText` as an executor with zero session or sibling-plan context. If shared `CONTEXT.md` changes, refresh and reread every affected snapshot. Complete this semantic Producer self-review before running the Plans manager's mechanical validation:
 
 1. **Intent or finding coverage** — "Why this matters", accepted decisions, non-goals, steps, tests, and done criteria all describe the same requested outcome or vetted finding. The draft introduces no unconfirmed product decision.
 2. **Evidence** — current-state claims, file paths, symbols, excerpts, commands, dependencies, and conventions are verified against the repository rather than guessed. No secret value appears; name only its location and credential type.
@@ -283,4 +283,4 @@ After writing a draft, reread the saved plan from disk as if the planning sessio
 
 Repair omissions or inconsistencies directly when doing so only clarifies already confirmed intent or verified evidence. If review exposes a missing product decision, material scope or approach choice, or a second plan, return to the producer's clarification or selection phase and obtain confirmation before finalizing. A STOP condition is not a substitute for a decision required to begin implementation.
 
-Only after this semantic review passes, run `/herder-plans validate`. Mechanical validation complements self-review; it does not replace it.
+Then run `shape`, resolve every issue and unordered overlap, then run `validate`. Repeat the snapshot review and semantic self-review after any plan or shared `CONTEXT.md` change. Mechanical validation complements self-review; it does not replace it.
