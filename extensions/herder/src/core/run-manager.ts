@@ -1311,7 +1311,7 @@ export class HerderRunManager {
 			throw new Error(`Unsupported initial lifecycle state: ${unsupported.map((plan: { id: string }) => `${plan.id}=${lifecycle.get(plan.id) ?? "missing"}`).join(", ")}`);
 		}
 		const checkoutStateToken = await driver.captureCheckout();
-		const baseCommit = gitValue(driver.repoRoot, "rev-parse", "HEAD");
+		const baseCommit = driver.worktreeHead(driver.repoRoot);
 		const namespace = driver.inspectNamespace("fire");
 		if (!namespace.ok) throw new Error(`Herder namespace is unavailable: ${namespace.reason}`);
 		recordRunConfiguration(this.planDirectory, {
@@ -1427,7 +1427,7 @@ export class HerderRunManager {
 		}
 		if (run.status === "failed" && failedVerification?.state === "failed" && !this.store.getPlan(run.runId, "RUN")) {
 			if (driver.branchHead(run.integrationBranch) !== failedVerification.request.integrationHead
-				|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== failedVerification.request.integrationTree
+				|| driver.worktreeTree(run.integrationWorktree) !== failedVerification.request.integrationTree
 				|| driver.worktreeStatus(run.integrationWorktree)) {
 				throw new Error("Cannot retry verification because the frozen integration tree changed");
 			}
@@ -2780,7 +2780,7 @@ export class HerderRunManager {
 		}
 		await driver.verifyCheckout(run.checkoutStateToken);
 		if (driver.branchHead(run.integrationBranch) !== stored.request.integrationHead
-			|| gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
+			|| driver.worktreeTree(run.integrationWorktree) !== stored.request.integrationTree
 			|| driver.worktreeStatus(run.integrationWorktree)) {
 			throw new Error("Integration worktree changed after the verification request was created");
 		}
@@ -2801,7 +2801,7 @@ export class HerderRunManager {
 					if (!namespace.ok) return `Verification gate changed the Herder namespace: ${namespace.reason}`;
 				}
 				if (driver.branchHead(run!.integrationBranch) !== stored.request.integrationHead
-					|| gitValue(run!.integrationWorktree, "rev-parse", "HEAD^{tree}") !== stored.request.integrationTree
+					|| driver.worktreeTree(run!.integrationWorktree) !== stored.request.integrationTree
 					|| driver.worktreeStatus(run!.integrationWorktree)) return "Verification gate changed the frozen integration worktree.";
 				const live = this.store.getVerification(run!.runId, run!.currentGeneration);
 				if (!live || live.state !== "running" || live.manifestSha256 !== manifestSha256) return "Verification gate changed manager-owned verification state.";
@@ -3749,7 +3749,7 @@ export class HerderRunManager {
 				}
 				break;
 			}
-			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: gitValue(plan.worktree, "rev-parse", "HEAD^{tree}"), rebase: null });
+			this.updatePlan(plan, { phase: "DONE", approvedHead: integration.head!, approvedTree: driver.worktreeTree(plan.worktree), rebase: null });
 		}
 
 		run = this.store.getRun()!;
@@ -3792,7 +3792,7 @@ export class HerderRunManager {
 				if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
 				const assignment = JSON.parse(bytes.toString("utf8")) as { snapshotSha256: string; assignment: { generationBase: string } };
 				const integrationHead = driver.branchHead(run.integrationBranch);
-				const integrationTree = gitValue(run.integrationWorktree, "rev-parse", "HEAD^{tree}");
+				const integrationTree = driver.worktreeTree(run.integrationWorktree);
 				const verification = this.store.getVerification(run.runId, run.currentGeneration);
 				if (!verification) {
 					const request = createVerificationRequest({
