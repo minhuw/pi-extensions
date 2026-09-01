@@ -1,12 +1,7 @@
-import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import { WORKER_ROLES, type ResolvedProfile, type ThinkingEffort } from "../src/shared/protocol.ts";
 
 export type ResolvedPiProfile = ResolvedProfile;
 export type { ThinkingEffort };
-
-export function loadPiProfile(catalogPath: string, requested?: string): ResolvedProfile {
-	return resolvePiProfile(requested, catalogPath);
-}
 
 export interface AvailableModel {
 	provider?: string;

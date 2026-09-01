@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadPiProfile } from "../../../adapters/profile.ts";
+import { resolvePiProfile } from "../../../src/core/profile-registry.ts";
 import { loadHerderNestedAgent, loadHerderPiRole, validateHerderRoleAgents } from "../../../adapters/role-config.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -57,7 +57,7 @@ test("Herder loads package-owned one-level nested definitions with explicit perm
 });
 
 test("Herder validates package roles against the built-in engine model catalog", async () => {
-	const profile = await loadPiProfile(catalog, "poorman");
+	const profile = resolvePiProfile("poorman", catalog);
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, available));
 	await assert.rejects(
 		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "deepseek-v4-flash" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
@@ -66,7 +66,7 @@ test("Herder validates package roles against the built-in engine model catalog",
 });
 
 test("Herder refuses own-model nested agents when Luna cannot honor the scout tier", async () => {
-	const profile = await loadPiProfile(catalog, "poorman");
+	const profile = resolvePiProfile("poorman", catalog);
 	await assert.rejects(
 		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "gpt-5.6-luna" ? { ...model, api: "openai-completions" } : model)),
 		/nested agent recon cannot start because gpt-5.6-luna .* does not support service tier fast/,
@@ -74,7 +74,7 @@ test("Herder refuses own-model nested agents when Luna cannot honor the scout ti
 });
 
 test("Herder refuses tiered roles when the resolved model cannot honor the tier", async () => {
-	const profile = await loadPiProfile(catalog, "eclipse");
+	const profile = resolvePiProfile("eclipse", catalog);
 	assert.equal(profile.roles["plan-implementer"].service_tier, "fast");
 	const tiered = [
 		{ provider: "cliproxyapi", id: "gpt-5.6-sol", fullId: "cliproxyapi/gpt-5.6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },

@@ -6,7 +6,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	activeModelMatches,
-	loadPiProfile,
 	modelMatches,
 	modelSupportsEffort,
 	modelSupportsServiceTier,
@@ -20,7 +19,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 
 test("Pi resolves the poorman profile into three generic package agents", async () => {
-	const profile = await loadPiProfile(catalog, "poorman");
+	const profile = resolvePiProfile("poorman", catalog);
 	assert.equal(profile.host, "pi");
 	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
 	assert.deepEqual(profile.roles, {
@@ -42,10 +41,6 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 			service_tier: "fast",
 		},
 	});
-
-	const registryProfile = resolvePiProfile("poorman", catalog);
-	assert.equal(profile.profile_sha256, registryProfile.profile_sha256);
-	assert.deepEqual(profile.roles, registryProfile.roles);
 });
 
 test("Pi profile vocabulary uses the canonical worker-role and effort tuples", () => {
@@ -73,7 +68,7 @@ test("Pi profile catalogs reject unsupported effort values", () => {
 		modified.profiles[0].orchestrator.effort = "bogus";
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		assert.throws(() => loadPiProfile(fixture, "eclipse"), /invalid effort/);
+		assert.throws(() => resolvePiProfile("eclipse", fixture), /invalid effort/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -103,7 +98,7 @@ test("service tiers map to exact provider request values on capable APIs only", 
 });
 
 test("model checks accept provider-qualified catalog entries without substitution", async () => {
-	const profile = await loadPiProfile(catalog, "poorman");
+	const profile = resolvePiProfile("poorman", catalog);
 	const available = [
 		{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3" },
 		{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash" },
@@ -123,7 +118,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		const missingFixture = path.join(root, "missing.json");
 		writeFileSync(missingFixture, JSON.stringify(missing));
 		assert.throws(
-			() => loadPiProfile(missingFixture, "eclipse"),
+			() => resolvePiProfile("eclipse", missingFixture),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
 
@@ -132,7 +127,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		const extraFixture = path.join(root, "extra.json");
 		writeFileSync(extraFixture, JSON.stringify(extra));
 		assert.throws(
-			() => loadPiProfile(extraFixture, "eclipse"),
+			() => resolvePiProfile("eclipse", extraFixture),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
 	} finally {
@@ -147,7 +142,7 @@ test("Pi profile catalogs reject host-specific compatibility fields", async () =
 		modified.profiles[0].hosts = ["codex"];
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		assert.throws(() => loadPiProfile(fixture, "eclipse"), /unknown fields: hosts/);
+		assert.throws(() => resolvePiProfile("eclipse", fixture), /unknown fields: hosts/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -392,10 +392,6 @@ function sameRecoveryIdentity(left: AttentionGitIdentity, right: AttentionGitIde
 		&& left.worktreeTree === right.worktreeTree;
 }
 
-function resolveProfile(requested?: string): ResolvedProfile {
-	return resolvePiProfile(requested);
-}
-
 function boundProfile(run: StoredRun, store: RunStore): ResolvedProfile {
 	const binding = store.getProfileBinding();
 	if (!binding || binding.profile !== run.profileName || binding.profileSha256 !== run.profileSha256 || binding.host !== run.host) {
@@ -1239,7 +1235,7 @@ export class HerderRunManager {
 			return input.mode === "revise" ? this.revise(input) : this.resume(input);
 		}
 		if (input.mode !== "fire") throw new Error("No deterministic Herder run is recorded; start a fresh run");
-		const profile = resolveProfile(input.profile);
+		const profile = resolvePiProfile(input.profile);
 		const planName = input.planName || path.basename(this.planDirectory);
 		const driver = new GitDriver({
 			repoRoot: input.repositoryRoot,
@@ -1323,7 +1319,7 @@ export class HerderRunManager {
 		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Resume repository does not match the recorded run");
 		if (input.planName && input.planName !== run.planName) throw new Error(`Resume plan name must remain ${run.planName}`);
 		this.specs(run);
-		const profile = resolveProfile(input.profile || run.profileName);
+		const profile = resolvePiProfile(input.profile || run.profileName);
 		if (profile.profile_sha256 !== run.profileSha256 || profile.profile !== run.profileName) {
 			throw new Error(`Recorded profile ${run.profileName} no longer matches its immutable binding`);
 		}
@@ -1474,7 +1470,7 @@ export class HerderRunManager {
 			throw new Error("Plan graph revision requires zero proposed or dispatched workers; wait for terminal events or stop them first");
 		}
 		if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the active Grill plan edit before running Herder revise");
-		const profile = resolveProfile(input.profile || run.profileName);
+		const profile = resolvePiProfile(input.profile || run.profileName);
 		if (profile.profile_sha256 !== run.profileSha256 || profile.profile !== run.profileName) {
 			throw new Error(`Recorded profile ${run.profileName} no longer matches its immutable binding`);
 		}

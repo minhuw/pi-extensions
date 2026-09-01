@@ -46,10 +46,10 @@ import { runResetCommand } from "./reset-command.ts";
 import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
 import {
 	activeModelMatches,
-	loadPiProfile,
 	unavailableProfileModels,
 	type ResolvedPiProfile,
 } from "./profile.ts";
+import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import { HERDER_ATTENTION_MESSAGE, attentionMessageDetails, buildAttentionPrompt } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
@@ -81,7 +81,6 @@ import {
 
 const EXTENSION_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(EXTENSION_ROOT, "..");
-const PROFILE_CATALOG = path.join(PACKAGE_ROOT, "assets/profiles/profiles.json");
 const PI_AGENT_ROOT = path.join(PACKAGE_ROOT, "assets/roles/pi");
 interface PlanSummary {
 	counts?: { total?: number; done?: number; rejected?: number; actionable?: number };
@@ -365,7 +364,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const resolveProfile = async (ctx: ExtensionContext, requested?: string): Promise<ResolvedPiProfile> => {
-		const profile = await loadPiProfile(PROFILE_CATALOG, requested);
+		const profile = resolvePiProfile(requested);
 		const unavailable = unavailableProfileModels(profile, ctx.modelRegistry.getAvailable());
 		if (unavailable.length) throw new Error(`Profile ${profile.profile} cannot start because Pi has no available model matching: ${unavailable.join(", ")}.`);
 		if (!activeModelMatches(profile, ctx.model) || ctx.thinkingLevel !== profile.orchestrator.effort) {
