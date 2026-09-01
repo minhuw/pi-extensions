@@ -88,6 +88,7 @@ function recoveryRequest(
 	detail = "The target plan is blocked",
 	cause: AttentionCause = "reviewer_blocked",
 	continuation: AttentionContinuation = { role: "plan-reviewer", phase: "READY_REVIEWER" },
+	state: "pending" | "awaiting_input" = "pending",
 ): AttentionRequestInput {
 	const request = {
 		schemaVersion: 1,
@@ -98,7 +99,7 @@ function recoveryRequest(
 		round: 2,
 		actionId: `${requestId}:action`,
 		kind: "plan_recovery",
-		state: "pending",
+		state,
 		cause,
 		detail,
 		detailSha256: sha256(detail),
@@ -192,14 +193,45 @@ test("attention CRUD preserves immutable evidence, deduplicates unresolved cause
 	}
 });
 
-test("unsupported runtime attention states are rejected before SQL mutation", () => {
+test("attention transitions allow only named legal operations", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-state-validation-"));
 	const store = new RunStore(planDirectory);
 	try {
 		insertRun(store, planDirectory);
-		const request = store.putAttention(recoveryRequest("001", "attention-runtime-state"));
-		assert.throws(() => store.updateAttentionState(request.requestId, "delegated" as never), /Unsupported attention state/);
-		assert.deepEqual(store.getAttention(request.requestId), request);
+		const pending = store.putAttention(recoveryRequest("001", "attention-pending"));
+		const pendingBefore = store.getAttention(pending.requestId)!;
+		const pendingEditing = store.beginRecoveryEdit(pending.requestId);
+		assert.equal(pendingEditing.state, "editing");
+		assert.deepEqual({ ...pendingEditing, state: pendingBefore.state, updatedAt: pendingBefore.updatedAt }, pendingBefore);
+		assert.deepEqual(store.beginRecoveryEdit(pending.requestId), pendingEditing, "editing recovery is replayable");
+
+		const awaiting = store.putAttention(recoveryRequest("002", "attention-awaiting", "The target plan is awaiting input", "reviewer_blocked", { role: "plan-reviewer", phase: "READY_REVIEWER" }, "awaiting_input"));
+		const awaitingBefore = store.getAttention(awaiting.requestId)!;
+		const awaitingEditing = store.beginRecoveryEdit(awaiting.requestId);
+		assert.equal(awaitingEditing.state, "editing");
+		assert.deepEqual({ ...awaitingEditing, state: awaitingBefore.state, updatedAt: awaitingBefore.updatedAt }, awaitingBefore);
+
+		const unresolvedPending = store.putAttention(recoveryRequest("003", "attention-resolve-pending"));
+		const unresolvedAwaiting = store.putAttention(recoveryRequest("004", "attention-resolve-awaiting", "Another plan is awaiting input", "reviewer_blocked", { role: "plan-reviewer", phase: "READY_REVIEWER" }, "awaiting_input"));
+		const unresolvedEditing = store.putAttention(recoveryRequest("005", "attention-resolve-editing"));
+		store.beginRecoveryEdit(unresolvedEditing.requestId);
+		for (const request of [unresolvedPending, unresolvedAwaiting, unresolvedEditing]) {
+			const resolved = store.resolveAttention(request.requestId);
+			assert.equal(resolved.state, "resolved");
+			assert.equal(resolved.updatedAt, resolved.resolvedAt, "resolution uses one timestamp");
+			assert.deepEqual(store.resolveAttention(request.requestId), resolved, "resolved attention is replayable");
+		}
+
+		const resolvedBefore = store.getAttention(unresolvedPending.requestId)!;
+		assert.throws(() => store.beginRecoveryEdit(unresolvedPending.requestId), /already resolved/);
+		assert.deepEqual(store.getAttention(unresolvedPending.requestId), resolvedBefore);
+
+		const wrongKind = store.putAttention(userDecisionRequest("006", "attention-wrong-kind"));
+		const wrongKindBefore = store.getAttention(wrongKind.requestId)!;
+		assert.throws(() => store.beginRecoveryEdit(wrongKind.requestId), /not a plan-recovery request/);
+		assert.deepEqual(store.getAttention(wrongKind.requestId), wrongKindBefore);
+
+		assert.throws(() => store.beginRecoveryEdit("attention-missing"), /Unknown attention request/);
 	} finally {
 		store.close();
 		fs.rmSync(planDirectory, { recursive: true, force: true });

@@ -3512,7 +3512,7 @@ export class HerderRunManager {
 				expectedTree: attention.recovery.worktreeTree,
 			};
 			const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
-			this.store.updateAttentionState(attention.requestId, "editing");
+			this.store.beginRecoveryEdit(attention.requestId);
 			driver.resetPlanExecution({
 				branch: attention.recovery.branch,
 				worktree: attention.recovery.worktree,

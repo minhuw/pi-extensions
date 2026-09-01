@@ -8,7 +8,6 @@ import {
 } from "./execution-store.ts";
 import {
 	MANAGER_PROTOCOL_VERSION,
-	ATTENTION_STATES,
 	attentionCapabilityToken,
 	canonicalEventPayload,
 	integrationRepairCapabilityDigest,
@@ -1421,20 +1420,29 @@ export class RunStore {
 		return this.getAttention(input.requestId)!;
 	}
 
-	updateAttentionState(requestId: string, state: AttentionState): StoredAttentionRequest {
-		if (!ATTENTION_STATES.includes(state)) throw new Error(`Unsupported attention state ${String(state)}`);
+	beginRecoveryEdit(requestId: string): StoredAttentionRequest {
 		const existing = this.getAttention(requestId);
 		if (!existing) throw new Error(`Unknown attention request ${requestId}`);
-		if (existing.state === state) return existing;
+		if (existing.kind !== "plan_recovery") throw new Error(`Attention request ${requestId} is not a plan-recovery request`);
+		if (existing.state === "editing") return existing;
 		if (existing.state === "resolved") throw new Error(`Attention request ${requestId} is already resolved`);
+		if (existing.state !== "pending" && existing.state !== "awaiting_input") {
+			throw new Error(`Attention request ${requestId} cannot enter editing from ${existing.state}`);
+		}
 		const now = new Date().toISOString();
-		this.database.prepare("UPDATE manager_attention_requests SET state = ?, updated_at = ?, resolved_at = ? WHERE request_id = ?")
-			.run(state, now, state === "resolved" ? now : null, requestId);
+		this.database.prepare("UPDATE manager_attention_requests SET state = ?, updated_at = ? WHERE request_id = ?")
+			.run("editing", now, requestId);
 		return this.getAttention(requestId)!;
 	}
 
 	resolveAttention(requestId: string): StoredAttentionRequest {
-		return this.updateAttentionState(requestId, "resolved");
+		const existing = this.getAttention(requestId);
+		if (!existing) throw new Error(`Unknown attention request ${requestId}`);
+		if (existing.state === "resolved") return existing;
+		const now = new Date().toISOString();
+		this.database.prepare("UPDATE manager_attention_requests SET state = ?, updated_at = ?, resolved_at = ? WHERE request_id = ?")
+			.run("resolved", now, now, requestId);
+		return this.getAttention(requestId)!;
 	}
 
 	getVerification(runId: string, generation?: number): StoredVerification | null {
