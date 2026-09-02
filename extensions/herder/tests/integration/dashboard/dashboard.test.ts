@@ -387,7 +387,7 @@ function createAttentionFixture(afterRootCreated?: (root: string) => void) {
         approvedTree: null,
         rebase: null,
       })
-      const detail = "The Judge needs a recorded decision."
+      const detail = "The Judge needs a recorded decision.\nReview the persisted evidence before continuing."
       const request = {
         schemaVersion: 1,
         requestId: "attention-001",
@@ -402,8 +402,8 @@ function createAttentionFixture(afterRootCreated?: (root: string) => void) {
         detail,
         detailSha256: sha256(detail),
         continuation: { role: "plan-judge", phase: "READY_JUDGE" },
-        question: "Which recorded decision should the Judge use?",
-        recommendedAction: "Answer the Judge question.",
+        question: "Which recorded decision should the Judge use?\nProvide the rationale and confirm the next step for this deliberately long attention-request-wrap-check token that must remain contained at narrow dashboard widths.",
+        recommendedAction: "Answer the Judge question, then record the decision in the manager.",
         createdAt: "2026-08-03T00:00:00.000Z",
         updatedAt: "2026-08-03T00:00:00.000Z",
       } as const
@@ -761,6 +761,7 @@ async function runTests(): Promise<void> {
     const state = buildDashboardState({ planDir: fixture.planDir, planName: "demo" })
     assert.equal(state.version, 2)
     assert.equal(Object.hasOwn(state, "attention"), false)
+    assert.equal(state.plans.some((plan) => Object.hasOwn(plan, "attention")), false)
     assert.equal(state.readOnly, true)
     assert.equal(state.planSet.name, "demo")
     assert.deepEqual(state.planSet.counts, { total: 6, todo: 2, inProgress: 1, done: 2, blocked: 1, rejected: 0, actionable: 4 })
@@ -829,11 +830,18 @@ async function runTests(): Promise<void> {
       assert.equal(css.status, 200)
       const cssText = await css.text()
       assert.match(cssText, /--background: oklch/)
+      assert.match(cssText, /\.attention-card\s*\{/)
+      assert.match(cssText, /white-space: pre-wrap/)
+      assert.match(cssText, /overflow-wrap: anywhere/)
       assert.doesNotMatch(cssText, /data-phase="recovery"/)
       const script = await fetch(new URL("dashboard.js", dashboard.url))
       assert.equal(script.status, 200)
       const scriptText = await script.text()
       assert.match(scriptText, /REFRESH_INTERVAL_MS = 2000/)
+      assert.match(scriptText, /function renderAttention/)
+      assert.match(scriptText, /attention\.question \?\? attention\.detail/)
+      assert.match(scriptText, /recommendedAction/)
+      assert.match(scriptText, /REQUEST \$\{String\(attention\.requestId/)
       assert.match(scriptText, /installSectionControls/)
       assert.doesNotMatch(scriptText, /"recovery",/)
       const api = await fetch(new URL("api/state", dashboard.url))
@@ -878,8 +886,24 @@ async function serveFixture(): Promise<void> {
   process.once("SIGTERM", shutdown)
 }
 
+async function serveAttentionFixture(): Promise<void> {
+  const fixture = createAttentionFixture()
+  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: fixture.planName, port: 0 })
+  process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
+  const shutdown = async () => {
+    await dashboard.close()
+    fixture.cleanup()
+    process.exitCode = 0
+  }
+  process.once("SIGINT", shutdown)
+  process.once("SIGTERM", shutdown)
+}
+
+const serveAttention = process.argv.slice(2).includes("--serve-attention")
 const serve = process.argv.slice(2).includes("--serve")
-if (serve) {
+if (serveAttention) {
+  await serveAttentionFixture()
+} else if (serve) {
   await serveFixture()
 } else {
   test("dashboard attention fixture removes its root when setup fails", () => {

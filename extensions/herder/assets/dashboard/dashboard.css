@@ -752,6 +752,73 @@ a:focus-visible,
   font-size: 0.84rem;
 }
 
+.attention-card {
+  min-width: 0;
+  margin-top: 0.75rem;
+  border: 1px solid color-mix(in oklab, var(--amber) 55%, var(--border));
+  border-radius: var(--radius);
+  background: var(--amber-soft);
+  padding: 0.7rem;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.attention-card-header,
+.attention-meta-row {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.attention-card-header {
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.attention-card-header strong,
+.attention-meta dt {
+  color: var(--amber);
+}
+
+.attention-request {
+  color: var(--amber);
+  font-size: 0.68rem;
+}
+
+.attention-meta {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.65rem 0 0;
+  font-size: 0.72rem;
+}
+
+.attention-meta-row dt {
+  flex: 0 0 4rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+.attention-meta-row dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.attention-question,
+.attention-recommendation {
+  margin: 0.65rem 0 0;
+}
+
+.attention-question {
+  font-size: 0.86rem;
+  font-weight: 500;
+}
+
+.attention-recommendation {
+  color: var(--muted-foreground);
+  font-size: 0.78rem;
+}
+
 .detail-facts {
   flex-wrap: wrap;
   gap: 0;

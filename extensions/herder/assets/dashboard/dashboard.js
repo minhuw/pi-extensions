@@ -68,7 +68,7 @@ function formatSnapshotTime(value) {
 }
 
 function humanize(value) {
-  return String(value ?? "unknown").replaceAll("-", " ")
+  return String(value ?? "unknown").replaceAll(/[-_]/g, " ")
 }
 
 function shorten(value, length = 34) {
@@ -328,6 +328,32 @@ function renderAttempt(attempt) {
   return row
 }
 
+function renderAttention(attention) {
+  const card = element("aside", "attention-card")
+  const header = element("div", "attention-card-header")
+  header.append(
+    element("strong", null, "Attention request"),
+    element("code", "attention-request", `REQUEST ${String(attention.requestId ?? "").slice(0, 8)}`),
+  )
+  const metadata = element("dl", "attention-meta")
+  for (const [label, value] of [
+    ["Kind", attention.kind],
+    ["State", attention.state],
+    ["Cause", attention.cause],
+  ]) {
+    const row = element("div", "attention-meta-row")
+    row.append(element("dt", null, label), element("dd", null, humanize(value)))
+    metadata.append(row)
+  }
+  card.append(header, metadata, element("p", "attention-question", attention.question ?? attention.detail))
+  if (attention.recommendedAction) {
+    const recommendation = element("p", "attention-recommendation")
+    recommendation.append(element("strong", null, "Recommended action: "), element("span", null, attention.recommendedAction))
+    card.append(recommendation)
+  }
+  return card
+}
+
 function renderPlanDetail(state) {
   const panel = byId("plan-detail")
   const plan = state.plans.find((candidate) => candidate.id === view.selectedPlan)
@@ -345,6 +371,7 @@ function renderPlanDetail(state) {
   phase.dataset.tone = phaseTone(plan.phase)
   topline.append(phase)
   fragment.append(topline, element("h3", "detail-title", plan.title), element("p", "detail-message", phaseMessage(plan)))
+  if (plan.attention) fragment.append(renderAttention(plan.attention))
 
   const facts = element("div", "detail-facts")
   facts.append(
@@ -460,7 +487,8 @@ function renderFinished(state) {
 
 function selectDefaultPlan(state) {
   if (state.plans.some((plan) => plan.id === view.selectedPlan)) return
-  view.selectedPlan = state.plans.find((plan) => ACTIVE_PHASES.has(plan.phase))?.id
+  view.selectedPlan = state.plans.find((plan) => plan.attention)?.id
+    ?? state.plans.find((plan) => ACTIVE_PHASES.has(plan.phase))?.id
     ?? state.plans.find((plan) => plan.phase === "ready")?.id
     ?? state.plans[0]?.id
     ?? null
