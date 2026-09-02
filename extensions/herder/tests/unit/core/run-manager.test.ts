@@ -306,6 +306,67 @@ function resolvedRepoPath(repo: string, ...parts: string[]): string {
 	return path.join(fs.realpathSync(repo), ...parts);
 }
 
+function usageCount(store: RunStore): number {
+	return Number((store.database.prepare("SELECT COUNT(*) AS count FROM attempts").get() as { count: number }).count);
+}
+
+function managerEventCount(store: RunStore, runId: string): number {
+	return Number((store.database.prepare("SELECT COUNT(*) AS count FROM manager_events WHERE run_id = ?").get(runId) as { count: number }).count);
+}
+
+function implementerEnvelope(commit: string, changedPath = "src/value.mjs"): string {
+	return `STATUS: COMPLETE\nCOMMITS: ${commit}\nADDRESSED: none\nCHECKS: fixture test — passed\nFILES CHANGED: ${changedPath}\nDISCOVERED_PATHS: none\nNOTES: committed the fixture change\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
+}
+
+function reviewerBlockEnvelope(round: number): string {
+	const finding = `[atomic-blocker-${round}][P1][BLOCKING][PLAN_REQUIREMENT] round ${round} blocker`;
+	return `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: resolve round ${round} blocker\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: continue the bounded review round\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
+}
+
+function judgeDoneEnvelope(leak: string): string {
+	return `DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nDISCOVERED_PATHS: none\nLEAKS: ${leak}\nQUESTION: none\nCHECKS: fixture test — passed\nRATIONALE: approve the exact reviewed patch\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
+}
+
+async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService>>, fixture: { repo: string; planDirectory: string }, prefix: string): Promise<Record<string, unknown>> {
+	const started = payload(payload(await requestManagerOperation(service, "start", {
+		mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+	})).reply);
+	let implementer = payload((started.actions as unknown[])[0]);
+	for (let round = 1; round <= 3; round += 1) {
+		const hostHandle = `${prefix}-implementer-${round}`;
+		await requestManagerOperation(service, "event", {
+			eventId: `${prefix}-dispatch-implementer-${round}`,
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle }],
+		});
+		const worktree = String(implementer.worktree);
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), `export const value = ${round + 1}\n`);
+		git(worktree, ["add", "src/value.mjs"]);
+		git(worktree, ["commit", "-q", "-m", `fix: complete atomic judge round ${round}`]);
+		const commit = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const afterImplementer = payload(payload(await requestManagerOperation(service, "event", {
+			eventId: `${prefix}-terminal-implementer-${round}`,
+			kind: "terminals",
+			terminals: [{ actionId: implementer.actionId, hostHandle, response: implementerEnvelope(commit) }],
+		})).reply);
+		const reviewer = payload((afterImplementer.actions as unknown[])[0]);
+		const reviewerHost = `${prefix}-reviewer-${round}`;
+		await requestManagerOperation(service, "event", {
+			eventId: `${prefix}-dispatch-reviewer-${round}`,
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: reviewerHost }],
+		});
+		const afterReviewer = payload(payload(await requestManagerOperation(service, "event", {
+			eventId: `${prefix}-terminal-reviewer-${round}`,
+			kind: "terminals",
+			terminals: [{ actionId: reviewer.actionId, hostHandle: reviewerHost, response: reviewerBlockEnvelope(round) }],
+		})).reply);
+		if (round === 3) return payload((afterReviewer.actions as unknown[])[0]);
+		implementer = payload((afterReviewer.actions as unknown[])[0]);
+	}
+	throw new Error("Atomic Judge was not scheduled");
+}
+
 function writeFollowUpPlanDirectory(
 	directory: string,
 	fixture: { originalHead: string; repo: string },
@@ -721,6 +782,288 @@ test("manager events retain unknown keys and multi-result dispatch behavior", { 
 			() => requestManagerOperation(service, "event", { ...event, metadata: { source: "changed" } }, "multi-dispatch-with-extra-conflict"),
 			/replayed with different payload/,
 		);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("dispatch batches preflight before any state or journal mutation", { timeout: 20_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-dispatch-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		const action = payload((started.actions as unknown[])[0]);
+		const event = {
+			eventId: "atomic-dispatch-batch",
+			kind: "dispatch_results" as const,
+			dispatchResults: [
+				{ actionId: String(action.actionId), accepted: true, hostHandle: "atomic-dispatch-worker" },
+				{ actionId: "zzzz-unknown-dispatch-action", accepted: false, error: "late invalid entry" },
+			],
+		};
+		await assert.rejects(() => requestManagerOperation(service, "event", event), /Unknown dispatch action/);
+		const beforeRetry = new RunStore(fixture.planDirectory);
+		try {
+			const run = beforeRetry.getRun()!;
+			assert.equal(beforeRetry.getAction(String(action.actionId))?.state, "proposed");
+			assert.equal(beforeRetry.getPlan(run.runId, "001")?.phase, "IMPLEMENTING");
+			assert.equal(beforeRetry.readEvent(event.eventId), null);
+		} finally { beforeRetry.close(); }
+
+		await requestManagerOperation(service, "event", {
+			...event,
+			dispatchResults: [event.dispatchResults[0]],
+		}, "atomic-dispatch-retry");
+		const afterRetry = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(afterRetry.getAction(String(action.actionId))?.state, "dispatched");
+			assert.ok(afterRetry.readEvent(event.eventId));
+		} finally { afterRetry.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("terminal batches preflight before terminal, usage, and journal writes", { timeout: 25_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-terminal-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		})).reply);
+		const action = payload((started.actions as unknown[])[0]);
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-terminal-dispatch",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: "atomic-terminal-worker" }],
+		});
+		const worktree = String(action.worktree);
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
+		git(worktree, ["add", "src/value.mjs"]);
+		git(worktree, ["commit", "-q", "-m", "fix: complete atomic terminal fixture"]);
+		const commit = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		const terminal = {
+			actionId: String(action.actionId),
+			hostHandle: "atomic-terminal-worker",
+			response: implementerEnvelope(commit),
+		};
+		const event = {
+			eventId: "atomic-terminal-batch",
+			kind: "terminals" as const,
+			terminals: [terminal, { actionId: "zzzz-unknown-terminal-action", response: implementerEnvelope(commit) }],
+		};
+		await assert.rejects(() => requestManagerOperation(service, "event", event), /Unknown terminal action/);
+		const beforeRetry = new RunStore(fixture.planDirectory);
+		try {
+			const run = beforeRetry.getRun()!;
+			assert.equal(beforeRetry.getAction(String(action.actionId))?.state, "dispatched");
+			assert.equal(beforeRetry.getPlan(run.runId, "001")?.phase, "IMPLEMENTING");
+			assert.equal(usageCount(beforeRetry), 0);
+			assert.equal(beforeRetry.readEvent(event.eventId), null);
+			assert.equal(beforeRetry.getReigniteRequest(run.runId, run.currentGeneration), null);
+		} finally { beforeRetry.close(); }
+
+		await requestManagerOperation(service, "event", {
+			...event,
+			terminals: [terminal],
+		}, "atomic-terminal-retry");
+		const afterRetry = new RunStore(fixture.planDirectory);
+		try {
+			const run = afterRetry.getRun()!;
+			assert.equal(afterRetry.getAction(String(action.actionId))?.state, "terminal");
+			assert.equal(afterRetry.getPlan(run.runId, "001")?.phase, "REVIEWING");
+			assert.equal(usageCount(afterRetry), 1);
+			assert.ok(afterRetry.readEvent(event.eventId));
+		} finally { afterRetry.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("successful terminal batches commit every result and one journal entry", { timeout: 25_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-terminal-batch-test-"));
+	const fixture = writeFixture(root);
+	appendIndependentPlan(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2,
+		})).reply);
+		const actions = (started.actions as unknown[]).map(payload);
+		assert.equal(actions.length, 2);
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-terminal-batch-dispatch",
+			kind: "dispatch_results",
+			dispatchResults: actions.map((action, index) => ({ actionId: action.actionId, accepted: true, hostHandle: `atomic-batch-worker-${index}` })),
+		});
+		for (const action of actions) {
+			const source = String(action.planId) === "001" ? "src/value.mjs" : "src/other.mjs";
+			fs.writeFileSync(path.join(String(action.worktree), source), `export const ${source.includes("other") ? "other" : "value"} = 2\n`);
+			git(String(action.worktree), ["add", source]);
+			git(String(action.worktree), ["commit", "-q", "-m", `fix: complete atomic batch plan ${action.planId}`]);
+		}
+		const before = new RunStore(fixture.planDirectory);
+		const runId = before.getRun()!.runId;
+		const eventsBefore = managerEventCount(before, runId);
+		const usageBefore = usageCount(before);
+		before.close();
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-terminal-batch-terminal",
+			kind: "terminals",
+			terminals: actions.map((action, index) => ({
+				actionId: action.actionId,
+				hostHandle: `atomic-batch-worker-${index}`,
+				response: implementerEnvelope(git(String(action.worktree), ["rev-parse", "HEAD"]).stdout.trim(), String(action.planId) === "001" ? "src/value.mjs" : "src/other.mjs"),
+			})),
+		});
+		const after = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(managerEventCount(after, runId), eventsBefore + 1);
+			assert.equal(usageCount(after), usageBefore + 2);
+			assert.deepEqual(after.getActions(runId, ["terminal"]).filter((action) => action.role === "plan-implementer").map((action) => action.planId), ["001", "002"]);
+			assert.equal(after.getActions(runId, ["proposed"]).filter((action) => action.role === "plan-reviewer").length, 2);
+			assert.ok(after.readEvent("atomic-terminal-batch-terminal"));
+		} finally { after.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("exact dispatch replay preserves capacity suppression and rejects changed payloads", { timeout: 25_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-replay-test-"));
+	const fixture = writeFixture(root);
+	appendIndependentPlan(fixture);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const started = payload(payload(await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2,
+		})).reply);
+		const actions = (started.actions as unknown[]).map(payload);
+		const event = {
+			eventId: "atomic-capacity-replay",
+			kind: "dispatch_results" as const,
+			dispatchResults: [
+			{ actionId: actions[0]!.actionId, accepted: true, hostHandle: "atomic-capacity-worker" },
+			{ actionId: actions[1]!.actionId, accepted: false, error: "host concurrency limit reached" },
+			],
+		};
+		const first = payload(payload(await requestManagerOperation(service, "event", event)).reply);
+		assert.equal(first.status, "running");
+		assert.equal(payload(first.scheduler).reason, "host-backpressure");
+		const replay = payload(payload(await requestManagerOperation(service, "event", event, "atomic-capacity-replay-operation")).reply);
+		assert.equal(replay.status, "running");
+		assert.equal(payload(replay.scheduler).reason, "host-backpressure");
+		await assert.rejects(() => requestManagerOperation(service, "event", {
+			...event,
+			dispatchResults: [event.dispatchResults[0], { ...event.dispatchResults[1], error: "host capacity changed" }],
+		}, "atomic-capacity-conflict-operation"), /replayed with different payload/);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("Reignite persistence failure does not roll back a completed terminal event", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-reignite-test-"));
+	const fixture = writeFixture(root);
+	process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE = "atomic-reignite-terminal";
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const awaiting = await prepareSinglePlan(service, fixture, "atomic-reignite");
+		const verified = await submitFinalVerification(service, fixture.planDirectory, awaiting, "atomic-reignite");
+		const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-reignite-dispatch",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "atomic-reignite-worker" }],
+		});
+		const event = {
+			eventId: "atomic-reignite-terminal",
+			kind: "terminals" as const,
+			terminals: [{
+				actionId: String(finalReviewer.actionId),
+				hostHandle: "atomic-reignite-worker",
+				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
+			}],
+		};
+		const before = new RunStore(fixture.planDirectory);
+		const usageBefore = usageCount(before);
+		before.close();
+		const completed = payload(payload(await requestManagerOperation(service, "event", event)).reply);
+		assert.equal(completed.status, "complete");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getAction(String(finalReviewer.actionId))?.state, "terminal");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+			assert.equal(usageCount(store), usageBefore + 1);
+			assert.ok(store.readEvent(event.eventId));
+		} finally { store.close(); }
+		const replay = payload(payload(await requestManagerOperation(service, "event", event, "atomic-reignite-replay")).reply);
+		assert.equal(replay.status, "complete");
+		const afterReplay = new RunStore(fixture.planDirectory);
+		try { assert.equal(usageCount(afterReplay), usageBefore + 1); }
+		finally { afterReplay.close(); }
+	} finally {
+		delete process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE;
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+test("leak side effects recover on exact terminal replay after a conflict", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-leak-test-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const judge = await reachAtomicJudge(service, fixture, "atomic-leak");
+		const leak = "[atomic-leak][P1][PLAN_REQUIREMENT] title=deferred check; problem=missing follow-up; evidence=judge; acceptance=write the follow-up; non_goals=none; dedupe_key=atomic-leak";
+		const leakPath = path.join(fixture.planDirectory, "leak", "001_atomic_leak_deferred_finding.md");
+		fs.mkdirSync(path.dirname(leakPath), { recursive: true });
+		fs.writeFileSync(leakPath, "conflicting leak content\n");
+		const judgeHost = "atomic-leak-judge";
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-leak-dispatch-judge",
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: judge.actionId, accepted: true, hostHandle: judgeHost }],
+		});
+		const event = {
+			eventId: "atomic-leak-terminal-judge",
+			kind: "terminals" as const,
+			terminals: [{ actionId: String(judge.actionId), hostHandle: judgeHost, response: judgeDoneEnvelope(leak) }],
+		};
+		await assert.rejects(() => requestManagerOperation(service, "event", event), /Leak record changed/);
+		const beforeReplay = new RunStore(fixture.planDirectory);
+		try {
+			const run = beforeReplay.getRun()!;
+			assert.equal(beforeReplay.getAction(String(judge.actionId))?.state, "terminal");
+			assert.equal(beforeReplay.readEvent(event.eventId)?.payloadSha256, sha256(stableJson(event)));
+			assert.equal(beforeReplay.getPlan(run.runId, "001")?.phase, "READY_TO_INTEGRATE");
+		} finally { beforeReplay.close(); }
+		fs.rmSync(leakPath);
+		const replay = payload(payload(await requestManagerOperation(service, "event", event, "atomic-leak-replay")).reply);
+		assert.equal(replay.status, "paused");
+		assert.equal(fs.existsSync(leakPath), true);
+		const afterReplay = new RunStore(fixture.planDirectory);
+		try {
+			const run = afterReplay.getRun()!;
+			assert.equal(afterReplay.getPlan(run.runId, "001")?.phase, "DONE");
+			assert.equal(afterReplay.getActions(run.runId, ["dispatched"]).some((action) => action.actionId === judge.actionId), false);
+		} finally { afterReplay.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
