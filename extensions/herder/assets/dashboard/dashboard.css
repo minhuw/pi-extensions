@@ -1097,6 +1097,170 @@ a:focus-visible,
   font-weight: 500;
 }
 
+.accounting-panel {
+  margin: 0;
+}
+
+.accounting-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.accounting-summary::-webkit-details-marker {
+  display: none;
+}
+
+.accounting-summary::after {
+  content: "＋";
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.accounting-panel[open] .accounting-summary::after {
+  content: "−";
+}
+
+.accounting-summary-label {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.accounting-summary-title {
+  margin-left: 0.65rem;
+  font-size: clamp(1.25rem, 2vw, 1.65rem);
+  font-weight: 580;
+  letter-spacing: -0.025em;
+  line-height: 1;
+}
+
+.accounting-body {
+  margin-top: 0.8rem;
+}
+
+.accounting-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
+}
+
+.accounting-total-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+.accounting-total {
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0.7rem;
+}
+
+.accounting-total-label,
+.accounting-total-value {
+  display: block;
+}
+
+.accounting-total-label {
+  color: var(--muted-foreground);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+.accounting-total-value {
+  margin-top: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.accounting-table-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.accounting-table-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.accounting-table-card h3 {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.accounting-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.accounting-table {
+  width: 100%;
+  min-width: 30rem;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.accounting-table th,
+.accounting-table td {
+  padding: 0.48rem 0.65rem;
+  border-top: 1px solid var(--border);
+  text-align: right;
+  vertical-align: top;
+}
+
+.accounting-table th {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.accounting-table td {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.accounting-table th:first-child,
+.accounting-table td:first-child {
+  width: 46%;
+  text-align: left;
+}
+
+.accounting-table td:first-child {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.accounting-number {
+  white-space: nowrap;
+}
+
 .site-footer {
   display: flex;
   align-items: center;
@@ -1186,8 +1350,13 @@ a:focus-visible,
     flex-direction: column;
   }
 
-  .integration-lane {
+  .integration-lane,
+  .accounting-table-grid {
     grid-template-columns: 1fr;
+  }
+
+  .accounting-total-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .integration-cell + .integration-cell {

@@ -8,7 +8,7 @@ import path from "node:path"
 import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
-import { executionDatabasePath, executionReport, recordUsageRecord } from "../../../src/daemon/execution-store.ts"
+import { executionDatabasePath, executionReport, openExecutionDatabase, recordUsageRecord } from "../../../src/daemon/execution-store.ts"
 import type { UsageRecord, UsageRecordInput } from "../../../src/daemon/execution-store.ts"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
 import { RunStore, type StoredPlanSpec } from "../../../src/daemon/run-store.ts"
@@ -194,7 +194,7 @@ function usage(planDir: string, input: Partial<UsageInput>): void {
   })
 }
 
-function createFixture() {
+function createFixture(withUsage = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-dashboard-test-"))
   const repo = path.join(root, "repo")
   fs.mkdirSync(repo)
@@ -206,69 +206,71 @@ function createFixture() {
   git(repo, "add", ".")
   git(repo, "commit", "-qm", "test: initialize dashboard fixture")
 
-  usage(planDir, {
-    attempt: "demo-001-implementer-1",
-    plan: "001",
-    role: "plan-implementer",
-    outcome: "COMPLETE",
-    round: "1",
-    startedAt: "2026-08-03T00:00:00Z",
-    finishedAt: "2026-08-03T00:02:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-001-reviewer-1",
-    plan: "001",
-    role: "plan-reviewer",
-    outcome: "APPROVE",
-    round: "1",
-    startedAt: "2026-08-03T00:02:00Z",
-    finishedAt: "2026-08-03T00:04:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-002-implementer-1",
-    plan: "002",
-    role: "plan-implementer",
-    outcome: "COMPLETE",
-    round: "1",
-    startedAt: "2026-08-03T00:04:00Z",
-    finishedAt: "2026-08-03T00:06:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-002-reviewer-1",
-    plan: "002",
-    role: "plan-reviewer",
-    outcome: "REVISE",
-    round: "1",
-    startedAt: "2026-08-03T00:06:00Z",
-    finishedAt: "2026-08-03T00:08:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-004-saver-1",
-    plan: "004",
-    role: "plan-judge",
-    outcome: "INTERRUPTED",
-    round: "1",
-    startedAt: "2026-08-03T00:08:00Z",
-    finishedAt: "2026-08-03T00:10:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-005-implementer-1",
-    plan: "005",
-    role: "plan-implementer",
-    outcome: "COMPLETE",
-    round: "1",
-    startedAt: "2026-08-03T00:10:00Z",
-    finishedAt: "2026-08-03T00:12:00Z",
-  })
-  usage(planDir, {
-    attempt: "demo-005-reviewer-1",
-    plan: "005",
-    role: "plan-reviewer",
-    outcome: "APPROVE",
-    round: "1",
-    startedAt: "2026-08-03T00:12:00Z",
-    finishedAt: "2026-08-03T00:14:00Z",
-  })
+  if (withUsage) {
+    usage(planDir, {
+      attempt: "demo-001-implementer-1",
+      plan: "001",
+      role: "plan-implementer",
+      outcome: "COMPLETE",
+      round: "1",
+      startedAt: "2026-08-03T00:00:00Z",
+      finishedAt: "2026-08-03T00:02:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-001-reviewer-1",
+      plan: "001",
+      role: "plan-reviewer",
+      outcome: "APPROVE",
+      round: "1",
+      startedAt: "2026-08-03T00:02:00Z",
+      finishedAt: "2026-08-03T00:04:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-002-implementer-1",
+      plan: "002",
+      role: "plan-implementer",
+      outcome: "COMPLETE",
+      round: "1",
+      startedAt: "2026-08-03T00:04:00Z",
+      finishedAt: "2026-08-03T00:06:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-002-reviewer-1",
+      plan: "002",
+      role: "plan-reviewer",
+      outcome: "REVISE",
+      round: "1",
+      startedAt: "2026-08-03T00:06:00Z",
+      finishedAt: "2026-08-03T00:08:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-004-saver-1",
+      plan: "004",
+      role: "plan-judge",
+      outcome: "INTERRUPTED",
+      round: "1",
+      startedAt: "2026-08-03T00:08:00Z",
+      finishedAt: "2026-08-03T00:10:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-005-implementer-1",
+      plan: "005",
+      role: "plan-implementer",
+      outcome: "COMPLETE",
+      round: "1",
+      startedAt: "2026-08-03T00:10:00Z",
+      finishedAt: "2026-08-03T00:12:00Z",
+    })
+    usage(planDir, {
+      attempt: "demo-005-reviewer-1",
+      plan: "005",
+      role: "plan-reviewer",
+      outcome: "APPROVE",
+      round: "1",
+      startedAt: "2026-08-03T00:12:00Z",
+      finishedAt: "2026-08-03T00:14:00Z",
+    })
+  }
 
   git(repo, "branch", "herder/demo/integration")
   git(repo, "branch", "herder/demo/002")
@@ -768,6 +770,23 @@ async function runTests(): Promise<void> {
     assert.equal(state.accounting.storage, "sqlite")
     assert.equal(state.accounting.attempts, 7)
     assert.equal(state.accounting.tokens.reportedInputOutput, 8400)
+    assert.deepEqual(state.accounting.byRole, [
+      { key: "plan-implementer", attempts: 3, tokenAttempts: 3, knownTokens: 3600 },
+      { key: "plan-judge", attempts: 1, tokenAttempts: 1, knownTokens: 1200 },
+      { key: "plan-reviewer", attempts: 3, tokenAttempts: 3, knownTokens: 3600 },
+    ])
+    assert.deepEqual(state.accounting.byOutcome, [
+      { key: "APPROVE", attempts: 2, tokenAttempts: 2, knownTokens: 2400 },
+      { key: "COMPLETE", attempts: 3, tokenAttempts: 3, knownTokens: 3600 },
+      { key: "INTERRUPTED", attempts: 1, tokenAttempts: 1, knownTokens: 1200 },
+      { key: "REVISE", attempts: 1, tokenAttempts: 1, knownTokens: 1200 },
+    ])
+    assert.deepEqual(state.accounting.byModel, [
+      { key: "gpt-5.6-sol / xhigh", attempts: 7, tokenAttempts: 7, knownTokens: 8400 },
+    ])
+    assert.deepEqual(state.accounting.byHarness, [
+      { key: "codex", attempts: 7, tokenAttempts: 7, knownTokens: 8400 },
+    ])
     assert.ok(state.integration.branch)
     assert.equal(state.integration.branch.name, "herder/demo/integration")
     assert.equal(state.integration.branch.head, git(fixture.repo, "rev-parse", "HEAD"))
@@ -816,6 +835,55 @@ async function runTests(): Promise<void> {
     assert.equal(git(fixture.repo, "status", "--porcelain=v1"), statusBefore)
     assert.deepEqual(fs.readFileSync(executionDatabasePath(fixture.planDir)), databaseBefore)
 
+    const emptyFixture = createFixture(false)
+    try {
+      const before = buildDashboardState({ planDir: emptyFixture.planDir, planName: "demo" })
+      const accountingValues = (accounting: typeof before.accounting) => ({
+        attempts: accounting.attempts,
+        rounds: accounting.rounds,
+        interruptions: accounting.interruptions,
+        tokenCoverage: accounting.tokenCoverage,
+        tokens: accounting.tokens,
+        timing: accounting.timing,
+        byRole: accounting.byRole,
+        byOutcome: accounting.byOutcome,
+        byModel: accounting.byModel,
+        byHarness: accounting.byHarness,
+      })
+      assert.equal(before.accounting.databaseExists, false)
+      assert.equal(before.accounting.storage, "uninitialized")
+      assert.deepEqual(accountingValues(before.accounting), {
+        attempts: 0,
+        rounds: [],
+        interruptions: 0,
+        tokenCoverage: { reported: 0, total: 0 },
+        tokens: { input: 0, cachedInput: 0, output: 0, reasoning: 0, reportedInputOutput: 0 },
+        timing: {
+          startedAt: null,
+          finishedAt: null,
+          wallClockMs: null,
+          attemptDurationMs: null,
+          durationCoverage: { reported: 0, total: 0 },
+        },
+        byRole: [],
+        byOutcome: [],
+        byModel: [],
+        byHarness: [],
+      })
+      const database = openExecutionDatabase(emptyFixture.planDir, { create: true })
+      database.close()
+      const after = buildDashboardState({ planDir: emptyFixture.planDir, planName: "demo" })
+      assert.equal(after.accounting.databaseExists, true)
+      assert.equal(after.accounting.storage, "sqlite")
+      assert.deepEqual(accountingValues(after.accounting), accountingValues(before.accounting))
+      assert.deepEqual(after.accounting.byRole, [])
+      assert.deepEqual(after.accounting.byOutcome, [])
+      assert.deepEqual(after.accounting.byModel, [])
+      assert.deepEqual(after.accounting.byHarness, [])
+    } finally {
+      emptyFixture.cleanup()
+    }
+
     const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
     try {
       const page = await fetch(dashboard.url)
@@ -833,11 +901,24 @@ async function runTests(): Promise<void> {
       assert.match(cssText, /\.attention-card\s*\{/)
       assert.match(cssText, /white-space: pre-wrap/)
       assert.match(cssText, /overflow-wrap: anywhere/)
+      assert.match(cssText, /\.accounting-panel\s*\{/)
+      assert.match(cssText, /\.accounting-table-grid\s*\{/)
+      assert.match(cssText, /\.accounting-table-wrap\s*\{/)
+      assert.match(cssText, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/)
+      assert.match(cssText, /\.accounting-table-grid[\s\S]*?grid-template-columns: 1fr/)
       assert.doesNotMatch(cssText, /data-phase="recovery"/)
       const script = await fetch(new URL("dashboard.js", dashboard.url))
       assert.equal(script.status, 200)
       const scriptText = await script.text()
       assert.match(scriptText, /REFRESH_INTERVAL_MS = 2000/)
+      assert.match(scriptText, /function createAccountingPanel/)
+      assert.match(scriptText, /document\.createElement\("details"\)/)
+      assert.match(scriptText, /const accountingBody = createAccountingPanel\(\)/)
+      assert.match(scriptText, /function renderAccounting\(accounting\)/)
+      assert.match(scriptText, /No accounting data yet\./)
+      assert.match(scriptText, /Cumulative attempt duration/)
+      assert.match(scriptText, /Wall-clock duration/)
+      assert.match(scriptText, /accountingBody\.replaceChildren/)
       assert.match(scriptText, /function renderAttention/)
       assert.match(scriptText, /attention\.question \?\? attention\.detail/)
       assert.match(scriptText, /recommendedAction/)
@@ -847,8 +928,63 @@ async function runTests(): Promise<void> {
       const api = await fetch(new URL("api/state", dashboard.url))
       assert.equal(api.status, 200)
       assert.equal(api.headers.get("cache-control"), "no-store")
-      const apiState = await api.json() as { planSet: { name: string } }
+      const apiState = await api.json() as { planSet: { name: string }; accounting: { attempts: number } }
       assert.equal(apiState.planSet.name, "demo")
+      assert.equal(apiState.accounting.attempts, 7)
+
+      const emptyFixtureForServer = createFixture(false)
+      try {
+        const emptyDashboard = await createDashboardServer({ planDir: emptyFixtureForServer.planDir, planName: "demo", port: 0 })
+        try {
+          const emptyApi = await fetch(new URL("api/state", emptyDashboard.url))
+          assert.equal(emptyApi.status, 200)
+          const emptyState = await emptyApi.json() as {
+            accounting: {
+              databaseExists: boolean
+              attempts: number
+              rounds: unknown[]
+              interruptions: number
+              tokenCoverage: { reported: number; total: number }
+              tokens: { reportedInputOutput: number }
+              byRole: unknown[]
+              byOutcome: unknown[]
+              byModel: unknown[]
+              byHarness: unknown[]
+            }
+          }
+          assert.equal(emptyState.accounting.databaseExists, false)
+          assert.deepEqual({
+            attempts: emptyState.accounting.attempts,
+            rounds: emptyState.accounting.rounds,
+            interruptions: emptyState.accounting.interruptions,
+            tokenCoverage: emptyState.accounting.tokenCoverage,
+            reportedInputOutput: emptyState.accounting.tokens.reportedInputOutput,
+            byRole: emptyState.accounting.byRole,
+            byOutcome: emptyState.accounting.byOutcome,
+            byModel: emptyState.accounting.byModel,
+            byHarness: emptyState.accounting.byHarness,
+          }, {
+            attempts: 0,
+            rounds: [],
+            interruptions: 0,
+            tokenCoverage: { reported: 0, total: 0 },
+            reportedInputOutput: 0,
+            byRole: [],
+            byOutcome: [],
+            byModel: [],
+            byHarness: [],
+          })
+          const emptyScript = await fetch(new URL("dashboard.js", emptyDashboard.url))
+          assert.equal(await emptyScript.text(), scriptText)
+          const emptyCss = await fetch(new URL("dashboard.css", emptyDashboard.url))
+          assert.equal(await emptyCss.text(), cssText)
+        } finally {
+          await emptyDashboard.close()
+        }
+      } finally {
+        emptyFixtureForServer.cleanup()
+      }
+
       const health = await fetch(new URL("api/health", dashboard.url))
       assert.deepEqual(await health.json(), { ok: true, readOnly: true })
       const head = await fetch(dashboard.url, { method: "HEAD" })
@@ -886,6 +1022,19 @@ async function serveFixture(): Promise<void> {
   process.once("SIGTERM", shutdown)
 }
 
+async function serveEmptyAccountingFixture(): Promise<void> {
+  const fixture = createFixture(false)
+  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
+  process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
+  const shutdown = async () => {
+    await dashboard.close()
+    fixture.cleanup()
+    process.exitCode = 0
+  }
+  process.once("SIGINT", shutdown)
+  process.once("SIGTERM", shutdown)
+}
+
 async function serveAttentionFixture(): Promise<void> {
   const fixture = createAttentionFixture()
   const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: fixture.planName, port: 0 })
@@ -900,9 +1049,12 @@ async function serveAttentionFixture(): Promise<void> {
 }
 
 const serveAttention = process.argv.slice(2).includes("--serve-attention")
+const serveEmptyAccounting = process.argv.slice(2).includes("--serve-empty-accounting")
 const serve = process.argv.slice(2).includes("--serve")
 if (serveAttention) {
   await serveAttentionFixture()
+} else if (serveEmptyAccounting) {
+  await serveEmptyAccountingFixture()
 } else if (serve) {
   await serveFixture()
 } else {

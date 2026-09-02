@@ -485,6 +485,88 @@ function renderFinished(state) {
   replaceChildren(byId("finished-grid"), cards)
 }
 
+function createAccountingPanel() {
+  const panel = document.createElement("details")
+  panel.id = "accounting-panel"
+  panel.className = "section accounting-panel"
+  const summary = element("summary", "accounting-summary")
+  summary.append(
+    element("span", "accounting-summary-label", "RUN ACCOUNTING"),
+    element("strong", "accounting-summary-title", "Execution usage"),
+  )
+  const body = element("div", "accounting-body")
+  panel.append(summary, body)
+  byId("main-content").append(panel)
+  return body
+}
+
+function renderAccountingTable(descriptor) {
+  const card = element("section", "accounting-table-card")
+  const heading = element("h3", null, descriptor.label)
+  heading.id = `accounting-${descriptor.id}-heading`
+  const wrapper = element("div", "accounting-table-wrap")
+  const table = element("table", "accounting-table")
+  table.setAttribute("aria-labelledby", heading.id)
+  const head = element("thead")
+  const headerRow = element("tr")
+  for (const label of ["Key", "Attempts", "Token-covered attempts", "Known tokens"]) {
+    const header = element("th", null, label)
+    header.setAttribute("scope", "col")
+    headerRow.append(header)
+  }
+  head.append(headerRow)
+  const body = element("tbody")
+  for (const row of descriptor.rows) {
+    const tableRow = element("tr")
+    for (const [index, value] of [
+      row.key,
+      formatCount(row.attempts),
+      formatCount(row.tokenAttempts),
+      formatCount(row.knownTokens),
+    ].entries()) {
+      tableRow.append(element("td", index === 0 ? "accounting-key" : "accounting-number", value))
+    }
+    body.append(tableRow)
+  }
+  table.append(head, body)
+  wrapper.append(table)
+  card.append(heading, wrapper)
+  return card
+}
+
+function renderAccounting(accounting) {
+  if (!accounting || Number(accounting.attempts ?? 0) === 0) {
+    accountingBody.replaceChildren(element("p", "accounting-empty", "No accounting data yet."))
+    return
+  }
+  const rounds = Array.isArray(accounting.rounds) ? accounting.rounds : []
+  const totals = element("div", "accounting-total-grid")
+  for (const [label, value] of [
+    ["Attempts", formatCount(accounting.attempts)],
+    ["Rounds", formatCount(rounds.length)],
+    ["Interruptions", formatCount(accounting.interruptions)],
+    ["Reported input/output tokens", formatCount(accounting.tokens?.reportedInputOutput)],
+    ["Token coverage", `${formatCount(accounting.tokenCoverage?.reported)} / ${formatCount(accounting.tokenCoverage?.total)}`],
+    ["Cumulative attempt duration", formatDuration(accounting.timing?.attemptDurationMs) || "Unavailable"],
+    ["Wall-clock duration", formatDuration(accounting.timing?.wallClockMs) || "Unavailable"],
+  ]) {
+    const total = element("div", "accounting-total")
+    total.append(element("span", "accounting-total-label", label), element("strong", "accounting-total-value", value))
+    totals.append(total)
+  }
+  const tables = element("div", "accounting-table-grid")
+  const descriptors = [
+    { id: "role", label: "By role", rows: accounting.byRole ?? [] },
+    { id: "outcome", label: "By outcome", rows: accounting.byOutcome ?? [] },
+    { id: "model", label: "By model", rows: accounting.byModel ?? [] },
+    { id: "harness", label: "By harness", rows: accounting.byHarness ?? [] },
+  ]
+  for (const descriptor of descriptors) tables.append(renderAccountingTable(descriptor))
+  accountingBody.replaceChildren(totals, tables)
+}
+
+const accountingBody = createAccountingPanel()
+
 function selectDefaultPlan(state) {
   if (state.plans.some((plan) => plan.id === view.selectedPlan)) return
   view.selectedPlan = state.plans.find((plan) => plan.attention)?.id
@@ -511,6 +593,7 @@ function render(state) {
   renderPlanDetail(state)
   renderIntegration(state)
   renderFinished(state)
+  renderAccounting(state.accounting)
 }
 
 function showConnectionError(message) {
