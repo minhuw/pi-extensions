@@ -73,12 +73,15 @@ test("same revision coalesces concurrent projections and reuses the exact body",
   releases.shift()!("ignored")
   await Promise.all([first, second])
   assert.equal(firstResponse.body, '{"revision":7,"build":1}\n')
+  assert.equal(firstResponse.headers["x-herder-revision"], "7")
   assert.equal(secondResponse.body, firstResponse.body)
+  assert.equal(secondResponse.headers["x-herder-revision"], "7")
 
   const thirdResponse = response()
   await dashboard.handle(request("/api/state"), thirdResponse)
   assert.equal(builds, 1)
   assert.equal(thirdResponse.body, firstResponse.body)
+  assert.equal(thirdResponse.headers["x-herder-revision"], "7")
 })
 
 test("revision rollover during a projection discards the stale body and retries", async () => {
@@ -108,7 +111,32 @@ test("revision rollover during a projection discards the stale body and retries"
   releases.shift()!("current")
   await Promise.all([first, second])
   assert.equal(firstResponse.body, '{"revision":2,"build":2}\n')
+  assert.equal(firstResponse.headers["x-herder-revision"], "2")
   assert.equal(secondResponse.body, firstResponse.body)
+  assert.equal(secondResponse.headers["x-herder-revision"], "2")
+})
+
+test("revision changes update the body and header together", async () => {
+  let revision = 1
+  let builds = 0
+  const dashboard = createDashboardHandler({
+    revisionProvider: () => revision,
+    stateBodyProvider: () => {
+      builds += 1
+      return `{"revision":${revision},"build":${builds}}\n`
+    },
+  })
+
+  const firstResponse = response()
+  await dashboard.handle(request("/api/state"), firstResponse)
+  assert.equal(firstResponse.body, '{"revision":1,"build":1}\n')
+  assert.equal(firstResponse.headers["x-herder-revision"], "1")
+
+  revision = 2
+  const secondResponse = response()
+  await dashboard.handle(request("/api/state"), secondResponse)
+  assert.equal(secondResponse.body, '{"revision":2,"build":2}\n')
+  assert.equal(secondResponse.headers["x-herder-revision"], "2")
 })
 
 test("no-revision fallback uses the injected clock and remains instance-local", async () => {
@@ -134,24 +162,30 @@ test("no-revision fallback uses the injected clock and remains instance-local", 
   const firstBody = response()
   await first.handle(request("/api/state"), firstBody)
   assert.equal(firstBuilds, 1)
+  assert.equal(firstBody.headers["x-herder-revision"], undefined)
   const cachedBody = response()
   await first.handle(request("/api/state"), cachedBody)
   assert.equal(firstBuilds, 1)
   assert.equal(cachedBody.body, firstBody.body)
+  assert.equal(cachedBody.headers["x-herder-revision"], undefined)
 
   now = 999
-  await first.handle(request("/api/state"), response())
+  const stillCached = response()
+  await first.handle(request("/api/state"), stillCached)
   assert.equal(firstBuilds, 1)
+  assert.equal(stillCached.headers["x-herder-revision"], undefined)
   now = 1000
   const refreshedBody = response()
   await first.handle(request("/api/state"), refreshedBody)
   assert.equal(firstBuilds, 2)
   assert.notEqual(refreshedBody.body, firstBody.body)
+  assert.equal(refreshedBody.headers["x-herder-revision"], undefined)
 
   const secondBody = response()
   await second.handle(request("/api/state"), secondBody)
   assert.equal(secondBuilds, 1)
   assert.match(secondBody.body, /"instance":"second"/)
+  assert.equal(secondBody.headers["x-herder-revision"], undefined)
 })
 
 test("slow no-revision projections are accepted and coalesced", async () => {

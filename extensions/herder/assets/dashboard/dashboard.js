@@ -19,6 +19,7 @@ const view = {
   filter: "all",
   paused: false,
   fetching: false,
+  lastRevision: null,
 }
 
 function byId(id) {
@@ -497,10 +498,14 @@ async function refresh() {
   try {
     const response = await fetch("/api/state", { cache: "no-store" })
     if (!response.ok) throw new Error(`snapshot request returned ${response.status}`)
+    const revision = response.headers.get("x-herder-revision") || null
+    byId("connection-toast").hidden = true
+    byId("snapshot-state").textContent = view.paused ? "PAUSED" : "LIVE"
+    if (revision !== null && revision === view.lastRevision) return
     const state = await response.json()
     if (state.version !== 2 || state.readOnly !== true) throw new Error("unsupported dashboard state")
-    byId("connection-toast").hidden = true
     render(state)
+    view.lastRevision = revision
   } catch (error) {
     showConnectionError(error.message)
   } finally {

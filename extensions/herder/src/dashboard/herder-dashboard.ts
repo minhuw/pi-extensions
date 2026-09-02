@@ -164,17 +164,18 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
   const clock = input.clock ?? Date.now
   const allowedHosts = new Set<string>()
   const assets = readAssets()
-  let cachedState: { revision: number | null; body: string; expiresAt: number } | null = null
-  let inFlight: { revision: number | null; promise: Promise<string> } | null = null
+  type StateBody = { body: string; revision: number | null }
+  let cachedState: StateBody & { expiresAt: number } | null = null
+  let inFlight: { revision: number | null; promise: Promise<StateBody> } | null = null
 
-  const stateBody = async (): Promise<string> => {
+  const stateBody = async (): Promise<StateBody> => {
     while (true) {
       const now = clock()
       const revision = revisionProvider() ?? null
       if (cachedState
         && cachedState.revision === revision
         && (revision !== null || now < cachedState.expiresAt)) {
-        return cachedState.body
+        return { body: cachedState.body, revision: cachedState.revision }
       }
       if (inFlight && inFlight.revision === revision) {
         await inFlight.promise
@@ -183,21 +184,20 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
 
       const build = Promise.resolve().then(stateBodyProvider).then((body) => {
         if (typeof body !== "string") throw new Error("Dashboard state body provider must return a string")
-        return body
+        return { body, revision }
       })
       const pending = { revision, promise: build }
       inFlight = pending
       try {
-        const body = await build
+        const result = await build
         const currentRevision = revisionProvider() ?? null
         if (currentRevision !== revision) continue
         const currentTime = clock()
         cachedState = {
-          revision,
-          body,
+          ...result,
           expiresAt: revision === null ? currentTime + STATE_CACHE_MS : Number.POSITIVE_INFINITY,
         }
-        return body
+        return result
       } finally {
         if (inFlight === pending) inFlight = null
       }
@@ -224,7 +224,9 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
     }
     if (pathname === "/api/state") {
       try {
-        send(response, 200, await stateBody(), "application/json; charset=utf-8", method)
+        const result = await stateBody()
+        if (result.revision !== null) response.setHeader("x-herder-revision", String(result.revision))
+        send(response, 200, result.body, "application/json; charset=utf-8", method)
       } catch (error) {
         send(response, 503, `${JSON.stringify({ error: "snapshot-unavailable", message: error instanceof Error ? error.message : String(error) })}\n`, "application/json; charset=utf-8", method)
       }
