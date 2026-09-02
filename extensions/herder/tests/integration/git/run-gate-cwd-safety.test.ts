@@ -359,6 +359,48 @@ test("does not wait for detached descendants holding capture pipes", { skip: pro
 	}
 });
 
+test("retains timeout escalation after the leader exits", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+	const fixtureData = fixture();
+	let descendantPid: number | null = null;
+	try {
+		const pidPath = path.join(fixtureData.root, "same-group-descendant.pid");
+		const survivorPath = path.join(fixtureData.root, "same-group-descendant-survived");
+		const descendantScript = [
+			"const fs = require(\"node:fs\");",
+			"process.on(\"SIGTERM\", () => {});",
+			`setTimeout(() => fs.writeFileSync(${JSON.stringify(survivorPath)}, \"survived\"), 8_000);`,
+			"setTimeout(() => {}, 10_000);",
+		].join(" ");
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			[
+				"const fs = require(\"node:fs\");",
+				"const { spawn } = require(\"node:child_process\");",
+				`const descendant = spawn(process.execPath, [\"-e\", ${JSON.stringify(descendantScript)}], { detached: false, stdio: \"ignore\" });`,
+				`fs.writeFileSync(${JSON.stringify(pidPath)}, String(descendant.pid));`,
+				"setTimeout(() => {}, 10_000);",
+			].join(" "),
+		], "same-group-timeout");
+		gate.timeoutMs = 1_000;
+		const startedAt = Date.now();
+		const [result] = fixtureData.driver.runVerificationGates("same-group-timeout", fixtureData.worktree, [gate]);
+		descendantPid = Number(fs.readFileSync(pidPath, "utf8"));
+		await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, 8_500 - (Date.now() - startedAt))));
+
+		assert.equal(result?.ok, false);
+		assert.ok(result!.durationMs >= 5_500, `timeout escalation ended too early: ${result!.durationMs} ms`);
+		assert.equal(fs.existsSync(survivorPath), false, "same-group descendant survived hard-kill escalation");
+	} finally {
+		if (descendantPid !== null && Number.isSafeInteger(descendantPid)) {
+			try {
+				process.kill(descendantPid, "SIGKILL");
+			} catch {}
+		}
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
 test("allows an in-worktree symlink and spawns from its canonical target", () => {
 	const fixtureData = fixture();
 	try {

@@ -313,21 +313,24 @@ async function main(): Promise<void> {
         })
         child.stdout!.on("data", captureOutput)
         child.stderr!.on("data", captureOutput)
-        let killTimer: NodeJS.Timeout | undefined
         let timeout: NodeJS.Timeout | undefined
-        let settled = false
+        let captureSettled = false
+        let hardKillComplete = false
         const closeCapture = (): void => {
           child.stdout?.destroy()
           child.stderr?.destroy()
         }
-        const settle = (): void => {
-          if (settled) return
-          settled = true
+        const finish = (): void => {
+          if (!captureSettled || (timedOut && !hardKillComplete)) return
+          resolve()
+        }
+        const settleCapture = (): void => {
+          if (captureSettled) return
+          captureSettled = true
           if (timeout) clearTimeout(timeout)
-          if (killTimer) clearTimeout(killTimer)
           setImmediate(() => {
             closeCapture()
-            resolve()
+            finish()
           })
         }
         timeout = setTimeout(() => {
@@ -336,29 +339,30 @@ async function main(): Promise<void> {
             if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
             else child.kill("SIGTERM")
           } catch {}
-          killTimer = setTimeout(() => {
+          setTimeout(() => {
             try {
               if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
               else child.kill("SIGKILL")
             } catch {}
+            hardKillComplete = true
+            finish()
           }, 5_000)
-          killTimer.unref()
         }, parsed.timeoutMs)
         timeout.unref()
         child.once("error", (error) => {
           spawnError = error
-          if (child.pid !== undefined) settle()
+          if (child.pid !== undefined) settleCapture()
         })
         child.once("exit", (code, signal) => {
           childExitCode = code
           childSignal = signal
-          settle()
+          settleCapture()
         })
         child.once("close", (code, signal) => {
-          if (!spawnError || settled) return
+          if (!spawnError || captureSettled) return
           childExitCode = code
           childSignal = signal
-          settle()
+          settleCapture()
         })
       })
       await logWrites
