@@ -54,6 +54,7 @@ export interface GateResult {
 	logPath: string;
 	logBytes: number;
 	logSha256: string;
+	logTruncated: boolean;
 }
 
 export interface IntegrationResult {
@@ -685,6 +686,7 @@ export class GitDriver {
 					logPath: String(result.logPath),
 					logBytes: Number(result.logBytes),
 					logSha256: String(result.logSha256),
+					logTruncated: Boolean(result.logTruncated),
 				};
 			} finally {
 				if (preparedModules) fs.rmSync(preparedModules, { recursive: true, force: true });

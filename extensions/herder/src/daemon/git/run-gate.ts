@@ -19,6 +19,9 @@ interface GateArguments {
   command: string[]
 }
 
+const GATE_LOG_LIMIT = 16_777_216
+const GATE_LOG_TRUNCATION_MARKER = "\n[herder] gate log truncated at 16777216 bytes\n"
+
 interface GateResult {
   ok: boolean
   label: string
@@ -30,6 +33,7 @@ interface GateResult {
   logPath: string
   logBytes: number
   logSha256: string
+  logTruncated: boolean
   timedOut: boolean
   error?: string
 }
@@ -272,6 +276,7 @@ async function main(): Promise<void> {
   let childSignal: NodeJS.Signals | null = null
   let spawnError: Error | null = null
   let timedOut = false
+  let logTruncated = false
   let spawnCwd = cwd
   let result: GateResult | null = null
 
@@ -281,13 +286,33 @@ async function main(): Promise<void> {
       const canonicalRoot = await realpath(root)
       spawnCwd = await realpath(cwd)
       if (!isInside(canonicalRoot, spawnCwd)) throw new Error(`working directory resolves outside expected worktree: ${spawnCwd}`)
+      let remainingLogBytes = GATE_LOG_LIMIT
+      let logWriteError: unknown = null
+      let logWrites: Promise<void> = Promise.resolve()
+      const captureOutput = (chunk: Buffer): void => {
+        const acceptedLength = Math.min(chunk.byteLength, remainingLogBytes)
+        if (acceptedLength < chunk.byteLength) logTruncated = true
+        remainingLogBytes -= acceptedLength
+        if (acceptedLength === 0) return
+        const accepted = chunk.subarray(0, acceptedLength)
+        logWrites = logWrites.then(async () => {
+          if (logWriteError) return
+          try {
+            await logHandle.write(accepted)
+          } catch (error) {
+            logWriteError = error
+          }
+        })
+      }
       await new Promise<void>((resolve) => {
         const child = spawn(parsed.command[0]!, parsed.command.slice(1), {
           cwd: spawnCwd,
           env: gateEnvironment(environmentRoot!),
           detached: process.platform !== "win32",
-          stdio: ["ignore", logHandle.fd, logHandle.fd],
+          stdio: ["ignore", "pipe", "pipe"],
         })
+        child.stdout!.on("data", captureOutput)
+        child.stderr!.on("data", captureOutput)
         let killTimer: NodeJS.Timeout | undefined
         const timeout = setTimeout(() => {
           timedOut = true
@@ -315,6 +340,9 @@ async function main(): Promise<void> {
           resolve()
         })
       })
+      await logWrites
+      if (logWriteError) throw logWriteError
+      if (logTruncated) await logHandle.write(GATE_LOG_TRUNCATION_MARKER)
     } catch (error) {
       spawnError = error instanceof Error ? error : new Error(String(error))
     }
@@ -335,6 +363,7 @@ async function main(): Promise<void> {
       logPath,
       logBytes: logStatus.size,
       logSha256: await sha256(logPath),
+      logTruncated,
       timedOut,
     }
     if (timedOut) result.error = `command exceeded ${parsed.timeoutMs} ms`

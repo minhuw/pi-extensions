@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,8 @@ import type { VerificationGate } from "../../../src/shared/protocol.ts";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const helperRoot = path.resolve(scriptDir, "../../../src/daemon/git");
 const linkType = process.platform === "win32" ? "junction" : "dir";
+const GATE_LOG_LIMIT = 16_777_216;
+const GATE_LOG_TRUNCATION_MARKER = "\n[herder] gate log truncated at 16777216 bytes\n";
 
 type Fixture = {
 	root: string;
@@ -42,6 +45,10 @@ function fixture(): Fixture {
 		fs.rmSync(root, { recursive: true, force: true });
 		throw error;
 	}
+}
+
+function outputScript(stream: "stdout" | "stderr", totalBytes: number, byte: number): string {
+	return `(() => { const chunk = Buffer.alloc(65536, ${byte}); let remaining = ${totalBytes}; while (remaining > 0) { const length = Math.min(remaining, chunk.length); process.${stream}.write(chunk.subarray(0, length)); remaining -= length; } })();`;
 }
 
 function normalizedGate(fixtureData: Fixture, cwd: string, argv: string[], gateId: string): VerificationGate {
@@ -218,6 +225,108 @@ test("npm dependency preparation rejects cwd replaced by an external symlink", (
 		fs.symlinkSync(external, nested, linkType);
 		assert.throws(() => fixtureData.driver.runVerificationGates("external-npm-cwd", fixtureData.worktree, [gate]), /cwd resolves outside the integration worktree/);
 		assert.equal(fs.existsSync(path.join(external, "node_modules")), false);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("preserves under-limit gate output and evidence", () => {
+	const fixtureData = fixture();
+	try {
+		const expected = Buffer.from("ordinary gate output\n");
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			`process.stdout.write(${JSON.stringify(expected.toString())})`,
+		], "under-limit-output");
+		const [result] = fixtureData.driver.runVerificationGates("under-limit-output", fixtureData.worktree, [gate]);
+		const log = fs.readFileSync(result!.logPath);
+
+		assert.equal(result?.ok, true);
+		assert.equal(result?.logTruncated, false);
+		assert.deepEqual(log, expected);
+		assert.equal(result?.logBytes, expected.byteLength);
+		assert.equal(result?.logSha256, createHash("sha256").update(expected).digest("hex"));
+		assert.equal(fs.statSync(result!.logPath).mode & 0o777, 0o600);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("caps and drains oversized stdout while preserving normal exit", { timeout: 30_000 }, () => {
+	const fixtureData = fixture();
+	try {
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			outputScript("stdout", GATE_LOG_LIMIT + 4_096, 65),
+		], "stdout-overflow");
+		const [result] = fixtureData.driver.runVerificationGates("stdout-overflow", fixtureData.worktree, [gate]);
+		const log = fs.readFileSync(result!.logPath);
+		const marker = Buffer.from(GATE_LOG_TRUNCATION_MARKER);
+
+		assert.equal(result?.ok, true);
+		assert.equal(result?.exitCode, 0);
+		assert.equal(result?.logTruncated, true);
+		assert.equal(log.byteLength, GATE_LOG_LIMIT + marker.byteLength);
+		assert.equal(log.subarray(0, GATE_LOG_LIMIT).equals(Buffer.alloc(GATE_LOG_LIMIT, 65)), true);
+		assert.deepEqual(log.subarray(GATE_LOG_LIMIT), marker);
+		assert.equal(log.indexOf(marker), GATE_LOG_LIMIT);
+		assert.equal(log.lastIndexOf(marker), GATE_LOG_LIMIT);
+		assert.equal(result?.logBytes, log.byteLength);
+		assert.equal(result?.logSha256, createHash("sha256").update(log).digest("hex"));
+		assert.equal(fs.statSync(result!.logPath).mode & 0o777, 0o600);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("caps mixed stdout and stderr against one shared limit", { timeout: 30_000 }, () => {
+	const fixtureData = fixture();
+	try {
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			`${outputScript("stdout", 9_000_000, 79)} ${outputScript("stderr", 9_000_000, 69)}`,
+		], "mixed-overflow");
+		const [result] = fixtureData.driver.runVerificationGates("mixed-overflow", fixtureData.worktree, [gate]);
+		const log = fs.readFileSync(result!.logPath);
+		const marker = Buffer.from(GATE_LOG_TRUNCATION_MARKER);
+
+		assert.equal(result?.ok, true);
+		assert.equal(result?.exitCode, 0);
+		assert.equal(result?.logTruncated, true);
+		assert.ok(log.byteLength <= GATE_LOG_LIMIT + marker.byteLength);
+		assert.deepEqual(log.subarray(-marker.byteLength), marker);
+		assert.equal(log.includes(79), true);
+		assert.equal(log.includes(69), true);
+		assert.equal(result?.logBytes, log.byteLength);
+		assert.equal(result?.logSha256, createHash("sha256").update(log).digest("hex"));
+		assert.equal(fs.statSync(result!.logPath).mode & 0o777, 0o600);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("preserves silent gate timeout failure behavior", { timeout: 15_000 }, () => {
+	const fixtureData = fixture();
+	try {
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			"setTimeout(() => {}, 10_000)",
+		], "silent-timeout");
+		gate.timeoutMs = 1_000;
+		const [result] = fixtureData.driver.runVerificationGates("silent-timeout", fixtureData.worktree, [gate]);
+		const log = fs.readFileSync(result!.logPath);
+
+		assert.equal(result?.ok, false);
+		assert.notEqual(result?.exitCode, 0);
+		assert.equal(result?.logTruncated, false);
+		assert.equal(log.byteLength, 0);
+		assert.equal(result?.logBytes, 0);
+		assert.equal(result?.logSha256, createHash("sha256").update(log).digest("hex"));
+		assert.equal(fs.statSync(result!.logPath).mode & 0o777, 0o600);
 	} finally {
 		fs.rmSync(fixtureData.root, { recursive: true, force: true });
 	}

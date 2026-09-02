@@ -88,4 +88,6 @@ Final verification gates run with an explicit minimal environment. Command disco
 
 Each gate receives a fresh private state root under the external verification log directory. `HOME`, XDG configuration/data/cache/state/runtime paths, platform home and application-data paths, and temporary directories point into that root. The root is removed after the gate evidence is finalized, while the mode-`0600` log and its hashes are preserved.
 
+Child stdout and stderr are drained into one combined log with a fixed 16777216-byte child-output cap. On overflow, the runner appends `\n[herder] gate log truncated at 16777216 bytes\n` exactly once outside that cap and reports `logTruncated: true`; `logBytes` and `logSha256` describe the final on-disk bytes, including the marker. Under-limit single-stream bytes remain unchanged, but pipe capture may change undocumented cross-stream interleaving.
+
 Credential-backed verification is unsupported until it has a separate safe contract. Gate logs are not raw-log-redacted; artifact sanitization is a separate responsibility.
