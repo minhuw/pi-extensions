@@ -332,6 +332,33 @@ test("preserves silent gate timeout failure behavior", { timeout: 15_000 }, () =
 	}
 });
 
+test("does not wait for detached descendants holding capture pipes", { skip: process.platform === "win32", timeout: 10_000 }, () => {
+	const fixtureData = fixture();
+	try {
+		const expected = Buffer.from("direct gate output\n");
+		const gate = normalizedGate(fixtureData, ".", [
+			process.execPath,
+			"-e",
+			[
+				"const { spawn } = require(\"node:child_process\");",
+				`process.stdout.write(${JSON.stringify(expected.toString())});`,
+				`const descendant = spawn(process.execPath, [\"-e\", ${JSON.stringify("setTimeout(() => {}, 4_500)")}], { detached: true, stdio: \"inherit\" });`,
+				"descendant.unref();",
+			].join(" "),
+		], "detached-descendant");
+		gate.timeoutMs = 1_000;
+		const [result] = fixtureData.driver.runVerificationGates("detached-descendant", fixtureData.worktree, [gate]);
+		const log = fs.readFileSync(result!.logPath);
+
+		assert.equal(result?.ok, true);
+		assert.equal(result?.exitCode, 0);
+		assert.equal(log.toString(), expected.toString());
+		assert.equal(result?.logBytes, expected.byteLength);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
 test("allows an in-worktree symlink and spawns from its canonical target", () => {
 	const fixtureData = fixture();
 	try {

@@ -314,7 +314,23 @@ async function main(): Promise<void> {
         child.stdout!.on("data", captureOutput)
         child.stderr!.on("data", captureOutput)
         let killTimer: NodeJS.Timeout | undefined
-        const timeout = setTimeout(() => {
+        let timeout: NodeJS.Timeout | undefined
+        let settled = false
+        const closeCapture = (): void => {
+          child.stdout?.destroy()
+          child.stderr?.destroy()
+        }
+        const settle = (): void => {
+          if (settled) return
+          settled = true
+          if (timeout) clearTimeout(timeout)
+          if (killTimer) clearTimeout(killTimer)
+          setImmediate(() => {
+            closeCapture()
+            resolve()
+          })
+        }
+        timeout = setTimeout(() => {
           timedOut = true
           try {
             if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
@@ -331,13 +347,18 @@ async function main(): Promise<void> {
         timeout.unref()
         child.once("error", (error) => {
           spawnError = error
+          if (child.pid !== undefined) settle()
         })
-        child.once("close", (code, signal) => {
-          clearTimeout(timeout)
-          if (killTimer) clearTimeout(killTimer)
+        child.once("exit", (code, signal) => {
           childExitCode = code
           childSignal = signal
-          resolve()
+          settle()
+        })
+        child.once("close", (code, signal) => {
+          if (!spawnError || settled) return
+          childExitCode = code
+          childSignal = signal
+          settle()
         })
       })
       await logWrites
