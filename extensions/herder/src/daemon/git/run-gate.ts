@@ -21,6 +21,7 @@ interface GateArguments {
 
 const GATE_LOG_LIMIT = 16_777_216
 const GATE_LOG_TRUNCATION_MARKER = "\n[herder] gate log truncated at 16777216 bytes\n"
+const GATE_HARD_KILL_GRACE_MS = 5_000
 
 interface GateResult {
   ok: boolean
@@ -214,6 +215,28 @@ async function sha256(file: string): Promise<string> {
   return hash.digest("hex")
 }
 
+async function writeAll(handle: Awaited<ReturnType<typeof open>>, buffer: Buffer): Promise<void> {
+  let written = 0
+  while (written < buffer.length) {
+    const result = await handle.write(buffer, written, buffer.length - written, null)
+    if (result.bytesWritten <= 0) throw new Error("Gate log write made no forward progress")
+    written += result.bytesWritten
+  }
+}
+
+function scheduleHardKill(pid: number | undefined): void {
+  if (!pid) return
+  try {
+    const escalator = spawn(process.execPath, [
+      "-e",
+      `const pid = Number(process.argv[1]); setTimeout(() => { try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL") } catch {} }, ${GATE_HARD_KILL_GRACE_MS})`,
+      String(pid),
+    ], { detached: true, stdio: "ignore" })
+    escalator.once("error", () => {})
+    escalator.unref()
+  } catch {}
+}
+
 function print(result: unknown, pretty = false): void {
   process.stdout.write(`${JSON.stringify(result, null, pretty ? 2 : 0)}\n`)
 }
@@ -298,7 +321,7 @@ async function main(): Promise<void> {
         logWrites = logWrites.then(async () => {
           if (logWriteError) return
           try {
-            await logHandle.write(accepted)
+            await writeAll(logHandle, accepted)
           } catch (error) {
             logWriteError = error
           }
@@ -315,13 +338,12 @@ async function main(): Promise<void> {
         child.stderr!.on("data", captureOutput)
         let timeout: NodeJS.Timeout | undefined
         let captureSettled = false
-        let hardKillComplete = false
         const closeCapture = (): void => {
           child.stdout?.destroy()
           child.stderr?.destroy()
         }
         const finish = (): void => {
-          if (!captureSettled || (timedOut && !hardKillComplete)) return
+          if (!captureSettled) return
           resolve()
         }
         const settleCapture = (): void => {
@@ -339,14 +361,7 @@ async function main(): Promise<void> {
             if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
             else child.kill("SIGTERM")
           } catch {}
-          setTimeout(() => {
-            try {
-              if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
-              else child.kill("SIGKILL")
-            } catch {}
-            hardKillComplete = true
-            finish()
-          }, 5_000)
+          scheduleHardKill(child.pid)
         }, parsed.timeoutMs)
         timeout.unref()
         child.once("error", (error) => {
@@ -367,7 +382,7 @@ async function main(): Promise<void> {
       })
       await logWrites
       if (logWriteError) throw logWriteError
-      if (logTruncated) await logHandle.write(GATE_LOG_TRUNCATION_MARKER)
+      if (logTruncated) await writeAll(logHandle, Buffer.from(GATE_LOG_TRUNCATION_MARKER))
     } catch (error) {
       spawnError = error instanceof Error ? error : new Error(String(error))
     }

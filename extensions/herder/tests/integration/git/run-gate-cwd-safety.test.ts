@@ -389,7 +389,7 @@ test("retains timeout escalation after the leader exits", { skip: process.platfo
 		await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, 8_500 - (Date.now() - startedAt))));
 
 		assert.equal(result?.ok, false);
-		assert.ok(result!.durationMs >= 5_500, `timeout escalation ended too early: ${result!.durationMs} ms`);
+		assert.ok(result!.durationMs < 5_000, `timeout finalization waited for hard-kill grace: ${result!.durationMs} ms`);
 		assert.equal(fs.existsSync(survivorPath), false, "same-group descendant survived hard-kill escalation");
 	} finally {
 		if (descendantPid !== null && Number.isSafeInteger(descendantPid)) {
