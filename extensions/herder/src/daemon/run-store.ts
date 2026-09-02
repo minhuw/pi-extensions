@@ -2223,7 +2223,7 @@ export class RunStore {
 	getTerminalLeaseReasons(runId: string): Set<string> {
 		const rows = this.database.prepare(`
 			SELECT lease_reason FROM manager_actions
-			WHERE run_id = ? AND state = 'terminal'
+			WHERE run_id = ? AND state IN ('terminal', 'cancelled')
 		`).all(runId) as Array<{ lease_reason: string }>;
 		return new Set(rows.map((row) => String(row.lease_reason)));
 	}

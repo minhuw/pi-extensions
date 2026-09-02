@@ -1864,14 +1864,24 @@ export class HerderRunManager {
 				this.store.markDispatched(result.actionId, result.hostHandle);
 				continue;
 			}
-			this.store.markCancelled(result.actionId, { error: result.error || "dispatch rejected" });
+			const capacity = /capacity|limit|slot|concurr/i.test(result.error || "");
 			const plan = this.store.getPlan(run.runId, action.planId);
-			if (plan) this.driver(run).release(plan.worktree, action.leaseReason);
-			if (!/capacity|limit|slot|concurr/i.test(result.error || "")) {
-				this.store.updateRun({ status: "paused", terminalDetail: `Dispatch rejected for ${action.agentType}: ${result.error || "unknown host error"}` });
-			} else if (plan) {
-				capacityRejected = true;
-				this.updatePlan(plan, { phase: readyPhaseForRole(action.role) });
+			this.store.transaction(() => {
+				this.store.markCancelled(result.actionId, { error: result.error || "dispatch rejected" });
+				if (plan) this.updatePlan(plan, { phase: readyPhaseForRole(action.role) });
+				if (!capacity) {
+					this.store.updateRun({ status: "paused", terminalDetail: `Dispatch rejected for ${action.agentType}: ${result.error || "unknown host error"}` });
+				} else {
+					capacityRejected = true;
+				}
+			});
+			if (plan) {
+				try {
+					this.driver(run).release(plan.worktree, action.leaseReason);
+				} catch (error) {
+					this.terminalSideEffectsDirty = true;
+					process.stderr.write(`herder-run-manager: failed to release ${action.leaseReason}: ${error instanceof Error ? error.message : String(error)}\n`);
+				}
 			}
 		}
 		if (capacityRejected && this.store.countActions(run.runId, { states: ["dispatched"] }) === 0) {

@@ -4,9 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
+import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
-import { git } from "../../../src/daemon/git-driver.ts";
+import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -20,6 +21,11 @@ type ConflictRun = {
 	fixture: Fixture;
 	plan2Worktree: string;
 	recoveryAction: JsonRecord;
+};
+type DispatchRun = {
+	service: Awaited<ReturnType<typeof ensureService>>;
+	fixture: Fixture;
+	action: JsonRecord;
 };
 type PlanState = {
 	plan: StoredPlan;
@@ -369,6 +375,168 @@ async function rejectRecoveryForCapacity(run: ConflictRun, prefix: string): Prom
 function cleanup(fixture: Fixture): void {
 	fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 }
+
+async function reachDispatchAction(fixture: Fixture, prefix: string): Promise<DispatchRun> {
+	const service = await ensureService(fixture.planDirectory);
+	const started = await managerRequest(service, "start", {
+		mode: "fire",
+		repositoryRoot: fixture.repo,
+		planDirectory: fixture.planDirectory,
+		profile: "eclipse",
+		maxParallel: 1,
+		dashboardUrl: service.dashboardUrl,
+	});
+	assert.equal(started.status, "running", prefix);
+	return { service, fixture, action: findAction(started, "001", "plan-implementer") };
+}
+
+test("retryable dispatch rejection resets the plan and resumes scheduling", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-dispatch-rejection-test-"));
+	const fixture = writeFixture(root);
+	let service: Awaited<ReturnType<typeof ensureService>> | null = null;
+	try {
+		const run = await reachDispatchAction(fixture, "dispatch-rejection");
+		service = run.service;
+		const reply = await managerRequest(service, "event", {
+			eventId: "dispatch-rejection-retryable",
+			kind: "dispatch_results",
+			dispatchResults: [{
+				actionId: run.action.actionId,
+				accepted: false,
+				error: "npm trusted store unavailable",
+			}],
+		});
+		assert.equal(reply.status, "paused");
+		assert.equal(actions(reply).length, 0);
+
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const currentRun = store.getRun();
+			assert.ok(currentRun);
+			const cancelled = store.getAction(String(run.action.actionId));
+			assert.ok(cancelled);
+			assert.equal(cancelled.state, "cancelled");
+			assert.deepEqual(cancelled.result, { error: "npm trusted store unavailable" });
+			const plan = store.getPlan(currentRun.runId, "001");
+			assert.ok(plan);
+			assert.equal(plan.phase, "READY_IMPLEMENTER");
+			assert.equal(currentRun.status, "paused");
+			assert.match(String(currentRun.terminalDetail), /Dispatch rejected for .*npm trusted store unavailable/);
+		} finally {
+			store.close();
+		}
+		assert.equal(readPlanState(fixture, "001").lease, null);
+
+		const resumed = await managerRequest(service, "start", {
+			mode: "resume",
+			repositoryRoot: fixture.repo,
+			planDirectory: fixture.planDirectory,
+			profile: "eclipse",
+		});
+		assert.equal(resumed.status, "running");
+		const replacement = findAction(resumed, "001", "plan-implementer");
+		assert.notEqual(replacement.actionId, run.action.actionId);
+		assert.equal(replacement.round, 1);
+		assert.equal(replacement.workerMode, "INITIAL");
+		const afterResume = readPlanState(fixture, "001");
+		assert.equal(afterResume.plan.phase, "IMPLEMENTING");
+		assert.equal(afterResume.lease, replacement.leaseReason);
+	} finally {
+		if (service) await stopService(fixture.planDirectory).catch(() => {});
+		cleanup(fixture);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("dispatch rejection survives release failure and preserves a re-owned lease", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-dispatch-release-failure-test-"));
+	const fixture = writeFixture(root);
+	let service: Awaited<ReturnType<typeof ensureService>> | null = null;
+	let manager: HerderRunManager | null = null;
+	let alternateLease: string | null = null;
+	let run: DispatchRun | null = null;
+	try {
+		run = await reachDispatchAction(fixture, "dispatch-release-failure");
+		assert.ok(run);
+		service = run.service;
+		await stopService(fixture.planDirectory);
+		service = null;
+
+		manager = new HerderRunManager(fixture.planDirectory);
+		const internals = manager as unknown as { terminalSideEffectsDirty: boolean };
+		internals.terminalSideEffectsDirty = false;
+		const originalRelease = GitDriver.prototype.release;
+		let failRelease = true;
+		GitDriver.prototype.release = function (this: GitDriver, worktree: string, expectedReason: string): void {
+			if (failRelease) {
+				failRelease = false;
+				throw new Error("injected release failure");
+			}
+			originalRelease.call(this, worktree, expectedReason);
+		} as typeof GitDriver.prototype.release;
+		try {
+			const rejected = await manager.event({
+				eventId: "dispatch-release-failure-rejected",
+				kind: "dispatch_results",
+				dispatchResults: [{
+					actionId: String(run.action.actionId),
+					accepted: false,
+					error: "npm trusted store unavailable",
+				}],
+			});
+			assert.equal(rejected.status, "paused");
+			const cancelled = manager.store.getAction(String(run.action.actionId));
+			assert.ok(cancelled);
+			assert.equal(cancelled.state, "cancelled");
+			assert.equal(manager.store.getPlan((manager.store.getRun()!).runId, "001")?.phase, "READY_IMPLEMENTER");
+			assert.equal(worktreeLease(fixture.repo, String(run.action.worktree)), cancelled.leaseReason);
+			assert.equal(internals.terminalSideEffectsDirty, true);
+
+			const resumed = await manager.resume({
+				mode: "resume",
+				repositoryRoot: fixture.repo,
+				planDirectory: fixture.planDirectory,
+				profile: "eclipse",
+			});
+			assert.equal(resumed.status, "running");
+			assert.equal(internals.terminalSideEffectsDirty, false);
+			const currentRun = manager.store.getRun()!;
+			const replacement = manager.store.getActions(currentRun.runId, ["proposed"])
+				.find((action) => action.planId === "001" && action.role === "plan-implementer");
+			assert.ok(replacement);
+			assert.notEqual(replacement.actionId, cancelled.actionId);
+			assert.equal(worktreeLease(fixture.repo, String(run.action.worktree)), replacement.leaseReason);
+		} finally {
+			GitDriver.prototype.release = originalRelease;
+		}
+
+		manager.close();
+		manager = null;
+		const worktree = String(run.action.worktree);
+		git(fixture.repo, ["worktree", "unlock", worktree]);
+		alternateLease = "test-reowned-lease";
+		git(fixture.repo, ["worktree", "lock", "--reason", alternateLease, worktree]);
+		const restarted = new HerderRunManager(fixture.planDirectory);
+		try {
+			const audited = await restarted.auditScheduler();
+			assert.ok(audited);
+			assert.equal(worktreeLease(fixture.repo, worktree), alternateLease);
+		} finally {
+			restarted.close();
+		}
+	} finally {
+		if (alternateLease) {
+			try {
+				const worktree = String(run?.action.worktree);
+				if (worktreeLease(fixture.repo, worktree) === alternateLease) git(fixture.repo, ["worktree", "unlock", worktree]);
+			} catch {}
+		}
+		manager?.close();
+		if (service) await stopService(fixture.planDirectory).catch(() => {});
+		cleanup(fixture);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("preserved integration conflict retries and completes guided rebase recovery", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-conflict-recovery-test-"));
