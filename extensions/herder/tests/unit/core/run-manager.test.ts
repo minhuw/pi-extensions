@@ -13,7 +13,7 @@ import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type IntegrationRepairClassification, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { planFixture } from "../../support/plan-fixture.ts";
@@ -167,6 +167,13 @@ test("independent plan helper rejects a missing index anchor before writing the 
 function payload(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
+
+const decisionOnlyRepairClassifications = [
+	"design_ambiguity",
+	"scope_ambiguity",
+	"credential",
+	"product_ambiguity",
+] as const satisfies readonly IntegrationRepairClassification[];
 
 test("empty plan graph keeps its graph identity", () => {
 	const fixture = planFixture({ prefix: "herder-plan-identity-golden-" });
@@ -2872,6 +2879,115 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 	}
 });
+
+for (const classification of decisionOnlyRepairClassifications) {
+	test(`decision-only integration repair classification pauses without write authority: ${classification}`, { timeout: 35_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-manager-integration-repair-${classification}-`));
+		const fixture = writeFixture(root);
+		try {
+			const service = await ensureService(fixture.planDirectory);
+			const afterReviewer = await prepareSinglePlan(service, fixture, `repair-${classification}`);
+			const failed = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, `repair-${classification}`, [{
+				gateId: "decision-only-failure",
+				label: "deliberate decision-only failure",
+				cwd: ".",
+				argv: [process.execPath, "-e", "process.exit(1)"],
+				rationale: `Creates the ${classification} decision episode.`,
+			}]);
+			assert.equal(failed.reply.status, "failed");
+			const repair = payload(failed.reply.integrationRepair);
+			const initial = new RunStore(fixture.planDirectory);
+			let verificationCount: number;
+			try {
+				const storedInitial = initial.getIntegrationRepairForRequest(String(repair.requestId));
+				assert.ok(storedInitial);
+				assert.equal(storedInitial.state, "failed");
+				verificationCount = Number((initial.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count);
+			} finally {
+				initial.close();
+			}
+
+			const common = {
+				requestId: String(repair.requestId),
+				requestSha256: String(repair.requestSha256),
+				capabilityToken: String(repair.capabilityToken),
+				runId: String(repair.runId),
+				generation: Number(repair.generation),
+				ownerSessionId: "main-session",
+			};
+			const integrationWorktree = String(repair.integrationWorktree);
+			const beforeHead = git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim();
+			const beforeTree = git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim();
+			const beforeWorktreeStatus = git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout;
+			const rationale = `The ${classification} failure requires an explicit user decision.`;
+			const begin = {
+				...common,
+				operation: "begin" as const,
+				operationId: `repair-${classification}-begin`,
+				classification,
+			};
+			await assert.rejects(
+				() => requestManagerOperation(service, "integration_repair", { ...begin, operationId: `repair-${classification}-missing-rationale` }, `repair-${classification}-missing-rationale`),
+				/Ambiguity classification requires a rationale or detail for the user decision/,
+			);
+
+			const begun = payload(payload(await requestManagerOperation(service, "integration_repair", { ...begin, rationale }, begin.operationId)).reply);
+			assert.equal(begun.status, "paused");
+			assert.equal(payload(begun.integrationRepair).classification, classification);
+			assert.equal(git(integrationWorktree, ["rev-parse", "HEAD"]).stdout.trim(), beforeHead);
+			assert.equal(git(integrationWorktree, ["rev-parse", "HEAD^{tree}"]).stdout.trim(), beforeTree);
+			assert.equal(git(integrationWorktree, ["status", "--porcelain", "--untracked-files=all"]).stdout, beforeWorktreeStatus);
+
+			const afterBegin = new RunStore(fixture.planDirectory);
+			try {
+				const run = afterBegin.getRun()!;
+				const storedRepair = afterBegin.getIntegrationRepairForRequest(String(repair.requestId))!;
+				assert.equal(run.status, "paused");
+				assert.equal(storedRepair.classification, classification);
+				assert.equal(storedRepair.episodeClassification, classification);
+				assert.equal(storedRepair.state, "paused");
+				assert.notEqual(storedRepair.state, "active");
+				assert.notEqual(storedRepair.state, "committing");
+				assert.equal(storedRepair.detail, rationale);
+				assert.equal(storedRepair.successorRequestId, null);
+				assert.equal(storedRepair.successorRequestSha256, null);
+				assert.equal(Number((afterBegin.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), verificationCount);
+			} finally {
+				afterBegin.close();
+			}
+
+			const finish = {
+				...common,
+				operation: "finish" as const,
+				operationId: `repair-${classification}-finish`,
+				observedCommit: beforeHead,
+			};
+			await assert.rejects(
+				() => requestManagerOperation(service, "integration_repair", finish, finish.operationId),
+				/Integration repair finish requires a new begin transition after a failed round/,
+			);
+
+			const afterFinish = new RunStore(fixture.planDirectory);
+			try {
+				const run = afterFinish.getRun()!;
+				const storedRepair = afterFinish.getIntegrationRepairForRequest(String(repair.requestId))!;
+				assert.equal(run.status, "paused");
+				assert.equal(storedRepair.classification, classification);
+				assert.equal(storedRepair.state, "paused");
+				assert.equal(storedRepair.detail, rationale);
+				assert.equal(storedRepair.successorRequestId, null);
+				assert.equal(storedRepair.successorRequestSha256, null);
+				assert.equal(Number((afterFinish.database.prepare("SELECT COUNT(*) AS count FROM manager_verifications").get() as { count: number }).count), verificationCount);
+			} finally {
+				afterFinish.close();
+			}
+		} finally {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+	});
+}
 
 test("each failed successor opens a fresh classification episode", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-integration-repair-episodes-"));
