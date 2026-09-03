@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { getExecutionReport } from "../../../src/core/plan-report.ts";
+import { reworkSnapshotPath } from "../../../src/core/plan-edit.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
@@ -18,6 +19,35 @@ import { sha256, stableJson, type ManagerOperationKind } from "../../../src/shar
 type JsonRecord = Record<string, unknown>;
 type Fixture = { repo: string; planDirectory: string };
 type Service = Awaited<ReturnType<typeof ensureService>>;
+type GraphState = Map<string, { bytes: Buffer; mode: number }>;
+
+function captureGraph(value: Fixture): GraphState {
+	const names = fs.readdirSync(value.planDirectory, { withFileTypes: true })
+		.filter((entry) => entry.isFile() && (entry.name === "README.md" || entry.name === "CONTEXT.md" || /^\d{3,}-.*\.md$/i.test(entry.name)))
+		.map((entry) => entry.name)
+		.sort();
+	return new Map(names.map((name): [string, { bytes: Buffer; mode: number }] => {
+		const candidate = path.join(value.planDirectory, name);
+		return [name, { bytes: fs.readFileSync(candidate), mode: fs.statSync(candidate).mode & 0o7777 }];
+	}));
+}
+
+function restoreSnapshot(candidate: string, bytes: Buffer, mode: number): void {
+	try { fs.unlinkSync(candidate); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	fs.writeFileSync(candidate, bytes, { mode });
+	fs.chmodSync(candidate, mode);
+}
+
+function restoreTemporaryFiles(planDirectory: string, editToken: string): string[] {
+	const prefix = `.herder-plan-edit-${editToken}-`;
+	return fs.readdirSync(planDirectory).filter((name) => name.startsWith(prefix) && name.endsWith(".tmp")).sort();
+}
+
+function writeCanonicalSnapshot(candidate: string, snapshot: JsonRecord): void {
+	fs.writeFileSync(candidate, stableJson(snapshot));
+	fs.chmodSync(candidate, 0o600);
+}
 
 function object(value: unknown): JsonRecord {
 	assert.ok(value && typeof value === "object" && !Array.isArray(value));
@@ -451,6 +481,132 @@ test("cancelling rework before finish leaves execution untouched", { timeout: 60
 			store.close();
 		}
 	}));
+
+test("rework cancellation rejects tampered snapshots and remains retryable", { timeout: 120_000 }, async () => withFixture("snapshot-tamper", async (service, value) => {
+	fs.writeFileSync(path.join(value.planDirectory, "CONTEXT.md"), "# Herder Plan-Set Context\n\n## Objective\n\nProve snapshot tampering cannot mutate the plan graph.\n");
+	const started = await startRun(service, value);
+	await failTargetRounds(service, started, "rework-snapshot-tamper");
+	const beforeBegin = captureGraph(value);
+	const begun = object(await requestManagerOperation(service, "edit", { operation: "begin", planId: "001", intent: "rework", editToken: randomUUID() }));
+	const editToken = String(object(begun.edit).editToken);
+	const snapshotPath = reworkSnapshotPath(value.planDirectory, editToken);
+	const originalSnapshotBytes = fs.readFileSync(snapshotPath);
+	const originalSnapshotMode = fs.statSync(snapshotPath).mode & 0o7777;
+	assert.equal(originalSnapshotMode, 0o600);
+	const originalSnapshot = object(JSON.parse(originalSnapshotBytes.toString("utf8")));
+	const targetPlanFile = String(originalSnapshot.targetPlanFile);
+	assert.deepEqual(captureGraph(value), beforeBegin);
+
+	rewriteTarget(value, "src/other.mjs");
+	fs.appendFileSync(path.join(value.planDirectory, "README.md"), "\nInterview-only README change.\n");
+	fs.appendFileSync(path.join(value.planDirectory, "CONTEXT.md"), "\nInterview-only context change.\n");
+	fs.writeFileSync(path.join(value.planDirectory, "003-created.md"), writePlan("003", "Interview-only plan", "src/created.mjs"));
+
+	const snapshotFiles = (snapshot: JsonRecord): unknown[] => {
+		if (!Array.isArray(snapshot.files)) throw new Error("snapshot files are not an array");
+		return snapshot.files;
+	};
+	const canonicalTamper = (change: (snapshot: JsonRecord) => void): (() => void) => () => {
+		const snapshot = JSON.parse(JSON.stringify(originalSnapshot)) as JsonRecord;
+		change(snapshot);
+		writeCanonicalSnapshot(snapshotPath, snapshot);
+	};
+	const replaceTargetContent = (snapshot: JsonRecord, contentBase64: string): void => {
+		snapshot.files = snapshotFiles(snapshot).map((entry) => {
+			const file = object(entry);
+			return file.name === targetPlanFile ? { ...file, contentBase64 } : file;
+		});
+	};
+	const sentinelPath = path.join(value.repo, "snapshot-sentinel.txt");
+	fs.writeFileSync(sentinelPath, "sentinel must remain unchanged\n", { mode: 0o640 });
+	fs.chmodSync(sentinelPath, 0o640);
+	const vectors: Array<{ name: string; tamper: () => void; symlink?: boolean }> = [
+		{
+			name: "invalid-json",
+			tamper: () => {
+				fs.writeFileSync(snapshotPath, originalSnapshotBytes.subarray(0, originalSnapshotBytes.length - 1));
+				fs.chmodSync(snapshotPath, 0o600);
+			},
+		},
+		{
+			name: "non-canonical-json",
+			tamper: () => {
+				fs.writeFileSync(snapshotPath, `${JSON.stringify(originalSnapshot, null, 2)}\n`);
+				fs.chmodSync(snapshotPath, 0o600);
+			},
+		},
+		{
+			name: "exposed-mode",
+			tamper: () => fs.chmodSync(snapshotPath, 0o644),
+		},
+		{
+			name: "snapshot-symlink",
+			symlink: true,
+			tamper: () => {
+				fs.unlinkSync(snapshotPath);
+				fs.symlinkSync(sentinelPath, snapshotPath);
+			},
+		},
+		{
+			name: "mismatched-plan-id",
+			tamper: canonicalTamper((snapshot) => { snapshot.planId = "002"; }),
+		},
+		{
+			name: "changed-content-with-old-hash",
+			tamper: canonicalTamper((snapshot) => replaceTargetContent(snapshot, Buffer.from("tampered snapshot content\n").toString("base64"))),
+		},
+		{
+			name: "invalid-content-base64",
+			tamper: canonicalTamper((snapshot) => replaceTargetContent(snapshot, "not-base64!")),
+		},
+		{
+			name: "missing-target-file",
+			tamper: canonicalTamper((snapshot) => {
+				snapshot.files = snapshotFiles(snapshot).filter((entry) => object(entry).name !== targetPlanFile);
+			}),
+		},
+	];
+
+	for (const vector of vectors) {
+		restoreSnapshot(snapshotPath, originalSnapshotBytes, originalSnapshotMode);
+		vector.tamper();
+		const beforeAttempt = captureGraph(value);
+		const sentinelBefore = vector.symlink ? { bytes: fs.readFileSync(sentinelPath), mode: fs.statSync(sentinelPath).mode & 0o7777 } : undefined;
+		await assert.rejects(
+			() => requestManagerOperation(service, "edit", { operation: "cancel", editToken }, `rework-snapshot-tamper-${vector.name}`),
+			/plan edit snapshot/i,
+		);
+		assert.deepEqual(captureGraph(value), beforeAttempt);
+		const store = new RunStore(value.planDirectory);
+		try {
+			const run = store.getRun();
+			assert.ok(run);
+			const edit = store.getPlanEdit(run.runId);
+			assert.ok(edit);
+			assert.equal(edit.editToken, editToken);
+			assert.equal(edit.state, "reserved");
+		} finally { store.close(); }
+		assert.deepEqual(restoreTemporaryFiles(value.planDirectory, editToken), []);
+		if (vector.symlink) {
+			assert.equal(fs.lstatSync(snapshotPath).isSymbolicLink(), true);
+			assert.deepEqual(fs.readFileSync(sentinelPath), sentinelBefore!.bytes);
+			assert.equal(fs.statSync(sentinelPath).mode & 0o7777, sentinelBefore!.mode);
+		}
+	}
+
+	restoreSnapshot(snapshotPath, originalSnapshotBytes, originalSnapshotMode);
+	await requestManagerOperation(service, "edit", { operation: "cancel", editToken }, "rework-snapshot-tamper-control");
+	assert.deepEqual(captureGraph(value), beforeBegin);
+	assert.equal(fs.existsSync(path.join(value.planDirectory, "003-created.md")), false);
+	assert.deepEqual(restoreTemporaryFiles(value.planDirectory, editToken), []);
+	assert.equal(fs.existsSync(snapshotPath), false);
+	const store = new RunStore(value.planDirectory);
+	try {
+		const run = store.getRun();
+		assert.ok(run);
+		assert.equal(store.getPlanEdit(run.runId), null);
+	} finally { store.close(); }
+}));
 
 test("cancelling rework restores a nested target plan", { timeout: 60_000 }, async () => withFixture("nested-cancel", async (service, value) => {
 		const nested = path.join(value.planDirectory, "nested");
