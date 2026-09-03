@@ -518,11 +518,12 @@ test("rework cancellation rejects tampered snapshots and remains retryable", { t
 		});
 	};
 	const sentinelPath = path.join(value.repo, "snapshot-sentinel.txt");
-	fs.writeFileSync(sentinelPath, "sentinel must remain unchanged\n", { mode: 0o640 });
-	fs.chmodSync(sentinelPath, 0o640);
-	const vectors: Array<{ name: string; tamper: () => void; symlink?: boolean }> = [
+	fs.writeFileSync(sentinelPath, originalSnapshotBytes, { mode: 0o600 });
+	fs.chmodSync(sentinelPath, 0o600);
+	const vectors: Array<{ name: string; tamper: () => void; expectedError: RegExp; symlink?: boolean }> = [
 		{
 			name: "invalid-json",
+			expectedError: /Plan edit snapshot is not valid JSON/,
 			tamper: () => {
 				fs.writeFileSync(snapshotPath, originalSnapshotBytes.subarray(0, originalSnapshotBytes.length - 1));
 				fs.chmodSync(snapshotPath, 0o600);
@@ -530,6 +531,7 @@ test("rework cancellation rejects tampered snapshots and remains retryable", { t
 		},
 		{
 			name: "non-canonical-json",
+			expectedError: /Plan edit snapshot identity is invalid/,
 			tamper: () => {
 				fs.writeFileSync(snapshotPath, `${JSON.stringify(originalSnapshot, null, 2)}\n`);
 				fs.chmodSync(snapshotPath, 0o600);
@@ -537,10 +539,12 @@ test("rework cancellation rejects tampered snapshots and remains retryable", { t
 		},
 		{
 			name: "exposed-mode",
+			expectedError: /Plan edit snapshot must have private mode 0600/,
 			tamper: () => fs.chmodSync(snapshotPath, 0o644),
 		},
 		{
 			name: "snapshot-symlink",
+			expectedError: /plan edit snapshot must be a regular file/i,
 			symlink: true,
 			tamper: () => {
 				fs.unlinkSync(snapshotPath);
@@ -549,18 +553,22 @@ test("rework cancellation rejects tampered snapshots and remains retryable", { t
 		},
 		{
 			name: "mismatched-plan-id",
+			expectedError: /Plan edit snapshot identity is invalid/,
 			tamper: canonicalTamper((snapshot) => { snapshot.planId = "002"; }),
 		},
 		{
 			name: "changed-content-with-old-hash",
+			expectedError: /Plan edit snapshot evidence .* is missing or changed/,
 			tamper: canonicalTamper((snapshot) => replaceTargetContent(snapshot, Buffer.from("tampered snapshot content\n").toString("base64"))),
 		},
 		{
 			name: "invalid-content-base64",
+			expectedError: /Plan edit snapshot entry .* is invalid/,
 			tamper: canonicalTamper((snapshot) => replaceTargetContent(snapshot, "not-base64!")),
 		},
 		{
 			name: "missing-target-file",
+			expectedError: /Plan edit snapshot target file is missing/,
 			tamper: canonicalTamper((snapshot) => {
 				snapshot.files = snapshotFiles(snapshot).filter((entry) => object(entry).name !== targetPlanFile);
 			}),
@@ -574,7 +582,7 @@ test("rework cancellation rejects tampered snapshots and remains retryable", { t
 		const sentinelBefore = vector.symlink ? { bytes: fs.readFileSync(sentinelPath), mode: fs.statSync(sentinelPath).mode & 0o7777 } : undefined;
 		await assert.rejects(
 			() => requestManagerOperation(service, "edit", { operation: "cancel", editToken }, `rework-snapshot-tamper-${vector.name}`),
-			/plan edit snapshot/i,
+			vector.expectedError,
 		);
 		assert.deepEqual(captureGraph(value), beforeAttempt);
 		const store = new RunStore(value.planDirectory);
