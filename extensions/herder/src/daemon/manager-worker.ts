@@ -35,6 +35,7 @@ const manager = new HerderRunManager(planDirectory);
 let queue = Promise.resolve();
 
 async function handle(call: ManagerWorkerCall): Promise<void> {
+	if (process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT === call.method) process.exit(7);
 	try {
 		let result: unknown;
 		if (call.method === "reply") result = manager.refreshReply();

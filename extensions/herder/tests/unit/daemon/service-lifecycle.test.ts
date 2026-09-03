@@ -152,6 +152,48 @@ test("initial snapshot failure closes the listening server and releases ownershi
 	}
 });
 
+test("manager worker crash rejects the dashboard request and respawns cleanly", { timeout: 10_000 }, async () => {
+	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
+	const priorCrashPoint = process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT;
+	let service: Awaited<ReturnType<typeof startHerderService>> | undefined;
+	let store: RunStore | undefined;
+	process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT = "dashboardState";
+	try {
+		service = await startHerderService({ planDirectory, dashboardPort: 0 });
+		if (priorCrashPoint === undefined) delete process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT;
+		else process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT = priorCrashPoint;
+
+		store = new RunStore(planDirectory);
+		const initialSnapshot = store.getSnapshotEnvelope();
+		assert.ok(initialSnapshot);
+
+		const failed = await fetch(`http://127.0.0.1:${service.port}/api/state`, { signal: AbortSignal.timeout(2_000) });
+		assert.equal(failed.status, 503);
+		const failedBody = await failed.json() as { error?: unknown; message?: unknown };
+		assert.equal(failedBody.error, "snapshot-unavailable");
+		assert.match(String(failedBody.message), /Herder manager worker exited with code 7/);
+
+		const recovered = await fetch(`http://127.0.0.1:${service.port}/api/state`, { signal: AbortSignal.timeout(2_000) });
+		assert.equal(recovered.status, 200);
+		const recoveredBody = await recovered.json() as { version?: unknown; readOnly?: unknown };
+		assert.equal(recoveredBody.version, 2);
+		assert.equal(recoveredBody.readOnly, true);
+
+		const finalSnapshot = store.getSnapshotEnvelope();
+		assert.ok(finalSnapshot);
+		assert.equal(finalSnapshot.revision, initialSnapshot.revision);
+		assert.deepEqual(finalSnapshot.reply, initialSnapshot.reply);
+		await service.close();
+		service = undefined;
+	} finally {
+		if (service) await service.close().catch(() => {});
+		store?.close();
+		if (priorCrashPoint === undefined) delete process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT;
+		else process.env.HERDER_TEST_MANAGER_WORKER_CRASH_AT = priorCrashPoint;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("scrub failure closes the constructor-owned database", () => {
 	const { root, planDirectory } = planFixture({ prefix: "herder-service-lifecycle-" });
 	type StoreInternals = { scrubPersistedIntegrationRepairReplies: (this: RunStore) => void };
