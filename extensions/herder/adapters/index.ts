@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Type, type TLiteral } from "typebox";
 import {
-	attentionCapabilityToken,
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
 	INTEGRATION_REPAIR_OPERATIONS,
 	isTerminalRunStatus,
@@ -50,7 +49,12 @@ import {
 	type ResolvedPiProfile,
 } from "./profile.ts";
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
-import { HERDER_ATTENTION_MESSAGE, attentionMessageDetails, buildAttentionPrompt } from "./attention.ts";
+import {
+	HERDER_ATTENTION_MESSAGE,
+	attentionMessageDetails,
+	attentionResolutionFromRequest,
+	buildAttentionPrompt,
+} from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-workflows.ts";
@@ -1476,20 +1480,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		assertMutationAllowed: () => {
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
 		},
-		assertAttentionAllowed: (input) => {
+		bindAttention: (input) => {
 			const request = currentAttention;
 			if (!request || request.state === "resolved") throw new Error("No unresolved Herder attention request is bound to this Pi session.");
 			assertOwnership(input.planDirectory, request.runId);
-			const capabilityToken = request.capabilityToken || attentionCapabilityToken(request.requestId);
-			if (input.requestId !== request.requestId
-				|| input.requestSha256 !== request.requestSha256
-				|| input.capabilityToken !== capabilityToken
-				|| input.runId !== request.runId
-				|| input.planId !== request.planId
-				|| input.generation !== request.generation
-				|| input.round !== request.round) {
+			if (input.requestId !== request.requestId) {
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
+			return attentionResolutionFromRequest(request);
 		},
 		beforePlanOperation: async (operation, params, ctx) => {
 			if (operation !== "finish_edit" && operation !== "cancel_edit") return;

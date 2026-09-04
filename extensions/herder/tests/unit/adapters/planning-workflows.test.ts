@@ -8,9 +8,10 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Check } from "typebox/value";
 import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "../../../adapters/run-guidance.ts";
-import { validateAttentionResolution } from "../../../src/shared/protocol.ts";
+import { attentionCapabilityToken, validateAttentionResolution } from "../../../src/shared/protocol.ts";
 import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
 import {
+	attentionResolutionFromRequest,
 	buildAttentionPrompt,
 } from "../../../adapters/attention.ts";
 import {
@@ -87,10 +88,14 @@ test("typed attention prompts preserve request bindings and route each variant",
 	} as ManagerAttentionRequest);
 	assert.match(userPrompt, /^HERDER_MAIN_SESSION_USER_DECISION_V1/m);
 	assert.match(userPrompt, /QUESTION: Which recorded decision should the Judge use\?/);
-	assert.match(userPrompt, /SCHEMA_VERSION: 1/);
-	assert.match(userPrompt, /schemaVersion: 1/);
 	assert.match(userPrompt, /PLAN_DIRECTORY: \/repo\/herder-plans/);
-	assert.match(userPrompt, /CAPABILITY_TOKEN: c{64}/);
+	assert.match(userPrompt, /REQUEST_ID: request-001/);
+	assert.match(userPrompt, /PLAN_ID: 001/);
+	assert.match(userPrompt, /GENERATION: 1/);
+	assert.match(userPrompt, /ROUND: 2/);
+	assert.match(userPrompt, /CONTINUATION_ROLE: plan-judge/);
+	assert.match(userPrompt, /CAUSE: judge_needs_input/);
+	assert.doesNotMatch(userPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256/);
 	assert.doesNotMatch(userPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
 	const operatorPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
@@ -101,8 +106,12 @@ test("typed attention prompts preserve request bindings and route each variant",
 		question: "Retry the recorded role or stop it?",
 	} as ManagerAttentionRequest);
 	assert.match(operatorPrompt, /^HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1/m);
-	assert.match(operatorPrompt, /schemaVersion: 1/);
+	assert.match(operatorPrompt, /REQUEST_ID: request-002/);
+	assert.match(operatorPrompt, /PLAN_ID: 001/);
+	assert.match(operatorPrompt, /GENERATION: 1/);
+	assert.match(operatorPrompt, /ROUND: 2/);
 	assert.match(operatorPrompt, /action "retry"/);
+	assert.doesNotMatch(operatorPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256/);
 	assert.doesNotMatch(operatorPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
 	const recoveryPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
@@ -133,10 +142,101 @@ test("typed attention prompts preserve request bindings and route each variant",
 	} as ManagerAttentionRequest);
 	assert.match(recoveryPrompt, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
 	assert.match(recoveryPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
-	assert.match(recoveryPrompt, /RECOVERY_GIT_IDENTITY:/);
+	assert.match(recoveryPrompt, /REQUEST_ID: request-003/);
+	assert.match(recoveryPrompt, /PLAN_ID: 001/);
+	assert.match(recoveryPrompt, /GENERATION: 1/);
+	assert.match(recoveryPrompt, /ROUND: 2/);
+	assert.match(recoveryPrompt, /CONTINUATION_ROLE: plan-judge/);
+	assert.match(recoveryPrompt, /CAUSE: reviewer_blocked/);
 	assert.match(recoveryPrompt, /ALLOWED_OPERATIONS: defer, unchanged_retry, revise, reject/);
-	assert.match(recoveryPrompt, /schemaVersion: 1/);
 	assert.match(recoveryPrompt, /001-plan\.md/);
+	assert.match(recoveryPrompt, /CHANGED_PATHS:/);
+	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
+});
+
+test("adapter binds complete attention evidence, including recovery Git identity", () => {
+	const base = {
+		requestId: "request-001",
+		runId: "run-001",
+		planId: "001",
+		generation: 1,
+		round: 2,
+		actionId: null,
+		requestSha256: "a".repeat(64),
+		state: "awaiting_input" as const,
+		cause: "judge_needs_input" as const,
+		detail: "A bounded decision is required.",
+		detailSha256: "b".repeat(64),
+		continuation: { role: "plan-judge" as const, phase: "READY_JUDGE" as const },
+		createdAt: "2026-08-12T00:00:00.000Z",
+		updatedAt: "2026-08-12T00:00:00.000Z",
+	};
+	const expectedBinding = {
+		schemaVersion: 1 as const,
+		requestId: base.requestId,
+		requestSha256: base.requestSha256,
+		capabilityToken: attentionCapabilityToken(base.requestId),
+		runId: base.runId,
+		planId: base.planId,
+		generation: base.generation,
+		round: base.round,
+		continuation: base.continuation,
+	};
+	const userBinding = attentionResolutionFromRequest({
+		...base,
+		kind: "user_decision",
+		question: "Which decision?",
+	} as ManagerAttentionRequest);
+	assert.deepEqual(userBinding, expectedBinding);
+	validateAttentionResolution({ ...userBinding, action: "answer", answer: "Use the evidence." });
+
+	const operatorBinding = attentionResolutionFromRequest({
+		...base,
+		requestId: "request-002",
+		kind: "operator_attention",
+		question: "Retry or stop?",
+	} as ManagerAttentionRequest);
+	assert.deepEqual(operatorBinding, {
+		...expectedBinding,
+		requestId: "request-002",
+		capabilityToken: attentionCapabilityToken("request-002"),
+	});
+	validateAttentionResolution({ ...operatorBinding, action: "retry" });
+
+	const recovery = {
+		planFingerprint: "d".repeat(64),
+		fingerprintVersion: 2 as const,
+		planFile: "001-plan.md",
+		inScopePaths: ["src/value.mjs"],
+		assignmentPath: "/repo/herder-plans/.herder/assignment.json",
+		assignmentSha256: "f".repeat(64),
+		snapshotSha256: "1".repeat(64),
+		generationBase: "2".repeat(40),
+		branch: "herder/herder-plans/001",
+		worktree: "/repo/herder-plans/.herder/worktrees/001",
+		worktreeHead: "3".repeat(40),
+		worktreeTree: "4".repeat(40),
+		changedPaths: ["src/value.mjs"],
+	};
+	const recoveryBinding = attentionResolutionFromRequest({
+		...base,
+		kind: "plan_recovery",
+		recovery,
+	} as ManagerAttentionRequest);
+	assert.deepEqual(recoveryBinding, {
+		...expectedBinding,
+		git: {
+			assignmentPath: recovery.assignmentPath,
+			assignmentSha256: recovery.assignmentSha256,
+			snapshotSha256: recovery.snapshotSha256,
+			generationBase: recovery.generationBase,
+			branch: recovery.branch,
+			worktree: recovery.worktree,
+			worktreeHead: recovery.worktreeHead,
+			worktreeTree: recovery.worktreeTree,
+		},
+	});
+	validateAttentionResolution({ ...recoveryBinding, action: "defer" });
 });
 
 test("attention tool inputs round-trip with the fixed resolution schema", () => {
@@ -158,6 +258,48 @@ test("attention tool inputs round-trip with the fixed resolution schema", () => 
 	assert.equal(resolution.schemaVersion, 1);
 	assert.equal(resolution.requestId, "request-001");
 	assert.equal(resolution.action, "answer");
+});
+
+test("attention schema is minimal and normalizes legacy stored calls", () => {
+	const tools: Array<{
+		name?: string;
+		parameters?: unknown;
+		prepareArguments?: (input: unknown) => unknown;
+	}> = [];
+	const pi = {
+		registerCommand: () => {},
+		registerTool: (tool: { name?: string; parameters?: unknown; prepareArguments?: (input: unknown) => unknown }) => { tools.push(tool); },
+	} as unknown as ExtensionAPI;
+	registerPiPlanningWorkflows(pi, "/repo/herder", async () => "/repo", { assertMutationAllowed: () => {} });
+	const tool = tools.find((candidate) => candidate.name === "herder_plan");
+	assert.ok(tool?.parameters);
+	assert.ok(tool.prepareArguments);
+	const minimal = {
+		operation: "attention",
+		planDirectory: "/repo/herder-plans",
+		requestId: "request-001",
+		action: "defer",
+	};
+	assert.equal(Check(tool.parameters as never, minimal), true);
+	assert.equal(Check(tool.parameters as never, { ...minimal, requestSha256: "a".repeat(64) }), false);
+	const prepared = tool.prepareArguments!({
+		...minimal,
+		planId: "caller-controlled-plan",
+		schemaVersion: 99,
+		requestSha256: "0".repeat(64),
+		capabilityToken: "0".repeat(64),
+		runId: "caller-controlled-run",
+		generation: 99,
+		round: 6,
+		continuation: { role: "plan-judge", phase: "JUDGING" },
+		git: { branch: "caller-controlled-branch" },
+	}) as Record<string, unknown>;
+	assert.deepEqual(prepared, {
+		...minimal,
+		planId: "caller-controlled-plan",
+	});
+	const nonAttention = { operation: "status", planDirectory: "/repo/herder-plans", requestSha256: "legacy" };
+	assert.equal(tool.prepareArguments!(nonAttention), nonAttention);
 });
 
 test("rework finish handled by the ownership hook is not submitted twice", async () => {
@@ -213,7 +355,7 @@ test("attention authorization runs before the deterministic manager mutation", a
 	try {
 		registerPiPlanningWorkflows(pi, root, async () => path.dirname(root), {
 			assertMutationAllowed: () => {},
-			assertAttentionAllowed: () => {
+			bindAttention: () => {
 				authorizationChecks += 1;
 				throw new Error("This Pi session does not own the attention request.");
 			},
@@ -225,14 +367,7 @@ test("attention authorization runs before the deterministic manager mutation", a
 			{
 				operation: "attention",
 				planDirectory: root,
-				schemaVersion: 1,
 				requestId: "request-001",
-				requestSha256: "a".repeat(64),
-				capabilityToken: "c".repeat(64),
-				runId: "run-001",
-				planId: "001",
-				generation: 1,
-				round: 1,
 				action: "defer",
 			},
 			undefined,

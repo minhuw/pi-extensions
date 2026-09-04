@@ -415,6 +415,7 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 		assert.equal(api.customMessages[0]!.customType, "herder-attention-v1");
 		assert.match(api.customMessages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
 		assert.match(api.customMessages[0]!.content, /REQUEST_ID:/);
+		assert.doesNotMatch(api.customMessages[0]!.content, /REQUEST_SHA256|CAPABILITY_TOKEN|RECOVERY_GIT_IDENTITY|schemaVersion|exact request binding/);
 		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
 
 		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
@@ -424,6 +425,25 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 		assert.equal(api.customMessages.length, 2);
 		assert.equal(api.customMessages[1]!.content, api.customMessages[0]!.content);
 		assert.equal(warnings.some((warning) => warning.level === "error"), false);
+
+		const resolved = object(await api.tool("herder_plan").execute(
+			"attention",
+			{
+				operation: "attention",
+				planDirectory: "herder-plans",
+				requestId: attention.requestId,
+				planId: "caller-controlled-plan",
+				action: "reject",
+				rationale: "Reject the blocked fixture without changing its plan content.",
+			},
+			undefined,
+			undefined,
+			ctx,
+		));
+		assert.equal(resolved.isError, undefined);
+		assert.equal(object(resolved.details).result && object(object(resolved.details).result).ok, true);
+		const accepted = object((await requestService(service, "/v1/status")).reply);
+		assert.equal(accepted.attention, undefined);
 
 		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
 		shutdown = true;
@@ -474,14 +494,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 			{
 				operation: "attention",
 				planDirectory: "herder-plans",
-				schemaVersion: 1,
 				requestId: attention.requestId,
-				requestSha256: attention.requestSha256,
-				capabilityToken: attention.capabilityToken,
-				runId: attention.runId,
-				planId: attention.planId,
-				generation: attention.generation,
-				round: attention.round,
 				action: "defer",
 			},
 			undefined,

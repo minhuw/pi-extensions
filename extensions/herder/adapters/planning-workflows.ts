@@ -6,10 +6,11 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { invokeHerderTool } from "../src/application/tools.ts";
 import { parsePlanCommandArguments, type PlanCommandOptions } from "./arguments.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
+import type { AttentionResolutionBinding } from "./attention.ts";
 
 const PI_PLANNING_WORKFLOWS = [
 	{ command: "herder-improve", skill: "improve", skillName: "herder-improve", mode: "session", description: "Audit this repository and shape verified findings into Herder plans." },
@@ -40,16 +41,7 @@ interface PiPlanningManagerReplyContext {
 
 interface PiPlanningRuntime {
 	assertMutationAllowed: () => void;
-	assertAttentionAllowed?: (input: {
-		planDirectory: string;
-		requestId?: string;
-		requestSha256?: string;
-		capabilityToken?: string;
-		runId?: string;
-		planId?: string;
-		generation?: number;
-		round?: number;
-	}) => void;
+	bindAttention?: (input: { planDirectory: string; requestId?: string }) => AttentionResolutionBinding;
 	prepareWorkflow?: (
 		skill: PiPlanningSkill,
 		argumentsText: string,
@@ -61,6 +53,44 @@ interface PiPlanningRuntime {
 		ctx: ExtensionContext,
 	) => Promise<{ handled: true; result: unknown } | undefined>;
 	handleManagerReply?: (reply: unknown, context?: PiPlanningManagerReplyContext) => Promise<void>;
+}
+
+const planningWorkflowSchema = Type.Object({
+	operation: Type.Union([
+		Type.Literal("init"), Type.Literal("validate"), Type.Literal("shape"),
+		Type.Literal("status"), Type.Literal("ready"), Type.Literal("snapshot"),
+		Type.Literal("report"), Type.Literal("track"), Type.Literal("untrack"),
+		Type.Literal("begin_edit"), Type.Literal("finish_edit"), Type.Literal("cancel_edit"),
+		Type.Literal("attention"),
+	]),
+	planDirectory: Type.String(),
+	planId: Type.Optional(Type.String()),
+	editToken: Type.Optional(Type.String()),
+	track: Type.Optional(Type.Boolean()),
+	requestId: Type.Optional(Type.String()),
+	action: Type.Optional(Type.String()),
+	answer: Type.Optional(Type.String()),
+	rationale: Type.Optional(Type.String()),
+}, { additionalProperties: false });
+
+const retiredAttentionArguments = [
+	"schemaVersion",
+	"requestSha256",
+	"capabilityToken",
+	"runId",
+	"generation",
+	"round",
+	"continuation",
+	"git",
+] as const;
+
+function preparePlanningWorkflowArguments(input: unknown): Static<typeof planningWorkflowSchema> {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as Static<typeof planningWorkflowSchema>;
+	const args = input as Record<string, unknown>;
+	if (args.operation !== "attention") return args as Static<typeof planningWorkflowSchema>;
+	const prepared = { ...args };
+	for (const key of retiredAttentionArguments) delete prepared[key];
+	return prepared as Static<typeof planningWorkflowSchema>;
 }
 
 function message(error: unknown): string {
@@ -220,31 +250,8 @@ export function registerPiPlanningWorkflows(
 		label: "Herder Plan",
 		executionMode: "sequential",
 		description: "Initialize, validate, shape, inspect, snapshot, report, coordinate a reserved Herder plan edit, or resolve one request-bound attention item.",
-		parameters: Type.Object({
-			operation: Type.Union([
-				Type.Literal("init"), Type.Literal("validate"), Type.Literal("shape"),
-				Type.Literal("status"), Type.Literal("ready"), Type.Literal("snapshot"),
-				Type.Literal("report"), Type.Literal("track"), Type.Literal("untrack"),
-				Type.Literal("begin_edit"), Type.Literal("finish_edit"), Type.Literal("cancel_edit"),
-				Type.Literal("attention"),
-			]),
-			planDirectory: Type.String(),
-			schemaVersion: Type.Optional(Type.Literal(1)),
-			planId: Type.Optional(Type.String()),
-			editToken: Type.Optional(Type.String()),
-			track: Type.Optional(Type.Boolean()),
-			requestId: Type.Optional(Type.String()),
-			requestSha256: Type.Optional(Type.String()),
-			capabilityToken: Type.Optional(Type.String()),
-			runId: Type.Optional(Type.String()),
-			generation: Type.Optional(Type.Integer({ minimum: 1 })),
-			round: Type.Optional(Type.Integer({ minimum: 1, maximum: 6 })),
-			action: Type.Optional(Type.String()),
-			answer: Type.Optional(Type.String()),
-			rationale: Type.Optional(Type.String()),
-			continuation: Type.Optional(Type.Object({ role: Type.String(), phase: Type.String() })),
-			git: Type.Optional(Type.Any()),
-		}, { additionalProperties: false }),
+		parameters: planningWorkflowSchema,
+		prepareArguments: preparePlanningWorkflowArguments,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
 				return { content: [{ type: "text" as const, text: "Trust this project before using Herder plan operations." }], isError: true, details: {} };
@@ -258,36 +265,23 @@ export function registerPiPlanningWorkflows(
 				const handled = params.operation === "finish_edit" || params.operation === "cancel_edit"
 					? await runtime.beforePlanOperation?.(params.operation, { planDirectory, editToken: params.editToken }, ctx)
 					: undefined;
-				if (params.operation === "attention") {
-					runtime.assertAttentionAllowed?.({
-						planDirectory,
-						requestId: params.requestId,
-						requestSha256: params.requestSha256,
-						capabilityToken: params.capabilityToken,
-						runId: params.runId,
-						planId: params.planId,
-						generation: params.generation,
-						round: params.round,
-					});
+				if (params.operation === "attention" && !runtime.bindAttention) {
+					throw new Error("Herder attention submissions require an adapter-owned request binding.");
 				}
+				const attentionBinding = params.operation === "attention"
+					? runtime.bindAttention!({ planDirectory, requestId: params.requestId })
+					: undefined;
 				const applicationParams = {
 					operation: params.operation,
 					planDirectory,
-					...(params.schemaVersion !== undefined ? { schemaVersion: params.schemaVersion } : {}),
-					...(params.planId !== undefined ? { planId: params.planId } : {}),
-					...(params.editToken !== undefined ? { editToken: params.editToken } : {}),
-					...(params.track !== undefined ? { track: params.track } : {}),
-					...(params.requestId !== undefined ? { requestId: params.requestId } : {}),
-					...(params.requestSha256 !== undefined ? { requestSha256: params.requestSha256 } : {}),
-					...(params.capabilityToken !== undefined ? { capabilityToken: params.capabilityToken } : {}),
-					...(params.runId !== undefined ? { runId: params.runId } : {}),
-					...(params.generation !== undefined ? { generation: params.generation } : {}),
-					...(params.round !== undefined ? { round: params.round } : {}),
+					...(params.operation === "attention" ? attentionBinding : {}),
+					...(params.operation !== "attention" && params.planId !== undefined ? { planId: params.planId } : {}),
+					...(params.operation !== "attention" && params.editToken !== undefined ? { editToken: params.editToken } : {}),
+					...(params.operation !== "attention" && params.track !== undefined ? { track: params.track } : {}),
+					...(params.operation !== "attention" && params.requestId !== undefined ? { requestId: params.requestId } : {}),
 					...(params.action !== undefined ? { action: params.action } : {}),
 					...(params.answer !== undefined ? { answer: params.answer } : {}),
 					...(params.rationale !== undefined ? { rationale: params.rationale } : {}),
-					...(params.continuation !== undefined ? { continuation: params.continuation } : {}),
-					...(params.git !== undefined ? { git: params.git } : {}),
 				};
 				const result = handled?.result ?? await invokeHerderTool("herder_plan", applicationParams);
 				if (!handled && result && typeof result === "object" && !Array.isArray(result)) {

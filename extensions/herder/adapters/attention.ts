@@ -1,4 +1,8 @@
-import { attentionCapabilityToken, type ManagerAttentionRequest } from "../src/shared/protocol.ts";
+import {
+	attentionCapabilityToken,
+	type AttentionResolutionInput,
+	type ManagerAttentionRequest,
+} from "../src/shared/protocol.ts";
 import { buildPlanningSkillPrompt } from "./planning-workflows.ts";
 
 export const HERDER_ATTENTION_MESSAGE = "herder-attention-v1";
@@ -11,6 +15,36 @@ export interface HerderAttentionMessageDetails {
 	round: number;
 }
 
+/** The immutable manager fields supplied by the adapter for an attention resolution. */
+export type AttentionResolutionBinding = Omit<AttentionResolutionInput, "action" | "answer" | "rationale">;
+
+/** Build the complete manager payload from the adapter-owned attention request. */
+export function attentionResolutionFromRequest(request: ManagerAttentionRequest): AttentionResolutionBinding {
+	return {
+		schemaVersion: 1,
+		requestId: request.requestId,
+		requestSha256: request.requestSha256,
+		capabilityToken: request.capabilityToken || attentionCapabilityToken(request.requestId),
+		runId: request.runId,
+		planId: request.planId,
+		generation: request.generation,
+		round: request.round,
+		continuation: request.continuation,
+		...(request.kind === "plan_recovery" ? {
+			git: {
+				assignmentPath: request.recovery.assignmentPath,
+				assignmentSha256: request.recovery.assignmentSha256,
+				snapshotSha256: request.recovery.snapshotSha256,
+				generationBase: request.recovery.generationBase,
+				branch: request.recovery.branch,
+				worktree: request.recovery.worktree,
+				worktreeHead: request.recovery.worktreeHead,
+				worktreeTree: request.recovery.worktreeTree,
+			},
+		} : {}),
+	};
+}
+
 function list(values: readonly string[] | undefined): string {
 	return values && values.length > 0 ? values.join("\n") : "none";
 }
@@ -18,36 +52,14 @@ function list(values: readonly string[] | undefined): string {
 function requestBinding(request: ManagerAttentionRequest, planDirectory?: string): string[] {
 	return [
 		...(planDirectory ? [`PLAN_DIRECTORY: ${planDirectory}`] : []),
-		"SCHEMA_VERSION: 1",
 		`REQUEST_ID: ${request.requestId}`,
-		`REQUEST_SHA256: ${request.requestSha256}`,
-		`CAPABILITY_TOKEN: ${request.capabilityToken || attentionCapabilityToken(request.requestId)}`,
-		`RUN_ID: ${request.runId}`,
 		`PLAN_ID: ${request.planId}`,
 		`GENERATION: ${request.generation}`,
 		`ROUND: ${request.round}`,
-		`ACTION_ID: ${request.actionId ?? "null"}`,
-		`STATE: ${request.state}`,
-		`DETAIL_SHA256: ${request.detailSha256}`,
 		`CONTINUATION_ROLE: ${request.continuation.role}`,
 		`CONTINUATION_PHASE: ${request.continuation.phase}`,
 		`CAUSE: ${request.cause}`,
 	];
-}
-
-function recoveryIdentity(request: Extract<ManagerAttentionRequest, { kind: "plan_recovery" }>): string[] {
-	const recovery = request.recovery;
-	const identity = {
-		assignmentPath: recovery.assignmentPath,
-		assignmentSha256: recovery.assignmentSha256,
-		snapshotSha256: recovery.snapshotSha256,
-		generationBase: recovery.generationBase,
-		branch: recovery.branch,
-		worktree: recovery.worktree,
-		worktreeHead: recovery.worktreeHead,
-		worktreeTree: recovery.worktreeTree,
-	};
-	return ["RECOVERY_GIT_IDENTITY:", JSON.stringify(identity)];
 }
 
 export function attentionMessageDetails(request: ManagerAttentionRequest): HerderAttentionMessageDetails {
@@ -87,14 +99,12 @@ export async function buildAttentionPrompt(
 			`CHANGED_PATHS_SHA256: ${recovery.changedPathsSha256 ?? "none"}`,
 			"CHANGED_PATHS:",
 			list(recovery.changedPaths),
-			...recoveryIdentity(request),
 			"ALLOWED_OPERATIONS: defer, unchanged_retry, revise, reject",
 			"For defer, submit the request unchanged with action \"defer\" and do not edit files.",
 			"For unchanged retry, preserve the target plan content, record a non-empty rationale, and submit action \"unchanged_retry\".",
 			"For a replacement, edit only the confirmed target plan content, run shape and validate, then submit action \"revise\" with a non-empty rationale.",
 			"For a rejected recovery, submit action \"reject\" with a non-empty rationale.",
-			"Every resolution payload must include the fixed field schemaVersion: 1.",
-			"Submit every recovery decision with herder_plan operation \"attention\", the exact request binding above, and the exact RECOVERY_GIT_IDENTITY object. Never invent a new capability token.",
+			"Submit every recovery decision with herder_plan operation \"attention\", planDirectory and requestId from the evidence above, and one allowed action. The adapter supplies immutable request and recovery Git evidence.",
 		].join("\n");
 		const grill = await buildPlanningSkillPrompt(packageRoot, "grill", "", runtimeContext);
 		return [
@@ -113,7 +123,7 @@ export async function buildAttentionPrompt(
 			`QUESTION: ${question}`,
 			`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 			binding,
-			"After the user answers, call herder_plan exactly once with operation \"attention\", schemaVersion: 1, action \"answer\", the exact answer text, and every request binding field above. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.",
+			"After the user answers, call herder_plan exactly once with operation \"attention\", planDirectory and requestId from the evidence above, action \"answer\", and the exact answer text. The adapter supplies immutable request evidence. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.",
 		].join("\n");
 	}
 
@@ -123,6 +133,6 @@ export async function buildAttentionPrompt(
 		`DETAIL: ${question}`,
 		`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 		binding,
-		"The user may defer. After a choice, call herder_plan exactly once with operation \"attention\", schemaVersion: 1, action \"retry\" for the recorded role or \"cancel\" to stop, with the exact request binding fields above. Use action \"defer\" only when no decision is made.",
+		"The user may defer. After a choice, call herder_plan exactly once with operation \"attention\", planDirectory and requestId from the evidence above, action \"retry\" for the recorded role or \"cancel\" to stop. Use action \"defer\" only when no decision is made; the adapter supplies immutable request evidence.",
 	].join("\n");
 }

@@ -40,11 +40,11 @@ If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_REWORK_V1`
 
 If the injected `<herder-runtime>` block contains `HERDER_ACTIVE_PLAN_RECOVERY_V1`, the manager has presented one durable recovery request for a blocked or input-waiting plan. This is target-local recovery, not the never-started active-Fire edit path:
 
-- Treat `REQUEST_ID`, `REQUEST_SHA256`, `CAPABILITY_TOKEN`, `RUN_ID`, `PLAN_ID`, `GENERATION`, `ROUND`, the continuation, and the `RECOVERY_GIT_IDENTITY` object as immutable request-bound evidence. Never invent or derive a replacement token.
+- Treat `REQUEST_ID`, `PLAN_ID`, `GENERATION`, `ROUND`, the continuation, and the recovery dossier as request-bound evidence. Submit the request ID and decision; the adapter supplies immutable request and recovery Git evidence.
 - Inspect the supplied dossier and the target plan. Ask exactly one question at a time, recommend an evidence-backed answer, and require final confirmation before editing. An unresolved graph-affecting discovery must stop and direct the operator to `/herder-revise`.
 - Edit only the confirmed target plan's compiled content in `PLAN_DIRECTORY`. Do not edit source, README lifecycle status, dependencies, sibling plans, Git refs, worktrees, leases, SQLite, or run-control state. Preserve the target ID, filename, dependencies, and graph topology.
 - `defer` leaves the durable request active. An unchanged retry is allowed only with a non-empty rationale explaining why the existing plan remains valid. A replacement is allowed only after target-only edits pass `herder_plan` `shape` and `validate`, followed by final confirmation. Rejection/cancellation requires a non-empty rationale.
-- As the final action, call `herder_plan` with `operation: "attention"`, the exact request binding, one allowed action (`defer`, `unchanged_retry`, `revise`, or `reject`), and the exact `git` identity. Do not call `/herder-revise` for a target-local recovery.
+- As the final action, call `herder_plan` with `operation: "attention"`, the supplied `planDirectory`, `requestId`, and one allowed action (`defer`, `unchanged_retry`, `revise`, or `reject`), plus rationale when required. The adapter supplies immutable request and recovery Git evidence. Do not call `/herder-revise` for a target-local recovery.
 
 ## Prepare
 
