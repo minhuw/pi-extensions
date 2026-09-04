@@ -6,6 +6,7 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { invokeHerderTool } from "../src/application/tools.ts";
 import { parsePlanCommandArguments, type PlanCommandOptions } from "./arguments.ts";
@@ -56,13 +57,10 @@ interface PiPlanningRuntime {
 }
 
 const planningWorkflowSchema = Type.Object({
-	operation: Type.Union([
-		Type.Literal("init"), Type.Literal("validate"), Type.Literal("shape"),
-		Type.Literal("status"), Type.Literal("ready"), Type.Literal("snapshot"),
-		Type.Literal("report"), Type.Literal("track"), Type.Literal("untrack"),
-		Type.Literal("begin_edit"), Type.Literal("finish_edit"), Type.Literal("cancel_edit"),
-		Type.Literal("attention"),
-	]),
+	operation: StringEnum([
+		"init", "validate", "shape", "status", "ready", "snapshot",
+		"report", "track", "untrack", "begin_edit", "finish_edit", "cancel_edit", "attention",
+	] as const),
 	planDirectory: Type.String(),
 	planId: Type.Optional(Type.String()),
 	editToken: Type.Optional(Type.String()),

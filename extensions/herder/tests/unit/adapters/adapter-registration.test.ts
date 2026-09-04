@@ -154,26 +154,45 @@ test("repair schemas preserve ordered vocabularies and optionality", () => {
 	const schema = record(api.tool("herder_integration_repair").parameters);
 	const properties = record(schema.properties);
 	assert.deepEqual(properties.operation, {
-		anyOf: [
-			{ type: "string", const: "begin" },
-			{ type: "string", const: "finish" },
-			{ type: "string", const: "cancel" },
-		],
+		type: "string",
+		enum: ["begin", "finish", "cancel"],
 	});
 	assert.deepEqual(properties.classification, {
-		anyOf: [
-			{ type: "string", const: "code_defect" },
-			{ type: "string", const: "transient" },
-			{ type: "string", const: "manifest_error" },
-			{ type: "string", const: "design_ambiguity" },
-			{ type: "string", const: "scope_ambiguity" },
-			{ type: "string", const: "credential" },
-			{ type: "string", const: "product_ambiguity" },
+		type: "string",
+		enum: [
+			"code_defect",
+			"transient",
+			"manifest_error",
+			"design_ambiguity",
+			"scope_ambiguity",
+			"credential",
+			"product_ambiguity",
 		],
 	});
 	assert.ok(Array.isArray(schema.required));
 	assert.ok(schema.required.includes("operation"));
 	assert.equal(schema.required.includes("classification"), false);
+});
+
+test("planning and reignite schemas preserve ordered vocabularies", () => {
+	const api = captureAdapter();
+	const planSchema = record(api.tool("herder_plan").parameters);
+	const reigniteSchema = record(api.tool("herder_reignite").parameters);
+	assert.deepEqual(toolProperty(api, "herder_plan", "operation"), {
+		type: "string",
+		enum: [
+			"init", "validate", "shape", "status", "ready", "snapshot",
+			"report", "track", "untrack", "begin_edit", "finish_edit", "cancel_edit", "attention",
+		],
+	});
+	assert.deepEqual(toolProperty(api, "herder_reignite", "state"), {
+		type: "string",
+		enum: ["written", "failed"],
+	});
+	assert.ok(Array.isArray(planSchema.required));
+	assert.ok(planSchema.required.includes("operation"));
+	assert.ok(Array.isArray(reigniteSchema.required));
+	assert.ok(reigniteSchema.required.includes("state"));
 });
 
 test("verification gate arrays share one schema contract", () => {

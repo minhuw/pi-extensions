@@ -3,13 +3,12 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { Type, type TLiteral } from "typebox";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
 	INTEGRATION_REPAIR_OPERATIONS,
 	isTerminalRunStatus,
-	type IntegrationRepairClassification,
-	type IntegrationRepairOperation,
 	type IntegrationRepairRequest,
 	type ManagerAttentionRequest,
 	type ManagerReply,
@@ -1663,10 +1662,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		description: "Classify one failed final-verification attempt and perform only the request-bound integration repair begin, finish, or cancel transition.",
 		parameters: Type.Object({
 			planDirectory: Type.String(),
-			operation: Type.Union(INTEGRATION_REPAIR_OPERATIONS.map((operation) => Type.Literal(operation)) as [
-				TLiteral<IntegrationRepairOperation>,
-				...TLiteral<IntegrationRepairOperation>[],
-			]),
+			operation: StringEnum(INTEGRATION_REPAIR_OPERATIONS),
 			requestId: Type.String(),
 			requestSha256: Type.String(),
 			capabilityToken: Type.String(),
@@ -1675,10 +1671,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			runId: Type.Optional(Type.String()),
 			generation: Type.Optional(Type.Integer({ minimum: 1 })),
 			repairId: Type.Optional(Type.String()),
-			classification: Type.Optional(Type.Union(INTEGRATION_REPAIR_CLASSIFICATIONS.map((classification) => Type.Literal(classification)) as [
-				TLiteral<IntegrationRepairClassification>,
-				...TLiteral<IntegrationRepairClassification>[],
-			])),
+			classification: Type.Optional(StringEnum(INTEGRATION_REPAIR_CLASSIFICATIONS)),
 			rationale: Type.Optional(Type.String()),
 			detail: Type.Optional(Type.String()),
 			gates: Type.Optional(Type.Array(verificationGateSchema, { maxItems: 32 })),
@@ -1870,7 +1863,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planDirectory: Type.String(),
 			requestId: Type.String(),
 			requestSha256: Type.String(),
-			state: Type.Union([Type.Literal("written"), Type.Literal("failed")]),
+			state: StringEnum(["written", "failed"] as const),
 			graphSha256: Type.Optional(Type.String()),
 			detail: Type.Optional(Type.String()),
 		}),
