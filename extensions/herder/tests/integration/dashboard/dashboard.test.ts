@@ -1009,35 +1009,8 @@ async function runTests(): Promise<void> {
   }
 }
 
-async function serveFixture(): Promise<void> {
-  const fixture = createFixture()
-  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
-  process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
-  const shutdown = async () => {
-    await dashboard.close()
-    fixture.cleanup()
-    process.exitCode = 0
-  }
-  process.once("SIGINT", shutdown)
-  process.once("SIGTERM", shutdown)
-}
-
-async function serveEmptyAccountingFixture(): Promise<void> {
-  const fixture = createFixture(false)
-  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
-  process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
-  const shutdown = async () => {
-    await dashboard.close()
-    fixture.cleanup()
-    process.exitCode = 0
-  }
-  process.once("SIGINT", shutdown)
-  process.once("SIGTERM", shutdown)
-}
-
-async function serveAttentionFixture(): Promise<void> {
-  const fixture = createAttentionFixture()
-  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: fixture.planName, port: 0 })
+async function serveFixture(fixture: { planDir: string; cleanup: () => void; planName?: string }): Promise<void> {
+  const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: fixture.planName ?? "demo", port: 0 })
   process.stdout.write(`HERDER_DASHBOARD_URL=${dashboard.url}\n`)
   const shutdown = async () => {
     await dashboard.close()
@@ -1052,11 +1025,11 @@ const serveAttention = process.argv.slice(2).includes("--serve-attention")
 const serveEmptyAccounting = process.argv.slice(2).includes("--serve-empty-accounting")
 const serve = process.argv.slice(2).includes("--serve")
 if (serveAttention) {
-  await serveAttentionFixture()
+  await serveFixture(createAttentionFixture())
 } else if (serveEmptyAccounting) {
-  await serveEmptyAccountingFixture()
+  await serveFixture(createFixture(false))
 } else if (serve) {
-  await serveFixture()
+  await serveFixture(createFixture())
 } else {
   test("dashboard attention fixture removes its root when setup fails", () => {
     let root: string | undefined
