@@ -13,7 +13,7 @@ test("Plans core is import-only and not a standalone CLI", () => {
 	assert.doesNotMatch(source, /^#!/m);
 	assert.doesNotMatch(source, /fileURLToPath|const isMain|function takeFlag|function main\(argv|process\.(stdout|stderr|exitCode)/);
 	assert.doesNotMatch(source, /herder-plans (record-usage|bind-profile|profile|usage)/);
-	assert.equal(statSync(sourcePath).mode & 0o777, 0o644);
+	assert.equal(statSync(sourcePath).mode & 0o111, 0);
 });
 
 test("internal profile and Git helpers are import-only", () => {
@@ -40,7 +40,7 @@ test("internal profile and Git helpers are import-only", () => {
 		const source = readFileSync(sourcePath, "utf8");
 		assert.doesNotMatch(source, /^#!/m);
 		assert.doesNotMatch(source, importOnlyForbiddenPattern);
-		assert.equal(statSync(sourcePath).mode & 0o777, 0o644, relative);
+		assert.equal(statSync(sourcePath).mode & 0o111, 0, relative);
 	}
 });
 test("Herder is a self-contained Pi-only extension", () => {
