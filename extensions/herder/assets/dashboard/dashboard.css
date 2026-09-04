@@ -385,8 +385,6 @@ a:focus-visible,
   height: 0.5rem;
   border-radius: 50%;
   background: var(--green);
-  box-shadow: none;
-  animation: none;
 }
 
 .section {
@@ -397,10 +395,6 @@ a:focus-visible,
 
 .section-heading {
   margin-bottom: 0.8rem;
-}
-
-.section-heading.compact {
-  margin-bottom: 0.75rem;
 }
 
 .section-controls {
@@ -1286,25 +1280,6 @@ a:focus-visible,
   padding: 0.8rem 1rem;
   color: var(--red);
   font-size: 0.78rem;
-}
-
-.animate-in {
-  opacity: 1;
-  animation: none;
-}
-
-.delay-1 { animation-delay: 80ms; }
-.delay-2 { animation-delay: 140ms; }
-.delay-3 { animation-delay: 200ms; }
-
-@keyframes fade-in-up {
-  from { opacity: 0; transform: translateY(24px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes live-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--green) 45%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 10px transparent; }
 }
 
 @media (max-width: 1120px) {
