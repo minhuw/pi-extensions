@@ -425,13 +425,13 @@ test("attention authorization runs before the deterministic manager mutation", a
 test("Pi planning prompt preserves the exact packaged skill and arguments", async () => {
 	const root = await fixture();
 	try {
-		const prompt = await buildPlanningSkillPrompt(root, "improve", "quick security", "HERDER_ACTIVE_PLAN_EDIT_V1\nPLAN_ID: 002");
+		const prompt = await buildPlanningSkillPrompt(root, "improve", 'quick security --lang "Traditional Chinese"', "HERDER_ACTIVE_PLAN_EDIT_V1\nPLAN_ID: 002");
 		assert.match(prompt, /^<skill name="herder-improve" location=".*SKILL\.md">/);
 		assert.match(prompt, /References are relative to .*skills\/improve\./);
 		assert.match(prompt, /# Improve/);
 		assert.doesNotMatch(prompt, /description: Audit/);
 		assert.match(prompt, /<herder-runtime>\nHERDER_ACTIVE_PLAN_EDIT_V1\nPLAN_ID: 002\n<\/herder-runtime>/);
-		assert.match(prompt, /\n\nquick security$/);
+		assert.match(prompt, /\n\nquick security --lang "Traditional Chinese"$/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -440,13 +440,13 @@ test("Pi planning prompt preserves the exact packaged skill and arguments", asyn
 test("Pi simplification prompt preserves the exact packaged skill and arguments", async () => {
 	const root = await fixture();
 	try {
-		const prompt = await buildPlanningSkillPrompt(root, "simplify", "deep duplication");
+		const prompt = await buildPlanningSkillPrompt(root, "simplify", "deep duplication --lang zh-CN");
 		assert.match(prompt, /^<skill name="herder-simplify" location=".*SKILL\.md">/);
 		assert.match(prompt, /References are relative to .*skills\/simplify\./);
 		assert.match(prompt, /# Simplify/);
 		assert.match(prompt, /references\/simplification-playbook\.md/);
 		assert.doesNotMatch(prompt, /description: Audit/);
-		assert.match(prompt, /\n\ndeep duplication$/);
+		assert.match(prompt, /\n\ndeep duplication --lang zh-CN$/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

@@ -60,8 +60,8 @@ The derived PlanContract on records/snapshots/shape is inspectable; immutable co
 | `/herder-grill <change>` | Clarify product intent and create a focused validated plan graph in the current session. |
 | `/herder-grill --plan <id-or-path> [--plan-dir <dir>]` | Standalone, refine a TODO or decision-blocked plan and split it into a focused dependency-aware plan set when shaping requires it; during Fire, only a target-local unstarted-plan edit is allowed. |
 | `/herder-grill --plan <id-or-path> --split [--plan-dir <dir>]` | Explicitly request/elevate a standalone graph split; rejected during active Fire. |
-| `/herder-improve [quick\|standard\|deep] [focus]` | Audit the repository and write prioritized improvement plans. |
-| `/herder-simplify [quick\|standard\|deep] [focus-or-path]` | Find safe codebase reductions and write prioritized simplification plans. |
+| `/herder-improve [quick\|standard\|deep] [focus] [--lang <language>]` | Audit the repository and write prioritized improvement plans. |
+| `/herder-simplify [quick\|standard\|deep] [focus-or-path] [--lang <language>]` | Find safe codebase reductions and write prioritized simplification plans. |
 | `/herder-validate [plan-dir] [--fix]` | Run a repository-aware semantic plan audit and conservative repair workflow. |
 | `/herder-plans init [plan-dir] [--track]` | Initialize a plan directory. |
 | `/herder-plans validate\|shape\|status\|ready [plan-dir]` | Run immediate deterministic plan-graph operations. |
@@ -80,6 +80,8 @@ The derived PlanContract on records/snapshots/shape is inspectable; immutable co
 | `/herder-cleanup [plan-dir] --deep [--include-failed]` | Destructively remove a fully terminal plan set after proving integration is merged into the current branch and all owned worktrees are safe. |
 | `/herder-cleanup [plan-dir] --force` | Unconditionally stop the run and delete that plan set's files, worktrees, branches, and coordination refs. Ignores terminality, proofs, and dirty worktrees. Cannot be undone. |
 | `/herder-stop` | Stop the active run owned by the current Pi session. |
+
+Improve and Simplify show a compact table, then automatically explain every vetted finding in table order using the same numbers and 2–3 plain-language sentences, before recommending what to plan and waiting for selection. `--lang <language>` changes the findings table, explanations, recommendation, and selection/follow-up discussion for that invocation only; use a language name or locale and quote multiword names. Without it, follow the user's conversation language, falling back to English. All authored plan content, the index, `CONTEXT.md`, and internal agent prompts/replies, findings reports, and handoffs remain English; paths, symbols, commands, and IDs stay verbatim. Example: `/herder-simplify quick --lang zh-CN`.
 
 Fire, resume, and revise accept `--profile <name>` and `--dashboard-port <port>`; fire and resume also accept `--max-parallel <count>`. Attach accepts only `--dashboard-port`, derives the immutable profile and parallelism from manager status, and refuses takeover while another live Pi process owns the run.
 

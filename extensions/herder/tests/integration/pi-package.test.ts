@@ -83,8 +83,8 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 		"/herder-grill <change>",
 		"/herder-grill --plan <id-or-path> [--plan-dir <dir>]",
 		"/herder-grill --plan <id-or-path> --split [--plan-dir <dir>]",
-		"/herder-improve [quick|standard|deep] [focus]",
-		"/herder-simplify [quick|standard|deep] [focus-or-path]",
+		"/herder-improve [quick|standard|deep] [focus] [--lang <language>]",
+		"/herder-simplify [quick|standard|deep] [focus-or-path] [--lang <language>]",
 		"/herder-validate [plan-dir] [--fix]",
 		"/herder-plans init [plan-dir] [--track]",
 		"/herder-plans validate|shape|status|ready [plan-dir]",
@@ -139,6 +139,27 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(simplificationPlaybook, /^## Finding format$/m);
 	await assert.rejects(() => readFile(path.join(extensionRoot, "skills/improve/references/closing-the-loop.md"), "utf8"), /ENOENT/);
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);
+});
+
+test("Improve and Simplify explain every numbered finding before selection with invocation-scoped discussion language", async () => {
+	for (const skill of ["improve", "simplify"]) {
+		const contents = await readFile(path.join(extensionRoot, "skills", skill, "SKILL.md"), "utf8");
+		const vet = contents.split("## 3. Vet, Prioritize, Confirm")[1].split("## 4. Write Plans")[0];
+		assert.match(vet, /\| # \| Finding \|[\s\S]*automatically explain every vetted finding individually in table order, reusing the same stable finding numbers[\s\S]*2–3 plain-language sentences[\s\S]*same response before the recommendation and selection question[\s\S]*Ask which findings to plan,[^\n]*and wait/, skill);
+		assert.match(vet, /what happens now or the current burden; the suggested change and benefit; and any meaningful risk, preserved behavior, or dependency when relevant/, skill);
+		assert.match(vet, /not just top recommendations or only on follow-up; do not pause per finding/, skill);
+		assert.match(vet, /In a noninteractive run, select that default/, skill);
+		assert.match(contents, /Before selection, author nothing; afterward, write only confirmed plan-directory content/, skill);
+		const invocation = contents.split("## Invocation Variants")[1];
+		assert.match(invocation, /`--lang <language>`: invocation-only override for the user-facing findings table, individual explanations, recommendation, and interactive selection\/follow-up discussion/, skill);
+		assert.match(invocation, /Accept a language name or locale.*`Chinese`, `zh-CN`, or `"Traditional Chinese"`; quote multiword names/, skill);
+		assert.match(invocation, /Without `--lang`, follow the user's conversation language, falling back to English/, skill);
+		assert.match(invocation, /language value is missing or unclear, ask for clarification before proceeding; never silently treat it as focus/, skill);
+		assert.match(invocation, /Keep all authored plan content, the index, and `CONTEXT\.md`, plus internal agent prompts, replies, findings reports, and handoffs in English regardless of the user-facing language/, skill);
+		assert.match(invocation, /Preserve paths, symbols, commands, and IDs verbatim/, skill);
+		const audit = contents.split("## 2. Audit")[1].split("## 3. Vet")[0];
+		assert.match(audit, /Because children do not inherit this skill, every audit prompt must include:[\s\S]*"Use English for all internal agent prompts, replies, findings reports, and handoffs, regardless of the user-facing language\."/, skill);
+	}
 });
 
 test("planning docs carry bounded caller/regression handoffs from audit findings through shared readiness checks", async () => {
