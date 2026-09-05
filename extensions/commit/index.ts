@@ -511,11 +511,10 @@ function validateCommitMessage(subjectValue: string | undefined, bodyValue: stri
 	const subject = subjectValue?.trim() ?? "";
 	const body = bodyValue?.trim() ?? "";
 	if (!subject || subject.includes("\n")) throw new Error("commit_git commit requires a one-line subject.");
-	if (subject.length > 75) throw new Error("Linux-style commit subjects must be at most 75 characters.");
-	if (subject.endsWith(".")) throw new Error("Linux-style commit subjects must not end with a period.");
+	if (subject.length > 75) throw new Error("Commit subjects must be at most 75 characters.");
+	if (subject.endsWith(".")) throw new Error("Commit subjects must not end with a period.");
 	if (/^\[PATCH/i.test(subject)) throw new Error("Do not store [PATCH] in the commit subject.");
-	if (/^[a-z]+\([^)]+\):/i.test(subject)) throw new Error("Use `subsystem: imperative summary`, not a Conventional Commit type(scope) prefix.");
-	if (!/^[A-Za-z0-9][A-Za-z0-9_.+/-]*: [a-z0-9]/.test(subject)) throw new Error("Use Linux-style `subsystem: imperative summary` subject form.");
+	if (!/^[A-Za-z0-9][A-Za-z0-9_.+/-]*(?:\([A-Za-z0-9][A-Za-z0-9_.+/-]*\))?!?: [a-z0-9]/.test(subject)) throw new Error("Use `subsystem: imperative summary` by default, or repository-required Conventional Commit `type(scope): imperative summary` (optional scope and breaking !).");
 	if (!body) throw new Error("commit_git commit requires a self-contained explanatory body.");
 	if (/^(?:Signed-off-by|Co-developed-by|Co-authored-by|Reviewed-by|Tested-by|Assisted-by):/mi.test(body)) {
 		throw new Error("Attribution and compliance trailers cannot be added automatically by /commit.");
@@ -1097,7 +1096,7 @@ export function registerCommitExtension(pi: ExtensionAPI, options: CommitExtensi
 	pi.registerTool<typeof COMMIT_GIT_PARAMETERS, Record<string, unknown>>({
 		name: COMMIT_GIT_TOOL,
 		label: "Commit Git",
-		description: "Safely inspect the active dirty worktree, page through arbitrarily large status and diff output, stage initially-dirty paths or prefixes, create Linux-style commits, and review commits.",
+		description: "Safely inspect the active dirty worktree, page through arbitrarily large status and diff output, stage initially-dirty paths or prefixes, create and review commits. Linux style is the default; repository-required Conventional Commits are allowed.",
 		parameters: COMMIT_GIT_PARAMETERS,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal) {
@@ -1331,7 +1330,7 @@ export function registerCommitExtension(pi: ExtensionAPI, options: CommitExtensi
 				const committedTree = await runGit(current, ["rev-parse", `${fullHash}^{tree}`], signal);
 				if (committedTree.code !== 0 || committedTree.stdout.trim() !== treeHash) throw new Error("Created commit tree did not match the reviewed index tree.");
 				const committedMessage = await runGit(current, ["show", "--no-show-signature", "-s", "--format=%B", fullHash], signal);
-				if (committedMessage.code !== 0 || committedMessage.stdout.trimEnd() !== `${subject}\n\n${body}`) throw new Error("Created commit message did not match the validated Linux-style message.");
+				if (committedMessage.code !== 0 || committedMessage.stdout.trimEnd() !== `${subject}\n\n${body}`) throw new Error("Created commit message did not match the validated message.");
 				const ancestry = await runGit(current, ["rev-list", "--parents", "-n", "1", fullHash], signal);
 				const expectedAncestry = parent ? `${fullHash} ${parent}` : fullHash;
 				if (ancestry.code !== 0 || ancestry.stdout.trim() !== expectedAncestry) throw new Error("Created commit ancestry did not match the current branch head.");
@@ -1558,7 +1557,7 @@ export function registerCommitExtension(pi: ExtensionAPI, options: CommitExtensi
 	});
 
 	pi.registerCommand("commit", {
-		description: "Create polished, self-contained Linux-style commits from the current dirty worktree.",
+		description: "Create polished, self-contained Linux-style commits by default, or repository-required Conventional Commits, from the current dirty worktree.",
 		handler: async (args, ctx) => {
 			if (invocationOwner || guard || tombstones.size > 0) {
 				const reason = invocationOwner

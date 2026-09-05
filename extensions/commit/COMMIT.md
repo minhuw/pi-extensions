@@ -20,7 +20,7 @@ Before staging anything:
 - Use `commit_git status` to confirm repository state and inspect staged, unstaged, and untracked paths. Its first page contains a complete count summary bound to the current state; follow continuation cursors when more path detail is needed for grouping or final reporting.
 - Locate applicable `AGENTS.md`, `CONTRIBUTING.md`, commit guidance, and other trusted repository instructions only through `commit_list`, then read them through `commit_read`.
 - The extension binds the run to the current symbolic branch and parent commit, and rejects same-OID branch switches as well as every in-progress merge, rebase, cherry-pick, revert, bisect, or unresolved conflict. If repository state later indicates any of these changes, stop and ask the user to resolve it outside `/commit`.
-- Use `commit_git log` to inspect recent subjects and learn subsystem vocabulary and repository terminology. Linux-style message structure remains the default unless explicit repository instructions require another format.
+- Use `commit_git log` to inspect recent subjects and learn subsystem vocabulary and repository terminology. Linux-style message structure remains the default; use Conventional Commits when explicit repository instructions require that format.
 - Before opening file content, classify every dirty path by name, extension, Git status, and file type. Immediately stop on `.env` variants, private-key material, credential stores, service-account files, suspicious symlinks, or another sensitive path. Do not use `read`, `cat`, `grep`, or a full diff to inspect such content.
 - The extension's preflight scanner reports only credential type and path and never forwards matched values. Do not repeat the scan with commands that print matching lines or values.
 - After path screening passes, use `commit_git diff` for staged and unstaged changes and `commit_read` for non-sensitive candidate untracked files. Start with `format: summary` to obtain a scalable exact path/addition/deletion manifest, then use `format: patch` with selected paths or prefixes where semantic inspection is needed. Follow continuation cursors instead of asking for one unbounded response. Do not read ignored files merely to search for more content to commit.
@@ -62,14 +62,14 @@ For each commit, in dependency order:
 1. Use `commit_git stage` with explicit initially-dirty file paths. For very large groups, `pathPrefixes` may select all initially-dirty files below one or more reviewed repository-relative prefixes; the extension expands them to the original dirty inventory. Partial-hunk staging remains unsupported, so if a file mixes inseparable unrelated work, stop rather than editing it.
 2. Call `commit_git status` after the index mutation and consume the pages needed to understand the state. Then review the staged tree with `commit_git diff` using `scope: staged`, `format: summary`, and no path filter, following every continuation cursor through the final page. Use targeted staged `format: patch` calls for files whose semantics are not clear from prior inspection. Run `commit_git check` afterward.
 3. Confirm the reviewed status and exact staged tree contain one logical change, include required tests, and contain no unrelated or sensitive material.
-4. Write a Linux-style subject and explanatory body using the rules below.
+4. Write a Linux-style subject by default, or a repository-required Conventional Commit subject, and an explanatory body using the rules below.
 5. Call `commit_git commit`. It creates a validated commit object, atomically updates the current branch, and rejects empty commits, detached HEAD, configured external signing, pathspec commits, invented attribution trailers, and malformed messages. It does not run hooks.
 6. Use `commit_git show` and `commit_git status` before continuing.
 7. If Git state changes outside `commit_git`, stop and report the state. Do not silently stage follow-up modifications or rewrite prior history.
 
-## Linux Commit Message Style
+## Linux Commit Message Style (Default)
 
-Follow the Linux kernel's permanent-changelog style, adapted to the repository:
+Follow the Linux kernel's permanent-changelog style by default, adapted to the repository:
 
 ```text
 subsystem: imperative summary
@@ -79,14 +79,16 @@ maintenance cost when relevant, then explain the solution and important
 trade-offs in plain language.
 ```
 
-Requirements:
+When explicit repository instructions require Conventional Commits, use that format instead: `fix(parser): reject invalid escapes`. Scoped and unscoped prefixes are accepted, including breaking-change forms such as `feat(parser)!: require explicit options` and `feat!: require explicit options`. Types and scopes use the same identifier characters as Linux subsystems: start with an ASCII letter or digit, followed by ASCII letters, digits, `_`, `.`, `+`, `/`, or `-`.
 
-- Derive `subsystem` from the affected area and repository vocabulary.
-- Use imperative mood: `parser: reject invalid escapes`, not `parser: rejected invalid escapes` or `feat(parser): ...`.
-- Keep the subject concise, specific, without a trailing period, and at or below 75 characters when practical.
+Requirements for either format:
+
+- Derive `subsystem` (or Conventional Commit scope) from the affected area and repository vocabulary.
+- Use imperative mood: `parser: reject invalid escapes`, not `parser: rejected invalid escapes`; use `fix(parser): reject invalid escapes` when required by repository rules. Begin the summary with a lowercase ASCII letter or digit.
+- Keep the subject concise, specific, without a trailing period, and at or below 75 characters.
 - Put a blank line between subject and body.
 - Make the body self-contained. Establish the problem and impact before implementation detail; explain why the change is correct, not merely which files changed.
-- Wrap ordinary body text at about 75 columns. Keep machine-readable trailers on one line.
+- Wrap ordinary body text at or below 75 columns. Verified `Fixes:`, `Closes:`, `Link:`, and standalone HTTP(S) URL lines may exceed that limit.
 - Solve and describe one logical problem per commit.
 - Do not include `[PATCH]` in the stored commit subject; that prefix belongs to patch email transport.
 - Do not copy incidental Conventional Commit prefixes from history unless explicit repository rules require them. Reuse the repository's subsystem names instead.

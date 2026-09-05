@@ -35,7 +35,7 @@ The workflow is commit-only by default. It may reorganize the Git index, but it 
 
 ## Commit message style
 
-Messages follow the Linux kernel's permanent-changelog style:
+Messages follow the Linux kernel's permanent-changelog style by default:
 
 ```text
 subsystem: imperative summary
@@ -44,6 +44,8 @@ Explain the problem and impact before the solution. Keep the message
 self-contained and describe important trade-offs in plain language.
 ```
 
-Subjects are concise and generally no longer than 75 characters. Ordinary body text is wrapped around 75 columns. `[PATCH]` is not stored in the commit subject, and attribution, sign-off, review, testing, or issue trailers are never invented.
+When explicit repository instructions require Conventional Commits, use that format instead: `fix(commit): respect repository message rules`. Scoped and unscoped prefixes are accepted, including breaking-change forms such as `feat(api)!: require explicit options` and `feat!: require explicit options`. Do not infer that requirement from incidental history prefixes.
+
+In either format, subjects use an imperative summary, are at most 75 characters, and have no trailing period. A self-contained explanatory body is required; ordinary body lines must be at most 75 characters. `[PATCH]` is not stored in the commit subject, and attribution, sign-off, review, testing, or issue trailers are never invented.
 
 Reference: [Linux kernel patch submission guidance](https://docs.kernel.org/process/submitting-patches.html).

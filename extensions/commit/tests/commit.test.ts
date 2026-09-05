@@ -913,6 +913,102 @@ test("structured commit_git operations honor trusted clean filters", async () =>
 	}
 });
 
+test("structured commit_git accepts repository-required Conventional Commits", async (t) => {
+	for (const subject of [
+		"fix(commit): respect repository message rules",
+		"feat(api.v2/internal_1+-)!: require explicit options",
+		"feat!: require explicit options",
+	]) {
+		await t.test(subject, async () => {
+			const root = await mkdtemp(path.join(os.tmpdir(), "commit-conventional-"));
+			const handlers = new Map<string, EventHandler>();
+			try {
+				git(root, ["init", "-q"]);
+				git(root, ["config", "user.name", "Commit Test"]);
+				git(root, ["config", "user.email", "commit-test@example.invalid"]);
+				const guidance = subject.includes("(") ? "Use Conventional Commits with a scope.\n" : "Use Conventional Commits.\n";
+				await writeFile(path.join(root, "AGENTS.md"), guidance);
+				await writeFile(path.join(root, "value.txt"), "one\n");
+				git(root, ["add", "--", "AGENTS.md", "value.txt"]);
+				git(root, ["commit", "-q", "-m", "test(commit): establish baseline"]);
+				const baseline = git(root, ["rev-parse", "HEAD"]);
+				await writeFile(path.join(root, "value.txt"), "two\n");
+				await writeFile(path.join(root, "leftover.txt"), "leave untracked\n");
+				const paths = ["AGENTS.md", "value.txt", "leftover.txt"];
+				const beforeBytes = await Promise.all(paths.map((file) => readFile(path.join(root, file))));
+				let registered: RegisteredCommand | undefined;
+				let gitTool: RegisteredTool | undefined;
+				let readTool: RegisteredTool | undefined;
+				let dispatched = "";
+				const pi = piFor({
+					exec: localExec,
+					onUserMessage: (message) => { dispatched = message; },
+					onCommand: (_name, command) => { registered = command; },
+					onTool: (tool) => {
+						if (tool.name === COMMIT_GIT_TOOL) gitTool = tool;
+						if (tool.name === COMMIT_READ_TOOL) readTool = tool;
+					},
+					onHandler: (event, handler) => { handlers.set(event, handler); },
+				});
+				registerCommitExtension(pi);
+				handlers.get("session_start")!();
+				const ctx = context({ cwd: root });
+				await registered!.handler("", ctx);
+				handlers.get("input")!({ source: "extension", text: dispatched });
+				await handlers.get("before_agent_start")!({ systemPrompt: "base", prompt: dispatched });
+				const instructions = await readTool!.execute("guidance", { path: "AGENTS.md" }, undefined, undefined, ctx);
+				assert.equal(instructions.content[0].text, guidance);
+				await gitTool!.execute("stage", { operation: "stage", paths: ["value.txt"] }, undefined, undefined, ctx);
+				await gitTool!.execute("status", { operation: "status" }, undefined, undefined, ctx);
+				await gitTool!.execute("diff", { operation: "diff", scope: "staged" }, undefined, undefined, ctx);
+				await gitTool!.execute("check", { operation: "check" }, undefined, undefined, ctx);
+				const body = subject.includes("!")
+					? "Avoid hidden defaults by requiring explicit options from callers.\n\nBREAKING CHANGE: Callers must now supply options."
+					: "Repository rules require scoped Conventional Commit subjects.\nAccept that format without changing working-tree content.";
+
+				if (!subject.includes("!")) {
+					const indexBefore = await readFile(path.join(root, ".git", "index"));
+					const invalidMessages = [
+						{ subject: "", body, error: /one-line subject/ },
+						{ subject: `${subject}\nextra line`, body, error: /one-line subject/ },
+						{ subject: `fix(commit): ${"x".repeat(63)}`, body, error: /at most 75 characters/ },
+						{ subject: `${subject}.`, body, error: /must not end with a period/ },
+						{ subject: `[PATCH] ${subject}`, body, error: /Do not store \[PATCH\]/ },
+						...["fix(): reject empty scope", "fix(_commit): reject leading punctuation",
+							"fix(bad scope): reject spaces", "fix(api@v2): reject punctuation",
+							"fix((commit)): reject nesting", "fix(commit)!!: reject duplicate marker",
+							"fix!(commit): reject misplaced marker", "fix(commit): Reject capitals",
+							"fix(commit):missing space", "missing prefix"].map((subject) => ({ subject, body, error: /imperative summary/ })),
+						{ subject, body: "", error: /self-contained explanatory body/ },
+						{ subject, body: "x".repeat(76), error: /body line exceeds 75 characters/ },
+						...["Signed-off-by", "Co-developed-by", "Co-authored-by", "Reviewed-by", "Tested-by", "Assisted-by"].map((trailer) => ({
+							subject, body: `${body}\n\n${trailer}: Commit Test <commit-test@example.invalid>`, error: /trailers cannot be added automatically/,
+						})),
+					];
+					for (const invalid of invalidMessages) {
+						await assert.rejects(() => gitTool!.execute("invalid-message", {
+							operation: "commit", subject: invalid.subject, body: invalid.body,
+						}, undefined, undefined, ctx), invalid.error);
+					}
+					assert.equal(git(root, ["rev-parse", "HEAD"]), baseline);
+					assert.deepEqual(await readFile(path.join(root, ".git", "index")), indexBefore);
+					assert.deepEqual(await Promise.all(paths.map((file) => readFile(path.join(root, file)))), beforeBytes);
+				}
+
+				const committed = await gitTool!.execute("commit", { operation: "commit", subject, body }, undefined, undefined, ctx);
+				assert.match(committed.content[0].text, /Created [0-9a-f]{12}/);
+				assert.equal(git(root, ["log", "-1", "--format=format:%B"]), `${subject}\n\n${body}\n`);
+				assert.equal(git(root, ["show", "HEAD:value.txt"]), "two\n");
+				assert.equal(git(root, ["status", "--porcelain"]), "?? leftover.txt\n");
+				assert.deepEqual(await Promise.all(paths.map((file) => readFile(path.join(root, file)))), beforeBytes);
+			} finally {
+				handlers.get("agent_settled")?.();
+				await rm(root, { recursive: true, force: true });
+			}
+		});
+	}
+});
+
 test("structured tools support unstaging and committing an unborn branch", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "commit-unborn-branch-"));
 	try {
