@@ -53,6 +53,7 @@ import {
 	attentionMessageDetails,
 	attentionResolutionFromRequest,
 	buildAttentionPrompt,
+	confirmPlanAcceptance,
 } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
@@ -1479,14 +1480,26 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		assertMutationAllowed: () => {
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
 		},
-		bindAttention: (input) => {
+		bindAttention: async (input, ctx) => {
+			const epoch = sessionEpoch;
 			const request = currentAttention;
 			if (!request || request.state === "resolved") throw new Error("No unresolved Herder attention request is bound to this Pi session.");
 			assertOwnership(input.planDirectory, request.runId);
 			if (input.requestId !== request.requestId) {
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
-			return attentionResolutionFromRequest(request);
+			const binding = attentionResolutionFromRequest(request);
+			if (input.action?.trim().toLowerCase() === "accept") {
+				await confirmPlanAcceptance(request, input, ctx);
+				assertSessionActive(epoch);
+				assertOwnership(input.planDirectory, request.runId);
+				if (currentAttention?.requestId !== request.requestId
+					|| currentAttention.requestSha256 !== request.requestSha256 || currentAttention.state === "resolved") {
+					throw new Error("The attention request changed during confirmation; review its current evidence before accepting.");
+				}
+				return { ...binding, confirmed: true };
+			}
+			return binding;
 		},
 		beforePlanOperation: async (operation, params, ctx) => {
 			if (operation !== "finish_edit" && operation !== "cancel_edit") return;

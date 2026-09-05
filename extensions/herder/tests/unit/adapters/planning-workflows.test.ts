@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Check } from "typebox/value";
 import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "../../../adapters/run-guidance.ts";
@@ -13,6 +13,7 @@ import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
 import {
 	attentionResolutionFromRequest,
 	buildAttentionPrompt,
+	confirmPlanAcceptance,
 } from "../../../adapters/attention.ts";
 import {
 	buildPlanningSkillPrompt,
@@ -154,7 +155,7 @@ test("typed attention prompts preserve request bindings and route each variant",
 	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
 });
 
-test("adapter binds complete attention evidence, including recovery Git identity", () => {
+test("adapter binds complete attention evidence, including recovery Git identity", async () => {
 	const base = {
 		requestId: "request-001",
 		runId: "run-001",
@@ -218,11 +219,8 @@ test("adapter binds complete attention evidence, including recovery Git identity
 		worktreeTree: "4".repeat(40),
 		changedPaths: ["src/value.mjs"],
 	};
-	const recoveryBinding = attentionResolutionFromRequest({
-		...base,
-		kind: "plan_recovery",
-		recovery,
-	} as ManagerAttentionRequest);
+	const recoveryRequest = { ...base, schemaVersion: 1 as const, kind: "plan_recovery" as const, recovery };
+	const recoveryBinding = attentionResolutionFromRequest(recoveryRequest);
 	assert.deepEqual(recoveryBinding, {
 		...expectedBinding,
 		git: {
@@ -237,6 +235,41 @@ test("adapter binds complete attention evidence, including recovery Git identity
 		},
 	});
 	validateAttentionResolution({ ...recoveryBinding, action: "defer" });
+
+	const exhausted = { ...recoveryRequest, round: 3 };
+	const choice = { answer: "Accept the missing optional export; retain its failed check.", rationale: "The user accepts the reduced scope." };
+	const confirmations: string[] = [];
+	const ctx = { hasUI: true, ui: { confirm: async (_title: string, text: string) => { confirmations.push(text); return true; } } } as Pick<ExtensionContext, "hasUI" | "ui">;
+	await confirmPlanAcceptance(exhausted, choice, ctx);
+	assert.equal(confirmations.length, 1);
+	assert.match(confirmations[0]!, /Generation 1, round 3/);
+	assert.ok(confirmations[0]!.includes(recovery.worktreeHead));
+	assert.ok(confirmations[0]!.includes(recovery.worktreeTree));
+	assert.ok(confirmations[0]!.includes(choice.answer));
+	assert.match(confirmations[0]!, /Failed checks remain recorded as failed/);
+	await assert.rejects(confirmPlanAcceptance(exhausted, choice, { ...ctx, hasUI: false }), /interactive user confirmation/);
+	await assert.rejects(confirmPlanAcceptance(exhausted, { ...choice, answer: " " }, ctx), /explicit accepted gaps/);
+	await assert.rejects(confirmPlanAcceptance(exhausted, { ...choice, rationale: " " }, ctx), /non-empty rationale/);
+	await assert.rejects(confirmPlanAcceptance(recoveryRequest, choice, ctx), /exhausted-plan recovery/);
+	await assert.rejects(confirmPlanAcceptance({ ...exhausted, state: "resolved" }, choice, ctx), /unresolved/);
+	assert.equal(confirmations.length, 1, "invalid requests never prompt for confirmation");
+	await assert.rejects(confirmPlanAcceptance(exhausted, choice, {
+		...ctx, ui: { ...ctx.ui, confirm: async () => false },
+	}), /Acceptance declined/);
+
+	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
+	const prompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", exhausted);
+	assert.match(prompt, /ALLOWED_OPERATIONS: defer, accept, revise, stop/);
+	assert.match(prompt, /implemented work, unmet requirements and impact, passed\/failed checks/);
+	assert.ok(prompt.includes(recovery.worktreeHead));
+	assert.ok(prompt.includes(recovery.worktreeTree));
+	assert.match(prompt, /Never submit a confirmed flag yourself/);
+	assert.match(prompt, /artifacts are preserved/);
+	assert.match(prompt, /history, not as authority/);
+	assert.match(prompt, /runtime block's `ALLOWED_OPERATIONS` is authoritative/);
+	assert.match(prompt, /Never translate this choice into `reject` or `cancel`/);
+	assert.doesNotMatch(prompt, /one allowed action \(`defer`, `unchanged_retry`, `revise`, or `reject`\)/);
+	assert.doesNotMatch(prompt, /submit action "unchanged_retry"|submit action "reject"/);
 });
 
 test("attention tool inputs round-trip with the fixed resolution schema", () => {
@@ -282,6 +315,7 @@ test("attention schema is minimal and normalizes legacy stored calls", () => {
 	};
 	assert.equal(Check(tool.parameters as never, minimal), true);
 	assert.equal(Check(tool.parameters as never, { ...minimal, requestSha256: "a".repeat(64) }), false);
+	assert.equal(Check(tool.parameters as never, { ...minimal, confirmed: true }), false);
 	const prepared = tool.prepareArguments!({
 		...minimal,
 		planId: "caller-controlled-plan",
@@ -291,6 +325,7 @@ test("attention schema is minimal and normalizes legacy stored calls", () => {
 		runId: "caller-controlled-run",
 		generation: 99,
 		round: 6,
+		confirmed: true,
 		continuation: { role: "plan-judge", phase: "JUDGING" },
 		git: { branch: "caller-controlled-branch" },
 	}) as Record<string, unknown>;
@@ -355,8 +390,12 @@ test("attention authorization runs before the deterministic manager mutation", a
 	try {
 		registerPiPlanningWorkflows(pi, root, async () => path.dirname(root), {
 			assertMutationAllowed: () => {},
-			bindAttention: () => {
+			bindAttention: async (input, ctx) => {
+				await Promise.resolve();
 				authorizationChecks += 1;
+				assert.equal(input.action, "defer");
+				assert.equal("confirmed" in input, false);
+				assert.equal(ctx.isProjectTrusted(), true);
 				throw new Error("This Pi session does not own the attention request.");
 			},
 		});
@@ -369,6 +408,7 @@ test("attention authorization runs before the deterministic manager mutation", a
 				planDirectory: root,
 				requestId: "request-001",
 				action: "defer",
+				confirmed: true,
 			},
 			undefined,
 			undefined,

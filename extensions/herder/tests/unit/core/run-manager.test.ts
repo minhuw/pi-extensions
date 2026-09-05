@@ -332,7 +332,7 @@ async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService
 		mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 	})).reply);
 	let implementer = payload((started.actions as unknown[])[0]);
-	for (let round = 1; round <= 3; round += 1) {
+	for (let round = 1; round <= 2; round += 1) {
 		const hostHandle = `${prefix}-implementer-${round}`;
 		await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-dispatch-implementer-${round}`,
@@ -361,7 +361,7 @@ async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService
 			kind: "terminals",
 			terminals: [{ actionId: reviewer.actionId, hostHandle: reviewerHost, response: reviewerBlockEnvelope(round) }],
 		})).reply);
-		if (round === 3) return payload((afterReviewer.actions as unknown[])[0]);
+		if (round === 2) return payload((afterReviewer.actions as unknown[])[0]);
 		implementer = payload((afterReviewer.actions as unknown[])[0]);
 	}
 	throw new Error("Atomic Judge was not scheduled");
@@ -3675,7 +3675,7 @@ test("awaiting repair successor resumes the persisted manifest", { timeout: 60_0
 		service = await ensureService(fixture.planDirectory);
 		const migrated = new RunStore(fixture.planDirectory);
 		try {
-			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 18);
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 19);
 			const verification = migrated.getVerificationByRequestId("migrated-awaiting-successor-request")!;
 			assert.equal(verification.state, "awaiting_manifest");
 			assert.equal(verification.manifest, null);

@@ -22,6 +22,7 @@ import {
 	validateAttentionRequest,
 	type AttentionRequest,
 	type AttentionRequestInput,
+	type AttentionResolutionInput,
 	type AttentionState,
 	type ManagerAction,
 	type ManagerAttentionRequest,
@@ -156,7 +157,8 @@ export interface StoredApproval {
 	round: number;
 	reviewerActionId: string;
 	decisionActionId: string;
-	decisionRole: "plan-reviewer" | "plan-judge";
+	decisionRole: "plan-reviewer" | "plan-judge" | "user";
+	userAcceptance?: AttentionResolutionInput;
 	assignmentSha256: string;
 	approvedBase: string;
 	approvedHead: string;
@@ -542,6 +544,7 @@ export function readManagerState(planDir: string) {
         reviewerActionId: approval.reviewer_action_id,
         decisionActionId: approval.decision_action_id,
         decisionRole: approval.decision_role,
+        ...(approval.user_acceptance_json == null ? {} : { userAcceptance: JSON.parse(approval.user_acceptance_json) as AttentionResolutionInput }),
         assignmentSha256: approval.assignment_sha256,
         approvedBase: approval.approved_base,
         approvedHead: approval.approved_head,
@@ -777,6 +780,7 @@ function rowToApproval(row: Record<string, unknown>): StoredApproval {
 		reviewerActionId: String(row.reviewer_action_id),
 		decisionActionId: String(row.decision_action_id),
 		decisionRole: row.decision_role as StoredApproval["decisionRole"],
+		...(row.user_acceptance_json == null ? {} : { userAcceptance: JSON.parse(String(row.user_acceptance_json)) as AttentionResolutionInput }),
 		assignmentSha256: String(row.assignment_sha256),
 		approvedBase: String(row.approved_base),
 		approvedHead: String(row.approved_head),
@@ -2315,7 +2319,8 @@ export class RunStore {
 		const existing = this.getApproval(input.runId, input.planId, input.generation);
 		if (existing) {
 			const expected = { ...input, createdAt: existing.createdAt };
-			if (JSON.stringify(existing) !== JSON.stringify(expected)) throw new Error(`Approval proof changed for ${input.planId} generation ${input.generation}`);
+			if (expected.userAcceptance === undefined) delete expected.userAcceptance;
+			if (stableJson(existing) !== stableJson(expected)) throw new Error(`Approval proof changed for ${input.planId} generation ${input.generation}`);
 			return existing;
 		}
 		this.database.prepare(`
@@ -2323,13 +2328,13 @@ export class RunStore {
 				run_id, plan_id, generation, round_number, reviewer_action_id,
 				decision_action_id, decision_role, assignment_sha256, approved_base,
 				approved_head, approved_tree, review_result_sha256,
-				decision_result_sha256, proof_sha256, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				decision_result_sha256, proof_sha256, user_acceptance_json, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			input.runId, input.planId, input.generation, input.round, input.reviewerActionId,
 			input.decisionActionId, input.decisionRole, input.assignmentSha256, input.approvedBase,
 			input.approvedHead, input.approvedTree, input.reviewResultSha256,
-			input.decisionResultSha256, input.proofSha256, new Date().toISOString(),
+			input.decisionResultSha256, input.proofSha256, input.userAcceptance === undefined ? null : JSON.stringify(input.userAcceptance), new Date().toISOString(),
 		);
 		return this.getApproval(input.runId, input.planId, input.generation)!;
 	}

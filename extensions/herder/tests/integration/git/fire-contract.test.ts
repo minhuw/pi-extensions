@@ -19,11 +19,16 @@ const root = await mkdtemp(path.join(tmpdir(), "herder-fire-test-"));
 test("Fire policy and gate execution remain isolated and fail-closed", async () => {
 try {
   assert.equal(decideReview({ round: 1, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }).action, "READY_TO_INTEGRATE");
-  assert.equal(decideReview({ round: 2, verdict: "REVISE", scope: "PASS", openBlockers: 1 }).action, "REPAIR_DIRECT");
-  assert.equal(decideReview({ round: 3, verdict: "REVISE", scope: "PASS", openBlockers: 1 }).action, "JUDGE");
-  assert.equal(decideJudge({ round: 3, decision: "REPAIR" }).nextRound, 4);
-  assert.equal(decideJudge({ round: 6, decision: "REPAIR" }).action, "BLOCKED_ROUND_LIMIT");
-  assert.throws(() => decideJudge({ round: 2, decision: "DONE" }), /between 3 and 6/);
+  assert.equal(decideReview({ round: 1, verdict: "REVISE", scope: "PASS", openBlockers: 0 }).nextRound, 2);
+  assert.equal(decideReview({ round: 2, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }).action, "READY_TO_INTEGRATE");
+  for (const verdict of ["REVISE", "BLOCK"] as const) {
+    assert.equal(decideReview({ round: 2, verdict, scope: "PASS", openBlockers: 1 }).action, "JUDGE");
+    assert.equal(decideReview({ round: 3, verdict, scope: "PASS", openBlockers: 1 }).action, "BLOCKED_ROUND_LIMIT");
+  }
+  assert.equal(decideJudge({ round: 2, decision: "REPAIR" }).nextRound, 3);
+  assert.equal(decideJudge({ round: 2, decision: "DONE" }).action, "READY_TO_INTEGRATE");
+  assert.throws(() => decideJudge({ round: 3, decision: "DONE" }), /between 2 and 2/);
+  assert.throws(() => decideReview({ round: 4, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }), /between 1 and 3/);
 
   for (const roleFile of ["plan-implementer.md", "plan-reviewer.md", "plan-judge.md"]) {
     const role = await readFile(path.join(pluginRoot, "assets", "roles", "contracts", roleFile), "utf8");
@@ -42,7 +47,7 @@ try {
   assert.match(reviewProtocol, /exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk\/commit/);
   assert.match(reviewProtocol, /Confirmed P2\/P3 findings remain advisory/);
   assert.match(reviewProtocol, /`FOLLOWUP` and `INVALID` never block/);
-  assert.match(reviewProtocol, /six-round authority rules/);
+  assert.match(reviewProtocol, /three-round authority rules/);
   assert.match(reviewProtocol, /For later review passes, do not reopen broad discovery/);
   assert.doesNotMatch(reviewProtocol, /CONFIDENCE:|confidence at least 80|four fresh `recon` children/);
   const reviewer = await readFile(path.join(pluginRoot, "assets", "roles", "contracts", "plan-reviewer.md"), "utf8");

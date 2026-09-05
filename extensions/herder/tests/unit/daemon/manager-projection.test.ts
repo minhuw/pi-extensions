@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { executionDatabasePath, openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
+import { EXECUTION_SCHEMA_VERSION, executionDatabasePath, openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
 import { readManagerState } from "../../../src/daemon/run-store.ts";
 import { attentionRequestSha256, sha256 } from "../../../src/shared/protocol.ts";
 
@@ -428,7 +428,7 @@ test("manager projection includes repair episode and transient retry state", () 
 	});
 });
 
-test("schema 18 manager projection tolerates missing optional repair columns and tables", () => {
+test("current-schema manager projection tolerates missing optional repair columns and tables", () => {
 	withPlanDirectory("herder-manager-projection-optional-", (planDirectory) => {
 		const seeded = openExecutionDatabase(planDirectory, { create: true });
 		seedRun(seeded);
@@ -491,7 +491,7 @@ test("schema 18 manager projection tolerates missing optional repair columns and
 			ALTER TABLE manager_integration_repairs_reduced RENAME TO manager_integration_repairs;
 			CREATE UNIQUE INDEX manager_integration_repairs_run_request ON manager_integration_repairs(run_id, request_id);
 			CREATE INDEX manager_integration_repairs_run_state ON manager_integration_repairs(run_id, state, generation, round_number);
-			PRAGMA user_version = 18;
+			PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION};
 		`);
 		database.close();
 
@@ -533,7 +533,7 @@ test("schema 18 manager projection tolerates missing optional repair columns and
 		const versionCheck = new DatabaseSync(executionDatabasePath(planDirectory), { readOnly: true });
 		try {
 			const version = versionCheck.prepare("PRAGMA user_version").get() as { user_version: number };
-			assert.equal(Number(version.user_version), 18);
+			assert.equal(Number(version.user_version), EXECUTION_SCHEMA_VERSION);
 		} finally {
 			versionCheck.close();
 		}

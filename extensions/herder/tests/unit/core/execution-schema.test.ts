@@ -20,6 +20,8 @@ import {
 } from "../../../src/daemon/execution-store.ts";
 import { readManagerState } from "../../../src/daemon/run-store.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
+import { buildCompletionProofPayload } from "../../../src/daemon/git/completion-proof.ts";
+import { attentionCapabilityToken, attentionRequestSha256, parseWorkerResult, sha256, stableJson, type AttentionResolutionInput, type ManagerAction } from "../../../src/shared/protocol.ts";
 
 function seedManagerRun(
 	database: NonNullable<ReturnType<typeof openExecutionDatabase>>,
@@ -117,8 +119,8 @@ test("legacy plan gate commands are unread and cleared on write", () => {
 	}
 });
 
-test("unsupported pre-18 execution schemas fail closed without mutation", () => {
-	for (const version of [6, 13, 17]) {
+test("unsupported pre-19 execution schemas fail closed without mutation", () => {
+	for (const version of [6, 13, 17, 18]) {
 		const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `herder-execution-schema-unsupported-${version}-`));
 		try {
 			const seeded = openExecutionDatabase(planDirectory, { create: true });
@@ -145,7 +147,7 @@ test("unsupported pre-18 execution schemas fail closed without mutation", () => 
 	}
 });
 
-test("fresh execution schema retains the canonical schema-18 fingerprint", () => {
+test("fresh execution schema retains the canonical schema-19 fingerprint", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-fingerprint-"));
 	try {
 		const database = openExecutionDatabase(planDirectory, { create: true });
@@ -166,9 +168,9 @@ test("fresh execution schema retains the canonical schema-18 fingerprint", () =>
 		const fingerprint = createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex");
 		database.close();
 
-		assert.equal(version, 18);
+		assert.equal(version, 19);
 		assert.equal(objects.length, 36);
-		assert.equal(fingerprint, "33b038b8d3860296598e35e7c3cb15319eddff6622fb884ff1e07e76645864ab");
+		assert.equal(fingerprint, "ed70c843910bddf379984f9082395caa0d6f3977113567612779dd1269935c48");
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
@@ -584,6 +586,90 @@ test("database replacement during exposure repair is revalidated and privately r
 		fs.rmSync(templatePath, { force: true });
 	} finally {
 		fs.fchmodSync = originalFchmod;
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+
+test("ordinary SQL rounds stop at three and user approval evidence survives replay and reopening", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-approval-store-"));
+	const store = new RunStore(planDirectory);
+	try {
+		seedManagerRun(store.database, "run-approval");
+		const action: ManagerAction = {
+			actionId: "reviewer-3", attemptId: "attempt-3", runId: "run-approval", planId: "001", generation: 1, round: 3,
+			role: "plan-reviewer", agentType: "reviewer", model: "model", effort: "high", workerMode: "VERIFICATION",
+			taskName: "Review", worktree: "/tmp/worktree", branch: "herder/plan/001", assignmentPath: "/tmp/assignment.json",
+			assignmentSha256: "a".repeat(64), leaseReason: "review frozen tree", prompt: "Review independently",
+		};
+		store.putPlan({
+			...action, phase: "NEEDS_INPUT", snapshotSha256: "b".repeat(64), generationBase: "c".repeat(40),
+			reviewPass: 1, findings: [], repair: [], gates: [], approvedBase: null, approvedHead: null, approvedTree: null, rebase: null,
+		});
+		store.putAction(action);
+		store.markDispatched(action.actionId, "review-host");
+		const review = parseWorkerResult("plan-reviewer", "VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: optional check missing");
+		store.markTerminal(action.actionId, review);
+		const acceptance: AttentionResolutionInput = {
+			schemaVersion: 1, requestId: "accept-3", requestSha256: "d".repeat(64), capabilityToken: attentionCapabilityToken("accept-3"),
+			runId: action.runId, planId: action.planId, generation: 1, round: 3, action: "accept", confirmed: true,
+			answer: "Waive the missing optional check.", rationale: "The independently reviewed tree is sufficient.",
+			git: {
+				assignmentPath: action.assignmentPath, assignmentSha256: action.assignmentSha256, snapshotSha256: "b".repeat(64),
+				generationBase: "c".repeat(40), branch: action.branch, worktree: action.worktree,
+				worktreeHead: "e".repeat(40), worktreeTree: "f".repeat(40),
+			},
+		};
+		const proof = buildCompletionProofPayload({
+			runId: action.runId, planId: action.planId, generation: 1, round: 3,
+			reviewerActionId: action.actionId, decisionActionId: action.actionId, decisionRole: "user", userAcceptance: acceptance,
+			assignmentSha256: action.assignmentSha256, approvedBase: acceptance.git!.generationBase,
+			approvedHead: acceptance.git!.worktreeHead!, approvedTree: acceptance.git!.worktreeTree!,
+			reviewResultSha256: sha256(stableJson(review)), decisionResultSha256: sha256(stableJson(acceptance)), integratedHead: "e".repeat(40),
+		});
+		const { schemaVersion, integratedHead, approvalProofSha256, ...core } = proof;
+		const input = { ...core, proofSha256: approvalProofSha256 };
+		const stored = store.putApproval(input);
+		assert.deepEqual(stored.userAcceptance, acceptance);
+		assert.deepEqual(store.putApproval({ ...input, userAcceptance: { ...acceptance, git: { ...acceptance.git! } } }), stored);
+		assert.throws(() => store.putApproval({ ...input, userAcceptance: { ...acceptance, answer: "Waive all requirements." } }), /Approval proof changed/);
+		assert.deepEqual(readManagerState(planDirectory).approvals[0]?.userAcceptance, acceptance);
+		assert.deepEqual(store.getAction(action.actionId)?.result, review, "user acceptance must not fabricate a worker approval");
+		const reopened = new RunStore(planDirectory, { readOnly: true });
+		try { assert.deepEqual(reopened.getApproval(action.runId, action.planId, 1), stored); } finally { reopened.close(); }
+		for (const sql of [
+			"UPDATE manager_approvals SET user_acceptance_json = NULL",
+			"UPDATE manager_approvals SET decision_role = 'plan-reviewer'",
+		]) assert.throws(() => store.database.exec(sql), /CHECK constraint failed/);
+		assert.throws(() => store.database.exec("UPDATE manager_approvals SET decision_action_id = 'fabricated-user-action'"), /FOREIGN KEY constraint failed/);
+		store.recordUsage({ attempt: action.attemptId, plan: action.planId, role: action.role, model: action.model, effort: action.effort, outcome: "REVISE", source: "test", round: 3 });
+		assert.throws(() => store.recordUsage({ attempt: "attempt-4", plan: "001", role: action.role, model: "model", effort: "high", outcome: "REVISE", source: "test", round: 4 }), /Round must be an integer from 1 through 3/);
+		const attention = {
+			schemaVersion: 1 as const, requestId: "attention-3", runId: action.runId, planId: action.planId, generation: 1, round: 3,
+			actionId: action.actionId, kind: "operator_attention" as const, state: "pending" as const, cause: "round_limit" as const,
+			detail: "Round limit", detailSha256: sha256("Round limit"), continuation: { role: action.role, phase: "NEEDS_INPUT" as const },
+			createdAt: "2026-08-13T00:00:00.000Z", updatedAt: "2026-08-13T00:00:00.000Z",
+		};
+		store.putAttention({ ...attention, requestSha256: attentionRequestSha256(attention) });
+		for (const table of ["attempts", "manager_plans", "manager_actions", "manager_approvals", "manager_attention_requests"]) {
+			for (const round of [0, 4, 6]) assert.throws(() => store.database.exec(`UPDATE ${table} SET round_number = ${round}`), /CHECK constraint failed.*round_number/);
+			assert.equal((store.database.prepare(`SELECT round_number FROM ${table}`).get() as { round_number: number }).round_number, 3);
+		}
+		store.database.exec("UPDATE manager_approvals SET decision_role = 'plan-reviewer', user_acceptance_json = NULL");
+		assert.equal(Object.hasOwn(store.getApproval(action.runId, action.planId, 1)!, "userAcceptance"), false);
+		assert.equal(Object.hasOwn(readManagerState(planDirectory).approvals[0]!, "userAcceptance"), false);
+		const { createdAt, ...ordinary } = store.getApproval(action.runId, action.planId, 1)!;
+		assert.doesNotThrow(() => store.putApproval({ ...ordinary, userAcceptance: undefined }));
+
+		const judgeAction = { ...action, actionId: "judge-2", attemptId: "judge-attempt", role: "plan-judge" as const, round: 2, workerMode: "ADJUDICATE" as const };
+		store.putAction(judgeAction);
+		store.markDispatched(judgeAction.actionId, "judge-host");
+		const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: Fix F001\nPASS_DOCUMENT: Preserve the API and repair F001.");
+		store.markTerminal(judgeAction.actionId, judge);
+		store.markTerminal(judgeAction.actionId, { ...judge, passDocument: "Changed" });
+		assert.deepEqual(store.getAction(judgeAction.actionId)?.result, judge, "terminal pass document is immutable");
+	} finally {
+		store.close();
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });

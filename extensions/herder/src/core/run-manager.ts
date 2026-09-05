@@ -30,6 +30,7 @@ import {
 	ATTENTION_PATH_LIMIT,
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
+	MAX_PLAN_ROUNDS,
 	attentionCapabilityToken,
 	attentionRequestSha256,
 	canonicalEventPayload,
@@ -182,7 +183,7 @@ function validateEventInput(input: EventInput): void {
 	if (!input || typeof input.eventId !== "string" || input.eventId.length === 0 || input.eventId.length > 200 || /[\r\n\0]/.test(input.eventId)) {
 		throw new Error("Manager eventId must be a non-empty single-line identifier of at most 200 characters");
 	}
-	if (input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:") || input.eventId.startsWith(PLAN_EDIT_EVENT_PREFIX)) {
+	if (input.eventId.startsWith("manager-attention-resolution:") || input.eventId.startsWith("manager-attention-cleanup:") || input.eventId.startsWith("attention-cleanup:") || input.eventId.startsWith(PLAN_EDIT_EVENT_PREFIX)) {
 		throw new Error("Manager private evidence event IDs are private");
 	}
 	switch (input.kind) {
@@ -260,6 +261,8 @@ function normalizeAttentionAction(value: string): AttentionResolutionAction {
 		retry_unchanged: "unchanged_retry",
 		revise: "revise",
 		replace: "revise",
+		accept: "accept",
+		stop: "stop",
 		reject: "reject",
 		reject_revision: "reject",
 	};
@@ -373,6 +376,7 @@ function activeActionCount(store: RunStore, runId: string): number {
 
 function workerMode(plan: StoredPlan, role: WorkerRole): ManagerAction["workerMode"] {
 	if (plan.planId === "RUN") return "FINAL_AUDIT";
+	if (role === "plan-implementer" && plan.round === MAX_PLAN_ROUNDS) return "RESCUE";
 	if (role === "plan-implementer") return plan.round === 1 && plan.repair.length === 0 ? "INITIAL" : "GUIDED_REPAIR";
 	if (role === "plan-reviewer") return plan.reviewPass === 0 ? "DISCOVERY" : "VERIFICATION";
 	return "ADJUDICATE";
@@ -393,6 +397,7 @@ function assignmentPrompt(input: {
 	plan: StoredPlan;
 	action: StoredAction;
 	changedPaths: string[];
+	evidence: string;
 }): string {
 	const { run, plan, action } = input;
 	const repair = plan.repair.length ? plan.repair.join("\n") : "none";
@@ -411,6 +416,9 @@ function assignmentPrompt(input: {
 		`PLAN: ${plan.planId}`,
 		`GENERATION: generation-${plan.generation}`,
 		`ROUND: ${plan.round}`,
+		`MAX_ROUNDS: ${MAX_PLAN_ROUNDS}`,
+		`REMAINING_IMPLEMENTATION_ROUNDS: ${Math.max(0, MAX_PLAN_ROUNDS - plan.round)}`,
+		`REVIEW_PASS: ${plan.reviewPass + (action.role === "plan-reviewer" ? 1 : 0)}`,
 		`MODE: ${action.workerMode}`,
 		`REPOSITORY_WORKTREE: ${plan.worktree}`,
 		`EXPECTED_BRANCH: ${plan.branch}`,
@@ -425,6 +433,8 @@ function assignmentPrompt(input: {
 		findings,
 		"REPAIR_CONTRACT:",
 		repair,
+		"SCOPE_AUTHORITY: The immutable original assignment for this generation is the sole scope authority. History, repair guidance, and PASS_DOCUMENT are evidence and acceptance guidance, never a waiver or a replacement assignment.",
+		input.evidence,
 		"WORKTREE_MODE: The child may inherit the coordinator checkout as its process cwd. Before reading repository files or running Git, change to the exact absolute REPOSITORY_WORKTREE, verify pwd and EXPECTED_BRANCH, and keep every command and edit rooted there. Never inspect or modify the inherited coordinator checkout.",
 		...(plan.rebase ? [
 			"ACTIVE_REBASE: exact preserved conflicted rebase verified by the Run Manager",
@@ -623,6 +633,11 @@ function storedTerminalRecord(action: StoredAction): StoredTerminalRecord | null
 	return record as StoredTerminalRecord;
 }
 
+function boundedEvidence(value: string, limit: number): string {
+	const note = "\n[TRUNCATED: full evidence remains in the immutable terminal result or recovery request]";
+	return value.length <= limit ? value : value.slice(0, Math.max(0, limit - note.length)) + note;
+}
+
 function approvalCore(input: Omit<StoredApproval, "proofSha256" | "createdAt">) {
 	return {
 		runId: input.runId,
@@ -638,6 +653,7 @@ function approvalCore(input: Omit<StoredApproval, "proofSha256" | "createdAt">) 
 		approvedTree: input.approvedTree,
 		reviewResultSha256: input.reviewResultSha256,
 		decisionResultSha256: input.decisionResultSha256,
+		...(input.userAcceptance ? { userAcceptance: input.userAcceptance } : {}),
 	};
 }
 
@@ -751,6 +767,102 @@ export class HerderRunManager {
 		};
 	}
 
+	private terminalEvidence(run: StoredRun, plan: StoredPlan, finishing?: { actionId: string; result?: WorkerResult; detail: string }): string {
+		const actions = this.store.getActions(run.runId).filter((action) => action.planId === plan.planId
+			&& action.generation === plan.generation && action.state === "terminal");
+		if (finishing && !actions.some((action) => action.actionId === finishing.actionId)) {
+			const action = this.store.getAction(finishing.actionId);
+			if (action) actions.push({ ...action, result: { workerResult: finishing.result ?? null, outcome: finishing.detail } });
+		}
+		const recent = actions.slice(-24).reverse();
+		return boundedEvidence([
+			`CURRENT_GENERATION_TERMINAL_HISTORY: plan=${plan.planId}; generation=${plan.generation}; attempts=${actions.length}`,
+			...(recent.length < actions.length ? ["[TRUNCATED: showing the latest 24 attempts]"] : []),
+			...recent.map((action) => {
+				const result = storedWorkerResult(action);
+				const record = action.result as Record<string, unknown> | null;
+				const fields = result as unknown as Record<string, unknown> | null;
+				return [
+					`ACTION_ID: ${action.actionId}; ROLE: ${action.role}; ROUND: ${action.round}; MODE: ${action.workerMode}`,
+					`WORKER_RESULT_SHA256: ${result ? sha256(stableJson(result)) : "none"}`,
+					`OUTCOME: ${boundedEvidence(String(fields?.status ?? fields?.verdict ?? fields?.decision ?? record?.outcome ?? "unknown"), 400)}`,
+					`TRANSPORT: ${boundedEvidence(stableJson(record?.terminal ?? "none"), 400)}`,
+					...(["checks", "commits", "filesChanged", "findings", "fixGuidance", "repairContracts", "authorizedBlockers", "notes", "stoppedBecause", "rationale"] as const)
+						.filter((field) => fields?.[field] !== undefined)
+						.map((field) => `${field}: ${boundedEvidence(stableJson(fields![field]), 650)}`),
+				].join("\n");
+			}),
+		].join("\n"), 10_000);
+	}
+
+	private passDocumentEvidence(run: StoredRun, plan: StoredPlan): string {
+		const judge = this.store.getActions(run.runId).filter((action) => action.planId === plan.planId
+			&& action.generation === plan.generation && action.round === 2 && action.role === "plan-judge"
+			&& action.state === "terminal" && storedWorkerResult(action)?.kind === "judge")
+			.reverse().find((action) => (storedWorkerResult(action) as Extract<WorkerResult, { kind: "judge" }>).decision === "REPAIR");
+		const result = judge ? storedWorkerResult(judge) : null;
+		if (!judge || result?.kind !== "judge" || !result.passDocument) {
+			return "PASS_DOCUMENT: none — no recorded round-2 Judge REPAIR document. Rescue may follow a proven operational failure; use the original assignment and recorded failure evidence, never invent a waiver.";
+		}
+		return `PASS_DOCUMENT_ACTION_ID: ${judge.actionId}\nPASS_DOCUMENT_SHA256: ${sha256(result.passDocument)}\nPASS_DOCUMENT_RESULT_SHA256: ${sha256(stableJson(result))}\nPASS_DOCUMENT:\n${result.passDocument}`;
+	}
+
+	private promptEvidence(run: StoredRun, plan: StoredPlan): string {
+		const prior = this.store.getAttentionRequests(run.runId).filter((request) => request.kind === "plan_recovery"
+			&& request.planId === plan.planId && request.generation < plan.generation && request.state === "resolved").at(-1);
+		return [
+			this.terminalEvidence(run, plan),
+			this.acceptedDependencyEvidence(run, plan),
+			...(plan.round === MAX_PLAN_ROUNDS ? [this.passDocumentEvidence(run, plan),
+				"FINAL_ROUND: Rescue uses the existing Implementer role, model and tools in a fresh session. Reviewer nonapproval ends autonomous work; no Judge and no round 4."] : []),
+			...(prior ? [`PREVIOUS_GENERATION_RECOVERY_EVIDENCE_ONLY: request=${prior.requestId}; sha256=${prior.detailSha256}. This is historical evidence, NOT a contract; the current revised assignment supersedes all old requirements.\n${boundedEvidence(prior.detail, 6_000)}`] : []),
+		].join("\n");
+	}
+
+	private acceptedDependencyEvidence(run: StoredRun, plan: StoredPlan): string {
+		const specs = this.specs(run);
+		const dependencies = new Set(plan.planId === "RUN" ? specs.map((spec) => spec.planId) : this.spec(run, plan.planId).dependencies);
+		for (const id of dependencies) for (const dependency of specs.find((spec) => spec.planId === id)?.dependencies ?? []) dependencies.add(dependency);
+		const accepted = this.store.getPlans(run.runId).filter((candidate) => candidate.phase === "DONE" && dependencies.has(candidate.planId))
+			.map((candidate) => ({ plan: candidate, approval: this.store.getApproval(run.runId, candidate.planId, candidate.generation) }))
+			.filter(({ approval }) => approval?.decisionRole === "user" && approval.userAcceptance);
+		if (!accepted.length) return "RECORDED_HUMAN_EXCEPTIONS: none";
+		return boundedEvidence([
+			"RECORDED_HUMAN_EXCEPTIONS: Explicit scoped user acceptance for DONE dependencies only. These are not PASS evidence: failed checks and findings remain failed/open. Do not silently reopen acknowledged gaps as unacknowledged criteria, or extend exceptions to this assignment, other trees, or new regressions. Final verification gates and REIGNITE behavior are unchanged.",
+			...accepted.map(({ plan: dependency, approval }) => [
+				`PLAN: ${dependency.planId}; GENERATION: ${dependency.generation}; ROUND: ${approval!.round}; ASSIGNMENT_SHA256: ${approval!.assignmentSha256}`,
+				`APPROVED_BASE: ${approval!.approvedBase}; APPROVED_HEAD: ${approval!.approvedHead}; APPROVED_TREE: ${approval!.approvedTree}; INTEGRATED_HEAD: ${dependency.approvedHead}; INTEGRATED_TREE: ${dependency.approvedTree}`,
+				`REVIEWER_ACTION_ID: ${approval!.reviewerActionId}; REVIEW_RESULT_SHA256: ${approval!.reviewResultSha256}; APPROVAL_PROOF_SHA256: ${approval!.proofSha256}`,
+				`USER_ACCEPTANCE_SHA256: ${approval!.decisionResultSha256}; REQUEST_ID: ${approval!.userAcceptance!.requestId}; REQUEST_SHA256: ${approval!.userAcceptance!.requestSha256}`,
+				`ACCEPTED_GAPS: ${boundedEvidence(approval!.userAcceptance!.answer!, 1_200)}`,
+				`RATIONALE: ${boundedEvidence(approval!.userAcceptance!.rationale!, 600)}`,
+			].join("\n")),
+		].join("\n"), 8_000);
+	}
+
+	private exhaustionDossier(run: StoredRun, plan: StoredPlan, detail: string, finishing?: { actionId: string; result?: WorkerResult }): string {
+		const evidence = this.recoveryEvidence(run, plan, this.spec(run, plan.planId));
+		return boundedEvidence([
+			"EXHAUSTION_DECISION_DOSSIER — evidence, not an approval or waiver",
+			`REASON: ${boundedEvidence(detail, 800)}`,
+			`EXACT_IDENTITY: ${stableJson({
+				branch: evidence.branch, generationBase: evidence.generationBase, HEAD: evidence.worktreeHead, tree: evidence.worktreeTree,
+				assignmentSha256: evidence.assignmentSha256, snapshotSha256: evidence.snapshotSha256,
+				assignmentPath: boundedEvidence(evidence.assignmentPath, 700), worktree: boundedEvidence(evidence.worktree, 700),
+				changedPathCount: evidence.changedPathCount, changedPathsSha256: evidence.changedPathsSha256,
+				inScopePathCount: evidence.inScopePathCount, inScopePathsSha256: evidence.inScopePathsSha256,
+			})}`,
+			"Full exact paths remain in runtime evidence and, for plan recovery, request.recovery; dossier path display may be truncated.",
+			`FROZEN_REVIEW: base=${plan.approvedBase}; HEAD=${plan.approvedHead}; tree=${plan.approvedTree}`,
+			`IMPLEMENTED_STATUS: inspect recorded COMPLETE/FAILED outcomes and checks below; failed checks remain failed. Worktree status: ${boundedEvidence(this.driver(run).worktreeStatus(plan.worktree) || "clean", 500)}`,
+			`REMAINING_FINDINGS_AND_IMPACT: ${boundedEvidence(stableJson(finishing?.result && "findings" in finishing.result ? finishing.result.findings : plan.findings), 1_000)}`,
+			`RECORDED_GATES: ${boundedEvidence(stableJson(plan.gates), 600)}`,
+			"RECOMMENDATION: Stop unless the exact clean reviewed patch is acceptable with explicitly acknowledged gaps. OPTIONS: accept (confirmed, accepted gaps and rationale; only a clean terminal round-3 reviewed tree), stop (preserve artifacts), or explicitly revise the target in a new generation. Pure transport exhaustion remains operator attention, not authorization to rewrite or waive requirements.",
+			boundedEvidence(this.passDocumentEvidence(run, plan), 3_000),
+			this.terminalEvidence(run, plan, finishing ? { ...finishing, detail } : undefined),
+		].join("\n"), 16_384);
+	}
+
 	private attention(input: {
 		run: StoredRun;
 		plan: StoredPlan | null;
@@ -764,8 +876,11 @@ export class HerderRunManager {
 		detail: string;
 		question?: string;
 		recommendedAction?: string;
+		result?: WorkerResult;
 	}): AttentionRequestInput {
-		const detail = input.detail.slice(0, 16_384);
+		const detail = input.plan && input.plan.planId !== "RUN" && ["round_limit", "implementer_exhausted", "transport_exhausted", "integration_conflict_exhausted"].includes(input.cause)
+			? this.exhaustionDossier(input.run, input.plan, input.detail, input.actionId ? { actionId: input.actionId, result: input.result } : undefined)
+			: boundedEvidence(input.detail, 16_384);
 		const now = new Date().toISOString();
 		const requestId = randomUUID();
 		const request = {
@@ -2098,7 +2213,7 @@ export class HerderRunManager {
 		const driver = this.driver(run);
 		const mutationMayHaveOccurred = driver.worktreeHead(plan.worktree) !== plan.generationBase || Boolean(driver.worktreeStatus(plan.worktree));
 		if (!mutationMayHaveOccurred) return this.retryTransportOrPause(run, plan, action, detail);
-		if (plan.round >= 6) {
+		if (plan.round >= MAX_PLAN_ROUNDS) {
 			const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
@@ -2168,7 +2283,7 @@ export class HerderRunManager {
 		if (!failure && changedPaths.length === 0) failure = "Implementer produced no changed paths";
 		const gates: GateResult[] = [];
 		if (failure) {
-			if (plan.round >= 6) {
+			if (plan.round >= MAX_PLAN_ROUNDS) {
 				return {
 					plan: { ...plan, phase: "BLOCKED", repair: [failure], gates },
 					attention: this.attention({
@@ -2177,6 +2292,7 @@ export class HerderRunManager {
 						spec: this.spec(run, plan.planId),
 						kind: "plan_recovery",
 						cause: "implementer_exhausted",
+						result,
 						actionId: action.actionId,
 						state: "pending",
 						continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
@@ -2201,7 +2317,7 @@ export class HerderRunManager {
 			throw new Error(`Reviewer mutated frozen plan ${plan.planId}`);
 		}
 		const blockers = countBlocking(result.findings);
-		const verdict = result.verdict === "REVISE" && blockers === 0 && result.scope === "PASS" ? "APPROVE" : result.verdict;
+		const verdict = result.verdict;
 		if (plan.planId === "RUN") {
 			const verification = this.store.getVerification(run.runId, plan.generation);
 			if (!verification) {
@@ -2247,7 +2363,8 @@ export class HerderRunManager {
 				plan,
 				spec: this.spec(run, plan.planId),
 				kind: "plan_recovery",
-				cause: "reviewer_blocked",
+				cause: decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "reviewer_blocked",
+				result,
 				actionId: action.actionId,
 				state: "pending",
 				continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
@@ -2421,7 +2538,8 @@ export class HerderRunManager {
 		}
 		const next = this.store.getNextAttention(run.runId);
 		if (attention.state === "resolved") {
-			const priorResolution = this.store.getAttentionResolutionHash(attention.requestId);
+			const priorResolution = this.store.readEvent(`manager-attention-resolution:${attention.requestId}`)?.payloadSha256
+				?? this.store.getAttentionResolutionHash(attention.requestId);
 			if (priorResolution && priorResolution !== sha256(stableJson(resolution))) {
 				throw new Error(`Attention request ${attention.requestId} was replayed with a different resolution`);
 			}
@@ -2531,9 +2649,9 @@ export class HerderRunManager {
 		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
 		const { prior, target } = validateTargetOnlyGraph(priorSpecs, compiled.specs, attention.planId, "Recovery revision", "Recovery target");
 		const targetChanged = target.planFingerprint !== prior.planFingerprint;
-		if (action === "unchanged_retry" && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
+		if (["unchanged_retry", "accept", "stop"].includes(action) && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
 		if (action === "revise" && !targetChanged) throw new Error("Target revision did not change the compiled target content");
-		if (["unchanged_retry", "reject"].includes(action) && !(resolution.rationale || "").trim()) {
+		if (["unchanged_retry", "reject", "accept", "stop"].includes(action) && !(resolution.rationale || "").trim()) {
 			throw new Error(`${action === "reject" ? "Recovery rejection" : "Unchanged recovery"} requires a non-empty rationale`);
 		}
 		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Recovery");
@@ -2558,10 +2676,55 @@ export class HerderRunManager {
 		const action = normalizeAttentionAction(String(resolution.action));
 		if (action === "defer") return;
 		if (attention.kind === "plan_recovery") {
+			if (action === "accept" || action === "stop") {
+				const driver = this.driver(run);
+				await driver.verifyCheckout(run.checkoutStateToken);
+				const { plan } = this.validateRecoveryTarget(run, attention, action, resolution);
+				let approval: Omit<StoredApproval, "createdAt"> | undefined;
+				if (action === "accept") {
+					if (resolution.confirmed !== true || !resolution.answer?.trim() || !resolution.rationale?.trim()) {
+						throw new Error("Acceptance requires explicit confirmation, accepted gaps and rationale");
+					}
+					if (!plan || plan.round !== MAX_PLAN_ROUNDS) throw new Error("Acceptance requires a terminal round-3 reviewed tree");
+					if (plan.rebase || ["rebase-merge", "rebase-apply"].some((name) => fs.existsSync(gitValue(plan.worktree, "rev-parse", "--path-format=absolute", "--git-path", name)))
+						|| driver.worktreeStatus(plan.worktree)) throw new Error("Acceptance requires a clean worktree without an active rebase");
+					if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree
+						|| plan.approvedBase !== attention.recovery.generationBase
+						|| plan.approvedHead !== attention.recovery.worktreeHead || plan.approvedTree !== attention.recovery.worktreeTree
+						|| driver.changedPaths(plan.worktree, plan.approvedBase).length === 0) {
+						throw new Error("Acceptance requires the exact nonempty frozen reviewed patch");
+					}
+					const reviewer = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation,
+						round: plan.round, role: "plan-reviewer", state: "terminal" });
+					const result = reviewer ? storedWorkerResult(reviewer) : null;
+					if (!reviewer || reviewer.actionId !== attention.actionId || result?.kind !== "reviewer") {
+						throw new Error("Acceptance requires the recovery request's terminal round-3 Reviewer evidence");
+					}
+					approval = createApproval({
+						runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
+						reviewerActionId: reviewer.actionId, decisionActionId: reviewer.actionId, decisionRole: "user",
+						assignmentSha256: plan.assignmentSha256, approvedBase: plan.approvedBase,
+						approvedHead: plan.approvedHead, approvedTree: plan.approvedTree,
+						reviewResultSha256: sha256(stableJson(result)), decisionResultSha256: sha256(stableJson(resolution)),
+						userAcceptance: resolution,
+					});
+				}
+				this.store.transaction(() => {
+					if (approval) this.store.putApproval(approval);
+					if (plan) this.updatePlan(plan, { phase: action === "accept" ? "READY_TO_INTEGRATE" : "BLOCKED" });
+					this.store.recordEvent(run.runId, `manager-attention-resolution:${attention.requestId}`, "attention_resolution", resolution);
+					this.store.resolveAttention(attention.requestId);
+					this.attentionStatusAfterResolution(run.runId);
+				});
+				return;
+			}
 			if (!["unchanged_retry", "revise", "reject", "retry", "cancel"].includes(action)) {
 				throw new Error(`Action ${action} cannot resolve plan-recovery attention`);
 			}
 			const recoveryAction = action === "retry" ? "unchanged_retry" : action === "cancel" ? "reject" : action;
+			if (recoveryAction === "unchanged_retry" && attention.round >= MAX_PLAN_ROUNDS) {
+				throw new Error("Exhausted round-3 recovery requires accept, stop, or an explicit target revision");
+			}
 			if (recoveryAction === "revise" && !(resolution.rationale || "").trim()) {
 				throw new Error("Target revision requires a non-empty rationale");
 			}
@@ -2663,16 +2826,42 @@ export class HerderRunManager {
 			|| reviewer.role !== "plan-reviewer" || reviewer.state !== "terminal") {
 			throw new Error(`Approval for ${plan.planId} lacks its exact terminal Reviewer action`);
 		}
+		const reviewerResult = storedWorkerResult(reviewer);
+		const decisionResult = decision ? storedWorkerResult(decision) : null;
+		if (!reviewerResult || reviewerResult.kind !== "reviewer"
+			|| sha256(stableJson(reviewerResult)) !== approval.reviewResultSha256) {
+			throw new Error(`Reviewer result proof changed for ${plan.planId}`);
+		}
+		if (approval.decisionRole === "user") {
+			const resolution = approval.userAcceptance;
+			if (!resolution) throw new Error(`Human approval lacks its acceptance evidence for ${plan.planId}`);
+			validateAttentionResolution(resolution);
+			const request = this.store.getAttention(resolution.requestId);
+			const latest = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation,
+				round: plan.round, role: "plan-reviewer", state: "terminal" });
+			if (!request || request.kind !== "plan_recovery" || request.state !== "resolved"
+				|| request.requestSha256 !== attentionRequestSha256(request) || resolution.requestSha256 !== request.requestSha256
+				|| resolution.capabilityToken !== (request.capabilityToken || attentionCapabilityToken(request.requestId))
+				|| normalizeAttentionAction(resolution.action) !== "accept" || resolution.confirmed !== true || !resolution.answer?.trim() || !resolution.rationale?.trim()
+				|| request.runId !== run.runId || request.planId !== plan.planId || request.generation !== plan.generation || request.round !== MAX_PLAN_ROUNDS
+				|| resolution.runId !== request.runId || resolution.planId !== request.planId || resolution.generation !== request.generation || resolution.round !== request.round
+				|| plan.round !== MAX_PLAN_ROUNDS || approval.decisionActionId !== reviewer.actionId || request.actionId !== reviewer.actionId || latest?.actionId !== reviewer.actionId
+				|| !resolution.git || !sameRecoveryIdentity(resolution.git, recoveryIdentityFromRequest(request)!)
+				|| request.recovery.assignmentPath !== plan.assignmentPath || request.recovery.assignmentSha256 !== plan.assignmentSha256
+				|| request.recovery.snapshotSha256 !== plan.snapshotSha256 || request.recovery.branch !== plan.branch || request.recovery.worktree !== plan.worktree
+				|| request.recovery.generationBase !== approval.approvedBase || request.recovery.worktreeHead !== approval.approvedHead || request.recovery.worktreeTree !== approval.approvedTree
+				|| sha256(stableJson(resolution)) !== approval.decisionResultSha256) {
+				throw new Error(`Human acceptance proof changed for ${plan.planId}`);
+			}
+			const recordedHash = this.store.readEvent(`manager-attention-resolution:${request.requestId}`)?.payloadSha256
+				?? this.store.getAttentionResolutionHash(request.requestId);
+			if (recordedHash && recordedHash !== approval.decisionResultSha256) throw new Error(`Human resolution proof changed for ${plan.planId}`);
+			return completionApproval(approval);
+		}
 		if (!decision || decision.runId !== run.runId || decision.planId !== plan.planId
 			|| decision.generation !== plan.generation || decision.round !== plan.round
 			|| decision.role !== approval.decisionRole || decision.state !== "terminal") {
 			throw new Error(`Approval for ${plan.planId} lacks its exact terminal decision action`);
-		}
-		const reviewerResult = storedWorkerResult(reviewer);
-		const decisionResult = storedWorkerResult(decision);
-		if (!reviewerResult || reviewerResult.kind !== "reviewer"
-			|| sha256(stableJson(reviewerResult)) !== approval.reviewResultSha256) {
-			throw new Error(`Reviewer result proof changed for ${plan.planId}`);
 		}
 		if (!decisionResult || sha256(stableJson(decisionResult)) !== approval.decisionResultSha256) {
 			throw new Error(`Decision result proof changed for ${plan.planId}`);
@@ -2747,7 +2936,7 @@ export class HerderRunManager {
 				approval: completionProof,
 			});
 			if (integration.status === "conflict") {
-				if (plan.round >= 6) {
+				if (plan.round >= MAX_PLAN_ROUNDS) {
 					const latestAction = this.store.getActions(run.runId)
 						.filter((candidate) => candidate.planId === plan.planId && candidate.generation === plan.generation && candidate.round === plan.round && candidate.state === "terminal")
 						.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.actionId.localeCompare(left.actionId))[0];
@@ -3063,7 +3252,7 @@ export class HerderRunManager {
 			leaseReason: stored.leaseReason,
 			prompt: "",
 		};
-		action.prompt = assignmentPrompt({ run, plan, action: stored, changedPaths });
+		action.prompt = assignmentPrompt({ run, plan, action: stored, changedPaths, evidence: this.promptEvidence(run, plan) });
 		return action;
 	}
 

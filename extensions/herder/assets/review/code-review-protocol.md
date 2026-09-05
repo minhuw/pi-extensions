@@ -1,6 +1,6 @@
 # Herder code review protocol
 
-Use this protocol only as the root `plan-reviewer` for the frozen assignment supplied by the deterministic Run Manager. It preserves four parallel actual reviewers for discovery and final aggregate audits, Herder's finding ledger, six-round repair policy, and exact terminal envelope.
+Use this protocol only as the root `plan-reviewer` for the frozen assignment supplied by the deterministic Run Manager. It preserves four parallel actual reviewers for discovery and final aggregate audits, Herder's finding ledger, three-round repair policy, and exact terminal envelope. Round 1 is quick Implementer–Reviewer; round 2 is Implementer–Reviewer with Judge only on nonapproval. Judge `DONE` closes the task; `REPAIR` supplies a binding `PASS_DOCUMENT` for round-3 `RESCUE` by the existing fresh-context Implementer with unchanged tools and its normal Implementer binding, then independent Reviewer. The manager may also advance round 2 to `RESCUE` for manager-proven operational failures or conflicts without any prior Reviewer or Judge (`PASS_DOCUMENT: none`); use the unchanged original assignment and precise manager-supplied failure evidence, never an invented waiver. No round-3 Judge or fourth automatic mutation is allowed.
 
 ## Non-negotiable invariants
 
@@ -23,6 +23,7 @@ Prepare a self-contained relevant scope packet for every child containing:
 - exact base/head or repair-delta boundary, assigned changed paths and relevant diff hunks, or an absolute path to a parent-created read-only diff artifact outside the repository;
 - primary explicit hunk/subsystem ownership and named cross-boundary questions;
 - relevant existing finding IDs and repair contracts, required exclusions, and the output contract below;
+- for rescue review, the original assignment criteria, immutable round-2 Judge `PASS_DOCUMENT` with its actionId/hash from the terminal action result for ordinary review-driven rescue (or precise manager-supplied failure evidence for manager-proven operational rescue with `PASS_DOCUMENT: none`), and relevant prior attempts/findings/check evidence; the document is not a separate file;
 - parent-owned shared-gate responsibilities and available check evidence, so children perform only targeted safe reproductions.
 
 Children have no parent conversation. Supply relevant evidence directly rather than asking children to rediscover assignment authority.
@@ -97,9 +98,9 @@ COVERAGE: <assigned evidence checked and any remaining gap>
 
 ## Verification workflow
 
-For later review passes, do not reopen broad discovery.
+For later review passes, do not reopen broad discovery. Round-3 rescue review is contract-focused: verify the Judge's binding acceptance document when supplied and serious introduced P0/P1 regressions. For manager-proven operational rescue with `PASS_DOCUMENT: none`, use the unchanged original assignment and precise failure evidence, never an invented waiver. When supplied, check the document's remaining authorized IDs, acceptance conditions/checks/evidence, rejected findings/reasons, scope invariants, and unresolved decisions against the original assignment; never weaken original criteria, add scope, or revive rejected findings as a new audit. If no evidence-complete discovery has occurred, perform that first required discovery with four parallel reviewers instead.
 
-1. Build the packet from the supplied ledger/open finding IDs, repair contracts, exact repair delta, checks, and discovered paths.
+1. Build the packet from the supplied ledger/open finding IDs, repair contracts, exact repair delta, checks, and discovered paths; include the immutable `PASS_DOCUMENT` and its actionId/hash for ordinary review-driven round 3, or precise manager-supplied failure evidence for manager-proven operational rescue without one.
 2. Assign up to four parallel fresh `reviewer` children bounded finding batches and named repair-delta boundaries. Verify fixes and concrete P0/P1 regressions introduced by the repair.
 3. Normalize only statuses for existing findings plus genuinely new regressions in the repair delta. Preserve every existing finding ID.
 4. Use optional targeted fresh reviewer second opinions only for disputed claims or unresolved coverage within that scope and the eight-call root budget.
@@ -113,6 +114,6 @@ Root `recon` handles bounded source-navigation questions; each subreviewer's opt
 
 The parent reopens every surviving merged location, verifies its concrete scenario and introducing change, completes required shared gates and any unresolved mandatory work, classifies discovered paths, and applies the installed Reviewer contract's severity and relationship rules.
 
-Every final blocker requires an exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk/commit. A confirmed issue blocks only when it is an evidence-complete P0/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`, a failed explicit acceptance criterion, a failed required gate, or a material scope violation. Confirmed P2/P3 findings remain advisory. `FOLLOWUP` and `INVALID` never block. Preserve the contract's repair guidance and six-round authority rules.
+Every final blocker requires an exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk/commit. A confirmed issue blocks only when it is an evidence-complete P0/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`, a failed explicit acceptance criterion, a failed required gate, or a material scope violation. Confirmed P2/P3 findings remain advisory. `FOLLOWUP` and `INVALID` never block. Preserve the contract's repair guidance and three-round authority rules. Round-1 evidence-complete blockers may authorize round 2 directly; only round-2 nonapproval invokes Judge, and Judge `REPAIR` authorizes ordinary review-driven round-3 rescue. Manager-proven operational failures or conflicts may advance to round 3 without prior Reviewer or Judge, using the unchanged original assignment and precise failure evidence, never an invented waiver. Exhaustion goes to the existing durable serialized main-session attention queue with a decision dossier of implemented/remaining work, checks and gaps, attempts, recommendation, and frozen identities. Review is independent: the rescuer cannot approve its own changes, and neither reviewer nor Judge may invent a fourth automatic mutation.
 
 Return only the exact terminal envelope required by the Reviewer contract. Keep proposed findings, unresolved child claims, rejected candidates, and temporary IDs internal unless concise evidence materially supports a final finding or explains an irreducible `BLOCK`.

@@ -213,7 +213,7 @@ async function startRun(service: Service, value: Fixture, maxParallel = 2): Prom
 	});
 }
 
-async function failTargetRounds(service: Service, started: JsonRecord, prefix: string, rounds = 6): Promise<{ reply: JsonRecord; worktree: string }> {
+async function failTargetRounds(service: Service, started: JsonRecord, prefix: string, rounds = 3): Promise<{ reply: JsonRecord; worktree: string }> {
 	let reply = started;
 	let target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
 	assert.ok(target);
@@ -475,7 +475,7 @@ test("cancelling rework before finish leaves execution untouched", { timeout: 60
 			const run = store.getRun()!;
 			assert.equal(run.currentGeneration, 1);
 			assert.equal(store.getPlanEdit(run.runId), null);
-			assert.equal(store.getPlan(run.runId, "001")?.round, 6);
+			assert.equal(store.getPlan(run.runId, "001")?.round, 3);
 			assert.equal(store.getPlan(run.runId, "001")?.phase, "BLOCKED");
 		} finally {
 			store.close();

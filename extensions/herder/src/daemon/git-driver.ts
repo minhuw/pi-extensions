@@ -15,6 +15,7 @@ import {
 	buildCompletionProofPayload,
 	inspectCompletionProof,
 	writeCompletionProof,
+	type ApprovalCore,
 } from "./git/completion-proof.ts";
 import { isAncestor as isAncestorProbe, isInside, runGit } from "./git/primitives.ts";
 import { formatCheckpointRef, listCoordinationRefs } from "./git/coordination-ref.ts";
@@ -94,20 +95,7 @@ export interface PlanTransientRef {
 	target: string;
 }
 
-export interface CompletionApprovalProof {
-	runId: string;
-	planId: string;
-	generation: number;
-	round: number;
-	reviewerActionId: string;
-	decisionActionId: string;
-	decisionRole: "plan-reviewer" | "plan-judge";
-	assignmentSha256: string;
-	approvedBase: string;
-	approvedHead: string;
-	approvedTree: string;
-	reviewResultSha256: string;
-	decisionResultSha256: string;
+export interface CompletionApprovalProof extends ApprovalCore {
 	approvalProofSha256: string;
 }
 

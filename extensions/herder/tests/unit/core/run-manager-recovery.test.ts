@@ -375,7 +375,7 @@ test("remaining generation-one recovery requests survive an earlier recovery", {
 	}
 });
 
-test("exhausted target recovery deletes dirty failed execution state before rescheduling", { timeout: 60_000 }, async () => {
+test("explicit exhausted target revision replaces failed execution and carries its evidence-only dossier", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-dirty-"));
 	const fixtureValue = fixture(root);
 	let service: Service | undefined;
@@ -393,29 +393,35 @@ test("exhausted target recovery deletes dirty failed execution state before resc
 		let target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
 		assert.ok(target);
 		let oldWorktree = String(target.worktree);
-		for (let round = 1; round <= 6; round += 1) {
+		for (let round = 1; round <= 3; round += 1) {
 			await managerReply(service, "event", {
 				eventId: `dirty-dispatch-${round}`,
 				kind: "dispatch_results",
 				dispatchResults: [{ actionId: target.actionId, accepted: true, hostHandle: `dirty-${round}` }],
 			});
 			oldWorktree = String(target.worktree);
-			if (round === 6) fs.writeFileSync(path.join(oldWorktree, "discarded-untracked.txt"), "discard me\n");
+			if (round === 3) fs.writeFileSync(path.join(oldWorktree, "discarded-untracked.txt"), "discard me\n");
 			reply = await managerReply(service, "event", {
 				eventId: `dirty-terminal-${round}`,
 				kind: "terminals",
 				terminals: [{ actionId: target.actionId, hostHandle: `dirty-${round}`, response: "STATUS: FAILED\nCOMMITS: none\nCHECKS: none\nFILES CHANGED: none\nDISCOVERED_PATHS: none\nNOTES: bounded failure\nUSAGE: input_tokens=1; output_tokens=1; source=test-host" }],
 			});
-			if (round < 6) target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
+			if (round < 3) target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
 		}
 		const attention = object(reply.attention);
 		assert.equal(attention.cause, "implementer_exhausted");
+		const targetFile = path.join(fixtureValue.planDirectory, "001-blocked.md");
+		fs.writeFileSync(targetFile, fs.readFileSync(targetFile, "utf8").replace("Use the declared fixture path only.", "Use the declared fixture path only and retain the integer API."));
 		const resolved = await managerReply(service, "event", {
 			eventId: "dirty-recovery-apply",
 			kind: "attention",
-			attention: attentionResolution(attention, String(reply.runId), "unchanged_retry", "The failed target remains valid after the bounded retry budget."),
+			attention: attentionResolution(attention, String(reply.runId), "revise", "Clarify the integer API requirement after the bounded retry budget."),
 		});
 		assert.equal(resolved.status, "running");
+		const replacement = object((resolved.actions as unknown[]).map(object).find((candidate) => candidate.planId === "001"));
+		assert.match(String(replacement.prompt), /PREVIOUS_GENERATION_RECOVERY_EVIDENCE_ONLY/);
+		assert.match(String(replacement.prompt), /current revised assignment supersedes all old requirements/);
+		assert.match(String(replacement.prompt), /bounded failure/);
 		assert.equal(fs.existsSync(path.join(oldWorktree, "discarded-untracked.txt")), false);
 		const store = new RunStore(fixtureValue.planDirectory);
 		try {
@@ -424,7 +430,7 @@ test("exhausted target recovery deletes dirty failed execution state before resc
 			assert.equal(run.currentGeneration, 2);
 			assert.equal(store.getPlan(run.runId, "001")?.round, 1);
 			assert.equal(store.getPlan(run.runId, "001")?.generation, 2);
-			assert.equal(store.getActions(run.runId).filter((action) => action.planId === "001").length, 7);
+			assert.equal(store.getActions(run.runId).filter((action) => action.planId === "001").length, 4);
 		} finally {
 			store.close();
 		}

@@ -1,5 +1,5 @@
 import { runGit } from "./primitives.ts"
-import { sha256, stableJson } from "../../shared/protocol.ts"
+import { MAX_PLAN_ROUNDS, sha256, stableJson, validateAttentionResolution, type AttentionResolutionInput } from "../../shared/protocol.ts"
 
 function formatCompletionFailure(_args: readonly string[], stderr: string, stdout: string): string {
   return (stderr || stdout || "git failed").trim()
@@ -24,7 +24,8 @@ export interface ApprovalCore {
   round: number
   reviewerActionId: string
   decisionActionId: string
-  decisionRole: "plan-reviewer" | "plan-judge"
+  decisionRole: "plan-reviewer" | "plan-judge" | "user"
+  userAcceptance?: AttentionResolutionInput
   assignmentSha256: string
   approvedBase: string
   approvedHead: string
@@ -53,6 +54,7 @@ function approvalCore(payload: ApprovalCore): ApprovalCore {
     reviewerActionId: payload.reviewerActionId,
     decisionActionId: payload.decisionActionId,
     decisionRole: payload.decisionRole,
+    ...(payload.userAcceptance !== undefined ? { userAcceptance: payload.userAcceptance } : {}),
     assignmentSha256: payload.assignmentSha256,
     approvedBase: payload.approvedBase,
     approvedHead: payload.approvedHead,
@@ -65,8 +67,8 @@ function approvalCore(payload: ApprovalCore): ApprovalCore {
 function validatePayload(payload: CompletionProofPayload, object: string): void {
   if (!payload || payload.schemaVersion !== 1 || payload.integratedHead !== object) throw new Error("completion proof identity does not match its commit")
   if (!/^\d{3,}$/.test(payload.planId || "") || !Number.isSafeInteger(payload.generation) || payload.generation < 1
-    || !Number.isSafeInteger(payload.round) || payload.round < 1 || payload.round > 6
-    || !["plan-reviewer", "plan-judge"].includes(payload.decisionRole)
+    || !Number.isSafeInteger(payload.round) || payload.round < 1 || payload.round > MAX_PLAN_ROUNDS
+    || !["plan-reviewer", "plan-judge", "user"].includes(payload.decisionRole)
     || !payload.runId || !payload.reviewerActionId || !payload.decisionActionId) {
     throw new Error("completion proof has invalid approval identity")
   }
@@ -75,6 +77,23 @@ function validatePayload(payload: CompletionProofPayload, object: string): void 
   }
   for (const field of ["approvedBase", "approvedHead", "approvedTree", "integratedHead"]) {
     if (!/^[0-9a-f]{40,64}$/.test(payload[field as keyof CompletionProofPayload] as string || "")) throw new Error(`completion proof has invalid ${field}`)
+  }
+  if (payload.decisionRole === "user") {
+    const acceptance = payload.userAcceptance
+    validateAttentionResolution(acceptance)
+    if (acceptance.action.trim().toLowerCase() !== "accept"
+      || acceptance.runId !== payload.runId || acceptance.planId !== payload.planId
+      || acceptance.generation !== payload.generation || acceptance.round !== payload.round
+      || acceptance.git?.assignmentSha256 !== payload.assignmentSha256
+      || acceptance.git?.generationBase !== payload.approvedBase
+      || acceptance.git?.worktreeHead !== payload.approvedHead
+      || acceptance.git?.worktreeTree !== payload.approvedTree
+      || payload.decisionActionId !== payload.reviewerActionId
+      || payload.decisionResultSha256 !== sha256(stableJson(acceptance))) {
+      throw new Error("completion user acceptance does not match its approval")
+    }
+  } else if (payload.userAcceptance !== undefined) {
+    throw new Error("only user completion decisions may contain user acceptance")
   }
   if (sha256(stableJson(approvalCore(payload))) !== payload.approvalProofSha256) {
     throw new Error("completion approval proof hash changed")

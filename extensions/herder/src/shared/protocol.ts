@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 9;
+export const MANAGER_PROTOCOL_VERSION = 10;
+export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
 export const RUN_STATUSES = ["initializing", "running", "paused", "needs_input", ...TERMINAL_RUN_STATUSES] as const;
@@ -58,7 +59,7 @@ export interface ManagerAction {
 	model: string;
 	effort: string;
 	serviceTier?: string;
-	workerMode: "INITIAL" | "GUIDED_REPAIR" | "DISCOVERY" | "VERIFICATION" | "ADJUDICATE" | "FINAL_AUDIT";
+	workerMode: "INITIAL" | "RESCUE" | "GUIDED_REPAIR" | "DISCOVERY" | "VERIFICATION" | "ADJUDICATE" | "FINAL_AUDIT";
 	taskName: string;
 	worktree: string;
 	branch: string;
@@ -141,6 +142,8 @@ export interface AttentionContinuation {
 /** Actions accepted by the manager-owned attention resolution operation. */
 export const ATTENTION_RESOLUTION_ACTIONS = [
 	"answer",
+	"accept",
+	"stop",
 	"defer",
 	"retry",
 	"cancel",
@@ -173,6 +176,8 @@ export interface AttentionResolutionInput {
 	generation: number;
 	round: number;
 	action: AttentionResolutionAction | string;
+	/** Supplied only by the human-confirming adapter, never by the model. */
+	confirmed?: boolean;
 	answer?: string;
 	rationale?: string;
 	continuation?: AttentionContinuation;
@@ -204,7 +209,7 @@ export function validateAttentionResolution(value: unknown): asserts value is At
 		throw new Error("Attention resolution capabilityToken must be a SHA-256");
 	}
 	if (!Number.isSafeInteger(resolution.generation) || Number(resolution.generation) < 1) throw new Error("Attention resolution generation must be positive");
-	if (!Number.isSafeInteger(resolution.round) || Number(resolution.round) < 1 || Number(resolution.round) > 6) throw new Error("Attention resolution round must be between 1 and 6");
+	if (!Number.isSafeInteger(resolution.round) || Number(resolution.round) < 1 || Number(resolution.round) > MAX_PLAN_ROUNDS) throw new Error(`Attention resolution round must be between 1 and ${MAX_PLAN_ROUNDS}`);
 	if (typeof resolution.action !== "string" || resolution.action.length === 0 || resolution.action.length > 64 || /[\0\r\n]/.test(resolution.action)) {
 		throw new Error("Attention resolution action is invalid");
 	}
@@ -212,6 +217,11 @@ export function validateAttentionResolution(value: unknown): asserts value is At
 		if (candidate !== undefined && (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /\0/.test(candidate))) {
 			throw new Error(`Attention resolution ${name} is invalid`);
 		}
+	}
+	if (resolution.confirmed !== undefined && typeof resolution.confirmed !== "boolean") throw new Error("Attention resolution confirmed must be a boolean");
+	if (resolution.action.trim().toLowerCase() === "accept"
+		&& (resolution.confirmed !== true || !resolution.answer?.trim() || !resolution.rationale?.trim())) {
+		throw new Error("Attention acceptance requires human confirmation, explicit accepted gaps or waivers, and rationale");
 	}
 	if (resolution.continuation !== undefined && (!resolution.continuation || typeof resolution.continuation !== "object" || Array.isArray(resolution.continuation)
 		|| !WORKER_ROLES.includes(resolution.continuation.role as WorkerRole)
@@ -370,7 +380,7 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 	if (!ATTENTION_STATES.includes(request.state as AttentionState)) throw new Error(`Unsupported attention state: ${String(request.state)}`);
 	if (!ATTENTION_CAUSES.includes(request.cause as AttentionCause)) throw new Error(`Unsupported attention cause: ${String(request.cause)}`);
 	if (!Number.isSafeInteger(request.generation) || Number(request.generation) < 1) throw new Error("Attention generation must be positive");
-	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > 6) throw new Error("Attention round must be between 1 and 6");
+	if (!Number.isSafeInteger(request.round) || Number(request.round) < 1 || Number(request.round) > MAX_PLAN_ROUNDS) throw new Error(`Attention round must be between 1 and ${MAX_PLAN_ROUNDS}`);
 	if (request.actionId !== null
 		&& (typeof request.actionId !== "string" || request.actionId.length === 0 || request.actionId.length > 300 || /[\0\r\n]/.test(request.actionId))) {
 		throw new Error("Attention actionId must be null or a bounded single-line string");
@@ -957,6 +967,7 @@ export interface JudgeResult {
 	findings: string[];
 	authorizedBlockers: string[];
 	repairContracts: string[];
+	passDocument?: string;
 	discoveredPaths: string[];
 	leaks: string[];
 	question?: string;
@@ -1004,12 +1015,17 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 	const decision = requiredField(fields, "DECISION");
 	if (!["DONE", "REPAIR", "NEEDS_INPUT", "BLOCKED"].includes(decision)) throw new Error(`Invalid Judge DECISION: ${decision}`);
 	const question = fields.get("QUESTION")?.trim();
+	const passDocument = fields.get("PASS_DOCUMENT");
+	if (passDocument !== undefined && (passDocument.length > 16_384 || /\0/.test(passDocument))) {
+		throw new Error("Judge PASS_DOCUMENT must be at most 16384 characters without NUL bytes");
+	}
 	const result: JudgeResult = {
 		kind: "judge",
 		decision: decision as JudgeResult["decision"],
 		findings: lines(fields.get("FINDINGS")),
 		authorizedBlockers: lines(fields.get("AUTHORIZED_BLOCKERS")).flatMap((line) => line.split(/[\s,]+/)).filter(Boolean),
 		repairContracts: lines(fields.get("REPAIR_CONTRACTS")),
+		...(passDocument !== undefined ? { passDocument } : {}),
 		discoveredPaths: lines(fields.get("DISCOVERED_PATHS")),
 		leaks: lines(fields.get("LEAKS")),
 		...(question && question.toLowerCase() !== "none" ? { question } : {}),
@@ -1022,6 +1038,9 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 	}
 	if (result.decision === "REPAIR" && (result.authorizedBlockers.length === 0 || result.repairContracts.length === 0)) {
 		throw new Error("Judge REPAIR requires authorized blockers and repair contracts");
+	}
+	if (result.decision === "REPAIR" && (!result.passDocument?.trim() || result.passDocument.trim().toLowerCase() === "none")) {
+		throw new Error("Judge REPAIR requires a nonempty PASS_DOCUMENT");
 	}
 	if (result.decision === "NEEDS_INPUT" && !result.question) {
 		throw new Error("Judge NEEDS_INPUT requires one question");

@@ -18,7 +18,7 @@ import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
-import { GitDriver } from "../../../src/daemon/git-driver.ts";
+import { GitDriver, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import {
 	agentRoot,
@@ -382,7 +382,7 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-test("main-session attention is delivered once and explicitly re-exposed after status", { timeout: 30_000 }, async () => {
+test("main-session attention queues concurrent plans and re-exposes only the current request", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
@@ -390,6 +390,11 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 	let shutdown = false;
 	try {
 		fixture = writeBlockedAttentionFixture(root);
+		const indexPath = path.join(fixture.planDirectory, "README.md");
+		const firstRow = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | BLOCKED — needs attention |";
+		fs.writeFileSync(indexPath, fs.readFileSync(indexPath, "utf8").replace(firstRow, `${firstRow}\n${firstRow.replaceAll("001", "002")}`));
+		fs.writeFileSync(path.join(fixture.planDirectory, "002-recover-worker.md"),
+			fs.readFileSync(path.join(fixture.planDirectory, "001-recover-worker.md"), "utf8").replaceAll("001", "002"));
 		const service = await ensureService(fixture.planDirectory);
 		const started = object((await requestManagerOperation(service, "start", {
 			mode: "fire",
@@ -443,7 +448,19 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 		assert.equal(resolved.isError, undefined);
 		assert.equal(object(resolved.details).result && object(object(resolved.details).result).ok, true);
 		const accepted = object((await requestService(service, "/v1/status")).reply);
-		assert.equal(accepted.attention, undefined);
+		const next = object(accepted.attention);
+		assert.equal(next.planId, "002");
+		assert.notEqual(next.requestId, attention.requestId);
+		assert.equal(api.customMessages.length, 3, "the next plan is surfaced only after resolving the first");
+		assert.match(api.customMessages[2]!.content, /PLAN_ID: 002/);
+		await api.invoke("agent_settled", ctx);
+		assert.equal(api.customMessages.length, 3, "queued requests are not duplicated");
+		const second = object(await api.tool("herder_plan").execute("attention-002", {
+			operation: "attention", planDirectory: "herder-plans", requestId: next.requestId,
+			action: "reject", rationale: "Reject the second blocked fixture without modifying its plan.",
+		}, undefined, undefined, ctx));
+		assert.equal(second.isError, undefined);
+		assert.equal(object((await requestService(service, "/v1/status")).reply).attention, undefined);
 
 		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
 		shutdown = true;
@@ -455,6 +472,110 @@ test("main-session attention is delivered once and explicitly re-exposed after s
 			await stopService(fixture.planDirectory).catch(() => {});
 			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
 		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("accepting exhausted work requires host confirmation and preserves the failed review", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-acceptance-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let ctx: ExtensionContext | undefined;
+	try {
+		fixture = writeFixture(root);
+		const service = await ensureService(fixture.planDirectory);
+		let reply = object((await requestManagerOperation(service, "start", {
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory,
+			profile: "eclipse", maxParallel: 1,
+		})).reply);
+		const complete = async (action: Record<string, unknown>, response: string) => {
+			const actionId = String(action.actionId);
+			const hostHandle = `pi-worker:${actionId}`;
+			await requestManagerOperation(service, "event", {
+				eventId: `dispatch-${actionId}`, kind: "dispatch_results", dispatchResults: [{ actionId, accepted: true, hostHandle }],
+			});
+			return object((await requestManagerOperation(service, "event", {
+				eventId: `terminal-${actionId}`, kind: "terminals", terminals: [{ actionId, hostHandle, response }],
+			})).reply);
+		};
+		for (let round = 1; round <= 3; round += 1) {
+			const implementer = object((reply.actions as unknown[])[0]);
+			assert.equal(implementer.round, round);
+			assert.equal(implementer.workerMode, round === 1 ? "INITIAL" : round === 2 ? "GUIDED_REPAIR" : "RESCUE");
+			const worktree = String(implementer.worktree);
+			fs.writeFileSync(path.join(worktree, "src/value.mjs"), `export const value = ${round + 1}\n`);
+			runCommand("git", ["-C", worktree, "add", "--", "src/value.mjs"]);
+			runCommand("git", ["-C", worktree, "commit", "-m", `fix(value): advance fixture to ${round + 1}`]);
+			reply = await complete(implementer, "STATUS: COMPLETE\nCHECKS: fixture source updated\nFILES CHANGED: src/value.mjs\nNOTES: regression check remains unresolved");
+			const reviewer = object((reply.actions as unknown[])[0]);
+			reply = await complete(reviewer, "VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: [F1][P1][BLOCKING][PLAN_REQUIREMENT] src/value.mjs:1 — required regression check fails\nFIX_GUIDANCE: [F1] make the regression check pass\nCHECKS: required regression check — FAILED\nRATIONALE: Original acceptance remains unmet");
+			if (round === 2) {
+				const judge = object((reply.actions as unknown[])[0]);
+				assert.equal(judge.role, "plan-judge");
+				reply = await complete(judge, "DECISION: REPAIR\nFINDINGS: [F1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] required check fails\nAUTHORIZED_BLOCKERS: F1\nREPAIR_CONTRACTS: [F1] expected=required regression check passes; constraints=original scope\nPASS_DOCUMENT: Resolve F1, run the required regression check, and preserve original scope. No rejected findings or unresolved decisions.\nCHECKS: required regression check — FAILED\nRATIONALE: One bounded rescue remains");
+			}
+		}
+		const attention = object(reply.attention);
+		assert.equal(attention.round, 3);
+		assert.equal(attention.cause, "round_limit");
+		assert.match(String(attention.detail), /EXHAUSTION_DECISION_DOSSIER/);
+		const factory = new PendingWorkerFactory();
+		api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const baseContext = restoredContext(fixture, String(reply.runId), []);
+		let consent = false;
+		let shutdownDuringConfirmation = false;
+		const confirmations: string[] = [];
+		ctx = { ...baseContext, hasUI: true, ui: { ...baseContext.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async (_title: string, text: string) => {
+				confirmations.push(text);
+				if (shutdownDuringConfirmation) await api!.invoke("session_shutdown", ctx!);
+				return consent;
+			},
+		} } as ExtensionContext;
+		await api.invoke("session_start", ctx);
+		await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
+		const params = {
+			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
+			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",
+			rationale: "The user accepts the current implementation with this specific gap.",
+			confirmed: true, // Untrusted model input must not bypass a declined host confirmation.
+		};
+		const declined = object(await api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx));
+		assert.equal(declined.isError, true);
+		assert.match(String((declined.content as Array<{ text: string }>)[0]!.text), /Acceptance declined/);
+		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
+		assert.equal(confirmations.length, 1);
+		const before = new RunStore(fixture.planDirectory);
+		try { assert.equal(before.getApproval(String(reply.runId), "001", 1), null); } finally { before.close(); }
+		consent = true;
+		shutdownDuringConfirmation = true;
+		const retired = object(await api.tool("herder_plan").execute("retired-session", params, undefined, undefined, ctx));
+		assert.equal(retired.isError, true, "a confirmation from a retired session cannot authorize acceptance");
+		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
+		shutdownDuringConfirmation = false;
+		await api.invoke("session_start", ctx);
+		const accepted = object(await api.tool("herder_plan").execute("accept", { ...params, confirmed: false }, undefined, undefined, ctx));
+		assert.equal(accepted.isError, undefined, JSON.stringify(accepted));
+		assert.equal(confirmations.length, 3);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const plan = store.getPlan(String(reply.runId), "001")!;
+			assert.equal(plan.phase, "DONE");
+			assert.match(plan.findings.join("\n"), /required regression check fails/);
+			const proof = store.getApproval(String(reply.runId), "001", 1)!;
+			assert.equal(proof.decisionRole, "user");
+			assert.equal(proof.userAcceptance?.confirmed, true);
+			assert.equal(proof.userAcceptance?.answer, params.answer);
+			assert.ok(confirmations.every((text) => text.includes(proof.approvedHead) && text.includes(proof.approvedTree)));
+			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
+			assert.equal(store.getVerification(String(reply.runId), 1)?.state, "awaiting_manifest", "acceptance never waives final verification");
+		} finally { store.close(); }
+		assert.equal(factory.requests.length, 0, "acceptance never dispatches another implementation or Judge");
+	} finally {
+		if (api && ctx) await api.invoke("session_shutdown", ctx).catch(() => {});
+		if (fixture) await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

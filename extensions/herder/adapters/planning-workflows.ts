@@ -42,7 +42,10 @@ interface PiPlanningManagerReplyContext {
 
 interface PiPlanningRuntime {
 	assertMutationAllowed: () => void;
-	bindAttention?: (input: { planDirectory: string; requestId?: string }) => AttentionResolutionBinding;
+	bindAttention?: (
+		input: { planDirectory: string; requestId?: string; action?: string; answer?: string; rationale?: string },
+		ctx: ExtensionContext,
+	) => AttentionResolutionBinding | Promise<AttentionResolutionBinding>;
 	prepareWorkflow?: (
 		skill: PiPlanningSkill,
 		argumentsText: string,
@@ -80,6 +83,7 @@ const retiredAttentionArguments = [
 	"round",
 	"continuation",
 	"git",
+	"confirmed",
 ] as const;
 
 function preparePlanningWorkflowArguments(input: unknown): Static<typeof planningWorkflowSchema> {
@@ -267,7 +271,8 @@ export function registerPiPlanningWorkflows(
 					throw new Error("Herder attention submissions require an adapter-owned request binding.");
 				}
 				const attentionBinding = params.operation === "attention"
-					? runtime.bindAttention!({ planDirectory, requestId: params.requestId })
+					? await runtime.bindAttention!({ planDirectory, requestId: params.requestId,
+						action: params.action, answer: params.answer, rationale: params.rationale }, ctx)
 					: undefined;
 				const applicationParams = {
 					operation: params.operation,

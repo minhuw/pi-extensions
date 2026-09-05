@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	ATTENTION_PATH_LIMIT,
+	ATTENTION_RESOLUTION_ACTIONS,
+	MANAGER_PROTOCOL_VERSION,
+	MAX_PLAN_ROUNDS,
+	attentionCapabilityToken,
+	validateAttentionResolution,
 	attentionRequestSha256,
 	canonicalEventPayload,
 	integrationRepairRefSnapshotSha256,
@@ -37,9 +42,10 @@ test("worker envelopes become typed deterministic results", () => {
 	assert.equal(reviewer.kind, "reviewer");
 	assert.equal(reviewer.findings.length, 1);
 
-	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
+	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nPASS_DOCUMENT: Fix F001 and rerun the failing check.\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
 	assert.equal(judge.kind, "judge");
 	assert.deepEqual(judge.authorizedBlockers, ["F001"]);
+	assert.equal(judge.passDocument, "Fix F001 and rerun the failing check.");
 });
 
 test("normalizeUsage preserves nested model slices from the terminal event", () => {
@@ -106,6 +112,9 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	};
 	const request = { ...requestBody, requestSha256: attentionRequestSha256(requestBody) };
 	assert.doesNotThrow(() => validateAttentionRequest(request));
+	const finalRound = { ...requestBody, round: MAX_PLAN_ROUNDS };
+	assert.doesNotThrow(() => validateAttentionRequest({ ...finalRound, requestSha256: attentionRequestSha256(finalRound) }));
+	assert.throws(() => validateAttentionRequest({ ...request, round: 4 }), /round must be between 1 and 3/);
 	const legacyRequestBody = {
 		...requestBody,
 		recovery: { ...requestBody.recovery, fingerprintVersion: 1 },
@@ -276,4 +285,55 @@ test("malformed envelopes and payload-changing replay identities fail closed", (
 	const changed = canonicalEventPayload({ a: 1, b: 3 });
 	assert.equal(first.sha256, reordered.sha256);
 	assert.notEqual(first.sha256, changed.sha256);
+});
+
+
+test("Judge repair requires a bounded pass document while other decisions may omit it", () => {
+	const repair = "DECISION: REPAIR\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: Fix F001";
+	for (const document of [undefined, "", "   ", "none", "NoNe"]) {
+		assert.throws(() => parseWorkerResult("plan-judge", repair + (document === undefined ? "" : `\nPASS_DOCUMENT: ${document}`)), /requires a nonempty PASS_DOCUMENT/);
+	}
+	const document = "Fix the failing assertion.\nPreserve the public API.";
+	const result = parseWorkerResult("plan-judge", `${repair}\nPASS_DOCUMENT: ${document}`);
+	assert.equal(result.kind, "judge");
+	assert.equal(result.passDocument, document);
+	assert.doesNotThrow(() => parseWorkerResult("plan-judge", `${repair}\nPASS_DOCUMENT: ${"x".repeat(16_384)}`));
+	for (const invalid of ["x".repeat(16_385), "bad\0document"]) {
+		for (const decision of [repair, "DECISION: DONE"]) {
+			assert.throws(() => parseWorkerResult("plan-judge", `${decision}\nPASS_DOCUMENT: ${invalid}`), /PASS_DOCUMENT must be/);
+		}
+	}
+	for (const decision of ["DONE", "BLOCKED", "NEEDS_INPUT\nQUESTION: Which API?"]) {
+		const result = parseWorkerResult("plan-judge", `DECISION: ${decision}`);
+		assert.equal(Object.hasOwn(result, "passDocument"), false);
+	}
+});
+
+test("attention acceptance requires adapter confirmation and explicit waivers through round three", () => {
+	assert.equal(MANAGER_PROTOCOL_VERSION, 10);
+	assert.equal(MAX_PLAN_ROUNDS, 3);
+	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("accept"));
+	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("stop"));
+	const acceptance = {
+		schemaVersion: 1,
+		requestId: "attention-accept",
+		requestSha256: "a".repeat(64),
+		capabilityToken: attentionCapabilityToken("attention-accept"),
+		runId: "run-1", planId: "001", generation: 1, round: 3,
+		action: " AcCePt ", confirmed: true,
+		answer: "Accept the missing optional regression check as a waived gap.",
+		rationale: "The reviewed tree is sufficient for this release.",
+	};
+	assert.doesNotThrow(() => validateAttentionResolution(acceptance));
+	for (const patch of [{ confirmed: false }, { confirmed: undefined }, { answer: undefined }, { answer: "   " }, { rationale: undefined }, { rationale: "   " }]) {
+		assert.throws(() => validateAttentionResolution({ ...acceptance, ...patch }), /requires human confirmation/);
+	}
+	for (const confirmed of ["true", 1, null]) {
+		assert.throws(() => validateAttentionResolution({ ...acceptance, action: "stop", confirmed }), /confirmed must be a boolean/);
+	}
+	assert.doesNotThrow(() => validateAttentionResolution({ ...acceptance, action: "stop", confirmed: false, answer: undefined, rationale: undefined }));
+	assert.throws(() => validateAttentionResolution({ ...acceptance, round: 4 }), /round must be between 1 and 3/);
+	for (const answer of ["x".repeat(16_385), "bad\0waiver"]) {
+		assert.throws(() => validateAttentionResolution({ ...acceptance, answer }), /answer is invalid/);
+	}
 });

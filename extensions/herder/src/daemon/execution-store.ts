@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { WORKER_ROLES } from "../shared/protocol.ts"
+import { MAX_PLAN_ROUNDS, WORKER_ROLES } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -49,7 +49,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 18
+export const EXECUTION_SCHEMA_VERSION = 19
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -597,7 +597,7 @@ CREATE TABLE attempts (
         output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
         reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
         source TEXT NOT NULL,
-        round_number INTEGER CHECK (round_number IS NULL OR round_number BETWEEN 1 AND 6),
+        round_number INTEGER CHECK (round_number IS NULL OR round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
         generation TEXT,
         harness TEXT,
         service_tier TEXT,
@@ -651,7 +651,7 @@ CREATE TABLE manager_plans (
         run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
         plan_id TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
         phase TEXT NOT NULL,
         branch TEXT NOT NULL,
         worktree TEXT NOT NULL,
@@ -682,7 +682,7 @@ CREATE TABLE manager_actions (
         run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
         plan_id TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
         role TEXT NOT NULL,
         attempt_id TEXT NOT NULL UNIQUE,
         state TEXT NOT NULL CHECK (state IN ('proposed', 'dispatched', 'terminal', 'cancelled')),
@@ -743,10 +743,11 @@ CREATE TABLE manager_approvals (
         run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
         plan_id TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0),
-        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
         reviewer_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
         decision_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
-        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge')),
+        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge', 'user')),
+        user_acceptance_json TEXT CHECK ((decision_role = 'user') = (user_acceptance_json IS NOT NULL)),
         assignment_sha256 TEXT NOT NULL,
         approved_base TEXT NOT NULL,
         approved_head TEXT NOT NULL,
@@ -883,7 +884,7 @@ CREATE TABLE "manager_attention_requests" (
       run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
       plan_id TEXT NOT NULL,
       generation INTEGER NOT NULL CHECK (generation > 0),
-      round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND 6),
+      round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
       action_id TEXT,
       request_sha256 TEXT NOT NULL,
       kind TEXT NOT NULL CHECK (kind IN ('plan_recovery', 'user_decision', 'operator_attention')),
@@ -926,7 +927,7 @@ CREATE INDEX manager_attention_requests_run_state
 CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       ON manager_attention_requests(run_id, plan_id, generation, cause)
       WHERE state <> 'resolved';
-PRAGMA user_version = 18;
+PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION};
   `)
 }
 
@@ -1147,7 +1148,7 @@ function optionalCount(value: unknown, label: string): number | null {
 function optionalRound(value: unknown): number | null {
   if (value === null || value === undefined || String(value).trim() === "") return null
   const round = optionalCount(value, "Round")
-  if (round === null || round < 1 || round > 6) fail("Round must be an integer from 1 through 6")
+  if (round === null || round < 1 || round > MAX_PLAN_ROUNDS) fail(`Round must be an integer from 1 through ${MAX_PLAN_ROUNDS}`)
   return round
 }
 

@@ -1,3 +1,4 @@
+import { MAX_PLAN_ROUNDS } from "../../shared/protocol.ts"
 import { fail } from "./primitives.ts"
 
 const REVIEW_VERDICTS = new Set(["APPROVE", "REVISE", "BLOCK"])
@@ -19,7 +20,7 @@ function parseInteger(value: string | undefined, name: string, { min = 0, max = 
 }
 
 export function decideReview({ round, verdict, scope, openBlockers }: { round: number | string; verdict: ReviewVerdict; scope: ReviewScope; openBlockers: number | string }): { action: PolicyAction; judgeRequired: boolean; nextRound: number | null } {
-  const normalizedRound = parseInteger(String(round), "round", { min: 1, max: 6 })
+  const normalizedRound = parseInteger(String(round), "round", { min: 1, max: MAX_PLAN_ROUNDS })
   const normalizedBlockers = parseInteger(String(openBlockers), "open-blockers")
   if (!REVIEW_VERDICTS.has(verdict)) fail("verdict must be APPROVE, REVISE, or BLOCK")
   if (!REVIEW_SCOPES.has(scope)) fail("scope must be PASS or FAIL")
@@ -31,19 +32,19 @@ export function decideReview({ round, verdict, scope, openBlockers }: { round: n
     return { action: "READY_TO_INTEGRATE", judgeRequired: false, nextRound: null }
   }
 
-  if (normalizedRound <= 2) {
+  if (normalizedRound === 1) {
     if (verdict === "BLOCK") {
       return { action: "BLOCKED", judgeRequired: false, nextRound: null }
     }
-    if (normalizedBlockers < 1) fail("REVISE requires at least one open blocker")
     return { action: "REPAIR_DIRECT", judgeRequired: false, nextRound: normalizedRound + 1 }
   }
 
+  if (normalizedRound === MAX_PLAN_ROUNDS) return { action: "BLOCKED_ROUND_LIMIT", judgeRequired: false, nextRound: null }
   return { action: "JUDGE", judgeRequired: true, nextRound: null }
 }
 
 export function decideJudge({ round, decision }: { round: number | string; decision: JudgeDecision }): { action: PolicyAction; nextRound: number | null } {
-  const normalizedRound = parseInteger(String(round), "round", { min: 3, max: 6 })
+  const normalizedRound = parseInteger(String(round), "round", { min: 2, max: 2 })
   if (!JUDGE_DECISIONS.has(decision)) {
     fail("decision must be DONE, REPAIR, NEEDS_INPUT, or BLOCKED")
   }
@@ -51,7 +52,6 @@ export function decideJudge({ round, decision }: { round: number | string; decis
     return { action: "READY_TO_INTEGRATE", nextRound: null }
   }
   if (decision === "REPAIR") {
-    if (normalizedRound === 6) return { action: "BLOCKED_ROUND_LIMIT", nextRound: null }
     return { action: "REPAIR_GUIDED", nextRound: normalizedRound + 1 }
   }
   return { action: decision, nextRound: null }
