@@ -8,7 +8,7 @@ The published extension table and installation details live in the root [README]
 ## Layout
 
 - `extensions/cliproxyapi-native-compaction/` — native OpenAI Responses compaction for eligible CLIProxyAPI-backed Pi sessions.
-- `extensions/commit/` — a commit-writing extension with preflight helpers and tests.
+- `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
 - `extensions/shared/` — shared Orca busy-state coordination plus its strict Node test.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.

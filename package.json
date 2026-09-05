@@ -51,12 +51,12 @@
 	},
 	"pi": {
 		"themes": ["./themes"],
+		"prompts": ["./extensions/commit/prompts/commit.md"],
 		"extensions": [
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/index.ts",
 			"./extensions/subagents/src/index.ts",
-			"./extensions/commit/index.ts",
 			"./extensions/writer/index.ts"
 		]
 	}
