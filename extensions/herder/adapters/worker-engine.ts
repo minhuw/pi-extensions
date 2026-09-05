@@ -362,7 +362,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot: this.agentRoot,
-			createSession: async ({ id, definition: childDefinition, binding, signal }) => {
+			createSession: async ({ id, definition: childDefinition, binding, signal, nestedScope }) => {
 				signal.throwIfAborted();
 				const childModel = resolveBinding(binding.model, binding.effort, binding.serviceTier);
 				const extensionPaths = this.resolveExtensionPaths(childDefinition.extensions, request.action.worktree, "nested");
@@ -403,6 +403,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					model: childModel as Model<any>,
 					thinkingLevel: binding.effort as ThinkingLevel,
 					tools: initialChildTools,
+					customTools: nestedScope ? [...createNestedAgentTools(nestedScope)] : [],
 					resourceLoader: childLoader,
 					sessionManager: childManager,
 				});

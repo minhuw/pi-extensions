@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { resolvePiProfile } from "../../../src/core/profile-registry.ts";
-import { loadHerderNestedAgent, loadHerderPiRole, validateHerderRoleAgents } from "../../../adapters/role-config.ts";
+import { HERDER_NESTED_AGENT_TYPES, loadHerderNestedAgent, loadHerderPiRole, resolveNestedBinding, validateHerderRoleAgents } from "../../../adapters/role-config.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
@@ -17,7 +17,7 @@ const available = [
 	{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 ];
 
-test("Herder loads exact non-recursive Pi role definitions", async () => {
+test("Herder loads exact scoped Pi role definitions", async () => {
 	const implementer = await loadHerderPiRole(agentRoot, "plan-implementer");
 	const reviewer = await loadHerderPiRole(agentRoot, "plan-reviewer");
 	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
@@ -31,10 +31,12 @@ test("Herder loads exact non-recursive Pi role definitions", async () => {
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
 
-test("Herder loads package-owned one-level nested definitions with explicit permissions", async () => {
+test("Herder loads package-owned nested definitions with reviewer-only delegation", async () => {
+	assert.deepEqual(HERDER_NESTED_AGENT_TYPES, ["recon", "searcher", "worker", "reviewer"]);
 	const recon = await loadHerderNestedAgent(agentRoot, "recon");
 	const searcher = await loadHerderNestedAgent(agentRoot, "searcher");
 	const worker = await loadHerderNestedAgent(agentRoot, "worker");
+	const reviewer = await loadHerderNestedAgent(agentRoot, "reviewer");
 	assert.deepEqual(recon.tools, ["read", "ffgrep", "fffind", "ls"]);
 	assert.deepEqual(recon.extensions, ["npm:@ff-labs/pi-fff"]);
 	assert.equal(recon.readOnly, true);
@@ -50,9 +52,91 @@ test("Herder loads package-owned one-level nested definitions with explicit perm
 	assert.equal(worker.modelBinding, undefined);
 	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail", "npm:@ff-labs/pi-fff"]);
 	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls"]);
+	assert.equal(reviewer.readOnly, false);
+	assert.equal(reviewer.binding, "inherit");
+	assert.equal(reviewer.modelBinding, undefined);
+	assert.deepEqual(reviewer.extensions, ["npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
+	for (const serviceTier of ["fast", "standard", undefined] as const) {
+		const parent = { model: "parent/reviewer", effort: "max", ...(serviceTier ? { serviceTier } : {}) };
+		assert.deepEqual(resolveNestedBinding(reviewer, parent), parent);
+	}
 	for (const definition of [recon, searcher, worker]) {
 		assert.equal(definition.tools.includes("Agent"), false);
 		assert.equal(definition.tools.includes("get_subagent_result"), false);
+	}
+});
+
+test("recon positively defines bounded static work and early caller-owned handoff", async () => {
+	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "recon");
+	assert.match(systemPrompt, /source-navigation child in the supplied current worktree/);
+	assert.match(systemPrompt, /reading files, locating paths and symbols with FFF/);
+	assert.match(systemPrompt, /tracing static callers, data flow, and contracts/);
+	assert.match(systemPrompt, /Start with capability triage/);
+	assert.match(systemPrompt, /runtime execution, implementation, or general code-review objective, return `HANDOFF_REQUIRED` immediately/);
+	assert.match(systemPrompt, /Return `PARTIAL` as soon as relevant static sources are exhausted or a tool mismatch appears/);
+	assert.match(systemPrompt, /Success includes an early useful handoff/);
+	assert.match(systemPrompt, /caller owns continuation; relaunch requires an explicit caller decision and a revised task or added capability/);
+	assert.match(systemPrompt, /fixed hard one-hour \(1h\) wall-clock deadline, including compaction and retries/);
+	assert.match(systemPrompt, /STATUS: ANSWERED \| PARTIAL \| HANDOFF_REQUIRED/);
+	for (const field of ["ANSWER", "EVIDENCE", "REMAINING"]) assert.match(systemPrompt, new RegExp(`^${field}:`, "m"));
+	assert.doesNotMatch(systemPrompt, /\b(?:do not|don't|don’t|never|cannot|must not|forbidden)\b/i);
+});
+
+test("subreviewer contract preserves sources and hands unresolved proof to its parent", async () => {
+	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
+	assert.match(systemPrompt, /source preservation is a behavioral contract, not a sandbox/);
+	assert.match(systemPrompt, /primary hunk\/subsystem ownership, named cross-boundary questions/);
+	assert.match(systemPrompt, /parent owns the compiled assignment, hash verification, and frozen authority/);
+	assert.match(systemPrompt, /parent runs required shared gates once/);
+	assert.match(systemPrompt, /writes in external scratch directories/);
+	assert.match(systemPrompt, /at most one concurrent recon and two launches total/);
+	assert.match(systemPrompt, /uncollected grandchildren fail this review closed/);
+	assert.match(systemPrompt, /wait_any: true/);
+	assert.match(systemPrompt, /60 seconds, then returns running without cancelling/);
+	assert.match(systemPrompt, /including timeout\/error/);
+	assert.match(systemPrompt, /Missing proof belongs in UNRESOLVED/);
+	assert.match(systemPrompt, /Child confidence scores are not an admission gate/);
+	for (const field of ["PROPOSED_FINDINGS", "UNRESOLVED", "COVERAGE"]) assert.match(systemPrompt, new RegExp(`^${field}:`, "m"));
+});
+
+test("nested reviewer rejects widened, incomplete, or dishonest permission metadata", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-reviewer-metadata-"));
+	try {
+		await mkdir(path.join(root, "nested"));
+		const file = path.join(root, "nested/reviewer.md");
+		const original = await readFile(path.join(agentRoot, "nested/reviewer.md"), "utf8");
+		const tools = "read, bash, ffgrep, fffind, ls, Agent, get_subagent_result";
+		const cases: [string, string, RegExp][] = [
+			["binding: inherit", "binding: own\nmodel: gpt-5.6-luna\neffort: max", /must inherit its parent binding/],
+			["binding: inherit", "binding: other", /invalid binding/],
+			["binding: inherit", "binding: inherit\nmodel: gpt-5.6-luna\neffort: max\nservice_tier: fast", /cannot declare its own model/],
+			["readOnly: false", "readOnly: true", /mutating or unrestricted tool/],
+			["readOnly: false", 'readOnly: "false"', /missing readOnly/],
+			["package: herder", "package: other", /mismatched nested agent metadata/],
+			["name: reviewer", "name: recon", /mismatched nested agent metadata/],
+			["kind: nested", "kind: root", /mismatched nested agent metadata/],
+			[`tools: ${tools}`, `tools: [${tools}, 42]`, /invalid tools/],
+			[`tools: ${tools}`, `tools: ${tools}, read`, /duplicate tools/],
+		];
+		for (const tool of tools.split(", ")) {
+			cases.push([`tools: ${tools}`, `tools: ${tools.split(", ").filter((item) => item !== tool).join(", ")}`, /exact reviewer tool envelope/]);
+		}
+		for (const tool of ["edit", "write", "unexpected", "web_search"]) {
+			cases.push([`tools: ${tools}`, `tools: ${tools}, ${tool}`, /exact reviewer tool envelope/]);
+		}
+		for (const tool of ["herder", "subagent", "steer_subagent"]) {
+			cases.push([`tools: ${tools}`, `tools: ${tools}, ${tool}`, /recursive agent tool .* is forbidden/]);
+		}
+		for (const extension of ["git:github.com/DietrichGebert/ponytail", "npm:pi-web-access", "npm:untrusted-extension"]) {
+			cases.push(["extensions: npm:@ff-labs/pi-fff", `extensions: npm:@ff-labs/pi-fff, ${extension}`, /requests forbidden extension/]);
+		}
+		for (const [before, after, error] of cases) {
+			await writeFile(file, original.replace(before, after));
+			await assert.rejects(() => loadHerderNestedAgent(root, "reviewer"), error, after);
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
 	}
 });
 

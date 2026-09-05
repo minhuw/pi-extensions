@@ -2,13 +2,10 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	HerderNestedAgentScope,
-	MAX_NESTED_CONCURRENCY_PER_ACTION,
 	type NestedAgentResult,
 	type PiNestedAgentSnapshot,
 } from "./nested-agent-executor.ts";
-import { HERDER_NESTED_AGENT_TYPES, type HerderNestedAgentType } from "./role-config.ts";
-
-const MAX_NESTED_CALLS = 8;
+import type { HerderNestedAgentType } from "./role-config.ts";
 
 export interface NestedAgentToolDetails {
 	agentId: string;
@@ -79,43 +76,38 @@ function snapshotLine(snapshot: PiNestedAgentSnapshot): string {
 	return `${snapshot.agentId} · ${name} · ${snapshot.status} · ↻${snapshot.turns} · ${snapshot.description}`;
 }
 
-/** Create the one-level Agent and result tools scoped to a single Herder action. */
+/** Create Agent and direct-child result tools for this action or reviewer scope. */
 export function createNestedAgentTools(scope: HerderNestedAgentScope) {
-	let calls = 0;
 	const agentTool = defineTool({
 		name: "Agent",
 		label: "Agent",
 		description: [
 			"Delegate one bounded task to a package-owned Herder nested agent.",
-			`Up to ${MAX_NESTED_CONCURRENCY_PER_ACTION} children may run concurrently for this role and at most ${MAX_NESTED_CALLS} may be launched in the action.`,
+			`Up to ${scope.maxConcurrency} children may run concurrently for this role and at most ${scope.maxCalls} may be launched in this scope.`,
 			"Set run_in_background to continue working while the child runs, then call get_subagent_result before returning the role's final answer.",
-			"recon and searcher use the package-owned scout binding gpt-5.6-luna at max on the fast tier. worker inherits this role's exact model, thinking level, and service tier.",
+			"recon and searcher use the package-owned scout binding gpt-5.6-luna at max on the fast tier. worker and reviewer inherit this role's exact model, thinking level, and service tier.",
 			"Every child inherits this action's stable worktree and lifetime.",
-			"Available types: recon is repository-read-only, searcher is primarily web research with explicitly delegated local read-only search, and worker may mutate and is available only to Implementer roles.",
+			`Allowed types in this scope: ${scope.allowedTypes.join(", ")}. recon is repository-read-only; searcher is web research with delegated local read-only search; worker may mutate (Implementer only); reviewer independently reviews (root Reviewer only).`,
 			"All children load Herder's trusted FFF package; searcher also loads pi-web-access, and worker also loads Ponytail's trusted pi-extension entry.",
-			"Nested children have no Agent or result tool, skills, inherited conversation, scheduling, resume, or secondary worktree.",
+			"Only reviewer children get Agent/result tools, restricted to recon leaves: one concurrent scout and two launches total. Other children cannot delegate. No child inherits conversation, skills, scheduling, resume, or a secondary worktree.",
+			"recon has a fixed one-hour execution deadline, including setup and retries; timeouts return partial output and never retry automatically.",
 		].join(" "),
-		promptSnippet: "Delegate bounded foreground or background work to a one-level Herder child",
+		promptSnippet: "Delegate bounded foreground or background work to a direct Herder child",
 		promptGuidelines: [
 			"Use Agent only for a bounded subtask with a self-contained prompt; the child has no parent conversation.",
-			`You may launch up to ${MAX_NESTED_CONCURRENCY_PER_ACTION} independent children concurrently. Multiple Agent calls in one response execute in parallel.`,
-			"For background children, retain every returned ID and collect each one with get_subagent_result before your final response.",
-			"Herder Agent children cannot delegate again. recon/searcher use the package scout model; worker inherits this role's model and shares the stable worktree.",
+			`You may launch up to ${scope.maxConcurrency} independent children concurrently. Multiple Agent calls in one response execute in parallel.`,
+			"Collect every background child before your final response. For parallel reviews use get_subagent_result with wait_any: true repeatedly, rather than batch waits for specific IDs.",
+			"Only nested reviewers may delegate again, to recon leaves only. recon/searcher use the package scout model; worker/reviewer inherit this role's binding and share the stable worktree.",
 			"The parent role remains accountable for verifying child claims and repository effects, including concurrent edits in the shared worktree.",
 		],
 		parameters: Type.Object({
 			prompt: Type.String({ description: "Complete self-contained task for the child agent." }),
 			description: Type.String({ description: "Short 3–5 word UI description." }),
-			subagent_type: Type.String({ description: `Package-owned nested type: ${HERDER_NESTED_AGENT_TYPES.join(", ")}.` }),
+			subagent_type: Type.String({ description: `Package-owned nested type: ${scope.allowedTypes.join(", ")}.` }),
 			run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately with an agent ID. Retrieve it later with get_subagent_result." })),
 		}),
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal) {
-			if (calls >= MAX_NESTED_CALLS) throw new Error(`Herder workers may call Agent at most ${MAX_NESTED_CALLS} times.`);
-			if (!HERDER_NESTED_AGENT_TYPES.includes(params.subagent_type as HerderNestedAgentType)) {
-				throw new Error(`Unknown Herder nested agent type: ${JSON.stringify(params.subagent_type)}.`);
-			}
-			calls += 1;
 			const request = {
 				type: params.subagent_type as HerderNestedAgentType,
 				prompt: params.prompt,
@@ -137,7 +129,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 					background: true,
 				};
 				return {
-					content: [{ type: "text" as const, text: `Agent started in background: ${launch.id}. Call get_subagent_result with this ID before returning your final response.` }],
+					content: [{ type: "text" as const, text: `Agent started in background: ${launch.id}. Collect it with get_subagent_result (prefer wait_any: true for parallel children) before returning your final response.` }],
 					details,
 				};
 			}
@@ -154,22 +146,32 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 		promptSnippet: "Collect a direct background Herder child",
 		promptGuidelines: [
 			"Collect every background child before returning the role's final response.",
-			"Use wait: true to block efficiently until the selected child settles; multiple result calls may wait in parallel.",
+			"Use wait_any: true for parallel children: collect whichever finishes first, then repeat. Do not batch waits for every specific ID.",
+			"Each wait is bounded to 60 seconds and never cancels the child. Retry collection if it is still running; listing alone does not collect.",
 		],
 		parameters: Type.Object({
-			agent_id: Type.Optional(Type.String({ description: "Direct child ID returned by Agent. Omit to list all direct children." })),
-			wait: Type.Optional(Type.Boolean({ description: "Wait for completion. Default: true when agent_id is supplied." })),
+			agent_id: Type.Optional(Type.String({ description: "Direct child ID returned by Agent. Omit both agent_id and wait_any to list all direct children." })),
+			wait_any: Type.Optional(Type.Boolean({ description: "Collect one uncollected background direct child, whichever completes first. Mutually exclusive with agent_id. Defaults to waiting when true." })),
+			wait: Type.Optional(Type.Boolean({ description: "Wait up to 60 seconds, without cancelling the child. Default: true with agent_id or wait_any: true." })),
 		}),
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal) {
-			if (!params.agent_id) {
-				const snapshots = scope.snapshots();
+			if (params.agent_id !== undefined && params.wait_any !== undefined) {
+				throw new Error("agent_id and wait_any are mutually exclusive.");
+			}
+			const lookup = params.wait_any === true
+				? await scope.resultAny(params.wait !== false, signal)
+				: params.agent_id !== undefined ? await scope.result(params.agent_id, params.wait !== false, signal) : undefined;
+			if (!lookup) {
+				const pending = new Set(scope.uncollectedBackgroundIds());
+				const snapshots = scope.snapshots().filter((snapshot) => params.wait_any !== true || pending.has(snapshot.agentId));
 				return {
-					content: [{ type: "text" as const, text: snapshots.length ? snapshots.map(snapshotLine).join("\n") : "No nested agents have been launched." }],
+					content: [{ type: "text" as const, text: snapshots.length
+						? `${params.wait_any === true ? "Agents still running:\n" : ""}${snapshots.map(snapshotLine).join("\n")}`
+						: params.wait_any === true ? "No uncollected background agents." : "No nested agents have been launched." }],
 					details: { agents: snapshots } as NestedAgentResultToolDetails,
 				};
 			}
-			const lookup = await scope.result(params.agent_id, params.wait !== false, signal);
 			if (!lookup.result) {
 				return {
 					content: [{ type: "text" as const, text: `Agent still running: ${snapshotLine(lookup.snapshot)}` }],
@@ -178,7 +180,9 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			}
 			const details = resultDetails(lookup.result, lookup.snapshot.type);
 			return {
-				content: [{ type: "text" as const, text: resultText(lookup.result, details) }],
+				content: [{ type: "text" as const, text: params.wait_any === true
+					? `Collected agent ${lookup.snapshot.agentId} · ${lookup.snapshot.type} · ${lookup.snapshot.description}\n\n${resultText(lookup.result, details)}\n\nUncollected background IDs: ${scope.uncollectedBackgroundIds().join(", ") || "none"}.`
+					: resultText(lookup.result, details) }],
 				details: { agent: lookup.snapshot, result: details } as NestedAgentResultToolDetails,
 			};
 		},

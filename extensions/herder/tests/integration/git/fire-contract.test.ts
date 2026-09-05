@@ -33,9 +33,24 @@ try {
     assert.doesNotMatch(role, /^model:/m);
   }
   const reviewProtocol = await readFile(path.join(pluginRoot, "assets", "review", "code-review-protocol.md"), "utf8");
-  assert.match(reviewProtocol, /four fresh `recon` children/);
-  assert.match(reviewProtocol, /CONFIDENCE: <integer 0-100>/);
-  assert.match(reviewProtocol, /confidence at least 80/);
+  assert.match(reviewProtocol, /four fresh `reviewer` children in one parallel wave/);
+  assert.match(reviewProtocol, /primary explicit hunk\/subsystem ownership and named cross-boundary questions/);
+  assert.match(reviewProtocol, /parent alone establishes compiled assignment and frozen authority/);
+  assert.match(reviewProtocol, /children never need coordinator checkout or source-plan authority/);
+  assert.match(reviewProtocol, /Every subreviewer also returns `UNRESOLVED`[\s\S]*`COVERAGE`/);
+  assert.match(reviewProtocol, /Evidence completeness and the parent's independent verification determine the final finding set/);
+  assert.match(reviewProtocol, /exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk\/commit/);
+  assert.match(reviewProtocol, /Confirmed P2\/P3 findings remain advisory/);
+  assert.match(reviewProtocol, /`FOLLOWUP` and `INVALID` never block/);
+  assert.match(reviewProtocol, /six-round authority rules/);
+  assert.match(reviewProtocol, /For later review passes, do not reopen broad discovery/);
+  assert.doesNotMatch(reviewProtocol, /CONFIDENCE:|confidence at least 80|four fresh `recon` children/);
+  const reviewer = await readFile(path.join(pluginRoot, "assets", "roles", "contracts", "plan-reviewer.md"), "utf8");
+  assert.match(reviewer, /Never search or read the coordinator checkout, source plan directory, sibling worktrees, common Git directory, plan index/);
+  assert.match(reviewer, /hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/);
+  assert.deepEqual([...reviewer.split("Return exactly:")[1].matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
+    "VERDICT", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "CHECKS", "RATIONALE", "USAGE",
+  ]);
 
   const gateWorktree = path.join(root, "gate-worktree");
   const gateLogs = path.join(root, "gate-logs");

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { ModelRegistry, ModelRuntime, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import {
@@ -538,6 +538,68 @@ export default function (pi) {
 			await synchronous.nested.stop("test cleanup");
 		} finally {
 			delete process.env.HERDER_TEST_FFF_SYNC;
+		}
+
+		const review = await factory.create({ action: { ...roleAction("plan-reviewer"), serviceTier: "fast" }, planDirectory });
+		try {
+			const observedModels: string[] = [];
+			const respond: Parameters<typeof faux.setResponses>[0][number] = (context, options, _state, model) => {
+				observedModels.push(model.id);
+				const tools = (context.tools ?? []).map((tool) => tool.name).sort();
+				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
+				if (model.id === "gpt-5.6-luna") {
+					assert.deepEqual(tools, ["read", "ffgrep", "fffind", "ls"].sort());
+					assert.equal(context.messages.length, 1, "scout starts with its own task only");
+					assert.equal(options?.reasoning, "max");
+					return fauxAssistantMessage("STATUS: ANSWERED\nANSWER: source trace\nEVIDENCE: src/test.ts:1\nREMAINING: none");
+				}
+				assert.equal(model.id, "test-model");
+				assert.equal(options?.reasoning, "high");
+				assert.deepEqual(tools, ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"].sort());
+				const results = context.messages.filter((entry) => entry.role === "toolResult");
+				if (results.length === 0) {
+					assert.equal(context.messages.length, 1, "reviewer starts with its own task only");
+					return fauxAssistantMessage(fauxToolCall("Agent", {
+						subagent_type: "recon", prompt: "Trace the exported symbol", description: "trace exported symbol",
+					}), { stopReason: "toolUse" });
+				}
+				if (results.length === 1) {
+					assert.notEqual(results[0]!.isError, true);
+					return fauxAssistantMessage([
+						fauxToolCall("bash", { command: "printf herder-review-check", timeout: 5 }),
+						fauxToolCall("Agent", { subagent_type: "reviewer", prompt: "Review", description: "reject deeper reviewer" }),
+						fauxToolCall("Agent", { subagent_type: "worker", prompt: "Edit", description: "reject mutation worker" }),
+					], { stopReason: "toolUse" });
+				}
+				assert.equal(results.length, 4);
+				const shell = results.find((entry) => entry.toolName === "bash")!;
+				assert.ok(shell.content.some((part) => part.type === "text" && part.text.includes("herder-review-check")));
+				assert.equal(results.filter((entry) => entry.isError).length, 2, "reviewer scope rejects wider delegation");
+				return fauxAssistantMessage("Review complete with source and runtime evidence");
+			};
+			faux.setResponses(Array.from({ length: 16 }, () => respond));
+			const results = await Promise.all(Array.from({ length: 4 }, (_, index) => review.nested.run({
+				type: "reviewer", prompt: `Review shard ${index}`, description: `review shard ${index}`,
+			})));
+			for (const result of results) assert.equal(result.status, "completed", result.error ?? result.output);
+			assert.equal(observedModels.filter((model) => model === "test-model").length, 12);
+			assert.equal(observedModels.filter((model) => model === "gpt-5.6-luna").length, 4);
+			const snapshots = review.nested.treeSnapshots();
+			assert.equal(snapshots.length, 8);
+			for (const result of results) {
+				assert.equal(result.model, "test/test-model");
+				assert.equal(result.effort, "high");
+				assert.equal(result.serviceTier, "fast");
+				assert.equal(snapshots.filter((child) => child.parentAgentId === result.id).length, 1);
+			}
+			assert.deepEqual(review.nested.usageSlices().map(({ type, count }) => ({ type, count })), [
+				{ type: "recon", count: 4 }, { type: "reviewer", count: 4 },
+			]);
+		} finally {
+			await review.nested.stop("test cleanup");
+			const reviewSession = review.session as AgentSession;
+			await reviewSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			reviewSession.dispose();
 		}
 
 		const beforeIncompletePair = (await readFile(events, "utf8")).trim().split("\n");

@@ -26,7 +26,7 @@ export interface HerderPiRoleDefinition {
 	systemPrompt: string;
 }
 
-export const HERDER_NESTED_AGENT_TYPES = ["recon", "searcher", "worker"] as const;
+export const HERDER_NESTED_AGENT_TYPES = ["recon", "searcher", "worker", "reviewer"] as const;
 export type HerderNestedAgentType = typeof HERDER_NESTED_AGENT_TYPES[number];
 export const HERDER_NESTED_BINDINGS = ["own", "inherit"] as const;
 export type HerderNestedBinding = typeof HERDER_NESTED_BINDINGS[number];
@@ -48,6 +48,8 @@ export interface HerderNestedAgentDefinition {
 	systemPrompt: string;
 }
 
+// Bash is unrestricted; reviewer source preservation is a prompt contract, not a sandbox.
+const REVIEWER_NESTED_TOOLS = ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"] as const;
 const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
 	"read", "ffgrep", "fffind", "ls",
 	"web_search", "source_check", "fetch_content", "get_search_content",
@@ -64,6 +66,7 @@ const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]>
 	recon: [FFF_EXTENSION_SOURCE],
 	searcher: [WEB_ACCESS_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
 	worker: [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
+	reviewer: [FFF_EXTENSION_SOURCE],
 };
 
 function stringField(frontmatter: Record<string, unknown>, name: string, file: string): string {
@@ -128,6 +131,7 @@ function validateOwnBinding(definition: HerderNestedAgentDefinition, availableMo
 }
 
 function toolList(value: unknown, file: string, allowedNestedTools: readonly string[] = ["Agent", "get_subagent_result"]): string[] {
+	if (Array.isArray(value) && value.some((tool) => typeof tool !== "string")) throw new Error(`invalid tools in ${file}`);
 	const normalized = stringList(value);
 	if (normalized.length === 0) throw new Error(`missing tools in ${file}`);
 	if (new Set(normalized).size !== normalized.length) throw new Error(`duplicate tools in ${file}`);
@@ -175,10 +179,14 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 	if (!(HERDER_NESTED_BINDINGS as readonly string[]).includes(binding)) {
 		throw new Error(`invalid binding in ${file}`);
 	}
+	if (type === "reviewer" && binding !== "inherit") throw new Error(`nested reviewer must inherit its parent binding in ${file}`);
 	const modelBinding = optionalMapping(parsed.frontmatter, file);
 	if (binding === "own" && !modelBinding) throw new Error(`own-model nested agent ${type} is missing model/effort in ${file}`);
 	if (binding === "inherit" && modelBinding) throw new Error(`inherit nested agent ${type} cannot declare its own model in ${file}`);
-	const tools = toolList(parsed.frontmatter.tools, file, []);
+	const tools = toolList(parsed.frontmatter.tools, file, type === "reviewer" ? ["Agent", "get_subagent_result"] : []);
+	if (type === "reviewer" && (tools.length !== REVIEWER_NESTED_TOOLS.length || tools.some((tool) => !(REVIEWER_NESTED_TOOLS as readonly string[]).includes(tool)))) {
+		throw new Error(`nested reviewer requires the exact reviewer tool envelope in ${file}`);
+	}
 	const extensions = stringList(parsed.frontmatter.extensions);
 	if (new Set(extensions).size !== extensions.length) throw new Error(`duplicate extensions in ${file}`);
 	const allowedExtensions = NESTED_EXTENSION_SOURCES[type];
