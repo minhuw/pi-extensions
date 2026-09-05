@@ -381,6 +381,15 @@ function activeActionCount(store: RunStore, runId: string): number {
 	return store.countActions(runId, { states: ["proposed", "dispatched"] });
 }
 
+function shapeAdmissionError(graph: ReturnType<typeof buildGraph>): Error {
+	const issues = [...new Set([
+		...graph.contextIssues,
+		...graph.plans.flatMap((plan) => plan.shapeIssues.map((issue) => `Plan ${plan.id}: ${issue}`)),
+		...graph.warnings,
+	])];
+	return new Error(`Herder plan graph is not shape-ready${issues.length ? `: ${boundedEvidence(issues.join("; "), 4_096)}` : ""}`);
+}
+
 function workerMode(plan: StoredPlan, role: WorkerRole): ManagerAction["workerMode"] {
 	if (plan.planId === "RUN") return "FINAL_AUDIT";
 	if (role === "plan-implementer" && plan.round === MAX_PLAN_ROUNDS) return "RESCUE";
@@ -948,7 +957,7 @@ export class HerderRunManager {
 
 	private compileCurrentGraph(run: StoredRun, graphGeneration = run.currentGeneration) {
 		const graph = buildGraph(this.planDirectory);
-		if (!graph.shapeReady) throw new Error("Herder plan graph is not shape-ready");
+		if (!graph.shapeReady) throw shapeAdmissionError(graph);
 		if (graph.plans.length === 0) throw new Error("Herder plan graph is empty");
 		return { graph, ...compilePlanSpecs({
 			runId: run.runId,
@@ -1057,7 +1066,7 @@ export class HerderRunManager {
 			helperRoot: HELPER_ROOT,
 		});
 		const graph = buildGraph(this.planDirectory);
-		if (!graph.shapeReady) throw new Error("Herder plan graph is not shape-ready");
+		if (!graph.shapeReady) throw shapeAdmissionError(graph);
 		if (graph.plans.length === 0) throw new Error("Herder plan graph is empty");
 		const lifecycle = readPlanLifecycle(this.planDirectory, graph);
 		const adopted = graph.plans.filter((plan: { id: string }) => lifecycle.get(plan.id) === "IN PROGRESS");

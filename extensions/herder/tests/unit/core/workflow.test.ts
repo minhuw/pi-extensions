@@ -1,3 +1,4 @@
+import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,65 +23,69 @@ function planBody(id: string, title: string): string {
 - **Kind**: behavioral
 - **Parent objective**: Exercise the lifecycle overlay
 
-## Why this matters
+## Outcome and acceptance
 
 Fixture intent.
 
-## Current state
-
-Fixture state.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`true\` | exit 0 |
+| A1 | the fixture command passes. | V1 |
 
-## Scope
+## Boundaries
 
-**In scope** (declared write paths):
+**Write paths**
 - \`src/${id}.mjs\`
 
 **Out of scope**:
 - Every other fixture file.
 
-## Dependency contract
+- Modified symbols: the scoped fixture file only.
+- Expected unchanged behavior: every other fixture remains unchanged.
+- Expected diff: the scoped fixture path.
 
-Consumes nothing and provides one passing fixture.
+## Starting conditions
 
-## Git workflow
+**Observed baseline**
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
+Fixture state.
 
-## Steps
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Test
 
 Run the fixture.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/workflow.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run the fixture test.
 
-## Review map
+## Escalation and handoff
 
-- Outcome: the fixture command passes.
-- Modified symbols: the scoped fixture file only.
-- Proof: \`true\`.
-- Expected unchanged behavior: every other fixture remains unchanged.
-- Expected diff: the scoped fixture path.
-
-## Done criteria
-
-- [ ] \`true\` exits 0.
-
-## STOP conditions
+Consumes nothing and provides one passing fixture.
 
 Stop if the fixture changed.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the fixture small.
+Deferred work: Keep the fixture small.
 `;
 }
 
@@ -114,7 +119,7 @@ function writeTwoPlanDir(root: string): string {
 	fs.writeFileSync(path.join(planDir, "001-first.md"), planBody("001", "First"));
 	fs.writeFileSync(
 		path.join(planDir, "002-second.md"),
-		planBody("002", "Second").replace("- **Depends on**: none", "- **Depends on**: herder-plans/001-*.md"),
+		planBody("002", "Second").replace("- **Depends on**: none", "- **Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")),
 	);
 	return planDir;
 }

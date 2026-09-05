@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
-import { initPlanDir } from "../../../src/core/plans.ts";
+import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
@@ -76,76 +76,75 @@ function planText(id: string, title: string, value: number, baseCommit: string):
 - **Kind**: behavioral
 - **Parent objective**: Prove that independent reviewed patches preserve exact conflict evidence during recovery.
 
-## Why this matters
+## Outcome and acceptance
 
-This fixture creates two approved patches from one base so integration must exercise a real restack conflict.
+This fixture starts with disjoint declarations, then simulates a newly discovered shared companion accepted by independent review so integration exercises a real restack conflict.
 
-## Current state
-
-- \`src/value.mjs\` exports the number one.
-- The plan changes that one tracked line to a distinct value.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Focused | \`node --test\` | exits 0 |
+| A1 | the shared fixture exports ${value}. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: one focused change to the shared fixture line.
-- **Safe intermediate state**: the patch remains isolated to the declared source path.
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**
 - \`src/value.mjs\`
 
 **Out of scope**:
 - Package metadata, dependencies, and plan control files.
 
-## Git workflow
+Preserve consistency between coupled fixture exports if that coupling is discovered during implementation. A directly necessary companion requires explicit independent review acceptance; this fixture simulates discovery, not permission to edit arbitrary paths.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
-- Do not push or open a pull request.
+- **Modified symbols**: \`value\` in \`src/value.mjs\`.
+- **Direct contracts**: the module export remains named \`value\`.
+- **Expected unchanged behavior**: module format and repository metadata remain unchanged.
+- **Expected diff**: one source line.
 
-## Steps
+## Starting conditions
+
+**Observed baseline**
+
+- \`src/value.mjs\` exports the number one.
+- The plan changes that one tracked line to a distinct value.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Change the shared fixture line
 
 Change the exported value to ${value} without changing the module interface.
 
-**Verify**: \`node --test\` → exits 0.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-conflict-recovery.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 - Keep the fixture change limited to \`src/value.mjs\`.
 - Use the real Git worktree and rebase flow rather than mocking integration.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: the shared fixture exports ${value}.
-- **Modified symbols**: \`value\` in \`src/value.mjs\`.
-- **Direct contracts**: the module export remains named \`value\`.
-- **Expected unchanged behavior**: module format and repository metadata remain unchanged.
-- **Proof**: the focused test command.
-- **Expected diff**: one source line.
-
-## Done criteria
-
-- [ ] The source line exports ${value}.
-- [ ] The patch contains no undeclared paths.
-- [ ] The focused check exits 0.
-
-## STOP conditions
+- **Provides**: one focused change to the shared fixture line.
+- **Safe intermediate state**: the patch remains isolated to the declared source path.
 
 Stop if the module interface or declared path must change, or if the real conflict cannot be created deterministically.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the two independent fixture patches deliberately small and conflicting.
+Deferred work: Keep the two independent fixture patches deliberately small and conflicting.
 `;
 }
 
@@ -156,6 +155,7 @@ function writeFixture(root: string): Fixture {
 		files: {
 			"package.json": `${JSON.stringify({ name: "conflict-recovery-fixture", private: true, type: "module" }, null, 2)}\n`,
 			"src/value.mjs": "export const value = 1\n",
+			"src/other.mjs": "export const value = 1\n",
 		},
 	});
 
@@ -179,11 +179,22 @@ The plans are intentionally independent so both patches start from the same base
 None.
 `);
 	fs.writeFileSync(path.join(planDirectory, "001-set-value-two.md"), planText("001", "Set the value to two", 2, baseCommit));
-	fs.writeFileSync(path.join(planDirectory, "002-set-value-three.md"), planText("002", "Set the value to three", 3, baseCommit));
+	fs.writeFileSync(path.join(planDirectory, "002-set-value-three.md"), planText("002", "Set the value to three", 3, baseCommit).replaceAll("src/value.mjs", "src/other.mjs"));
+	const graph = buildGraph(planDirectory);
+	assert.equal(graph.shapeReady, true);
+	assert.deepEqual(graph.overlaps, []);
+	assert.deepEqual(graph.plans.map((plan) => plan.inScopePaths), [["src/value.mjs"], ["src/other.mjs"]]);
 	return { repo, planDirectory, baseCommit };
 }
 
-function commitValue(worktree: string, value: number, message: string): string {
+function commitValue(worktree: string, value: number, message: string, discoveredCompanion = false): string {
+	if (discoveredCompanion) {
+		// Simulate coupling discovered after independent dispatch: the second owned
+		// export must stay consistent with a shared companion. Review below must
+		// explicitly accept that companion before the real Git restack conflicts.
+		fs.writeFileSync(path.join(worktree, "src/other.mjs"), `export const value = ${value}\n`);
+		git(worktree, ["add", "src/other.mjs"]);
+	}
 	fs.writeFileSync(path.join(worktree, "src/value.mjs"), `export const value = ${value}\n`);
 	git(worktree, ["add", "src/value.mjs"]);
 	git(worktree, ["commit", "-q", "-m", message]);
@@ -227,18 +238,20 @@ function worktreeLease(repo: string, worktree: string): string | null {
 	return locked ? locked.slice("locked".length).trim() : null;
 }
 
-function implementerEnvelope(commit: string, note: string): string {
+function implementerEnvelope(commit: string, note: string, discoveredCompanion = false): string {
 	return `STATUS: COMPLETE
 COMMITS: ${commit}
 ADDRESSED: none
 CHECKS: focused fixture check — passed
-FILES CHANGED: src/value.mjs
-DISCOVERED_PATHS: none
+FILES CHANGED: ${discoveredCompanion ? "src/other.mjs, src/value.mjs" : "src/value.mjs"}
+DISCOVERED_PATHS: ${discoveredCompanion ? "src/value.mjs — necessity=keep the discovered shared export consistent with src/other.mjs; plan_link=A1" : "none"}
 NOTES: ${note}
 USAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
 }
 
 const reviewerEnvelope = "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: focused fixture check — passed\nRATIONALE: the frozen patch is exact and focused\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host";
+const companionReviewerEnvelope = reviewerEnvelope.replace("DISCOVERED_PATHS: none", "DISCOVERED_PATHS: src/value.mjs — JUSTIFIED — A1 requires consistency with the newly discovered shared fixture export; no public interface change");
+
 
 async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise<ConflictRun> {
 	const service = await ensureService(fixture.planDirectory);
@@ -268,7 +281,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 	});
 
 	const firstHead = commitValue(String(firstImplementer.worktree), 2, "test: set shared value to two");
-	const secondHead = commitValue(String(secondImplementer.worktree), 3, "test: set shared value to three");
+	const secondHead = commitValue(String(secondImplementer.worktree), 3, "test: set shared value to three", true);
 	let reply = await managerRequest(service, "event", {
 		eventId: `${prefix}-terminal-implementer-001`,
 		kind: "terminals",
@@ -303,7 +316,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 		terminals: [{
 			actionId: secondImplementer.actionId,
 			hostHandle: `${prefix}-implementer-002`,
-			response: implementerEnvelope(secondHead, "prepared the conflicting independent patch"),
+			response: implementerEnvelope(secondHead, "prepared the conflicting independent patch", true),
 		}],
 	});
 	const secondReviewer = findAction(reply, "002", "plan-reviewer");
@@ -318,7 +331,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 		terminals: [{
 			actionId: secondReviewer.actionId,
 			hostHandle: `${prefix}-reviewer-002`,
-			response: reviewerEnvelope,
+			response: companionReviewerEnvelope,
 		}],
 	});
 	const recoveryAction = findAction(reply, "002", "plan-implementer");
@@ -585,7 +598,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 			terminals: [{
 				actionId: replacement.actionId,
 				hostHandle: "recovery-success-replacement",
-				response: implementerEnvelope(rebasedHead, "resolved only the preserved conflict and continued the rebase"),
+				response: implementerEnvelope(rebasedHead, "resolved only the preserved conflict and continued the rebase", true),
 			}],
 		});
 		const verificationReviewer = findAction(reply, "002", "plan-reviewer");
@@ -602,7 +615,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 			terminals: [{
 				actionId: verificationReviewer.actionId,
 				hostHandle: "recovery-success-verification-reviewer",
-				response: reviewerEnvelope,
+				response: companionReviewerEnvelope,
 			}],
 		});
 		const finalState = readPlanState(fixture, "002");

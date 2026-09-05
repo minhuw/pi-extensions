@@ -1,3 +1,4 @@
+import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -6,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { getExecutionReport } from "../../../src/core/plan-report.ts";
 import { reworkSnapshotPath } from "../../../src/core/plan-edit.ts";
-import { initPlanDir } from "../../../src/core/plans.ts";
+import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { recordUsageRecord } from "../../../src/daemon/execution-store.ts";
@@ -64,75 +65,75 @@ function writePlan(id: string, title: string, scope: string): string {
 - **Risk**: LOW
 - **Depends on**: none
 - **Category**: tests
-- **Planned at**: commit \`fixture\`, 2026-08-11
+- **Planned at**: commit \`abc1234\`, 2026-08-11
 - **Kind**: behavioral
 - **Parent objective**: Exercise plan rework.
 
-## Why this matters
+## Outcome and acceptance
 
 The fixture proves rework discards one plan's execution without touching siblings.
 
-## Current state
-
-- The target starts as TODO.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Focused | \`node --test\` | exits 0 |
+| A1 | the manager can rework this target. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: a bounded rework fixture.
-- **Safe intermediate state**: only the declared fixture path changes.
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**
 - \`${scope}\`
 
 **Out of scope**:
 - Manager state and plan graph files.
 
-## Git workflow
+- **Modified symbols**: the fixture value.
+- **Direct contracts**: the manager rework protocol.
+- **Expected unchanged behavior**: unrelated plans continue.
+- **Expected diff**: one fixture path.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- The target starts as TODO.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Keep the fixture bounded
 
 Use the declared fixture path only.
 
-**Verify**: \`node --test\` → exits 0.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-rework.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 - Keep this plan independent and deterministic.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: the manager can rework this target.
-- **Modified symbols**: the fixture value.
-- **Direct contracts**: the manager rework protocol.
-- **Expected unchanged behavior**: unrelated plans continue.
-- **Proof**: the focused test command.
-- **Expected diff**: one fixture path.
-
-## Done criteria
-
-- [ ] The target rework is durable.
-
-## STOP conditions
+- **Provides**: a bounded rework fixture.
+- **Safe intermediate state**: only the declared fixture path changes.
 
 Stop if rework would touch an unrelated plan or graph edge.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the target-local rework evidence exact.
+Deferred work: Keep the target-local rework evidence exact.
 `;
 }
 
@@ -242,7 +243,7 @@ function markSiblingDoneDownstream(value: Fixture): void {
 		.replace("| [002](002-sibling.md) | Unrelated sibling | P1 | S | — | TODO |", "| [002](002-sibling.md) | Unrelated sibling | P1 | S | 001 | DONE |"));
 	const sibling = path.join(value.planDirectory, "002-sibling.md");
 	fs.writeFileSync(sibling, fs.readFileSync(sibling, "utf8")
-		.replace("- **Depends on**: none", "- **Depends on**: herder-plans/001-*.md"));
+		.replace("- **Depends on**: none", "- **Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")));
 }
 
 function rewriteTarget(value: Fixture, scope = "src/value.mjs"): void {
@@ -325,9 +326,12 @@ test("rework discards an exhausted plan and reschedules round 1 without touching
 		assert.equal(object(begun.reply).attention, undefined);
 
 		rewriteTarget(value, "src/other.mjs");
+		const overlapping = buildGraph(value.planDirectory);
+		assert.equal(overlapping.shapeReady, false);
+		assert.deepEqual(overlapping.overlaps, [{ plans: ["001", "002"], paths: ["src/other.mjs"], ordered: false }]);
 		await assert.rejects(
 			() => requestManagerOperation(service!, "edit", { operation: "prepare", editToken: edit.editToken }),
-			/unordered overlap/,
+			/Herder plan graph is not shape-ready/,
 		);
 		rewriteTarget(value);
 		await requestManagerOperation(service, "edit", { operation: "prepare", editToken: edit.editToken });
@@ -755,9 +759,9 @@ test("transitive integrated downstream plans refuse rework", { timeout: 60_000 }
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8")
 			.replace("| [002](002-sibling.md) | Unrelated sibling | P1 | S | — | TODO |", "| [002](002-sibling.md) | Unrelated sibling | P1 | S | 001 | BLOCKED — waiting for root |\n| [003](003-downstream.md) | Integrated descendant | P1 | S | 002 | DONE |"));
 		fs.writeFileSync(path.join(value.planDirectory, "002-sibling.md"), fs.readFileSync(path.join(value.planDirectory, "002-sibling.md"), "utf8")
-			.replace("- **Depends on**: none", "- **Depends on**: herder-plans/001-*.md"));
+			.replace("- **Depends on**: none", "- **Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")));
 		fs.writeFileSync(path.join(value.planDirectory, "003-downstream.md"), writePlan("003", "Integrated descendant", "src/other.mjs")
-			.replace("- **Depends on**: none", "- **Depends on**: herder-plans/002-*.md"));
+			.replace("- **Depends on**: none", "- **Depends on**: 002").replace("Dependencies: none.", fixtureDependencies("002")));
 		const started = await startRun(service, value);
 		await failTargetRounds(service, started, "rework-transitive");
 		await assert.rejects(

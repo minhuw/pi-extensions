@@ -97,11 +97,6 @@ None.
 `)
   fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), `# Plan 001: Update the exported value
 
-> **Executor instructions**: Follow this plan exactly. Do not edit the plan index; the deterministic Run Manager owns lifecycle state.
->
-> **Drift check (run first)**: \`git diff --stat ${originalHead}..HEAD -- src/value.mjs test/value.test.mjs\`
-> Stop if either file drifted from the Current state below.
-
 ## Status
 
 - **Priority**: P1
@@ -113,7 +108,7 @@ None.
 - **Kind**: behavioral
 - **Parent objective**: Prove one complete live deterministic-manager implementation and review pipeline.
 
-## Why this matters
+## Outcome and acceptance
 
 The fixture provides a tiny, deterministic behavioral change that the Pi host can implement and independently review without dependencies or network access.
 
@@ -123,27 +118,14 @@ The fixture provides a tiny, deterministic behavioral change that the Pi host ca
 - Update the existing focused assertion from one to two.
 - Keep the module name, export name, package format, and test command unchanged.
 
-## Current state
-
-- \`src/value.mjs\` exports \`value\` with the numeric value \`1\`.
-- \`test/value.test.mjs\` imports \`value\` and asserts that it equals \`1\`.
-- \`npm test\` passes with Node's built-in test runner.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Tests | \`npm test\` | exits 0 with one passing test |
+| A1 | The fixture exports value as two while preserving its ESM interface and focused assertion. | V1 |
+| A2 | Only the source initializer and its existing test expectation change from one to two; no other file or interface changes. | V2 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: \`value\` equals two and the focused test enforces that behavior.
-- **Safe intermediate state**: both owned files change in one commit and \`npm test\` passes.
-
-## Scope
-
-**In scope**:
+**Write paths**
 
 - \`src/value.mjs\`
 - \`test/value.test.mjs\`
@@ -152,13 +134,28 @@ The fixture provides a tiny, deterministic behavioral change that the Pi host ca
 
 - Package metadata, dependencies, filenames, module format, exported names, and unrelated documentation.
 
-## Git workflow
+- **Modified symbols**: the \`value\` initializer and its focused assertion.
+- **Direct contracts**: ESM import/export and strict equality.
+- **Expected unchanged behavior**: filenames, export name, package format, and test command.
+- **Expected diff**: one numeric literal in each owned file.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
-- Do not push or merge into the user's branch.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- \`src/value.mjs\` exports \`value\` with the numeric value \`1\`.
+- \`test/value.test.mjs\` imports \`value\` and asserts that it equals \`1\`.
+- Source inspection predicts that \`npm test\` passes with Node's built-in test runner; it has not been run during fixture creation.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Update the implementation
 
@@ -168,36 +165,32 @@ Change only the numeric literal exported by \`src/value.mjs\` from \`1\` to \`2\
 
 Change only the expected numeric literal in \`test/value.test.mjs\` from \`1\` to \`2\`.
 
-**Verify**: \`npm test\` exits 0 with one passing test.
+Suggested route above implements A1 and A2; V1 and V2 are their acceptance proofs. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm test\` | exit 0; the focused assertion proves value equals two |
+| V2 | acceptance | A2 | T1 | \`git diff ${originalHead} --\` | source-preserving inspection: exactly one numeric literal changes from 1 to 2 in each of src/value.mjs and test/value.test.mjs; no other diff |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; dependency-free fixture package present | \`node --version\` | \`package.json\` |
 
 - Run \`npm test\` and require the existing focused assertion to pass.
 - Inspect the diff and require exactly the two intended numeric-literal changes.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: \`value\` is two.
-- **Modified symbols**: the \`value\` initializer and its focused assertion.
-- **Direct contracts**: ESM import/export and strict equality.
-- **Expected unchanged behavior**: filenames, export name, package format, and test command.
-- **Proof**: \`npm test\` and the two-file diff.
-- **Expected diff**: one numeric literal in each owned file.
+- **Provides**: \`value\` equals two and the focused test enforces that behavior.
+- **Safe intermediate state**: both owned files change in one commit and \`npm test\` passes.
 
-## Done criteria
+Stop if the stated source or assertion assumptions are invalidated, if a dependency appears necessary, or if any file outside the two declared paths must change.
 
-- [ ] \`npm test\` exits 0.
-- [ ] \`src/value.mjs\` exports \`value\` as \`2\`.
-- [ ] \`test/value.test.mjs\` asserts that \`value\` equals \`2\`.
-- [ ] No file outside the two declared paths changes.
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-## STOP conditions
-
-Stop if either owned file has drifted, if a dependency appears necessary, or if any file outside the two declared paths must change.
-
-## Maintenance notes
-
-Keep this fixture deliberately small so host-transport failures remain distinguishable from implementation complexity.
+Deferred work: Keep this fixture deliberately small so host-transport failures remain distinguishable from implementation complexity.
 `)
   const graph = buildGraph(planDirectory)
   assert.equal(graph.shapeReady, true)

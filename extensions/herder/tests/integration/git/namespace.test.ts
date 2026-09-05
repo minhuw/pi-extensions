@@ -50,52 +50,72 @@ function planBody(id: string): string {
 - **Depends on**: none
 - **Category**: tests
 - **Planned at**: commit \`abc1234\`, 2026-07-19
+- **Kind**: behavioral
+- **Parent objective**: Exercise the deterministic fixture lifecycle without changing user-owned state.
 
-## Why this matters
+## Outcome and acceptance
 
 Exercise Fire namespace checks.
 
-## Current state
-
-The fixture is empty.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`true\` | exit 0 |
+| A1 | Fire namespace inspection rejects ambiguous repository state. | V1 |
 
-## Scope
+## Boundaries
+
+**Write paths**
+- \`base.txt\`
+
+**Out of scope**
+- User checkout, unrelated files, and manager-owned state.
 
 Namespace checks only.
 
-## Git workflow
+Preserve user-owned files and the existing fixture interfaces; review only the declared transition.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Use one focused conventional commit.
-- Do not push or open a pull request.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+The fixture is empty.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Test
 
 Run the fixture.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/integration/git/namespace.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run the fixture test.
 
-## Done criteria
+## Escalation and handoff
 
-- [ ] \`true\` exits 0.
-
-## STOP conditions
+Provides the bounded fixture transition. Safe intermediate state: unrelated files and manager state remain unchanged.
 
 Stop if repository state is ambiguous.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the fixture small.
+Deferred work: Keep the fixture small.
 `
 }
 

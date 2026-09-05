@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fixtureDependencies } from "../../support/plan-v2.ts";
 
 import assert from "node:assert/strict"
 import fs from "node:fs"
@@ -67,72 +68,74 @@ function planBody(id: string, title: string, dependencies: string): string {
 - **Effort**: M
 - **Risk**: LOW
 - **Depends on**: ${dependencies}
-- **Category**: dashboard-fixture
+- **Category**: tests
 - **Planned at**: commit \`abc1234\`, 2026-08-03
 - **Kind**: behavioral
 - **Parent objective**: Exercise the local Herder dashboard
 
-## Why this matters
+## Outcome and acceptance
 
 The dashboard needs a realistic, validated plan fixture.
 
-## Current state
-
-The fixture is self-contained.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`true\` | exit 0 |
+| A1 | the dashboard state is observable. | V1 |
 
-## Scope
+## Boundaries
 
-**In scope** (declared write paths):
+**Write paths**
 - \`src/${id}.mjs\`
 
 **Out of scope**:
 - Every other fixture file.
 
-## Dependency contract
+- Modified symbols: the fixture scope only.
+- Expected unchanged behavior: all other fixtures remain unchanged.
+- Expected diff: the scoped fixture path and direct tests.
 
-Consumes declared predecessors and provides one validated fixture state.
+## Starting conditions
 
-## Git workflow
+**Observed baseline**
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Use one focused conventional commit.
-- Do not push or open a pull request.
+The fixture is self-contained.
 
-## Steps
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+${fixtureDependencies(dependencies)}
+
+## Implementation route
 
 ### Step 1: Exercise the dashboard
 
 Run the fixture.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/integration/dashboard/dashboard.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run the fixture test.
 
-## Review map
+## Escalation and handoff
 
-- Outcome: the dashboard state is observable.
-- Modified symbols: the fixture scope only.
-- Proof: \`true\`.
-- Expected unchanged behavior: all other fixtures remain unchanged.
-- Expected diff: the scoped fixture path and direct tests.
-
-## Done criteria
-
-- [ ] \`true\` exits 0.
-
-## STOP conditions
+Consumes declared predecessors and provides one validated fixture state.
 
 Stop if the fixture becomes invalid.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep this fixture deterministic.
+Deferred work: Keep this fixture deterministic.
 `
 }
 
@@ -163,11 +166,11 @@ The fixture intentionally contains one blocked plan.
 `)
   const plans: Array<[string, string, string, string]> = [
     ["001", "Build execution store", "none", "foundation"],
-    ["002", "Run implementation review loop", "herder-plans/001-*.md", "pipeline"],
-    ["003", "Integrate reviewed branch", "herder-plans/002-*.md", "integration"],
+    ["002", "Run implementation review loop", "001", "pipeline"],
+    ["003", "Integrate reviewed branch", "002", "integration"],
     ["004", "Recover interrupted worker", "none", "recovery"],
-    ["005", "Publish final report", "herder-plans/001-*.md", "report"],
-    ["006", "Prepare follow-up work", "herder-plans/001-*.md", "followup"],
+    ["005", "Publish final report", "001", "report"],
+    ["006", "Prepare follow-up work", "001", "followup"],
   ]
   for (const [id, title, dependencies, slug] of plans) {
     fs.writeFileSync(path.join(planDir, `${id}-${slug}.md`), planBody(id, title, dependencies))
@@ -458,7 +461,7 @@ function createManagerLifecycleFixture() {
     fs.mkdirSync(planDir)
     fs.writeFileSync(path.join(planDir, ".gitignore"), ".herder/\n")
     const firstText = planBody("001", "First", "none")
-    const secondText = planBody("002", "Second", "herder-plans/001-first.md")
+    const secondText = planBody("002", "Second", "001")
     fs.writeFileSync(path.join(planDir, "README.md"), `# Herder Plans
 
 ## Execution order & status

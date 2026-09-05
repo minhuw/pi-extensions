@@ -191,7 +191,7 @@ Find maintenance duplication outside production code:
 
 Preserve independent coverage of meaningful boundaries. Deleting a unit test because an end-to-end test exists may slow feedback or hide the failure location; deleting an integration test because a unit test exists may remove contract coverage. State the unique risk each retained layer covers.
 
-Prefer one canonical command and one documented source of truth. Never edit generated output directly when the generator owns it; plan the source or generator change and its regeneration proof.
+Prefer one documented source of truth and nonredundant checks with distinct risks. Discover canonical invocations through repository scripts, pyproject/uv, Nix, lockfiles, CI, and instructions—not binary presence. Record owner/cwd, non-mutating probe, prerequisites, and source evidence; setup failure/wrong invocation is not a code finding. Do not ad hoc install/download tools or assume ambient HOME. Existing final-manager npm-only locked preparation is not planner setup authority. Never edit generated output directly when the generator owns it; plan the source or generator change and its regeneration proof. Keep tests/docs with the invariant unless they provide a separately useful, gate-passing prerequisite.
 
 ---
 
@@ -243,7 +243,7 @@ Every audit pass returns findings in this exact shape:
 - **Maintenance cost**: The concrete burden: duplicate fixes, broad change surface, extra states, dependency/API support, navigation, or regression risk.
 - **Simplification proof**: Evidence that the reduction is safe; identify dynamic/external reachability checked and any remaining unknowns.
 - **Preserved contract**: Observable behavior, public API, data compatibility, security property, or operational invariant that must not change.
-- **Reduction sketch**: What disappears, converges, narrows, or becomes local. This is not a full implementation plan.
+- **Reduction sketch**: What disappears, converges, narrows, or becomes local. A suggested route, not an extra binding design constraint or full implementation plan.
 - **Net effect**: Expected reduction in concepts, branches/states, dependencies, APIs, files-to-change, or approximate LOC when defensible.
 - **Verification**: Focused positive checks plus a negative completeness check; name characterization prerequisites.
 - **Effort**: S (hours) | M (day-ish) | L (multi-day), including tests and migration work.
@@ -251,7 +251,7 @@ Every audit pass returns findings in this exact shape:
 - **Confidence**: HIGH | MED — confidence in both the problem and the safety proof. Do not return LOW as a finding: finish the investigation, then either raise confidence, keep the complexity, or route a product question to Grill.
 ```
 
-Unresolved leads are not findings. If an audit pass cannot close purpose or reachability, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm. Leads never become plans.
+Unresolved leads are not findings. If an audit pass cannot close purpose or reachability, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm. Leads never become plans. Resolve facts and confirm material decisions before drafting; STOP conditions cannot hide unknown starting contracts. Use seven V2 sections without generic Git/test/review boilerplate. A rows bind preservation/reduction, V rows distinguish development/acceptance/final proof, and T rows identify evidence-backed toolchains. Every criterion needs acceptance proof before dependents start. Separate observed purpose/baseline from required starting state and expected dependency edits; label patch directions as suggested.
 
 ## Prioritization rubric
 

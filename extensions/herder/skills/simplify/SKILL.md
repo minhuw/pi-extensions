@@ -10,7 +10,7 @@ Act as a reduction-focused senior maintainer, not an implementer. Find where the
 ## Hard Rules
 
 1. Never modify source. The only authored files are under `herder-plans/`; Fire executes plans. Use `herder_plan` for its manager-owned initialization, validation, and tracking metadata.
-2. Before the user selects findings, do not mutate the working tree: no installs, artifact-writing builds, commits, formatters, issue creation, or external writes. Run only read-only checks known to leave the checkout unchanged, and confirm Git status remains stable before plan writing begins.
+2. Never mutate source or execute setup/build writes: no installs, artifact-writing builds, commits, formatters, issue creation, or external writes. Before selection, author nothing; afterward, write only confirmed plan-directory content. Run only read-only checks known to leave the checkout unchanged, and confirm Git status remains stable before plan writing begins.
 3. Required behavior is frozen. A simplification may remove behavior only when repository evidence proves it is obsolete and no supported caller still depends on it. Route unresolved product or compatibility intent to Grill.
 4. Smaller is not synonymous with shorter. Optimize for fewer maintained concepts, branches, states, dependencies, APIs, and places-to-change. Never trade readable explicit code for compressed or clever code.
 5. Apply Chesterton's Fence: establish why a path, guard, abstraction, or compatibility layer exists before planning its removal. Finish that investigation in this session. If purpose or reachability still cannot be proven from the repository, keep the complexity or route product/compatibility intent to Grill; never guess and never write an investigation or spike plan.
@@ -35,6 +35,8 @@ Before judging simplicity, read repository instructions, README and contribution
 - accepted ADRs, compatibility promises, support windows, product/domain context, active migrations, and feature-flag policy;
 - test shape and baseline health, including which risky areas lack characterization coverage;
 - current conventions and recent convergence visible in history, so an intentional boundary is not mistaken for needless indirection.
+
+Discover each canonical toolchain owner/invocation from repository scripts, `pyproject.toml`/`uv.lock`, Nix declarations/locks, and CI/instructions as applicable—not `which` or `command -v`. Verify cwd, non-mutating availability/version probe, prerequisites, and evidence; setup is separate from checks. Do not install, download substitutes, inject credentials, or assume ambient HOME. Missing preparation or wrong invocation is not proof of a code defect. Record source observations and unrun checks honestly.
 
 Map high-maintenance hotspots using evidence such as churn, fan-in/fan-out, unusually broad configuration or state surfaces, duplicate implementations, and files or modules that require many coordinated edits. Use Git history when it can explain why code exists. State anything that could not be inspected.
 
@@ -94,17 +96,17 @@ Keep important "keep" decisions and rejected candidates in a private audit ledge
 
 ## 4. Write Plans
 
-Resolve the Herder extension root and the absolute `herder-plans` directory.
+Resolve the Herder extension root and the absolute `herder-plans` directory. During active Fire, Simplify is refused; do not bypass reservations or request-bound recovery.
 
 - If `herder-plans/README.md` exists, do not call `init`; call `herder_plan` with `operation: "validate"` and reconcile the existing graph without changing its tracking policy.
 - If the directory is absent or contains no plan content, call `herder_plan` with `operation: "init"`. Use local tracking by default unless the user explicitly requested tracked plans.
 - If plan files exist but the index is missing, stop and route reconstruction to `/herder-validate --fix`; do not initialize over the content or guess its tracking policy.
 
-Before writing, record `git rev-parse --short HEAD`. Keep IDs monotonic, skip findings already planned or rejected, and do not alter existing lifecycle statuses. If an existing plan appears obsolete or conflicts with a selected reduction, report it and route revision to Grill or Validate rather than creating an overlapping replacement or inventing a new status. Reopen every cited file yourself; subagent excerpts and line numbers are leads, never plan evidence.
+Before writing, record `git rev-parse --short HEAD` and date evidence. Keep IDs monotonic, skip findings already planned or rejected, and do not alter existing lifecycle statuses. If an existing plan appears obsolete or conflicts with a selected reduction, report it and route revision to Grill or Validate rather than creating an overlapping replacement or inventing a new status. Reopen every cited file yourself; subagent excerpts and line numbers are leads, never plan evidence.
 
 Shape each selected finding as a reduction graph before drafting: affected packages, exact writable paths and symbols, callers and public contracts, tests, migration/compatibility constraints, documentation, negative proofs, and safe integration points. Prefer these plan shapes:
 
-- characterization tests first when the reduction is already known but required behavior is not adequately pinned;
+- keep characterization tests and necessary docs with the bounded reduction; separate only independently useful, gate-passing prerequisites, never layers or tests/docs for the same invariant;
 - converge callers on the already-supported canonical path before deleting a duplicate;
 - remove flags, adapters, dependencies, or public aliases only after explicit exit criteria are proven; and
 - separate a bounded migration from final cleanup when both cannot land safely together.
@@ -115,19 +117,19 @@ Do not create abstractions merely to make a plan look smaller.
 
 Deleting behavior based on an uncertain caller search is not mechanical.
 
-Each plan must use the complete shared template and include:
+Resolve all start-blocking uncertainty before drafting; do not hide unknown reachability or support decisions in STOP conditions. Use the concise seven-section V2 template:
 
-- the current behavior and contract that must remain stable;
-- why the existing complexity exists and the evidence that it can now change;
-- the exact surface expected to disappear, consolidate, narrow, or become local;
-- focused regression tests or characterization prerequisites;
-- positive behavior checks and negative completeness checks;
-- STOP conditions for hidden callers, unsupported compatibility needs, dynamic registration, changed baseline behavior, or scope expansion; and
-- a review map that makes preservation and actual reduction easy to verify.
+- Bind the preserved behavior and intended reduction once in A rows; label implementation directions as suggested unless the decision is confirmed and binding.
+- Put exact write paths, preserved direct callers/invariants, and the review boundary in Boundaries.
+- Separate verified observed baseline/purpose evidence from required starting state and expected dependency edits; give one specific Consumes guarantee per direct dependency.
+- Link the short route's exact anchors to A/V IDs. Use focused positive preservation and negative completeness proof in V rows, with evidence-backed T owner/cwd/prerequisites/probe. Every A needs acceptance-phase proof; development feedback and final integrated checks are distinct.
+- State plan-specific escalation, the provided invariant, safe intermediate state, and meaningful deferrals in handoff. Expected upstream changes or shifted lines alone are not drift.
+
+No repeated generic Git/test/review boilerplate, per-step command copies, or standalone tests/docs plans for the same invariant.
 
 Put only verified facts repeated by multiple plans in `herder-plans/CONTEXT.md`; compiled snapshots, not sibling files or the audit transcript, must provide complete executor context. Update only human-readable plan rows, dependency notes, and considered/rejected rationale in the index; never inspect or alter manager-owned execution-accounting data.
 
-Defer unsupported behavior, support-window, or product choices to Grill. Use `herder_plan` with `operation: "snapshot"` and `operation: "shape"` for the corresponding manager operations; never invoke a bundled script.
+Defer unsupported behavior, support-window, or product choices to Grill. Perform the template's Producer self-review: cold-read each compiled `snapshot`, check repository evidence, A/V/T sufficiency, toolchain prerequisites, and dependency guarantees. Then run `shape`, resolve every issue and unordered overlap, and run `validate`; repeat snapshot/self-review after every local/shared change. These structural operations execute no plan commands and do not replace semantic review. Never invoke a bundled script.
 
 ## Invocation Variants
 

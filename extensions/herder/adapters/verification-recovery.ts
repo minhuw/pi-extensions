@@ -63,3 +63,11 @@ export function classifyVerificationRecovery(
 				: "none";
 	return { actionable, stranded, ownerMismatch, ambiguity, atLimit, kind };
 }
+
+
+export const FINAL_VERIFICATION_SELECTION_GUIDANCE = [
+	"PLAN_V2_SELECTION: Read the complete compiled assignment, its V verification rows (Phase/Criteria/Toolchain/Command/Expected), and every referenced T toolchain (Owner/Cwd/Prerequisites/Probe/Evidence), including shared definitions. Select final-phase coverage plus required integration-risk checks for this exact tree; do not reinterpret development diagnostics or examples as final gates. Acceptance evidence remains per-plan evidence, not a substitute for final integration checks.",
+	"CANONICAL_INVOCATION: Verify repository scripts, pyproject/uv, Nix definitions, lockfiles, CI, and instructions. Use the declared manager environment, not bare-binary discovery: for example uv run --no-sync only after verifying the prepared locked environment, nix develop --command for a declared prepared shell, or the canonical package script. Do not guess manager flags or assume a globally found binary is the project toolchain.",
+	"ENVIRONMENT_BOUNDARY: Final gates run with a minimal environment; interactive HOME configuration and ambient credentials are not inherited. Separate prerequisite preparation from checks. Do not install, sync, download unpinned tools, inject credentials, or add setup commands disguised as checks. Herder's existing npm-only locked auto-preparation is the narrow exception, not a general setup service.",
+	"PROBE_BOUNDARY: Safe non-mutating availability/version probes through the declared environment may be used only as selection diagnostics, never as acceptance evidence or substitutes for actual checks. Only the manager executes the selected authoritative verification gates. If prerequisites or invocation cannot be established, report concrete manager/argv/cwd/error evidence and ask for the prerequisite/decision; do not fabricate passed checks or submit a known-invalid tool choice.",
+] as const;

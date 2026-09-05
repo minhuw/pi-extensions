@@ -61,7 +61,7 @@ import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
 import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
-import { classifyVerificationRecovery } from "./verification-recovery.ts";
+import { classifyVerificationRecovery, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "./verification-recovery.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
@@ -453,12 +453,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			...(repairVerification ? [
 				"Retain the inherited ordered gate prefix exactly. Add a gate only when it directly covers a newly touched path, and explain every addition. This selection is still authoritative Herder verification, not a local diagnostic.",
 			] : []),
+			...FINAL_VERIFICATION_SELECTION_GUIDANCE,
 			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
 			"Represent every command as direct argv. Every argv element must be one non-empty line: never put literal newlines inside a shell script argument. Use [\"/bin/sh\", \"-lc\", \"single-line script\"] only when shell syntax is genuinely required; join multiple shell statements with && or semicolons.",
 			"PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot for inspection only. Each gate cwd is TreeRelative: use '.' for the worktree root or a relative path such as 'pkg'. Absolute paths in cwd are invalid; never copy INTEGRATION_WORKTREE into cwd.",
 			'EXAMPLE_GATE: {"gateId":"unit","label":"unit tests","cwd":".","argv":["npm","test"],"rationale":"Covers the integrated change."}',
 			...(retryDetail ? [`PREVIOUS_MANIFEST_ERROR: ${retryDetail.replace(/\s+/g, " ").slice(0, 1_000)}`, "Correct the rejected manifest and submit it again."] : []),
-			"As your final action, call herder_verification exactly once. Do not provide a prose-only answer.",
+			"Once prerequisites, authority, and gate selection are established, call herder_verification exactly once as your final action. If they are unresolved, report the concrete blocker and ask for the missing prerequisite or decision instead of submitting a known-invalid manifest. A prose-only success claim is never verification evidence.",
 			`REQUEST_ID: ${request.requestId}`,
 			`REQUEST_SHA256: ${request.requestSha256}`,
 			`RUN_ID: ${request.runId}`,

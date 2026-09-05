@@ -34,52 +34,72 @@ function planBody(): string {
 - **Depends on**: none
 - **Category**: tests
 - **Planned at**: commit \`abc1234\`, 2026-07-19
+- **Kind**: behavioral
+- **Parent objective**: Exercise the deterministic fixture lifecycle without changing user-owned state.
 
-## Why this matters
+## Outcome and acceptance
 
 Exercise one branch per plan.
 
-## Current state
-
-No plan branch exists.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`true\` | exit 0 |
+| A1 | One plan branch rebases, integrates, and cleans up without changing unrelated work. | V1 |
 
-## Scope
+## Boundaries
+
+**Write paths**
+- \`plan.txt\`
+
+**Out of scope**
+- User checkout, unrelated files, and manager-owned state.
 
 Git lifecycle only.
 
-## Git workflow
+Preserve user-owned files and the existing fixture interfaces; review only the declared transition.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Use one focused conventional commit.
-- Do not push or open a pull request.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+No plan branch exists.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Test
 
 Create one committed file.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-Run \`true\`.
+## Verification
 
-## Done criteria
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/integration/git/branch-model.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
 
-- [ ] \`true\` exits 0.
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
-## STOP conditions
+Use V1; a no-op command is not acceptance evidence.
+
+## Escalation and handoff
+
+Provides the bounded fixture transition. Safe intermediate state: unrelated files and manager state remain unchanged.
 
 Stop on ambiguous Git state.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the fixture deterministic.
+Deferred work: Keep the fixture deterministic.
 `
 }
 

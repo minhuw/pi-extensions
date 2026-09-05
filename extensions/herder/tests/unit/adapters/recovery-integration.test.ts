@@ -87,72 +87,70 @@ None.
 - **Kind**: behavioral
 - **Parent objective**: Prove a replacement Pi session recovers one lost worker without duplicate scheduling.
 
-## Why this matters
+## Outcome and acceptance
 
 This fixture exercises the adapter and manager lifecycle at the point where an in-process Pi worker disappears.
 
-## Current state
-
-- \`src/value.mjs\` contains the fixture source.
-- The manager has one ready plan and no provider or credential dependency.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Tests | \`npm test\` | exits 0 |
+| A1 | one missing built-in worker produces one same-round retry. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: one worker recovery transition.
-- **Safe intermediate state**: the fixture repository remains unchanged.
-
-## Scope
-
-**In scope**:
+**Write paths**
 - \`src/value.mjs\`
 
 **Out of scope**:
 - Package metadata, dependencies, and the test contract.
 
-## Git workflow
+- **Modified symbols**: none in the fixture.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
-- Do not push or open a pull request.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- \`src/value.mjs\` contains the fixture source.
+- The manager has one ready plan and no provider or credential dependency.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Hold the worker slot
 
 Leave the fixture source unchanged while the manager exercises worker recovery.
 
-**Verify**: \`npm test\` → exits 0.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/adapters/recovery-integration.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 - Run \`npm test\`.
 - Inspect manager and Git lease evidence.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: one missing built-in worker produces one same-round retry.
-- **Modified symbols**: none in the fixture.
-- **Proof**: manager recovery assertions.
-
-## Done criteria
-
-- [ ] \`npm test\` exits 0.
-- [ ] One same-round retry is dispatched after worker loss.
-
-## STOP conditions
+- **Provides**: one worker recovery transition.
+- **Safe intermediate state**: the fixture repository remains unchanged.
 
 Stop if the manager cannot preserve the plan generation, round, or worktree lease.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the recovery fixture small and provider-free.
+Deferred work: Keep the recovery fixture small and provider-free.
 `);
 	return { root, repo, planDirectory };
 }
@@ -394,7 +392,7 @@ test("main-session attention queues concurrent plans and re-exposes only the cur
 		const firstRow = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | BLOCKED — needs attention |";
 		fs.writeFileSync(indexPath, fs.readFileSync(indexPath, "utf8").replace(firstRow, `${firstRow}\n${firstRow.replaceAll("001", "002")}`));
 		fs.writeFileSync(path.join(fixture.planDirectory, "002-recover-worker.md"),
-			fs.readFileSync(path.join(fixture.planDirectory, "001-recover-worker.md"), "utf8").replaceAll("001", "002"));
+			fs.readFileSync(path.join(fixture.planDirectory, "001-recover-worker.md"), "utf8").replaceAll("001", "002").replaceAll("src/value.mjs", "src/other.mjs"));
 		const service = await ensureService(fixture.planDirectory);
 		const started = object((await requestManagerOperation(service, "start", {
 			mode: "fire",

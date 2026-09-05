@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { IntegrationRepairRequest } from "../../../src/shared/protocol.ts";
-import { classifyVerificationRecovery } from "../../../adapters/verification-recovery.ts";
+import { classifyVerificationRecovery, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "../../../adapters/verification-recovery.ts";
 
 const currentSessionId = "main-session";
 
@@ -153,4 +153,13 @@ test("classification matrix preserves recovery boundaries and precedence", () =>
 		expected({ actionable: true, ambiguity: true, kind: "decision_required" }),
 		"ambiguity and exhausted repairs are never recoverable",
 	);
+});
+
+
+test("initial selection guidance binds V phases and T evidence without turning probes/setup into gates", () => {
+	const prompt = FINAL_VERIFICATION_SELECTION_GUIDANCE.join("\n");
+	for (const term of ["compiled assignment", "Phase/Criteria/Toolchain/Command/Expected", "Owner/Cwd/Prerequisites/Probe/Evidence", "final-phase coverage", "integration-risk", "development diagnostics", "uv run --no-sync", "nix develop --command", "canonical package script", "minimal environment", "interactive HOME", "npm-only locked auto-preparation"]) assert.ok(prompt.includes(term), term);
+	assert.match(prompt, /probes.*only as selection diagnostics/);
+	assert.match(prompt, /Only the manager executes.*authoritative verification gates/);
+	assert.match(prompt, /do not fabricate passed checks or submit a known-invalid tool choice/);
 });

@@ -31,7 +31,7 @@ Review only what is directly supported by code evidence. Keep findings framed as
 - Data crossing into interpreters or privileged APIs: SQL or shell operations assembled from request data (SQL/command injection), HTML sinks fed by user-controlled content (XSS), dynamic execution APIs used with runtime input, or filesystem paths derived from request data (path traversal). Describe the safer API or validation boundary; do not provide runnable examples.
 - Access control: endpoints/server actions that lack server-side identity checks, authorization enforced only in the client, object access by ID without ownership or tenant checks (IDOR), or missing request authenticity checks (CSRF) on state-changing routes.
 - Input contracts: API boundaries that trust request bodies without schema validation, file upload handling without clear type/size/storage constraints, or broad object assignment from request data into persistence models (mass assignment).
-- Dependency posture: run the ecosystem's audit command (`npm audit`, `pip-audit`, `cargo audit`) in read-only mode. Report only critical/high advisories that affect reachable runtime code or build/distribution paths; avoid low-signal audit noise.
+- Dependency posture: inspect declared manifests/locks and available advisories; use a repository-declared audit invocation only when known to be source-preserving and already available through its canonical manager environment. Do not install/download an audit tool or substitute an ambient binary. Missing setup or wrong invocation is an operational gap, not a code finding. Report only critical/high advisories affecting reachable runtime code or build/distribution paths; avoid low-signal noise.
 - Production configuration: overly broad CORS where credentials are allowed, missing response-hardening headers (e.g. CSP) where sensitive browser surfaces exist, cookies missing appropriate `HttpOnly`/`Secure`/`SameSite` attributes, or debug/verbose behavior enabled in production configuration.
 - Data minimization: PII or sensitive operational data in logs, stack traces returned to clients, or internal error details exposed through API responses.
 
@@ -55,7 +55,7 @@ The goal is not a percentage — it's *which untested code is dangerous*.
 - Modules with high churn (git log) + no tests are refactor-risk signals. Do not plan characterization tests unless they protect or unblock a specific, already-bounded code change.
 - Existing test quality: tests that assert nothing meaningful, heavy mocking that tests the mocks, snapshot tests nobody reads, flaky patterns (real timers, real network, order dependence).
 - Missing test layers: unit-only suites with zero integration coverage on API boundaries, or the inverse (slow E2E for what a unit test would catch).
-- Verification infrastructure: is there a one-command way to know the codebase works? If not, that's finding #1 and a prerequisite plan for any risky change.
+- Verification infrastructure: identify focused commands that prove the selected invariant from scripts, pyproject/uv, Nix, CI, and instructions. A missing command is not automatically the top finding or a standalone prerequisite plan. Distinguish absent setup/wrong invocation from broken infrastructure; keep tests and docs with the bounded change unless a separately useful, gate-passing prerequisite is justified.
 
 ## 5. Tech Debt & Architecture
 
@@ -117,10 +117,10 @@ Every finding, from every category and every subagent, comes back in this shape:
 - **Effort**: S (hours) / M (a day-ish) / L (multi-day) — for the *fix*, including tests.
 - **Risk**: What the fix could break; LOW/MED/HIGH plus one line why.
 - **Confidence**: HIGH (read the code, certain) / MED (strong signal, remaining unknowns named). Do not return LOW as a finding: finish the investigation, then either raise confidence, reject it, or route a product question to Grill.
-- **Fix sketch**: 1–3 sentences. Not the plan — just enough to judge effort honestly.
+- **Fix sketch**: 1–3 suggested-route sentences, not an extra binding design decision or full plan—just enough to judge effort honestly.
 ```
 
-Unresolved leads are not findings. If an audit pass cannot close the claim, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm, using additional read-only subagents when leads are independent. Leads never become plans.
+Unresolved leads are not findings. If an audit pass cannot close the claim, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm, using additional read-only subagents when leads are independent. Leads never become plans. Before authoring, resolve facts and confirm material choices; do not disguise unresolved starting requirements as STOP conditions. Draft the seven-section V2 contract without generic Git/test/review boilerplate: A binds required behavior, V distinguishes development/acceptance/final proof, and T names evidence-backed owner/cwd/prerequisites/probe. Record observed baseline separately from future dependency guarantees. Ad hoc setup/downloads are forbidden for audit agents; existing final-manager npm-only locked preparation does not grant planner authority.
 
 ## Prioritization rubric
 

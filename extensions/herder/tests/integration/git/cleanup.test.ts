@@ -75,50 +75,72 @@ function planBody(planId = "001"): string {
 - **Depends on**: none
 - **Category**: tests
 - **Planned at**: commit \`abc1234\`, 2026-07-19
+- **Kind**: behavioral
+- **Parent objective**: Exercise the deterministic fixture lifecycle without changing user-owned state.
 
-## Why this matters
+## Outcome and acceptance
 
 Cleanup fixture.
 
-## Current state
+| ID | Required behavior | Proof |
+|---|---|---|
+| A1 | Cleanup retains unproven or unsafe branches and removes only the proven completed fixture. | V1 |
+
+## Boundaries
+
+**Write paths**
+- \`done.txt\`
+
+**Out of scope**
+- User checkout, unrelated files, and manager-owned state.
+
+Cleanup fixture.
+
+Preserve user-owned files and the existing fixture interfaces; review only the declared transition.
+
+## Starting conditions
+
+**Observed baseline**
 
 Complete.
 
-## Commands you will need
+**Required starting state**
 
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Test | \`true\` | exit 0 |
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
 
-## Scope
+**Expected dependency changes**
 
-Cleanup fixture.
+Dependencies: none.
 
-## Git workflow
-
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-
-## Steps
+## Implementation route
 
 ### Step 1: Test
 
 Run the fixture.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/integration/git/cleanup.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run the fixture test.
 
-## Done criteria
+## Escalation and handoff
 
-- [x] Complete.
-
-## STOP conditions
+Provides the bounded fixture transition. Safe intermediate state: unrelated files and manager state remain unchanged.
 
 Stop on unsafe cleanup.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep small.
+Deferred work: Keep small.
 `
 }
 

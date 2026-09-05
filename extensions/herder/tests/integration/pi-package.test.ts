@@ -7,6 +7,31 @@ import { fileURLToPath } from "node:url";
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const repositoryRoot = path.resolve(extensionRoot, "../..");
 
+function testPlanV2Template(template: string): void {
+	const local = template.match(/```markdown\n(# Plan [\s\S]*?)\n```/)?.[1];
+	assert.ok(local, "template has a complete local plan example");
+	assert.deepEqual([...local.matchAll(/^## (.+)$/gm)].map((match) => match[1]), [
+		"Status", "Outcome and acceptance", "Boundaries", "Starting conditions",
+		"Implementation route", "Verification", "Escalation and handoff",
+	]);
+	for (const header of [
+		"| ID | Required behavior | Proof |",
+		"| Plan | Consumes |",
+		"| ID | Phase | Criteria | Toolchain | Command | Expected |",
+		"| ID | Owner | Cwd | Prerequisites | Probe | Evidence |",
+	]) assert.equal(local.split(header).length - 1, 1, `one canonical ${header} table`);
+	for (const label of ["Write paths", "Out of scope", "Observed baseline", "Required starting state", "Expected dependency changes"]) {
+		assert.ok(local.includes(`**${label}**`));
+	}
+	assert.match(local, /\| A1 \|[^\n]+\| V2 \|/);
+	assert.match(local, /\| V2 \| acceptance \| A1 \| T1 \|/);
+	assert.doesNotMatch(local, /^- Branch:|npm install|\bwhich\s+(?:node|npm)/m);
+	assert.match(template, /every A row has an acceptance-phase proof/);
+	assert.match(template, /shared\/local IDs cannot shadow/);
+	assert.match(template, /Parser\/shape validation runs no plan commands/);
+	assert.match(template, /agent CHECKS is not authoritative gate evidence/);
+}
+
 test("Pi package registers Herder while keeping planning skills command-owned", async () => {
 	const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
 	const lock = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
@@ -26,9 +51,12 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(herderReadme, /pi install npm:@ff-labs\/pi-fff/);
 	assert.match(herderReadme, /pi install npm:pi-web-access/);
-	assert.match(planTemplate, /npm ci/);
+	assert.match(planTemplate, /Prerequisites/);
+	assert.match(planTemplate, /locked dependencies installed/);
 	assert.doesNotMatch(planTemplate, /npm install/);
-	assert.match(planTemplate, /npm run test:herder --/);
+	assert.match(planTemplate, /npm run focused-test/);
+
+	testPlanV2Template(planTemplate);
 	assert.ok(manifest.pi.extensions.includes("./extensions/herder/adapters/index.ts"));
 	assert.match(herderReadme, /^## Planning and execution commands$/m);
 	const expectedCommandNames = [
@@ -92,7 +120,7 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.doesNotMatch(improve, /closing-the-loop|`plan <description>`|`review-plan <file>`|`execute(?: \[<plan>\])?`|`reconcile`|`--issues`/);
 	assert.match(improve, /Finish investigation in this session \(main session; subagents for independent read-only passes\)/);
 	assert.match(improve, /Resolve every unresolved lead in this session before the table, using additional read-only subagents/);
-	assert.match(improve, /characterization tests only when they protect or unblock a specific, already-bounded code change/);
+	assert.match(improve, /Keep characterization tests and necessary docs with the bounded invariant; split only for independently useful, gate-passing prerequisites/);
 	assert.match(improve, /Do not write investigation or spike plans/);
 	assert.match(auditPlaybook, /Do not plan characterization tests unless they protect or unblock a specific, already-bounded code change/);
 	assert.match(auditPlaybook, /Leads never become plans/);
@@ -106,8 +134,8 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(simplify, /never write an investigation or spike plan/);
 	assert.doesNotMatch(simplificationPlaybook, /INVESTIGATE/);
 	assert.match(simplificationPlaybook, /Characterization tests tied to selected, already-bounded reductions/);
-	assert.match(simplify, /operation: "snapshot"/);
-	assert.match(simplify, /operation: "shape"/);
+	assert.match(simplify, /cold-read each compiled `snapshot`/);
+	assert.match(simplify, /Then run `shape`, resolve every issue and unordered overlap/);
 	assert.match(simplificationPlaybook, /^## Finding format$/m);
 	await assert.rejects(() => readFile(path.join(extensionRoot, "skills/improve/references/closing-the-loop.md"), "utf8"), /ENOENT/);
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);

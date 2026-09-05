@@ -5,32 +5,16 @@ import { randomUUID } from "node:crypto"
 import { initializeExecutionStore } from "../daemon/execution-store.ts"
 import { isInside, runGit } from "../daemon/git/primitives.ts"
 import { sha256 } from "../shared/protocol.ts"
+import { parseDependencyIds, parsePlanContract, parseSharedToolchains, type PlanContract, type PlanToolchain } from "./plan-contract.ts"
+export type { PlanContract, AcceptanceCriterion, PlanVerification, PlanToolchain, PlanKind, VerificationPhase } from "./plan-contract.ts"
 
 const DEFAULT_PLAN_DIR = "herder-plans"
 const TERMINAL = new Set(["DONE", "REJECTED"])
 const ACTIONABLE = new Set(["TODO", "IN PROGRESS", "BLOCKED"])
 const SUPPORTED_STATUSES = new Set([...TERMINAL, ...ACTIONABLE])
-const REQUIRED_PLAN_HEADINGS = [
-  "Status",
-  "Why this matters",
-  "Current state",
-  "Commands you will need",
-  "Scope",
-  "Git workflow",
-  "Steps",
-  "Test plan",
-  "Done criteria",
-  "STOP conditions",
-  "Maintenance notes",
-]
-const REQUIRED_PLAN_METADATA = ["Priority", "Effort", "Risk", "Depends on", "Category", "Planned at"]
-const SHAPE_PLAN_HEADINGS = ["Dependency contract", "Review map"]
-const SHAPE_PLAN_METADATA = ["Kind", "Parent objective"]
-const PLAN_KINDS = new Set(["behavioral", "mechanical", "migration", "spike"])
 const SHARED_CONTEXT_FILE = "CONTEXT.md"
 const MAX_PLAN_WORDS = 1200
 const MAX_SHARED_CONTEXT_WORDS = 1600
-const FIRE_BRANCH_INSTRUCTION = "use the exact branch/worktree assigned by Herder Fire; never create or switch branches."
 const REQUIRED_INDEX_HEADERS = ["plan", "title", "priority", "effort", "depends on", "status"]
 
 export type PlanStatus = "TODO" | "IN PROGRESS" | "DONE" | "BLOCKED" | "REJECTED"
@@ -88,9 +72,11 @@ export interface PlanRecord {
   status: PlanStatus
   statusDetail: string
   file: string
+  sourcePlanSha256: string
   kind: string | null
   parentObjective: string | null
   inScopePaths: string[]
+  contract: PlanContract
   planWords: number
   planLines: number
   shapeIssues: string[]
@@ -100,6 +86,7 @@ export interface PlanRecord {
 export interface PlanGraph {
   planDir: string
   readme: string
+  indexSha256: string
   counts: { total: number; done: number; rejected: number; actionable: number }
   plans: PlanRecord[]
   ready: string[]
@@ -109,6 +96,7 @@ export interface PlanGraph {
   waves: string[][]
   complete: boolean
   contextFile: string | null
+  contextSha256: string | null
   contextWords: number
   contextIssues: string[]
   shapeReady: boolean
@@ -129,6 +117,7 @@ interface PlanFileDetails {
   kind: string | null
   parentObjective: string | null
   inScopePaths: string[]
+  contract: PlanContract
   planWords: number
   planLines: number
   shapeIssues: string[]
@@ -284,14 +273,8 @@ export function canonicalId(value: unknown, context = "plan ID"): string {
 }
 
 function parseDependencies(value: unknown): string[] {
-  const plain = String(value)
-    .replace(/<!--.*?-->/g, " ")
-    .replace(/[`*_]/g, " ")
-    .trim()
-  if (!plain || /^(?:none|n\/a|na|—|-|–)$/i.test(plain)) return []
-  const ids = [...plain.matchAll(/\b\d+\b/g)].map((match) => canonicalId(match[0], "dependency"))
-  if (ids.length === 0) fail(`Cannot parse dependencies: ${JSON.stringify(value)}`)
-  return [...new Set(ids)]
+  const plain = String(value).trim()
+  return plain === "—" ? [] : parseDependencyIds(plain, "Index dependencies")
 }
 
 function parseStatus(value: unknown, id: string): { status: PlanStatus; statusDetail: string } {
@@ -312,10 +295,6 @@ function parseStatus(value: unknown, id: string): { status: PlanStatus; statusDe
 function extractLink(value: unknown): string | null {
   const match = String(value).match(/\[[^\]]+\]\(([^)]+)\)/)
   return match ? match[1].trim().replace(/^<|>$/g, "") : null
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function wordCount(value: unknown): number {
@@ -361,86 +340,26 @@ function resolvePlanFile(planDir: string, planCell: string, id: string): string 
   return resolved
 }
 
-function sectionText(text: string, heading: string): string {
-  const match = new RegExp(`^##\\s+${escapeRegex(heading)}\\s*$`, "im").exec(text)
-  if (!match) return ""
-  const tail = text.slice(match.index + match[0].length)
-  const next = tail.search(/^##\s+/m)
-  return next === -1 ? tail : tail.slice(0, next)
-}
-
-function extractInScopePaths(text: string): string[] {
-  const scope = sectionText(text, "Scope")
-  const inScope = scope.match(/\*\*In scope\*\*[^\n]*([\s\S]*?)(?=\*\*Out of scope\*\*|$)/i)?.[1] ?? ""
-  const paths: string[] = []
-  for (const match of inScope.matchAll(/`([^`\r\n]+)`/g)) {
-    const candidate = match[1].trim()
-    if (!candidate || /\s(?:--?|&&|\|)\s/.test(candidate) || /[()]$/.test(candidate)) continue
-    if (!candidate.includes("/") && !/^[\w@.-]+\.[A-Za-z0-9*{}_-]+$/.test(candidate)) continue
-    paths.push(candidate)
-  }
-  return [...new Set(paths)]
-}
-
-function parsePlanFile(file: string, id: string): PlanFileDetails {
+function parsePlanFile(file: string, id: string, sharedToolchains: readonly PlanToolchain[]): PlanFileDetails {
   const text = fs.readFileSync(file, "utf8")
-  const title = text.match(/^#\s+Plan\s+(\d+)\b/i)
+  const title = text.match(/^#\s+Plan\s+(\d+):\s+\S[^\r\n]*/)
   if (!title || canonicalId(title[1], "plan title") !== id) {
     fail(`Plan ${id} must start with a matching "# Plan ${id}:" title: ${file}`)
   }
-  for (const heading of REQUIRED_PLAN_HEADINGS) {
-    if (!new RegExp(`^##\\s+${escapeRegex(heading)}\\s*$`, "im").test(text)) {
-      fail(`Plan ${id} is missing required heading "## ${heading}": ${file}`)
-    }
-  }
-  const metadata = new Map<string, string>()
-  for (const field of REQUIRED_PLAN_METADATA) {
-    const match = text.match(new RegExp(`^\\s*[-*]\\s+\\*\\*${escapeRegex(field)}\\*\\*:\\s*(.+?)\\s*$`, "im"))
-    if (!match) fail(`Plan ${id} is missing required metadata "- **${field}**:": ${file}`)
-    metadata.set(field, match[1])
-  }
-  for (const field of SHAPE_PLAN_METADATA) {
-    const match = text.match(new RegExp(`^\\s*[-*]\\s+\\*\\*${escapeRegex(field)}\\*\\*:\\s*(.+?)\\s*$`, "im"))
-    if (match) metadata.set(field, match[1])
-  }
-  const workflowHeading = /^##\s+Git workflow\s*$/im.exec(text)
-  const workflowTail = text.slice(workflowHeading!.index + workflowHeading![0].length)
-  const nextHeadingOffset = workflowTail.search(/^##\s+/m)
-  const workflow = nextHeadingOffset === -1 ? workflowTail : workflowTail.slice(0, nextHeadingOffset)
-  const branchInstructions = [...text.matchAll(/^\s*[-*]\s+Branch:\s*(.+?)\s*$/gim)]
-  const workflowBranchInstructions = [...workflow.matchAll(/^\s*[-*]\s+Branch:\s*(.+?)\s*$/gim)]
-  if (branchInstructions.length !== 1 || workflowBranchInstructions.length !== 1) {
-    fail(`Plan ${id} must contain exactly one "- Branch:" instruction in "## Git workflow": ${file}`)
-  }
-  if (workflowBranchInstructions[0]![1]!.trim() !== FIRE_BRANCH_INSTRUCTION) {
-    fail(`Plan ${id} must delegate branch ownership to Herder Fire with "- Branch: ${FIRE_BRANCH_INSTRUCTION}": ${file}`)
-  }
+  const contract = parsePlanContract(text, { sharedToolchains, label: `Plan ${id} (${file})` })
   const shapeIssues: string[] = []
-  for (const field of SHAPE_PLAN_METADATA) {
-    if (!metadata.has(field)) shapeIssues.push(`missing metadata "${field}"`)
-  }
-  for (const heading of SHAPE_PLAN_HEADINGS) {
-    if (!new RegExp(`^##\\s+${escapeRegex(heading)}\\s*$`, "im").test(text)) {
-      shapeIssues.push(`missing heading "## ${heading}"`)
-    }
-  }
-  const kind = metadata.has("Kind") ? metadata.get("Kind")!.trim().toLowerCase() : null
-  if (kind && !PLAN_KINDS.has(kind)) {
-    fail(`Plan ${id} has unsupported Kind ${JSON.stringify(metadata.get("Kind"))}: ${file}`)
-  }
-  const inScopePaths = extractInScopePaths(text)
-  if (inScopePaths.length === 0) shapeIssues.push("has no machine-readable backticked in-scope paths")
   const planWords = wordCount(text)
   const planLines = text.split(/\r?\n/).length
   if (planWords > MAX_PLAN_WORDS) {
     shapeIssues.push(`has ${planWords} words; compact subplans must stay at or below ${MAX_PLAN_WORDS}`)
   }
   return {
-    dependencies: parseDependencies(metadata.get("Depends on")),
+    dependencies: contract.metadata.dependencies,
     text,
-    kind,
-    parentObjective: metadata.get("Parent objective")?.trim() || null,
-    inScopePaths,
+    kind: contract.metadata.kind,
+    parentObjective: contract.metadata.parentObjective,
+    inScopePaths: contract.writePaths,
+    contract,
     planWords,
     planLines,
     shapeIssues,
@@ -566,6 +485,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
 
   const contextFile = sharedContextPath(planDir)
   const contextText = contextFile ? fs.readFileSync(contextFile, "utf8") : ""
+  const sharedToolchains = parseSharedToolchains(contextText, contextFile ?? SHARED_CONTEXT_FILE)
   const contextWords = wordCount(contextText)
   const contextIssues = contextWords > MAX_SHARED_CONTEXT_WORDS
     ? [`Shared context has ${contextWords} words; keep it at or below ${MAX_SHARED_CONTEXT_WORDS}`]
@@ -581,7 +501,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
     seen.add(id)
     const file = resolvePlanFile(planDir, row.cells[column.plan!]!, id)
     const indexDependencies = parseDependencies(row.cells[column["depends on"]!])
-    const parsedPlan = parsePlanFile(file, id)
+    const parsedPlan = parsePlanFile(file, id, sharedToolchains)
     const fileDependencies = parsedPlan.dependencies
     if (JSON.stringify([...indexDependencies].sort()) !== JSON.stringify([...fileDependencies].sort())) {
       fail(`Plan ${id} dependency mismatch: README has [${indexDependencies.join(", ")}], file has [${fileDependencies.join(", ")}]`)
@@ -596,9 +516,11 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
       status: parsedStatus.status,
       statusDetail: parsedStatus.statusDetail,
       file,
+      sourcePlanSha256: sha256(parsedPlan.text),
       kind: parsedPlan.kind,
       parentObjective: parsedPlan.parentObjective,
       inScopePaths: parsedPlan.inScopePaths,
+      contract: parsedPlan.contract,
       planWords: parsedPlan.planWords,
       planLines: parsedPlan.planLines,
       shapeIssues: parsedPlan.shapeIssues,
@@ -653,7 +575,12 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
         || dependenciesByPlan.get(right.id)!.has(left.id)
       overlaps.push({ plans: [left.id, right.id], paths, ordered })
       if (!ordered) {
-        warnings.push(`Plans ${left.id} and ${right.id} have unordered overlapping in-scope paths: ${paths.join(", ")}`)
+        const issue = `Plans ${left.id} and ${right.id} have unordered overlapping in-scope paths: ${paths.join(", ")}`
+        warnings.push(issue)
+        for (const plan of [left, right]) {
+          plan.shapeIssues.push(issue)
+          plan.shapeReady = false
+        }
       }
     }
   }
@@ -667,6 +594,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
   return {
     planDir,
     readme,
+    indexSha256: sha256(readmeFile.text),
     counts: projection.counts,
     plans,
     ready: projection.ready,
@@ -676,6 +604,7 @@ export function buildGraph(inputDir = DEFAULT_PLAN_DIR): PlanGraph {
     waves: buildWaves(plans),
     complete: projection.complete,
     contextFile,
+    contextSha256: contextFile ? sha256(contextText) : null,
     contextWords,
     contextIssues,
     shapeReady: contextIssues.length === 0 && plans.every((plan) => plan.shapeReady),
@@ -805,6 +734,7 @@ export interface PlanSnapshot {
   planDir: string
   readme: string
   plan: PlanRecord
+  contract: PlanContract
   planText: string
   sourcePlanText: string
   contextText: string
@@ -813,8 +743,29 @@ export interface PlanSnapshot {
   indexText: string
 }
 
-function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, contextText: string, indexText: string): PlanSnapshot {
+function assertSnapshotInput(file: string, actual: string | null, expected: string | null): void {
+  if (actual !== expected) fail(`${file} changed since graph validation; rebuild the plan graph before snapshotting`)
+}
+
+function readSnapshotInputs(graph: PlanGraph) {
+  const contextFile = sharedContextPath(graph.planDir)
+  assertSnapshotInput(path.join(graph.planDir, SHARED_CONTEXT_FILE), contextFile, graph.contextFile)
+  const contextText = contextFile ? fs.readFileSync(contextFile, "utf8") : ""
+  assertSnapshotInput(path.join(graph.planDir, SHARED_CONTEXT_FILE), contextFile ? sha256(contextText) : null, graph.contextSha256)
+  const indexText = readRegularFile(graph.readme).text
+  assertSnapshotInput(graph.readme, sha256(indexText), graph.indexSha256)
+  return { contextText, indexText, sharedToolchains: parseSharedToolchains(contextText, contextFile ?? SHARED_CONTEXT_FILE) }
+}
+
+function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, inputs: ReturnType<typeof readSnapshotInputs>): PlanSnapshot {
+  const { contextText, indexText, sharedToolchains } = inputs
   const sourcePlanText = fs.readFileSync(plan.file, "utf8")
+  assertSnapshotInput(plan.file, sha256(sourcePlanText), plan.sourcePlanSha256)
+  // Compile only the captured, hash-checked texts used by this immutable snapshot.
+  const contract = parsePlanContract(sourcePlanText, { sharedToolchains, label: `Plan ${plan.id} (${plan.file})` })
+  if (JSON.stringify(contract) !== JSON.stringify(plan.contract)) {
+    fail(`Plan ${plan.id} contract disagrees with the validated graph; rebuild the plan graph before snapshotting`)
+  }
   const planText = contextText
     ? `<!-- herder-snapshot:shared-context -->\n${contextText.trim()}\n\n<!-- herder-snapshot:local-plan -->\n${sourcePlanText.trim()}\n`
     : sourcePlanText
@@ -834,6 +785,7 @@ function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, contextText: str
     planDir: graph.planDir,
     readme: graph.readme,
     plan,
+    contract,
     planText,
     sourcePlanText,
     contextText,
@@ -844,17 +796,15 @@ function createPlanSnapshot(graph: PlanGraph, plan: PlanRecord, contextText: str
 }
 
 export function snapshotPlansFromGraph(graph: PlanGraph): PlanSnapshot[] {
-  const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
-  const indexText = readRegularFile(graph.readme).text
-  return graph.plans.map((plan) => createPlanSnapshot(graph, plan, contextText, indexText))
+  const inputs = readSnapshotInputs(graph)
+  return graph.plans.map((plan) => createPlanSnapshot(graph, plan, inputs))
 }
 
 function snapshotPlanFromGraph(graph: PlanGraph, inputId: unknown): PlanSnapshot {
   const id = canonicalId(inputId)
   const plan = graph.plans.find((candidate) => candidate.id === id)
   if (!plan) fail(`Plan ${id} is not indexed in ${graph.readme}`)
-  const contextText = graph.contextFile ? fs.readFileSync(graph.contextFile, "utf8") : ""
-  return createPlanSnapshot(graph, plan, contextText, readRegularFile(graph.readme).text)
+  return createPlanSnapshot(graph, plan, readSnapshotInputs(graph))
 }
 
 export function snapshotPlan(inputDir = DEFAULT_PLAN_DIR, inputId: unknown): PlanSnapshot {
@@ -874,6 +824,7 @@ export function getShapeReport(inputDir = DEFAULT_PLAN_DIR) {
       kind: plan.kind,
       parentObjective: plan.parentObjective,
       inScopePaths: plan.inScopePaths,
+      contract: plan.contract,
       planWords: plan.planWords,
       planLines: plan.planLines,
       shapeReady: plan.shapeReady,

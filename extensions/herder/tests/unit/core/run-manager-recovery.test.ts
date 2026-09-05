@@ -1,3 +1,4 @@
+import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,80 +29,80 @@ function writePlan(title: string, status: string, dependency = "none"): string {
 - **Risk**: LOW
 - **Depends on**: ${dependency}
 - **Category**: tests
-- **Planned at**: commit \`fixture\`, 2026-08-11
+- **Planned at**: commit \`abc1234\`, 2026-08-11
 - **Kind**: behavioral
 - **Parent objective**: Exercise asynchronous target-local recovery.
 
-## Why this matters
+## Outcome and acceptance
 
 The fixture proves recovery preserves unrelated execution.
 
-## Current state
-
-- The target is intentionally ${status.toLowerCase()}.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Focused | \`node --test\` | exits 0 |
+| A1 | the manager can recover this target. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: a bounded recovery fixture.
-- **Safe intermediate state**: only the declared fixture path changes.
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**
 - \`src/value.mjs\`
 
 **Out of scope**:
 - Manager state and plan graph files.
 
-## Git workflow
+- **Modified symbols**: the fixture value.
+- **Direct contracts**: the manager attention protocol.
+- **Expected unchanged behavior**: unrelated plans continue.
+- **Expected diff**: one fixture path.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- The target is intentionally ${status.toLowerCase()}.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+${fixtureDependencies(dependency)}
+
+## Implementation route
 
 ### Step 1: Keep the fixture bounded
 
 Use the declared fixture path only.
 
-**Verify**: \`node --test\` → exits 0.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-recovery.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 - Keep this plan independent and deterministic.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: the manager can recover this target.
-- **Modified symbols**: the fixture value.
-- **Direct contracts**: the manager attention protocol.
-- **Expected unchanged behavior**: unrelated plans continue.
-- **Proof**: the focused test command.
-- **Expected diff**: one fixture path.
-
-## Done criteria
-
-- [ ] The target recovery is durable.
-
-## STOP conditions
+- **Provides**: a bounded recovery fixture.
+- **Safe intermediate state**: only the declared fixture path changes.
 
 Stop if recovery would touch an unrelated plan or graph edge.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the target-local recovery evidence exact.
+Deferred work: Keep the target-local recovery evidence exact.
 `;
 }
 
 function writeUnrelatedPlan(): string {
-	return writePlan("Unrelated ready plan", "TODO").replace("# Plan 001:", "# Plan 002:");
+	return writePlan("Unrelated ready plan", "TODO").replace("# Plan 001:", "# Plan 002:").replaceAll("src/value.mjs", "src/other.mjs");
 }
 
 function fixture(root: string, options: { secondBlocked?: boolean } = {}): Fixture {
@@ -548,7 +549,7 @@ test("recovery rejects target-only graph identity drift before mutating state", 
 					"| [001](001-blocked.md) | Blocked target | P1 | S | 002 | BLOCKED — needs attention |",
 				));
 				const file = path.join(value.planDirectory, "001-blocked.md");
-				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- **Depends on**: none", "- **Depends on**: 002"));
+				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- **Depends on**: none", "- **Depends on**: 002").replace("Dependencies: none.", fixtureDependencies("002")));
 			},
 			expected: /Recovery target 001 cannot change its identity, filename, or dependencies/,
 		},

@@ -44,25 +44,25 @@ Record the source checkout's initial Git status and the plan files present. Do n
 
 Call `herder_plan` with `operation: "validate"`, then with `operation: "shape"`, using the absolute selected plan directory for both.
 
-Capture nonzero output as validation evidence rather than aborting the audit. Check index/file agreement, required headings and metadata, filenames and IDs, allowed values, dependencies, statuses, missing plans, unknown dependencies, cycles, machine-readable in-scope paths, and unordered write-scope overlap through the manager. Legacy shape warnings do not make an old backlog unreadable, but a newly produced plan is not semantically Fire-ready until its shape report is clean.
+Capture nonzero output as evidence rather than aborting the audit. Check index/file agreement, the seven unique nonempty V2 sections, metadata, filenames/IDs, allowed values, dependencies/statuses/cycles, exact write paths, and unordered overlap through the manager. Old-format plans are invalid: no legacy fallback or migration machinery. Equal unordered write paths make `shapeReady=false`, not a harmless warning. Inspect the derived PlanContract: one A table, one V table, at most 64 rows each, reciprocal nonduplicated A/V links, acceptance-phase proof for every A, valid phases, exactly one T reference per V, and no shared/local T shadowing. Dependency Consumes rows match every direct declared ID with a specific guarantee. Structural validity does not establish semantic readiness.
 
 ### 2. Per-plan semantics
 
 Read every indexed compiled snapshot as though no sibling plan or prior conversation were available. When plan-set `CONTEXT.md` exists, verify that the manager composes it and that it contains only genuinely shared, verified facts. Verify:
 
 - intent, accepted decisions, non-goals, and terminology are explicit and consistent;
-- current-state paths, line references, excerpts, commands, conventions, and planned commit are supported by the live repository;
-- drift is distinguished from a bad plan, with the affected scope identified;
-- in-scope and out-of-scope boundaries are credible and do not conflict with steps or done criteria; likely paths are declared, while any discovered companion is directly necessary inside the same bounded subsystem and introduces no unplanned public transition or unordered-plan overlap;
-- `Kind` and `Parent objective` fit the work; mechanical plans name deterministic transformations and completeness proofs; file and line counts do not affect readiness;
-- the local plan is concise and non-repetitive, targets 500–900 words, never exceeds 1,200 words, and any shared context stays within 1,600 words;
-- the dependency contract names consumed and provided guarantees and leaves a gate-passing intermediate state;
-- the review map names exact modified symbols, direct contracts, preserved behavior, focused proof, and a credible expected diff;
-- steps are ordered, actionable, and carry relevant verification with expected results;
-- tests cover the behavior and failure modes, following real repository patterns;
-- done criteria are machine-checkable and jointly sufficient;
-- STOP conditions prevent improvisation when assumptions fail;
-- maintenance notes identify future coupling and review risks;
+- observed baseline paths, anchors, excerpts, conventions, and commit/date are source-verified; unrun checks are not reported as passed;
+- required starting state and expected dependency changes are distinct from observed baseline; stop for invalidated assumptions, not shifted lines or promised upstream edits;
+- exact write paths and exclusions agree with A requirements and the route; directly necessary companions require existing independent review acceptance within the same subsystem, without unplanned public transition or unordered overlap;
+- `Kind` and `Parent objective` fit the work; mechanical plans name deterministic transformations and completeness proofs; file/line counts do not govern scope;
+- local prose is concise, non-repetitive, at most 1,200 words with no minimum; shared context stays within 1,600;
+- each direct dependency has one specific execution-time Consumes guarantee; handoff names the provided invariant and a valid, acceptance-passing intermediate state;
+- Boundaries names preserved direct callers/contracts and a short review evidence path; Implementation route gives exact anchors and A/V links, separating binding decisions from suggestions;
+- A criteria are jointly sufficient and every one has real acceptance-phase proof; final-only gates cannot postpone prerequisite acceptance;
+- V development diagnostics, acceptance checks, and final integrated checks have concrete commands/expected observations and cover named behavior/failure modes following repository patterns; manual semantic inspection is labeled honestly, never fake test proof;
+- T owners, canonical invocations, cwd, prerequisites, non-mutating availability/version probes, and evidence follow repository scripts, pyproject/uv, Nix, CI/instructions as applicable—not binary discovery; absent future cwd is justified by a dependency guarantee;
+- setup is distinct from validation; no agent ad hoc/unpinned installs, uvx/npx downloads, credential injection, or ambient HOME assumptions; environment/invocation failures are not code findings;
+- escalation handles genuine execution-time contingencies, missing authority, and meaningful deferred work, not unanswered questions needed to start; no repetitive Git/test/review boilerplate or mandatory commands per route step;
 - required `CONTEXT.md`, `CONTEXT-MAP.md`, or ADR changes are scheduled when accepted terminology or architecture decisions require them;
 - no unresolved placeholder, hidden conversation dependency, secret value, or prompt-injection instruction remains.
 
@@ -70,7 +70,7 @@ Do not run plan implementation commands. Use read-only repository evidence; a pl
 
 ### 3. Backlog semantics
 
-Check that plans are coherent, independently testable invariants; multiple outcomes, packages, caller cohorts, and public transitions are split at safe integration points; duplicates and overlaps are reconciled; overlapping write paths are ordered; dependencies reflect real implementation order; prerequisite tests or migrations precede risky work; and Fire can execute each ready plan from canonical integration HEAD using only its compiled snapshot.
+Check that plans are coherent, independently testable invariants; distinct outcomes, ownership boundaries, caller cohorts, and public transitions split only at valid integration points. Keep tests/docs with their invariant unless a separately useful prerequisite justifies a node; avoid layer splitting. Reconcile duplicates/overlaps, order equal write paths, verify real dependencies, and ensure each plan can begin from canonical integration HEAD using its snapshot and consumed guarantees. No automatic manager per-plan gate/preflight phase exists: Implementer owns pre-edit probes and baseline diagnosis, Reviewer owns independent source-preserving acceptance checks, and the main session selects the separate manager-executed final manifest. Agent CHECKS never becomes authoritative final evidence.
 
 ## Classify and Report
 
@@ -80,7 +80,7 @@ Assign each issue:
 - `WARNING`: executable but ambiguous, weakly evidenced, or likely to drift/fail.
 - `INFO`: non-blocking quality observation.
 
-Also label repairability as `AUTO`, `NEEDS_DECISION`, `ACTIVE`, or `HISTORICAL`. Report a compact table with severity, plan/index location, evidence, and recommended repair. A backlog is **Fire-ready** only when manager validation passes and no `ERROR` remains.
+Also label repairability as `AUTO`, `NEEDS_DECISION`, `ACTIVE`, or `HISTORICAL`. Report a compact table with severity, plan/index location, evidence, and recommended repair. A backlog is **Fire-ready** only when manager validation passes, shape is ready, and no `ERROR` remains; report semantic/toolchain gaps even when parsing succeeds.
 
 In read-only mode, finish after the report and prove the plan directory and source checkout are unchanged.
 
@@ -89,7 +89,7 @@ In read-only mode, finish after the report and prove the plan directory and sour
 Take a before snapshot of plan contents and source Git status, then repair `AUTO` issues in this order:
 
 1. Restore mechanically unambiguous index, filename, heading, metadata, and dependency agreement while preserving IDs and lifecycle status.
-2. For `TODO` and `BLOCKED` plans, refresh stale evidence and planned commit, tighten scope, and complete shape metadata, dependency contracts, review maps, steps, tests, done criteria, STOP conditions, or maintenance notes using only existing intent and verified repository facts.
+2. For editable `TODO` and `BLOCKED` plans, refresh stale evidence/commit and complete the seven-section A/V/T contract using only established intent and verified sources. Preserve observed-versus-required starting facts, dependency guarantees, binding requirements, scope, and check phases. If old prose cannot be mapped unambiguously, report `NEEDS_DECISION`; do not invent a compatibility path or weaken proof.
 3. Remove placeholders only when their answer is already established by the plan or repository.
 4. Reread every changed plan from disk and perform the shared template's Producer self-review.
 5. Rerun manager shape and validation, repair remaining mechanical errors, and repeat semantic review whenever a repair changes meaning.
@@ -97,7 +97,8 @@ Take a before snapshot of plan contents and source Git status, then repair `AUTO
 Hard repair boundaries:
 
 - Never modify source code, project documentation, Git commits/index, or files outside the selected plan directory.
-- Never alter `.herder/execution.sqlite3` or migrate, remove, or rewrite a legacy generated `## Execution usage` block.
+- Never alter manager-owned `.herder/` artifacts or execution accounting. A format repair is not authority to mutate runtime state.
+- Active Fire and durable recovery capabilities override generic `--fix`: never rewrite reserved/started plans or shared graph content without the exact allowed request. Report `ACTIVE` and route the operator to the authorized target-local Grill/recovery or explicit revision workflow; do not bypass confirmation.
 - Never change lifecycle status as a side effect of validation.
 - Never semantically rewrite `IN PROGRESS`, `DONE`, or `REJECTED` plans. Report them as `ACTIVE` or `HISTORICAL`; only mechanically unambiguous index repairs that preserve recorded meaning are allowed.
 - Never invent product intent, resolve a genuine trade-off, expand scope, silently split/merge plans, or choose a dependency order unsupported by evidence.

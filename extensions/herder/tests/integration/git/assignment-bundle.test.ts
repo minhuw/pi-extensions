@@ -54,72 +54,74 @@ function planBody(): string {
 - **Effort**: S
 - **Risk**: LOW
 - **Depends on**: none
-- **Category**: orchestration
+- **Category**: tests
 - **Planned at**: commit \`abc1234\`, 2026-07-28
 - **Kind**: behavioral
 - **Parent objective**: Keep every worker inside its assigned worktree
 
-## Why this matters
+## Outcome and acceptance
 
 Workers need the exact assigned plan without reading the coordinator checkout.
 
-## Current state
-
-The coordinator owns the source backlog.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`node --test\` | exit 0 |
+| A1 | the worker remains in its worktree. | V1 |
 
-## Scope
+## Boundaries
 
-**In scope** (declared write paths):
+**Write paths**
 - \`src/worker.mjs\`
 
 **Out of scope**:
 - The source plan directory.
 
-## Dependency contract
+- Modified symbols: \`src/worker.mjs\`.
+- Expected unchanged behavior: coordination files remain unchanged.
+- Expected diff: the worker module and its direct tests.
 
-Consumes the immutable assignment and changes no coordination state.
+## Starting conditions
 
-## Git workflow
+**Observed baseline**
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Use one focused conventional commit.
-- Do not push or open a pull request.
+The coordinator owns the source backlog.
 
-## Steps
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Read the assignment
 
 Use the local immutable bundle.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/integration/git/assignment-bundle.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run \`node --test\`.
 
-## Review map
+## Escalation and handoff
 
-- Outcome: the worker remains in its worktree.
-- Modified symbols: \`src/worker.mjs\`.
-- Proof: \`node --test\`.
-- Expected unchanged behavior: coordination files remain unchanged.
-- Expected diff: the worker module and its direct tests.
-
-## Done criteria
-
-- [ ] The local assignment is available.
-
-## STOP conditions
+Consumes the immutable assignment and changes no coordination state.
 
 Stop if the assignment hash changes.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep assignment transport deterministic.
+Deferred work: Keep assignment transport deterministic.
 `
 }
 

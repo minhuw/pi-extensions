@@ -1,3 +1,4 @@
+import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -48,72 +49,71 @@ const FIXTURE_PLAN = (originalHead: string) => `# Plan 001: Update the fixture v
 - **Kind**: behavioral
 - **Parent objective**: Prove the deterministic Reviewer and Judge transitions through public manager events.
 
-## Why this matters
+## Outcome and acceptance
 
 The fixture gives the manager a real repository and a small patch that can be carried through every review round.
 
-## Current state
-
-- \`src/value.mjs\` exports the number one.
-- The Implementer commits one focused value change per round.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Tests | \`npm test\` | exits 0 |
+| A1 | accepted Reviewer and Judge results persist the documented next state. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: a deterministic fixture patch for manager transition characterization.
-- **Safe intermediate state**: every round remains a clean committed worktree.
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**
 - \`src/value.mjs\`
 
 **Out of scope**:
 - Package metadata and manager implementation.
 
-## Git workflow
+- **Modified symbols**: the fixture value only.
+- **Direct contracts**: public manager events and RunStore records.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit per Implementer round.
-- Do not push or open a pull request.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- \`src/value.mjs\` exports the number one.
+- The Implementer commits one focused value change per round.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Update the exported value
 
 Change the exported numeric value while preserving the module interface.
 
-**Verify**: \`npm test\` → exits 0.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-review-judge.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 - Drive manager \`start()\` and \`event()\` endpoints only.
 - Assert durable phase, round, action, approval, and run status contracts.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: accepted Reviewer and Judge results persist the documented next state.
-- **Modified symbols**: the fixture value only.
-- **Direct contracts**: public manager events and RunStore records.
-- **Proof**: focused manager transition tests.
-
-## Done criteria
-
-- [ ] Every accepted transition is characterized through public events.
-
-## STOP conditions
+- **Provides**: a deterministic fixture patch for manager transition characterization.
+- **Safe intermediate state**: every round remains a clean committed worktree.
 
 Stop if a transition cannot be reached through public manager events.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep assertions on durable state rather than incidental prose.
+Deferred work: Keep assertions on durable state rather than incidental prose.
 `;
 
 function payload(value: unknown): JsonRecord {
@@ -133,6 +133,7 @@ function writeFixture(root: string): Fixture {
 		files: {
 			"package.json": `${JSON.stringify({ name: "herder-transition-fixture", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
 			"src/value.mjs": "export const value = 1\n",
+			"src/independent.mjs": "export const value = 1\n",
 			"test/value.test.mjs": `import assert from "node:assert/strict"\nimport test from "node:test"\nimport { value } from "../src/value.mjs"\ntest("value", () => assert.ok(Number.isInteger(value)))\n`,
 		},
 	});
@@ -241,11 +242,12 @@ async function finishImplementer(service: Service, candidate: JsonRecord, prefix
 	await dispatch(service, candidate, prefix);
 	const round = Number(candidate.round);
 	const worktree = String(candidate.worktree);
-	fs.writeFileSync(path.join(worktree, "src/value.mjs"), `export const value = ${round + 1}\n`);
-	git(worktree, ["add", "src/value.mjs"]);
+	const sourcePath = candidate.planId === "002" ? "src/independent.mjs" : "src/value.mjs";
+	fs.writeFileSync(path.join(worktree, sourcePath), `export const value = ${round + 1}\n`);
+	git(worktree, ["add", sourcePath]);
 	git(worktree, ["commit", "-q", "-m", `test: commit transition round ${round}`]);
 	const commit = git(worktree, ["rev-parse", "HEAD"]).stdout.trim();
-	return terminal(service, candidate, prefix, implementerResponse(commit, discoveredPaths));
+	return terminal(service, candidate, prefix, implementerResponse(commit, discoveredPaths).replaceAll("src/value.mjs", sourcePath));
 }
 
 function failedImplementerResponse(reason: string): string {
@@ -992,7 +994,7 @@ test("exhaustion keeps siblings schedulable, acceptance unlocks dependencies wit
 			"| [003](003-dependent.md) | Dependent | P1 | S | 001 | TODO |", "", "## Dependency notes",
 		].join("\n")));
 		fs.writeFileSync(path.join(fixture.planDirectory, "002-independent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 002:").replaceAll("src/value.mjs", "src/independent.mjs"));
-		fs.writeFileSync(path.join(fixture.planDirectory, "003-dependent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 003:").replace("**Depends on**: none", "**Depends on**: 001").replaceAll("src/value.mjs", "src/dependent.mjs"));
+		fs.writeFileSync(path.join(fixture.planDirectory, "003-dependent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 003:").replace("**Depends on**: none", "**Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")).replaceAll("src/value.mjs", "src/dependent.mjs"));
 		const state = await exhaustReview(service, fixture, "accept-scheduling");
 		const sibling = action(state.reply, "plan-implementer");
 		assert.equal(sibling.planId, "002");
@@ -1030,7 +1032,7 @@ for (const decision of ["accept", "stop"] as const) {
 		await withFixture(`queued-${decision}`, async (service, fixture) => {
 			const readme = path.join(fixture.planDirectory, "README.md");
 			fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("\n\n## Dependency notes", "\n| [002](002-independent.md) | Independent | P1 | S | — | TODO |\n\n## Dependency notes"));
-			fs.writeFileSync(path.join(fixture.planDirectory, "002-independent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 002:"));
+			fs.writeFileSync(path.join(fixture.planDirectory, "002-independent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 002:").replaceAll("src/value.mjs", "src/independent.mjs"));
 			const first = await exhaustReview(service, fixture, `queued-${decision}-first`);
 			let reply = first.reply;
 			const prefix = `queued-${decision}-second`;

@@ -60,78 +60,75 @@ None.
 - **Kind**: behavioral
 - **Parent objective**: Prove the deterministic Herder manager executes and integrates one reviewed plan.
 
-## Why this matters
+## Outcome and acceptance
 
 This fixture proves that process discovery, durable action accounting, worker backfilling, independent review, integration, and final audit all advance through the deterministic manager.
 
-## Current state
-
-- \`src/value.mjs\` exports the number one.
-- \`test/value.test.mjs\` expects the number two and therefore becomes the focused verification proof after implementation.
-- The repository uses dependency-free ESM and Node's built-in test runner.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Tests | \`npm test\` | exits 0 with one passing test |
+| A1 | The fixture exports value as two while preserving its ESM interface and focused assertion. | V1 |
 
-## Dependency contract
+## Boundaries
 
-- **Consumes**: none.
-- **Provides**: the exported fixture value is two and its focused test passes.
-- **Safe intermediate state**: this is the only source transition and the repository test command passes after integration.
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**
 - \`src/value.mjs\`
 
 **Out of scope**:
 - Package metadata, dependencies, and the test contract.
 
-## Git workflow
+- **Modified symbols**: \`value\` in \`src/value.mjs\`.
+- **Direct contracts**: the existing import and strict equality assertion.
+- **Expected unchanged behavior**: module format and export name remain unchanged.
+- **Expected diff**: one numeric literal in \`src/value.mjs\`.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Create one focused conventional commit.
-- Do not push or open a pull request.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+- \`src/value.mjs\` exports the number one.
+- \`test/value.test.mjs\` expects the number two and therefore becomes the focused verification proof after implementation.
+- The repository uses dependency-free ESM and Node's built-in test runner.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Update the exported value
 
 Change the exported numeric value from one to two without changing the module interface.
 
-**Verify**: \`npm test\` → one passing test.
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
 
-## Test plan
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm test\` | exit 0; the focused assertion proves value equals two |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; dependency-free fixture package present | \`node --version\` | \`package.json\` |
 
 - Run \`npm test\` and require the existing focused value assertion to pass.
 - Keep the \`node:test\` and \`node:assert/strict\` module specifiers; they are not shell commands.
 - Do not add dependencies or broaden the test surface.
 
-## Review map
+## Escalation and handoff
 
-- **Outcome**: the exported value is two.
-- **Modified symbols**: \`value\` in \`src/value.mjs\`.
-- **Direct contracts**: the existing import and strict equality assertion.
-- **Expected unchanged behavior**: module format and export name remain unchanged.
-- **Proof**: \`npm test\`.
-- **Expected diff**: one numeric literal in \`src/value.mjs\`.
-
-## Done criteria
-
-- [ ] \`npm test\` exits 0.
-- [ ] \`src/value.mjs\` continues exporting \`value\` with the number two.
-- [ ] No dependency or test contract changes are introduced.
-
-## STOP conditions
+- **Provides**: the exported fixture value is two and its focused test passes.
+- **Safe intermediate state**: this is the only source transition and the repository test command passes after integration.
 
 Stop if the module no longer matches the stated ESM shape, if the test requires another behavior, or if a dependency would be required.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep this fixture deliberately small so control-plane failures remain distinguishable from implementation complexity.
+Deferred work: Keep this fixture deliberately small so control-plane failures remain distinguishable from implementation complexity.
 `);
 	return { repo, planDirectory, originalHead };
 }
@@ -399,13 +396,13 @@ None.
 		.replaceAll("Plan 001: Update the fixture value", "Plan 001: Follow up residual work")
 		.replaceAll("Update the fixture value", "Follow up residual work");
 	if (options.shapeReady === false) {
-		planBody = planBody.replace(/\n## Review map\n[\s\S]*?(?=\n## )/, "\n");
+		planBody += "\n" + "Oversized follow-up context. ".repeat(500);
 	}
 	fs.writeFileSync(path.join(directory, "001-follow-up.md"), planBody);
 	if (options.extraStatus) {
 		fs.writeFileSync(
 			path.join(directory, "002-follow-up.md"),
-			planBody.replaceAll("Plan 001", "Plan 002").replaceAll("Follow up residual work", "Follow up extra work"),
+			planBody.replaceAll("Plan 001", "Plan 002").replaceAll("Follow up residual work", "Follow up extra work").replaceAll("src/value.mjs", "src/other.mjs"),
 		);
 	}
 	const graph = buildGraph(directory);
@@ -1373,7 +1370,8 @@ test("minimum-timeout final verification failure preserves timeout and log evide
 			assert.notEqual(gate.exitCode, 0);
 			assert.ok(String(gate.logPath));
 			assert.equal(fs.existsSync(String(gate.logPath)), true);
-			assert.equal("timedOut" in gate, false);
+			assert.equal(gate.timedOut, true);
+			assert.equal(gate.outcome, "timed_out");
 			assert.equal(store.getPlan(run.runId, "RUN"), null);
 			assert.equal(store.getActions(run.runId).some((action) => action.planId === "RUN" || action.workerMode === "FINAL_AUDIT"), false);
 		} finally {

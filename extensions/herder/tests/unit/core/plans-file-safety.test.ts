@@ -55,53 +55,67 @@ None.
 - **Kind**: behavioral
 - **Parent objective**: Exercise safe plan metadata handling.
 
-## Why this matters
+## Outcome and acceptance
 
 The fixture keeps metadata local.
 
-## Current state
-
-The fixture is ready for the test.
-
-## Commands you will need
-
-| Purpose | Command | Expected on success |
+| ID | Required behavior | Proof |
 |---|---|---|
-| Test | \`true\` | exit 0 |
+| A1 | Unsafe plan metadata files are rejected without modifying user files. | V1 |
 
-## Scope
+## Boundaries
 
-**In scope**:
+**Write paths**
 - \`src/example.ts\`
 
 **Out of scope**:
 - Other files.
 
-## Git workflow
+Preserve user-owned files and the existing fixture interfaces; review only the declared transition.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
+## Starting conditions
 
-## Steps
+**Observed baseline**
+
+The fixture is ready for the test.
+
+**Required starting state**
+
+The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
+
+**Expected dependency changes**
+
+Dependencies: none.
+
+## Implementation route
 
 ### Step 1: Test
 
 Run the test.
 
-## Test plan
+Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
+
+## Verification
+
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+|---|---|---|---|---|---|
+| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/plans-file-safety.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+|---|---|---|---|---|---|
+| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
 
 Run the test.
 
-## Done criteria
+## Escalation and handoff
 
-- [ ] The test passes.
-
-## STOP conditions
+Provides the bounded fixture transition. Safe intermediate state: unrelated files and manager state remain unchanged.
 
 Stop if the fixture changes.
 
-## Maintenance notes
+Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
 
-Keep the fixture small.
+Deferred work: Keep the fixture small.
 `);
 	return { root, repo, planDir };
 }

@@ -5,6 +5,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import test from "node:test"
 import {
   buildGraph,
@@ -14,6 +15,7 @@ import {
   projectStatuses,
   setTracking,
   snapshotPlan,
+  snapshotPlansFromGraph,
 } from "../../../src/core/plans.ts"
 import { getExecutionReport } from "../../../src/core/plan-report.ts"
 import {
@@ -45,67 +47,54 @@ function planBody(id: string, title: string, dependencies: string): string {
 - **Kind**: behavioral
 - **Parent objective**: Exercise the plan manager fixture
 
-## Why this matters
+## Outcome and acceptance
 
-Fixture intent.
+Fixture intent: preserve a syntactically valid independent fixture.
 
-## Current state
+| ID | Required behavior | Proof |
+| --- | --- | --- |
+| A1 | The scoped fixture is valid JavaScript | V1 |
 
-Fixture state.
+## Boundaries
 
-## Commands you will need
-
-| Purpose | Command | Expected on success |
-|---|---|---|
-| Test | \`true\` | exit 0 |
-
-## Scope
-
-**In scope** (declared write paths):
+**Write paths**:
 - \`src/${id}.mjs\`
 
 **Out of scope**:
-- Every other fixture file.
+- Every other fixture file. Preserve their callers and syntax.
 
-## Dependency contract
+## Starting conditions
 
-Consumes the declared predecessor state and provides one passing fixture.
+**Observed baseline**: The fixture manager currently reads a numbered plan.
 
-## Git workflow
+**Required starting state**: Declared predecessors have integrated their fixture.
 
-- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
-- Use one focused conventional commit.
-- Do not push or open a pull request.
+${dependencies === "none" ? "Dependencies: none." : `| Plan | Consumes |
+| --- | --- |
+${dependencies.split(",").map((dependency) => `| ${dependency.trim()} | The predecessor provides its independent syntactically valid fixture |`).join("\n")}`}
 
-## Steps
+**Expected dependency changes**: Predecessors may add their declared fixture, without changing this fixture's contract.
 
-### Step 1: Test
+## Implementation route
 
-Run the fixture.
+Suggested: implement A1 in the scoped fixture's module body, then use V1 to check its syntax.
 
-## Test plan
+## Verification
 
-Run the fixture test.
+| ID | Phase | Criteria | Toolchain | Command | Expected |
+| --- | --- | --- | --- | --- | --- |
+| V1 | acceptance | A1 | T1 | \`node --check src/${id}.mjs\` | exit 0; scoped fixture parses |
 
-## Review map
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| T1 | npm project scripts | . | Node >=22.19; locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\`; AGENTS.md |
 
-- Outcome: the fixture command passes.
-- Modified symbols: the scoped fixture file only.
-- Proof: \`true\`.
-- Expected unchanged behavior: every other fixture remains unchanged.
-- Expected diff: the scoped fixture path and its direct tests.
+## Escalation and handoff
 
-## Done criteria
+Stop if fixture ownership changed; report unavailable toolchain manager/command/cwd/error.
+Provide a valid module to downstream consumers and keep integration syntactically valid.
+Defer unrelated fixtures.
 
-- [ ] \`true\` exits 0.
-
-## STOP conditions
-
-Stop if the fixture changed.
-
-## Maintenance notes
-
-Keep the fixture small.
 `
 }
 
@@ -122,8 +111,8 @@ function writeFixture(root: string, { cycle = false, mismatch = false }: { cycle
 | [002](002-second.md) | Second | P1 | M | 001 | TODO |
 | 003 | Parallel | P2 | S | — | BLOCKED — previous attempt stopped |
 `)
-  fs.writeFileSync(path.join(planDir, "001-first.md"), planBody("001", "First", cycle ? "herder-plans/002-*.md" : "none"))
-  fs.writeFileSync(path.join(planDir, "002-second.md"), planBody("002", "Second", mismatch ? "none" : "herder-plans/001-*.md"))
+  fs.writeFileSync(path.join(planDir, "001-first.md"), planBody("001", "First", cycle ? "002" : "none"))
+  fs.writeFileSync(path.join(planDir, "002-second.md"), planBody("002", "Second", mismatch ? "none" : "001"))
   fs.writeFileSync(path.join(planDir, "003-parallel.md"), planBody("003", "Parallel", "none"))
   return planDir
 }
@@ -188,6 +177,8 @@ try {
   assert.equal(shapePlan.planWords < 1200, true)
   assert.equal(Number.isSafeInteger(shapePlan.planLines), true)
   assert.equal(Object.hasOwn(shapePlan, "reviewBudget"), false)
+  assert.deepEqual(shapePlan.contract.dependencies, [{ plan: "001", consumes: "The predecessor provides its independent syntactically valid fixture" }])
+  assert.deepEqual(shapePlan.contract, required(valid.plans.find((plan) => plan.id === "002")).contract)
 
   const readmeBeforeUsage = fs.readFileSync(valid.readme, "utf8")
   const runProfile = {
@@ -311,12 +302,22 @@ try {
   assert.match(snapshot.indexText, /Execution order/)
   assert.match(snapshot.snapshotSha256, /^[a-f0-9]{64}$/)
   assert.equal(snapshot.snapshotInputs.length, 1)
+  assert.equal(snapshot.planText, fs.readFileSync(snapshot.plan.file, "utf8"))
+  assert.equal(snapshot.sourcePlanText, snapshot.planText)
+  assert.equal(snapshot.contextText, "")
+  assert.equal(snapshot.snapshotSha256, createHash("sha256").update(snapshot.sourcePlanText).digest("hex"))
+  assert.deepEqual(snapshot.contract, snapshot.plan.contract)
+  assert.deepEqual(snapshot.contract, shapePlan.contract)
 
   fs.writeFileSync(path.join(valid.planDir, "CONTEXT.md"), `# Herder Plan-Set Context
 
 ## Objective
 
 Keep shared fixture facts in one compiled snapshot input.
+
+| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| T2 | npm workspace scripts | future/package | Dependency provides this package; locked install | \`node --version\` | Root package.json and AGENTS.md |
 `)
   const composedSnapshot = snapshotPlan(valid.planDir, "2")
   assert.match(composedSnapshot.planText, /herder-snapshot:shared-context/)
@@ -324,6 +325,10 @@ Keep shared fixture facts in one compiled snapshot input.
   assert.match(composedSnapshot.planText, /Plan 002/)
   assert.equal(composedSnapshot.snapshotInputs.length, 2)
   assert.equal(composedSnapshot.contextText.includes("Plan-Set Context"), true)
+  assert.equal(composedSnapshot.sourcePlanText, snapshot.sourcePlanText)
+  assert.notEqual(composedSnapshot.snapshotSha256, snapshot.snapshotSha256)
+  assert.deepEqual(composedSnapshot.contract.toolchains.map((row) => [row.id, row.source]), [["T2", "shared"], ["T1", "local"]])
+  assert.equal(composedSnapshot.snapshotSha256, createHash("sha256").update(composedSnapshot.planText).digest("hex"))
 
   projectStatuses(valid.planDir, [{ id: "002", status: "IN PROGRESS" }])
   assert.equal(required(buildGraph(valid.planDir).plans.find((plan) => plan.id === "002")).status, "IN PROGRESS")
@@ -361,8 +366,8 @@ Keep shared fixture facts in one compiled snapshot input.
 
   const malformed = writeFixture(path.join(root, "malformed"))
   const malformedPlan = path.join(malformed, "002-second.md")
-  fs.writeFileSync(malformedPlan, fs.readFileSync(malformedPlan, "utf8").replace("## Maintenance notes", "## Notes"))
-  expectFailure(() => buildGraph(malformed), /missing required heading "## Maintenance notes"/)
+  fs.writeFileSync(malformedPlan, fs.readFileSync(malformedPlan, "utf8").replace("## Escalation and handoff", "## Notes"))
+  expectFailure(() => buildGraph(malformed), /unexpected heading "## Notes"/)
 
   const legacyBudget = writeFixture(path.join(root, "legacy-budget"))
   const legacyBudgetPlan = path.join(legacyBudget, "002-second.md")
@@ -373,9 +378,7 @@ Keep shared fixture facts in one compiled snapshot input.
       "- **Parent objective**: Exercise the plan manager fixture\n- **Review budget**: arbitrary legacy value, changed_lines<=0\n",
     ),
   )
-  const ignoredLegacyBudget = required(buildGraph(legacyBudget).plans.find((plan) => plan.id === "002"))
-  assert.equal(Object.hasOwn(ignoredLegacyBudget, "reviewBudget"), false)
-  assert.equal(ignoredLegacyBudget.shapeReady, true)
+  expectFailure(() => buildGraph(legacyBudget), /unexpected metadata "Review budget"/)
 
   const legacyShape = writeFixture(path.join(root, "legacy-shape"))
   const legacyShapePlan = path.join(legacyShape, "002-second.md")
@@ -383,13 +386,9 @@ Keep shared fixture facts in one compiled snapshot input.
     legacyShapePlan,
     fs.readFileSync(legacyShapePlan, "utf8")
       .replace("- **Kind**: behavioral\n", "")
-      .replace("- **Parent objective**: Exercise the plan manager fixture\n", "")
-      .replace(/## Dependency contract[\s\S]*?(?=## Git workflow)/, "")
-      .replace(/## Review map[\s\S]*?(?=## Done criteria)/, ""),
+      .replace("- **Parent objective**: Exercise the plan manager fixture\n", ""),
   )
-  const legacyGraph = buildGraph(legacyShape)
-  assert.equal(legacyGraph.shapeReady, false)
-  assert.match(legacyGraph.warnings.join("\n"), /Plan 002 shape: missing metadata "Kind"/)
+  expectFailure(() => buildGraph(legacyShape), /missing required metadata "Kind"/)
 
   const overlap = writeFixture(path.join(root, "overlap"))
   const overlapPlan = path.join(overlap, "003-parallel.md")
@@ -404,6 +403,17 @@ Keep shared fixture facts in one compiled snapshot input.
     ordered: false,
   }])
   assert.match(overlapShape.warnings.join("\n"), /unordered overlapping in-scope paths/)
+  assert.equal(overlapShape.shapeReady, false)
+  assert.equal(required(overlapShape.plans.find((plan) => plan.id === "002")).shapeReady, false)
+  assert.equal(required(overlapShape.plans.find((plan) => plan.id === "003")).shapeReady, false)
+  assert.match(required(overlapShape.plans.find((plan) => plan.id === "003")).issues.join("\n"), /unordered overlapping/)
+
+  const ordered = writeFixture(path.join(root, "ordered-overlap"))
+  const orderedPlan = path.join(ordered, "002-second.md")
+  fs.writeFileSync(orderedPlan, fs.readFileSync(orderedPlan, "utf8").replace("src/002.mjs", "src/001.mjs"))
+  const orderedShape = getShapeReport(ordered)
+  assert.deepEqual(orderedShape.overlaps, [{ plans: ["001", "002"], paths: ["src/001.mjs"], ordered: true }])
+  assert.equal(orderedShape.shapeReady, true)
 
   const verbose = writeFixture(path.join(root, "verbose"))
   const verbosePlan = path.join(verbose, "002-second.md")
@@ -415,27 +425,31 @@ Keep shared fixture facts in one compiled snapshot input.
   assert.equal(verboseShape.shapeReady, false)
   assert.match(verboseShape.warnings.join("\n"), /compact subplans must stay at or below 1200/)
 
-  const legacyBranch = writeFixture(path.join(root, "legacy-branch"))
-  const legacyBranchPlan = path.join(legacyBranch, "002-second.md")
-  fs.writeFileSync(
-    legacyBranchPlan,
-    fs.readFileSync(legacyBranchPlan, "utf8").replace(
-      "use the exact branch/worktree assigned by Herder Fire; never create or switch branches.",
-      "use `herder/002-second`",
-    ),
-  )
-  expectFailure(() => buildGraph(legacyBranch), /must delegate branch ownership to Herder Fire/)
+  const legacyFormat = writeFixture(path.join(root, "legacy-format"))
+  const legacyFormatPlan = path.join(legacyFormat, "002-second.md")
+  fs.writeFileSync(legacyFormatPlan, `# Plan 002: Legacy
 
-  const misplacedBranch = writeFixture(path.join(root, "misplaced-branch"))
-  const misplacedBranchPlan = path.join(misplacedBranch, "002-second.md")
-  const canonicalBranch = "- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches."
-  fs.writeFileSync(
-    misplacedBranchPlan,
-    fs.readFileSync(misplacedBranchPlan, "utf8")
-      .replace(`${canonicalBranch}\n`, "")
-      .replace("## Status", `${canonicalBranch}\n\n## Status`),
-  )
-  expectFailure(() => buildGraph(misplacedBranch), /exactly one "- Branch:" instruction in "## Git workflow"/)
+## Status
+- **Priority**: P1
+- **Effort**: S
+- **Risk**: LOW
+- **Depends on**: 001
+- **Category**: tests
+- **Planned at**: commit \`abc1234\`, 2026-07-15
+
+${["Why this matters", "Current state", "Commands you will need", "Scope", "Git workflow", "Steps", "Test plan", "Done criteria", "STOP conditions", "Maintenance notes"].map((heading) => `## ${heading}\n\nLegacy content.\n`).join("\n")}
+- Branch: use the exact branch/worktree assigned by Herder Fire; never create or switch branches.
+`)
+  expectFailure(() => buildGraph(legacyFormat), /unexpected heading "## Why this matters"/)
+
+  const sharedConflict = writeFixture(path.join(root, "shared-conflict"))
+  fs.writeFileSync(path.join(sharedConflict, "CONTEXT.md"), composedSnapshot.contextText.replace("T2", "T1"))
+  expectFailure(() => buildGraph(sharedConflict), /duplicate ID T1/)
+
+  const badConsumes = writeFixture(path.join(root, "bad-consumes"))
+  const badConsumesPlan = path.join(badConsumes, "002-second.md")
+  fs.writeFileSync(badConsumesPlan, fs.readFileSync(badConsumesPlan, "utf8").replace("| 001 | The predecessor", "| 003 | The predecessor"))
+  expectFailure(() => buildGraph(badConsumes), /Consumes rows must agree exactly/)
 
   const unindexed = writeFixture(path.join(root, "unindexed"))
   fs.writeFileSync(path.join(unindexed, "004-forgotten.md"), "# Plan 004\n\n- **Depends on**: none\n")
@@ -447,6 +461,82 @@ Keep shared fixture facts in one compiled snapshot input.
 }
 })
 
+
+test("graph snapshots bind contracts and hashes to the same unchanged source inputs", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-snapshot-inputs-"))
+  try {
+    const planDir = writeFixture(temporary)
+    const contextFile = path.join(planDir, "CONTEXT.md")
+    const local = planBody("002", "Second", "001")
+    const toolchain = required(local.match(/\| ID \| Owner \|[\s\S]*?(?=\n\n)/))[0]
+    const contextText = `# Shared context\n\n${toolchain}\n`
+    fs.writeFileSync(contextFile, contextText)
+    for (const name of ["001-first.md", "002-second.md", "003-parallel.md"]) {
+      const file = path.join(planDir, name)
+      fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(toolchain, "Use shared T1."))
+    }
+    const graph = buildGraph(planDir)
+    const snapshots = snapshotPlansFromGraph(graph)
+    assert.equal(graph.indexSha256, createHash("sha256").update(fs.readFileSync(graph.readme)).digest("hex"))
+    assert.equal(graph.contextSha256, createHash("sha256").update(contextText).digest("hex"))
+    for (const snapshot of snapshots) {
+      assert.deepEqual(snapshot.contract, snapshot.plan.contract)
+      assert.notEqual(snapshot.contract, snapshot.plan.contract, "compile the captured inputs, not the cached object")
+      assert.equal(snapshot.plan.sourcePlanSha256, createHash("sha256").update(snapshot.sourcePlanText).digest("hex"))
+      assert.equal(snapshot.contract.toolchains[0].source, "shared")
+      assert.equal(snapshot.contextText, contextText)
+      assert.equal(snapshot.sourcePlanText, fs.readFileSync(snapshot.plan.file, "utf8"))
+      assert.equal(snapshot.indexText, fs.readFileSync(graph.readme, "utf8"))
+      assert.equal(snapshot.planText, `<!-- herder-snapshot:shared-context -->\n${contextText.trim()}\n\n<!-- herder-snapshot:local-plan -->\n${snapshot.sourcePlanText.trim()}\n`)
+      assert.equal(snapshot.snapshotSha256, createHash("sha256").update(snapshot.planText).digest("hex"))
+      assert.deepEqual(snapshot.snapshotInputs, [
+        { kind: "shared-context", file: contextFile, sha256: createHash("sha256").update(contextText).digest("hex") },
+        { kind: "plan", file: snapshot.plan.file, sha256: createHash("sha256").update(snapshot.sourcePlanText).digest("hex") },
+      ])
+    }
+    const target = required(snapshots.find((snapshot) => snapshot.plan.id === "002"))
+    const changes = [
+      [target.plan.file, target.sourcePlanText.replace("The scoped fixture is valid JavaScript", "The scoped fixture exports a function")],
+      [target.plan.file, target.sourcePlanText.replace("node --check src/002.mjs", "node src/002.mjs")],
+      [target.plan.file, target.sourcePlanText + "\n"],
+      [contextFile, contextText.replace("node --version", "npm --version")],
+      [contextFile, contextText + "\n"],
+      [graph.readme, target.indexText.replace("| TODO |", "| DONE |")],
+      [graph.readme, target.indexText + "\n"],
+    ]
+    for (const [file, changed] of changes) {
+      const original = fs.readFileSync(file, "utf8")
+      fs.writeFileSync(file, changed)
+      assert.throws(() => snapshotPlansFromGraph(graph), /changed since graph validation/, file)
+      assert.equal(fs.readFileSync(file, "utf8"), changed, "drift rejection must not rewrite source")
+      fs.writeFileSync(file, original)
+      assert.deepEqual(snapshotPlansFromGraph(graph), snapshots)
+    }
+    const command = target.plan.contract.verification[0].command
+    target.plan.contract.verification[0].command = "`unvalidated command`"
+    assert.throws(() => snapshotPlansFromGraph(graph), /contract disagrees with the validated graph/)
+    assert.equal(target.contract.verification[0].command, command)
+    target.plan.contract.verification[0].command = command
+    fs.unlinkSync(contextFile)
+    assert.throws(() => snapshotPlansFromGraph(graph), /changed since graph validation/)
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true })
+  }
+})
+
+test("graph snapshots reject a newly added context, even when it is empty", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-snapshot-context-"))
+  try {
+    const graph = buildGraph(writeFixture(temporary))
+    const contextFile = path.join(graph.planDir, "CONTEXT.md")
+    for (const text of ["", "# New shared context\n"]) {
+      fs.writeFileSync(contextFile, text)
+      assert.throws(() => snapshotPlansFromGraph(graph), /changed since graph validation/)
+    }
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true })
+  }
+})
 
 test("optional run bindings round-trip immutably through roles_json", () => {
   const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "herder-optional-bindings-"))

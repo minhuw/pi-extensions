@@ -25,6 +25,18 @@ Focused runs execute only the named test files and skip typecheck.
 
 Integration tests are strict TypeScript files discovered in sorted path order. The smoke runner fails closed and prints any legacy integration `.mjs` paths, then runs the discovered files with Node's `--test-concurrency=2`; each file keeps its scenarios sequential. Unit tests run in a separate phase. To exercise dashboard server mode directly, run `node --experimental-strip-types extensions/herder/tests/integration/dashboard/dashboard.test.ts --serve`; the URL is printed as `HERDER_DASHBOARD_URL`, and SIGINT/SIGTERM shuts the server and fixture down.
 
+## Plan V2 and verification ownership
+
+Plan fixtures use the breaking seven-section [canonical format](skills/plans/references/plan-format.md), not old headings or a legacy fallback. A/V references are reciprocal and every criterion needs acceptance-phase proof; development diagnostics and final-only checks cannot replace prerequisite acceptance. T definitions are unique across local/shared context and identify canonical owner/cwd/prerequisites/probe/evidence. Baseline observations must not fabricate expected dependency code; suggested routes are not extra binding acceptance requirements. Equal unordered write paths prevent shape readiness. Parser coverage establishes structure, not semantic executability.
+
+Discover actual commands through repository scripts, pyproject/uv or Nix declarations where applicable, lockfiles, CI, and instructions—not `which`. In this checkout `package.json`, `package-lock.json`, and `AGENTS.md` declare Node >=22.19.0 and npm scripts; `npm ci` is setup, not a passed test. Focused Herder runs skip typecheck; the full Herder suite already includes it, so avoid redundant final gates without distinct coverage.
+
+Phase owners are explicit: producers/Validate inspect sources and cold-read compiled snapshots without implementation/setup writes; Implementers run non-mutating canonical availability/version probes and baseline checks before editing, then development/acceptance checks; independent Reviewers rerun appropriate source-preserving checks; the main session selects final direct-argv gates and the manager executes them on the frozen integrated tree. No automatic manager per-plan gate/preflight phase or new preflight role is added. Agent CHECKS is self-report, never manager-executed proof; unrun/blocked checks stay unrun/blocked.
+
+Existing final GitDriver preparation is npm-only and locked: a direct npm/npx gate with declared dependencies, no node_modules, and an npm lockfile temporarily receives `npm ci --ignore-scripts --no-audit --no-fund`; created modules are removed afterward or on preparation failure. This is not a universal preparer or agent permission for ad hoc/unpinned installs. Gate subprocesses still use the isolated minimal environment; preparation failures may precede any check evidence. See [Final verification environment](adapters/README.md#final-verification-environment).
+
+Gate outcomes `passed`, `command_failed`, `unavailable`, `timed_out`, and `runner_error`, plus error/timedOut/signal metadata, are process evidence only. A launched uv/Nix wrapper missing a nested tool may be `command_failed`; exit 127 or log text alone is not a source-defect diagnosis. Inspect the declared invocation and prerequisites, report exact manager/command/cwd/error, and never rewrite missing setup as a passed check.
+
 ## Local live Pi/Poorman setup
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.
