@@ -54,7 +54,7 @@ function roleLabel(role: PiWorkerSnapshot["role"]): string {
 }
 
 /**
- * Compact model/thinking/tier identity shown next to agent names everywhere.
+ * Model/thinking/tier identity for full-detail role and direct-child rows.
  * Order is always: model · thinking · service tier (omit missing fields).
  * Kept local to Herder so the two tree implementations stay independent while
  * showing the same identity information shape as subagents.
@@ -120,7 +120,7 @@ function workerIcon(worker: PiWorkerSnapshot, frame: number, theme: Theme): stri
 
 function nestedIcon(agent: PiNestedAgentSnapshot, frame: number, theme: Theme): string {
 	if (agent.status === "completed") return theme.fg("success", "✓");
-	if (["error", "aborted"].includes(agent.status)) return theme.fg("error", "✗");
+	if (["error", "aborted", "timed_out"].includes(agent.status)) return theme.fg("error", "✗");
 	if (agent.status === "stopped") return theme.fg("warning", "■");
 	return theme.fg("accent", SPINNER[frame % SPINNER.length]!);
 }
@@ -144,7 +144,7 @@ function workerActivity(worker: PiWorkerSnapshot): string {
 
 function nestedActivity(agent: PiNestedAgentSnapshot): string {
 	if (agent.status === "completed") return "done";
-	if (["error", "aborted", "stopped"].includes(agent.status)) return agent.status;
+	if (["error", "aborted", "stopped", "timed_out"].includes(agent.status)) return agent.status;
 	const active = activityLabel(agent.activeTools[0]);
 	const live = active ?? activityLabel(agent.activity) ?? responseActivity(agent.responseText);
 	if (live) return live.endsWith("…") ? live : `${live}…`;
@@ -173,9 +173,9 @@ function topStats(worker: PiWorkerSnapshot, now: number): string {
 
 function nestedStats(agent: PiNestedAgentSnapshot, now: number): string {
 	return [
-		`↻${agent.turns}`,
+		...(agent.parentAgentId ? [] : [`↻${agent.turns}`]),
 		`${agent.toolUses} tool${agent.toolUses === 1 ? "" : "s"}`,
-		tokenStats(agent.lifetimeTokens, agent.contextPercent, agent.compactionCount),
+		agent.parentAgentId ? formatTokens(agent.lifetimeTokens) : tokenStats(agent.lifetimeTokens, agent.contextPercent, agent.compactionCount),
 		formatWorkerElapsed(agent.startedAt, agent.completedAt ?? now),
 	].join(" · ");
 }
@@ -197,14 +197,21 @@ function completedSummaryLabel(agents: readonly PiNestedAgentSnapshot[]): string
 	return `${[...counts.entries()].map(([name, count]) => `${count} ${name}`).join(" · ")} done`;
 }
 
-function appendNestedRows(rows: RenderRow[], children: readonly PiNestedAgentSnapshot[], prefix: string): void {
-	const live = children.filter((agent) => agent.status !== "completed");
-	const completed = children.filter((agent) => agent.status === "completed");
+function appendNestedRows(rows: RenderRow[], descendants: readonly PiNestedAgentSnapshot[], prefix: string, parentAgentId?: string): void {
+	// ponytail: at most 24 descendants per action; index by parent if the launch cap grows.
+	const children = descendants.filter((agent) => agent.parentAgentId === parentAgentId);
+	const collapsible = (agent: PiNestedAgentSnapshot) => agent.status === "completed"
+		&& !descendants.some((child) => child.parentAgentId === agent.agentId && child.status !== "completed");
+	const live = children.filter((agent) => !collapsible(agent));
+	const completed = children.filter(collapsible);
 	const items: RenderRow[] = live.map((agent) => ({ kind: "nested", agent, prefix, connector: "├─" as const }));
 	if (completed.length > 0) items.push({ kind: "summary", completed, prefix, connector: "├─" });
 	items.forEach((item, index) => {
 		item.connector = index === items.length - 1 ? "└─" : "├─";
 		rows.push(item);
+		if (item.agent) {
+			appendNestedRows(rows, descendants, `${prefix}${item.connector === "├─" ? "│  " : "   "}`, item.agent.agentId);
+		}
 	});
 }
 
@@ -234,9 +241,10 @@ function renderRow(row: RenderRow, width: number, theme: Theme, now: number, fra
 		return truncateToWidth(left, width);
 	}
 	const agent = row.agent!;
-	const identityTag = formatAgentNameIdentity(theme, agent);
+	const identityTag = agent.parentAgentId ? "" : formatAgentNameIdentity(theme, agent);
 	const left = `${row.prefix}${theme.fg("dim", row.connector)} ${nestedIcon(agent, frame, theme)} ${theme.bold(agent.displayName)}${identityTag}  ${theme.fg("dim", nestedActivity(agent))}`;
-	return rightAlign(left, theme.fg("dim", nestedStats(agent, now)), width);
+	const stats = theme.fg("dim", nestedStats(agent, now));
+	return agent.parentAgentId ? truncateToWidth(`${left}  ${stats}`, width) : rightAlign(left, stats, width);
 }
 
 export function workerFleetTreeLines(

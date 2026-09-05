@@ -112,6 +112,65 @@ test("aborted nested agents render as failures", () => {
 	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  aborted\s+↻1/);
 });
 
+test("reviewer scouts render beneath their owner and retain timeout evidence", () => {
+	const children = [
+		nested({ agentId: "review-1", type: "reviewer", displayName: "Reviewer" }),
+		nested({ agentId: "scout-1", parentAgentId: "review-1", status: "timed_out", activeTools: [], completedAt: 3_606_000 }),
+		nested({ agentId: "review-2", type: "reviewer", displayName: "Reviewer" }),
+		nested({ agentId: "scout-2", parentAgentId: "review-2" }),
+	];
+	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 3_606_000, 0);
+	assert.equal(lines.length, 6);
+	assert.match(lines[2]!, /├─ ⠋ Reviewer/);
+	assert.match(lines[3]!, /│  └─ ✗ Recon.*timed_out.*1h 00m 00s$/);
+	assert.match(lines[4]!, /└─ ⠋ Reviewer/);
+	assert.match(lines[5]!, /   └─ ⠋ Recon/);
+	assert.equal(lines[3]!.indexOf("└─"), lines[2]!.indexOf("├─") + 3);
+	assert.equal(lines[5]!.indexOf("└─"), lines[4]!.indexOf("└─") + 3);
+	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
+});
+
+test("second-level scouts use compact inline stats without repeated identity or context details", () => {
+	const children = [
+		nested({ agentId: "review", type: "reviewer", displayName: "Reviewer" }),
+		nested({ agentId: "scout", parentAgentId: "review" }),
+	];
+	const current = model([worker({ children })]);
+	const lines = workerFleetTreeLines(current, theme, 160, 66_000);
+	assert.match(lines[2]!, /Reviewer · gpt-5\.6-sol · xhigh · fast.*↻1 · 2 tools · 2\.5k \(34% · ⇊1\)/);
+	assert.match(lines[3]!, /└─ ⠋ Recon  reading…  2 tools · 2\.5k · 1m 00s$/);
+	assert.doesNotMatch(lines[3]!, /gpt-|xhigh|fast|↻|%|⇊/);
+	assert.ok(visibleWidth(lines[3]!) < 85, "grandchildren avoid padding across the full terminal width");
+	for (const width of [1, 4, 12, 24, 80]) {
+		const narrow = workerFleetTreeLines(current, theme, width, 66_000);
+		assert.ok(narrow.every((line) => visibleWidth(line) <= width));
+	}
+});
+
+test("completed reviewers retain failed scout evidence", () => {
+	for (const status of ["timed_out", "error", "aborted", "stopped"] as const) {
+		const children = [
+			nested({ agentId: "review", type: "reviewer", displayName: "Reviewer", status: "completed" }),
+			nested({ agentId: "scout", parentAgentId: "review", status, activeTools: [], completedAt: 3_606_000 }),
+		];
+		const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 3_606_000);
+		assert.equal(lines.length, 4);
+		assert.match(lines[2]!, /✓ Reviewer.*done/);
+		assert.match(lines[3]!, new RegExp(`Recon.*${status}.*1h 00m 00s$`));
+		assert.equal(lines[3]!.indexOf("└─"), lines[2]!.indexOf("└─") + 3);
+	}
+});
+
+test("completed reviewer summaries include only direct siblings", () => {
+	const children = [
+		nested({ agentId: "review", type: "reviewer", displayName: "Reviewer", status: "completed" }),
+		nested({ agentId: "scout", parentAgentId: "review", status: "completed" }),
+	];
+	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160);
+	assert.equal(lines.length, 3);
+	assert.match(lines[2]!, /✓ 1 Reviewer done$/);
+});
+
 test("completed nested agents collapse into one summary under the live children", () => {
 	const children = [
 		...Array.from({ length: 6 }, (_, index) => nested({
