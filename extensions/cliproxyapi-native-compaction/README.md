@@ -36,7 +36,7 @@ OpenAI-compatible syntax alone does not enable native compaction. All of these m
 - API: `cliproxyapi-codex-responses`
 - Model: explicitly allowlisted by exact ID
 
-The default allowlist contains `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Kimi, Claude, Gemini, and other OpenAI-compatible models continue using Pi's built-in text-summary compaction.
+The default allowlist contains `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-6-astra`. Kimi, Claude, Gemini, and other OpenAI-compatible models continue using Pi's built-in text-summary compaction.
 
 ## Configuration
 
@@ -53,7 +53,7 @@ A trusted project may override it at `.pi/cliproxyapi-native-compaction.json`:
   "enabled": true,
   "providerId": "cliproxyapi",
   "apiId": "cliproxyapi-codex-responses",
-  "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"],
   "fallbackToBuiltin": true
 }
 ```

@@ -39,7 +39,12 @@ const config: NativeCompactionConfig = {
 
 describe("model capability gate", () => {
 	it("defaults to the supported OpenAI aliases", () => {
-		expect(DEFAULT_NATIVE_MODELS).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+		expect(DEFAULT_NATIVE_MODELS).toEqual([
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+			"gpt-5.6-luna",
+			"gpt-6-astra",
+		]);
 	});
 
 	it.each(DEFAULT_NATIVE_MODELS)("accepts default OpenAI model %s", (id) => {
