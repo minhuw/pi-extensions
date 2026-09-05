@@ -244,7 +244,10 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 			{ message: "No deterministic Herder run exists" },
 		);
 		assert.equal(operationPosts, 1, "terminal failure must not trigger a replay submission");
-		assert.equal(operationGets, 2, "execute should poll until the durable operation reaches terminal failure");
+		// The daemon may reach terminal failure before the first poll; scheduling
+		// must not determine how many nonterminal receipts this test observes.
+		const executePolls = operationGets;
+		assert.ok(executePolls >= 1, "execute should poll the durable operation until terminal failure");
 		assert.equal(healthRequests, 1, "terminal failure must not trigger service reacquisition");
 
 		await assert.rejects(
@@ -252,7 +255,7 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 			{ message: "No deterministic Herder run exists" },
 		);
 		assert.equal(operationPosts, 1, "wait-only terminal failure must not resubmit");
-		assert.equal(operationGets, 3, "wait-only terminal failure should poll once");
+		assert.equal(operationGets, executePolls + 1, "wait-only terminal failure should poll once");
 		assert.equal(healthRequests, 2, "wait-only terminal failure must not retry service reacquisition");
 	} finally {
 		globalThis.fetch = originalFetch;
