@@ -67,6 +67,18 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	}
 });
 
+test("roles encourage bounded Recon exploration without delegating judgment", async () => {
+	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
+		const { systemPrompt } = await loadHerderPiRole(agentRoot, role);
+		assert.match(systemPrompt, /Prefer (?:bounded )?Recon/);
+		assert.match(systemPrompt, /concrete question, starting paths, stopping boundary, and compact evidence request/);
+		assert.match(systemPrompt, /direct known-path reads need no scout/i);
+	}
+	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
+	assert.match(systemPrompt, /Prefer `recon` for a bounded unfamiliar-code/);
+	assert.match(systemPrompt, /not a runtime tester or general reviewer/);
+});
+
 test("recon positively defines bounded static work and early caller-owned handoff", async () => {
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "recon");
 	assert.match(systemPrompt, /source-navigation child in the supplied current worktree/);

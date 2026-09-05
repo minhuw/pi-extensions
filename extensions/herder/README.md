@@ -90,6 +90,8 @@ Exact model, effort, and service-tier bindings live in `assets/profiles/profiles
 
 Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`.
 
+Roles prefer bounded Recon lookups for unfamiliar code, not for runtime proof or review judgment; known-path reads stay direct. Delegation may reduce expensive repeated exploration but adds scout latency, so any speed/quality gain needs measurement.
+
 ## Runtime model
 
 Fire and resume start or reuse Herder's persistent local Run Manager, launch the read-only dashboard, dispatch the first eligible worker batch, and return control to the root session. Attach claims an unowned or stale-owned active run, preserves `running`, `paused`, or `needs_input`, and deterministically replaces vanished built-in Pi workers. Revise adopts a validated immutable graph generation after active workers settle. In an Orca-managed terminal, Herder automatically opens the loopback dashboard through Orca's workspace browser; other terminals receive the local URL without host-specific forwarding. As workers finish, the manager backfills the global pool, advances review rounds, and integrates approved plans in dependency order. Pi journals each admitted worker prompt in a blue expandable card and each returned response in a green card (red on interruption); cards identify the plan, exact model, thinking level, and service tier, and do not enlarge the root model context. See [Orchestration workflow](adapters/README.md#orchestration-workflow) for service, dashboard, and transport mechanics.

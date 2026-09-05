@@ -98,6 +98,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			`You may launch up to ${scope.maxConcurrency} independent children concurrently. Multiple Agent calls in one response execute in parallel.`,
 			"Collect every background child before your final response. For parallel reviews use get_subagent_result with wait_any: true repeatedly, rather than batch waits for specific IDs.",
 			"Only nested reviewers may delegate again, to recon leaves only. recon/searcher use the package scout model; worker/reviewer inherit this role's binding and share the stable worktree.",
+			"Prefer recon for bounded unfamiliar-code navigation and static caller/data-flow traces. Supply a concrete question, starting paths, a stopping boundary, and a compact evidence request; consume its handoff instead of repeating the whole exploration. Keep implementation, runtime proof, and review judgment with the capable role. Direct known-path reads need no scout.",
 			"The parent role remains accountable for verifying child claims and repository effects, including concurrent edits in the shared worktree.",
 		],
 		parameters: Type.Object({
