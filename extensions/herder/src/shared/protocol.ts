@@ -131,6 +131,7 @@ export const ATTENTION_CAUSES = [
 	"judge_needs_input",
 	"final_reviewer_needs_input",
 	"transport_exhausted",
+	"verification_environment",
 ] as const;
 
 export type AttentionKind = typeof ATTENTION_KINDS[number];
@@ -587,6 +588,7 @@ export const INTEGRATION_REPAIR_CLASSIFICATIONS = [
 	"design_ambiguity",
 	"scope_ambiguity",
 	"credential",
+	"environment",
 	"product_ambiguity",
 ] as const;
 export type IntegrationRepairClassification = typeof INTEGRATION_REPAIR_CLASSIFICATIONS[number];
@@ -751,6 +753,8 @@ export interface IntegrationRepairRequest {
 	currentCommit?: string;
 	currentTree?: string;
 	failedGates: VerificationGate[];
+	/** Recorded runner evidence only; exit outcomes are not source-defect classifications. */
+	verificationResult?: unknown;
 	canonicalGates: VerificationGate[];
 	/** Canonical Herder-owned refs captured when the repair began. */
 	beginRefSnapshot?: IntegrationRepairRef[];
@@ -921,6 +925,9 @@ function parseFields(text: string): Map<string, string> {
 		const match = line.match(/^([A-Z][A-Z _-]*):\s*(.*)$/);
 		if (match) {
 			current = match[1]!.trim();
+			if (fields.has(current) && ["BLOCKER_KIND", "STATUS", "VERDICT", "DECISION", "SCOPE", "FINDINGS", "AUTHORIZED_BLOCKERS", "REPAIR_CONTRACTS", "FIX_GUIDANCE"].includes(current)) {
+				throw new Error(`Worker result repeats ${current}`);
+			}
 			fields.set(current, match[2]!.trim());
 		} else if (current && line.trim()) {
 			fields.set(current, `${fields.get(current)}\n${line.trim()}`);
@@ -940,8 +947,13 @@ function lines(value: string | undefined): string[] {
 	return value.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
+export const WORKER_BLOCKER_KINDS = ["ENVIRONMENT", "INVOCATION", "REQUIREMENT"] as const;
+export type WorkerBlockerKind = typeof WORKER_BLOCKER_KINDS[number];
+
 export interface ImplementerResult {
 	kind: "implementer";
+	/** Worker-reported evidence only; never approval or mutation authority. */
+	blockerKind?: WorkerBlockerKind;
 	status: "COMPLETE" | "STOPPED" | "FAILED";
 	commits: string[];
 	checks: string[];
@@ -954,6 +966,8 @@ export interface ImplementerResult {
 
 export interface ReviewerResult {
 	kind: "reviewer";
+	/** Worker-reported evidence only; never approval or mutation authority. */
+	blockerKind?: WorkerBlockerKind;
 	verdict: "APPROVE" | "REVISE" | "BLOCK";
 	findings: string[];
 	fixGuidance: string[];
@@ -966,6 +980,8 @@ export interface ReviewerResult {
 
 export interface JudgeResult {
 	kind: "judge";
+	/** Worker-reported evidence only; never approval or mutation authority. */
+	blockerKind?: WorkerBlockerKind;
 	decision: "DONE" | "REPAIR" | "NEEDS_INPUT" | "BLOCKED";
 	findings: string[];
 	authorizedBlockers: string[];
@@ -981,13 +997,35 @@ export interface JudgeResult {
 
 export type WorkerResult = ImplementerResult | ReviewerResult | JudgeResult;
 
+function parseBlockerKind(role: WorkerRole, fields: Map<string, string>): WorkerBlockerKind | undefined {
+	if (!fields.has("BLOCKER_KIND")) return undefined;
+	const kind = requiredField(fields, "BLOCKER_KIND");
+	if (!WORKER_BLOCKER_KINDS.includes(kind as WorkerBlockerKind)) throw new Error(`Invalid BLOCKER_KIND: ${kind}`);
+	const blocked = role === "plan-implementer" ? ["STOPPED", "FAILED"].includes(fields.get("STATUS") || "")
+		: role === "plan-reviewer" ? fields.get("VERDICT") === "BLOCK"
+			: ["NEEDS_INPUT", "BLOCKED"].includes(fields.get("DECISION") || "");
+	if (!blocked) throw new Error("BLOCKER_KIND requires a blocked worker outcome, not success or code repair");
+	const concrete = (value: string | undefined): boolean => Boolean(value?.trim() && !/^(?:none|unknown|n\/a|pending|not run)$/i.test(value.trim()));
+	const detail = role === "plan-implementer" ? fields.get("STOPPED BECAUSE") || fields.get("NOTES") : fields.get("RATIONALE");
+	if (!concrete(detail) || !lines(fields.get("CHECKS")).some(concrete)) {
+		throw new Error("BLOCKER_KIND requires concrete detail and CHECKS evidence (manager, command, cwd, error, and prerequisite or decision)");
+	}
+	if (kind !== "REQUIREMENT" && (fields.get("SCOPE") === "FAIL"
+		|| ["FINDINGS", "FIX_GUIDANCE", "AUTHORIZED_BLOCKERS", "REPAIR_CONTRACTS", "PASS_DOCUMENT"].some((name) => lines(fields.get(name)).length > 0))) {
+		throw new Error("ENVIRONMENT/INVOCATION cannot report defect findings, repair authority, or failed scope");
+	}
+	return kind as WorkerBlockerKind;
+}
+
 export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult {
 	const fields = parseFields(text);
+	const blockerKind = parseBlockerKind(role, fields);
 	if (role === "plan-implementer") {
 		const status = requiredField(fields, "STATUS");
 		if (!["COMPLETE", "STOPPED", "FAILED"].includes(status)) throw new Error(`Invalid Implementer STATUS: ${status}`);
 		return {
 			kind: "implementer",
+			...(blockerKind ? { blockerKind } : {}),
 			status: status as ImplementerResult["status"],
 			commits: lines(fields.get("COMMITS")).flatMap((line) => line.split(/[\s,]+/)).filter((item) => /^[0-9a-f]{7,64}$/i.test(item)),
 			checks: lines(fields.get("CHECKS")),
@@ -1005,6 +1043,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 		if (!["PASS", "FAIL"].includes(scope)) throw new Error(`Invalid Reviewer SCOPE: ${scope}`);
 		return {
 			kind: "reviewer",
+			...(blockerKind ? { blockerKind } : {}),
 			verdict: verdict as ReviewerResult["verdict"],
 			findings: lines(fields.get("FINDINGS")),
 			fixGuidance: lines(fields.get("FIX_GUIDANCE")),
@@ -1024,6 +1063,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 	}
 	const result: JudgeResult = {
 		kind: "judge",
+		...(blockerKind ? { blockerKind } : {}),
 		decision: decision as JudgeResult["decision"],
 		findings: lines(fields.get("FINDINGS")),
 		authorizedBlockers: lines(fields.get("AUTHORIZED_BLOCKERS")).flatMap((line) => line.split(/[\s,]+/)).filter(Boolean),

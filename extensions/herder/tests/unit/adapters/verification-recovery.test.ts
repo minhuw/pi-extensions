@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { IntegrationRepairRequest } from "../../../src/shared/protocol.ts";
-import { classifyVerificationRecovery, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "../../../adapters/verification-recovery.ts";
+import { classifyVerificationRecovery, verificationRunnerEvidence, FINAL_VERIFICATION_SELECTION_GUIDANCE, ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE } from "../../../adapters/verification-recovery.ts";
 
 const currentSessionId = "main-session";
 
@@ -95,7 +95,7 @@ test("classification matrix preserves recovery boundaries and precedence", () =>
 		);
 	}
 
-	for (const classification of ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"] as const) {
+	for (const classification of ["design_ambiguity", "scope_ambiguity", "credential", "environment", "product_ambiguity"] as const) {
 		assert.deepEqual(
 			classifyVerificationRecovery(repair({ classification }), currentSessionId),
 			expected({ actionable: true, ambiguity: true, kind: "decision_required" }),
@@ -156,10 +156,33 @@ test("classification matrix preserves recovery boundaries and precedence", () =>
 });
 
 
+test("runner prompt evidence preserves outcomes/errors without guessing source defects", () => {
+	const gates = [
+		{ gateId: "uv", argv: ["uv", "run", "pytest"], cwd: ".", outcome: "command_failed", exitCode: 127, error: "dependency missing", logPath: "/tmp/check.log" },
+		{ gateId: "nix", outcome: "unavailable", error: "spawn nix ENOENT", signal: null, timedOut: false },
+		{ gateId: "timeout", outcome: "timed_out", signal: "SIGTERM", timedOut: true },
+	];
+	assert.deepEqual(JSON.parse(verificationRunnerEvidence({ gates, error: "setup failed", unrelated: "not evidence" })), { gates, error: "setup failed" });
+	assert.equal(verificationRunnerEvidence(undefined), "unavailable");
+	assert.equal(verificationRunnerEvidence({ gates }).includes("code_defect"), false);
+	assert.ok(verificationRunnerEvidence({ error: "x".repeat(20_000) }).length <= 16_384);
+});
+
+
 test("initial selection guidance binds V phases and T evidence without turning probes/setup into gates", () => {
 	const prompt = FINAL_VERIFICATION_SELECTION_GUIDANCE.join("\n");
 	for (const term of ["compiled assignment", "Phase/Criteria/Toolchain/Command/Expected", "Owner/Cwd/Prerequisites/Probe/Evidence", "final-phase coverage", "integration-risk", "development diagnostics", "uv run --no-sync", "nix develop --command", "canonical package script", "minimal environment", "interactive HOME", "npm-only locked auto-preparation"]) assert.ok(prompt.includes(term), term);
 	assert.match(prompt, /probes.*only as selection diagnostics/);
 	assert.match(prompt, /Only the manager executes.*authoritative verification gates/);
 	assert.match(prompt, /do not fabricate passed checks or submit a known-invalid tool choice/);
+});
+
+
+test("environment decision guidance offers external preparation and explicit unchanged resume", () => {
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /prepare.*externally/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /explicitly invoke \/herder-resume/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /SAME ordered canonical gates/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /without a code-round or transient-budget charge/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /Do not call begin\/finish again/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /never automatically retries/);
 });

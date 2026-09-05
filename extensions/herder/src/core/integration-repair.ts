@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { gitValue, type GitDriver } from "../daemon/git-driver.ts";
 import {
 	integrationRepairCapabilityDigest,
@@ -57,6 +58,7 @@ const REPAIR_CLASSIFICATION_ALIASES: Record<string, IntegrationRepairClassificat
 	scope: "scope_ambiguity",
 	scope_ambiguity: "scope_ambiguity",
 	credential: "credential",
+	environment: "environment",
 	product: "product_ambiguity",
 	product_ambiguity: "product_ambiguity",
 };
@@ -185,6 +187,7 @@ export function integrationRepairRequest(verification: StoredVerification, repai
 			...(repair?.currentCommit ? { currentCommit: repair.currentCommit } : {}),
 			...(repair?.currentTree ? { currentTree: repair.currentTree } : {}),
 			failedGates: verification.manifest?.gates ?? [],
+			...(verification.result ? { verificationResult: verification.result } : {}),
 			canonicalGates,
 			...(repair?.beginRefSnapshot && repair.beginRefSnapshotSha256 ? {
 				beginRefSnapshot: repairBeginRefSnapshot(repair),
@@ -440,6 +443,98 @@ function repairGateManifest(
 		return { request, manifest, gates: prepared.gates, manifestSha256 };
 	}
 
+/** Explicit operator resume only. No edit capability, new classification, or budget is granted.
+ * The caller validates the live graph/profile/namespace before entering this transition.
+ */
+export async function resumeEnvironmentVerification(
+	deps: IntegrationRepairDependencies,
+	failedRequestId: string,
+): Promise<ManagerReply> {
+	const run = deps.store.getRun();
+	const verification = deps.store.getVerificationByRequestId(failedRequestId);
+	const repair = deps.store.getIntegrationRepairForRequest(failedRequestId);
+	if (!run || !verification || !repair || verification.state !== "failed"
+		|| repair.classification !== "environment" || repair.episodeClassification !== "environment"
+		|| !["paused", "verifying", "committed"].includes(repair.state)
+		|| ["stopped", "complete"].includes(run.status) || deps.store.getPlan(run.runId, "RUN")) {
+		throw new Error("Environment resume requires a recorded classified failure before the final RUN audit");
+	}
+	const request = verification.request;
+	const generation = deps.store.getGeneration(run.runId, run.currentGeneration);
+	if (request.runId !== run.runId || request.generation !== run.currentGeneration
+		|| request.graphSha256 !== run.graphSha256 || createVerificationRequest(request).requestSha256 !== request.requestSha256
+		|| request.integrationBranch !== run.integrationBranch || request.integrationWorktree !== run.integrationWorktree
+		|| !generation || generation.graphSha256 !== request.graphSha256 || generation.runAssignmentPath !== request.runAssignmentPath || generation.runAssignmentSha256 !== request.runAssignmentSha256
+		|| sha256(fs.readFileSync(request.runAssignmentPath)) !== request.runAssignmentSha256
+		|| repair.runId !== run.runId || repair.generation !== run.currentGeneration
+		|| repair.requestId !== request.requestId || repair.requestSha256 !== request.requestSha256
+		|| repair.episodeRequestId !== request.requestId || repair.episodeRequestSha256 !== request.requestSha256
+		|| repair.episodeIntegrationHead !== request.integrationHead || repair.episodeIntegrationTree !== request.integrationTree) {
+		throw new Error("Environment resume failed request identity changed");
+	}
+	if (!verification.manifest) throw new Error("Environment resume requires the exact failed manifest");
+	const normalized = normalizeVerificationManifest(request, verification.manifest);
+	const gates = normalized.manifest.gates;
+	const gatesSha256 = sha256(stableJson(gates));
+	if (normalized.manifestSha256 !== verification.manifestSha256
+		|| gatesSha256 !== repair.episodeCanonicalGatesSha256
+		|| stableJson(gates) !== stableJson(repair.episodeCanonicalGates)
+		|| stableJson(gates) !== stableJson(repair.effectiveGates)) {
+		throw new Error("Environment resume must retain the exact canonical gate program");
+	}
+	repairBeginRefSnapshot(repair); // Unlike initial begin, resume cannot reconstruct missing namespace evidence.
+	await validateFreshRepairBeginGitIdentity(deps, run, verification, repair);
+	const operationId = `environment-retry:${request.requestId}`;
+	const binding = { requestId: request.requestId, requestSha256: request.requestSha256, repairId: repair.repairId,
+		episodeId: repair.episodeId, integrationHead: request.integrationHead, integrationTree: request.integrationTree,
+		canonicalGatesSha256: gatesSha256 };
+	const payloadSha256 = sha256(stableJson(binding));
+	const latest = deps.store.getVerification(run.runId, run.currentGeneration);
+	if (repair.state === "paused") {
+		if (latest?.request.requestId !== request.requestId || repair.successorRequestId || repair.successorRequestSha256
+			|| repair.successorManifest || repair.successorManifestSha256
+			|| deps.store.getIntegrationRepairAudits(repair.repairId).some((audit) => audit.operationId === operationId)) {
+			throw new Error("Environment resume successor evidence is stale or incomplete");
+		}
+		const successor = repairGateManifest(verification, repair, {
+			gates, rationale: "Explicit operator resume after external preparation; retain the exact failed verification program.",
+		}, request.integrationHead, request.integrationTree);
+		deps.store.transaction(() => {
+			deps.store.putVerificationRequest(successor.request);
+			deps.store.updateIntegrationRepair(repair.repairId, {
+				state: "verifying", currentCommit: request.integrationHead, currentTree: request.integrationTree,
+				successorRequestId: successor.request.requestId, successorRequestSha256: successor.request.requestSha256,
+				successorManifest: successor.manifest, successorManifestSha256: successor.manifestSha256,
+				operationId, operationPayloadSha256: payloadSha256,
+				detail: "Operator resumed the unchanged verification program after external environment preparation; no edit authority granted.",
+			});
+			deps.store.recordIntegrationRepairAudit(repair.repairId, operationId, "environment-retry", payloadSha256, {
+				...binding, successorRequestId: successor.request.requestId, successorRequestSha256: successor.request.requestSha256,
+				successorManifestSha256: successor.manifestSha256,
+			});
+			deps.updateRun({ status: "paused", terminalDetail: "Executing the unchanged authoritative verification program after explicit environment resume." });
+		});
+	}
+	const durableRepair = deps.store.getIntegrationRepair(repair.repairId)!;
+	const successor = validateDurableRepairSuccessor(deps.store, durableRepair);
+	const successorEvidence = { ...binding, successorRequestId: successor.verification.request.requestId,
+		successorRequestSha256: successor.verification.request.requestSha256, successorManifestSha256: successor.manifestSha256 };
+	if (durableRepair.operationId !== operationId || durableRepair.operationPayloadSha256 !== payloadSha256
+		|| deps.store.getVerification(run.runId, run.currentGeneration)?.request.requestId !== successor.verification.request.requestId
+		|| successor.verification.request.predecessorRequestId !== request.requestId
+		|| createVerificationRequest(successor.verification.request).requestSha256 !== successor.verification.request.requestSha256
+		|| successor.verification.request.graphSha256 !== request.graphSha256
+		|| successor.verification.request.runAssignmentPath !== request.runAssignmentPath
+		|| successor.verification.request.runAssignmentSha256 !== request.runAssignmentSha256
+		|| successor.verification.request.integrationHead !== request.integrationHead || successor.verification.request.integrationTree !== request.integrationTree
+		|| stableJson(successor.manifest.gates) !== stableJson(gates)
+		|| !deps.store.getIntegrationRepairAudits(repair.repairId).some((audit) => audit.operationId === operationId && audit.action === "environment-retry"
+			&& audit.payloadSha256 === payloadSha256 && stableJson(audit.evidence) === stableJson(successorEvidence))) {
+		throw new Error("Environment resume successor does not match its operator authorization");
+	}
+	return deps.verification(successor.manifest);
+}
+
 export async function runIntegrationRepair(
 	deps: IntegrationRepairDependencies,
 	wireInput: IntegrationRepairInput,
@@ -469,7 +564,7 @@ export async function runIntegrationRepair(
 		};
 		if (input.operation === "begin") {
 			const classification = normalizeIntegrationRepairClassification(input.classification);
-			const decisionOnly = ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(classification);
+			const decisionOnly = ["design_ambiguity", "scope_ambiguity", "credential", "environment", "product_ambiguity"].includes(classification);
 			if (!decisionOnly && !["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Integration repair classification is not an automatic recovery path");
 			if (verification.state !== "failed") throw new Error("Integration repair begin requires a failed verification attempt");
 			const ownerSessionId = input.ownerSessionId;

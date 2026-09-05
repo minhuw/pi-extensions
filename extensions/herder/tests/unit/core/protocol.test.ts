@@ -337,3 +337,40 @@ test("attention acceptance requires adapter confirmation and explicit waivers th
 		assert.throws(() => validateAttentionResolution({ ...acceptance, answer }), /answer is invalid/);
 	}
 });
+
+
+const blockerEnvelopes = [
+	["plan-implementer", "STATUS: STOPPED\nSTOPPED BECAUSE: npm project dependencies are missing; operator must prepare the locked environment"],
+	["plan-reviewer", "VERDICT: BLOCK\nSCOPE: PASS\nFINDINGS: none\nRATIONALE: npm project dependencies are missing; operator must prepare the locked environment"],
+	["plan-judge", "DECISION: BLOCKED\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nRATIONALE: npm project dependencies are missing; operator must prepare the locked environment"],
+] as const;
+const blockerChecks = "CHECKS: manager=npm project scripts; command=npm test; cwd=/repo; error=missing locked dependency; prerequisite=npm ci by operator";
+
+test("optional worker blockers require blocked outcomes and concrete detail/check evidence", () => {
+	for (const [role, envelope] of blockerEnvelopes) {
+		for (const kind of ["ENVIRONMENT", "INVOCATION", "REQUIREMENT"]) {
+			assert.equal(parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\n${blockerChecks}`).blockerKind, kind);
+			assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\nCHECKS: none`), /concrete detail and CHECKS/);
+			assert.throws(() => parseWorkerResult(role, `${envelope.replace(/(?:STOPPED BECAUSE|RATIONALE): .*/, "RATIONALE: none")}\nBLOCKER_KIND: ${kind}\n${blockerChecks}`), /concrete detail and CHECKS/);
+		}
+		assert.equal(parseWorkerResult(role, `${envelope}\n${blockerChecks}`).blockerKind, undefined);
+		assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: CODE\n${blockerChecks}`), /Invalid BLOCKER_KIND/);
+	}
+});
+
+test("worker blocker classification rejects success, repair authority, scope failure, and hidden contradictions", () => {
+	for (const [role, envelope] of [
+		["plan-implementer", "STATUS: COMPLETE"],
+		["plan-reviewer", "VERDICT: APPROVE\nSCOPE: PASS"],
+		["plan-reviewer", "VERDICT: REVISE\nSCOPE: PASS"],
+		["plan-judge", "DECISION: DONE"],
+		["plan-judge", "DECISION: REPAIR"],
+	] as const) assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /requires a blocked worker outcome/);
+	for (const kind of ["ENVIRONMENT", "INVOCATION"]) {
+		for (const extra of ["FINDINGS: [P1][BLOCKING] source bug", "FIX_GUIDANCE: edit code", "AUTHORIZED_BLOCKERS: F001", "REPAIR_CONTRACTS: fix F001", "PASS_DOCUMENT: fix F001", "SCOPE: FAIL"]) {
+			assert.throws(() => parseWorkerResult("plan-implementer", `${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ${kind}\n${blockerChecks}\n${extra}`), /cannot report defect findings/);
+		}
+	}
+	assert.throws(() => parseWorkerResult("plan-reviewer", `${blockerEnvelopes[1][1]}\nFINDINGS: source bug\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /repeats FINDINGS/);
+	assert.throws(() => parseWorkerResult("plan-implementer", `STATUS: COMPLETE\n${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /repeats STATUS/);
+});

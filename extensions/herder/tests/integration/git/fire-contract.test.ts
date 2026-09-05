@@ -53,8 +53,11 @@ try {
   const reviewer = await readFile(path.join(pluginRoot, "assets", "roles", "contracts", "plan-reviewer.md"), "utf8");
   assert.match(reviewer, /Never search or read the coordinator checkout, source plan directory, sibling worktrees, common Git directory, plan index/);
   assert.match(reviewer, /hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/);
-  assert.deepEqual([...reviewer.split("Return exactly:")[1].matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
-    "VERDICT", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "CHECKS", "RATIONALE", "USAGE",
+  const reviewerEnvelope = reviewer.match(/```text\n(VERDICT:[\s\S]*?)\n```/)?.[1];
+  assert.ok(reviewerEnvelope, "reviewer contract has one explicit terminal envelope");
+  assert.match(reviewer, /omitting BLOCKER_KIND unless VERDICT is BLOCK/);
+  assert.deepEqual([...reviewerEnvelope.matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
+    "VERDICT", "BLOCKER_KIND", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "CHECKS", "RATIONALE", "USAGE",
   ]);
 
   const gateWorktree = path.join(root, "gate-worktree");

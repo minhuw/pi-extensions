@@ -168,7 +168,8 @@ export async function buildAttentionPrompt(
 
 	return [
 		"HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1",
-		"Present this bounded operator choice without rewriting the plan: retry the recorded role, or stop/cancel it. Do not reinterpret transport/provider evidence as a plan failure and do not edit any file.",
+		"Present this bounded operator choice without rewriting the plan: retry the recorded role, or stop/cancel it. Do not reinterpret transport/provider/environment/invocation evidence as a code or plan failure and do not edit any file.",
+		...(request.cause === "verification_environment" ? ["ENVIRONMENT_BOUNDARY: This worker self-report is not an evidence-complete review, approval, waiver, or permission to install dependencies or edit source/plans. Present the exact manager/command/cwd/error and required prerequisite. Only an explicit user retry resumes the recorded role/mode at the same round; no automatic retry or round charge."] : []),
 		`DETAIL: ${question}`,
 		`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 		binding,

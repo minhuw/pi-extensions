@@ -20,6 +20,7 @@ const AMBIGUITY_CLASSIFICATIONS: ReadonlySet<IntegrationRepairClassification> = 
 	"design_ambiguity",
 	"scope_ambiguity",
 	"credential",
+	"environment",
 	"product_ambiguity",
 ]);
 
@@ -64,6 +65,20 @@ export function classifyVerificationRecovery(
 	return { actionable, stranded, ownerMismatch, ambiguity, atLimit, kind };
 }
 
+/** Bounded runner observations for the recovery prompt, never inferred classifications. */
+export function verificationRunnerEvidence(value: unknown): string {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return "unavailable";
+	const result = value as Record<string, unknown>;
+	const gates = Array.isArray(result.gates) ? result.gates.slice(0, 32) : [];
+	const observations = gates.map((value) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+		const gate = value as Record<string, unknown>;
+		return Object.fromEntries(["gateId", "label", "command", "cwd", "argv", "outcome", "exitCode", "error", "signal", "timedOut", "logPath"]
+			.filter((key) => gate[key] !== undefined).map((key) => [key, gate[key]]));
+	});
+	return JSON.stringify({ ...(result.error !== undefined ? { error: result.error } : {}), gates: observations }).slice(0, 16_384);
+}
+
 
 export const FINAL_VERIFICATION_SELECTION_GUIDANCE = [
 	"PLAN_V2_SELECTION: Read the complete compiled assignment, its V verification rows (Phase/Criteria/Toolchain/Command/Expected), and every referenced T toolchain (Owner/Cwd/Prerequisites/Probe/Evidence), including shared definitions. Select final-phase coverage plus required integration-risk checks for this exact tree; do not reinterpret development diagnostics or examples as final gates. Acceptance evidence remains per-plan evidence, not a substitute for final integration checks.",
@@ -71,3 +86,6 @@ export const FINAL_VERIFICATION_SELECTION_GUIDANCE = [
 	"ENVIRONMENT_BOUNDARY: Final gates run with a minimal environment; interactive HOME configuration and ambient credentials are not inherited. Separate prerequisite preparation from checks. Do not install, sync, download unpinned tools, inject credentials, or add setup commands disguised as checks. Herder's existing npm-only locked auto-preparation is the narrow exception, not a general setup service.",
 	"PROBE_BOUNDARY: Safe non-mutating availability/version probes through the declared environment may be used only as selection diagnostics, never as acceptance evidence or substitutes for actual checks. Only the manager executes the selected authoritative verification gates. If prerequisites or invocation cannot be established, report concrete manager/argv/cwd/error evidence and ask for the prerequisite/decision; do not fabricate passed checks or submit a known-invalid tool choice.",
 ] as const;
+
+
+export const ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE = "Read the recorded prerequisite evidence and ask the operator to prepare the verified declared environment externally, without source edits, credentials injection, or ambient HOME inheritance. Then the user may explicitly invoke /herder-resume: Herder validates the frozen request/head/tree/namespace and replays the SAME ordered canonical gates, without a code-round or transient-budget charge. Do not call begin/finish again, edit the manifest, run the authoritative checks yourself, or redirect this environment-only wait into a corrective plan/revise. Stop or defer if preparation is not authorized. A failed successor opens a fresh unclassified episode; it never automatically retries.";

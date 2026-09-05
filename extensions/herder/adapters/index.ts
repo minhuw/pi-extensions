@@ -61,7 +61,7 @@ import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
 import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
-import { classifyVerificationRecovery, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "./verification-recovery.ts";
+import { classifyVerificationRecovery, verificationRunnerEvidence, FINAL_VERIFICATION_SELECTION_GUIDANCE, ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE } from "./verification-recovery.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
@@ -598,6 +598,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`REPAIR_STATE: ${repair!.state}`,
 				`FAILURE_DETAIL: ${failure.detail}`,
 				`LOG_PATH: ${logPath}`,
+				`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
 				"Do not call herder_integration_repair, edit the integration worktree, or claim recovery. Ask the user to recover the former session or choose an explicit operator/corrective-plan path.",
 			].join("\n")
 			: recovery.kind === "decision_required"
@@ -615,8 +616,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				`MAX_ROUNDS: ${repair!.maxRounds}`,
 				`FAILURE_DETAIL: ${failure.detail}`,
 				`LOG_PATH: ${logPath}`,
-				"Read the recorded log and ask the user whether to stop, defer, or continue through an explicitly revised/corrective plan. Do not call herder_integration_repair begin again, do not claim success, and do not execute Herder verification commands yourself.",
-				"/herder-resume remains operator recovery for a durable paused run; ordinary deterministic defects no longer require graph revision before the bounded rounds are exhausted, but this exhausted state requires the user's choice.",
+				`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
+				...(repair?.classification === "environment" ? [ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE] : [
+					"Read the recorded log and ask the user whether to stop, defer, or continue through an explicitly revised/corrective plan. Do not call herder_integration_repair begin again, do not claim success, and do not execute Herder verification commands yourself.",
+					"/herder-resume remains operator recovery for a durable paused run; ordinary deterministic defects no longer require graph revision before the bounded rounds are exhausted, but this exhausted state requires the user's choice.",
+				]),
 			].join("\n")
 			: recovery.kind === "recoverable" && repair
 				? [
@@ -656,16 +660,19 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					`INTEGRATION_HEAD: ${integrationHead}`,
 					`FAILURE_DETAIL: ${failure.detail}`,
 					`LOG_PATH: ${logPath}`,
-					"CLASSIFICATIONS: manifest_error | transient | code_defect | design_ambiguity | scope_ambiguity | credential | product_ambiguity",
+					`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
+					"CLASSIFICATIONS: manifest_error | transient | code_defect | design_ambiguity | scope_ambiguity | credential | environment | product_ambiguity",
 					...(repair.episodeId ? [
 						`CLASSIFICATION_EPISODE: ${repair.episodeId}`,
 						"A classification is immutable only inside this episode. Every newly failed successor opens a fresh unclassified episode; classify the current evidence and do not carry forward a prior episode's classification.",
 					] : []),
 					...(repair.transientRetryUsed ? ["TRANSIENT_BUDGET: The unchanged transient retry for this exact head/tree/gate program is already consumed; select a different evidence-supported path."] : []),
-					"For manifest_error, call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree.",
+					"Gate outcomes (passed, command_failed, unavailable, timed_out, runner_error), errors, signals, and timeout flags are runner observations, not defect classifications. Even command_failed from uv/nix/package-manager wrappers may mean missing prerequisites. Inspect the recorded evidence; never infer code_defect from an exit code or log regex alone.",
+					"Separate setup from validation. Use repository-declared canonical uv run, nix develop --command, or package-script invocations when specified, not bare tools, global installs, uvx/npx downloads, or ambient HOME substitution. Record exact manager/argv/cwd/error and the required prerequisite.",
+					"For manifest_error (wrong argv, cwd, or manager invocation), call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree. Proven missing environment prerequisites are environment, not source defects or automatic transient retries.",
 					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
 					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the next bounded code-repair commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
-					"For design_ambiguity, scope_ambiguity, credential, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. A corrective plan followed by /herder-revise remains available when the user chooses it.",
+					"For design_ambiguity, scope_ambiguity, credential, environment, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. For environment, the operator may prepare the verified declared prerequisites externally, then explicitly use /herder-resume to replay the exact canonical gates without edits or a budget charge. Other decision classifications may use a corrective plan followed by /herder-revise when the user chooses it.",
 					"Before begin, do not edit the frozen integration worktree, move Git refs, update SQLite, or mutate manager state. If a started code repair cannot be completed safely, restore the assigned worktree to its recorded clean head and call cancel.",
 					"Do not edit the frozen integration worktree before the begin transition binds writable authority to this main session.",
 					"Before finish, stage and create or amend the session-authored repair commit in the assigned worktree, confirm git status --porcelain is empty, and pass observedCommit equal to git rev-parse HEAD. Herder never stages, creates, or amends commits; it validates the clean commit and reruns the retained authoritative gates, then either proceeds to the existing final audit or presents the next bounded recovery request. /herder-resume remains operator recovery, not the ordinary path.",
@@ -679,6 +686,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					`MAIN_SESSION_ID: ${failure.sessionId || "unknown"}`,
 					`FAILURE_DETAIL: ${failure.detail}`,
 					`LOG_PATH: ${logPath}`,
+					`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
 					"Inspect the log using read-only commands and explain the concrete failure to the user. Do not claim success, silently retry, or execute verification commands yourself.",
 					"Use /herder-resume for a fresh verification request after correcting a manifest or transient operational failure; for an integrated code defect, propose a corrective plan followed by /herder-revise.",
 					"Do not edit the frozen integration worktree, move Git refs, or mutate manager state.",
@@ -1737,7 +1745,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			assertOwnership(planDirectory, request.runId);
 			if (params.operation === "begin" && !params.classification) throw new Error("Integration repair begin requires exactly one classification");
 			const classificationOnly = params.operation === "begin"
-				&& ["design_ambiguity", "scope_ambiguity", "credential", "product_ambiguity"].includes(params.classification || request.classification || "");
+				&& ["design_ambiguity", "scope_ambiguity", "credential", "environment", "product_ambiguity"].includes(params.classification || request.classification || "");
 			await resolveProfile(ctx, currentState?.profile || "unknown");
 			assertSessionActive(epoch);
 			const checkout = await assertRepairCheckout(binding, params.operation, params.observedCommit);

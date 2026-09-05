@@ -166,6 +166,7 @@ test("repair schemas preserve ordered vocabularies and optionality", () => {
 			"design_ambiguity",
 			"scope_ambiguity",
 			"credential",
+			"environment",
 			"product_ambiguity",
 		],
 	});

@@ -35,6 +35,8 @@ Phase owners are explicit: producers/Validate inspect sources and cold-read comp
 
 Existing final GitDriver preparation is npm-only and locked: a direct npm/npx gate with declared dependencies, no node_modules, and an npm lockfile temporarily receives `npm ci --ignore-scripts --no-audit --no-fund`; created modules are removed afterward or on preparation failure. This is not a universal preparer or agent permission for ad hoc/unpinned installs. Gate subprocesses still use the isolated minimal environment; preparation failures may precede any check evidence. See [Final verification environment](adapters/README.md#final-verification-environment).
 
+Worker STOPPED/FAILED, Reviewer BLOCK, and Judge NEEDS_INPUT/BLOCKED can optionally report BLOCKER_KIND ENVIRONMENT/INVOCATION/REQUIREMENT. Ordinary code results and success omit it. Environment/invocation evidence enters same-role/ready-phase, same-round operator attention without automatic retry or guessed source repair; integrity checks still precede handling, and dirty/unreviewed changes cannot be accepted. Final `environment` classification is non-mutating and consumes no code round; wrong argv/manager/cwd is `manifest_error`.
+
 Gate outcomes `passed`, `command_failed`, `unavailable`, `timed_out`, and `runner_error`, plus error/timedOut/signal metadata, are process evidence only. A launched uv/Nix wrapper missing a nested tool may be `command_failed`; exit 127 or log text alone is not a source-defect diagnosis. Inspect the declared invocation and prerequisites, report exact manager/command/cwd/error, and never rewrite missing setup as a passed check.
 
 ## Local live Pi/Poorman setup

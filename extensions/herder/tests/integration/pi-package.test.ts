@@ -288,7 +288,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 			assert.match(contents, /^extensions: npm:@ff-labs\/pi-fff$/m);
 		}
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
-		assert.match(contract, /Return exactly:/);
+		assert.match(contract, /Return exactly the envelope below/);
+		assert.match(contract, /BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/);
+		assert.match(contract, /(?:omit|omitting|omitted).*BLOCKER_KIND|BLOCKER_KIND omitted/);
 		if (role === "plan-reviewer") {
 			assert.match(contents, /REVIEW_PROTOCOL_PATH/);
 			assert.match(contract, /review protocol's bounded multi-agent workflow/);
