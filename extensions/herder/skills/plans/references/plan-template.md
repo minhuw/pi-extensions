@@ -149,20 +149,34 @@ when shared context changes. Check:
 1. **Confirmed contract**: intent, binding A requirements, non-goals, preserved
    callers/invariants, and suggested route agree. No unresolved decision necessary
    to start has been disguised as a STOP condition.
-2. **Source evidence**: verify paths, symbols, current facts, commit/date, test
-   cases, conventions, toolchain owner/invocation/cwd/prerequisites, and cited
-   manifests/lockfiles/CI. Record unrun checks as unrun; never expose secrets.
+2. **Source evidence**: verify direct caller paths/symbols (`change` vs `preserve`),
+   regression paths + test names/anchors, and protected invariants against source.
+   Follow bounded caller/test/fixture links, including fixtures outside obvious
+   modules; distinguish `not inspected` from `no coverage found` in a stated scope.
+   Verify current facts, commit/date, conventions, and T owner/invocation/cwd/
+   prerequisites against manifests/lockfiles/CI. Record unrun checks as unrun;
+   never expose secrets.
 3. **Starting guarantees**: observed facts are distinct from dependency promises;
    every direct dependency has one specific Consumes row, matches the index, and
    leaves a valid intermediate state. Expected edits/shifted lines are not drift.
 4. **Proof sufficiency**: A/V links resolve reciprocally, every A has acceptance
-   proof, phases reflect actual completion order, and concrete commands/expected
-   observations test the named behavior and failure modes. No redundant generic
-   gates, fake test proof, or final-only prerequisite acceptance.
-5. **Bounded execution**: exact write paths and direct contracts give reviewers a
-   short evidence path; companions require semantic justification and review.
-   Suggested patch directions do not become binding requirements. Split only at
-   independently useful, safe boundaries—not tests/docs/layers for one invariant.
+   proof, and phases reflect completion order. Acceptance V commands/expected
+   observations cover named regressions and competing negative regressions, not
+   just the new happy path. State expected assertion changes versus preserved
+   behavior: obsolete incidental assertions may migrate, but never delete a
+   security/behavior invariant just to pass. No redundant generic gates, fake test
+   proof, or final-only prerequisite acceptance; no broad searches/tests or full
+   suite required for every plan.
+5. **Bounded execution**: reconcile caller/regression evidence with the snapshot
+   (no audit ledger required):
+   necessary companion edits belong in Boundaries write paths, preservation
+   obligations in A requirements/Boundaries, and named coverage in acceptance V.
+   Unaffected read-only callers need no write scope. Before ready, check omissions,
+   account for known coverage gaps in proof, and resolve material leads. Check
+   newly found shared writes and their dependency order; companions require
+   semantic justification and review. Suggested patches are not binding.
+   Split only at independently useful, safe boundaries—not tests/docs/layers for
+   one invariant.
 6. **Phase ownership**: Implementer probes/diagnoses before edits; Reviewer
    independently checks the frozen target; main session selects the final
    manifest and manager executes it. Parser/shape validation runs no plan commands

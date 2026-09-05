@@ -141,6 +141,61 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.equal(Object.hasOwn(manifest.pi, "subagents"), false);
 });
 
+test("planning docs carry bounded caller/regression handoffs from audit findings through shared readiness checks", async () => {
+	const [improve, playbook, template, validate] = await Promise.all([
+		"skills/improve/SKILL.md",
+		"skills/improve/references/audit-playbook.md",
+		"skills/plans/references/plan-template.md",
+		"skills/validate/SKILL.md",
+	].map((file) => readFile(path.join(extensionRoot, file), "utf8")));
+	const finding = playbook.split("## Finding format")[1].split("## Prioritization rubric")[0];
+	assert.match(finding, /\*\*Caller\/regression handoff\*\*/);
+	assert.match(finding, /Direct callers: affected `path:line` \+ symbol — `change` \(necessary companion edit\) or `preserve` \(read-only contract\)/);
+	assert.match(finding, /Existing regressions: `test\/path:line` \+ test name\/anchor — protected invariant; expected assertion changes versus behaviors that must remain/);
+	assert.match(finding, /Gaps\/leads: known missing cases or unresolved questions; state the bounded read scope/);
+	assert.match(finding, /distinguish `not inspected` from `no coverage found in <scope>`/);
+	assert.match(finding, /anchors and short obligations, not file dumps/);
+	assert.match(finding, /fixtures outside obvious modules; no mandatory broad searches, test runs, or full suite per finding/);
+
+	const audit = improve.split("## 2. Audit")[1].split("## 3. Vet")[0];
+	assert.match(audit, /always including `## Finding format`/);
+	assert.match(audit, /findings in `Finding format`, including the caller\/regression handoff and bounded read scope/);
+	const vet = improve.split("## 3. Vet, Prioritize, Confirm")[1].split("## 4. Write Plans")[0];
+	assert.match(vet, /Verify cited source anchors yourself, including direct callers and named regression assertions\/fixtures/);
+	assert.match(vet, /private audit ledger \(in-session, not a file\)/);
+	assert.match(vet, /retain each caller\/regression handoff, verified anchors, and lead dispositions through vetting, selection, and context compaction/);
+	assert.match(vet, /Before selection, author nothing/);
+	const drafting = improve.split("## 4. Write Plans")[1].split("## Invocation Variants")[0];
+	assert.match(drafting, /Reopen every cited file yourself; subagent excerpts and line numbers are leads, never plan evidence/);
+	assert.match(drafting, /Map necessary companion edits to existing Boundaries write paths, preservation obligations to A requirements\/Boundaries, and named regression coverage to acceptance V commands\/expected observations/);
+	assert.match(drafting, /unaffected read-only callers need not become write scope/);
+	assert.match(drafting, /No new plan section\/table, manifest, or audit artifact/);
+	assert.match(drafting, /reconcile selected ledger handoffs against each compiled snapshot through the Producer self-review in \[plan-template\.md\]/);
+
+	const producer = template.split("## Producer self-review — before validation")[1].replace(/\s+/g, " ");
+	const validator = validate.split("### 2. Per-plan semantics")[1].split("## Classify and Report")[0].replace(/\s+/g, " ");
+	for (const [label, text] of [["Producer self-review", producer], ["Validate semantics", validator]]) {
+		assert.match(text, /verify direct caller paths\/symbols|source-verify baseline facts/, label);
+		assert.match(text, /direct caller paths\/symbols \(`change` vs `preserve`\)/, label);
+		assert.match(text, /regression paths \+ test names\/anchors, and protected invariants/, label);
+		assert.match(text, /fixtures outside obvious modules/, label);
+		assert.match(text, /distinguish `not inspected` from `no coverage found`/, label);
+		assert.match(text, /necessary companion edits (?:belong|are) in Boundaries write paths, preservation obligations in A requirements\/Boundaries, and named coverage in acceptance V/, label);
+		assert.match(text, /unaffected read-only callers need no write scope/i, label);
+		assert.match(text, /acceptance.*named regressions and competing negative regressions/i, label);
+		assert.match(text, /expected assertion changes versus preserved behavior/, label);
+		assert.match(text, /obsolete incidental assertions may migrate/i, label);
+		assert.match(text, /never delete a security\/behavior invariant just to pass/, label);
+		assert.match(text, /no (?:mandatory )?broad searches\/tests or full suite (?:required for every|per) plan/, label);
+		assert.match(text, /[Bb]efore (?:declaring )?ready, check (?:caller\/regression )?omissions/, label);
+		assert.match(text, /account for known coverage gaps in proof, and resolve material leads/, label);
+		assert.match(text, /newly found shared writes and their dependency order/, label);
+	}
+	assert.match(validator, /without requiring an audit ledger/);
+	assert.match(validator, /Missing necessary scope or proof is an `ERROR`; material scope\/order choices need confirmation, not silent widening/);
+	assert.match(validate, /perform the shared template's Producer self-review/);
+});
+
 test("deterministic manager owns scheduling while Pi workers delegate only through the scoped Agent tool", async () => {
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");

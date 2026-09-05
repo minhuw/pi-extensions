@@ -118,7 +118,13 @@ Every finding, from every category and every subagent, comes back in this shape:
 - **Risk**: What the fix could break; LOW/MED/HIGH plus one line why.
 - **Confidence**: HIGH (read the code, certain) / MED (strong signal, remaining unknowns named). Do not return LOW as a finding: finish the investigation, then either raise confidence, reject it, or route a product question to Grill.
 - **Fix sketch**: 1–3 suggested-route sentences, not an extra binding design decision or full plan—just enough to judge effort honestly.
+- **Caller/regression handoff**:
+  - Direct callers: affected `path:line` + symbol — `change` (necessary companion edit) or `preserve` (read-only contract); name the behavior at risk.
+  - Existing regressions: `test/path:line` + test name/anchor — protected invariant; expected assertion changes versus behaviors that must remain.
+  - Gaps/leads: known missing cases or unresolved questions; state the bounded read scope and distinguish `not inspected` from `no coverage found in <scope>`.
 ```
+
+Keep the handoff to anchors and short obligations, not file dumps. Follow affected symbols to direct callers and linked regressions/fixtures, including fixtures outside obvious modules; no mandatory broad searches, test runs, or full suite per finding.
 
 Unresolved leads are not findings. If an audit pass cannot close the claim, list a one-line lead (`path:line` + open question) for the parent session. The parent investigates before Confirm, using additional read-only subagents when leads are independent. Leads never become plans. Before authoring, resolve facts and confirm material choices; do not disguise unresolved starting requirements as STOP conditions. Draft the seven-section V2 contract without generic Git/test/review boilerplate: A binds required behavior, V distinguishes development/acceptance/final proof, and T names evidence-backed owner/cwd/prerequisites/probe. Record observed baseline separately from future dependency guarantees. Ad hoc setup/downloads are forbidden for audit agents; existing final-manager npm-only locked preparation does not grant planner authority.
 
