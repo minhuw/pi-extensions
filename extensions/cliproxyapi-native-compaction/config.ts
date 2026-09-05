@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const CONFIG_FILE_NAME = "cliproxyapi-native-compaction.json";
-export const DEFAULT_NATIVE_MODELS = ["gpt-5.6-sol"] as const;
+export const DEFAULT_NATIVE_MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
 
 export interface NativeCompactionConfig {
 	enabled: boolean;

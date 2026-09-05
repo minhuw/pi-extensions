@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Model } from "@earendil-works/pi-ai";
 import {
+	DEFAULT_NATIVE_MODELS,
 	isEligibleModel,
 	type NativeCompactionConfig,
 } from "../config.ts";
@@ -32,13 +33,20 @@ const config: NativeCompactionConfig = {
 	enabled: true,
 	providerId: "cliproxyapi",
 	apiId: "cliproxyapi-codex-responses",
-	models: ["gpt-5.6-sol"],
+	models: [...DEFAULT_NATIVE_MODELS],
 	fallbackToBuiltin: true,
 };
 
 describe("model capability gate", () => {
-	it("accepts only an explicitly allowlisted CLIProxyAPI Codex model", () => {
-		expect(isEligibleModel(model, config)).toBe(true);
+	it("defaults to the supported OpenAI aliases", () => {
+		expect(DEFAULT_NATIVE_MODELS).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+	});
+
+	it.each(DEFAULT_NATIVE_MODELS)("accepts default OpenAI model %s", (id) => {
+		expect(isEligibleModel({ ...model, id }, config)).toBe(true);
+	});
+
+	it("rejects models outside the exact CLIProxyAPI Codex allowlist", () => {
 		expect(isEligibleModel({ ...model, id: "kimi-k3" }, config)).toBe(false);
 		expect(isEligibleModel({ ...model, provider: "openai-compatible" }, config)).toBe(false);
 		expect(isEligibleModel({ ...model, api: "openai-completions" }, config)).toBe(false);
