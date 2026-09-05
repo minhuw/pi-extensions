@@ -110,6 +110,20 @@ test("model checks accept provider-qualified catalog entries without substitutio
 	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
 });
 
+test("model availability includes optional rescue and Searcher bindings", () => {
+	const profile = resolvePiProfile("universe", catalog);
+	const available = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"].map((id) => ({ provider: "proxy", id }));
+	assert.deepEqual(unavailableProfileModels(profile, available), []);
+	assert.equal(activeModelMatches(profile, available[0]), true);
+	const custom = {
+		...profile,
+		rescue: { ...profile.rescue!, model: "rescue-only" },
+		searcher: { ...profile.searcher!, model: "searcher-only" },
+	};
+	assert.deepEqual(unavailableProfileModels(custom, available), ["rescue-only", "searcher-only"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
+});
+
 test("Pi profile catalogs require exactly the canonical worker roles", async () => {
 	const root = mkdtempSync(path.join(os.tmpdir(), "herder-pi-profile-roles-"));
 	try {

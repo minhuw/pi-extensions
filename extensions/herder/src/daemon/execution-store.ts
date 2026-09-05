@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
 import type { DatabaseSync } from "node:sqlite"
-import { MAX_PLAN_ROUNDS, WORKER_ROLES } from "../shared/protocol.ts"
+import { MAX_PLAN_ROUNDS, THINKING_EFFORTS, WORKER_ROLES, type ThinkingEffort } from "../shared/protocol.ts"
 
 const require = createRequire(import.meta.url)
 type Database = DatabaseSync
@@ -1287,11 +1287,19 @@ function normalizeRunConfiguration(input: RunConfigurationInput = {}): RunConfig
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) fail("Roles must be a JSON object")
   const roleRecords = roles as Record<string, unknown>
   const normalizedRoles: Record<string, RunRoleBinding> = {}
-  for (const role of WORKER_ROLES) {
+  for (const role of [...WORKER_ROLES, "rescue", "searcher"]) {
+    if ((role === "rescue" || role === "searcher") && !Object.hasOwn(roleRecords, role)) continue
     const mapping = roleRecords[role] as Record<string, unknown> | undefined
     if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) fail(`Missing run role ${role}`)
     const unknownFields = Object.keys(mapping).filter((field) => !["agent_type", "model", "effort", "service_tier"].includes(field))
     if (unknownFields.length > 0) fail(`Run role ${role} contains unknown fields: ${unknownFields.join(", ")}`)
+    if (role === "rescue" || role === "searcher") {
+      const agentType = role === "rescue" ? "herder.plan-implementer" : "herder.searcher"
+      if (mapping.agent_type !== agentType) fail(`Run role ${role} must use agent type ${agentType}`)
+      if (typeof mapping.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/.test(mapping.model)) fail(`Run role ${role} has an invalid model`)
+      if (!THINKING_EFFORTS.includes(mapping.effort as ThinkingEffort)) fail(`Run role ${role} has an invalid effort`)
+      if (mapping.service_tier !== undefined && mapping.service_tier !== "fast" && mapping.service_tier !== "standard") fail(`Run role ${role} has an invalid service tier`)
+    }
     normalizedRoles[role] = {
       agent_type: requiredText(mapping.agent_type, `${role} agent type`),
       model: requiredText(mapping.model, `${role} model`),

@@ -47,6 +47,8 @@ export function unavailableProfileModels(profile: ResolvedProfile, available: re
 	const required = new Set([
 		profile.orchestrator.model,
 		...WORKER_ROLES.map((role) => profile.roles[role].model),
+		...(profile.rescue ? [profile.rescue.model] : []),
+		...(profile.searcher ? [profile.searcher.model] : []),
 		HERDER_OWN_NESTED_MODEL,
 	]);
 	return [...required].filter((model) => !available.some((candidate) => modelMatches(model, candidate)));

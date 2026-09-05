@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 10;
+export const MANAGER_PROTOCOL_VERSION = 11;
 export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
@@ -45,6 +45,8 @@ export interface ResolvedProfile {
 	host: HostName;
 	orchestrator: Omit<RoleProfile, "agent_type">;
 	roles: Record<WorkerRole, RoleProfile>;
+	rescue?: RoleProfile;
+	searcher?: Omit<RoleProfile, "agent_type">;
 }
 
 export interface ManagerAction {
@@ -59,6 +61,7 @@ export interface ManagerAction {
 	model: string;
 	effort: string;
 	serviceTier?: string;
+	searcherBinding?: Omit<RoleProfile, "agent_type">;
 	workerMode: "INITIAL" | "RESCUE" | "GUIDED_REPAIR" | "DISCOVERY" | "VERIFICATION" | "ADJUDICATE" | "FINAL_AUDIT";
 	taskName: string;
 	worktree: string;

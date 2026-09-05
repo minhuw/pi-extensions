@@ -446,3 +446,42 @@ Keep shared fixture facts in one compiled snapshot input.
   fs.rmSync(root, { recursive: true, force: true })
 }
 })
+
+
+test("optional run bindings round-trip immutably through roles_json", () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "herder-optional-bindings-"))
+  try {
+    const roles = {
+      "plan-implementer": { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "medium" },
+      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+      "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-astra", effort: "xhigh" },
+      rescue: { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh", service_tier: "standard" },
+      searcher: { agent_type: "herder.searcher", model: "gpt-6-astra", effort: "medium", service_tier: "fast" },
+    }
+    const configuration = { profile: "universe", profileSha256: "a".repeat(64), host: "pi", roles }
+    assert.equal(recordRunConfiguration(planDir, configuration).recorded, true)
+    assert.deepEqual(required(readRunConfiguration(planDir).configuration).roles, roles)
+    assert.equal(recordRunConfiguration(planDir, { ...configuration, roles: JSON.stringify(roles) }).recorded, false)
+    for (const key of ["rescue", "searcher"] as const) {
+      for (const change of [{ model: "gpt-5.6-sol" }, { effort: "high" }, { service_tier: "standard" === roles[key].service_tier ? "fast" : "standard" }]) {
+        expectFailure(() => recordRunConfiguration(planDir, { ...configuration, roles: { ...roles, [key]: { ...roles[key], ...change } } }), /already bound/)
+      }
+      const without = { ...roles } as Record<string, unknown>
+      delete without[key]
+      expectFailure(() => recordRunConfiguration(planDir, { ...configuration, roles: without }), /already bound/)
+      for (const [change, error] of [
+        [{ agent_type: "herder.custom" }, /must use agent type/],
+        [{ model: "bad model" }, /invalid model/],
+        [{ effort: "ultra" }, /invalid effort/],
+        [{ service_tier: "priority" }, /invalid service tier/],
+        [{ extra: true }, /unknown fields/],
+      ] as const) {
+        expectFailure(() => recordRunConfiguration(planDir, { ...configuration, roles: { ...roles, [key]: { ...roles[key], ...change } } }), error)
+      }
+      expectFailure(() => recordRunConfiguration(planDir, { ...configuration, roles: { ...roles, [key]: null } }), /Missing run role/)
+    }
+    assert.deepEqual(required(readRunConfiguration(planDir).configuration).roles, roles)
+  } finally {
+    fs.rmSync(planDir, { recursive: true, force: true })
+  }
+})

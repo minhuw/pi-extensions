@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AgentSessionEvent, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
+import { resolvePiProfile } from "../../../src/core/profile-registry.ts";
 import {
 	HerderNestedAgentScope,
 	RECON_TIMEOUT_MS,
@@ -141,6 +142,33 @@ test("nested Agent runs one package-owned foreground recon child with the scout 
 	assert.equal(snapshot.serviceTier, "fast");
 	assert.equal(snapshot.status, "completed");
 	assert.deepEqual(snapshot.activeTools, []);
+});
+
+test("universe dispatches Searcher on Astra and only Recon on Luna", async () => {
+	const profile = resolvePiProfile("universe");
+	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
+		const mapping = role === "plan-implementer" ? profile.rescue! : profile.roles[role];
+		const created: NestedSessionCreateRequest[] = [];
+		const value = new HerderNestedAgentScope({
+			action: { ...action(role), model: mapping.model, effort: mapping.effort, searcherBinding: profile.searcher },
+			agentRoot,
+			createSession: async (request) => {
+				created.push(request);
+				return new FakeNestedSession(request.id);
+			},
+		});
+		const types = role === "plan-implementer" ? ["searcher", "recon", "worker"] as const
+			: role === "plan-reviewer" ? ["searcher", "recon", "reviewer"] as const : ["searcher", "recon"] as const;
+		for (const type of types) {
+			const result = await value.run({ type, prompt: "Bounded lookup", description: "inspect model binding" });
+			assert.equal(result.status, "completed");
+		}
+		assert.deepEqual(created[0]!.binding, { model: "gpt-6-astra", effort: "medium" });
+		assert.deepEqual(created[1]!.binding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
+		if (created[2]) assert.deepEqual(created[2].binding, { model: mapping.model, effort: mapping.effort });
+		assert.deepEqual(value.snapshots().filter((child) => child.model === "gpt-5.6-luna").map((child) => child.type), ["recon"]);
+		await value.stop("test complete");
+	}
 });
 
 test("nested results keep a distinct no-result diagnostic and complete empty content", async () => {

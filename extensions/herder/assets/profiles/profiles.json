@@ -41,6 +41,18 @@
         "plan-reviewer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
         "plan-judge": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" }
       }
+    },
+    {
+      "name": "universe",
+      "description": "Astra orchestrates, implements, rescues, judges, and searches while Sol reviews; Luna scouts.",
+      "orchestrator": { "model": "gpt-6-astra", "effort": "xhigh" },
+      "roles": {
+        "plan-implementer": { "model": "gpt-6-astra", "effort": "medium" },
+        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+        "plan-judge": { "model": "gpt-6-astra", "effort": "xhigh" }
+      },
+      "rescue": { "model": "gpt-6-astra", "effort": "xhigh" },
+      "searcher": { "model": "gpt-6-astra", "effort": "medium" }
     }
   ]
 }

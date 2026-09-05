@@ -31,6 +31,7 @@ import {
 	MAIN_SESSION_VERIFICATION_PAUSE_DETAIL,
 	MANAGER_PROTOCOL_VERSION,
 	MAX_PLAN_ROUNDS,
+	WORKER_ROLES,
 	attentionCapabilityToken,
 	attentionRequestSha256,
 	canonicalEventPayload,
@@ -358,7 +359,13 @@ function boundProfile(run: StoredRun, store: RunStore): ResolvedProfile {
 		profile_sha256: binding.profileSha256,
 		host: binding.host,
 		orchestrator: { model: "bound-by-host", effort: "bound-by-host" as ResolvedProfile["orchestrator"]["effort"] },
-		roles: binding.roles as ResolvedProfile["roles"],
+		roles: Object.fromEntries(WORKER_ROLES.map((role) => [role, binding.roles[role]])) as ResolvedProfile["roles"],
+		...(binding.roles.rescue ? { rescue: binding.roles.rescue as ResolvedProfile["rescue"] } : {}),
+		...(binding.roles.searcher ? { searcher: {
+			model: binding.roles.searcher.model,
+			effort: binding.roles.searcher.effort as ResolvedProfile["orchestrator"]["effort"],
+			...(binding.roles.searcher.service_tier !== undefined ? { service_tier: binding.roles.searcher.service_tier as ResolvedProfile["orchestrator"]["service_tier"] } : {}),
+		} } : {}),
 	};
 }
 
@@ -1070,7 +1077,11 @@ export class HerderRunManager {
 			profile: profile.profile,
 			profileSha256: profile.profile_sha256,
 			host: profile.host,
-			roles: profile.roles,
+			roles: {
+				...profile.roles,
+				...(profile.rescue ? { rescue: profile.rescue } : {}),
+				...(profile.searcher ? { searcher: { agent_type: "herder.searcher", ...profile.searcher } } : {}),
+			},
 		});
 		const runId = randomUUID();
 		const graphGeneration = 1;
@@ -3168,7 +3179,8 @@ export class HerderRunManager {
 	}
 
 	private createAction(run: StoredRun, plan: StoredPlan, role: WorkerRole, profile: ResolvedProfile, driver: GitDriver): StoredAction {
-		const mapping = requiredRole(profile, role);
+		const mode = workerMode(plan, role);
+		const mapping = role === "plan-implementer" && mode === "RESCUE" && profile.rescue ? profile.rescue : requiredRole(profile, role);
 		const ordinal = attemptOrdinal(this.store, run.runId, plan.planId, plan.generation, role);
 		const attemptId = `${plan.planId}-g${plan.generation}-r${plan.round}-${role.replace("plan-", "")}-${ordinal}`;
 		const actionId = `${run.runId}:${attemptId}`;
@@ -3197,7 +3209,6 @@ export class HerderRunManager {
 				throw error;
 			}
 		}
-		const mode = workerMode(plan, role);
 		const action: ManagerAction = {
 			actionId,
 			attemptId,
@@ -3210,6 +3221,7 @@ export class HerderRunManager {
 			model: mapping.model,
 			effort: mapping.effort,
 			...(mapping.service_tier ? { serviceTier: mapping.service_tier } : {}),
+			...(profile.searcher ? { searcherBinding: profile.searcher } : {}),
 			workerMode: mode,
 			taskName,
 			worktree: plan.worktree,
@@ -3231,6 +3243,7 @@ export class HerderRunManager {
 		const plan = this.store.getPlan(run.runId, stored.planId);
 		if (!plan) throw new Error(`Action ${stored.actionId} has no plan runtime`);
 		const changedPaths = plan.planId === "RUN" || plan.rebase ? [] : this.driver(run).changedPaths(plan.worktree, plan.generationBase);
+		const { searcher } = boundProfile(run, this.store);
 		const action: ManagerAction = {
 			actionId: stored.actionId,
 			attemptId: stored.attemptId,
@@ -3243,6 +3256,7 @@ export class HerderRunManager {
 			model: stored.model,
 			effort: stored.effort,
 			...(stored.serviceTier ? { serviceTier: stored.serviceTier } : {}),
+			...(searcher ? { searcherBinding: searcher } : {}),
 			workerMode: stored.workerMode as ManagerAction["workerMode"],
 			taskName: stored.taskName,
 			worktree: plan.worktree,

@@ -67,6 +67,35 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	}
 });
 
+test("universe keeps Luna on Recon and validates rescue and Searcher overrides", async () => {
+	const profile = resolvePiProfile("universe", catalog);
+	const models = [
+		...available,
+		{ provider: "proxy", id: "gpt-6-astra", api: "openai-completions", thinkingLevelMap: { medium: "medium", xhigh: "xhigh", max: null } },
+		{ provider: "proxy", id: "gpt-5.6-sol", thinkingLevelMap: { xhigh: "xhigh", max: null } },
+	];
+	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, models));
+	const parent = { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6-astra", effort: "medium" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast" });
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
+		...profile, rescue: { ...profile.rescue!, model: "rescue-only" },
+	}, [...models, { provider: "proxy", id: "rescue-only", thinkingLevelMap: { medium: "medium", xhigh: null } }]), /rescue-only does not support thinking xhigh/);
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
+		...profile, rescue: { ...profile.rescue!, service_tier: "fast" },
+	}, models), /herder.plan-implementer .* does not support service tier fast/);
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
+		...profile, rescue: { ...profile.rescue!, agent_type: "herder.plan-reviewer" },
+	}, models), /must use package agent herder.plan-implementer/);
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
+		...profile, searcher: { ...profile.searcher!, effort: "max" },
+	}, models), /nested agent searcher .* does not support thinking max/);
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
+		...profile, searcher: { ...profile.searcher!, service_tier: "fast" },
+	}, models), /nested agent searcher .* does not support service tier fast/);
+});
+
 test("roles encourage bounded Recon exploration without delegating judgment", async () => {
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 		const { systemPrompt } = await loadHerderPiRole(agentRoot, role);

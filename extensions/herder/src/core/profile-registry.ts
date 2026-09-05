@@ -22,6 +22,8 @@ export interface PiProfileDefinition {
 	description: string;
 	orchestrator: Omit<RoleProfile, "agent_type">;
 	roles: Record<WorkerRole, Omit<RoleProfile, "agent_type">>;
+	rescue?: Omit<RoleProfile, "agent_type">;
+	searcher?: Omit<RoleProfile, "agent_type">;
 }
 
 export interface PiProfileCatalog {
@@ -66,7 +68,7 @@ export function loadPiProfileCatalog(file = DEFAULT_PROFILE_CATALOG): PiProfileC
 		}
 		names.add(profile.name);
 		if (typeof profile.description !== "string" || !profile.description.trim()) throw new Error(`Profile ${profile.name} has no description`);
-		const unknown = Object.keys(profile).filter((key) => !["name", "description", "orchestrator", "roles"].includes(key));
+		const unknown = Object.keys(profile).filter((key) => !["name", "description", "orchestrator", "roles", "rescue", "searcher"].includes(key));
 		if (unknown.length) throw new Error(`Profile ${profile.name} has unknown fields: ${unknown.join(", ")}`);
 		if (!profile.roles || typeof profile.roles !== "object" || Array.isArray(profile.roles)) throw new Error(`Profile ${profile.name} has no roles`);
 		const roleValues = profile.roles as Record<string, unknown>;
@@ -77,6 +79,8 @@ export function loadPiProfileCatalog(file = DEFAULT_PROFILE_CATALOG): PiProfileC
 			name: profile.name,
 			description: profile.description.trim(),
 			orchestrator: mapping(profile.orchestrator, `${profile.name} orchestrator`),
+			...(profile.rescue !== undefined ? { rescue: mapping(profile.rescue, `${profile.name} rescue`) } : {}),
+			...(profile.searcher !== undefined ? { searcher: mapping(profile.searcher, `${profile.name} searcher`) } : {}),
 			roles: Object.fromEntries(WORKER_ROLES.map((role) => [role, mapping(roleValues[role], `${profile.name}/${role}`)])) as PiProfileDefinition["roles"],
 		};
 	});
@@ -95,6 +99,8 @@ export function resolvePiProfile(requested?: string, file = DEFAULT_PROFILE_CATA
 		profile_sha256: sha256(stableJson(profile)),
 		host: "pi",
 		orchestrator: profile.orchestrator,
+		...(profile.rescue ? { rescue: { agent_type: "herder.plan-implementer", ...profile.rescue } } : {}),
+		...(profile.searcher ? { searcher: profile.searcher } : {}),
 		roles: Object.fromEntries(WORKER_ROLES.map((role) => [role, {
 			agent_type: `herder.${role}`,
 			...profile.roles[role],

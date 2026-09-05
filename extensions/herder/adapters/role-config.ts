@@ -106,7 +106,11 @@ function optionalMapping(frontmatter: Record<string, unknown>, file: string): Ne
 	};
 }
 
-export function resolveNestedBinding(definition: HerderNestedAgentDefinition, action: Pick<ManagerAction, "model" | "effort" | "serviceTier">): NestedAgentModelBinding {
+export function resolveNestedBinding(definition: HerderNestedAgentDefinition, action: Pick<ManagerAction, "model" | "effort" | "serviceTier" | "searcherBinding">): NestedAgentModelBinding {
+	if (definition.name === "searcher" && action.searcherBinding) {
+		const mapping = action.searcherBinding;
+		return { model: mapping.model, effort: mapping.effort, ...(mapping.service_tier ? { serviceTier: mapping.service_tier } : {}) };
+	}
 	if (definition.binding === "inherit") {
 		return {
 			model: action.model,
@@ -118,9 +122,11 @@ export function resolveNestedBinding(definition: HerderNestedAgentDefinition, ac
 	return definition.modelBinding;
 }
 
-function validateOwnBinding(definition: HerderNestedAgentDefinition, availableModels: readonly AvailableModel[]): void {
-	if (definition.binding !== "own" || !definition.modelBinding) return;
-	const mapping = definition.modelBinding;
+function validateOwnBinding(definition: HerderNestedAgentDefinition, availableModels: readonly AvailableModel[], override?: ResolvedProfile["searcher"]): void {
+	if (!override && (definition.binding !== "own" || !definition.modelBinding)) return;
+	const mapping = override
+		? { model: override.model, effort: override.effort, ...(override.service_tier ? { serviceTier: override.service_tier } : {}) }
+		: definition.modelBinding!;
 	const candidate = availableModels.find((model) => modelMatches(mapping.model, model));
 	if (!candidate || !modelSupportsEffort(candidate, mapping.effort)) {
 		throw new Error(`Herder nested agent ${definition.name} cannot start because ${mapping.model} does not support thinking ${mapping.effort}.`);
@@ -214,9 +220,10 @@ export async function validateHerderRoleAgents(
 	availableModels: readonly AvailableModel[],
 ): Promise<void> {
 	const nested = await Promise.all(HERDER_NESTED_AGENT_TYPES.map((type) => loadHerderNestedAgent(agentRoot, type)));
-	for (const definition of nested) validateOwnBinding(definition, availableModels);
-	for (const role of WORKER_ROLES) {
-		const mapping = profile.roles[role];
+	for (const definition of nested) validateOwnBinding(definition, availableModels, definition.name === "searcher" ? profile.searcher : undefined);
+	const mappings = WORKER_ROLES.map((role) => [role, profile.roles[role]] as const);
+	if (profile.rescue) mappings.push(["plan-implementer", profile.rescue]);
+	for (const [role, mapping] of mappings) {
 		const definition = await loadHerderPiRole(agentRoot, role);
 		if (mapping.agent_type !== definition.agentType) {
 			throw new Error(`Herder role ${role} must use package agent ${definition.agentType}, not ${mapping.agent_type}.`);
