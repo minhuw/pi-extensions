@@ -23,6 +23,7 @@ import { resetPlanExecution, type ResetPlanCleanupEvidence, type ResetPlanCleanu
 import { canonicalWorktreeRoot, isAllowedWorktreeRoot } from "./git/worktree-locations.ts";
 import type { StoredPlanSpec } from "./run-store.ts";
 import { resolveNodeExecutable } from "../shared/node-executable.ts";
+import { GATE_OUTCOMES, type GateOutcome } from "../shared/gate-outcome.ts";
 import {
 	integrationRepairRefSnapshotSha256,
 	normalizeIntegrationRepairRefSnapshotEvidence,
@@ -50,6 +51,11 @@ export interface GateResult {
 	rationale: string;
 	command: string;
 	ok: boolean;
+	/** Process outcome only: a launched command failure is not necessarily a code defect. */
+	outcome?: GateOutcome;
+	error?: string;
+	timedOut?: boolean;
+	signal?: string | null;
 	exitCode: number | null;
 	durationMs: number;
 	logPath: string;
@@ -660,6 +666,14 @@ export class GitDriver {
 					"--timeout-ms", String(gate.timeoutMs ?? 30 * 60 * 1_000),
 					"--", ...gate.argv,
 				], { allowFailure: true, allowNotOk: true });
+				// A runner/setup failure may precede log creation. Never manufacture
+				// "undefined" paths or NaN timing as if a check had actually run.
+				if (typeof result.logPath !== "string" || !result.logPath
+					|| typeof result.logSha256 !== "string" || !/^[0-9a-f]{64}$/.test(result.logSha256)
+					|| !Number.isFinite(result.durationMs) || !Number.isSafeInteger(result.logBytes)
+					|| Number(result.logBytes) < 0 || !GATE_OUTCOMES.includes(result.outcome as GateOutcome)) {
+					throw new Error(`Verification gate ${gate.gateId} runner failed before evidence was finalized: ${String(result.error || result.phase || "invalid gate evidence")}`);
+				}
 				return {
 					gateId: gate.gateId,
 					label: gate.label,
@@ -669,6 +683,10 @@ export class GitDriver {
 					rationale: gate.rationale,
 					command: gate.argv.join(" "),
 					ok: Boolean(result.ok),
+					outcome: result.outcome as GateOutcome,
+					...(typeof result.error === "string" ? { error: result.error } : {}),
+					timedOut: Boolean(result.timedOut),
+					signal: typeof result.signal === "string" ? result.signal : null,
 					exitCode: result.exitCode === null ? null : Number(result.exitCode),
 					durationMs: Number(result.durationMs),
 					logPath: String(result.logPath),

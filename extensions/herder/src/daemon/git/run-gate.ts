@@ -8,6 +8,7 @@ import path from "node:path"
 import { isInside } from "./primitives.ts"
 import process from "node:process"
 import { performance } from "node:perf_hooks"
+import { gateOutcome, type GateOutcome } from "../../shared/gate-outcome.ts"
 
 interface GateArguments {
   cwd: string
@@ -25,6 +26,7 @@ const GATE_HARD_KILL_GRACE_MS = 5_000
 
 interface GateResult {
   ok: boolean
+  outcome: GateOutcome
   label: string
   commandSha256: string
   cwd: string
@@ -265,7 +267,7 @@ async function main(): Promise<void> {
   try {
     parsed = parseArguments(process.argv.slice(2))
   } catch (error) {
-    print({ ok: false, phase: "arguments", error: error instanceof Error ? error.message : String(error) })
+    print({ ok: false, outcome: "runner_error", phase: "arguments", error: error instanceof Error ? error.message : String(error) })
     process.exitCode = 1
     return
   }
@@ -283,7 +285,7 @@ async function main(): Promise<void> {
     await mkdir(logDir, { recursive: true })
     if (isInside(canonicalRoot, await realpath(logDir))) throw new Error("--log-dir must be outside the command worktree")
   } catch (error) {
-    print({ ok: false, phase: "setup", error: error instanceof Error ? error.message : String(error) }, parsed.pretty)
+    print({ ok: false, outcome: "runner_error", phase: "setup", error: error instanceof Error ? error.message : String(error) }, parsed.pretty)
     process.exitCode = 1
     return
   }
@@ -298,6 +300,8 @@ async function main(): Promise<void> {
   let childExitCode: number | null = null
   let childSignal: NodeJS.Signals | null = null
   let spawnError: Error | null = null
+  let launchFailed = false
+  let runnerFailed = false
   let timedOut = false
   let logTruncated = false
   let spawnCwd = cwd
@@ -366,6 +370,7 @@ async function main(): Promise<void> {
         timeout.unref()
         child.once("error", (error) => {
           spawnError = error
+          launchFailed = true
           if (child.pid !== undefined) settleCapture()
         })
         child.once("exit", (code, signal) => {
@@ -385,6 +390,7 @@ async function main(): Promise<void> {
       if (logTruncated) await writeAll(logHandle, Buffer.from(GATE_LOG_TRUNCATION_MARKER))
     } catch (error) {
       spawnError = error instanceof Error ? error : new Error(String(error))
+      runnerFailed = true
     }
 
     await logHandle.close()
@@ -394,6 +400,7 @@ async function main(): Promise<void> {
     const ok = !spawnError && !timedOut && childExitCode === 0
     result = {
       ok,
+      outcome: gateOutcome({ ok, timedOut, launchFailed, runnerFailed }),
       label: parsed.label,
       commandSha256: createHash("sha256").update(JSON.stringify(parsed.command)).digest("hex"),
       cwd: spawnCwd,
@@ -426,6 +433,7 @@ async function main(): Promise<void> {
   if (!result) throw new Error("gate evidence was not finalized")
   if (cleanupError) {
     result.ok = false
+    result.outcome = "runner_error"
     const message = `gate environment cleanup failed: ${cleanupError}`
     result.error = result.error ? `${result.error}; ${message}` : message
   }
@@ -436,6 +444,6 @@ async function main(): Promise<void> {
 try {
   await main()
 } catch (error) {
-  print({ ok: false, phase: "runner", error: error instanceof Error ? error.message : String(error) })
+  print({ ok: false, outcome: "runner_error", phase: "runner", error: error instanceof Error ? error.message : String(error) })
   process.exitCode = 1
 }

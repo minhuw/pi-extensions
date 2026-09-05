@@ -87,6 +87,73 @@ function normalizedGate(fixtureData: Fixture, cwd: string, argv: string[], gateI
 	}).manifest.gates[0]!;
 }
 
+test("records unavailable executable evidence without calling it a code failure", () => {
+	const fixtureData = fixture();
+	try {
+		const missing = path.join(fixtureData.root, "missing-toolchain-binary");
+		const gate = normalizedGate(fixtureData, ".", [missing, "check"], "missing-tool");
+		const [result] = fixtureData.driver.runVerificationGates("missing-tool", fixtureData.worktree, [gate]);
+		assert.equal(result?.ok, false);
+		assert.equal(result?.outcome, "unavailable");
+		assert.match(result?.error ?? "", /ENOENT/);
+		assert.equal(result?.timedOut, false);
+		assert.ok(fs.existsSync(result!.logPath));
+		assert.equal(result?.logBytes, 0);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("does not infer tool absence or code defects from a wrapper exit code", () => {
+	const fixtureData = fixture();
+	try {
+		const gate = normalizedGate(fixtureData, ".", [process.execPath, "-e", "process.stderr.write('ruff unavailable in selected environment'); process.exit(127)"], "wrapper-failed");
+		const [result] = fixtureData.driver.runVerificationGates("wrapper-failed", fixtureData.worktree, [gate]);
+		assert.equal(result?.ok, false);
+		assert.equal(result?.outcome, "command_failed");
+		assert.equal(result?.exitCode, 127);
+		assert.equal(result?.error, undefined);
+		assert.match(fs.readFileSync(result!.logPath, "utf8"), /ruff unavailable/);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("preserves explicit environment-manager argv and cwd without binary discovery", () => {
+	const fixtureData = fixture();
+	try {
+		const packageRoot = path.join(fixtureData.worktree, "python-package");
+		fs.mkdirSync(packageRoot);
+		const manager = path.join(fixtureData.worktree, "manager.cjs");
+		fs.writeFileSync(manager, "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), home: process.env.HOME }));\n");
+		const args = ["run", "--no-sync", "ruff", "check", "src with spaces"];
+		const gate = normalizedGate(fixtureData, "python-package", [process.execPath, manager, ...args], "manager-invocation");
+		const [result] = fixtureData.driver.runVerificationGates("manager-invocation", fixtureData.worktree, [gate]);
+		assert.equal(result?.outcome, "passed");
+		const report = JSON.parse(fs.readFileSync(result!.logPath, "utf8")) as { args: string[]; cwd: string; home: string };
+		assert.deepEqual(report.args, args);
+		assert.equal(report.cwd, fs.realpathSync(packageRoot));
+		assert.notEqual(report.home, os.homedir());
+		assert.equal(fs.existsSync(report.home), false);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
+test("rejects unfinalized runner output instead of inventing gate evidence", () => {
+	const fixtureData = fixture();
+	try {
+		const helperRoot = path.join(fixtureData.root, "broken-runner");
+		fs.mkdirSync(helperRoot);
+		fs.writeFileSync(path.join(helperRoot, "run-gate.ts"), "console.log(JSON.stringify({ ok: false, outcome: 'runner_error', phase: 'setup', error: 'cannot create isolated home' }));\n");
+		const driver = new GitDriver({ repoRoot: fixtureData.repo, planDirectory: fixtureData.planDirectory, planName: "cwd-safety", helperRoot });
+		const gate = normalizedGate(fixtureData, ".", [process.execPath, "-e", "process.exit(0)"], "runner-unavailable");
+		assert.throws(() => driver.runVerificationGates("runner-unavailable", fixtureData.worktree, [gate]), /runner failed before evidence was finalized: cannot create isolated home/);
+	} finally {
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
 test("prepares locked npm dependencies transiently in the gate cwd", () => {
 	const fixtureData = fixture();
 	try {
@@ -321,6 +388,9 @@ test("preserves silent gate timeout failure behavior", { timeout: 15_000 }, () =
 		const log = fs.readFileSync(result!.logPath);
 
 		assert.equal(result?.ok, false);
+		assert.equal(result?.outcome, "timed_out");
+		assert.equal(result?.timedOut, true);
+		assert.match(result?.error ?? "", /command exceeded 1000 ms/);
 		assert.notEqual(result?.exitCode, 0);
 		assert.equal(result?.logTruncated, false);
 		assert.equal(log.byteLength, 0);
