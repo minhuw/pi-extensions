@@ -10,6 +10,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { invokeHerderTool } from "../src/application/tools.ts";
 import { parsePlanCommandArguments, type PlanCommandOptions } from "./arguments.ts";
+import { assertPlanResponseOptions, formatPlanToolResponse } from "./plan-tool-response.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import type { AttentionResolutionBinding } from "./attention.ts";
 
@@ -66,6 +67,9 @@ const planningWorkflowSchema = Type.Object({
 	] as const),
 	planDirectory: Type.String(),
 	planId: Type.Optional(Type.String()),
+	view: Type.Optional(StringEnum(["compact", "full"] as const, { description: "validate/shape/snapshot only: compact by default; full exposes raw records and derived contracts." })),
+	offset: Type.Optional(Type.Integer({ minimum: 0, description: "validate/shape/snapshot only: zero-based response character offset. Use the returned nextOffset to continue a partial response." })),
+	responseSha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$", description: "Required with offset > 0: previous page's response hash; rejects continuation if the presentation changed." })),
 	editToken: Type.Optional(Type.String()),
 	track: Type.Optional(Type.Boolean()),
 	requestId: Type.Optional(Type.String()),
@@ -251,7 +255,7 @@ export function registerPiPlanningWorkflows(
 		name: "herder_plan",
 		label: "Herder Plan",
 		executionMode: "sequential",
-		description: "Initialize, validate, shape, inspect, snapshot, report, coordinate a reserved Herder plan edit, or resolve one request-bound attention item.",
+		description: "Initialize, validate, shape, inspect, snapshot, report, coordinate a reserved Herder plan edit, or resolve one request-bound attention item. Validate/shape return compact diagnostics; snapshot returns compiled Markdown once. Use view: full for raw records/contracts. These inspections page at 12,000 characters or 1,900 lines, with hash-bound continuation; collect every page before treating evidence as complete.",
 		parameters: planningWorkflowSchema,
 		prepareArguments: preparePlanningWorkflowArguments,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -259,6 +263,7 @@ export function registerPiPlanningWorkflows(
 				return { content: [{ type: "text" as const, text: "Trust this project before using Herder plan operations." }], isError: true, details: {} };
 			}
 			try {
+				assertPlanResponseOptions(params.operation, params);
 				if (["init", "track", "untrack"].includes(params.operation)) runtime.assertMutationAllowed();
 				const repoRoot = await repositoryRoot(ctx);
 				const planDirectory = params.operation === "init"
@@ -298,7 +303,7 @@ export function registerPiPlanningWorkflows(
 						});
 					}
 				}
-				return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: { result } };
+				return { content: [{ type: "text" as const, text: formatPlanToolResponse(params.operation, result, params) }], details: { result } };
 			} catch (error) {
 				return { content: [{ type: "text" as const, text: message(error) }], isError: true, details: {} };
 			}
