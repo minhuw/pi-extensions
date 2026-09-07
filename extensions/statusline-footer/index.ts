@@ -4,7 +4,7 @@
  * Visual language is borrowed from pikit's footer: left/right justified rows,
  * a positional RGB gradient context bar, per-level thinking color (rainbow at
  * max/xhigh), a hairline rule, and Nerd Font icons with ASCII fallbacks.
- * Metrics remain ours: TTFT/TTFB, token-weighted throughput, cache ratio,
+ * Metrics remain ours: TTFT/TTFB, aggregate throughput, cache ratio,
  * session cost, and working-tree diff.
  *
  * Full mode:
@@ -195,6 +195,7 @@ interface Stats {
 	output: number;
 	cost: number;
 	cacheRead: number;
+	cacheWrite: number;
 	reasoning: number;
 	turns: number;
 	compactions: number;
@@ -209,6 +210,7 @@ function addUsage(stats: Stats, usage: Usage | undefined): void {
 	stats.input += usage.input;
 	stats.output += usage.output;
 	stats.cacheRead += usage.cacheRead;
+	stats.cacheWrite += usage.cacheWrite ?? 0;
 	stats.reasoning += usage.reasoning ?? 0;
 	stats.cost += usage.cost.total;
 }
@@ -243,6 +245,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		output: 0,
 		cost: 0,
 		cacheRead: 0,
+		cacheWrite: 0,
 		reasoning: 0,
 		turns: 0,
 		compactions: 0,
@@ -300,8 +303,8 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 //   message_update (*_delta) → first streamed token (text/thinking/toolcall)
 //   message_end (assistant)  → exact usage.output + stream end time
 //
-// Weighted avg tok/s = Σ output tokens / Σ stream durations, i.e. a
-// token-weighted mean over all completed requests in this session.
+// Avg tok/s = Σ output tokens / Σ stream durations over completed
+// requests with observed content in this session.
 
 interface StreamMetrics {
 	requestSentAt: number;
@@ -368,13 +371,33 @@ interface GitStat {
 	behind: number;
 }
 
-// Extension modules are cached within the process, while pi-subagents binds a
-// fresh extension activation to every child AgentSession. Keep telemetry keyed
-// by session so child lifecycle and stream events cannot reset or corrupt the
-// interactive parent's footer. The map also preserves metrics across /reload.
+// Keep telemetry keyed by session so child lifecycle and stream events cannot
+// reset or corrupt the interactive parent's footer. Actual reloads replace this
+// module; only the small custom-entry snapshot survives them.
 const sessionStates = new Map<string, SessionState>();
+const RELOAD_ENTRY = "statusline-footer:reload";
+type ReloadSnapshot = Pick<SessionState, "metrics" | "serviceTier">;
 
-function freshSessionState(previous?: SessionState): SessionState {
+function restoreSnapshot(data: unknown): ReloadSnapshot | undefined {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+	const { metrics, serviceTier } = data as Record<string, unknown>;
+	if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) return undefined;
+	if (serviceTier !== undefined && typeof serviceTier !== "string") return undefined;
+
+	const restored = freshMetrics();
+	for (const key of Object.keys(restored) as (keyof StreamMetrics)[]) {
+		const value = (metrics as Record<string, unknown>)[key];
+		if (value === null && restored[key] === null) continue;
+		if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+		restored[key] = value;
+	}
+	restored.requestSentAt = 0;
+	restored.firstTokenAt = 0;
+	restored.curTtftMs = null;
+	return { metrics: restored, serviceTier };
+}
+
+function freshSessionState(previous?: ReloadSnapshot): SessionState {
 	return {
 		metrics: previous?.metrics ?? freshMetrics(),
 		gitStat: { status: "pending", ahead: 0, behind: 0 },
@@ -449,7 +472,7 @@ function refreshGitStat(cwd: string, state: SessionState) {
 		};
 		state.requestRender?.();
 	};
-	execFile("git", ["status", "--porcelain=v1", "--untracked-files=normal"], opts, (err, stdout) => {
+	execFile("git", ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"], opts, (err, stdout) => {
 		status = err ? "unavailable" : parseGitStatus(stdout);
 		finish();
 	});
@@ -488,23 +511,23 @@ type IconSet = {
 };
 
 const NERD_ICONS: IconSet = {
-	compact: "\uF0615", // md-arrow-collapse
-	elapsed: "\uF0954", // md-clock
-	turns: "\uF0368", // md-message-reply-text
-	input: "\uF005E", // md-arrow-up-thick
-	output: "\uF0046", // md-arrow-down-thick
-	cache: "\uF140B", // md-lightning-bolt
-	cost: "\uF01C1", // md-currency-usd
-	ttft: "\uF051B", // md-timer-outline
-	ttfb: "\uF04E1", // md-swap-horizontal
-	speed: "\uF04C5", // md-speedometer
-	last: "\uF02DA", // md-history
-	calls: "\uF05B7", // md-wrench
-	err: "\uF0159", // md-close-circle
-	ok: "\uF0133", // md-checkbox-marked-circle
-	branch: "\uF062C", // md-source-branch
-	file: "\uF0224", // md-file-outline
-	cwd: "\uF0770", // md-folder-open
+	compact: "\u{F0615}", // md-arrow-collapse
+	elapsed: "\u{F0954}", // md-clock
+	turns: "\u{F0368}", // md-message-reply-text
+	input: "\u{F005E}", // md-arrow-up-thick
+	output: "\u{F0046}", // md-arrow-down-thick
+	cache: "\u{F140B}", // md-lightning-bolt
+	cost: "\u{F01C1}", // md-currency-usd
+	ttft: "\u{F051B}", // md-timer-outline
+	ttfb: "\u{F04E1}", // md-swap-horizontal
+	speed: "\u{F04C5}", // md-speedometer
+	last: "\u{F02DA}", // md-history
+	calls: "\u{F05B7}", // md-wrench
+	err: "\u{F0159}", // md-close-circle
+	ok: "\u{F0133}", // md-checkbox-marked-circle
+	branch: "\u{F062C}", // md-source-branch
+	file: "\u{F0224}", // md-file-outline
+	cwd: "\u{F0770}", // md-folder-open
 } as const;
 
 const ASCII_ICONS: IconSet = {
@@ -600,6 +623,7 @@ function renderContext(
 	barWidth: number,
 	compactions: number,
 	compactIcon: string,
+	maxWidth = Infinity,
 ): string {
 	const compact = glyph(theme, compactIcon, compactions > 0 ? "warning" : "dim") + " " +
 		theme.fg(compactions > 0 ? "warning" : "dim", `${compactions}×`);
@@ -607,17 +631,55 @@ function renderContext(
 		const pct = usage.percent;
 		const used = fmtTokens(usage.tokens ?? 0);
 		const window = fmtTokens(usage.contextWindow);
-		return cluster([
-			compact,
-			gradientBar(pct, barWidth, theme),
-			theme.fg("muted", `${pct.toFixed(1)}%`),
-			theme.fg("dim", `${used}/${window}`),
-		], "  ");
+		const percent = theme.fg("muted", `${pct.toFixed(1)}%`);
+		const counts = theme.fg("dim", `${used}/${window}`);
+		const barSpace = maxWidth - visibleWidth(cluster([compact, percent, counts], "  ")) - 2;
+		if (barSpace >= 4) {
+			return cluster([compact, gradientBar(pct, Math.min(barWidth, barSpace), theme), percent, counts], "  ");
+		}
+		const prefix = compactions > 0 ? compact : "";
+		const remaining = maxWidth - visibleWidth(cluster([prefix, percent], "  ")) - 2;
+		return remaining >= 4
+			? cluster([prefix, gradientBar(pct, Math.min(barWidth, remaining), theme), percent], "  ")
+			: truncateToWidth(percent, Math.max(0, maxWidth));
 	}
 	if (usage?.contextWindow) {
-		return cluster([compact, theme.fg("dim", `/ ${fmtTokens(usage.contextWindow)}`)], "  ");
+		return truncateToWidth(cluster([compact, theme.fg("dim", `/ ${fmtTokens(usage.contextWindow)}`)], "  "), maxWidth);
 	}
-	return compact;
+	return truncateToWidth(compact, maxWidth);
+}
+
+function renderIdentityRow(
+	ctx: ExtensionContext,
+	theme: Theme,
+	width: number,
+	state: SessionState,
+	s: Stats,
+	compactMode: boolean,
+): string {
+	const set = icons();
+	const usage = ctx.getContextUsage();
+	const barWidth = compactMode ? COMPACT_BAR_WIDTH : BAR_WIDTH;
+	let left = renderModelLabel(ctx, theme, !compactMode, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
+	const tail = compactMode ? [
+		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`),
+		theme.fg("dim", fmtDuration(s.durationMs)),
+	] : [];
+	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
+	const right = cluster([context, ...tail], "  ");
+	if (visibleWidth(left) + visibleWidth(right) + 3 <= width) return alignRow(left, right, width);
+
+	// Keep identity and context percent; shed provider, token counts, and compact extras first.
+	left = renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
+	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
+	left = truncateToWidth(left, Math.max(0, width - minimumContext - 3));
+	const budget = Math.max(0, width - visibleWidth(left) - 3);
+	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
+	const contextBudget = Math.max(0, budget - (tail.length ? visibleWidth(cluster(tail, "  ")) + 2 : 0));
+	return alignRow(left, cluster([
+		renderContext(theme, usage, barWidth, s.compactions, set.compact, contextBudget),
+		...tail,
+	], "  "), width);
 }
 
 function renderCompact(
@@ -626,17 +688,7 @@ function renderCompact(
 	width: number,
 	state: SessionState,
 ): string {
-	const set = icons();
-	const s = collectStats(ctx, state);
-	const usage = ctx.getContextUsage();
-	const sep = "  ";
-	const left = renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
-	const right = cluster([
-		renderContext(theme, usage, COMPACT_BAR_WIDTH, s.compactions, set.compact),
-		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`),
-		theme.fg("dim", fmtDuration(s.durationMs)),
-	], sep);
-	return alignRow(left, right, width);
+	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true);
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -654,19 +706,14 @@ function renderFull(
 ): string[] {
 	const set = icons();
 	const s = collectStats(ctx, state);
-	const usage = ctx.getContextUsage();
 	const sep = "  ";
 
-	const line1 = alignRow(
-		renderModelLabel(ctx, theme, true, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier),
-		renderContext(theme, usage, BAR_WIDTH, s.compactions, set.compact),
-		width,
-	);
+	const line1 = renderIdentityRow(ctx, theme, width, state, s, false);
 
 	const { metrics } = state;
 	const avgTtft = avgTtftMs(metrics);
 	const avg = avgTokPerSec(metrics);
-	const totalIn = s.input + s.cacheRead;
+	const totalIn = s.input + s.cacheRead + s.cacheWrite;
 	const cachePct = totalIn > 0 ? Math.round((s.cacheRead / totalIn) * 100) : null;
 	const cacheColor: ThemeToken = cachePct == null ? "dim" : cachePct >= 70 ? "success" : cachePct >= 40 ? "warning" : "dim";
 
@@ -784,8 +831,10 @@ export default function (pi: ExtensionAPI) {
 
 		installedCtx = undefined; // new session runtime → reinstall
 		const sessionId = ctx.sessionManager.getSessionId();
-		const previous = sessionStates.get(sessionId);
-			const state = freshSessionState(event.reason === "reload" ? previous : undefined);
+		const entry = event.reason === "reload"
+			? ctx.sessionManager.getEntries().findLast((entry) => entry.type === "custom" && entry.customType === RELOAD_ENTRY)
+			: undefined;
+		const state = freshSessionState(entry?.type === "custom" ? restoreSnapshot(entry.data) : undefined);
 		sessionStates.set(sessionId, state);
 		if (mode !== "off") install(ctx, state);
 	});
@@ -795,8 +844,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", (event, ctx) => {
 		const state = getSessionState(ctx);
 		if (!state || ctx.mode !== "tui") return;
-		const tier = extractServiceTier(event.payload);
-		if (tier) state.serviceTier = tier;
+		state.serviceTier = extractServiceTier(event.payload);
+	});
+
+	pi.on("model_select", (_event, ctx) => {
+		const state = getSessionState(ctx);
+		if (!state || ctx.mode !== "tui") return;
+		state.serviceTier = undefined;
+		state.requestRender?.();
 	});
 
 	pi.on("before_provider_headers", (_event, ctx) => {
@@ -832,16 +887,21 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_update", (event, ctx) => {
 		const metrics = getSessionState(ctx)?.metrics;
-		if (!metrics || ctx.mode !== "tui") return;
-		// First content-block start or delta (text/thinking/toolcall)
-		// ≈ first token from the provider.
-		const t = event.assistantMessageEvent.type;
-		if (metrics.firstTokenAt === 0 && (t.endsWith("_delta") || t.endsWith("_start"))) {
-			metrics.firstTokenAt = Date.now();
-			if (metrics.requestSentAt > 0) {
-				metrics.curTtftMs = metrics.firstTokenAt - metrics.requestSentAt;
-				metrics.lastTtftMs = metrics.curTtftMs;
-			}
+		if (!metrics || ctx.mode !== "tui" || metrics.firstTokenAt !== 0) return;
+		const update = event.assistantMessageEvent;
+		let hasContent = false;
+		if (update.type === "text_delta" || update.type === "thinking_delta" || update.type === "toolcall_delta") {
+			hasContent = update.delta.length > 0;
+		} else if (update.type === "text_start" || update.type === "thinking_start" || update.type === "toolcall_start") {
+			const block = update.partial.content[update.contentIndex];
+			hasContent = (block?.type === "text" && block.text.length > 0)
+				|| (block?.type === "thinking" && block.thinking.length > 0)
+				|| (block?.type === "toolCall" && block.name.length > 0);
+		}
+		if (!hasContent) return;
+		metrics.firstTokenAt = Date.now();
+		if (metrics.requestSentAt > 0) {
+			metrics.curTtftMs = metrics.firstTokenAt - metrics.requestSentAt;
 		}
 	});
 
@@ -850,7 +910,7 @@ export default function (pi: ExtensionAPI) {
 		if (!state || ctx.mode !== "tui" || event.message.role !== "assistant") return;
 		const { metrics } = state;
 		const usage = (event.message as AssistantMessage).usage;
-		const streamStart = metrics.firstTokenAt || metrics.requestSentAt;
+		const streamStart = metrics.firstTokenAt;
 		const streamMs = streamStart > 0 ? Date.now() - streamStart : 0;
 		// Ignore degenerate samples (no stream observed, or instant responses
 		// where duration is too small to yield a meaningful rate).
@@ -860,6 +920,7 @@ export default function (pi: ExtensionAPI) {
 			metrics.lastTokPerSec = usage.output / (streamMs / 1000);
 			metrics.requests++;
 			if (metrics.curTtftMs != null) {
+				metrics.lastTtftMs = metrics.curTtftMs;
 				metrics.totalTtftMs += metrics.curTtftMs;
 				metrics.ttftCount++;
 			}
@@ -875,8 +936,16 @@ export default function (pi: ExtensionAPI) {
 		installedCtx = undefined;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const state = sessionStates.get(sessionId);
-		if (state) state.requestRender = undefined;
-		if (event.reason !== "reload") sessionStates.delete(sessionId);
+		if (state) {
+			state.requestRender = undefined;
+			if (event.reason === "reload") {
+				pi.appendEntry(RELOAD_ENTRY, {
+					metrics: { ...state.metrics, requestSentAt: 0, firstTokenAt: 0, curTtftMs: null },
+					serviceTier: state.serviceTier,
+				});
+			}
+		}
+		sessionStates.delete(sessionId);
 	});
 
 	pi.registerCommand("footer", {

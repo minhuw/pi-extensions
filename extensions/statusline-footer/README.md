@@ -37,7 +37,7 @@ Full mode is three content rows plus a hairline under the identity row. Primary 
 
 Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard. Segments are separated by space, not mid-dots.
 
-Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right.
+Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right. At narrow widths, both layouts prioritize the model and context percentage: secondary details drop out and the bar shrinks or disappears before the model is truncated.
 
 ## Commands
 
@@ -55,7 +55,7 @@ Compact mode keeps identity on the left and the bar, cost, and elapsed time on t
 - Thinking effort is a first-class CAPS label with per-level color, including a rainbow wash at `xhigh` and `max`.
 - Rows are left/right justified so identity stays put while capacity and cost hug the right edge.
 - Nerd Font icons are used on Ghostty, WezTerm, Kitty, iTerm2, Alacritty, Foot, Rio, and Contour. Everything else falls back to ASCII. Override with `STATUSLINE_NERD_FONTS=1` or `0`.
-- Streaming metrics are measured passively from Pi's provider and message events rather than estimated.
+- Streaming metrics are measured passively from Pi's provider and message events rather than estimated. Completed samples survive `/reload` through a small session custom entry; a new, resumed, or restarted session starts fresh streaming metrics.
 - Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
 - Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history.
@@ -71,11 +71,12 @@ Compact mode keeps identity on the left and the bar, cost, and elapsed time on t
 ## Metric sources
 
 - Context usage comes from Pi's context API; cost, turns, cache usage, compactions, errors, and touched files are derived from the active session branch.
-- TTFT spans the provider request marker to the first streamed content event, with `message_start` as a fallback for providers that hide HTTP events.
+- TTFT spans the provider request marker to the first nonempty streamed content, with `message_start` as a fallback request marker for providers that hide HTTP events. Empty block starts and empty deltas do not count as tokens.
 - TTFB uses Pi's provider-response event when the provider exposes it.
-- Token throughput uses exact output-token usage over measured stream time; the displayed average is token-weighted.
-- Git branch comes from Pi's footer data. Working-tree state uses a throttled `git status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
-- Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`.
+- Token throughput uses exact output-token usage over measured stream time; requests without observed content are excluded. The displayed average is total output tokens divided by total measured stream time.
+- Cache hit rate is cached-read tokens divided by all input tokens: uncached input + cache reads + cache writes.
+- Git branch comes from Pi's footer data. Working-tree state uses a throttled `git --no-optional-locks status --porcelain=v1 --untracked-files=normal`: a successful empty result is `clean`, any output is `dirty`, and a failed or pending status is shown as `git ?` or `git …`. Optional `git diff --shortstat HEAD` supplies additions/deletions, while `git rev-list --left-right --count @{upstream}...HEAD` supplies ahead/behind; either auxiliary query can fail without changing the authoritative status.
+- Service tier is sniffed from the last `before_provider_request` payload and shown only when it is not `standard`/`default`/`auto`. `priority` displays as `FAST`; a request without a tier or a model change clears the previous badge.
 
 ## License
 

@@ -36,6 +36,7 @@ type HarnessOptions = {
 	thinkingLevel?: string;
 	contextUsage?: { percent?: number; tokens?: number; contextWindow: number } | null;
 	branch?: any[];
+	entries?: any[];
 	cwd?: string;
 	gitBranch?: string | null;
 	extensionStatuses?: string[];
@@ -47,6 +48,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => unknown }>();
 	const notifications: string[] = [];
+	const entries = options.entries ?? [];
 	const requestRender = vi.fn();
 	let footer: FooterComponent | undefined;
 	let footerInstallCount = 0;
@@ -103,9 +105,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 			getSessionId: () => sessionId,
 			getLeafId: () => "leaf",
 			getBranch: () => options.branch ?? [],
-			getEntries: () => {
-				throw new Error("collectStats must use getBranch()");
-			},
+			getEntries: vi.fn(() => entries),
 		},
 		ui,
 	} as unknown as ExtensionContext;
@@ -119,11 +119,15 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 		registerCommand(name: string, command: { handler: (args: string, ctx: ExtensionContext) => unknown }) {
 			commands.set(name, command);
 		},
+		appendEntry: vi.fn((customType: string, data: unknown) => {
+			entries.push({ type: "custom", customType, data: structuredClone(data) });
+		}),
 	} as unknown as ExtensionAPI;
 
 	return {
 		pi,
 		ctx,
+		entries,
 		notifications,
 		requestRender,
 		getFooter: () => footer,
@@ -229,6 +233,84 @@ describe("statusline footer visual language", () => {
 	});
 });
 
+describe("statusline footer responsive identity and icons", () => {
+	it.each(["full", "compact"])("preserves model and percent in narrow %s mode", async (mode) => {
+		for (const nerdFonts of ["0", "1"]) {
+			vi.stubEnv("STATUSLINE_NERD_FONTS", nerdFonts);
+			const harness = createHarness(`responsive-${mode}-${nerdFonts}`, "tui", {
+				model: { id: "gpt-5.4", provider: "openai", reasoning: true },
+			});
+			try {
+				statuslineFooter(harness.pi);
+				await harness.emit("session_start", { reason: "startup" });
+				await harness.runCommand("footer", mode);
+				for (const width of [0, 1, 2, 3, 12, 24, 40, 60, 80, 120]) {
+					const lines = harness.getFooter()!.render(width);
+					for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+					if (width >= 24) {
+						expect(lines[0]).toContain("gpt-5.4");
+						expect(lines[0]).toContain("42.5%");
+					}
+				}
+				const narrow = harness.getFooter()!.render(40)[0]!;
+				expect(narrow).not.toContain("openai");
+				expect(narrow).not.toContain("100k");
+				expect([...narrow].filter((char) => char === "▉").length).toBeLessThan(mode === "full" ? 18 : 10);
+			} finally {
+				harness.disposeFooter();
+				await harness.emit("session_shutdown", { reason: "quit" });
+				vi.unstubAllEnvs();
+			}
+		}
+	});
+
+	it("bounds a long Unicode model label while keeping its prefix and context percent", async () => {
+		const harness = createHarness("responsive-unicode-model", "tui", {
+			model: { id: "模型模型模型模型模型模型模型模型", provider: "provider", reasoning: true },
+			thinkingLevel: "xhigh",
+		});
+		try {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			for (const mode of ["full", "compact"]) {
+				await harness.runCommand("footer", mode);
+				const lines = harness.getFooter()!.render(24);
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
+				expect(lines[0]).toContain("模型");
+				expect(lines[0]).toContain("42.5%");
+			}
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+		}
+	});
+
+	it("renders supplementary-plane Nerd Font icons without stray suffix characters", async () => {
+		vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+		const harness = createHarness("nerd-font-codepoints", "tui", {
+			branch: [{ type: "message", message: {
+				role: "assistant",
+				usage: { input: 1, output: 2, cacheRead: 3, cost: { total: 0.01 } },
+				content: [{ type: "toolCall", name: "read", arguments: { path: "example.ts" } }],
+			} }],
+		});
+		try {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			const rendered = harness.getFooter()!.render(240).join("\n");
+			for (const codepoint of [0xF0615, 0xF0954, 0xF0368, 0xF005E, 0xF0046, 0xF140B,
+				0xF01C1, 0xF051B, 0xF04C5, 0xF05B7, 0xF0133, 0xF062C, 0xF0224, 0xF0770]) {
+				expect(rendered).toContain(String.fromCodePoint(codepoint));
+			}
+			expect(rendered).not.toMatch(/[\uF000-\uF8FF]/u);
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			vi.unstubAllEnvs();
+		}
+	});
+});
+
 describe("statusline footer rendering", () => {
 	const branch = [
 		{
@@ -315,7 +397,7 @@ describe("statusline footer rendering", () => {
 		vi.mocked(execFile).mockImplementation((_file, args, _options, callback) => {
 			const complete = () => {
 				const cb = callback as (error: Error | null, stdout: string) => void;
-				if (args?.[0] === "status") cb(statusError ? new Error("git unavailable") : null, statusOutput);
+				if (args?.[1] === "status") cb(statusError ? new Error("git unavailable") : null, statusOutput);
 				else if (args?.[0] === "diff") cb(null, "");
 				else cb(new Error("no upstream"), "");
 			};
@@ -328,6 +410,10 @@ describe("statusline footer rendering", () => {
 		statuslineFooter(pending.pi);
 		await pending.emit("session_start", { type: "session_start", reason: "startup" });
 		expect(pending.getFooter()!.render(120)[3]).toContain("git …");
+		expect(execFile).toHaveBeenCalledWith(
+			"git", ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"],
+			expect.objectContaining({ cwd: pending.ctx.cwd }), expect.any(Function),
+		);
 		defer = false;
 		for (const complete of pendingCallbacks) complete();
 		pending.getFooter()?.dispose?.();
@@ -363,15 +449,19 @@ describe("statusline footer rendering", () => {
 				type: "message",
 				message: {
 					role: "assistant",
-					usage: { input: 1, output: 2, cacheRead: 3, reasoning: 4, cost: { total: 0.01 } },
+					usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 9, reasoning: 4, cost: { total: 0.01 } },
 				},
 			},
-			{ type: "compaction", usage: { input: 10, output: 20, cacheRead: 30, reasoning: 40, cost: { total: 0.10 } } },
-			{ type: "branch_summary", usage: { input: 100, output: 200, cacheRead: 300, reasoning: 400, cost: { total: 1 } } },
-			{ type: "message", message: { role: "toolResult", usage: { input: 1, output: 2, cacheRead: 3, reasoning: 4, cost: { total: 0.01 } } } },
+			{ type: "compaction", usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 90, reasoning: 40, cost: { total: 0.10 } } },
+			{ type: "branch_summary", usage: { input: 100, output: 200, cacheRead: 300, cacheWrite: 900, reasoning: 400, cost: { total: 1 } } },
+			{ type: "message", message: { role: "toolResult", usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 9, reasoning: 4, cost: { total: 0.01 } } } },
 		];
 		const harness = createHarness("usage-branch-boundary", "tui", {
 			branch: activeBranch,
+			entries: [{ type: "message", message: {
+				role: "assistant",
+				usage: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cost: { total: 100 } },
+			} }],
 		});
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
@@ -383,8 +473,28 @@ describe("statusline footer rendering", () => {
 		expect(totals).toContain("224");
 		expect(totals).toContain("336");
 		expect(totals).toContain("448 think");
+		expect(totals).toContain("23%");
 		expect(totals).not.toContain("1M");
+		expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
 		harness.getFooter()?.dispose?.();
+	});
+
+	it.each([
+		[9_000, "9%"],
+		[undefined, "90%"],
+	])("includes cache writes (%s) in the cache-hit denominator", async (cacheWrite, expected) => {
+		const harness = createHarness(`cache-writes-${cacheWrite}`, "tui", {
+			branch: [{ type: "message", message: {
+				role: "assistant",
+				usage: { input: 100, output: 20, cacheRead: 900, cacheWrite, cost: { total: 0 } },
+			} }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		const totals = harness.getFooter()!.render(240)[2]!;
+		expect(totals).toContain(expected);
+		if (cacheWrite) expect(totals).not.toContain("90%");
+		harness.disposeFooter();
 	});
 
 	it("tolerates missing usage on every optional carrier", async () => {
@@ -442,6 +552,95 @@ describe("statusline footer rendering", () => {
 });
 
 describe("statusline footer degraded stream lifecycle", () => {
+	it.each(["text_delta", "thinking_delta", "toolcall_delta"])("waits for real content in %s", async (type) => {
+		let now = 1_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness(`first-content-${type}`, "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+		now = 1_100;
+		for (const [startType, block] of [
+			["text_start", { type: "text", text: "" }],
+			["thinking_start", { type: "thinking", thinking: "" }],
+			["toolcall_start", { type: "toolCall", name: "", arguments: {} }],
+		] as const) {
+			await harness.emit("message_update", {
+				type: "message_update",
+				assistantMessageEvent: { type: startType, contentIndex: 0, partial: { content: [block] } },
+			});
+		}
+		for (const deltaType of ["text_delta", "thinking_delta", "toolcall_delta"]) {
+			await harness.emit("message_update", {
+				type: "message_update", assistantMessageEvent: { type: deltaType, delta: "" },
+			});
+		}
+		now = 1_600;
+		await harness.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type, delta: "content" },
+		});
+		now = 1_800;
+		await harness.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "more" },
+		});
+		now = 2_600;
+		await harness.emit("message_end", assistantEnd(10));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=600 lastTtft=600 lastTok/s=10.0");
+		harness.disposeFooter();
+	});
+
+	it.each([
+		["text_start", { type: "text", text: "hello" }],
+		["thinking_start", { type: "thinking", thinking: "considering" }],
+		["toolcall_start", { type: "toolCall", name: "read", arguments: {} }],
+	])("counts initial content in %s", async (type, block) => {
+		let now = 1_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness(`initial-content-${type}`, "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+		now = 1_200;
+		await harness.emit("message_update", {
+			type: "message_update",
+			assistantMessageEvent: {
+				type, contentIndex: 1, partial: { content: [{ type: "text", text: "" }, block] },
+			},
+		});
+		now = 2_200;
+		await harness.emit("message_end", assistantEnd(20));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=20.0");
+		harness.disposeFooter();
+	});
+
+	it("rejects empty-only streams despite a request marker and output usage", async () => {
+		let now = 1_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("empty-only-stream", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "startup" });
+		await harness.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+		now = 1_200;
+		await harness.emit("message_update", {
+			type: "message_update", assistantMessageEvent: {
+				type: "text_start", contentIndex: 0, partial: { content: [{ type: "text", text: "" }] },
+			},
+		});
+		await harness.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "" },
+		});
+		now = 2_200;
+		await harness.emit("message_end", assistantEnd(20));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=0");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=- lastTtft=- lastTok/s=-");
+		harness.disposeFooter();
+	});
+
 	it("uses the assistant start fallback and keeps response diagnostics isolated", async () => {
 		let now = 0;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -605,6 +804,33 @@ describe("statusline footer degraded stream lifecycle", () => {
 });
 
 describe("statusline footer session isolation", () => {
+	it.each([{}, { service_tier: "standard" }])("replaces stale priority tier with %j and clears it on model switch", async (payload) => {
+		const root = createHarness(`tier-root-${JSON.stringify(payload)}`, "tui");
+		const other = createHarness(`tier-other-${JSON.stringify(payload)}`, "tui");
+		const print = createHarness(root.ctx.sessionManager.getSessionId(), "print");
+		for (const harness of [root, other, print]) {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { type: "session_start", reason: "startup" });
+			await harness.emit("before_provider_request", { payload: { service_tier: "priority" } });
+		}
+		expect(root.getFooter()!.render(240)[0]).toContain("FAST");
+		await root.emit("before_provider_request", { payload });
+		expect(root.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(other.getFooter()!.render(240)[0]).toContain("FAST");
+
+		await root.emit("before_provider_request", { payload: { service_tier: "priority" } });
+		await print.emit("before_provider_request", { payload: {} });
+		await print.emit("model_select", { type: "model_select" });
+		expect(root.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(root.requestRender).not.toHaveBeenCalled();
+		await root.emit("model_select", { type: "model_select" });
+		expect(root.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(root.requestRender).toHaveBeenCalledOnce();
+		expect(other.getFooter()!.render(240)[0]).toContain("FAST");
+		root.disposeFooter();
+		other.disposeFooter();
+	});
+
 	it("ignores overlapping pi-subagents streams and shutdowns", async () => {
 		let now = 0;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -651,7 +877,109 @@ describe("statusline footer session isolation", () => {
 		await root.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
 	});
 
-	it("preserves streaming metrics across reload", async () => {
+	const reloadSnapshot = {
+		metrics: {
+			requestSentAt: 1_000, firstTokenAt: 1_100, curTtftMs: 100,
+			lastTtftMs: 200, lastTtfbMs: null, lastTokPerSec: 20,
+			totalOutput: 20, totalStreamMs: 1_000, totalTtftMs: 200, ttftCount: 1,
+			requests: 1, headersSeen: 1, responsesSeen: 0,
+		},
+		serviceTier: "priority",
+	};
+
+	it.each([
+		["null", null],
+		["array", []],
+		["missing metrics", {}],
+		["array metrics", { metrics: [] }],
+		["missing required field", { metrics: { ...reloadSnapshot.metrics, requests: undefined } }],
+		["null required field", { metrics: { ...reloadSnapshot.metrics, totalOutput: null } }],
+		["missing nullable field", { metrics: { ...reloadSnapshot.metrics, lastTtfbMs: undefined } }],
+		["NaN", { metrics: { ...reloadSnapshot.metrics, totalOutput: NaN } }],
+		["infinity", { metrics: { ...reloadSnapshot.metrics, totalStreamMs: Infinity } }],
+		["negative", { metrics: { ...reloadSnapshot.metrics, headersSeen: -1 } }],
+		["string", { metrics: { ...reloadSnapshot.metrics, curTtftMs: "100" } }],
+		["invalid tier", { ...reloadSnapshot, serviceTier: 123 }],
+	])("ignores a malformed latest reload snapshot: %s", async (label, data) => {
+		const harness = createHarness(`corrupt-reload-${label}`, "tui", {
+			entries: [
+				{ type: "custom", customType: "statusline-footer:reload", data: reloadSnapshot },
+				{ type: "custom", customType: "statusline-footer:reload", data },
+			],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "reload" });
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("headersSeen=0 responsesSeen=0 requests=0");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=- lastTtft=- lastTok/s=-");
+		expect(harness.getFooter()!.render(240)[0]).not.toContain("FAST");
+		harness.disposeFooter();
+	});
+
+	it("resets persisted in-flight fields when restoring completed metrics", async () => {
+		let now = 2_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const harness = createHarness("reload-reset-markers", "tui", {
+			entries: [{ type: "custom", customType: "statusline-footer:reload", data: reloadSnapshot }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason: "reload" });
+		await harness.emit("message_end", assistantEnd(999));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=1");
+		expect(harness.notifications.at(-1)).toContain("lastTtfb=- avgTtft=200 lastTtft=200 lastTok/s=20.0");
+
+		now = 3_000;
+		await harness.emit("message_start", { message: { role: "assistant" } });
+		now = 3_200;
+		await harness.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "fresh" },
+		});
+		now = 4_200;
+		await harness.emit("message_end", assistantEnd(10));
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("requests=2");
+		expect(harness.notifications.at(-1)).toContain("avgTtft=200 lastTtft=200 lastTok/s=10.0");
+		expect(reloadSnapshot.metrics.requestSentAt).toBe(1_000);
+		harness.disposeFooter();
+	});
+
+	it.each(["startup", "new", "resume", "fork"])("starts fresh rather than restoring stale entries on %s", async (reason) => {
+		const harness = createHarness(`fresh-${reason}`, "tui", {
+			entries: [{ type: "custom", customType: "statusline-footer:reload", data: reloadSnapshot }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { type: "session_start", reason });
+		await harness.runCommand("footer", "debug");
+		expect(harness.notifications.at(-1)).toContain("headersSeen=0 responsesSeen=0 requests=0");
+		expect(harness.getFooter()!.render(240)[0]).not.toContain("FAST");
+		expect(harness.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
+		harness.disposeFooter();
+		await harness.emit("session_shutdown", { type: "session_shutdown", reason: reason === "startup" ? "quit" : reason });
+		expect(harness.pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("never restores or persists print-session snapshots, even with the TUI session ID", async () => {
+		const entries = [{ type: "custom", customType: "statusline-footer:reload", data: reloadSnapshot }];
+		const root = createHarness("print-reload-isolation", "tui", { entries });
+		const print = createHarness("print-reload-isolation", "print", { entries });
+		for (const harness of [root, print]) {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { type: "session_start", reason: "reload" });
+		}
+		await print.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+		expect(print.getFooter()).toBeUndefined();
+		expect(print.ctx.sessionManager.getEntries).not.toHaveBeenCalled();
+		expect(print.pi.appendEntry).not.toHaveBeenCalled();
+		expect(entries).toHaveLength(1);
+		await root.runCommand("footer", "debug");
+		expect(root.notifications.at(-1)).toContain("requests=1");
+		root.disposeFooter();
+		await root.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		expect(root.pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("persists completed metrics across an actual module reload and drops in-flight timing", async () => {
 		let now = 0;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
@@ -659,6 +987,7 @@ describe("statusline footer session isolation", () => {
 		statuslineFooter(beforeReload.pi);
 		await beforeReload.emit("session_start", { type: "session_start", reason: "startup" });
 
+		await beforeReload.emit("before_provider_request", { payload: { service_tier: "priority" } });
 		now = 5_000;
 		await beforeReload.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
 		now = 5_250;
@@ -668,20 +997,66 @@ describe("statusline footer session isolation", () => {
 		});
 		now = 6_250;
 		await beforeReload.emit("message_end", assistantEnd(20));
-		beforeReload.getFooter()?.dispose?.();
+		now = 8_000;
+		await beforeReload.emit("before_provider_headers", { type: "before_provider_headers", headers: {} });
+		now = 8_600;
+		await beforeReload.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "unfinished" },
+		});
+		beforeReload.disposeFooter();
 		await beforeReload.emit("session_shutdown", { type: "session_shutdown", reason: "reload" });
+		expect(beforeReload.pi.appendEntry).toHaveBeenCalledOnce();
+		expect(beforeReload.entries[0]).toMatchObject({
+			type: "custom", customType: "statusline-footer:reload", data: {
+				serviceTier: "priority",
+				metrics: {
+					requestSentAt: 0, firstTokenAt: 0, curTtftMs: null,
+					requests: 1, totalOutput: 20, totalStreamMs: 1_000, lastTtftMs: 250,
+				},
+			},
+		});
+		await beforeReload.runCommand("footer", "debug");
+		expect(beforeReload.notifications.at(-1)).toContain("metrics unavailable");
 
-		const afterReload = createHarness("reload-session", "tui");
-		statuslineFooter(afterReload.pi);
+		vi.resetModules();
+		const { default: reloadedFooter } = await import("../index.ts");
+		const afterReload = createHarness("reload-session", "tui", {
+			entries: [
+				{ type: "custom", customType: "statusline-footer:reload", data: null },
+				...structuredClone(beforeReload.entries),
+				{ type: "custom", customType: "another-extension", data: {} },
+			],
+			branch: [], // The snapshot need not be on the currently selected branch.
+		});
+		reloadedFooter(afterReload.pi);
 		await afterReload.emit("session_start", { type: "session_start", reason: "reload" });
 		await afterReload.runCommand("footer", "debug");
 
 		const debug = afterReload.notifications.at(-1);
 		expect(debug).toContain("requests=1");
-		expect(debug).toContain("avgTtft=250");
-		expect(debug).toContain("lastTok/s=20.0");
+		expect(debug).toContain("avgTtft=250 lastTtft=250 lastTok/s=20.0");
+		expect(afterReload.getFooter()!.render(240)[0]).toContain("FAST");
+		expect(afterReload.ctx.sessionManager.getEntries).toHaveBeenCalledOnce();
 
-		afterReload.getFooter()?.dispose?.();
+		now = 10_000;
+		await afterReload.emit("message_end", assistantEnd(999));
+		await afterReload.runCommand("footer", "debug");
+		expect(afterReload.notifications.at(-1)).toContain("requests=1");
+		expect(afterReload.notifications.at(-1)).toContain("avgTtft=250 lastTtft=250 lastTok/s=20.0");
+		now = 11_000;
+		await afterReload.emit("message_start", { message: { role: "assistant" } });
+		now = 11_150;
+		await afterReload.emit("message_update", {
+			type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "fresh" },
+		});
+		now = 12_150;
+		await afterReload.emit("message_end", assistantEnd(10));
+		await afterReload.runCommand("footer", "debug");
+		expect(afterReload.notifications.at(-1)).toContain("requests=2");
+		expect(afterReload.notifications.at(-1)).toContain("avgTtft=200 lastTtft=150 lastTok/s=10.0");
+
+		afterReload.disposeFooter();
 		await afterReload.emit("session_shutdown", { type: "session_shutdown", reason: "quit" });
+		expect(afterReload.pi.appendEntry).not.toHaveBeenCalled();
 	});
 });
