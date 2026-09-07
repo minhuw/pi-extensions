@@ -54,6 +54,7 @@ import {
 	attentionResolutionFromRequest,
 	buildAttentionPrompt,
 	confirmPlanAcceptance,
+	registerAttentionMessageRenderer,
 } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
@@ -183,6 +184,7 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 }
 
 export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFactory: HerderPiWorkerFactory): void {
+	registerAttentionMessageRenderer(pi);
 	registerWorkerTranscriptRenderers(pi);
 	registerCleanupTranscriptRenderer(pi);
 	const engine = new PiWorkerEngine(sessionFactory);

@@ -1,4 +1,5 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	MAX_PLAN_ROUNDS,
 	attentionCapabilityToken,
@@ -16,6 +17,11 @@ export interface HerderAttentionMessageDetails {
 	planId: string;
 	generation: number;
 	round: number;
+	cause?: ManagerAttentionRequest["cause"];
+	role?: ManagerAttentionRequest["continuation"]["role"];
+	phase?: ManagerAttentionRequest["continuation"]["phase"];
+	reason?: string;
+	nextAction?: string;
 }
 
 /** The immutable manager fields supplied by the adapter for an attention resolution. */
@@ -91,6 +97,38 @@ function requestBinding(request: ManagerAttentionRequest, planDirectory?: string
 	];
 }
 
+function compactLine(value: string | undefined, maxLength = 240): string | undefined {
+	const line = value?.replace(/\s+/g, " ").trim();
+	if (!line) return undefined;
+	return line.length <= maxLength ? line : `${line.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function humanLabel(value: string): string {
+	const label = value.replace(/^plan-/, "").replaceAll("_", " ");
+	return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function attentionReason(request: ManagerAttentionRequest): string {
+	const question = compactLine(request.question);
+	if (question) return question;
+	if (["implementer_exhausted", "round_limit", "integration_conflict_exhausted", "transport_exhausted"].includes(request.cause)) {
+		return humanLabel(request.cause);
+	}
+	// Strip only the manager-owned preamble; the worker's explanation stays verbatim.
+	const detail = request.cause === "verification_environment"
+		? request.detail.replace(/^WORKER_SELF_REPORT:[^\r\n]*\r?\nWORKTREE:[^\r\n]*\r?\n/, "")
+		: request.detail;
+	return compactLine(detail) ?? humanLabel(request.cause);
+}
+
+function nextAction(request: ManagerAttentionRequest): string {
+	if (request.kind === "user_decision") return "Answer the question, or defer.";
+	if (request.kind === "operator_attention") return "Retry the recorded role, cancel it, or defer.";
+	return request.round === MAX_PLAN_ROUNDS
+		? "Review the dossier, then accept, revise, stop, or defer."
+		: "Review the dossier, then retry unchanged, revise, reject, or defer.";
+}
+
 export function attentionMessageDetails(request: ManagerAttentionRequest): HerderAttentionMessageDetails {
 	return {
 		requestId: request.requestId,
@@ -98,7 +136,66 @@ export function attentionMessageDetails(request: ManagerAttentionRequest): Herde
 		planId: request.planId,
 		generation: request.generation,
 		round: request.round,
+		cause: request.cause,
+		role: request.continuation.role,
+		phase: request.continuation.phase,
+		reason: attentionReason(request),
+		nextAction: nextAction(request),
 	};
+}
+
+export function attentionMessageDisplay(
+	content: string,
+	details: HerderAttentionMessageDetails | undefined,
+	expanded: boolean,
+	theme: Theme,
+	expandHint = "Open for full dossier",
+): string {
+	const title = `${theme.fg("warning", "⚠")} ${theme.fg("customMessageLabel", theme.bold("Herder attention"))}`;
+	const identity = [
+		details?.planId ? `Plan ${details.planId}` : undefined,
+		details?.role ? humanLabel(details.role) : undefined,
+		typeof details?.round === "number" ? `round ${details.round}` : undefined,
+	].filter((value): value is string => Boolean(value)).join(" · ");
+	const lines = [`${title}${identity ? `  ${theme.fg("muted", identity)}` : ""}`];
+	if (details?.reason) lines.push(`${theme.fg("dim", "  Reason:")} ${details.reason}`);
+	if (details?.nextAction) lines.push(`${theme.fg("dim", "  Next:")} ${details.nextAction}`);
+	if (!expanded) {
+		lines.push(theme.fg("muted", `  ${expandHint}`));
+		return lines.join("\n");
+	}
+	const binding = [
+		typeof details?.generation === "number" ? `generation ${details.generation}` : undefined,
+		details?.phase ? `phase ${details.phase}` : undefined,
+		details?.requestId ? `request ${details.requestId}` : undefined,
+	].filter((value): value is string => Boolean(value)).join(" · ");
+	if (binding) lines.push(theme.fg("muted", `  ${binding}`));
+	lines.push(theme.fg("dim", "  Full dossier"), content);
+	return lines.join("\n");
+}
+
+export function registerAttentionMessageRenderer(pi: ExtensionAPI): void {
+	pi.registerMessageRenderer<HerderAttentionMessageDetails>(HERDER_ATTENTION_MESSAGE, (message, { expanded, outputPad }, theme) => {
+		if (typeof message.content !== "string") return undefined;
+		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+		const display = attentionMessageDisplay(
+			message.content,
+			message.details,
+			expanded,
+			theme,
+			keyHint("app.tools.expand", "for full dossier"),
+		);
+		box.addChild(expanded
+			? new Text(display, 0, 0)
+			: {
+				render: (width: number) => display.split("\n").map((line) => truncateToWidth(line, width)),
+				invalidate: () => {},
+			});
+		return {
+			render: (width: number) => box.render(width).map((line) => truncateToWidth(line, width)),
+			invalidate: () => box.invalidate(),
+		};
+	});
 }
 
 export async function buildAttentionPrompt(

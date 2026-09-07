@@ -419,6 +419,13 @@ test("main-session attention queues concurrent plans and re-exposes only the cur
 		assert.match(api.customMessages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
 		assert.match(api.customMessages[0]!.content, /REQUEST_ID:/);
 		assert.doesNotMatch(api.customMessages[0]!.content, /REQUEST_SHA256|CAPABILITY_TOKEN|RECOVERY_GIT_IDENTITY|schemaVersion|exact request binding/);
+		const messageDetails = object(api.customMessages[0]!.details);
+		assert.equal(messageDetails.planId, "001");
+		assert.equal(messageDetails.cause, "initial_decision_blocked");
+		assert.equal(messageDetails.role, "plan-implementer");
+		assert.equal(messageDetails.round, 1);
+		assert.equal(messageDetails.nextAction, "Review the dossier, then retry unchanged, revise, reject, or defer.");
+		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
 		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
 
 		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
@@ -533,7 +540,8 @@ test("accepting exhausted work requires host confirmation and preserves the fail
 			},
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
-		await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
+		const delivered = await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
+		assert.equal(object(delivered.details).nextAction, "Review the dossier, then accept, revise, stop, or defer.");
 		const params = {
 			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
 			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",

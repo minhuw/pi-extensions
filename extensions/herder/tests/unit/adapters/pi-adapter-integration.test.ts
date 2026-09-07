@@ -19,6 +19,7 @@ import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
+import { HERDER_ATTENTION_MESSAGE } from "../../../adapters/attention.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
 import { HERDER_CLEANUP_ENTRY } from "../../../adapters/cleanup-transcript.ts";
 import {
@@ -465,7 +466,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 
 		assert.deepEqual(api.tools.map((tool) => String((tool as { name: string }).name)).sort(), ["herder_integration_repair", "herder_plan", "herder_reignite", "herder_verification"]);
 		assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
-		assert.deepEqual([...api.renderers].sort(), [HERDER_CLEANUP_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
+		assert.deepEqual([...api.renderers].sort(), [HERDER_ATTENTION_MESSAGE, HERDER_CLEANUP_ENTRY, HERDER_WORKER_INPUT_ENTRY, HERDER_WORKER_OUTPUT_ENTRY].sort());
 
 		const ui = new CapturedUI();
 		context = contextFor(fixture, ui);

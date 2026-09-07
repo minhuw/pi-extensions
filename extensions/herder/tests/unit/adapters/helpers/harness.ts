@@ -105,6 +105,10 @@ export class CapturedExtensionAPI {
 		this.renderers.push(customType);
 	}
 
+	registerMessageRenderer(customType: string, _renderer: unknown): void {
+		this.renderers.push(customType);
+	}
+
 	appendEntry(customType: string, data: unknown): void {
 		this.appendedEntries.push({ customType, data });
 	}

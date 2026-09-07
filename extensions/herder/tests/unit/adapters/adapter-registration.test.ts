@@ -34,6 +34,10 @@ class CapturedExtensionAPI {
 		this.renderers.push(customType);
 	}
 
+	registerMessageRenderer(customType: string, _renderer: unknown): void {
+		this.renderers.push(customType);
+	}
+
 	async invoke(event: string, ...args: unknown[]): Promise<unknown> {
 		const handler = this.handlers.get(event);
 		if (!handler) throw new Error(`No captured ${event} handler`);
@@ -132,6 +136,7 @@ test("adapter registration exposes the complete live surface", () => {
 	].sort());
 	assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
 	assert.deepEqual([...api.renderers].sort(), [
+		"herder-attention-v1",
 		"herder-cleanup-v2",
 		"herder-worker-input-v1",
 		"herder-worker-output-v1",

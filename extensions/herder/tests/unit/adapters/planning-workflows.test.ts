@@ -4,16 +4,22 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
 import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "../../../adapters/run-guidance.ts";
 import { attentionCapabilityToken, validateAttentionResolution } from "../../../src/shared/protocol.ts";
 import { attentionResolutionFromArgs } from "../../../src/application/tools.ts";
 import {
+	HERDER_ATTENTION_MESSAGE,
+	attentionMessageDetails,
+	attentionMessageDisplay,
 	attentionResolutionFromRequest,
 	buildAttentionPrompt,
 	confirmPlanAcceptance,
+	registerAttentionMessageRenderer,
+	type HerderAttentionMessageDetails,
 } from "../../../adapters/attention.ts";
 import {
 	buildPlanningSkillPrompt,
@@ -153,6 +159,130 @@ test("typed attention prompts preserve request bindings and route each variant",
 	assert.match(recoveryPrompt, /001-plan\.md/);
 	assert.match(recoveryPrompt, /CHANGED_PATHS:/);
 	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
+});
+
+test("attention messages render a compact card while preserving the full prompt", async () => {
+	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
+	const request = {
+		schemaVersion: 1 as const,
+		requestId: "request-card",
+		runId: "run-card",
+		planId: "017",
+		generation: 2,
+		round: 2,
+		actionId: "action-card",
+		requestSha256: "a".repeat(64),
+		state: "awaiting_input" as const,
+		kind: "user_decision" as const,
+		cause: "judge_needs_input" as const,
+		detail: "The Judge needs a bounded product decision.",
+		detailSha256: "b".repeat(64),
+		continuation: { role: "plan-judge" as const, phase: "READY_JUDGE" as const },
+		question: "Should the optional compatibility alias remain in scope?",
+		recommendedAction: "Answer the Judge question.",
+		createdAt: "2026-08-12T00:00:00.000Z",
+		updatedAt: "2026-08-12T00:00:00.000Z",
+		capabilityToken: "secret-capability-token",
+	} satisfies ManagerAttentionRequest;
+	const prompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", request);
+	const details = attentionMessageDetails(request);
+	assert.deepEqual(details, {
+		requestId: "request-card",
+		kind: "user_decision",
+		planId: "017",
+		generation: 2,
+		round: 2,
+		cause: "judge_needs_input",
+		role: "plan-judge",
+		phase: "READY_JUDGE",
+		reason: "Should the optional compatibility alias remain in scope?",
+		nextAction: "Answer the question, or defer.",
+	});
+	assert.doesNotMatch(JSON.stringify(details), /secret-capability-token/);
+	const operatorDetails = attentionMessageDetails({
+		...request,
+		kind: "operator_attention",
+		cause: "transport_exhausted",
+		question: undefined,
+	});
+	assert.equal(operatorDetails.reason, "Transport exhausted");
+	assert.equal(operatorDetails.nextAction, "Retry the recorded role, cancel it, or defer.");
+	for (const blocker of ["ENVIRONMENT", "INVOCATION"]) {
+		const explanation = "Chromium executable unavailable; prepare the pinned browser before retrying.";
+		const environmentRequest = {
+			...request,
+			kind: "operator_attention" as const,
+			cause: "verification_environment" as const,
+			question: undefined,
+			detail: [
+				`WORKER_SELF_REPORT: ${blocker}; role=plan-implementer; mode=INITIAL; round=2`,
+				`WORKTREE: /repo/${"long-directory/".repeat(30)}001`,
+				explanation,
+				"CHECKS (worker evidence, not authoritative verification):",
+				"npm run test:e2e — blocked",
+			].join("\n"),
+		};
+		assert.ok(attentionMessageDetails(environmentRequest).reason?.startsWith(explanation));
+		const environmentPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", environmentRequest);
+		assert.ok(environmentPrompt.includes(environmentRequest.detail), "display compaction must not change the dossier");
+		assert.equal(attentionMessageDetails({ ...environmentRequest, detail: explanation }).reason, explanation);
+	}
+
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	} as unknown as Theme;
+	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
+	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
+	assert.match(collapsed, /Reason: Should the optional compatibility alias remain in scope\?/);
+	assert.match(collapsed, /Next: Answer the question, or defer\./);
+	assert.match(collapsed, /ctrl\+o for full dossier/);
+	assert.doesNotMatch(collapsed, /HERDER_MAIN_SESSION|REQUEST_ID|secret-capability-token/);
+
+	const expanded = attentionMessageDisplay(prompt, details, true, theme);
+	assert.match(expanded, /generation 2 · phase READY_JUDGE · request request-card/);
+	assert.ok(expanded.endsWith(prompt), "expanded display retains the exact model-facing prompt");
+
+	let capturedRenderer: MessageRenderer<HerderAttentionMessageDetails> | undefined;
+	registerAttentionMessageRenderer({
+		registerMessageRenderer: (customType: string, renderer: MessageRenderer<HerderAttentionMessageDetails>) => {
+			assert.equal(customType, HERDER_ATTENTION_MESSAGE);
+			capturedRenderer = renderer;
+		},
+	} as unknown as ExtensionAPI);
+	const renderer = capturedRenderer;
+	assert.ok(renderer);
+	initTheme("dark", false);
+	const message = {
+		role: "custom" as const,
+		customType: HERDER_ATTENTION_MESSAGE,
+		content: prompt,
+		display: true,
+		details,
+		timestamp: 0,
+	};
+	for (const expandedView of [false, true]) {
+		for (const width of [1, 4, 16, 40, 80]) {
+			const component = renderer(message, { expanded: expandedView, outputPad: 1 }, theme);
+			assert.ok(component);
+			assert.ok(component.render(width).every((line) => visibleWidth(line) <= width));
+		}
+	}
+	const compactComponent = renderer(message, { expanded: false, outputPad: 1 }, theme);
+	assert.ok(compactComponent);
+	assert.equal(compactComponent.render(80).length, 6, "collapsed card stays four content lines plus padding");
+
+	const legacy = attentionMessageDisplay(prompt, {
+		requestId: details.requestId,
+		kind: details.kind,
+		planId: details.planId,
+		generation: details.generation,
+		round: details.round,
+	}, false, theme, "ctrl+o for full dossier");
+	assert.match(legacy, /Plan 017 · round 2/);
+	assert.doesNotMatch(legacy, /HERDER_MAIN_SESSION/);
+	assert.ok(attentionMessageDisplay(prompt, undefined, true, theme).endsWith(prompt));
 });
 
 test("adapter binds complete attention evidence, including recovery Git identity", async () => {
