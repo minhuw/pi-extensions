@@ -33,17 +33,20 @@ test("terminal run status policy is shared and fail-closed", () => {
 });
 
 test("worker envelopes become typed deterministic results", () => {
-	const implementer = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: abcdef1\nADDRESSED: none\nCHECKS: npm test — passed\nFILES CHANGED: src/a.ts, test/a.test.ts\nDISCOVERED_PATHS: none\nNOTES: done\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=host");
+	const implementer = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: abcdef1\nADDRESSED: none\nSETUP: cwd=.; command=npm ci; result=passed\nCHECKS: npm test — passed\nFILES CHANGED: src/a.ts, test/a.test.ts\nDISCOVERED_PATHS: none\nNOTES: done\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=3; reasoning_tokens=1; source=host");
 	assert.equal(implementer.kind, "implementer");
+	assert.deepEqual(implementer.setup, ["cwd=.; command=npm ci; result=passed"]);
 	assert.deepEqual(implementer.filesChanged, ["src/a.ts", "test/a.test.ts"]);
 	assert.equal(implementer.usage.inputTokens, 10);
 
-	const reviewer = parseWorkerResult("plan-reviewer", "VERDICT: REVISE\nFINDINGS: [NEW][P1][BLOCKING][PLAN_REQUIREMENT] src/a.ts:1 — wrong value; scenario=x; evidence=y; introduced_by=z\nFIX_GUIDANCE: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test failed\nRATIONALE: one blocker\nUSAGE: input_tokens=unknown; cached_input_tokens=unknown; output_tokens=unknown; reasoning_tokens=unknown; source=unknown");
+	const reviewer = parseWorkerResult("plan-reviewer", "VERDICT: REVISE\nFINDINGS: [NEW][P1][BLOCKING][PLAN_REQUIREMENT] src/a.ts:1 — wrong value; scenario=x; evidence=y; introduced_by=z\nFIX_GUIDANCE: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nSCOPE: PASS\nSETUP: none\nCHECKS: npm test failed\nRATIONALE: one blocker\nUSAGE: input_tokens=unknown; cached_input_tokens=unknown; output_tokens=unknown; reasoning_tokens=unknown; source=unknown");
 	assert.equal(reviewer.kind, "reviewer");
+	assert.deepEqual(reviewer.setup, []);
 	assert.equal(reviewer.findings.length, 1);
 
-	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nPASS_DOCUMENT: Fix F001 and rerun the failing check.\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
+	const judge = parseWorkerResult("plan-judge", "DECISION: REPAIR\nPASS_DOCUMENT: Fix F001 and rerun the failing check.\nFINDINGS: [F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; evidence=test\nAUTHORIZED_BLOCKERS: F001\nREPAIR_CONTRACTS: [F001] observed=x; expected=y; reproduction=z; constraints=q\nDISCOVERED_PATHS: none\nLEAKS: none\nQUESTION: none\nSETUP: cwd=.; command=npm ci; result=reused existing node_modules\nCHECKS: test reproduced\nRATIONALE: bounded repair remains\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=2; reasoning_tokens=0; source=host");
 	assert.equal(judge.kind, "judge");
+	assert.deepEqual(judge.setup, ["cwd=.; command=npm ci; result=reused existing node_modules"]);
 	assert.deepEqual(judge.authorizedBlockers, ["F001"]);
 	assert.equal(judge.passDocument, "Fix F001 and rerun the failing check.");
 });
@@ -344,17 +347,19 @@ const blockerEnvelopes = [
 	["plan-reviewer", "VERDICT: BLOCK\nSCOPE: PASS\nFINDINGS: none\nRATIONALE: npm project dependencies are missing; operator must prepare the locked environment"],
 	["plan-judge", "DECISION: BLOCKED\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nRATIONALE: npm project dependencies are missing; operator must prepare the locked environment"],
 ] as const;
-const blockerChecks = "CHECKS: manager=npm project scripts; command=npm test; cwd=/repo; error=missing locked dependency; prerequisite=npm ci by operator";
+const blockerSetup = "SETUP: manager=npm project scripts; command=npm ci; cwd=/repo; result=failed; error=cache miss; prerequisite=declared locked dependencies";
+const blockerChecks = "CHECKS: command=npm test; cwd=/repo; result=not run because declared setup failed";
 
-test("optional worker blockers require blocked outcomes and concrete detail/check evidence", () => {
+test("optional worker blockers require blocked outcomes and concrete setup/check evidence", () => {
 	for (const [role, envelope] of blockerEnvelopes) {
 		for (const kind of ["ENVIRONMENT", "INVOCATION", "REQUIREMENT"]) {
-			assert.equal(parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\n${blockerChecks}`).blockerKind, kind);
-			assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\nCHECKS: none`), /concrete detail and CHECKS/);
-			assert.throws(() => parseWorkerResult(role, `${envelope.replace(/(?:STOPPED BECAUSE|RATIONALE): .*/, "RATIONALE: none")}\nBLOCKER_KIND: ${kind}\n${blockerChecks}`), /concrete detail and CHECKS/);
+			assert.equal(parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\n${blockerChecks}`).blockerKind, kind);
+			assert.equal(parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\nCHECKS: none`).blockerKind, kind, "failed setup is sufficient operational evidence before a check can run");
+			assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\nSETUP: none\nCHECKS: none`), /concrete detail and SETUP or CHECKS/);
+			assert.throws(() => parseWorkerResult(role, `${envelope.replace(/(?:STOPPED BECAUSE|RATIONALE): .*/, "RATIONALE: none")}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\n${blockerChecks}`), /concrete detail and SETUP or CHECKS/);
 		}
-		assert.equal(parseWorkerResult(role, `${envelope}\n${blockerChecks}`).blockerKind, undefined);
-		assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: CODE\n${blockerChecks}`), /Invalid BLOCKER_KIND/);
+		assert.equal(parseWorkerResult(role, `${envelope}\n${blockerSetup}\n${blockerChecks}`).blockerKind, undefined);
+		assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: CODE\n${blockerSetup}\n${blockerChecks}`), /Invalid BLOCKER_KIND/);
 	}
 });
 
@@ -365,12 +370,12 @@ test("worker blocker classification rejects success, repair authority, scope fai
 		["plan-reviewer", "VERDICT: REVISE\nSCOPE: PASS"],
 		["plan-judge", "DECISION: DONE"],
 		["plan-judge", "DECISION: REPAIR"],
-	] as const) assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /requires a blocked worker outcome/);
+	] as const) assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ENVIRONMENT\n${blockerSetup}\n${blockerChecks}`), /requires a blocked worker outcome/);
 	for (const kind of ["ENVIRONMENT", "INVOCATION"]) {
 		for (const extra of ["FINDINGS: [P1][BLOCKING] source bug", "FIX_GUIDANCE: edit code", "AUTHORIZED_BLOCKERS: F001", "REPAIR_CONTRACTS: fix F001", "PASS_DOCUMENT: fix F001", "SCOPE: FAIL"]) {
-			assert.throws(() => parseWorkerResult("plan-implementer", `${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ${kind}\n${blockerChecks}\n${extra}`), /cannot report defect findings/);
+			assert.throws(() => parseWorkerResult("plan-implementer", `${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\n${blockerChecks}\n${extra}`), /cannot report defect findings/);
 		}
 	}
-	assert.throws(() => parseWorkerResult("plan-reviewer", `${blockerEnvelopes[1][1]}\nFINDINGS: source bug\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /repeats FINDINGS/);
-	assert.throws(() => parseWorkerResult("plan-implementer", `STATUS: COMPLETE\n${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ENVIRONMENT\n${blockerChecks}`), /repeats STATUS/);
+	assert.throws(() => parseWorkerResult("plan-reviewer", `${blockerEnvelopes[1][1]}\nFINDINGS: source bug\nBLOCKER_KIND: ENVIRONMENT\n${blockerSetup}\n${blockerChecks}`), /repeats FINDINGS/);
+	assert.throws(() => parseWorkerResult("plan-implementer", `STATUS: COMPLETE\n${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ENVIRONMENT\n${blockerSetup}\n${blockerChecks}`), /repeats STATUS/);
 });

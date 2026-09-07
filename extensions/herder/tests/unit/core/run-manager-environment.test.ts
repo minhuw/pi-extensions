@@ -103,13 +103,14 @@ async function implemented(f: Fixture, a: ManagerAction) {
 	git(a.worktree, ["commit", "-qm", `test: implement round ${a.round}`]);
 	return terminal(f, a, "STATUS: COMPLETE\nCHECKS: fixture value inspected\nNOTES: complete");
 }
-const checks = "CHECKS: manager=npm project scripts; command=npm test; cwd=/repo; error=missing locked dependency; prerequisite=operator prepares locked environment";
+const setup = "SETUP: manager=npm project scripts; command=npm ci; cwd=/repo; result=failed; error=declared cache unavailable; prerequisite=locked dependencies";
+const checks = "CHECKS: command=npm test; cwd=/repo; result=not run because setup failed";
 function blocked(role: ManagerAction["role"], kind = "ENVIRONMENT") {
-	const detail = "Locked dependencies are absent; operator must prepare the declared environment";
+	const detail = "Declared locked dependency restoration failed; operator action is required";
 	return [role === "plan-implementer" ? `STATUS: STOPPED\nSTOPPED BECAUSE: ${detail}`
 		: role === "plan-reviewer" ? `VERDICT: BLOCK\nSCOPE: PASS\nFINDINGS: none\nRATIONALE: ${detail}`
 			: `DECISION: BLOCKED\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nRATIONALE: ${detail}`,
-		`BLOCKER_KIND: ${kind}`, checks].join("\n");
+		`BLOCKER_KIND: ${kind}`, setup, checks].join("\n");
 }
 function retry(f: Fixture, request: ManagerAttentionRequest, eventId = `retry:${request.requestId}`) {
 	return f.manager.event({ eventId, kind: "attention", attention: {
@@ -164,6 +165,9 @@ test("environment block preserves dirty implementation, findings and round while
 		assert.match(fs.readFileSync(path.join(a.worktree, "value-001.mjs"), "utf8"), /incomplete/);
 		assert.equal(reply.attention?.cause, "verification_environment");
 		assert.equal(reply.attention?.kind, "operator_attention");
+		assert.match(reply.attention?.detail ?? "", /SETUP \(worker preparation evidence, not check evidence\):/);
+		assert.match(reply.attention?.detail ?? "", /command=npm ci/);
+		assert.match(reply.attention?.detail ?? "", /CHECKS \(worker evidence, not authoritative verification\):/);
 		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
 	} finally { f.close(); }
 });

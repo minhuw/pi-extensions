@@ -49,7 +49,7 @@ unauthorized requests but not empty results. V1 was not run during planning;
 these observations come from source inspection, not a passed-check claim.
 
 **Required starting state**: The integrated adapter contract below is available;
-the declared npm environment is prepared.
+Node/npm is available and the worker may restore the repository-locked npm environment.
 
 | Plan | Consumes |
 | --- | --- |
@@ -76,7 +76,7 @@ contract is binding; a particular helper or patch shape is not.
 
 | ID | Owner | Cwd | Prerequisites | Probe | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| T1 | npm project scripts | . | Node >=22.19; locked dependencies installed | `node --version` | `package.json`; `package-lock.json`; AGENTS.md |
+| T1 | npm project scripts | . | Node >=22.19; restore missing dependencies with repository-declared `npm ci` from `package-lock.json` | `node --version` | `package.json`; `package-lock.json`; AGENTS.md |
 
 ## Escalation and handoff
 
@@ -113,20 +113,27 @@ A single shared toolchain table may use exactly:
 ```markdown
 | ID | Owner | Cwd | Prerequisites | Probe | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| T1 | npm project scripts | . | Node >=22.19; locked dependencies installed | `node --version` | `package.json`; `package-lock.json`; AGENTS.md |
+| T1 | npm project scripts | . | Node >=22.19; restore missing dependencies with repository-declared `npm ci` from `package-lock.json` | `node --version` | `package.json`; `package-lock.json`; AGENTS.md |
 ```
 
 When moving T1 here, remove its local definition: shared/local IDs cannot shadow,
-even identically. Keep commands in V rows and setup in T prerequisites, not a
-second shared-command list or executable config. `Cwd` may be a dependency-created
-directory; distinguish that guarantee from observed baseline. Discover the
-canonical invocation from scripts, pyproject/uv, Nix, CI, and instructions as
-applicable, never merely from a binary on PATH. Do not assume uv/Nix is present or
-silently install, sync, download, inject credentials, or inherit ambient HOME.
-Existing final-manager npm-only locked preparation is separate: it temporarily
-prepares missing node_modules for qualifying direct npm/npx gates and removes
-what it created. It is not a universal preparer or agent setup authority; see the
-format reference. Preparation failure is not check success.
+even identically. Keep commands in V rows and source-backed setup authority in T
+prerequisites, not a second shared-command list or executable config. `Cwd` may be
+a dependency-created directory; distinguish that guarantee from observed baseline.
+Discover canonical invocation and setup from scripts, pyproject/uv, Nix, manifests/
+locks, CI, and instructions, never merely from a binary on PATH. Workers may restore
+locked dependencies, pinned assets, and repository-prescribed setup, but dependency
+selection or tracked manifest/lock changes require explicit assignment authority.
+Never authorize guessed packages, opportunistic unpinned uvx/npx, global/system/
+privileged changes, credentials, ambient HOME workarounds, weakened checks, or
+unrelated source repair. Setup evidence is separate from check evidence.
+
+Existing final-manager npm-only locked preparation remains separate and transient.
+A non-npm pinned asset can be prepared only through an explicit repository-owned
+setup-and-check invocation inside one gate's isolated HOME/cache; a prep-only gate
+cannot seed the next fresh gate. If no such invocation exists, report the prerequisite
+rather than assuming Playwright or inventing generic orchestration. See the format
+reference. Preparation failure is not check success.
 
 Do not move local acceptance, write scope, dependency guarantees, or escalation
 triggers into shared context. Any shared edit changes all affected snapshots.
@@ -177,10 +184,12 @@ when shared context changes. Check:
    semantic justification and review. Suggested patches are not binding.
    Split only at independently useful, safe boundaries—not tests/docs/layers for
    one invariant.
-6. **Phase ownership**: Implementer probes/diagnoses before edits; Reviewer
-   independently checks the frozen target; main session selects the final
-   manifest and manager executes it. Parser/shape validation runs no plan commands
-   and cannot prove semantic readiness; agent CHECKS is not authoritative gate evidence.
+6. **Phase ownership**: Implementer performs declared setup, probes, and diagnosis
+   before edits; Reviewer reuses or source-preservingly restores declared dependencies
+   before independently checking the frozen target; main session selects the final
+   manifest and manager executes it. Parser/shape validation runs no setup or plan
+   commands and cannot prove semantic readiness or eager dependency availability;
+   agent SETUP/CHECKS remain self-report, not authoritative gate evidence.
 
 Repair only omissions supported by confirmed intent and verified evidence. Missing
 product authority or material scope/approach choices return to clarification and

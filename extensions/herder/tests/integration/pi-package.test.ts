@@ -28,8 +28,8 @@ function testPlanV2Template(template: string): void {
 	assert.doesNotMatch(local, /^- Branch:|npm install|\bwhich\s+(?:node|npm)/m);
 	assert.match(template, /every A row has an acceptance-phase proof/);
 	assert.match(template, /shared\/local IDs cannot shadow/);
-	assert.match(template, /Parser\/shape validation runs no plan commands/);
-	assert.match(template, /agent CHECKS is not authoritative gate evidence/);
+	assert.match(template, /Parser\/shape validation runs no setup or plan/);
+	assert.match(template, /agent SETUP\/CHECKS remain self-report/);
 }
 
 test("Pi package registers Herder while keeping planning skills command-owned", async () => {
@@ -50,8 +50,11 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(herderReadme, /pi install npm:pi-web-access/);
 	assert.match(planTemplate, /Prerequisites/);
-	assert.match(planTemplate, /locked dependencies installed/);
-	assert.doesNotMatch(planTemplate, /npm install/);
+	assert.match(planTemplate, /restore missing dependencies with repository-declared `npm ci`/);
+	assert.match(planTemplate, /pinned assets/);
+	assert.match(planTemplate, /dependency\s+selection or tracked manifest\/lock changes require explicit assignment authority/);
+	assert.match(planTemplate, /setup-and-check invocation inside one gate's isolated HOME\/cache/);
+	assert.doesNotMatch(planTemplate, /npm install|shared registry|centralized setup service/);
 	assert.match(planTemplate, /npm run focused-test/);
 
 	testPlanV2Template(planTemplate);
@@ -326,6 +329,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
 	assert.match(worker, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
 	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls$/m);
+	assert.match(worker, /only when the parent explicitly delegates sole setup ownership/);
+	assert.match(worker, /never compete with parent or sibling installs/);
 	const reviewer = await readFile(path.join(agentDir, "nested/reviewer.md"), "utf8");
 	assert.match(reviewer, /^package: herder$/m);
 	assert.match(reviewer, /^kind: nested$/m);
@@ -334,6 +339,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.doesNotMatch(reviewer, /^extensions:/m);
 	assert.match(reviewer, /^tools: read, bash, grep, find, ls, Agent, get_subagent_result$/m);
 	assert.doesNotMatch(reviewer, /^(?:model|effort|service_tier):/m);
+	assert.match(reviewer, /Reuse parent-prepared dependencies/);
+	assert.match(reviewer, /delegates sole pre-check setup ownership/);
 	const reviewProtocol = await readFile(path.join(extensionRoot, "assets/review/code-review-protocol.md"), "utf8");
 	assert.match(reviewProtocol, /four fresh `reviewer` children in one parallel wave/);
 	assert.match(reviewProtocol, /primary explicit hunk\/subsystem ownership and named cross-boundary questions/);
@@ -363,6 +370,10 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		}
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly the envelope below/);
+		assert.match(contract, /^SETUP: </m);
+		assert.match(contract, /repository-declared locked|repository-prescribed, locked/);
+		assert.match(contract, /tracked manifest\/lock changes.*only when this assignment explicitly authorizes|Never modify tracked manifests, locks, source/);
+		assert.match(contract, /opportunistic unpinned `uvx`\/`npx`/);
 		assert.match(contract, /BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/);
 		assert.match(contract, /(?:omit|omitting|omitted).*BLOCKER_KIND|BLOCKER_KIND omitted/);
 		if (role === "plan-reviewer") {

@@ -182,6 +182,77 @@ test("prepares locked npm dependencies transiently in the gate cwd", () => {
 	}
 });
 
+test("runs a repository-owned pinned-asset setup and check in one isolated gate", () => {
+	const fixtureData = fixture();
+	const previousCache = process.env.XDG_CACHE_HOME;
+	try {
+		const packageRoot = path.join(fixtureData.worktree, "packages", "asset-fixture");
+		const dependency = path.join(packageRoot, "vendor", "fixture-installer");
+		const scripts = path.join(packageRoot, "scripts");
+		const ambientCache = path.join(fixtureData.root, "ambient-cache");
+		fs.mkdirSync(dependency, { recursive: true });
+		fs.mkdirSync(scripts, { recursive: true });
+		fs.writeFileSync(path.join(dependency, "package.json"), `${JSON.stringify({
+			name: "fixture-installer",
+			version: "1.2.3",
+			main: "index.js",
+		}, null, 2)}\n`);
+		fs.writeFileSync(path.join(dependency, "index.js"), `
+const fs = require("node:fs");
+const path = require("node:path");
+const assetPath = (cache) => path.join(cache, "fixture-browser", "1.2.3", "browser.bin");
+exports.assetPath = assetPath;
+exports.prepare = (cache) => { const asset = assetPath(cache); fs.mkdirSync(path.dirname(asset), { recursive: true }); fs.writeFileSync(asset, "pinned"); return asset; };
+`);
+		fs.writeFileSync(path.join(scripts, "prepare-asset.cjs"), `
+const installer = require("fixture-installer");
+const cache = process.env.XDG_CACHE_HOME;
+const asset = installer.prepare(cache);
+console.log(JSON.stringify({ phase: "setup", command: "fixture-installer prepare fixture-browser@1.2.3", cwd: process.cwd(), cache, asset, result: "prepared" }));
+`);
+		fs.writeFileSync(path.join(scripts, "check-asset.cjs"), `
+const fs = require("node:fs");
+const installer = require("fixture-installer");
+const cache = process.env.XDG_CACHE_HOME;
+const asset = installer.assetPath(cache);
+if (fs.readFileSync(asset, "utf8") !== "pinned") process.exit(1);
+console.log(JSON.stringify({ phase: "check", command: "fixture browser check", cwd: process.cwd(), cache, asset, result: "passed" }));
+`);
+		fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({
+			name: "verification-asset-fixture",
+			private: true,
+			dependencies: { "fixture-installer": "file:vendor/fixture-installer" },
+			scripts: { "verify:asset": "node scripts/prepare-asset.cjs && node scripts/check-asset.cjs" },
+		}, null, 2)}\n`);
+		runCommand("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: packageRoot });
+		const sourceBefore = ["package.json", "package-lock.json", "scripts/prepare-asset.cjs", "scripts/check-asset.cjs", "vendor/fixture-installer/package.json", "vendor/fixture-installer/index.js"]
+			.map((relative) => fs.readFileSync(path.join(packageRoot, relative), "utf8"));
+		process.env.XDG_CACHE_HOME = ambientCache;
+
+		const gate = normalizedGate(fixtureData, "packages/asset-fixture", ["npm", "run", "verify:asset"], "pinned-asset");
+		const [result] = fixtureData.driver.runVerificationGates("pinned-asset", fixtureData.worktree, [gate]);
+		assert.equal(result?.ok, true);
+		const records = fs.readFileSync(result!.logPath, "utf8").split("\n")
+			.filter((line) => line.startsWith("{"))
+			.map((line) => JSON.parse(line) as { phase: string; cache: string; asset: string; result: string });
+		assert.deepEqual(records.map(({ phase, result }) => ({ phase, result })), [
+			{ phase: "setup", result: "prepared" },
+			{ phase: "check", result: "passed" },
+		]);
+		assert.equal(records[0]?.cache, records[1]?.cache);
+		assert.notEqual(records[0]?.cache, ambientCache);
+		assert.equal(fs.existsSync(records[0]!.asset), false, "isolated gate asset state was retained after verification");
+		assert.equal(fs.existsSync(path.join(ambientCache, "fixture-browser")), false, "ambient cache was inherited by the gate");
+		assert.equal(fs.existsSync(path.join(packageRoot, "node_modules")), false, "transient locked dependencies remained in the frozen worktree");
+		assert.deepEqual(["package.json", "package-lock.json", "scripts/prepare-asset.cjs", "scripts/check-asset.cjs", "vendor/fixture-installer/package.json", "vendor/fixture-installer/index.js"]
+			.map((relative) => fs.readFileSync(path.join(packageRoot, relative), "utf8")), sourceBefore);
+	} finally {
+		if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+		else process.env.XDG_CACHE_HOME = previousCache;
+		fs.rmSync(fixtureData.root, { recursive: true, force: true });
+	}
+});
+
 test("dependency-free npm verification does not require node_modules", () => {
 	const fixtureData = fixture();
 	try {

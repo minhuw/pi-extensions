@@ -169,17 +169,19 @@ test("runner prompt evidence preserves outcomes/errors without guessing source d
 });
 
 
-test("initial selection guidance binds V phases and T evidence without turning probes/setup into gates", () => {
+test("initial selection guidance binds V phases and explicit isolated pinned-asset preparation", () => {
 	const prompt = FINAL_VERIFICATION_SELECTION_GUIDANCE.join("\n");
-	for (const term of ["compiled assignment", "Phase/Criteria/Toolchain/Command/Expected", "Owner/Cwd/Prerequisites/Probe/Evidence", "final-phase coverage", "integration-risk", "development diagnostics", "uv run --no-sync", "nix develop --command", "canonical package script", "minimal environment", "interactive HOME", "npm-only locked auto-preparation"]) assert.ok(prompt.includes(term), term);
+	for (const term of ["compiled assignment", "Phase/Criteria/Toolchain/Command/Expected", "Owner/Cwd/Prerequisites/Probe/Evidence", "final-phase coverage", "integration-risk", "development diagnostics", "uv run --no-sync", "nix develop --command", "canonical package script", "fresh minimal environment", "interactive HOME", "npm-only locked node_modules preparation", "repository-owned setup-and-check script", "isolated HOME/XDG cache", "prep-only gate cannot seed a later fresh gate", "Do not assume Playwright"]) assert.ok(prompt.includes(term), term);
 	assert.match(prompt, /probes.*only as selection diagnostics/);
 	assert.match(prompt, /Only the manager executes.*authoritative verification gates/);
 	assert.match(prompt, /do not fabricate passed checks or submit a known-invalid tool choice/);
+	assert.doesNotMatch(prompt, /shared cache registry|generic dependency orchestration service/);
 });
 
 
-test("environment decision guidance offers external preparation and explicit unchanged resume", () => {
-	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /prepare.*externally/);
+test("environment decision guidance follows attempted in-gate setup with explicit unchanged resume", () => {
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /already attempted any repository-owned in-gate setup/);
+	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /remaining verified external prerequisite/);
 	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /explicitly invoke \/herder-resume/);
 	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /SAME ordered canonical gates/);
 	assert.match(ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, /without a code-round or transient-budget charge/);

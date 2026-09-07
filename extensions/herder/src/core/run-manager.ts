@@ -804,7 +804,7 @@ export class HerderRunManager {
 					`WORKER_RESULT_SHA256: ${result ? sha256(stableJson(result)) : "none"}`,
 					`OUTCOME: ${boundedEvidence(String(fields?.status ?? fields?.verdict ?? fields?.decision ?? record?.outcome ?? "unknown"), 400)}`,
 					`TRANSPORT: ${boundedEvidence(stableJson(record?.terminal ?? "none"), 400)}`,
-					...(["checks", "commits", "filesChanged", "findings", "fixGuidance", "repairContracts", "authorizedBlockers", "notes", "stoppedBecause", "rationale"] as const)
+					...(["setup", "checks", "commits", "filesChanged", "findings", "fixGuidance", "repairContracts", "authorizedBlockers", "notes", "stoppedBecause", "rationale"] as const)
 						.filter((field) => fields?.[field] !== undefined)
 						.map((field) => `${field}: ${boundedEvidence(stableJson(fields![field]), 650)}`),
 				].join("\n");
@@ -2309,8 +2309,10 @@ export class HerderRunManager {
 			`WORKER_SELF_REPORT: ${result.blockerKind}; role=${action.role}; mode=${action.workerMode}; round=${plan.round}`,
 			`WORKTREE: ${plan.worktree}`,
 			result.kind === "implementer" ? result.stoppedBecause || result.notes : result.rationale,
+			"SETUP (worker preparation evidence, not check evidence):",
+			...(result.setup.length > 0 ? result.setup : ["none"]),
 			"CHECKS (worker evidence, not authoritative verification):",
-			...result.checks,
+			...(result.checks.length > 0 ? result.checks : ["none"]),
 		].join("\n"), 16_384);
 		return {
 			plan: { ...plan, phase: "NEEDS_INPUT", repair: [...plan.repair, detail] },

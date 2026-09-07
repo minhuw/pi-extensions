@@ -57,7 +57,7 @@ try {
   assert.ok(reviewerEnvelope, "reviewer contract has one explicit terminal envelope");
   assert.match(reviewer, /omitting BLOCKER_KIND unless VERDICT is BLOCK/);
   assert.deepEqual([...reviewerEnvelope.matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
-    "VERDICT", "BLOCKER_KIND", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "CHECKS", "RATIONALE", "USAGE",
+    "VERDICT", "BLOCKER_KIND", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "SETUP", "CHECKS", "RATIONALE", "USAGE",
   ]);
 
   const gateWorktree = path.join(root, "gate-worktree");

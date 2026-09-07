@@ -956,6 +956,7 @@ export interface ImplementerResult {
 	blockerKind?: WorkerBlockerKind;
 	status: "COMPLETE" | "STOPPED" | "FAILED";
 	commits: string[];
+	setup: string[];
 	checks: string[];
 	filesChanged: string[];
 	discoveredPaths: string[];
@@ -973,6 +974,7 @@ export interface ReviewerResult {
 	fixGuidance: string[];
 	discoveredPaths: string[];
 	scope: "PASS" | "FAIL";
+	setup: string[];
 	checks: string[];
 	rationale: string;
 	usage: UsageEvidence;
@@ -990,6 +992,7 @@ export interface JudgeResult {
 	discoveredPaths: string[];
 	leaks: string[];
 	question?: string;
+	setup: string[];
 	checks: string[];
 	rationale: string;
 	usage: UsageEvidence;
@@ -1007,8 +1010,9 @@ function parseBlockerKind(role: WorkerRole, fields: Map<string, string>): Worker
 	if (!blocked) throw new Error("BLOCKER_KIND requires a blocked worker outcome, not success or code repair");
 	const concrete = (value: string | undefined): boolean => Boolean(value?.trim() && !/^(?:none|unknown|n\/a|pending|not run)$/i.test(value.trim()));
 	const detail = role === "plan-implementer" ? fields.get("STOPPED BECAUSE") || fields.get("NOTES") : fields.get("RATIONALE");
-	if (!concrete(detail) || !lines(fields.get("CHECKS")).some(concrete)) {
-		throw new Error("BLOCKER_KIND requires concrete detail and CHECKS evidence (manager, command, cwd, error, and prerequisite or decision)");
+	const operationalEvidence = [...lines(fields.get("SETUP")), ...lines(fields.get("CHECKS"))];
+	if (!concrete(detail) || !operationalEvidence.some(concrete)) {
+		throw new Error("BLOCKER_KIND requires concrete detail and SETUP or CHECKS evidence (manager, command, cwd, error, and prerequisite or decision)");
 	}
 	if (kind !== "REQUIREMENT" && (fields.get("SCOPE") === "FAIL"
 		|| ["FINDINGS", "FIX_GUIDANCE", "AUTHORIZED_BLOCKERS", "REPAIR_CONTRACTS", "PASS_DOCUMENT"].some((name) => lines(fields.get(name)).length > 0))) {
@@ -1028,6 +1032,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 			...(blockerKind ? { blockerKind } : {}),
 			status: status as ImplementerResult["status"],
 			commits: lines(fields.get("COMMITS")).flatMap((line) => line.split(/[\s,]+/)).filter((item) => /^[0-9a-f]{7,64}$/i.test(item)),
+			setup: lines(fields.get("SETUP")),
 			checks: lines(fields.get("CHECKS")),
 			filesChanged: lines(fields.get("FILES CHANGED")).flatMap((line) => line.split(/\s*,\s*/)).filter((item) => item && item.toLowerCase() !== "none"),
 			discoveredPaths: lines(fields.get("DISCOVERED_PATHS")),
@@ -1049,6 +1054,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 			fixGuidance: lines(fields.get("FIX_GUIDANCE")),
 			discoveredPaths: lines(fields.get("DISCOVERED_PATHS")),
 			scope: scope as ReviewerResult["scope"],
+			setup: lines(fields.get("SETUP")),
 			checks: lines(fields.get("CHECKS")),
 			rationale: fields.get("RATIONALE") || "",
 			usage: parseUsageLine(fields.get("USAGE")),
@@ -1072,6 +1078,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 		discoveredPaths: lines(fields.get("DISCOVERED_PATHS")),
 		leaks: lines(fields.get("LEAKS")),
 		...(question && question.toLowerCase() !== "none" ? { question } : {}),
+		setup: lines(fields.get("SETUP")),
 		checks: lines(fields.get("CHECKS")),
 		rationale: fields.get("RATIONALE") || "",
 		usage: parseUsageLine(fields.get("USAGE")),
