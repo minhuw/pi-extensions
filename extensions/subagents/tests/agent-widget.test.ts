@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import {
   buildInvocationTags,
   buildRecordInvocation,
@@ -7,6 +8,14 @@ import {
   formatModelName,
   getAgentStatsParts,
 } from "../src/ui/agent-widget.js";
+
+it("keeps the default fleet on Pi's built-in search tools", () => {
+  for (const agent of DEFAULT_AGENTS.values()) {
+    expect(agent.excludeExtensions).toEqual(["pi-fff"]);
+  }
+  expect(DEFAULT_AGENTS.get("recon")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+  expect(DEFAULT_AGENTS.get("reviewer")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+});
 
 describe("foreground agent metadata", () => {
   it("always formats the exact effective model name", () => {

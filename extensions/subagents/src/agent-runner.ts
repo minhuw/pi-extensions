@@ -683,7 +683,8 @@ export async function runAgent(
   // Exclude typo check: compares against the PRE-filter discovered set (an excluded
   // name absent from the surviving set is the exclude working as intended). Also
   // flags path-like and "*" entries — excludes are plain names only.
-  if (hasExcludes && discoveredNames) {
+  // Package defaults may exclude optional ambient extensions that are not installed.
+  if (hasExcludes && discoveredNames && agentConfig?.isDefault !== true) {
     for (const name of excludeNames) {
       if (!discoveredNames.has(name)) {
         options.onToolActivity?.({

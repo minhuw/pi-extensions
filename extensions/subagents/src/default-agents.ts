@@ -8,6 +8,7 @@
 import type { AgentConfig } from "./types.js";
 
 const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const DEFAULT_EXCLUDED_EXTENSIONS = ["pi-fff"];
 
 export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
   [
@@ -19,6 +20,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
         'Fast read-only codebase reconnaissance. Use to answer "where is X / who calls Y / how does Z work", map entry points, and return compressed context another agent can use without re-reading files. Specify breadth: "quick", "medium" (default), or "thorough". Do NOT use for implementation, code review, or open-ended design.',
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
+      excludeExtensions: DEFAULT_EXCLUDED_EXTENSIONS,
       skills: true,
       // Fast tier + high effort on Luna — cheap-ish latency path for search fan-out.
       model: "openai/gpt-5.6-luna",
@@ -83,6 +85,7 @@ Do not use emojis. Do not propose large refactors.`,
         "Implementation agent for a clear, bounded coding task. Use when requirements or a plan are known and files need to be changed, tests run, and results reported. Escalates instead of guessing on ambiguous product decisions. Do NOT use for broad exploration (use recon) or for merge review (use reviewer).",
       // all built-ins
       extensions: true,
+      excludeExtensions: DEFAULT_EXCLUDED_EXTENSIONS,
       skills: true,
       systemPrompt: `# WORKER — implement a bounded task
 
@@ -146,6 +149,7 @@ Concrete questions or missing decisions.`,
         "Read-only code review with severity-ranked findings. Use proactively after worker changes, before commit/PR, or when an independent second opinion is needed. Reviews diffs (default: git diff / specified paths) for bugs, security, regressions, and missing tests. Does NOT implement fixes. Do NOT use for exploration or implementation.",
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
+      excludeExtensions: DEFAULT_EXCLUDED_EXTENSIONS,
       skills: true,
       systemPrompt: `# READ-ONLY CODE REVIEWER
 
