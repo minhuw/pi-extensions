@@ -93,7 +93,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 		"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-astra", effort: "xhigh" },
 	});
 	assert.deepEqual(universe.rescue, { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh" });
-	assert.deepEqual(universe.searcher, { model: "gpt-6-astra", effort: "medium" });
+	assert.deepEqual(universe.searcher, { model: "gpt-5.6-sol", effort: "xhigh" });
 	assert.deepEqual(Object.keys(universe.roles), WORKER_ROLES);
 
 	const eclipse = resolvePiProfile();

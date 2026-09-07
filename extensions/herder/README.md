@@ -99,7 +99,7 @@ Blocked-plan recovery, three-round exhaustion, and input waits use the existing 
 | `poorman` | Luna orchestrates, reviews, and judges while DeepSeek implements. |
 | `epic` | Fable orchestrates and judges, Opus implements, and Sol reviews. |
 | `lightspeed` | Grok 4.6 orchestrates and implements while Luna reviews and judges. |
-| `universe` | Astra medium implements; Sol xhigh reviews; Astra xhigh orchestrates, judges, and rescues. Luna max/fast is Recon-only; Searcher uses Astra medium. |
+| `universe` | Astra medium implements; Sol xhigh reviews and searches; Astra xhigh orchestrates, judges, and rescues. Luna max/fast is Recon-only. |
 
 Exact model, effort, and service-tier bindings live in `assets/profiles/profiles.json` and are resolved by the runtime.
 

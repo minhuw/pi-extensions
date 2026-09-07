@@ -76,7 +76,7 @@ test("universe keeps Luna on Recon and validates rescue and Searcher overrides",
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, models));
 	const parent = { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6-astra", effort: "medium" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-5.6-sol", effort: "xhigh" });
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast" });
 	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {

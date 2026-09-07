@@ -319,7 +319,7 @@ async function reachJudge(service: Service, fixture: Fixture, prefix: string, pr
 			assert.equal(implementer.model, "gpt-6-astra");
 			assert.equal(implementer.effort, "medium");
 			assert.equal(implementer.serviceTier, undefined);
-			assert.deepEqual(implementer.searcherBinding, { model: "gpt-6-astra", effort: "medium" });
+			assert.deepEqual(implementer.searcherBinding, { model: "gpt-5.6-sol", effort: "xhigh" });
 		}
 		reply = await finishImplementer(service, implementer, prefix);
 		reviewer = action(reply, "plan-reviewer");
@@ -631,7 +631,7 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 			assert.equal(state.judge.model, "gpt-6-astra");
 			assert.equal(state.judge.effort, "xhigh");
 			assert.equal(state.judge.serviceTier, undefined);
-			assert.deepEqual(state.judge.searcherBinding, { model: "gpt-6-astra", effort: "medium" });
+			assert.deepEqual(state.judge.searcherBinding, { model: "gpt-5.6-sol", effort: "xhigh" });
 		}
 		await dispatch(service, state.judge, "judge-repair");
 		await stopService(fixture.planDirectory);
@@ -676,7 +676,7 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 		assert.equal(implementer.model, profile === "universe" ? "gpt-6-astra" : "gpt-5.6-luna");
 		assert.equal(implementer.effort, profile === "universe" ? "xhigh" : "max");
 		assert.equal(implementer.serviceTier, profile === "universe" ? undefined : "fast");
-		assert.deepEqual(implementer.searcherBinding, profile === "universe" ? { model: "gpt-6-astra", effort: "medium" } : undefined);
+		assert.deepEqual(implementer.searcherBinding, profile === "universe" ? { model: "gpt-5.6-sol", effort: "xhigh" } : undefined);
 
 		assert.match(String(implementer.prompt), /PASS_DOCUMENT_ACTION_ID:/);
 		assert.match(String(implementer.prompt), new RegExp(String(state.judge.actionId)));
