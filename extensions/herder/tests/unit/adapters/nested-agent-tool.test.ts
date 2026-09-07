@@ -144,7 +144,7 @@ test("nested Agent runs one package-owned foreground recon child with the scout 
 	assert.deepEqual(snapshot.activeTools, []);
 });
 
-test("universe dispatches Searcher on Astra and only Recon on Luna", async () => {
+test("universe dispatches Searcher on Sol and only Recon on Luna", async () => {
 	const profile = resolvePiProfile("universe");
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 		const mapping = role === "plan-implementer" ? profile.rescue! : profile.roles[role];
@@ -163,7 +163,7 @@ test("universe dispatches Searcher on Astra and only Recon on Luna", async () =>
 			const result = await value.run({ type, prompt: "Bounded lookup", description: "inspect model binding" });
 			assert.equal(result.status, "completed");
 		}
-		assert.deepEqual(created[0]!.binding, { model: "gpt-6-astra", effort: "medium" });
+		assert.deepEqual(created[0]!.binding, { model: "gpt-5.6-sol", effort: "xhigh" });
 		assert.deepEqual(created[1]!.binding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 		if (created[2]) assert.deepEqual(created[2].binding, { model: mapping.model, effort: mapping.effort });
 		assert.deepEqual(value.snapshots().filter((child) => child.model === "gpt-5.6-luna").map((child) => child.type), ["recon"]);
