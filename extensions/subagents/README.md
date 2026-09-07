@@ -66,7 +66,7 @@ Peers: `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-wo
 | `worker` | Bounded implementation + verify | all coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review; no edits | read-only | inherit parent |
 
-The embedded fleet uses Pi's built-in `grep`/`find` tools and excludes the ambient `pi-fff` extension. Custom agent definitions remain free to opt into their own extension set.
+The embedded fleet uses Pi's built-in `grep`/`find` tools and excludes an ambient search extension that could replace them. Custom agent definitions remain free to opt into their own extension set.
 
 Typical handoff: recon maps the surface → worker implements → reviewer gates the diff.
 
