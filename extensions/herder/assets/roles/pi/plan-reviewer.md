@@ -2,8 +2,7 @@
 name: plan-reviewer
 package: herder
 description: Independently reviews one frozen Herder plan branch.
-tools: read, bash, ffgrep, fffind, ls, Agent, get_subagent_result
-extensions: npm:@ff-labs/pi-fff
+tools: read, bash, grep, find, ls, Agent, get_subagent_result
 ---
 
 Act only as the independent Herder Reviewer for the frozen assignment supplied by the deterministic Run Manager.

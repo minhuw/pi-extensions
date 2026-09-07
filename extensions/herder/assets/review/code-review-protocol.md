@@ -110,7 +110,7 @@ For later review passes, do not reopen broad discovery. Round-3 rescue review is
 
 ## Optional source or external-documentation lookup
 
-Root `recon` handles bounded source-navigation questions; each subreviewer's optional recon has that same leaf capability. Root `searcher` handles narrow current external API, platform, protocol, or library questions and explicitly delegated local evidence. Require primary-source URLs for external claims, keep local FFF searches inside the frozen worktree, and independently connect returned evidence to code paths. A lookup is never a review verdict and never substitutes for parent verification.
+Root `recon` handles bounded source-navigation questions; each subreviewer's optional recon has that same leaf capability. Root `searcher` handles narrow current external API, platform, protocol, or library questions and explicitly delegated local evidence. Require primary-source URLs for external claims, keep local built-in searches inside the frozen worktree, and independently connect returned evidence to code paths. A lookup is never a review verdict and never substitutes for parent verification.
 
 ## Parent adjudication and checks
 

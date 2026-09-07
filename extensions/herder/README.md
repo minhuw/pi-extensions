@@ -11,7 +11,6 @@ Install the extension collection and its explicitly injected worker dependencies
 ```bash
 pi install git:github.com/minhuw/pi-extensions
 pi install git:github.com/DietrichGebert/ponytail
-pi install npm:@ff-labs/pi-fff
 pi install npm:pi-web-access
 ```
 
@@ -33,8 +32,8 @@ Herder refuses to start when Pi's active providers cannot resolve every required
 ## What Herder owns
 
 - Dependency-aware scheduling with a configurable global worker limit.
-- Clean, parentless Pi worker sessions: every role explicitly loads trusted `npm:@ff-labs/pi-fff`; Implementers additionally load Ponytail's exact `pi-extension/index.js`.
-- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Every child loads FFF, `searcher` additionally loads `npm:pi-web-access`, and `worker` additionally loads Ponytail. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
+- Clean, parentless Pi worker sessions using Pi's built-in `grep` and `find` tools; Implementers load only Ponytail's exact `pi-extension/index.js`, while Reviewer and Judge load no extensions.
+- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Children use built-in repository search; `searcher` loads only `npm:pi-web-access`, `worker` loads only Ponytail, and `recon`/`reviewer` load no extensions. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
 - One stable Herder branch and isolated Git worktree per plan, stored under `<plan-dir>/.herder/worktrees/` so they stay inside the plan set.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.

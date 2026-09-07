@@ -22,11 +22,11 @@ test("Herder loads exact scoped Pi role definitions", async () => {
 	const reviewer = await loadHerderPiRole(agentRoot, "plan-reviewer");
 	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
-	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
-	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail", "npm:@ff-labs/pi-fff"]);
-	assert.deepEqual(reviewer.tools, ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
-	assert.deepEqual(reviewer.extensions, ["npm:@ff-labs/pi-fff"]);
-	assert.deepEqual(judge.extensions, ["npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail"]);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(reviewer.extensions, []);
+	assert.deepEqual(judge.extensions, []);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
 	assert.match(implementer.systemPrompt, /ROLE_CONTRACT_PATH/);
 });
@@ -37,26 +37,26 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	const searcher = await loadHerderNestedAgent(agentRoot, "searcher");
 	const worker = await loadHerderNestedAgent(agentRoot, "worker");
 	const reviewer = await loadHerderNestedAgent(agentRoot, "reviewer");
-	assert.deepEqual(recon.tools, ["read", "ffgrep", "fffind", "ls"]);
-	assert.deepEqual(recon.extensions, ["npm:@ff-labs/pi-fff"]);
+	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
+	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
 	assert.equal(recon.binding, "own");
 	assert.deepEqual(recon.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
 	assert.equal(searcher.readOnly, true);
 	assert.equal(searcher.binding, "own");
 	assert.deepEqual(searcher.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
-	assert.deepEqual(searcher.extensions, ["npm:pi-web-access", "npm:@ff-labs/pi-fff"]);
-	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content", "fffind", "ffgrep"]);
+	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
+	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content", "find", "grep"]);
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
-	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail", "npm:@ff-labs/pi-fff"]);
-	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "ffgrep", "fffind", "ls"]);
+	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail"]);
+	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
 	assert.equal(reviewer.readOnly, false);
 	assert.equal(reviewer.binding, "inherit");
 	assert.equal(reviewer.modelBinding, undefined);
-	assert.deepEqual(reviewer.extensions, ["npm:@ff-labs/pi-fff"]);
-	assert.deepEqual(reviewer.tools, ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(reviewer.extensions, []);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
 	for (const serviceTier of ["fast", "standard", undefined] as const) {
 		const parent = { model: "parent/reviewer", effort: "max", ...(serviceTier ? { serviceTier } : {}) };
 		assert.deepEqual(resolveNestedBinding(reviewer, parent), parent);
@@ -111,7 +111,7 @@ test("roles encourage bounded Recon exploration without delegating judgment", as
 test("recon positively defines bounded static work and early caller-owned handoff", async () => {
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "recon");
 	assert.match(systemPrompt, /source-navigation child in the supplied current worktree/);
-	assert.match(systemPrompt, /reading files, locating paths and symbols with FFF/);
+	assert.match(systemPrompt, /reading files, locating paths and symbols with Pi's built-in search tools/);
 	assert.match(systemPrompt, /tracing static callers, data flow, and contracts/);
 	assert.match(systemPrompt, /Start with capability triage/);
 	assert.match(systemPrompt, /runtime execution, implementation, or general code-review objective, return `HANDOFF_REQUIRED` immediately/);
@@ -147,7 +147,7 @@ test("nested reviewer rejects widened, incomplete, or dishonest permission metad
 		await mkdir(path.join(root, "nested"));
 		const file = path.join(root, "nested/reviewer.md");
 		const original = await readFile(path.join(agentRoot, "nested/reviewer.md"), "utf8");
-		const tools = "read, bash, ffgrep, fffind, ls, Agent, get_subagent_result";
+		const tools = "read, bash, grep, find, ls, Agent, get_subagent_result";
 		const cases: [string, string, RegExp][] = [
 			["binding: inherit", "binding: own\nmodel: gpt-5.6-luna\neffort: max", /must inherit its parent binding/],
 			["binding: inherit", "binding: other", /invalid binding/],
@@ -170,7 +170,11 @@ test("nested reviewer rejects widened, incomplete, or dishonest permission metad
 			cases.push([`tools: ${tools}`, `tools: ${tools}, ${tool}`, /recursive agent tool .* is forbidden/]);
 		}
 		for (const extension of ["git:github.com/DietrichGebert/ponytail", "npm:pi-web-access", "npm:untrusted-extension"]) {
-			cases.push(["extensions: npm:@ff-labs/pi-fff", `extensions: npm:@ff-labs/pi-fff, ${extension}`, /requests forbidden extension/]);
+			cases.push([
+				"description: Reviews an assigned frozen diff partition and returns evidence-backed proposed findings.",
+				`description: Reviews an assigned frozen diff partition and returns evidence-backed proposed findings.\nextensions: ${extension}`,
+				/requests forbidden extension/,
+			]);
 		}
 		for (const [before, after, error] of cases) {
 			await writeFile(file, original.replace(before, after));

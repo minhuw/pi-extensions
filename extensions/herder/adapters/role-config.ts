@@ -49,24 +49,23 @@ export interface HerderNestedAgentDefinition {
 }
 
 // Bash is unrestricted; reviewer source preservation is a prompt contract, not a sandbox.
-const REVIEWER_NESTED_TOOLS = ["read", "bash", "ffgrep", "fffind", "ls", "Agent", "get_subagent_result"] as const;
+const REVIEWER_NESTED_TOOLS = ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"] as const;
 const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
-	"read", "ffgrep", "fffind", "ls",
+	"read", "grep", "find", "ls",
 	"web_search", "source_check", "fetch_content", "get_search_content",
 ]);
 export const PONYTAIL_EXTENSION_SOURCE = "git:github.com/DietrichGebert/ponytail";
-export const FFF_EXTENSION_SOURCE = "npm:@ff-labs/pi-fff";
 export const WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access";
 const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {
-	"plan-implementer": [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
-	"plan-reviewer": [FFF_EXTENSION_SOURCE],
-	"plan-judge": [FFF_EXTENSION_SOURCE],
+	"plan-implementer": [PONYTAIL_EXTENSION_SOURCE],
+	"plan-reviewer": [],
+	"plan-judge": [],
 };
 const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]> = {
-	recon: [FFF_EXTENSION_SOURCE],
-	searcher: [WEB_ACCESS_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
-	worker: [PONYTAIL_EXTENSION_SOURCE, FFF_EXTENSION_SOURCE],
-	reviewer: [FFF_EXTENSION_SOURCE],
+	recon: [],
+	searcher: [WEB_ACCESS_EXTENSION_SOURCE],
+	worker: [PONYTAIL_EXTENSION_SOURCE],
+	reviewer: [],
 };
 
 function stringField(frontmatter: Record<string, unknown>, name: string, file: string): string {

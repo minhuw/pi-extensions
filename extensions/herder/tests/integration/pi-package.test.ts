@@ -44,12 +44,10 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(rootReadme, /Node >=22\.19\.0/);
 	assert.match(rootReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
 	assert.match(rootReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
-	assert.match(rootReadme, /pi install npm:@ff-labs\/pi-fff/);
 	assert.match(rootReadme, /pi install npm:pi-web-access/);
 	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.match(herderReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
 	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
-	assert.match(herderReadme, /pi install npm:@ff-labs\/pi-fff/);
 	assert.match(herderReadme, /pi install npm:pi-web-access/);
 	assert.match(planTemplate, /Prerequisites/);
 	assert.match(planTemplate, /locked dependencies installed/);
@@ -292,7 +290,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /name: "get_subagent_result"/);
 	assert.doesNotMatch(nestedTool, /resolvedModel|thinking:|service_tier/);
 	assert.match(roleConfig, /PONYTAIL_EXTENSION_SOURCE = "git:github\.com\/DietrichGebert\/ponytail"/);
-	assert.match(roleConfig, /FFF_EXTENSION_SOURCE = "npm:@ff-labs\/pi-fff"/);
+	assert.match(roleConfig, /WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access"/);
 	assert.match(roleConfig, /ROLE_EXTENSION_SOURCES/);
 	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker", "reviewer"\]/);
 	assert.match(roleConfig, /\["Agent", "get_subagent_result"\]/);
@@ -320,21 +318,21 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		}
 	}
 	const recon = await readFile(path.join(agentDir, "nested/recon.md"), "utf8");
-	assert.match(recon, /^extensions: npm:@ff-labs\/pi-fff$/m);
-	assert.match(recon, /^tools: read, ffgrep, fffind, ls$/m);
+	assert.doesNotMatch(recon, /^extensions:/m);
+	assert.match(recon, /^tools: read, grep, find, ls$/m);
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
-	assert.match(searcher, /^extensions: npm:pi-web-access, npm:@ff-labs\/pi-fff$/m);
-	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content, fffind, ffgrep$/m);
+	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
+	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content, find, grep$/m);
 	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
-	assert.match(worker, /^extensions: git:github\.com\/DietrichGebert\/ponytail, npm:@ff-labs\/pi-fff$/m);
-	assert.match(worker, /^tools: read, edit, write, bash, ffgrep, fffind, ls$/m);
+	assert.match(worker, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
+	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls$/m);
 	const reviewer = await readFile(path.join(agentDir, "nested/reviewer.md"), "utf8");
 	assert.match(reviewer, /^package: herder$/m);
 	assert.match(reviewer, /^kind: nested$/m);
 	assert.match(reviewer, /^binding: inherit$/m);
 	assert.match(reviewer, /^readOnly: false$/m);
-	assert.match(reviewer, /^extensions: npm:@ff-labs\/pi-fff$/m);
-	assert.match(reviewer, /^tools: read, bash, ffgrep, fffind, ls, Agent, get_subagent_result$/m);
+	assert.doesNotMatch(reviewer, /^extensions:/m);
+	assert.match(reviewer, /^tools: read, bash, grep, find, ls, Agent, get_subagent_result$/m);
 	assert.doesNotMatch(reviewer, /^(?:model|effort|service_tier):/m);
 	const reviewProtocol = await readFile(path.join(extensionRoot, "assets/review/code-review-protocol.md"), "utf8");
 	assert.match(reviewProtocol, /four fresh `reviewer` children in one parallel wave/);
@@ -356,12 +354,12 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.match(contents, /^package: herder$/m);
 		assert.match(contents, /^tools: .*Agent.*get_subagent_result/m);
 		assert.doesNotMatch(contents, /^tools: .*(?:steer_subagent|herder)/m);
+		assert.match(contents, /^tools: .*\bgrep\b.*\bfind\b/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
-		assert.doesNotMatch(contents, /^tools: .*\b(?:grep|find)\b/m);
 		if (role === "plan-implementer") {
-			assert.match(contents, /^extensions: git:github\.com\/DietrichGebert\/ponytail, npm:@ff-labs\/pi-fff$/m);
+			assert.match(contents, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
 		} else {
-			assert.match(contents, /^extensions: npm:@ff-labs\/pi-fff$/m);
+			assert.doesNotMatch(contents, /^extensions:/m);
 		}
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly the envelope below/);

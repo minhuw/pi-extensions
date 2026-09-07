@@ -32,7 +32,6 @@ import {
 } from "./nested-agent-executor.ts";
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import {
-	FFF_EXTENSION_SOURCE,
 	loadHerderPiRole,
 	PONYTAIL_EXTENSION_SOURCE,
 	WEB_ACCESS_EXTENSION_SOURCE,
@@ -175,12 +174,13 @@ function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: nu
 }
 
 const SEARCHER_WEB_TOOL_NAMES = new Set(["web_search", "source_check", "fetch_content", "get_search_content"]);
-const SEARCHER_LOCAL_TOOL_NAMES = new Set(["fffind", "ffgrep", "find", "grep"]);
+const SEARCHER_LOCAL_TOOL_NAMES = new Set(["find", "grep"]);
 
 function searchPathStaysWithinWorktree(worktree: string, rawPath: string): boolean {
-	const value = rawPath.trim();
+	const value = rawPath.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").trim();
 	if (!value) return true;
-	if (value === "~" || value.startsWith("~/") || value.startsWith("~\\") || path.win32.isAbsolute(value)) return false;
+	if (value.startsWith("@") || /^file:\/\//i.test(value)
+		|| value === "~" || value.startsWith("~/") || value.startsWith("~\\") || path.win32.isAbsolute(value)) return false;
 	try {
 		const lexicalRoot = path.resolve(worktree);
 		const candidate = path.resolve(lexicalRoot, value);
@@ -200,9 +200,6 @@ function searchPathStaysWithinWorktree(worktree: string, rawPath: string): boole
 export function applySearcherToolPolicy(toolName: string, rawInput: unknown, worktree: string): { block: true; reason: string } | undefined {
 	const input = record(rawInput);
 	if (SEARCHER_LOCAL_TOOL_NAMES.has(toolName)) {
-		if (input?.cursor !== undefined) {
-			return { block: true, reason: "Herder searcher disables cross-call FFF cursors to preserve worktree confinement." };
-		}
 		if (input && typeof input.path === "string" && !searchPathStaysWithinWorktree(worktree, input.path)) {
 			return { block: true, reason: "Herder searcher may search only inside its assigned worktree." };
 		}
@@ -221,37 +218,9 @@ export function applySearcherToolPolicy(toolName: string, rawInput: unknown, wor
 	return undefined;
 }
 
-export function resolveFffToolNames(
-	tools: readonly string[],
-	extensions: readonly { tools: ReadonlyMap<string, unknown> }[],
-): string[] {
-	if (!tools.includes("fffind") && !tools.includes("ffgrep")) return [...tools];
-	const registered = new Set(extensions.flatMap((extension) => [...extension.tools.keys()]));
-	const names = registered.has("fffind") && registered.has("ffgrep")
-		? { fffind: "fffind", ffgrep: "ffgrep" }
-		: registered.has("find") && registered.has("grep")
-			? { fffind: "find", ffgrep: "grep" }
-			: undefined;
-	if (!names) throw new Error("Herder FFF extension did not register its required find and grep tools.");
-	return tools.map((tool) => tool === "fffind" || tool === "ffgrep" ? names[tool] : tool);
-}
-
-function initialFffToolNames(
-	tools: readonly string[],
-	extensions: readonly { tools: ReadonlyMap<string, unknown> }[],
-): string[] {
-	try {
-		return resolveFffToolNames(tools, extensions);
-	} catch {
-		return [...new Set([...tools, "find", "grep"])];
-	}
-}
-
 export function trustedNestedExtensionPath(agentDir: string, installed: string, source: string): string {
-	const packagePath = source === WEB_ACCESS_EXTENSION_SOURCE
-		? ["pi-web-access"]
-		: source === FFF_EXTENSION_SOURCE ? ["@ff-labs", "pi-fff"] : undefined;
-	if (!packagePath) throw new Error(`Herder npm extension ${source} is not allowed.`);
+	if (source !== WEB_ACCESS_EXTENSION_SOURCE) throw new Error(`Herder npm extension ${source} is not allowed.`);
+	const packagePath = ["pi-web-access"];
 	const realRoot = realpathSync(path.join(agentDir, "npm"));
 	const realInstalled = realpathSync(installed);
 	if (!isInside(realRoot, realInstalled)) {
@@ -394,7 +363,6 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 				if (childExtensions.errors.length > 0) {
 					throw new Error(`Herder nested extensions failed to load: ${childExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
 				}
-				const initialChildTools = initialFffToolNames(childDefinition.tools, childExtensions.extensions);
 				signal.throwIfAborted();
 				const { session: child } = await createAgentSession({
 					cwd: request.action.worktree,
@@ -402,7 +370,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					modelRuntime: runtime,
 					model: childModel as Model<any>,
 					thinkingLevel: binding.effort as ThinkingLevel,
-					tools: initialChildTools,
+					tools: childDefinition.tools,
 					customTools: nestedScope ? [...createNestedAgentTools(nestedScope)] : [],
 					resourceLoader: childLoader,
 					sessionManager: childManager,
@@ -415,7 +383,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 						},
 					});
 					signal.throwIfAborted();
-					const childTools = resolveFffToolNames(childDefinition.tools, childExtensions.extensions);
+					const childTools = childDefinition.tools;
 					child.setActiveToolsByName(childTools);
 					if (child.messages.length !== 0) throw new Error("Herder nested agent session was not created with clean history.");
 					const activeChildTools = new Set(child.agent.state.tools.map((tool) => tool.name));
@@ -467,7 +435,6 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		if (roleExtensions.errors.length > 0) {
 			throw new Error(`Herder role extensions failed to load: ${roleExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
 		}
-		const initialRoleTools = initialFffToolNames(definition.tools, roleExtensions.extensions);
 		const nestedTools = createNestedAgentTools(nested);
 		const { session } = await createAgentSession({
 			cwd: request.action.worktree,
@@ -475,7 +442,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			modelRuntime: runtime,
 			model: model as Model<any>,
 			thinkingLevel: request.action.effort as ThinkingLevel,
-			tools: initialRoleTools,
+			tools: definition.tools,
 			customTools: [...nestedTools],
 			resourceLoader,
 			sessionManager,
@@ -487,7 +454,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					throw new Error(`Herder role extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
 				},
 			});
-			const roleTools = resolveFffToolNames(definition.tools, roleExtensions.extensions);
+			const roleTools = definition.tools;
 			session.setActiveToolsByName(roleTools);
 			if (session.messages.length !== 0) throw new Error("Herder Pi worker session was not created with clean history.");
 			const activeTools = new Set(session.agent.state.tools.map((tool) => tool.name));
