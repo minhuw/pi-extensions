@@ -170,10 +170,17 @@ async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void
 	}
 }
 
-function abortSession(session: NestedWorkerSession): Promise<void> {
-	const abort = Promise.resolve().then(() => session.abort());
-	void abort.catch(() => {});
-	return abort;
+/** Reapply cancellation after SDK phase-start events install their controllers. */
+export function abortSession(
+	session: Pick<NestedWorkerSession, "abort"> & { abortCompaction?(): void },
+	previous?: Promise<void>,
+): Promise<void> {
+	const abort = Promise.resolve().then(() => {
+		session.abortCompaction?.();
+		return session.abort();
+	});
+	// Do not chain cancellation behind an earlier abort: it may await this new phase.
+	return Promise.allSettled([previous, abort]).then(() => {});
 }
 
 function sliceKey(slice: Pick<NestedUsageSlice, "type" | "model" | "effort" | "serviceTier">): string {
@@ -490,6 +497,9 @@ export class HerderNestedAgentScope {
 			item.snapshot.sessionId = session.sessionId;
 			if (session.messages.length !== 0) throw new Error("Herder nested agents require a session with zero inherited messages.");
 			unsubscribe = session.subscribe((event) => {
+				if (signal.aborted && (event.type === "agent_start" || event.type === "compaction_start")) {
+					aborting = abortSession(session, aborting);
+				}
 				if (observeSessionEvent(item, event)) this.emitUpdate();
 			});
 			signal.throwIfAborted();

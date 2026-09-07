@@ -39,6 +39,22 @@ Worker STOPPED/FAILED, Reviewer BLOCK, and Judge NEEDS_INPUT/BLOCKED can optiona
 
 Gate outcomes `passed`, `command_failed`, `unavailable`, `timed_out`, and `runner_error`, plus error/timedOut/signal metadata, are process evidence only. A launched uv/Nix wrapper missing a nested tool may be `command_failed`; exit 127 or log text alone is not a source-defect diagnosis. Inspect the declared invocation and prerequisites, report exact manager/command/cwd/error, and never rewrite missing setup as a passed check.
 
+## Bounded review policy and calibration
+
+The focused package-contract check is deterministic and uses no provider:
+
+```sh
+npm run test:herder -- extensions/herder/tests/integration/pi-package.test.ts
+```
+
+Plan `DISCOVERY` uses Plan V2 Risk **LOW = 1, MED = 2, HIGH = 4** as a floor; missing risk means HIGH. Actual authorization/authentication, persistence, concurrency, public-boundary, or executable Markdown/prompt-policy risk may escalate; diff/file size or documentation extension never justifies a downgrade. First discovery in any later round uses the same rule. `FINAL_AUDIT` still uses four reviewers with full aggregate coverage. `VERIFICATION` defaults to one scoped child, scaling only for distinct risky repair boundaries up to four. All four lenses and owned-hunk/cross-boundary coverage remain required within the review scope. These are prompt policy counts, not changes to hard runtime caps (eight root calls, four concurrent direct children) or model bindings.
+
+Contract checks cover materiality before expensive proof, optional rather than mandatory second opinions, zero-findings validity, separate unresolved mandatory coverage gaps/material concerns versus rejected speculation, stable IDs, partial-report omissions not resolving findings, and incomplete serious concerns/required checks never implying approval. Automatic Reignite drafting is limited to eligible P0/P1 `BLOCKING` `PLAN_REQUIREMENT`/`PATCH_REGRESSION` material blockers; advisories remain reports, not executable scope. Static contracts do not demonstrate live reviewer quality.
+
+`HERDER_REVIEW_TIMEOUT_MS` is opt-in: a positive integer no greater than 2147483647, unset disabled pending calibration. One deadline starts at root Reviewer start and includes SDK compaction/retries and all descendants. Exhaustion enters same-round operator attention with no automatic retry or approval. Safe Bash cleanup/settlement may exceed the deadline; measure that tail separately from the configured budget. This is separate from the live fixture's overall/stall limits below.
+
+Before selecting a default budget or claiming improvements, compare approximately 30 representative historical changes under the old and bounded policies, with model bindings held constant. Include LOW/MED/HIGH risks, risky small and executable-policy diffs, repairs, and final audits. Human-audit material defects and misses (including serious unresolved coverage), not raw finding counts. Record latency, total tokens including descendants, and human triage effort/dispositions for material blockers, advisories, and rejected speculation. Report timeout/cleanup tails and quality-cost tradeoffs; do not hide misses behind faster runs. This is a calibration plan, not a completed benchmark; no live tests or benchmark are run as part of this policy update.
+
 ## Local live Pi/Poorman setup
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.

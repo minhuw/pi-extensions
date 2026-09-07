@@ -1148,3 +1148,81 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("adapter forwards host review budget exhaustion unchanged instead of accepting partial approval", { timeout: 60_000 }, async (t) => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-review-budget-"));
+	const previousTimeout = process.env.HERDER_REVIEW_TIMEOUT_MS;
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	try {
+		process.env.HERDER_REVIEW_TIMEOUT_MS = "123456";
+		const deadline = new Deferred<() => void>();
+		const realSetTimeout = globalThis.setTimeout;
+		// Only the configured review timer is fired manually; manager I/O uses real timers.
+		t.mock.method(globalThis, "setTimeout", (callback: () => void, delay?: number, ...args: unknown[]) => {
+			if (delay === 123_456) deadline.resolve(callback);
+			return realSetTimeout(callback, delay, ...args);
+		});
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		class BudgetFactory extends CapturedWorkerFactory {
+			override async create(request: PiWorkerRequest) {
+				const prepared = await super.create(request);
+				if (request.action.role !== "plan-reviewer") return prepared;
+				const { session } = prepared;
+				const completion = new Deferred<void>();
+				session.prompt = async (text) => {
+					session.promptText = text;
+					session.prompted = true;
+					session.started.resolve();
+					await completion.promise;
+					session.messages.push({ role: "assistant", content: [{ type: "text", text: "VERDICT: APPROVE\nSCOPE: PASS" }], stopReason: "stop" });
+					session.settled.resolve();
+				};
+				session.abort = async () => { session.aborted = true; completion.resolve(); };
+				return prepared;
+			}
+		}
+		const factory = new BudgetFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "budget session start");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "budget fire");
+		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "budget implementer");
+		await withDeadline(implementer.started.promise, "budget implementer started");
+		assert.equal(implementer.promptText, implementer.action.prompt);
+		implementer.release();
+		const reviewer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-reviewer"), "budget reviewer");
+		await withDeadline(reviewer.started.promise, "budget reviewer started");
+		assert.match(reviewer.promptText, /123456ms total wall-clock/);
+		(await withDeadline(deadline.promise, "review deadline armed"))();
+		await withDeadline(api.waitForAttentionMessage(), "budget attention forwarded");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const completed = store.getAction(reviewer.action.actionId)!;
+			const terminal = object(object(completed.result).terminal);
+			assert.equal(terminal.failureKind, "review_budget_exhausted");
+			assert.equal(terminal.interrupted, true);
+			assert.equal(terminal.response, "VERDICT: APPROVE\nSCOPE: PASS");
+			assert.equal(terminal.hostHandle, `pi-worker:${reviewer.sessionId}`);
+			assert.equal(run.status, "needs_input");
+			assert.equal(store.getPlan(run.runId, "001")!.phase, "NEEDS_INPUT");
+		} finally { store.close(); }
+		assert.equal(reviewer.aborted, true);
+		assert.equal(reviewer.disposed, true);
+		assert.equal(factory.sessions.length, 2, "budget exhaustion must not become transport redispatch");
+		assert.equal(factory.providerCalls, 0);
+	} finally {
+		if (api && context) await withDeadline(api.invoke("session_shutdown", context), "budget shutdown", 5_000).catch(() => {});
+		if (previousTimeout === undefined) delete process.env.HERDER_REVIEW_TIMEOUT_MS;
+		else process.env.HERDER_REVIEW_TIMEOUT_MS = previousTimeout;
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});

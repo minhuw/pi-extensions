@@ -98,7 +98,11 @@ test("universe keeps Luna on Recon and validates rescue and Searcher overrides",
 
 test("roles encourage bounded Recon exploration without delegating judgment", async () => {
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
-		const { systemPrompt } = await loadHerderPiRole(agentRoot, role);
+		let { systemPrompt } = await loadHerderPiRole(agentRoot, role);
+		if (role === "plan-reviewer") {
+			assert.match(systemPrompt, /read the complete `ROLE_CONTRACT_PATH` and the complete `REVIEW_PROTOCOL_PATH`/);
+			systemPrompt = await readFile(path.join(packageRoot, "assets/review/code-review-protocol.md"), "utf8");
+		}
 		assert.match(systemPrompt, /Prefer (?:bounded )?Recon/);
 		assert.match(systemPrompt, /concrete question, starting paths, stopping boundary, and compact evidence request/);
 		assert.match(systemPrompt, /direct known-path reads need no scout/i);
@@ -136,8 +140,10 @@ test("subreviewer contract preserves sources and hands unresolved proof to its p
 	assert.match(systemPrompt, /wait_any: true/);
 	assert.match(systemPrompt, /60 seconds, then returns running without cancelling/);
 	assert.match(systemPrompt, /including timeout\/error/);
-	assert.match(systemPrompt, /Missing proof belongs in UNRESOLVED/);
-	assert.match(systemPrompt, /Child confidence scores are not an admission gate/);
+	assert.match(systemPrompt, /UNRESOLVED: <COVERAGE_GAP or MATERIAL_CONCERN/);
+	assert.match(systemPrompt, /Missing proof alone neither rejects a credible concern nor promotes it to a blocker/);
+	assert.match(systemPrompt, /Reject unsupported speculation with a concise reason/);
+	assert.match(systemPrompt, /child confidence scores are not an admission gate/i);
 	for (const field of ["PROPOSED_FINDINGS", "UNRESOLVED", "COVERAGE"]) assert.match(systemPrompt, new RegExp(`^${field}:`, "m"));
 });
 

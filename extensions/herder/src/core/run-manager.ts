@@ -208,6 +208,9 @@ function validateEventInput(input: EventInput): void {
 			for (const terminal of input.terminals) {
 				if (!terminal || typeof terminal.actionId !== "string" || terminal.actionId.length === 0) throw new Error("Invalid terminal event");
 				if (seen.has(terminal.actionId)) throw new Error(`Duplicate terminal event for ${terminal.actionId}`);
+				if (terminal.failureKind !== undefined && (terminal.failureKind !== "review_budget_exhausted" || terminal.interrupted !== true)) {
+					throw new Error("Terminal failureKind must be review_budget_exhausted with interrupted: true");
+				}
 				seen.add(terminal.actionId);
 			}
 			return;
@@ -476,8 +479,13 @@ function countBlocking(findings: string[]): number {
 	return findings.filter((finding) => /\[BLOCKING\]/.test(finding) && /\[(?:P0|P1)\]/.test(finding)).length;
 }
 
+function findingId(entry: string): string | undefined {
+	return entry.match(/^\[([^\[\]\s]+)\]/)?.[1];
+}
+
 function isActionableReigniteFinding(finding: string): boolean {
-	return /\[PLAN_REQUIREMENT\]/.test(finding) || /\[PATCH_REGRESSION\]/.test(finding);
+	// Validate only the envelope; the Reviewer owns the truth and completeness of its evidence.
+	return /^\[[^\[\]\s]+\]\[(?:P0|P1)\]\[BLOCKING\]\[(?:PLAN_REQUIREMENT|PATCH_REGRESSION)\]\s+[^\s[]/.test(finding);
 }
 
 const REIGNITE_DIRECTORY_PATTERN = /^(?:herder-reignite|herder-reignite-[2-9]|herder-reignite-[1-9]\d+)$/;
@@ -594,7 +602,7 @@ interface StoredTerminalRecord {
 	workerResult: WorkerResult | null;
 	usage: ReturnType<typeof normalizeUsage>;
 	outcome: string;
-	terminal: { interrupted: boolean; error: string | null; hostHandle: string | null };
+	terminal: { interrupted: boolean; error: string | null; hostHandle: string | null; failureKind?: TerminalEvent["failureKind"]; response?: string };
 }
 
 interface TerminalTransition {
@@ -631,6 +639,10 @@ function terminalRecord(result: WorkerResult | null, terminal: TerminalEvent, us
 			interrupted: Boolean(terminal.interrupted),
 			error: terminal.error ?? null,
 			hostHandle: terminal.hostHandle ?? null,
+			...(terminal.failureKind ? {
+				failureKind: terminal.failureKind,
+				response: terminal.response ?? "",
+			} : {}),
 		},
 	};
 }
@@ -2131,6 +2143,7 @@ export class HerderRunManager {
 		for (const terminal of [...terminals].sort((left, right) => left.actionId.localeCompare(right.actionId))) {
 			const action = this.store.getAction(terminal.actionId);
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown terminal action ${terminal.actionId}`);
+			if (terminal.failureKind && action.role !== "plan-reviewer") throw new Error("review_budget_exhausted is only valid for plan-reviewer terminals");
 			if (terminal.hostHandle && action.hostHandle && terminal.hostHandle !== action.hostHandle) {
 				throw new Error(`Terminal handle mismatch for ${terminal.actionId}`);
 			}
@@ -2160,7 +2173,30 @@ export class HerderRunManager {
 			}
 			const usage = normalizeUsage(parsed, terminal);
 			let transition: TerminalTransition;
-			if (terminal.interrupted) {
+			if (terminal.failureKind === "review_budget_exhausted") {
+				const detail = boundedEvidence([
+					`HOST_FAILURE: review_budget_exhausted; role=${action.role}; mode=${action.workerMode}; round=${plan.round}; reviewPass=${plan.reviewPass}`,
+					"Review incomplete: partial output is diagnostic only, never a verdict, code defect, environment classification, approval, or repair authority.",
+					`ACTION_ID: ${action.actionId}`,
+					`WORKTREE: ${plan.worktree}`,
+					`FROZEN_HEAD: ${plan.approvedHead}; FROZEN_TREE: ${plan.approvedTree}; ASSIGNMENT_SHA256: ${plan.assignmentSha256}`,
+					`HOST_USAGE: ${stableJson(usage)}`,
+					`REASON: ${terminal.error || "Reviewer action budget exhausted"}`,
+					"PARTIAL_RESPONSE (non-authoritative diagnostic evidence):",
+					terminal.response || "none",
+				].join("\n"), 16_384);
+				transition = {
+					plan: { ...plan, phase: "NEEDS_INPUT" },
+					runUpdate: { status: "needs_input", terminalDetail: detail },
+					attention: this.attention({
+						run, plan, kind: "operator_attention", cause: "review_budget_exhausted",
+						actionId: action.actionId, state: "awaiting_input",
+						continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+						detail,
+						recommendedAction: "Explicitly retry the same Reviewer mode/round with a fresh action budget, cancel, or defer. No automatic retry, code repair, plan rewrite, acceptance, or Reignite is authorized.",
+					}),
+				};
+			} else if (terminal.interrupted) {
 				const detail = terminal.error || "Worker transport was interrupted";
 				transition = action.role === "plan-implementer"
 					? this.retryImplementerTransport(run, plan, action, detail)
@@ -2478,7 +2514,16 @@ export class HerderRunManager {
 		verification: StoredVerification,
 	): ReigniteRequest {
 		const existing = this.store.getReigniteRequest(run.runId, plan.generation);
-		const state = result.findings.some(isActionableReigniteFinding) ? "pending" : "skipped";
+		const findings = result.findings.filter(isActionableReigniteFinding);
+		const idCounts = new Map<string, number>();
+		for (const finding of result.findings) {
+			const id = findingId(finding);
+			if (id) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+		}
+		// Ambiguous IDs (including repeated NEW) cannot bind guidance to a specific finding.
+		const guidanceIds = new Set(findings.map(findingId).filter((id) => id && idCounts.get(id) === 1));
+		const fixGuidance = result.fixGuidance.filter((guidance) => /^\[[^\[\]\s]+\]\s+[^\s[]/.test(guidance) && guidanceIds.has(findingId(guidance)));
+		const state = findings.length > 0 ? "pending" : "skipped";
 		return createReigniteRequest({
 			requestId: existing?.requestId ?? randomUUID(),
 			runId: run.runId,
@@ -2490,8 +2535,8 @@ export class HerderRunManager {
 			integrationBranch: verification.request.integrationBranch,
 			verdict: result.verdict,
 			scope: result.scope,
-			findings: result.findings,
-			fixGuidance: result.fixGuidance,
+			findings,
+			fixGuidance,
 			rationale: result.rationale,
 			createdAt: existing?.createdAt ?? new Date().toISOString(),
 			state,
@@ -2573,7 +2618,9 @@ export class HerderRunManager {
 		const marker = `USER_INPUT [${eventId}]: ${value}`;
 		const plans = this.store.getPlans(run.runId);
 		const suppliedAttention = this.store.getAttention(attentionRequestId);
-		if (suppliedAttention?.cause === "verification_environment") throw new Error("Environment attention requires a request-bound explicit retry or cancel resolution");
+		if (suppliedAttention?.cause === "verification_environment" || suppliedAttention?.cause === "review_budget_exhausted") {
+			throw new Error("Environment or review-budget attention requires a request-bound explicit retry or cancel resolution");
+		}
 		// The event may have committed its plan/attention transaction before the
 		// process was replaced and before the event journal write. Recognize that
 		// durable marker only on the explicitly bound request's plan.
@@ -2886,8 +2933,8 @@ export class HerderRunManager {
 			this.cacheSpecs(validation.nextSpecs);
 			return;
 		}
-		if (attention.cause === "verification_environment" && !["retry", "cancel"].includes(action)) {
-			throw new Error("Environment attention requires explicit retry or cancel; it cannot approve or waive checks");
+		if ((attention.cause === "verification_environment" || attention.cause === "review_budget_exhausted") && !["retry", "cancel"].includes(action)) {
+			throw new Error("Environment or review-budget attention requires explicit retry or cancel; it cannot approve or waive checks");
 		}
 		if (!["answer", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
 		if (attention.kind === "user_decision" && action === "answer" && !(resolution.answer || "").trim()) {

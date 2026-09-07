@@ -778,3 +778,58 @@ test("rejected setup and cleanup promises cannot suppress a collectable terminal
 	await value.stop();
 	assert.equal(value.activeCount(), 0);
 });
+
+for (const phase of ["agent_start", "compaction_start"] as const) {
+	test(`nested late ${phase} re-aborts after controller installation and retains every abort barrier`, async () => {
+		const phaseResume = deferred<void>();
+		const cancelled = deferred<void>();
+		const firstAbort = deferred<void>();
+		const secondAbort = deferred<void>();
+		class LatePhaseSession extends FakeNestedSession {
+			readonly started = deferred<void>();
+			controllerInstalled = false;
+			abortCalls = 0;
+			override async prompt(): Promise<void> {
+				this.started.resolve();
+				await phaseResume.promise;
+				this.emit(phase === "agent_start" ? { type: phase } : { type: phase, reason: "threshold" });
+				this.controllerInstalled = true;
+				await cancelled.promise;
+			}
+			override async abort(): Promise<void> {
+				const call = ++this.abortCalls;
+				if (this.controllerInstalled) cancelled.resolve();
+				// Like SDK abort(), the first call waits for the whole prompt to become idle.
+				await cancelled.promise;
+				await (call === 1 ? firstAbort.promise : secondAbort.promise);
+			}
+		}
+		const session = new LatePhaseSession("late-phase");
+		const value = new HerderNestedAgentScope({ action: action("plan-reviewer"), agentRoot, createSession: async () => session });
+		const running = value.run(reviewerRequest);
+		let stopping: Promise<void> | undefined;
+		try {
+			await session.started.promise;
+			stopping = value.stop();
+			await nextTurn();
+			assert.equal(session.abortCalls, 1);
+			phaseResume.resolve();
+			await nextTurn();
+			assert.equal(session.abortCalls, 2, "fresh cancellation cannot wait behind the first abort");
+			assert.equal(session.disposed, false);
+			secondAbort.reject(new Error("late abort failed"));
+			await nextTurn();
+			assert.equal(session.disposed, false, "the earlier abort still owns the session");
+			assert.equal(value.activeCount(), 1);
+			firstAbort.reject(new Error("initial abort failed"));
+			await stopping;
+			assert.equal((await running).status, "stopped");
+			assert.equal(session.disposed, true);
+			assert.equal(session.listenerCount, 0);
+			assert.equal(value.activeCount(), 0);
+		} finally {
+			phaseResume.resolve(); cancelled.resolve(); firstAbort.resolve(); secondAbort.resolve();
+			await Promise.allSettled([running, stopping, value.stop()]);
+		}
+	});
+}

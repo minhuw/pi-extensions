@@ -308,6 +308,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /wait_any/);
 	assert.match(nestedExecutor, /scopeController/);
 	assert.match(nestedExecutor, /MAX_NESTED_CONCURRENCY_PER_ACTION = 4/);
+	assert.match(nestedExecutor, /MAX_NESTED_CALLS = 8/);
 	assert.doesNotMatch(nestedExecutor, /MAX_GLOBAL_NESTED_CONCURRENCY|globalLimiter/);
 	for (const type of ["recon", "searcher", "worker"]) {
 		const nested = await readFile(path.join(agentDir, "nested", `${type}.md`), "utf8");
@@ -342,13 +343,13 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(reviewer, /Reuse parent-prepared dependencies/);
 	assert.match(reviewer, /delegates sole pre-check setup ownership/);
 	const reviewProtocol = await readFile(path.join(extensionRoot, "assets/review/code-review-protocol.md"), "utf8");
-	assert.match(reviewProtocol, /four fresh `reviewer` children in one parallel wave/);
+	assert.match(reviewProtocol, /For `FINAL_AUDIT`, launch four fresh `reviewer` children in one parallel wave and retain full aggregate coverage/);
 	assert.match(reviewProtocol, /primary explicit hunk\/subsystem ownership and named cross-boundary questions/);
 	assert.match(reviewProtocol, /four review lenses remain a coverage checklist/);
 	assert.match(reviewProtocol, /Optional targeted fresh second opinions/);
 	assert.match(reviewProtocol, /not a mandatory full second discovery wave/);
 	assert.match(reviewProtocol, /No child confidence threshold is a prerequisite/);
-	assert.match(reviewProtocol, /Missing proof is handed to the parent explicitly/);
+	assert.match(reviewProtocol, /Missing proof alone neither rejects a credible material concern nor promotes it to a blocker/);
 	assert.match(reviewProtocol, /required shared gates once per frozen review target/);
 	assert.match(reviewProtocol, /runtime timeout is neither a code defect nor approval evidence/);
 	assert.match(reviewProtocol, /wait_any: true/);
@@ -381,6 +382,91 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 			assert.match(contract, /review protocol's bounded multi-agent workflow/);
 		}
 	}
+});
+
+test("bounded review policy preserves risk floors, materiality, scoped verification, and fail-closed evidence", async () => {
+	const [protocol, contract, root, child] = await Promise.all([
+		"assets/review/code-review-protocol.md",
+		"assets/roles/contracts/plan-reviewer.md",
+		"assets/roles/pi/plan-reviewer.md",
+		"assets/roles/pi/nested/reviewer.md",
+	].map((file) => readFile(path.join(extensionRoot, file), "utf8")));
+	for (const text of [protocol, contract]) {
+		assert.match(text, /LOW = 1, MED = 2, HIGH = 4/);
+		assert.match(text, /[Mm]issing risk[^.]*HIGH/);
+		assert.match(text, /[Ee]scalate[^.]*authorization\/authentication, persistence, concurrency, public boundaries, and executable Markdown\/prompt policies/);
+		assert.match(text, /[Nn]ever downgrade[^.]*diff\/file (?:count|size)[^.]*documentation extension/);
+		assert.match(text, /`FINAL_AUDIT`[^\n]*four[^\n]*full aggregate coverage/);
+		assert.match(text, /(?:same Plan V2 risk rule|same risk rule)[^.]*regardless of round|first discovery in a later round uses this same risk rule/i);
+		assert.match(text, /[Dd]efault(?:s)? to one scoped/);
+		assert.match(text, /[Ss]cale up only for distinct risky repair boundaries, up to four|scaling only for distinct risky repair boundaries up to four/);
+		assert.match(text, /counts are prompt policy|counts[^.]*prompt policy/);
+		assert.doesNotMatch(text, /first required discovery with four parallel|initial four reviewers|four actual reviewers remain mandatory/i);
+	}
+	for (const text of [protocol, contract, child]) {
+		assert.match(text, /[Mm]ateriality before (?:expensive )?proof/);
+		assert.match(text, /concrete plausible trigger and material consequence, or an explicit failed acceptance\/scope obligation/);
+		assert.match(text, /Do not actively seek optional P2\/P3 improvements/);
+		assert.match(text, /Zero findings is valid; never suppress confirmed serious defects to meet a count/);
+		assert.match(text, /COVERAGE_GAP/);
+		assert.match(text, /MATERIAL_CONCERN/);
+		assert.match(text, /(?:[Rr]eject unsupported|\*\*Unsupported) speculation[^.]*concise reason/);
+		assert.match(text, /every hypothetical[^.]*false/);
+		assert.match(text, /[Ss]erious unresolved concerns[^.]*missing required checks\/coverage[^.]*incomplete[^.]*never approval/);
+		assert.match(text, /[Mm]issing finding from a partial report is not resolution/);
+		assert.match(text, /[Dd]o not reopen[^.]*resolved\/rejected findings without new evidence/);
+		assert.match(text, /(?:[Ii]ndependently checks materiality|[Ii]ndependently check[^.]*materiality)/);
+		assert.match(text, /all four lenses|four review lenses|coverage checklist regardless of child count/);
+		assert.doesNotMatch(text, /retain missing-proof claims as explicit unresolved work|Missing proof belongs in UNRESOLVED|neither silently discard it nor promote it/);
+	}
+	assert.match(root, /Before any repository action, read the complete `ROLE_CONTRACT_PATH` and the complete `REVIEW_PROTOCOL_PATH` from the exact paths supplied/);
+	assert.match(root, /If either is missing or unreadable, return `BLOCK`, never inferred approval/);
+	assert.match(root, /You alone establish compiled assignment and frozen authority/);
+	assert.match(root, /Return only the contract's exact terminal envelope/);
+	assert.ok(root.split("---")[2].trim().split(/\s+/).length <= 250, "Pi wrapper stays a short loader, not a duplicated policy");
+	assert.doesNotMatch(root, /LOW =|MED =|HIGH =|PASS_DOCUMENT|wait_any|SETUP|COVERAGE_GAP|HERDER_REVIEW_TIMEOUT_MS/);
+	assert.match(protocol, /A separate skeptic is not mandatory/);
+	assert.match(protocol, /Verify all accepted open IDs and concrete P0\/P1 repair-delta regressions/);
+	assert.match(protocol, /For later review passes, do not reopen broad discovery/);
+	assert.match(protocol, /exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk\/commit/);
+	assert.match(protocol, /evidence-complete P0\/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`/);
+	assert.match(protocol, /failed explicit acceptance criterion, a failed required acceptance gate, or a material scope violation/);
+	assert.match(protocol, /Confirmed P2\/P3 findings remain advisory/);
+	assert.match(protocol, /`FOLLOWUP` and `INVALID` never block/);
+	assert.match(protocol, /No round-3 Judge or fourth automatic mutation is allowed/);
+	assert.match(contract, /hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/);
+	assert.match(contract, /Verify frozen branch\/HEAD\/tree integrity before returning/);
+	assert.match(contract, /final-phase V rows[^.]*cannot be the only prerequisite acceptance proof/);
+	assert.match(contract, /ENVIRONMENT\/INVOCATION enters durable `operator_attention`[^.]*same role\/ready phase and substantive round without automatic retry or code repair/);
+	assert.match(contract, /`APPROVE` only when required acceptance checks and explicit criteria pass, mandatory coverage is complete, and no serious material concern remains unresolved/);
+	const envelope = contract.match(/```text\n(VERDICT:[\s\S]*?)\n```/)?.[1];
+	assert.ok(envelope);
+	assert.deepEqual([...envelope.matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
+		"VERDICT", "BLOCKER_KIND", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "SETUP", "CHECKS", "RATIONALE", "USAGE",
+	]);
+});
+
+test("review docs separate policy counts, opt-in deadlines, material-only Reignite, and unmeasured calibration", async () => {
+	const [readme, adapter, testing] = await Promise.all([
+		"README.md", "adapters/README.md", "TESTING.md",
+	].map((file) => readFile(path.join(extensionRoot, file), "utf8")));
+	for (const text of [readme, adapter, testing]) {
+		assert.match(text, /LOW = 1, MED = 2, HIGH = 4/);
+		assert.match(text, /`FINAL_AUDIT`[^\n]*four[^\n]*full aggregate coverage/);
+		assert.match(text, /prompt policy counts[^\n]*hard runtime caps/);
+		assert.match(text, /HERDER_REVIEW_TIMEOUT_MS[^\n]*positive integer no greater than 2147483647[^\n]*unset[^\n]*disabl/);
+		assert.match(text, /deadline[^\n]*root Reviewer start[^\n]*SDK compaction[^\n]*retr(?:y|ies)[^\n]*descendant/);
+		assert.match(text, /[Ee]xhaustion[^\n]*same-round[^\n]*operator[_ ]attention/);
+		assert.match(text, /no automatic retry or approval|never automatic retry or approval/);
+		assert.match(text, /settlement may exceed the deadline/);
+		assert.match(text, /P0\/P1 `BLOCKING`[^\n]*`PLAN_REQUIREMENT`[^\n]*`PATCH_REGRESSION`/);
+		assert.match(text, /[Aa]dvisories remain[^\n]*reports, not executable scope/);
+	}
+	assert.match(adapter, /advisory-only reports do not trigger automatic Reignite drafting/);
+	assert.match(testing, /approximately 30 representative historical changes[^\n]*model bindings held constant/);
+	assert.match(testing, /Human-audit material defects and misses/);
+	assert.match(testing, /latency, total tokens including descendants, and human triage effort/);
+	assert.match(testing, /not a completed benchmark; no live tests or benchmark are run/);
 });
 
 test("Pi exposes current-session agentic workflows, direct plan commands, and the exact plan application tool", async () => {

@@ -3,12 +3,15 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { ModelRegistry, ModelRuntime, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
-import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
+import { HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
+import { Deferred } from "./helpers/harness.ts";
 import {
+	applyNestedAbortSignal,
 	applySearcherToolPolicy,
 	applyServiceTier,
 	DefaultPiWorkerSessionFactory,
@@ -835,3 +838,555 @@ test("assistant extraction uses only the exact final child response", () => {
 		{ role: "assistant", content: [{ type: "text", text: "  VERDICT: APPROVE  \n" }], stopReason: "stop" },
 	]), { text: "  VERDICT: APPROVE  \n", failed: false });
 });
+
+class BudgetSession extends FakeSession {
+	readonly started = new Deferred<void>();
+	readonly promptDone = new Deferred<void>();
+	readonly abortDone = new Deferred<void>();
+	readonly shutdownDone = new Deferred<void>();
+	promptText = "";
+	promptOptions?: unknown;
+	promptError?: string;
+	providerError?: string;
+	abortError?: string;
+	abortCalls = 0;
+	holdShutdown = false;
+	shutdownStarted = false;
+	override readonly extensionRunner = {
+		emit: async () => this.shutdown(),
+	} as unknown as AgentSession["extensionRunner"];
+	override async prompt(text = "", options?: unknown): Promise<void> {
+		this.prompted = true;
+		this.promptText = text;
+		this.promptOptions = options;
+		this.started.resolve();
+		await this.promptDone.promise;
+		this.messages.push({
+			role: "assistant", content: [{ type: "text", text: "VERDICT: APPROVE\nSCOPE: PASS" }],
+			stopReason: this.providerError ? "error" : "stop", errorMessage: this.providerError,
+		});
+		if (this.promptError) throw new Error(this.promptError);
+	}
+	override async abort(): Promise<void> {
+		this.aborted = true;
+		this.abortCalls += 1;
+		await this.abortDone.promise;
+		if (this.abortError) throw new Error(this.abortError);
+	}
+	async shutdown(): Promise<void> {
+		this.shutdownStarted = true;
+		if (this.holdShutdown) await this.shutdownDone.promise;
+	}
+}
+
+function reviewerAction(planId = "001"): ManagerAction {
+	return { ...action("review", planId), role: "plan-reviewer", agentType: "herder.plan-reviewer", workerMode: planId === "RUN" ? "FINAL_AUDIT" : "DISCOVERY" };
+}
+
+function budgetFixture(timeoutMs?: number, parent = reviewerAction(), createSession: NestedSessionCreator = async () => { throw new Error("unused child"); }) {
+	const session = new BudgetSession("budget-root");
+	const nested = new HerderNestedAgentScope({ action: parent, agentRoot, createSession });
+	const factory: PiWorkerSessionFactory = {
+		availableModels: async () => [],
+		create: async () => ({ session, nested }),
+	};
+	const engine = new PiWorkerEngine(factory, timeoutMs);
+	const terminals: PiWorkerTerminal[] = [];
+	const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal((result) => { terminals.push(result); resolve(result); }));
+	return { session, nested, engine, terminals, terminal, request: { action: parent, planDirectory: "/tmp/budget-plans" } };
+}
+
+const reviewChild = { type: "reviewer", prompt: "Check a shard", description: "review shard" } as const;
+const scoutChild = { ...reviewChild, type: "recon" } as const;
+
+test("review timeout configuration is opt-in and rejects malformed environment or numeric overrides", () => {
+	const original = process.env.HERDER_REVIEW_TIMEOUT_MS;
+	try {
+		for (const value of ["", " ", " 100", "100 ", "-1", "0", "1.5", "NaN", "Infinity", "1e3", "0x10", "100ms", "2147483648", "9007199254740992"]) {
+			process.env.HERDER_REVIEW_TIMEOUT_MS = value;
+			assert.throws(() => budgetFixture(), /HERDER_REVIEW_TIMEOUT_MS.*positive safe integer.*2147483647/);
+		}
+		for (const value of [NaN, Infinity, -1, 0, 1.5, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1]) {
+			assert.throws(() => budgetFixture(value), /HERDER_REVIEW_TIMEOUT_MS/);
+		}
+		assert.doesNotThrow(() => budgetFixture(100), "numeric injection overrides the environment");
+		for (const value of ["1", "2147483647"]) {
+			process.env.HERDER_REVIEW_TIMEOUT_MS = value;
+			assert.doesNotThrow(() => budgetFixture());
+		}
+		delete process.env.HERDER_REVIEW_TIMEOUT_MS;
+		assert.doesNotThrow(() => budgetFixture());
+	} finally {
+		if (original === undefined) delete process.env.HERDER_REVIEW_TIMEOUT_MS;
+		else process.env.HERDER_REVIEW_TIMEOUT_MS = original;
+	}
+});
+
+for (const [planId, phase] of [["001", "retry"], ["RUN", "compaction"]] as const) {
+	test(`root ${planId} reviewer deadline includes active SDK ${phase} and waits for prompt, abort and shutdown`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+		const { engine, session, nested, terminal, terminals, request } = budgetFixture(100, reviewerAction(planId));
+		session.holdShutdown = true;
+		if (phase === "retry") session.abortError = "late abort rejection";
+		const handle = await engine.prepare(request);
+		t.mock.timers.tick(50_000);
+		assert.equal(session.aborted, false, "prepare does not spend the review budget");
+		const originalAction = structuredClone(request.action);
+		engine.start(handle);
+		engine.start(handle);
+		assert.equal(engine.snapshots()[0]!.startedAt, 0, "preserve prepared-time telemetry independently of the review deadline");
+		assert.deepEqual(request.action, originalAction, "budget notice must not mutate assignment identity");
+		assert.ok(session.promptText.startsWith(originalAction.prompt));
+		assert.match(session.promptText, /100ms total wall-clock; deadline 1970-01-01T00:00:50.100Z; 100ms remaining/);
+		assert.match(session.promptText, /Reserve time.*synthesize/);
+		assert.deepEqual(session.promptOptions, { expandPromptTemplates: false, source: "extension" });
+		t.mock.timers.tick(50);
+		session.emit({ type: "agent_end", messages: [], willRetry: true });
+		session.emit(phase === "retry"
+			? { type: "auto_retry_start", attempt: 1 } as AgentSessionEvent
+			: { type: "compaction_start", reason: "overflow" } as AgentSessionEvent);
+		t.mock.timers.tick(49);
+		assert.equal(session.aborted, false);
+		t.mock.timers.tick(1);
+		await assert.rejects(nested.spawnBackground(reviewChild), /scope is closed/);
+		await nextTurn();
+		assert.equal(session.aborted, true);
+		assert.equal(engine.snapshots()[0]!.status, "stopping");
+		session.emit({ type: "agent_start" });
+		assert.equal(engine.snapshots()[0]!.status, "stopping", "late SDK events cannot restart a stopped worker");
+		session.abortDone.resolve();
+		await nextTurn();
+		assert.equal(terminals.length, 0, "root prompt still owns the worker after abort settles");
+		assert.equal(session.disposed, false);
+		session.promptDone.resolve();
+		await nextTurn();
+		assert.equal(session.shutdownStarted, true);
+		t.mock.timers.tick(5_001);
+		assert.equal(terminals.length, 0, "root shutdown must settle before manager terminal/release");
+		assert.equal(engine.has(handle), true);
+		session.shutdownDone.resolve();
+		const result = await terminal;
+		assert.equal(result.failureKind, "review_budget_exhausted");
+		assert.equal(result.interrupted, true);
+		assert.match(result.response!, /VERDICT: APPROVE/, "partial approval cannot override host exhaustion");
+		assert.match(result.error!, /wall-clock budget exhausted/);
+		await nextTurn();
+		t.mock.timers.tick(100_000);
+		assert.equal(session.abortCalls, 2, "late agent_start needs a fresh abort, even when the first abort rejects");
+		assert.equal(terminals.length, 1);
+		assert.equal(session.disposed, true);
+		assert.equal(engine.has(handle), false);
+	});
+}
+
+test("reviewer timeout cascades to late descendants without releasing Bash-capable children early", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	const child = new BudgetSession("nested-reviewer");
+	const scout = new BudgetSession("grandchild-scout");
+	child.holdShutdown = scout.holdShutdown = true;
+	let childScope!: HerderNestedAgentScope;
+	const { session, nested, engine, terminal, terminals, request } = budgetFixture(100, reviewerAction(), async ({ nestedScope }) => {
+		if (nestedScope) { childScope = nestedScope; return child; }
+		return scout;
+	});
+	const handle = await engine.prepare(request);
+	engine.start(handle);
+	t.mock.timers.tick(75);
+	const launched = await nested.spawnBackground(reviewChild);
+	await child.started.promise;
+	t.mock.timers.tick(15);
+	await childScope.spawnBackground(scoutChild);
+	await scout.started.promise;
+	t.mock.timers.tick(10);
+	await nextTurn();
+	assert.equal([session, child, scout].every((item) => item.aborted), true);
+	await assert.rejects(childScope.spawnBackground(scoutChild), /scope is closed/);
+	session.promptDone.resolve();
+	await nextTurn();
+	assert.equal(terminals.length, 0);
+	session.abortDone.resolve();
+	t.mock.timers.tick(5_000);
+	await nextTurn();
+	assert.equal(scout.disposed, true, "preserve recon's bounded cleanup guarantee");
+	assert.equal(child.disposed, false);
+	assert.equal(nested.activeCount(), 1);
+	assert.equal(terminals.length, 0);
+	assert.equal(engine.has(handle), true);
+	child.promptDone.resolve();
+	await nextTurn();
+	assert.equal(child.shutdownStarted, true);
+	child.abortDone.resolve();
+	t.mock.timers.tick(10_000);
+	await nextTurn();
+	assert.equal(terminals.length, 0, "Bash-capable child shutdown is not bounded by the scout grace period");
+	child.shutdownDone.resolve();
+	assert.equal((await terminal).failureKind, "review_budget_exhausted");
+	await nextTurn();
+	assert.equal((await nested.result(launched.id, false)).result!.status, "stopped");
+	assert.equal([session, child, scout].every((item) => item.disposed), true);
+	assert.equal(engine.has(handle), false);
+	// Abandoned scout SDK work is still observed; it cannot revive the worker.
+	scout.promptDone.resolve(); scout.abortDone.resolve(); scout.shutdownDone.resolve();
+	await nextTurn();
+	assert.equal(terminals.length, 1);
+});
+
+test("reviewer deadline retains pending Bash-capable child creation until late cleanup settles", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	const creation = new Deferred<NestedWorkerSession>();
+	const child = new BudgetSession("late-reviewer");
+	child.holdShutdown = true;
+	const { session, nested, engine, terminal, terminals, request } = budgetFixture(100, reviewerAction(), async () => creation.promise);
+	const handle = await engine.prepare(request);
+	engine.start(handle);
+	await nested.spawnBackground(reviewChild);
+	t.mock.timers.tick(100);
+	await nextTurn();
+	session.promptDone.resolve(); session.abortDone.resolve();
+	t.mock.timers.tick(10_000);
+	await nextTurn();
+	assert.equal(terminals.length, 0);
+	assert.equal(engine.has(handle), true);
+	creation.resolve(child);
+	await nextTurn();
+	assert.equal(child.prompted, false);
+	assert.equal(child.aborted, true);
+	assert.equal(child.shutdownStarted, true);
+	child.abortDone.resolve();
+	await nextTurn();
+	assert.equal(terminals.length, 0);
+	child.shutdownDone.resolve();
+	assert.equal((await terminal).failureKind, "review_budget_exhausted");
+	assert.equal(child.disposed, true);
+});
+
+test("one reviewer deadline remains active while successful prompt completion cleans up descendants", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	const child = new BudgetSession("cleanup-reviewer");
+	child.holdShutdown = true;
+	const { session, nested, engine, terminal, request } = budgetFixture(100, reviewerAction(), async () => child);
+	const handle = await engine.prepare(request);
+	engine.start(handle);
+	const runningChild = nested.run(reviewChild);
+	await child.started.promise;
+	session.promptDone.resolve();
+	child.promptDone.resolve(); child.abortDone.resolve();
+	await nextTurn();
+	assert.equal(child.shutdownStarted, true);
+	t.mock.timers.tick(100);
+	await nextTurn();
+	assert.equal(session.aborted, true);
+	child.shutdownDone.resolve();
+	await runningChild;
+	await nextTurn();
+	assert.equal(engine.has(handle), true, "root abort must settle even after the child is disposed");
+	session.abortDone.resolve();
+	assert.equal((await terminal).failureKind, "review_budget_exhausted");
+});
+
+test("explicit reviewer stop clears the deadline, shares abort and waits for terminal listeners", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	const { engine, session, terminals, request } = budgetFixture(100);
+	const listenerDone = new Deferred<void>();
+	engine.onTerminal(async () => listenerDone.promise);
+	const handle = await engine.prepare(request);
+	engine.start(handle);
+	const stops = [engine.stop(handle), engine.stop(handle)];
+	let stopped = false;
+	void Promise.all(stops).then(() => { stopped = true; });
+	session.promptDone.resolve();
+	await nextTurn();
+	t.mock.timers.tick(1_000);
+	assert.equal(terminals.length, 0, "root abort still owns the worker even though prompt settled");
+	assert.equal(stopped, false);
+	session.abortDone.resolve();
+	await nextTurn();
+	assert.equal(terminals.length, 1);
+	assert.equal(terminals[0]!.failureKind, undefined);
+	assert.equal(terminals[0]!.interrupted, true);
+	assert.equal(session.abortCalls, 1);
+	assert.equal(stopped, false);
+	listenerDone.resolve();
+	await Promise.all(stops);
+	assert.equal(engine.has(handle), false);
+});
+
+test("transport and provider failure before the deadline retain their classification during slow cleanup", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	for (const kind of ["promptError", "providerError", "uncollected"] as const) {
+		const child = new BudgetSession("failure-cleanup");
+		const { engine, session, nested, terminal, request } = budgetFixture(100, reviewerAction(), async () => child);
+		if (kind !== "uncollected") session[kind] = `${kind} failed`;
+		const handle = await engine.prepare(request);
+		engine.start(handle);
+		const childResult = kind === "uncollected" ? nested.spawnBackground(reviewChild) : nested.run(reviewChild);
+		await child.started.promise;
+		session.promptDone.resolve();
+		await nextTurn();
+		t.mock.timers.tick(1_000);
+		assert.equal(session.aborted, false);
+		child.promptDone.resolve(); child.abortDone.resolve();
+		await childResult;
+		const result = await terminal;
+		assert.equal(result.failureKind, undefined);
+		assert.equal(result.interrupted, true);
+		assert.match(result.error!, kind === "uncollected" ? /without collecting background nested agents/ : new RegExp(`${kind} failed`));
+	}
+});
+
+test("normal reviewer completion, prepared discard and prepared stop leave no deadline behind", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	for (const mode of ["complete", "discard", "stop"] as const) {
+		const { engine, session, terminal, terminals, request } = budgetFixture(100);
+		const handle = await engine.prepare(request);
+		if (mode === "complete") {
+			engine.start(handle);
+			session.promptDone.resolve();
+			assert.equal((await terminal).interrupted, undefined);
+			await nextTurn();
+		} else await engine[mode](handle);
+		t.mock.timers.tick(1_000);
+		await nextTurn();
+		assert.equal(session.abortCalls, 0);
+		assert.equal(terminals.length, mode === "complete" ? 1 : 0);
+		assert.equal(session.disposed, true);
+		assert.equal(engine.has(handle), false);
+	}
+});
+
+test("unset review budget and configured nonreview roles leave their prompt and lifetime unchanged", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	const original = process.env.HERDER_REVIEW_TIMEOUT_MS;
+	delete process.env.HERDER_REVIEW_TIMEOUT_MS;
+	try {
+		for (const role of ["plan-reviewer", "plan-implementer", "plan-judge"] as const) {
+			const { engine, session, terminal, request } = budgetFixture(role === "plan-reviewer" ? undefined : 100, { ...action(), role, agentType: `herder.${role}` });
+			const handle = await engine.prepare(request);
+			engine.start(handle);
+			t.mock.timers.tick(10_000);
+			assert.equal(session.aborted, false);
+			assert.equal(session.promptText, request.action.prompt);
+			session.promptDone.resolve();
+			assert.equal((await terminal).failureKind, undefined);
+		}
+	} finally {
+		if (original === undefined) delete process.env.HERDER_REVIEW_TIMEOUT_MS;
+		else process.env.HERDER_REVIEW_TIMEOUT_MS = original;
+	}
+});
+
+test("all roles retain snapshots through root shutdown and terminal listeners, including a stop during shutdown", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+	for (const role of ["plan-reviewer", "plan-implementer", "plan-judge"] as const) {
+		const { engine, session, terminals, request } = budgetFixture(100, { ...action(), role, agentType: `herder.${role}` });
+		session.holdShutdown = true;
+		const listenerDone = new Deferred<void>();
+		let inListener = false;
+		const handle = await engine.prepare(request);
+		engine.onTerminal(async () => {
+			assert.equal(session.disposed, true);
+			assert.equal(engine.has(handle), true);
+			inListener = true;
+			await listenerDone.promise;
+		});
+		engine.start(handle);
+		session.promptDone.resolve();
+		await nextTurn();
+		assert.equal(session.shutdownStarted, true);
+		assert.equal(terminals.length, 0);
+		const stopping = engine.stop(handle);
+		session.shutdownDone.resolve();
+		await nextTurn();
+		t.mock.timers.tick(10_000);
+		assert.equal(inListener, false, "stop during shutdown still waits for SDK abort");
+		assert.equal(engine.has(handle), true);
+		session.abortDone.resolve();
+		await nextTurn();
+		assert.equal(terminals[0]!.interrupted, true);
+		assert.equal(terminals[0]!.failureKind, undefined);
+		assert.equal(inListener, true);
+		listenerDone.resolve();
+		await stopping;
+		assert.equal(engine.has(handle), false);
+	}
+});
+
+async function budgetSdkFixture(compaction: boolean) {
+	const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
+	const faux = fauxProvider({ models: [{ id: "budget-model", contextWindow: 512 }] });
+	runtime.registerNativeProvider(faux.provider);
+	const settings = SettingsManager.inMemory({
+		retry: { enabled: true, baseDelayMs: 10_000, maxRetries: 3 },
+		compaction: { enabled: compaction, reserveTokens: 32, keepRecentTokens: 1 },
+	});
+	const loader = new DefaultResourceLoader({
+		cwd: os.tmpdir(), agentDir: os.tmpdir(), settingsManager: settings,
+		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		systemPromptOverride: () => "Review the assignment.",
+	});
+	await loader.reload();
+	const { session } = await createAgentSession({
+		cwd: os.tmpdir(), modelRuntime: runtime, model: faux.getModel(),
+		resourceLoader: loader, settingsManager: settings, sessionManager: SessionManager.inMemory(), tools: [],
+	});
+	return { runtime, faux, session };
+}
+
+for (const phase of ["retry", "compaction"] as const) {
+	test(`review deadline cancels the real SDK's active ${phase} with a provider-free session`, async (t) => {
+		const { faux, session } = await budgetSdkFixture(phase === "compaction");
+		const active = new Deferred<void>();
+		let compactionSignal: AbortSignal | undefined;
+		session.subscribe((event) => { if (event.type === "auto_retry_start") active.resolve(); });
+		faux.setResponses(phase === "retry" ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" })] : [
+			fauxAssistantMessage("VERDICT: APPROVE\nSCOPE: PASS"),
+			async (_context, options) => {
+				compactionSignal = options!.signal!;
+				active.resolve();
+				await new Promise<void>((resolve) => compactionSignal!.addEventListener("abort", () => resolve(), { once: true }));
+				return fauxAssistantMessage("summary cancelled");
+			},
+		]);
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+		const parent = { ...reviewerAction(), prompt: `Review this evidence: ${"evidence ".repeat(400)}` };
+		const nested = new HerderNestedAgentScope({ action: parent, agentRoot, createSession: async () => { throw new Error("unused"); } });
+		const engine = new PiWorkerEngine({ availableModels: async () => [], create: async () => ({ session, nested }) }, 100);
+		const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal(resolve));
+		const handle = await engine.prepare({ action: parent, planDirectory: os.tmpdir() });
+		try {
+			engine.start(handle);
+			await Promise.race([active.promise, terminal.then(() => { throw new Error(`SDK completed without entering ${phase}`); })]);
+			assert.equal(phase === "retry" ? session.isRetrying : session.isCompacting, true);
+			t.mock.timers.tick(100);
+			await nextTurn();
+			if (phase === "compaction") assert.equal(compactionSignal!.aborted, true, "SDK abort alone does not cancel compaction");
+			const result = await terminal;
+			assert.equal(result.failureKind, "review_budget_exhausted");
+			assert.equal(result.interrupted, true);
+			assert.equal(session.isRetrying, false);
+			assert.equal(session.isCompacting, false);
+			assert.equal(faux.state.callCount, phase === "retry" ? 1 : 2, "exhaustion cannot start another SDK attempt");
+		} finally {
+			session.abortCompaction();
+			await engine.stop(handle);
+		}
+	});
+}
+
+for (const owner of ["root", "reviewer", "recon"] as const) {
+	for (const phase of ["compaction", "agent"] as const) {
+		test(`${owner} cancellation survives pending ${phase} auth and the late SDK phase start`, async (t) => {
+			const { runtime, faux, session } = await budgetSdkFixture(phase === "compaction");
+			const authStarted = new Deferred<void>();
+			const authResume = new Deferred<void>();
+			const providerRelease = new Deferred<void>();
+			const authGate = async () => { authStarted.resolve(); await authResume.promise; };
+			if (phase === "compaction") {
+				// The SDK awaits this before emitting compaction_start/installing its controller.
+				const internals = session as unknown as {
+					_getSummarizationRequestAuth(model: NonNullable<AgentSession["model"]>): Promise<unknown>;
+				};
+				const getAuth = internals._getSummarizationRequestAuth.bind(session);
+				t.mock.method(internals, "_getSummarizationRequestAuth", async (model: NonNullable<AgentSession["model"]>) => {
+					await authGate();
+					return getAuth(model);
+				});
+			} else {
+				// Prompt preflight can finish auth after an idle session.abort() already resolved.
+				const checkAuth = runtime.checkAuth.bind(runtime);
+				t.mock.method(runtime, "hasConfiguredAuth", () => false);
+				t.mock.method(runtime, "checkAuth", async (...args: Parameters<ModelRuntime["checkAuth"]>) => {
+					await authGate();
+					return checkAuth(...args);
+				});
+			}
+			const providerSignals: AbortSignal[] = [];
+			const abortedOnAdmission: boolean[] = [];
+			faux.setResponses([
+				...(phase === "compaction" ? [fauxAssistantMessage("VERDICT: APPROVE\nSCOPE: PASS")] : []),
+				async (_context, options) => {
+					const signal = options!.signal!;
+					providerSignals.push(signal);
+					abortedOnAdmission.push(signal.aborted);
+					let detach = () => {};
+					try {
+						await Promise.race([
+							new Promise<void>((resolve) => {
+								if (signal.aborted) resolve();
+								else {
+									const aborted = () => resolve();
+									signal.addEventListener("abort", aborted, { once: true });
+									detach = () => signal.removeEventListener("abort", aborted);
+								}
+							}),
+							providerRelease.promise,
+						]);
+					} finally { detach(); }
+					return fauxAssistantMessage("cancelled", { stopReason: signal.aborted ? "aborted" : "stop" });
+				},
+			]);
+			const evidence = "evidence ".repeat(400);
+			let prompting: Promise<void> | undefined;
+			let disposed = false;
+			const wrap = (): NestedWorkerSession => ({
+				get sessionId() { return session.sessionId; },
+				get messages() { return session.messages; },
+				subscribe: (listener) => session.subscribe(listener),
+				prompt: (text, options) => prompting = session.prompt(text, options),
+				abort: () => { session.abortCompaction(); return session.abort(); },
+				dispose: () => { disposed = true; session.dispose(); },
+				getSessionStats: () => session.getSessionStats(),
+			});
+			// Exercise unrestricted subscriptions without the extra production stream guard.
+			// Read-only leaves need that guard even after bounded disposal removes listeners.
+			const fixture = owner === "root" ? undefined : budgetFixture(100, reviewerAction(), async ({ signal }) => {
+				if (owner === "recon") applyNestedAbortSignal(session, signal);
+				return wrap();
+			});
+			const parent = { ...reviewerAction(), prompt: evidence };
+			const nested = fixture?.nested ?? new HerderNestedAgentScope({ action: parent, agentRoot, createSession: async () => { throw new Error("unused"); } });
+			const engine = fixture?.engine ?? new PiWorkerEngine({ availableModels: async () => [], create: async () => ({ session: wrap(), nested }) }, 100);
+			let terminalResult: PiWorkerTerminal | undefined;
+			const terminal = new Promise<PiWorkerTerminal>((resolve) => engine.onTerminal((result) => { terminalResult = result; resolve(result); }));
+			t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+			const handle = await engine.prepare({ action: parent, planDirectory: os.tmpdir() });
+			try {
+				engine.start(handle);
+				if (owner !== "root") await nested.spawnBackground({ type: owner, prompt: evidence, description: "pending auth child" });
+				await Promise.race([authStarted.promise, terminal.then(() => { throw new Error("SDK completed without entering auth"); })]);
+				t.mock.timers.tick(100);
+				await nextTurn();
+				assert.equal(engine.snapshots()[0]!.status, "stopping");
+				assert.equal(session.isCompacting, false, "no compaction controller exists during auth");
+				fixture?.session.promptDone.resolve();
+				fixture?.session.abortDone.resolve();
+				await nextTurn();
+				t.mock.timers.tick(5_001);
+				await nextTurn();
+				assert.equal(disposed, owner === "recon", "only read-only leaves may finish bounded cleanup with auth pending");
+				assert.equal(engine.has(handle), owner !== "recon", "root/reviewer retain ownership while auth is pending");
+				authResume.resolve();
+				await nextTurn();
+				assert.ok(providerSignals.every((signal) => signal.aborted), `late request stayed live (aborted on admission: ${abortedOnAdmission})`);
+				assert.equal(session.isCompacting, false, "compaction must settle without manually completing the provider response");
+				assert.equal(session.isStreaming, false, "late normal agent runs must also settle");
+				assert.ok(terminalResult, "deadline must reach terminal without manually completing the provider response");
+				assert.equal((await terminal).failureKind, "review_budget_exhausted");
+				assert.equal(terminalResult.interrupted, true);
+				assert.equal(disposed, true);
+				assert.equal(faux.state.callCount, (phase === "compaction" ? 1 : 0) + providerSignals.length);
+				if (owner === "recon") assert.equal(providerSignals.length, 0, "disposed leaves must reject new provider admission");
+				else assert.ok(providerSignals.length <= 1);
+			} finally {
+				// Release both barriers on assertion failure so this regression cannot hang the suite.
+				authResume.resolve();
+				providerRelease.resolve();
+				fixture?.session.promptDone.resolve();
+				fixture?.session.abortDone.resolve();
+				session.abortCompaction();
+				await Promise.allSettled([prompting, engine.stop(handle)]);
+				session.dispose();
+			}
+		});
+	}
+}

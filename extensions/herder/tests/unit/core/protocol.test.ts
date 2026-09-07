@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	ATTENTION_PATH_LIMIT,
+	ATTENTION_CAUSES,
 	ATTENTION_RESOLUTION_ACTIONS,
 	MANAGER_PROTOCOL_VERSION,
 	MAX_PLAN_ROUNDS,
@@ -23,6 +24,7 @@ import {
 	RUN_STATUSES,
 	TERMINAL_RUN_STATUSES,
 	type IntegrationRepairRef,
+	type TerminalEvent,
 } from "../../../src/shared/protocol.ts";
 
 test("terminal run status policy is shared and fail-closed", () => {
@@ -115,6 +117,9 @@ test("typed attention requests require bounded evidence, continuation, and recov
 	};
 	const request = { ...requestBody, requestSha256: attentionRequestSha256(requestBody) };
 	assert.doesNotThrow(() => validateAttentionRequest(request));
+	const exhausted = { ...requestBody, cause: "review_budget_exhausted" as const };
+	assert.ok(ATTENTION_CAUSES.includes(exhausted.cause));
+	assert.doesNotThrow(() => validateAttentionRequest({ ...exhausted, requestSha256: attentionRequestSha256(exhausted) }));
 	const finalRound = { ...requestBody, round: MAX_PLAN_ROUNDS };
 	assert.doesNotThrow(() => validateAttentionRequest({ ...finalRound, requestSha256: attentionRequestSha256(finalRound) }));
 	assert.throws(() => validateAttentionRequest({ ...request, round: 4 }), /round must be between 1 and 3/);
@@ -313,7 +318,7 @@ test("Judge repair requires a bounded pass document while other decisions may om
 });
 
 test("attention acceptance requires adapter confirmation and explicit waivers through round three", () => {
-	assert.equal(MANAGER_PROTOCOL_VERSION, 11);
+	assert.equal(MANAGER_PROTOCOL_VERSION, 12);
 	assert.equal(MAX_PLAN_ROUNDS, 3);
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("accept"));
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("stop"));
@@ -359,7 +364,9 @@ test("optional worker blockers require blocked outcomes and concrete setup/check
 			assert.throws(() => parseWorkerResult(role, `${envelope.replace(/(?:STOPPED BECAUSE|RATIONALE): .*/, "RATIONALE: none")}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\n${blockerChecks}`), /concrete detail and SETUP or CHECKS/);
 		}
 		assert.equal(parseWorkerResult(role, `${envelope}\n${blockerSetup}\n${blockerChecks}`).blockerKind, undefined);
-		assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: CODE\n${blockerSetup}\n${blockerChecks}`), /Invalid BLOCKER_KIND/);
+		for (const kind of ["CODE", "review_budget_exhausted"]) {
+			assert.throws(() => parseWorkerResult(role, `${envelope}\nBLOCKER_KIND: ${kind}\n${blockerSetup}\n${blockerChecks}`), /Invalid BLOCKER_KIND/);
+		}
 	}
 });
 
@@ -378,4 +385,17 @@ test("worker blocker classification rejects success, repair authority, scope fai
 	}
 	assert.throws(() => parseWorkerResult("plan-reviewer", `${blockerEnvelopes[1][1]}\nFINDINGS: source bug\nBLOCKER_KIND: ENVIRONMENT\n${blockerSetup}\n${blockerChecks}`), /repeats FINDINGS/);
 	assert.throws(() => parseWorkerResult("plan-implementer", `STATUS: COMPLETE\n${blockerEnvelopes[0][1]}\nBLOCKER_KIND: ENVIRONMENT\n${blockerSetup}\n${blockerChecks}`), /repeats STATUS/);
+});
+
+test("host review budget failure survives JSON transport and participates in replay identity", () => {
+	const terminal: TerminalEvent = {
+		actionId: "review-1", hostHandle: "pi-worker:review-1", interrupted: true,
+		failureKind: "review_budget_exhausted", response: "VERDICT: APPROVE\nSCOPE: PASS",
+		usage: { inputTokens: 10, outputTokens: 2, durationMs: 100 },
+	};
+	const event = { eventId: "budget-1", kind: "terminals", terminals: [terminal] };
+	assert.deepEqual(JSON.parse(JSON.stringify(event)), event);
+	const { failureKind: _, ...transportTerminal } = terminal;
+	assert.notEqual(canonicalEventPayload(event).sha256, canonicalEventPayload({ ...event, terminals: [transportTerminal] }).sha256);
+	assert.equal(parseWorkerResult("plan-reviewer", terminal.response!).kind, "reviewer", "host classification is separate from model-facing envelopes");
 });

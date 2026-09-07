@@ -1786,6 +1786,74 @@ test("final Reviewer follow-up findings persist a skipped reignite dossier", { t
 	}
 });
 
+for (const scenario of ["advisory", "mixed", "material", "duplicate-ids", "invalid-labels"] as const) test(`Reignite ${scenario} filtering preserves the full immutable report and binds only unambiguous material guidance`, { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-reignite-${scenario}-`));
+	const fixture = writeFixture(root);
+	const material = Array.from({ length: scenario === "material" ? 20 : 2 }, (_, index) =>
+		`[material-${index}][${index % 2 ? "P0" : "P1"}][BLOCKING][${index % 2 ? "PLAN_REQUIREMENT" : "PATCH_REGRESSION"}] src/value.mjs:1 — wrong value; scenario=import; evidence=assertion fails; introduced_by=fixture patch`);
+	const guidance = material.map((_, index) => `[material-${index}] observed=wrong value; expected=two; reproduction=import; constraints=preserve export`);
+	const advisory = [
+		"[advisory-1][P2][ADVISORY][PLAN_REQUIREMENT] eventual improvement",
+		"[advisory-2][P3][ADVISORY][PATCH_REGRESSION] cosmetic churn",
+		"[advisory-3][P1][ADVISORY][PLAN_REQUIREMENT] nonblocking observation",
+		"[advisory-4][P2][BLOCKING][PATCH_REGRESSION] severity does not authorize execution",
+		"[followup][P0][BLOCKING][FOLLOWUP] unrelated emergency",
+		"[invalid][P1][BLOCKING][INVALID] unsupported claim mentioning [PLAN_REQUIREMENT]",
+	];
+	const malformed = [
+		"text citing [material-0][P1][BLOCKING][PLAN_REQUIREMENT] is not an envelope",
+		"[bad-1][P1][BLOCKING][FOLLOWUP] mentions [PATCH_REGRESSION] in explanation",
+		"[bad-2][P2][BLOCKING][PLAN_REQUIREMENT] mentions [P1] in explanation",
+		"[bad-3][P1][BLOCKING][PLAN_REQUIREMENT][INVALID] duplicate relationship",
+		"[bad-4][P1][BLOCKING][PLAN_REQUIREMENT] [INVALID] extra relationship",
+		"[bad-5][P1][P2][BLOCKING][PLAN_REQUIREMENT] duplicate severity",
+		"[bad-6][P1][BLOCKING][ADVISORY][PATCH_REGRESSION] duplicate disposition",
+		"[bad-7][P9][BLOCKING][PLAN_REQUIREMENT] unknown severity",
+		"[bad-8][P1][BLOCKING][PLAN_REQUIREMENT]",
+		"[P1][BLOCKING][PLAN_REQUIREMENT] missing finding ID",
+	];
+	const duplicateMaterial = material[0]!.replace("material-0", "NEW");
+	const findings = scenario === "advisory" ? advisory : scenario === "invalid-labels" ? malformed
+		: scenario === "mixed" ? [...material, ...advisory, ...malformed]
+			: scenario === "duplicate-ids" ? [duplicateMaterial, advisory[0]!.replace("advisory-1", "NEW")]
+				: material;
+	const fixGuidance = scenario === "duplicate-ids" ? ["[NEW] fix the material defect", "[NEW] perform advisory cleanup"] : [
+		...guidance,
+		"[advisory-1] advisory cleanup",
+		"[invalid] unsupported guidance",
+		"[unrelated] cites [material-0] but belongs to a different finding",
+		"explanation mentions [material-0] without an anchored ID",
+		"[material-0-extra] not the eligible ID",
+		"[material-0][advisory-1] conflicting guidance IDs",
+	];
+	const eligible = scenario === "advisory" || scenario === "invalid-labels" ? [] : scenario === "duplicate-ids" ? [duplicateMaterial] : material;
+	const eligibleGuidance = scenario === "mixed" || scenario === "material" ? guidance : [];
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		const completed = await finishFinalReview(service, fixture, `filter-${scenario}`,
+			`VERDICT: REVISE\nFINDINGS: ${findings.join("\n")}\nFIX_GUIDANCE: ${fixGuidance.join("\n")}\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: original full review remains evidence`);
+		assert.equal(completed.status, "complete");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
+			assert.equal(dossier.state, eligible.length ? "pending" : "skipped");
+			assert.deepEqual(dossier.findings, eligible);
+			assert.deepEqual(dossier.fixGuidance, eligibleGuidance);
+			assert.equal(Boolean(completed.reigniteRequest), eligible.length > 0);
+			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, findings);
+			const audit = store.getLatestAction(run.runId, { planId: "RUN", generation: run.currentGeneration, round: 1, role: "plan-reviewer", state: "terminal" })!;
+			const report = payload(payload(audit.result).workerResult);
+			assert.deepEqual(report.findings, findings);
+			assert.deepEqual(report.fixGuidance, fixGuidance);
+		} finally { store.close(); }
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
 test("pending reignite allocation is stable and skips an existing README", { timeout: 30_000 }, async () => {
 	const occupiedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-occupied-"));
 	const occupied = writeFixture(occupiedRoot);

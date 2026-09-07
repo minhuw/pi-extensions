@@ -26,6 +26,7 @@ import {
 	type ThinkingEffort,
 } from "./profile.ts";
 import {
+	abortSession,
 	HerderNestedAgentScope,
 	type NestedWorkerSession,
 	type PiNestedAgentSnapshot,
@@ -73,6 +74,7 @@ export interface PiWorkerTerminal {
 	planDirectory: string;
 	response?: string;
 	interrupted?: boolean;
+	failureKind?: "review_budget_exhausted";
 	error?: string;
 	usage: Partial<UsageEvidence>;
 }
@@ -88,6 +90,7 @@ interface WorkerSession {
 	readonly extensionRunner?: AgentSession["extensionRunner"];
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 	prompt(text: string, options?: { expandPromptTemplates?: boolean; source?: "extension" }): Promise<void>;
+	abortCompaction?(): void;
 	abort(): Promise<void>;
 	dispose(): void;
 	getSessionStats(): SessionStats;
@@ -113,6 +116,10 @@ interface WorkerRecord {
 	unsubscribeNested: () => void;
 	started: boolean;
 	stopRequested: boolean;
+	reviewBudgetExhausted: boolean;
+	reviewDeadline?: number;
+	reviewTimer?: ReturnType<typeof setTimeout>;
+	aborting?: Promise<void>;
 	completion?: Promise<void>;
 }
 
@@ -152,6 +159,18 @@ export function applyServiceTier(session: AgentSession, tier: string): void {
 				return { ...finalPayload, service_tier: serviceTier };
 			},
 		} as typeof options);
+	};
+}
+
+/** Scout cleanup can dispose subscriptions before SDK auth/preflight finishes. */
+export function applyNestedAbortSignal(session: AgentSession, signal: AbortSignal): void {
+	const base = session.agent.streamFunction;
+	session.agent.streamFunction = (model, context, options) => {
+		signal.throwIfAborted();
+		return base(model, context, {
+			...options,
+			signal: options?.signal ? AbortSignal.any([signal, options.signal]) : signal,
+		});
 	};
 }
 
@@ -403,12 +422,13 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					throw error;
 				}
 				if (binding.serviceTier) applyServiceTier(child, binding.serviceTier);
+				applyNestedAbortSignal(child, signal);
 				return {
 					get sessionId() { return child.sessionId; },
 					get messages() { return child.messages; },
 					subscribe: (listener) => child.subscribe(listener),
 					prompt: (text, options) => child.prompt(text, options),
-					abort: () => child.abort(),
+					abort: () => { child.abortCompaction(); return child.abort(); },
 					shutdown: async () => { await child.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); },
 					dispose: () => child.dispose(),
 					getSessionStats: () => child.getSessionStats(),
@@ -479,9 +499,16 @@ export class PiWorkerEngine {
 	private readonly workers = new Map<string, WorkerRecord>();
 	private readonly updates = new Set<UpdateListener>();
 	private readonly terminals = new Set<TerminalListener>();
+	private readonly reviewTimeoutMs?: number;
 
-	constructor(factory: PiWorkerSessionFactory) {
+	constructor(factory: PiWorkerSessionFactory, reviewTimeoutMs?: number) {
 		this.factory = factory;
+		const configured = reviewTimeoutMs ?? process.env.HERDER_REVIEW_TIMEOUT_MS;
+		const timeout = typeof configured === "string" && /^\d+$/.test(configured) ? Number(configured) : configured;
+		if (timeout !== undefined && (typeof timeout !== "number" || !Number.isSafeInteger(timeout) || timeout < 1 || timeout > 2_147_483_647)) {
+			throw new Error("HERDER_REVIEW_TIMEOUT_MS must be a positive safe integer <= 2147483647 (unset to disable).");
+		}
+		this.reviewTimeoutMs = timeout;
 	}
 
 	availableModels(): Promise<readonly AvailableModel[]> {
@@ -557,7 +584,7 @@ export class PiWorkerEngine {
 			activeTools: [],
 			children: [],
 		};
-		const worker = {
+		const worker: WorkerRecord = {
 			request,
 			session,
 			nested,
@@ -567,9 +594,13 @@ export class PiWorkerEngine {
 			unsubscribeNested: () => {},
 			started: false,
 			stopRequested: false,
-		} satisfies WorkerRecord;
+			reviewBudgetExhausted: false,
+		};
 		worker.unsubscribe = session.subscribe((event) => {
-			if (observeSessionEvent(worker, event, () => { worker.snapshot.status = "running"; })) this.emitUpdate();
+			if (worker.stopRequested && (event.type === "agent_start" || event.type === "compaction_start")) {
+				worker.aborting = abortSession(session, worker.aborting);
+			}
+			if (observeSessionEvent(worker, event, () => { if (!worker.stopRequested) worker.snapshot.status = "running"; })) this.emitUpdate();
 		});
 		worker.unsubscribeNested = nested.onUpdate((children) => {
 			worker.snapshot.children = children.map(cloneSessionSnapshot);
@@ -586,8 +617,15 @@ export class PiWorkerEngine {
 		if (worker.started) return;
 		worker.started = true;
 		worker.snapshot.status = "running";
+		if (worker.request.action.role === "plan-reviewer" && this.reviewTimeoutMs !== undefined) {
+			worker.reviewDeadline = Date.now() + this.reviewTimeoutMs;
+			worker.reviewTimer = setTimeout(() => {
+				worker.reviewBudgetExhausted = true;
+				this.abortWorker(worker, "Herder reviewer wall-clock budget exhausted");
+			}, this.reviewTimeoutMs);
+		}
 		this.emitUpdate();
-		worker.completion = this.run(handle, worker);
+		worker.completion = this.run(handle, worker).finally(() => clearTimeout(worker.reviewTimer));
 		void worker.completion.catch(() => {});
 	}
 
@@ -595,6 +633,7 @@ export class PiWorkerEngine {
 		const worker = this.workers.get(handle);
 		if (!worker) return;
 		if (worker.started) throw new Error(`Cannot discard running Pi worker ${handle}.`);
+		clearTimeout(worker.reviewTimer);
 		await worker.nested.stop("Prepared Herder worker was discarded");
 		worker.unsubscribeNested();
 		worker.unsubscribe();
@@ -609,44 +648,60 @@ export class PiWorkerEngine {
 	async stop(handle: string): Promise<void> {
 		const worker = this.workers.get(handle);
 		if (!worker) return;
-		worker.stopRequested = true;
-		worker.snapshot.status = "stopping";
-		this.emitUpdate();
+		clearTimeout(worker.reviewTimer);
 		if (!worker.started) {
 			await this.discard(handle);
 			return;
 		}
-		await Promise.allSettled([
-			worker.session.abort(),
-			worker.nested.stop("Parent Herder worker was stopped"),
-		]);
-		await worker.completion?.catch(() => {});
+		this.abortWorker(worker, "Parent Herder worker was stopped");
+		await Promise.allSettled([worker.aborting, worker.completion]);
+	}
+
+	private abortWorker(worker: WorkerRecord, reason: string): void {
+		clearTimeout(worker.reviewTimer);
+		worker.stopRequested = true;
+		worker.snapshot.status = "stopping";
+		worker.aborting ??= abortSession(worker.session);
+		// Close launches and cascade immediately, but never await our own run completion.
+		void worker.nested.stop(reason).catch(() => {});
+		this.emitUpdate();
 	}
 
 	private async run(handle: string, worker: WorkerRecord): Promise<void> {
 		let failure: string | undefined;
+		const prompt = worker.request.action.prompt + (worker.reviewDeadline === undefined ? "" :
+			`\n\nHerder host review budget: ${this.reviewTimeoutMs}ms total wall-clock; deadline ${new Date(worker.reviewDeadline).toISOString()}; ${Math.max(0, worker.reviewDeadline - Date.now())}ms remaining. This single deadline includes SDK retries/compaction and all descendants; delegation does not reset it. Reserve time to collect evidence and synthesize your final review before the deadline.`);
 		try {
-			await worker.session.prompt(worker.request.action.prompt, { expandPromptTemplates: false, source: "extension" });
+			await worker.session.prompt(prompt, { expandPromptTemplates: false, source: "extension" });
 		} catch (error) {
 			failure = message(error);
 		}
+		const result = finalAssistantResult(worker.session.messages);
 		const uncollected = worker.nested.uncollectedBackgroundIds();
 		if (!worker.stopRequested && uncollected.length > 0) {
 			failure = [failure, `Pi worker completed without collecting background nested agents: ${uncollected.join(", ")}`]
 				.filter(Boolean)
 				.join("\n");
 		}
+		// A failure that arrived first must not become a budget failure during cleanup.
+		if (failure || result.failed || !result.text) clearTimeout(worker.reviewTimer);
 		await worker.nested.stop("Parent Herder worker completed");
+		clearTimeout(worker.reviewTimer);
+		// The prompt can settle before SDK abort cleanup (including Bash) finishes.
+		await worker.aborting?.catch(() => {});
 		const finishedAt = Date.now();
-		const result = finalAssistantResult(worker.session.messages);
 		const interrupted = worker.stopRequested || Boolean(failure) || result.failed || !result.text;
-		const errors = [...new Set([failure, result.error].filter((value): value is string => Boolean(value)))];
+		const errors = [...new Set([
+			...(worker.reviewBudgetExhausted ? ["Herder reviewer wall-clock budget exhausted"] : []),
+			failure, result.error,
+		].filter((value): value is string => Boolean(value)))];
 		const terminal: PiWorkerTerminal = {
 			handle,
 			actionId: worker.request.action.actionId,
 			planDirectory: worker.request.planDirectory,
 			...(result.text ? { response: result.text } : {}),
 			...(interrupted ? { interrupted: true } : {}),
+			...(worker.reviewBudgetExhausted ? { failureKind: "review_budget_exhausted" as const } : {}),
 			...(interrupted ? { error: errors.join("\n") || (worker.stopRequested ? "Pi worker stopped" : "Pi worker produced no terminal result") } : {}),
 			usage: {
 				...usageEvidence(worker.session, worker.snapshot.startedAt, finishedAt),
@@ -654,16 +709,24 @@ export class PiWorkerEngine {
 			},
 		};
 		try {
-			await Promise.all([...this.terminals].map((listener) => listener(terminal)));
-		} finally {
 			worker.unsubscribeNested();
 			worker.unsubscribe();
 			try {
 				await disposeWorkerSession(worker.session);
-			} finally {
-				this.workers.delete(handle);
-				this.emitUpdate();
+			} catch (error) {
+				terminal.interrupted = true;
+				terminal.error = [terminal.error, message(error)].filter(Boolean).join("\n");
 			}
+			// An explicit stop may also arrive while extension shutdown is pending.
+			await worker.aborting?.catch(() => {});
+			if (worker.stopRequested) {
+				terminal.interrupted = true;
+				terminal.error ||= "Pi worker stopped";
+			}
+			await Promise.all([...this.terminals].map((listener) => listener(terminal)));
+		} finally {
+			this.workers.delete(handle);
+			this.emitUpdate();
 		}
 	}
 }

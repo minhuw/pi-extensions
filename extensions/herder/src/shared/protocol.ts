@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 11;
+export const MANAGER_PROTOCOL_VERSION = 12;
 export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
@@ -109,6 +109,8 @@ export interface TerminalEvent {
 	hostHandle?: string;
 	response?: string;
 	interrupted?: boolean;
+	/** Host-owned interruption; never inferred from worker output. */
+	failureKind?: "review_budget_exhausted";
 	error?: string;
 	usage?: Partial<UsageEvidence>;
 }
@@ -125,6 +127,7 @@ export const ATTENTION_CAUSES = [
 	"initial_decision_blocked",
 	"implementer_exhausted",
 	"reviewer_blocked",
+	"review_budget_exhausted",
 	"judge_blocked",
 	"round_limit",
 	"integration_conflict_exhausted",

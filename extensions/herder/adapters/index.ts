@@ -1993,6 +1993,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				hostHandle: completed.handle,
 				...(completed.response ? { response: completed.response } : {}),
 				...(completed.interrupted ? { interrupted: true } : {}),
+				...(completed.failureKind ? { failureKind: completed.failureKind } : {}),
 				...(completed.error ? { error: completed.error } : {}),
 				usage: completed.usage,
 			};

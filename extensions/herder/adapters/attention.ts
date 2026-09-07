@@ -109,6 +109,7 @@ function humanLabel(value: string): string {
 }
 
 function attentionReason(request: ManagerAttentionRequest): string {
+	if (request.cause === "review_budget_exhausted") return "Reviewer action budget exhausted; review incomplete (not approval or a defect).";
 	const question = compactLine(request.question);
 	if (question) return question;
 	if (["implementer_exhausted", "round_limit", "integration_conflict_exhausted", "transport_exhausted"].includes(request.cause)) {
@@ -267,6 +268,7 @@ export async function buildAttentionPrompt(
 		"HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1",
 		"Present this bounded operator choice without rewriting the plan: retry the recorded role, or stop/cancel it. Do not reinterpret transport/provider/environment/invocation evidence as a code or plan failure and do not edit any file.",
 		...(request.cause === "verification_environment" ? ["ENVIRONMENT_BOUNDARY: This worker self-report is not an evidence-complete review, approval, waiver, or permission to install dependencies or edit source/plans. Present the exact manager/command/cwd/error and required prerequisite. Only an explicit user retry resumes the recorded role/mode at the same round; no automatic retry or round charge."] : []),
+		...(request.cause === "review_budget_exhausted" ? ["REVIEW_BUDGET_BOUNDARY: The host ended an incomplete review at its action budget. Partial output, even APPROVE, is non-authoritative diagnostic evidence: not a completed review, code defect, environment failure, approval, waiver, or Reignite authority. Preserve prior findings and repair guidance. Only an explicit user retry starts a fresh action budget for the same Reviewer mode/round/review pass; otherwise cancel or defer. Never automatically retry, repair code, revise plans, or accept incomplete work."] : []),
 		`DETAIL: ${question}`,
 		`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 		binding,

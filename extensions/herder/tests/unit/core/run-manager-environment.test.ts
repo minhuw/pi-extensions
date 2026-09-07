@@ -7,7 +7,7 @@ import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { git } from "../../../src/daemon/git-driver.ts";
 import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
-import { integrationRepairCapabilityToken, sha256, stableJson, type ManagerAction, type ManagerAttentionRequest, type ManagerReply, type VerificationManifest } from "../../../src/shared/protocol.ts";
+import { integrationRepairCapabilityToken, sha256, stableJson, type ManagerAction, type ManagerAttentionRequest, type ManagerReply, type TerminalEvent, type VerificationManifest } from "../../../src/shared/protocol.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 
 function planText(id: string, head: string): string {
@@ -147,6 +147,198 @@ async function finalReviewer(f: Fixture) {
 	assert.equal(audit.planId, "RUN");
 	return audit;
 }
+
+function budgetTerminal(f: Fixture, a: ManagerAction, eventId = `budget:${a.actionId}`, overrides: Partial<TerminalEvent> = {}) {
+	return f.manager.event({ eventId, kind: "terminals", terminals: [{
+		actionId: a.actionId, hostHandle: a.actionId, interrupted: true, failureKind: "review_budget_exhausted",
+		response: `${approve}\nUSAGE: input_tokens=999; output_tokens=999; source=partial-worker`,
+		error: "Host reviewer wall-clock budget expired", usage: {
+			inputTokens: 12, outputTokens: 3, source: "test-host", durationMs: 60_000,
+			nested: [{ type: "reviewer", model: a.model, effort: a.effort, count: 4, inputTokens: 8, cachedInputTokens: 0, outputTokens: 2, reasoningTokens: 1 }],
+		}, ...overrides,
+	}] });
+}
+
+async function budgetReviewer(f: Fixture, stage: "discovery" | "verification" | "rescue" | "final") {
+	if (stage === "final") return finalReviewer(f);
+	if (stage === "rescue") {
+		const a = await judge(f);
+		await dispatch(f, a);
+		const repair = await terminal(f, a, "DECISION: REPAIR\nAUTHORIZED_BLOCKERS: value\nREPAIR_CONTRACTS: [value] fix the value\nPASS_DOCUMENT: Preserve the export and verify its value\nRATIONALE: bounded repair");
+		return action(await implemented(f, action(repair)), "plan-reviewer");
+	}
+	const a = await reviewer(f);
+	if (stage === "discovery") return a;
+	await dispatch(f, a);
+	return action(await implemented(f, action(await terminal(f, a, revise))), "plan-reviewer");
+}
+
+for (const stage of ["discovery", "verification", "rescue", "final"] as const) test(`${stage} reviewer budget ignores partial APPROVE, preserves evidence, and retries only by explicit decision`, { timeout: 45_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = await budgetReviewer(f, stage);
+		const seeded = runtime(f, a.planId);
+		f.manager.store.putPlan({ ...seeded, findings: [...seeded.findings, "[prior] recorded unresolved finding"], repair: [...seeded.repair, "[prior] recorded repair guidance"] });
+		const before = runtime(f, a.planId);
+		await dispatch(f, a);
+		const reply = await budgetTerminal(f, a);
+		const request = reply.attention!;
+		assert.equal(reply.status, "needs_input");
+		assert.equal(reply.actions.length, 0);
+		assert.equal(request.kind, "operator_attention");
+		assert.equal(request.cause, "review_budget_exhausted");
+		assert.deepEqual(request.continuation, { role: "plan-reviewer", phase: "READY_REVIEWER" });
+		assert.equal(request.round, before.round);
+		assert.match(request.detail, /HOST_FAILURE: review_budget_exhausted/);
+		assert.match(request.detail, /HOST_USAGE: .*"inputTokens":12/);
+		assert.match(request.detail, /PARTIAL_RESPONSE \(non-authoritative diagnostic evidence\):\nVERDICT: APPROVE/);
+		assert.equal(runtime(f, a.planId).phase, "NEEDS_INPUT");
+		for (const key of ["round", "reviewPass", "findings", "repair", "approvedHead", "approvedTree", "assignmentSha256"] as const) {
+			assert.deepEqual(runtime(f, a.planId)[key], before[key], key);
+		}
+		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
+		assert.equal(f.manager.store.getReigniteRequest(a.runId, a.generation), null);
+		const record = f.manager.store.getAction(a.actionId)!.result as { workerResult: unknown; outcome: string; terminal: TerminalEvent; usage: TerminalEvent["usage"] };
+		assert.equal(record.workerResult, null);
+		assert.equal(record.outcome, "INTERRUPTED");
+		assert.equal(record.terminal.failureKind, "review_budget_exhausted");
+		assert.equal(record.terminal.interrupted, true);
+		assert.match(record.terminal.response!, /^VERDICT: APPROVE/);
+		assert.equal(record.terminal.error, "Host reviewer wall-clock budget expired");
+		assert.equal(record.usage?.inputTokens, 12);
+		assert.equal(record.usage?.nested?.[0]?.count, 4);
+		assert.equal(record.usage?.durationMs, 60_000);
+		const attempts = f.manager.store.countActions(a.runId);
+		f.restart();
+		assert.deepEqual(f.manager.reply().attention, request);
+		await budgetTerminal(f, a);
+		await budgetTerminal(f, a, "new-budget-delivery");
+		const resumed = await resume(f);
+		assert.equal(resumed.actions.length, 0);
+		assert.notEqual(resumed.status, "complete");
+		assert.equal(f.manager.store.countActions(a.runId), attempts);
+		assert.equal(f.manager.store.getAttentionRequests(a.runId).length, 1);
+		assert.equal(f.manager.store.getTerminalActionsMissingUsage(a.runId).length, 0);
+		const usageCount = f.manager.store.database.prepare("SELECT COUNT(*) AS count FROM attempts WHERE attempt_id = ?").get(a.attemptId) as { count: number };
+		assert.equal(usageCount.count, 1);
+		await assert.rejects(f.manager.event({ eventId: "legacy-budget-answer", kind: "user_input", attentionRequestId: request.requestId, userInput: "retry" }), /request-bound explicit retry or cancel/);
+		for (const decision of ["answer", "accept", "revise"] as const) {
+			await assert.rejects(f.manager.event({ eventId: `invalid-budget-${decision}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: decision, answer: "continue", rationale: "continue", confirmed: true } }), /explicit retry or cancel/);
+		}
+		await assert.rejects(f.manager.event({ eventId: "wrong-budget-hash", kind: "attention", attention: { ...attentionResolutionFromRequest(request), requestSha256: "0".repeat(64), action: "retry" } }), /hash does not match/);
+		const deferred = await f.manager.event({ eventId: "defer-budget", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "defer" } });
+		assert.equal(deferred.attention?.requestId, request.requestId);
+		assert.equal(deferred.actions.length, 0);
+		const next = action(await retry(f, request));
+		assert.equal(next.role, a.role);
+		assert.equal(next.workerMode, a.workerMode);
+		assert.equal(next.round, a.round);
+		assert.equal(next.assignmentSha256, a.assignmentSha256);
+		assert.equal(next.worktree, a.worktree);
+		assert.notEqual(next.actionId, a.actionId);
+		assert.equal(runtime(f, a.planId).reviewPass, before.reviewPass);
+		assert.deepEqual(runtime(f, a.planId).findings, before.findings);
+		assert.deepEqual(runtime(f, a.planId).repair.slice(0, before.repair.length), before.repair);
+		f.restart();
+		assert.equal(action(await retry(f, request)).actionId, next.actionId);
+		await assert.rejects(f.manager.event({ eventId: "divergent-budget-resolution", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "cancel" } }), /different resolution/);
+		if (stage === "final") {
+			assert.equal(next.workerMode, "FINAL_AUDIT");
+			await dispatch(f, next);
+			assert.equal((await terminal(f, next, approve)).status, "complete");
+		}
+	} finally { f.close(); }
+});
+
+for (const stage of ["discovery", "final"] as const) test(`${stage} reviewer budget cancellation survives restart and resume without cleanup or Reignite`, { timeout: 45_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = await budgetReviewer(f, stage);
+		await dispatch(f, a);
+		const before = runtime(f, a.planId);
+		const request = (await budgetTerminal(f, a)).attention!;
+		const cancel = () => f.manager.event({ eventId: "cancel-budget", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "cancel", rationale: "Stop the incomplete review" } });
+		assert.equal((await cancel()).actions.length, 0);
+		f.restart();
+		assert.equal((await cancel()).actions.length, 0);
+		const reply = await resume(f);
+		assert.notEqual(reply.status, "complete");
+		assert.equal(reply.actions.length, 0);
+		assert.equal(runtime(f, a.planId).phase, "BLOCKED");
+		assert.equal(runtime(f, a.planId).approvedTree, before.approvedTree);
+		assert.equal(runtime(f, a.planId).reviewPass, before.reviewPass);
+		assert.ok(fs.existsSync(a.worktree));
+		assert.equal(f.manager.store.getReigniteRequest(a.runId, a.generation), null);
+		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "resolved");
+	} finally { f.close(); }
+});
+
+test("review-budget terminal retains full partial diagnostics while attention display stays bounded", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = await reviewer(f);
+		await dispatch(f, a);
+		const response = `${approve}\n${"unfinished inspection evidence; ".repeat(800)}diagnostic tail`;
+		const reply = await budgetTerminal(f, a, "large-budget-diagnostic", { response });
+		const record = f.manager.store.getAction(a.actionId)!.result as { workerResult: unknown; terminal: TerminalEvent };
+		assert.equal(record.workerResult, null);
+		assert.equal(record.terminal.response, response);
+		assert.ok(reply.attention!.detail.length <= 16_384);
+		assert.match(reply.attention!.detail, /TRUNCATED/);
+		assert.equal(reply.actions.length, 0);
+		assert.equal(reply.status, "needs_input");
+	} finally { f.close(); }
+});
+
+test("reviewer budget attention frees capacity for an unrelated plan", { timeout: 30_000 }, async () => {
+	const f = await fixture(2);
+	try {
+		const a = await reviewer(f);
+		await dispatch(f, a);
+		const reply = await budgetTerminal(f, a);
+		assert.equal(reply.attention?.cause, "review_budget_exhausted");
+		assert.equal(action(reply).planId, "002");
+		assert.equal(action(reply).role, "plan-implementer");
+		assert.equal(runtime(f).phase, "NEEDS_INPUT");
+	} finally { f.close(); }
+});
+
+test("budget terminal validates host reason and interruption flag and rejects nonreviewer roles", { timeout: 45_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = action(f.reply);
+		await dispatch(f, a);
+		for (const overrides of [{ failureKind: "timeout" }, { failureKind: null }, { interrupted: false }, { interrupted: undefined }]) {
+			await assert.rejects(budgetTerminal(f, a, "invalid-budget", overrides as Partial<TerminalEvent>), /failureKind must be review_budget_exhausted with interrupted: true/);
+		}
+		await assert.rejects(budgetTerminal(f, a), /only valid for plan-reviewer/);
+		assert.equal(f.manager.store.getAction(a.actionId)?.state, "dispatched");
+		const j = await judge(f);
+		await dispatch(f, j);
+		await assert.rejects(budgetTerminal(f, j), /only valid for plan-reviewer/);
+		assert.equal(f.manager.store.getAction(j.actionId)?.state, "dispatched");
+		assert.equal(f.manager.store.getAttentionRequests(a.runId).length, 0);
+	} finally { f.close(); }
+});
+
+test("review budget cannot mask a changed assignment, dirty worktree, or changed frozen head/tree", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = await reviewer(f);
+		await dispatch(f, a);
+		const mode = fs.statSync(a.assignmentPath).mode;
+		fs.chmodSync(a.assignmentPath, 0o600);
+		await assert.rejects(budgetTerminal(f, a), /assignment|writ|mode/i);
+		fs.chmodSync(a.assignmentPath, mode);
+		fs.writeFileSync(path.join(a.worktree, "value-001.mjs"), "export const value = 99;\n");
+		await assert.rejects(budgetTerminal(f, a), /mutated frozen plan/);
+		git(a.worktree, ["add", "."]);
+		git(a.worktree, ["commit", "-qm", "test: forbidden reviewer mutation"]);
+		await assert.rejects(budgetTerminal(f, a), /mutated frozen plan/);
+		assert.equal(f.manager.store.getAction(a.actionId)?.state, "dispatched");
+		assert.equal(f.manager.store.getAttentionRequests(a.runId).length, 0);
+	} finally { f.close(); }
+});
 
 test("environment block preserves dirty implementation, findings and round while unrelated work continues", { timeout: 30_000 }, async () => {
 	const f = await fixture(2);
