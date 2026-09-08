@@ -9,6 +9,8 @@ Read [references/plan-format.md](references/plan-format.md) and [references/plan
 
 Pi exposes deterministic operations through `/herder-plans <operation>` and the native `herder_plan` tool. Use `/herder-grill` for new product intent and `/herder-validate --fix` for semantic plan repair.
 
+Apply the format's [execution boundary](references/plan-format.md#execution-boundary): cloud provisioning, deployment/publishing, live migrations, and live restore/undo are external operator work, not Herder setup or completion gates. Confirm the repository implementation deliverable separately and record outstanding live evidence in Escalation and handoff; never silently waive existing release requirements. Structural operations do not enforce this semantic boundary.
+
 - `init`: create the plan index and tracking policy.
 - `shape`: report derived contract structure, size, and unordered write-path overlaps (`shapeReady=false` for equal unordered paths); it cannot prove semantic readiness.
 - `validate`: parse the complete graph and fail on malformed plans, cycles, dependency disagreement, or unsafe overlap.

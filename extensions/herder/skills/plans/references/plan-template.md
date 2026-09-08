@@ -2,6 +2,8 @@
 
 Use the seven sections below, once each and in order. The A/V/T tables are authoritative structured facts; prose explains them without duplicating requirements or commands. A competent executor gets only the immutable compiled snapshot and assigned repository, not the interview, audit, or sibling files. Keep local content under 1,200 words and shared context under 1,600; there is no minimum.
 
+Apply the [execution boundary](plan-format.md#execution-boundary): Herder delivers repository changes, not cloud provisioning, deployment/publishing, live migrations, or live restore/undo—even on disposable targets. Configuration/scripts/runbooks and local tests/emulators/non-mutating dry-runs may be in scope. Keep external operations and outstanding release evidence in **Escalation and handoff**, not executable starting conditions, dependencies, or A/V/T requirements. Confirm that separation with the user; code completion is not release acceptance.
+
 ## Local example
 
 This is an **illustrative repository**, not evidence about the checkout being planned. Replace its paths, symbols, commit/date, decisions, scripts, and observations with verified facts. Here plan 001 has a separately confirmed adapter guarantee; plan 002 must not pretend that guarantee already exists at planning time.
@@ -155,7 +157,11 @@ when shared context changes. Check:
 
 1. **Confirmed contract**: intent, binding A requirements, non-goals, preserved
    callers/invariants, and suggested route agree. No unresolved decision necessary
-   to start has been disguised as a STOP condition.
+   to start has been disguised as a STOP condition. Apply the execution boundary:
+   no required starting state, dependency, A/V proof, or T setup may make the run
+   perform or wait for cloud provisioning, deployment, or live migration/restore.
+   Keep those operations in a separately confirmed external operator handoff;
+   do not silently weaken existing criteria or claim unrun release evidence.
 2. **Source evidence**: verify direct caller paths/symbols (`change` vs `preserve`),
    regression paths + test names/anchors, and protected invariants against source.
    Follow bounded caller/test/fixture links, including fixtures outside obvious

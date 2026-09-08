@@ -879,6 +879,14 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		assert.match(reignitePrompt, /Pass SOURCE_PLAN_DIRECTORY as planDirectory/);
 		assert.match(reignitePrompt, /allocated sibling is also accepted/);
 		assert.match(reignitePrompt, /Do not call \/herder-fire/);
+		assert.match(reignitePrompt, /skills\/plans\/references\/plan-format\.md/);
+		assert.match(reignitePrompt, /skills\/plans\/references\/plan-template\.md/);
+		assert.match(reignitePrompt, /Cloud provisioning, deployment\/publishing, live migrations, and live restore\/undo/);
+		assert.match(reignitePrompt, /not Herder starting conditions, dependencies, setup, or acceptance\/final gates/);
+		assert.match(reignitePrompt, /Local tests, emulators, non-mutating dry-runs/);
+		assert.match(reignitePrompt, /acknowledge failed with that detail/);
+		assert.match(reignitePrompt, /Do not invent a TODO\/BLOCKED operational node, silently drop\/rephase a criterion/);
+		assert.match(reignitePrompt, /Code completion is not release acceptance/);
 		assert.equal(factory.sessions.some((session) => session.action.role === "plan-implementer" && session.action.planId !== "001"), false);
 		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
 		assert.equal(firstCount, 1);

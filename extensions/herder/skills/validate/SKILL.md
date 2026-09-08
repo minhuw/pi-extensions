@@ -51,6 +51,8 @@ Capture nonzero output as evidence rather than aborting the audit. Check index/f
 Read every indexed compiled snapshot as though no sibling plan or prior conversation were available. When plan-set `CONTEXT.md` exists, verify that the manager composes it and that it contains only genuinely shared, verified facts. Verify:
 
 - intent, accepted decisions, non-goals, and terminology are explicit and consistent;
+- apply the [execution boundary](../plans/references/plan-format.md#execution-boundary): required starting state, dependency guarantees, A criteria, V gates in any phase, and T prerequisites must not require performing or waiting for cloud provisioning, deployment/publishing, live migration/restore/undo, or external live evidence—even for disposable/synthetic targets or with operator authorization. Treat violations, including operations disguised as setup or proof, as `ERROR` with `NEEDS_DECISION` (or `ACTIVE`/`HISTORICAL` per lifecycle), not retry/authentication problems;
+- distinguish implementing configuration/scripts/runbooks and local tests/emulators/non-mutating dry-runs (allowed) from operating a release. External operations and outstanding live evidence belong in separately confirmed **Escalation and handoff**; local simulation is not release acceptance;
 - source-verify baseline facts, commit/date, direct caller paths/symbols (`change` vs `preserve`), regression paths + test names/anchors, and protected invariants using the shared Producer self-review; follow bounded caller/test/fixture links, including fixtures outside obvious modules, and distinguish `not inspected` from `no coverage found` in the stated scope; unrun checks stay unrun;
 - required starting state and expected dependency changes are distinct from observed baseline; stop for invalidated assumptions, not shifted lines or promised upstream edits;
 - exact write paths and exclusions agree with A requirements and the route; directly necessary companions require existing independent review acceptance within the same subsystem, without unplanned public transition or unordered overlap;
@@ -102,6 +104,7 @@ Hard repair boundaries:
 - Never change lifecycle status as a side effect of validation.
 - Never semantically rewrite `IN PROGRESS`, `DONE`, or `REJECTED` plans. Report them as `ACTIVE` or `HISTORICAL`; only mechanically unambiguous index repairs that preserve recorded meaning are allowed.
 - Never invent product intent, resolve a genuine trade-off, expand scope, silently split/merge plans, or choose a dependency order unsupported by evidence.
+- Never silently drop, rephase, or move live criteria into handoff to make a plan pass `--fix`, weaken acceptance, or waive release safety. Route execution-boundary conflicts to confirmed Grill replanning under the existing lifecycle/request capabilities; leave them unresolved in `--fix`.
 - Never overwrite in-scope evidence when the working tree has uncommitted changes that make the baseline ambiguous.
 
 Leave `NEEDS_DECISION`, `ACTIVE`, and `HISTORICAL` issues unresolved. Route missing intent in a selectable `TODO` or decision-blocked plan to `/herder-grill --plan <id>`; do not invoke Grill automatically.

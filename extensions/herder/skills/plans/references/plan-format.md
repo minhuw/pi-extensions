@@ -21,6 +21,16 @@ The immutable compiled `planText` is execution authority. `snapshot` composes th
 
 `leak/` findings are never indexed or scheduled. Producers must confirm, promote, number, and validate them before execution. Do not treat deferred findings as accepted intent.
 
+## Execution boundary
+
+Herder implements, verifies, reviews, and integrates repository changes; it does not operate a release. Cloud resource provisioning, deployment/publishing, live migrations, and live database restore/undo are outside Herder execution, including disposable or synthetic-data targets. Operator approval, available credentials, and a plan's toolchain/setup instructions do not override worker role restrictions.
+
+Plans may implement deployment configuration, infrastructure definitions, migration/recovery code, scripts, and runbooks, and verify them with local tests, emulators, and non-mutating dry-runs. Required starting state, dependency guarantees, A criteria, and development/acceptance/final V checks must not require the run to perform or wait for those external operations; do not disguise them as T prerequisites or another executable Herder plan.
+
+When the objective includes a release, confirm the repository implementation deliverable separately. Record the external operator workflow, target/operation approvals, and outstanding live evidence in **Escalation and handoff**, outside executable A/V/T requirements. Code completion is not deployment, release acceptance, or approval for real-data use. Never silently drop an existing live criterion or claim local simulation proves it: return to clarification and confirmation before changing that contract.
+
+This is a semantic readiness requirement for producers and `/herder-validate`, not a keyword ban or a claim that structural `shape`/`validate` enforces operational safety.
+
 ## Index
 
 README contains one table with these required headers; extra columns are allowed:

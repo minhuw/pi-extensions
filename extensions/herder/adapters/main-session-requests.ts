@@ -272,9 +272,12 @@ export class MainSessionRequests {
 		const guidance = request.fixGuidance.length > 0 ? request.fixGuidance.map((item) => `- ${item}`).join("\n") : "none";
 		const prompt = [
 			"HERDER_MAIN_SESSION_REIGNITE_V1",
-			"The original Herder run is complete. Residual PLAN_REQUIREMENT and PATCH_REGRESSION findings must become a new fireable sibling plan directory in one shot.",
+			"The original Herder run is complete. Turn residual PLAN_REQUIREMENT and PATCH_REGRESSION findings into a new fireable sibling plan directory only when their remediation fits Herder's repository execution boundary.",
+			`Before authoring, read ${this.host.packageRoot}/skills/plans/references/plan-format.md and ${this.host.packageRoot}/skills/plans/references/plan-template.md completely, including the execution boundary and Producer self-review.`,
+			"Cloud provisioning, deployment/publishing, live migrations, and live restore/undo (including disposable targets) are external operator work, not Herder starting conditions, dependencies, setup, or acceptance/final gates. Local tests, emulators, non-mutating dry-runs, and implementing configuration/scripts/runbooks are allowed. Code completion is not release acceptance.",
+			"If a finding requires external operations or changing an existing live acceptance requirement, report the needed operator handoff or confirmed replan and acknowledge failed with that detail. Do not invent a TODO/BLOCKED operational node, silently drop/rephase a criterion, or claim unrun live evidence. The original run remains complete; release approval is separate.",
 			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
-			"Use herder_plan init with local tracking, write the plan files, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
+			"For findings within that boundary, use herder_plan init with local tracking, write the plan files, cold-read their compiled snapshots using the Producer self-review, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
 			"As your final action, call herder_reignite exactly once with written or failed. Pass SOURCE_PLAN_DIRECTORY as planDirectory; the allocated sibling is also accepted. Acknowledgement always targets the source run. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
 			`REQUEST_ID: ${request.requestId}`,
 			`REQUEST_SHA256: ${request.requestSha256}`,

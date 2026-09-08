@@ -163,6 +163,35 @@ test("Improve and Simplify explain every numbered finding before selection with 
 	}
 });
 
+test("planning contracts keep external release operations out of Herder completion", async () => {
+	const format = await readFile(path.join(extensionRoot, "skills/plans/references/plan-format.md"), "utf8");
+	const boundary = format.split("## Execution boundary")[1].split("## Index")[0];
+	assert.match(boundary, /Cloud resource provisioning, deployment\/publishing, live migrations, and live database restore\/undo/);
+	assert.match(boundary, /including disposable or synthetic-data targets/);
+	assert.match(boundary, /Operator approval, available credentials.*do not override worker role restrictions/);
+	assert.match(boundary, /local tests, emulators, and non-mutating dry-runs/);
+	assert.match(boundary, /Required starting state, dependency guarantees, A criteria, and development\/acceptance\/final V checks must not require the run to perform or wait/);
+	assert.match(boundary, /do not disguise them as T prerequisites or another executable Herder plan/);
+	assert.match(boundary, /outside executable A\/V\/T requirements/);
+	assert.match(boundary, /Never silently drop an existing live criterion or claim local simulation proves it/);
+	assert.match(boundary, /semantic readiness requirement.*not a keyword ban/);
+	for (const file of [
+		"README.md", "skills/plans/references/plan-template.md",
+		...["grill", "improve", "simplify", "plans", "validate"].map((skill) => `skills/${skill}/SKILL.md`),
+	]) {
+		const text = await readFile(path.join(extensionRoot, file), "utf8");
+		assert.match(text, /plan-format\.md#execution-boundary/, file);
+		assert.match(text, /operator/i, file);
+	}
+	const template = (await readFile(path.join(extensionRoot, "skills/plans/references/plan-template.md"), "utf8")).replace(/\s+/g, " ");
+	assert.match(template, /no required starting state, dependency, A\/V proof, or T setup may make the run perform or wait/);
+	const validate = await readFile(path.join(extensionRoot, "skills/validate/SKILL.md"), "utf8");
+	assert.match(validate, /execution boundary[\s\S]*`ERROR`/i);
+	assert.match(validate, /NEEDS_DECISION/);
+	const implementer = await readFile(path.join(extensionRoot, "assets/roles/contracts/plan-implementer.md"), "utf8");
+	assert.match(implementer, /Never modify the user's original checkout, integrate branches, push, deploy, or publish/);
+});
+
 test("planning docs carry bounded caller/regression handoffs from audit findings through shared readiness checks", async () => {
 	const [improve, playbook, template, validate] = await Promise.all([
 		"skills/improve/SKILL.md",
