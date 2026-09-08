@@ -7,6 +7,7 @@ import { ensureService, requestManagerOperation, stopService } from "../../../sr
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
 
@@ -63,89 +64,16 @@ async function managerRequest(
 }
 
 function planText(id: string, title: string, value: number, baseCommit: string): string {
-	return `# Plan ${id}: ${title}
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${baseCommit.slice(0, 8)}\`, 2026-08-10
-- **Kind**: behavioral
-- **Parent objective**: Prove that independent reviewed patches preserve exact conflict evidence during recovery.
-
-## Outcome and acceptance
-
-This fixture starts with disjoint declarations, then simulates a newly discovered shared companion accepted by independent review so integration exercises a real restack conflict.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | the shared fixture exports ${value}. | V1 |
-
-## Boundaries
-
-**Write paths**
-- \`src/value.mjs\`
-
-**Out of scope**:
-- Package metadata, dependencies, and plan control files.
-
-Preserve consistency between coupled fixture exports if that coupling is discovered during implementation. A directly necessary companion requires explicit independent review acceptance; this fixture simulates discovery, not permission to edit arbitrary paths.
-
-- **Modified symbols**: \`value\` in \`src/value.mjs\`.
-- **Direct contracts**: the module export remains named \`value\`.
-- **Expected unchanged behavior**: module format and repository metadata remain unchanged.
-- **Expected diff**: one source line.
-
-## Starting conditions
-
-**Observed baseline**
-
-- \`src/value.mjs\` exports the number one.
-- The plan changes that one tracked line to a distinct value.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Change the shared fixture line
-
-Change the exported value to ${value} without changing the module interface.
-
-Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-conflict-recovery.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
-
-- Keep the fixture change limited to \`src/value.mjs\`.
-- Use the real Git worktree and rebase flow rather than mocking integration.
-
-## Escalation and handoff
-
-- **Provides**: one focused change to the shared fixture line.
-- **Safe intermediate state**: the patch remains isolated to the declared source path.
-
-Stop if the module interface or declared path must change, or if the real conflict cannot be created deterministically.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep the two independent fixture patches deliberately small and conflicting.
-`;
+	return fixturePlan({
+		id,
+		title,
+		head: baseCommit.slice(0, 8),
+		plannedAt: "2026-08-10",
+		parentObjective: "Prove that independent reviewed patches preserve exact conflict evidence during recovery.",
+		acceptance: `The shared fixture exports ${value}.`,
+		implementation: `Change the exported value to ${value} without changing the module interface.`,
+		verificationCommand: "npm run test:herder -- extensions/herder/tests/unit/core/run-manager-conflict-recovery.test.ts",
+	});
 }
 
 function writeFixture(root: string): Fixture {

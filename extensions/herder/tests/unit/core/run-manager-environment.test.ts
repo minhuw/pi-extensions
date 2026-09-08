@@ -9,56 +9,23 @@ import { git } from "../../../src/daemon/git-driver.ts";
 import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
 import { integrationRepairCapabilityToken, sha256, stableJson, type ManagerAction, type ManagerAttentionRequest, type ManagerReply, type TerminalEvent, type VerificationManifest } from "../../../src/shared/protocol.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 
 function planText(id: string, head: string): string {
-	return `# Plan ${id}: Update value ${id}
-
-## Status
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${head}\`, 2026-08-20
-- **Kind**: behavioral
-- **Parent objective**: Exercise bounded runtime failure routing.
-
-## Outcome and acceptance
-Change the fixture value to two without changing its interface.
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | Value ${id} exports two | V1 |
-
-## Boundaries
-**Write paths**
-- \`value-${id}.mjs\`
-**Out of scope**
-Dependencies and other modules. Preserve the named export interface.
-
-## Starting conditions
-**Observed baseline**
-value-${id}.mjs exports one at ${head}.
-**Required starting state**
-The named export exists.
-**Expected dependency changes**
-None.
-Dependencies: none.
-
-## Implementation route
-Change the exported literal in value-${id}.mjs for A1; check V1.
-
-## Verification
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`node --input-type=module -e 'import {value} from "./value-${id}.mjs"; if(value !== 2) process.exit(1)'\` | exit 0; value equals two |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19 installed | \`node --version\` | \`package.json\` |
-
-## Escalation and handoff
-Stop for missing toolchain prerequisites with exact command/cwd/error evidence. Ask for missing requirement authority. Provide the named value export to downstream callers; no deferred work. Preserve the worktree while blocked.
-`;
+	return fixturePlan({
+		id,
+		head,
+		plannedAt: "2026-08-20",
+		title: `Update value ${id}`,
+		writePaths: [`value-${id}.mjs`],
+		parentObjective: "Exercise bounded runtime failure routing.",
+		acceptance: `Value ${id} exports two.`,
+		implementation: `Change the exported literal in value-${id}.mjs for A1; check V1.`,
+		verificationCommand: `node --input-type=module -e 'import {value} from "./value-${id}.mjs"; if(value !== 2) process.exit(1)'`,
+		toolchainOwner: "npm project scripts",
+		toolchainPrerequisites: "Node >=22.19 installed",
+		toolchainEvidence: "`package.json`",
+	});
 }
 
 async function fixture(count = 1, beforeStart?: (planDirectory: string) => void) {

@@ -385,6 +385,7 @@ export default function (pi) {
 			const beforeRole = await eventLines();
 			const prepared = await factory.create({ action: roleAction(role), planDirectory });
 			const session = prepared.session as AgentSession;
+			assert.equal(session.messages.length, 0);
 			const hasPonytail = session.extensionRunner.hasHandlers("before_agent_start");
 			assert.equal(hasPonytail, role === "plan-implementer");
 			assert.deepEqual(

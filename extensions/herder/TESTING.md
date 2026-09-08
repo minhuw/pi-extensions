@@ -23,6 +23,8 @@ npm run test:herder -- extensions/herder/tests/integration/architecture.test.ts
 
 Focused runs execute only the named test files and skip typecheck.
 
+Manager/adapter lifecycle tests reuse `tests/support/plan-v2.ts::fixturePlan` for valid plan setup, with scenario-specific facts at the call site. Parser and assignment-contract tests keep independent literal fixtures. Prefer assertions on registered tools, dispatched sessions, delivered messages, and durable outcomes over regexes matching TypeScript implementation spelling; retain explicit checks for package assets and model-facing prompt contracts.
+
 Integration tests are strict TypeScript files discovered in sorted path order. The smoke runner fails closed and prints any legacy integration `.mjs` paths, then runs the discovered files with Node's `--test-concurrency=2`; each file keeps its scenarios sequential. Unit tests run in a separate phase. To exercise dashboard server mode directly, run `node --experimental-strip-types extensions/herder/tests/integration/dashboard/dashboard.test.ts --serve`; the URL is printed as `HERDER_DASHBOARD_URL`, and SIGINT/SIGTERM shuts the server and fixture down.
 
 ## Plan V2 and verification ownership

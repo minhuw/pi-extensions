@@ -17,6 +17,7 @@ import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integratio
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { planFixture } from "../../support/plan-fixture.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 
 function writeFixture(root: string): { repo: string; planDirectory: string; originalHead: string } {
 	const { repo, originalHead } = initFixtureRepo(root, {
@@ -47,89 +48,16 @@ None.
 
 None.
 `);
-	fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), `# Plan 001: Update the fixture value
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${originalHead.slice(0, 8)}\`, 2026-08-07
-- **Kind**: behavioral
-- **Parent objective**: Prove the deterministic Herder manager executes and integrates one reviewed plan.
-
-## Outcome and acceptance
-
-This fixture proves that process discovery, durable action accounting, worker backfilling, independent review, integration, and final audit all advance through the deterministic manager.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | The fixture exports value as two while preserving its ESM interface and focused assertion. | V1 |
-
-## Boundaries
-
-**Write paths**
-- \`src/value.mjs\`
-
-**Out of scope**:
-- Package metadata, dependencies, and the test contract.
-
-- **Modified symbols**: \`value\` in \`src/value.mjs\`.
-- **Direct contracts**: the existing import and strict equality assertion.
-- **Expected unchanged behavior**: module format and export name remain unchanged.
-- **Expected diff**: one numeric literal in \`src/value.mjs\`.
-
-## Starting conditions
-
-**Observed baseline**
-
-- \`src/value.mjs\` exports the number one.
-- \`test/value.test.mjs\` expects the number two and therefore becomes the focused verification proof after implementation.
-- The repository uses dependency-free ESM and Node's built-in test runner.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Update the exported value
-
-Change the exported numeric value from one to two without changing the module interface.
-
-Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm test\` | exit 0; the focused assertion proves value equals two |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; dependency-free fixture package present | \`node --version\` | \`package.json\` |
-
-- Run \`npm test\` and require the existing focused value assertion to pass.
-- Keep the \`node:test\` and \`node:assert/strict\` module specifiers; they are not shell commands.
-- Do not add dependencies or broaden the test surface.
-
-## Escalation and handoff
-
-- **Provides**: the exported fixture value is two and its focused test passes.
-- **Safe intermediate state**: this is the only source transition and the repository test command passes after integration.
-
-Stop if the module no longer matches the stated ESM shape, if the test requires another behavior, or if a dependency would be required.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep this fixture deliberately small so control-plane failures remain distinguishable from implementation complexity.
-`);
+	fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), fixturePlan({
+		head: originalHead.slice(0, 8),
+		plannedAt: "2026-08-07",
+		parentObjective: "Prove the deterministic Herder manager executes and integrates one reviewed plan.",
+		acceptance: "The fixture exports value as two while preserving its ESM interface and focused assertion.",
+		implementation: "Change the exported numeric value from one to two without changing the module interface.",
+		verificationCommand: "npm test",
+		toolchainPrerequisites: "Node >=22.19; dependency-free fixture package present",
+		toolchainEvidence: "`package.json`",
+	}));
 	return { repo, planDirectory, originalHead };
 }
 

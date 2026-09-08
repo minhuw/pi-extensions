@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -187,6 +188,63 @@ test("reliable submission and wait recovery preserve operation identity without 
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("wait recovery handles a lost poll identity without resubmitting", async () => {
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
+	const originalFetch = globalThis.fetch;
+	let losePollIdentity = true;
+	let operationGets = 0;
+	try {
+		const service = await ensureService(planDirectory);
+		const receipt = await submitManagerOperation(service, "stop", {}, "lost-poll-test");
+		globalThis.fetch = async (input, init) => {
+			const pathname = new URL(String(input)).pathname;
+			const method = init?.method ?? "GET";
+			if (pathname === "/v1/operation" && method === "GET") {
+				operationGets += 1;
+				if (losePollIdentity) {
+					losePollIdentity = false;
+					return new Response(JSON.stringify({ ok: false, error: "operation-not-found" }), {
+						status: 404,
+						headers: { "content-type": "application/json" },
+					});
+				}
+			}
+			return originalFetch(input, init);
+		};
+		const result = await waitManagerOperationReliable(planDirectory, receipt.operationId) as Record<string, unknown>;
+		assert.equal(result.status, "idle");
+		assert.ok(operationGets >= 2, "lost poll identity should reacquire the service and poll again");
+	} finally {
+		globalThis.fetch = originalFetch;
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("startup retries transport failures six times but stops on permanent errors", async () => {
+	const originalRealpathSync = fs.realpathSync;
+	const originalSetTimeout = globalThis.setTimeout;
+	let lookups = 0;
+	let failure = new Error("startup connection failed", { cause: { code: "ECONNRESET" } });
+	fs.realpathSync = ((..._args: any[]) => {
+		lookups += 1;
+		throw failure;
+	}) as unknown as typeof fs.realpathSync;
+	globalThis.setTimeout = ((callback: (...args: any[]) => void, _delay?: number, ...args: any[]) => originalSetTimeout(callback, 0, ...args)) as typeof globalThis.setTimeout;
+	try {
+		await assert.rejects(() => submitManagerOperationReliable("/unused", "stop", {}, "startup-retry-test"), /startup connection failed/);
+		assert.equal(lookups, 6);
+		failure = new Error("unsafe plan path");
+		lookups = 0;
+		await assert.rejects(() => submitManagerOperationReliable("/unused", "stop", {}, "startup-permanent-test"), /unsafe plan path/);
+		assert.equal(lookups, 1);
+	} finally {
+		fs.realpathSync = originalRealpathSync;
+		globalThis.setTimeout = originalSetTimeout;
+	}
+});
+
 test("execute recovery replays an accepted operation with the same identity", async () => {
 	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const originalFetch = globalThis.fetch;
@@ -230,8 +288,22 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 			const pathname = new URL(String(input)).pathname;
 			const method = init?.method ?? "GET";
 			if (pathname === "/health" && method === "GET") healthRequests += 1;
-			if (pathname === "/v1/operation" && method === "POST") operationPosts += 1;
-			if (pathname === "/v1/operation" && method === "GET") operationGets += 1;
+			if (pathname === "/v1/operation" && method === "POST") {
+				operationPosts += 1;
+				const response = await originalFetch(input, init);
+				const body = await response.json() as { operation: { state: string } };
+				// Exercise polling even if the daemon fails before returning the receipt.
+				body.operation.state = "accepted";
+				return new Response(JSON.stringify(body), { status: response.status });
+			}
+			if (pathname === "/v1/operation" && method === "GET") {
+				operationGets += 1;
+				const response = await originalFetch(input, init);
+				const body = await response.json() as Record<string, any>;
+				const operation = body.operation as Record<string, unknown> | undefined;
+				if (operation?.state === "failed") operation.error = "socket fetch failed";
+				return new Response(JSON.stringify(body), { status: response.status, headers: { "content-type": "application/json" } });
+			}
 			return originalFetch(input, init);
 		};
 
@@ -241,7 +313,7 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 				kind: "dispatch_results",
 				dispatchResults: [],
 			}, operationId),
-			{ message: "No deterministic Herder run exists" },
+			{ message: "socket fetch failed" },
 		);
 		assert.equal(operationPosts, 1, "terminal failure must not trigger a replay submission");
 		// The daemon may reach terminal failure before the first poll; scheduling
@@ -252,11 +324,48 @@ test("execute and wait-only surface durable terminal failures without reconnecti
 
 		await assert.rejects(
 			() => waitManagerOperationReliable(planDirectory, operationId),
-			{ message: "No deterministic Herder run exists" },
+			{ message: "socket fetch failed" },
 		);
 		assert.equal(operationPosts, 1, "wait-only terminal failure must not resubmit");
 		assert.equal(operationGets, executePolls + 1, "wait-only terminal failure should poll once");
 		assert.equal(healthRequests, 2, "wait-only terminal failure must not retry service reacquisition");
+	} finally {
+		globalThis.fetch = originalFetch;
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("permanent submission responses never reconnect or poll", async () => {
+	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
+	const originalFetch = globalThis.fetch;
+	try {
+		await ensureService(planDirectory);
+		for (const [status, body, expected] of [
+			[200, { ok: true, operation: { operationId: "failed-receipt", state: "failed", error: "socket fetch failed" } }, /socket fetch failed/],
+			[400, { ok: false, error: "socket fetch failed" }, /socket fetch failed/],
+			[404, { ok: false, error: "operation-not-found" }, /operation-not-found/],
+		] as const) {
+			let posts = 0;
+			let polls = 0;
+			let healthChecks = 0;
+			globalThis.fetch = async (input, init) => {
+				const pathname = new URL(String(input)).pathname;
+				if (pathname === "/health") healthChecks += 1;
+				if (pathname === "/v1/operation") {
+					if (init?.method === "POST") {
+						posts += 1;
+						if (posts > 1) return new Response(JSON.stringify({ ok: false, error: "unexpected replay" }), { status: 400 });
+						return new Response(JSON.stringify(body), { status });
+					}
+					polls += 1;
+					return new Response(JSON.stringify({ ok: false, error: "unexpected poll" }), { status: 400 });
+				}
+				return originalFetch(input, init);
+			};
+			await assert.rejects(() => executeManagerOperation(planDirectory, "stop", {}, "failed-receipt"), expected);
+			assert.deepEqual({ posts, polls, healthChecks }, { posts: 1, polls: 0, healthChecks: 1 });
+		}
 	} finally {
 		globalThis.fetch = originalFetch;
 		await stopService(planDirectory).catch(() => {});

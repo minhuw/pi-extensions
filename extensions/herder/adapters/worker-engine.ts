@@ -14,6 +14,7 @@ import {
 	SettingsManager,
 	type AgentSession,
 	type AgentSessionEvent,
+	type ToolDefinition,
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { WORKER_ROLES, type ManagerAction, type UsageEvidence, type WorkerRole } from "../src/shared/protocol.ts";
@@ -37,6 +38,8 @@ import {
 	loadHerderPiRole,
 	PONYTAIL_EXTENSION_SOURCE,
 	WEB_ACCESS_EXTENSION_SOURCE,
+	type HerderPiRoleDefinition,
+	type HerderNestedAgentDefinition,
 } from "./role-config.ts";
 import { finalAssistantResult } from "./assistant-message.ts";
 import { cloneSessionSnapshot, observeSessionEvent } from "./session-telemetry.ts";
@@ -319,114 +322,140 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		});
 	}
 
+	private resolveModel(
+		available: readonly AvailableModel[],
+		requestedModel: string,
+		effort: ThinkingEffort,
+		serviceTier: string | undefined,
+		label: "worker" | "nested agent",
+	): Model<any> {
+		const model = available.find((candidate) => modelMatches(requestedModel, candidate));
+		if (!model) throw new Error(`Pi ${label} model ${requestedModel} is unavailable.`);
+		if (!modelSupportsEffort(model, effort)) {
+			throw new Error(`Pi ${label} model ${requestedModel} does not support thinking ${effort}.`);
+		}
+		if (serviceTier && !modelSupportsServiceTier(model)) {
+			throw new Error(`Pi ${label} model ${requestedModel} (${model.api || "unknown api"}) does not support service tier ${serviceTier}.`);
+		}
+		return model as Model<any>;
+	}
+
+	private async admitSession(options: {
+		model: Model<any>;
+		modelRuntime: ModelRuntime;
+		binding: Pick<ManagerAction, "effort" | "serviceTier">;
+		cwd: string;
+		sessionDirectory: string;
+		definition: HerderPiRoleDefinition | HerderNestedAgentDefinition;
+		customTools: ToolDefinition[];
+		signal?: AbortSignal;
+	}): Promise<AgentSession> {
+		const { definition, binding } = options;
+		const nested = "name" in definition;
+		const owner = nested ? "nested" : "role";
+		const label = nested ? `Herder nested agent ${definition.name}` : `Herder role ${definition.role}`;
+		const sessionManager = SessionManager.create(options.cwd, options.sessionDirectory);
+		if (sessionManager.getHeader()?.parentSession) throw new Error(`Herder ${nested ? "nested agents" : "Pi workers"} cannot inherit a parent session.`);
+		const extensionPaths = this.resolveExtensionPaths(definition.extensions, options.cwd, owner);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: options.cwd,
+			agentDir: this.agentDir,
+			additionalExtensionPaths: extensionPaths,
+			extensionFactories: nested && definition.name === "searcher" ? [{
+				name: "herder-searcher-policy",
+				factory: (childPi) => {
+					childPi.on("tool_call", (event) => applySearcherToolPolicy(event.toolName, event.input, options.cwd));
+				},
+			}] : [],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			...(nested ? { noContextFiles: true } : {}),
+			systemPromptOverride: () => definition.systemPrompt,
+			appendSystemPromptOverride: () => [],
+		});
+		await resourceLoader.reload();
+		const extensions = resourceLoader.getExtensions();
+		if (extensions.errors.length > 0) {
+			throw new Error(`Herder ${owner} extensions failed to load: ${extensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
+		}
+		options.signal?.throwIfAborted();
+
+		let session: AgentSession | undefined;
+		try {
+			const created = await createAgentSession({
+				cwd: options.cwd,
+				agentDir: this.agentDir,
+				modelRuntime: options.modelRuntime,
+				model: options.model,
+				thinkingLevel: binding.effort as ThinkingLevel,
+				tools: definition.tools,
+				customTools: options.customTools,
+				resourceLoader,
+				sessionManager,
+			});
+			session = created.session;
+			await session.bindExtensions({
+				mode: "print",
+				onError: (error) => {
+					throw new Error(`Herder ${owner} extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
+				},
+			});
+			options.signal?.throwIfAborted();
+			session.setActiveToolsByName(definition.tools);
+			if (session.messages.length !== 0) throw new Error(`Herder ${nested ? "nested agent" : "Pi worker"} session was not created with clean history.`);
+			const activeTools = new Set(session.agent.state.tools.map((tool) => tool.name));
+			const missingTools = definition.tools.filter((tool) => !activeTools.has(tool));
+			const unexpectedTools = [...activeTools].filter((tool) => !definition.tools.includes(tool));
+			if (missingTools.length > 0) throw new Error(`${label} is missing required tools: ${missingTools.join(", ")}.`);
+			if (unexpectedTools.length > 0) throw new Error(`${label} exposed unexpected tools: ${unexpectedTools.join(", ")}.`);
+		} catch (error) {
+			if (session) {
+				await Promise.allSettled([
+					...(options.signal?.aborted ? [session.abort()] : []),
+					disposeWorkerSession(session),
+				]);
+			}
+			throw error;
+		}
+		if (binding.serviceTier) applyServiceTier(session, binding.serviceTier);
+		if (options.signal) applyNestedAbortSignal(session, options.signal);
+		return session;
+	}
+
 	async create(request: PiWorkerRequest): Promise<PreparedWorkerSession> {
 		const role = roleFromAgentType(request.action.agentType);
 		if (role !== request.action.role) throw new Error(`Action role ${request.action.role} does not match ${request.action.agentType}.`);
 		const definition = await loadHerderPiRole(this.agentRoot, role);
 		const runtime = this.runtime();
 		const available = await runtime.getAvailable();
-		const model = available.find((candidate) => modelMatches(request.action.model, candidate));
-		if (!model) throw new Error(`Pi worker model ${request.action.model} is unavailable.`);
-		if (!modelSupportsEffort(model, request.action.effort as ThinkingEffort)) {
-			throw new Error(`Pi worker model ${request.action.model} does not support thinking ${request.action.effort}.`);
-		}
-		if (request.action.serviceTier && !modelSupportsServiceTier(model)) {
-			throw new Error(`Pi worker model ${request.action.model} (${model.api || "unknown api"}) does not support service tier ${request.action.serviceTier}.`);
-		}
-
+		const model = this.resolveModel(available, request.action.model, request.action.effort as ThinkingEffort, request.action.serviceTier, "worker");
 		const sessionRoot = path.join(request.planDirectory, ".herder", "pi-sessions");
 		await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
 		const nestedRoot = path.join(sessionRoot, "nested", request.action.actionId.replace(/[^A-Za-z0-9._-]+/g, "_"));
-		const resolveBinding = (requested: string, effort: ThinkingEffort, serviceTier?: string) => {
-			const resolved = available.find((candidate) => modelMatches(requested, candidate));
-			if (!resolved) throw new Error(`Pi nested agent model ${requested} is unavailable.`);
-			if (!modelSupportsEffort(resolved, effort)) {
-				throw new Error(`Pi nested agent model ${requested} does not support thinking ${effort}.`);
-			}
-			if (serviceTier && !modelSupportsServiceTier(resolved)) {
-				throw new Error(`Pi nested agent model ${requested} (${resolved.api || "unknown api"}) does not support service tier ${serviceTier}.`);
-			}
-			return resolved;
-		};
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot: this.agentRoot,
 			createSession: async ({ id, definition: childDefinition, binding, signal, nestedScope }) => {
 				signal.throwIfAborted();
-				const childModel = resolveBinding(binding.model, binding.effort, binding.serviceTier);
-				const extensionPaths = this.resolveExtensionPaths(childDefinition.extensions, request.action.worktree, "nested");
+				const childModel = this.resolveModel(available, binding.model, binding.effort, binding.serviceTier, "nested agent");
 				const childRoot = path.join(nestedRoot, id);
 				await mkdir(childRoot, { recursive: true, mode: 0o700 });
 				signal.throwIfAborted();
-				const childManager = SessionManager.create(request.action.worktree, childRoot);
-				if (childManager.getHeader()?.parentSession) throw new Error("Herder nested agents cannot inherit a parent session.");
-				const childLoader = new DefaultResourceLoader({
-					cwd: request.action.worktree,
-					agentDir: this.agentDir,
-					additionalExtensionPaths: extensionPaths,
-					extensionFactories: childDefinition.name === "searcher" ? [{
-						name: "herder-searcher-policy",
-						factory: (childPi) => {
-							childPi.on("tool_call", (event) => applySearcherToolPolicy(event.toolName, event.input, request.action.worktree));
-						},
-					}] : [],
-					noExtensions: true,
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-					systemPromptOverride: () => childDefinition.systemPrompt,
-					appendSystemPromptOverride: () => [],
-				});
-				await childLoader.reload();
-				const childExtensions = childLoader.getExtensions();
-				if (childExtensions.errors.length > 0) {
-					throw new Error(`Herder nested extensions failed to load: ${childExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
-				}
-				signal.throwIfAborted();
-				const { session: child } = await createAgentSession({
-					cwd: request.action.worktree,
-					agentDir: this.agentDir,
+				const child = await this.admitSession({
+					model: childModel,
 					modelRuntime: runtime,
-					model: childModel as Model<any>,
-					thinkingLevel: binding.effort as ThinkingLevel,
-					tools: childDefinition.tools,
+					binding,
+					cwd: request.action.worktree,
+					sessionDirectory: childRoot,
+					definition: childDefinition,
 					customTools: [
 						...(nestedScope ? createNestedAgentTools(nestedScope) : []),
 						...(childDefinition.name === "recon" ? createReconTools(request.action.worktree, signal, this.agentDir) : []),
 					],
-					resourceLoader: childLoader,
-					sessionManager: childManager,
+					signal,
 				});
-				try {
-					await child.bindExtensions({
-						mode: "print",
-						onError: (error) => {
-							throw new Error(`Herder nested extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
-						},
-					});
-					signal.throwIfAborted();
-					const childTools = childDefinition.tools;
-					child.setActiveToolsByName(childTools);
-					if (child.messages.length !== 0) throw new Error("Herder nested agent session was not created with clean history.");
-					const activeChildTools = new Set(child.agent.state.tools.map((tool) => tool.name));
-					const missingChildTools = childTools.filter((tool) => !activeChildTools.has(tool));
-					const unexpectedChildTools = [...activeChildTools].filter((tool) => !childTools.includes(tool));
-					if (missingChildTools.length > 0) {
-						throw new Error(`Herder nested agent ${childDefinition.name} is missing required tools: ${missingChildTools.join(", ")}.`);
-					}
-					if (unexpectedChildTools.length > 0) {
-						throw new Error(`Herder nested agent ${childDefinition.name} exposed unexpected tools: ${unexpectedChildTools.join(", ")}.`);
-					}
-				} catch (error) {
-					await Promise.allSettled([
-						...(signal.aborted ? [child.abort()] : []),
-						disposeWorkerSession(child),
-					]);
-					throw error;
-				}
-				if (binding.serviceTier) applyServiceTier(child, binding.serviceTier);
-				applyNestedAbortSignal(child, signal);
 				return {
 					get sessionId() { return child.sessionId; },
 					get messages() { return child.messages; },
@@ -440,60 +469,22 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			},
 		});
 
-		const sessionManager = SessionManager.create(request.action.worktree, sessionRoot);
-		if (sessionManager.getHeader()?.parentSession) throw new Error("Herder Pi workers cannot inherit a parent session.");
-		const roleExtensionPaths = this.resolveExtensionPaths(definition.extensions, request.action.worktree, "role");
-		const resourceLoader = new DefaultResourceLoader({
-			cwd: request.action.worktree,
-			agentDir: this.agentDir,
-			additionalExtensionPaths: roleExtensionPaths,
-			noExtensions: true,
-			noSkills: true,
-			noPromptTemplates: true,
-			noThemes: true,
-			systemPromptOverride: () => definition.systemPrompt,
-			appendSystemPromptOverride: () => [],
-		});
-		await resourceLoader.reload();
-		const roleExtensions = resourceLoader.getExtensions();
-		if (roleExtensions.errors.length > 0) {
-			throw new Error(`Herder role extensions failed to load: ${roleExtensions.errors.map((item) => `${item.path}: ${item.error}`).join("; ")}`);
-		}
 		const nestedTools = createNestedAgentTools(nested);
-		const { session } = await createAgentSession({
-			cwd: request.action.worktree,
-			agentDir: this.agentDir,
-			modelRuntime: runtime,
-			model: model as Model<any>,
-			thinkingLevel: request.action.effort as ThinkingLevel,
-			tools: definition.tools,
-			customTools: [...nestedTools],
-			resourceLoader,
-			sessionManager,
-		});
+		let session: AgentSession;
 		try {
-			await session.bindExtensions({
-				mode: "print",
-				onError: (error) => {
-					throw new Error(`Herder role extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
-				},
+			session = await this.admitSession({
+				model,
+				modelRuntime: runtime,
+				binding: request.action,
+				cwd: request.action.worktree,
+				sessionDirectory: sessionRoot,
+				definition,
+				customTools: [...nestedTools],
 			});
-			const roleTools = definition.tools;
-			session.setActiveToolsByName(roleTools);
-			if (session.messages.length !== 0) throw new Error("Herder Pi worker session was not created with clean history.");
-			const activeTools = new Set(session.agent.state.tools.map((tool) => tool.name));
-			const missingTools = roleTools.filter((tool) => !activeTools.has(tool));
-			const unexpectedTools = [...activeTools].filter((tool) => !roleTools.includes(tool));
-			if (missingTools.length > 0) throw new Error(`Herder role ${role} is missing required tools: ${missingTools.join(", ")}.`);
-			if (unexpectedTools.length > 0) throw new Error(`Herder role ${role} exposed unexpected tools: ${unexpectedTools.join(", ")}.`);
 		} catch (error) {
-			await Promise.allSettled([
-				disposeWorkerSession(session),
-				nested.stop("Parent Herder session creation failed"),
-			]);
+			await Promise.allSettled([nested.stop("Parent Herder session creation failed")]);
 			throw error;
 		}
-		if (request.action.serviceTier) applyServiceTier(session, request.action.serviceTier);
 		return { session, nested };
 	}
 }

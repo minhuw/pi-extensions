@@ -13,6 +13,7 @@ import type { ManagerAction, ManagerReply } from "../../../src/shared/protocol.t
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
@@ -94,92 +95,24 @@ None.
 
 None.
 `);
-	fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), `# Plan 001: Update the fixture value
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${originalHead.slice(0, 12)}\`, 2026-08-10
-- **Kind**: behavioral
-- **Parent objective**: Prove a provider-free Pi adapter registration and lifecycle run.
-
-## Outcome and acceptance
-
-This dependency-free fixture exercises the complete adapter route without a provider, credential, or external Pi process.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | The fixture exports value as two while preserving its ESM interface and focused assertion. | V1 |
-| A2 | Only the source initializer and its existing test expectation change from one to two; no other file or interface changes. | V2 |
-
-## Boundaries
-
-**Write paths**
-
-- \`src/value.mjs\`
-- \`test/value.test.mjs\`
-
-**Out of scope**:
-
-- Package metadata, dependencies, providers, credentials, and external host processes.
-
-- **Modified symbols**: the value initializer and its assertion.
-- **Direct contracts**: ESM import/export and strict equality.
-- **Expected unchanged behavior**: filenames, module format, and export name.
-
-## Starting conditions
-
-**Observed baseline**
-
-- \`src/value.mjs\` exports \`value\` with the numeric value \`1\`.
-- \`test/value.test.mjs\` asserts the initial value and becomes the local verification proof after implementation.
-- The repository uses dependency-free ESM and Node's built-in test runner.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Update the fixture behavior
-
-Change the exported value and its focused assertion from one to two without changing the module interface.
-
-Suggested route above implements A1 and A2; V1 and V2 are their acceptance proofs. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm test\` | exit 0; the focused assertion proves value equals two |
-| V2 | acceptance | A2 | T1 | \`git diff ${originalHead} --\` | source-preserving inspection: exactly one numeric literal changes from 1 to 2 in each of src/value.mjs and test/value.test.mjs; no other diff |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; dependency-free fixture package present | \`node --version\` | \`package.json\` |
-
-- Run \`npm test\` and require the focused fixture assertion to pass.
-- Inspect the diff and require exactly the two intended files to change.
-
-## Escalation and handoff
-
-- **Provides**: \`value\` equals two and its focused test enforces that behavior.
-- **Safe intermediate state**: both source and focused coverage change in one commit.
-
-Stop if the stated source or assertion assumptions are invalidated, if a dependency appears necessary, or if any file outside the two declared paths must change.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep this fixture deliberately small so provider and transport failures remain distinguishable from implementation complexity.
-`);
+	fs.writeFileSync(path.join(planDirectory, "001-update-value.md"), fixturePlan({
+		head: originalHead.slice(0, 12),
+		plannedAt: "2026-08-10",
+		parentObjective: "Prove a provider-free Pi adapter registration and lifecycle run.",
+		writePaths: ["src/value.mjs", "test/value.test.mjs"],
+		acceptance: "The fixture exports value as two while preserving its ESM interface and focused assertion.",
+		acceptanceRows: [
+			{ id: "A1", requiredBehavior: "The fixture exports value as two while preserving its ESM interface and focused assertion.", proof: "V1" },
+			{ id: "A2", requiredBehavior: "Only the source initializer and its existing test expectation change from one to two; no other file or interface changes.", proof: "V2" },
+		],
+		implementation: "Change the exported value and its focused assertion from one to two without changing the module interface.",
+		toolchainPrerequisites: "Node >=22.19; dependency-free fixture package present",
+		toolchainEvidence: "`package.json`",
+		verificationRows: [
+			{ id: "V1", criteria: "A1", command: "npm test", expected: "exit 0; the focused assertion proves value equals two" },
+			{ id: "V2", criteria: "A2", command: `git diff ${originalHead} --`, expected: "source-preserving inspection: exactly one numeric literal changes from 1 to 2 in each of src/value.mjs and test/value.test.mjs; no other diff" },
+		],
+	}));
 	const graph = buildGraph(planDirectory);
 	assert.equal(graph.shapeReady, true);
 	assert.deepEqual(graph.ready, ["001"]);

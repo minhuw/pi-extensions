@@ -16,6 +16,7 @@ import {
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
 import { GitDriver, runCommand } from "../../../src/daemon/git-driver.ts";
@@ -74,84 +75,15 @@ None.
 
 None.
 `);
-	fs.writeFileSync(path.join(planDirectory, "001-recover-worker.md"), `# Plan 001: Recover a lost worker
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${originalHead.slice(0, 8)}\`, 2026-08-10
-- **Kind**: behavioral
-- **Parent objective**: Prove a replacement Pi session recovers one lost worker without duplicate scheduling.
-
-## Outcome and acceptance
-
-This fixture exercises the adapter and manager lifecycle at the point where an in-process Pi worker disappears.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | one missing built-in worker produces one same-round retry. | V1 |
-
-## Boundaries
-
-**Write paths**
-- \`src/value.mjs\`
-
-**Out of scope**:
-- Package metadata, dependencies, and the test contract.
-
-- **Modified symbols**: none in the fixture.
-
-## Starting conditions
-
-**Observed baseline**
-
-- \`src/value.mjs\` contains the fixture source.
-- The manager has one ready plan and no provider or credential dependency.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Hold the worker slot
-
-Leave the fixture source unchanged while the manager exercises worker recovery.
-
-Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/adapters/recovery-integration.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
-
-- Run \`npm test\`.
-- Inspect manager and Git lease evidence.
-
-## Escalation and handoff
-
-- **Provides**: one worker recovery transition.
-- **Safe intermediate state**: the fixture repository remains unchanged.
-
-Stop if the manager cannot preserve the plan generation, round, or worktree lease.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep the recovery fixture small and provider-free.
-`);
+	fs.writeFileSync(path.join(planDirectory, "001-recover-worker.md"), fixturePlan({
+		title: "Recover a lost worker",
+		head: originalHead.slice(0, 8),
+		plannedAt: "2026-08-10",
+		parentObjective: "Prove a replacement Pi session recovers one lost worker without duplicate scheduling.",
+		acceptance: "One missing built-in worker produces one same-round retry.",
+		implementation: "Leave the fixture source unchanged while the manager exercises worker recovery.",
+		verificationCommand: "npm run test:herder -- extensions/herder/tests/unit/adapters/recovery-integration.test.ts",
+	}));
 	return { root, repo, planDirectory };
 }
 
@@ -1057,6 +989,70 @@ test("a fresh adapter instance waits for same-process ownership retirement befor
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+for (const outcome of ["failed receipt", "lost accepted receipt"] as const) {
+	test(`adapter dispatch handles ${outcome} through the durable operation client`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-dispatch-transport-"));
+		const originalFetch = globalThis.fetch;
+		let fixture: Fixture | undefined;
+		let api: CapturedExtensionAPI | undefined;
+		let ctx: ExtensionContext | undefined;
+		try {
+			fixture = writeFixture(root);
+			const factory = new PendingWorkerFactory();
+			api = new CapturedExtensionAPI();
+			registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+			const notifications: Warning[] = [];
+			ctx = freshContext(fixture, notifications);
+			await api.invoke("session_start", ctx);
+			const submissions: Record<string, unknown>[] = [];
+			globalThis.fetch = async (input, init) => {
+				if (new URL(String(input)).pathname === "/v1/operation" && init?.method === "POST") {
+					const body = object(JSON.parse(String(init.body)));
+					if (body.kind === "event" && object(body.input).kind === "dispatch_results") {
+						submissions.push(body);
+						if (outcome === "failed receipt") {
+							if (submissions.length > 1) throw new Error("Unexpected retry of failed dispatch receipt");
+							return Response.json({ ok: true, operation: {
+								operationId: body.operationId, kind: "event", state: "failed",
+								error: "fetch failed in the completed manager operation",
+							} });
+						}
+						const response = await originalFetch(input, init);
+						if (submissions.length === 1) throw new Error("fetch failed after durable dispatch acceptance");
+						return response;
+					}
+				}
+				return originalFetch(input, init);
+			};
+			await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "dispatch transport");
+			assert.equal(factory.sessions.length, 1, "receipt recovery must not create another worker");
+			const session = factory.sessions[0]!;
+			if (outcome === "failed receipt") {
+				assert.equal(submissions.length, 1, "a durable failure is not a transport retry");
+				assert.equal(session.prompted, false, "unaccepted workers must not start");
+				assert.equal(session.disposed, true, "unaccepted prepared sessions must be disposed");
+				assert.ok(notifications.some((entry) => entry.level === "error" && entry.message.includes("fetch failed in the completed manager operation")));
+				assert.equal(evidence(fixture).actions.some((action) => action.state === "dispatched"), false);
+			} else {
+				assert.equal(submissions.length, 2);
+				assert.deepEqual(submissions[1], submissions[0], "recovery must retain the operation ID, event ID, and payload");
+				assert.equal(submissions[0]!.operationId, `event:${object(submissions[0]!.input).eventId}`);
+				await withDeadline(session.started, "accepted worker start");
+				const actions = evidence(fixture).actions;
+				assert.equal(actions.length, 1);
+				assert.equal(actions[0]!.state, "dispatched");
+				assert.equal(actions[0]!.hostHandle, `pi-worker:${session.sessionId}`);
+				assert.equal(notifications.some((entry) => entry.level === "error"), false);
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (api && ctx) await withDeadline(api.invoke("session_shutdown", ctx), "dispatch transport cleanup").catch(() => {});
+			if (fixture) await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
 
 test("foreign worker handles fail closed without changing manager evidence", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-recovery-foreign-"));

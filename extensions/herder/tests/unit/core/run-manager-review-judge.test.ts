@@ -13,6 +13,7 @@ import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { sha256, stableJson, type AttentionResolutionInput } from "../../../src/shared/protocol.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Service = Awaited<ReturnType<typeof ensureService>>;
@@ -36,85 +37,14 @@ type JudgeEnvelope = {
 	passDocument?: string;
 };
 
-const FIXTURE_PLAN = (originalHead: string) => `# Plan 001: Update the fixture value
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`${originalHead.slice(0, 8)}\`, 2026-08-10
-- **Kind**: behavioral
-- **Parent objective**: Prove the deterministic Reviewer and Judge transitions through public manager events.
-
-## Outcome and acceptance
-
-The fixture gives the manager a real repository and a small patch that can be carried through every review round.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | accepted Reviewer and Judge results persist the documented next state. | V1 |
-
-## Boundaries
-
-**Write paths**
-- \`src/value.mjs\`
-
-**Out of scope**:
-- Package metadata and manager implementation.
-
-- **Modified symbols**: the fixture value only.
-- **Direct contracts**: public manager events and RunStore records.
-
-## Starting conditions
-
-**Observed baseline**
-
-- \`src/value.mjs\` exports the number one.
-- The Implementer commits one focused value change per round.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Update the exported value
-
-Change the exported numeric value while preserving the module interface.
-
-Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-review-judge.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
-
-- Drive manager \`start()\` and \`event()\` endpoints only.
-- Assert durable phase, round, action, approval, and run status contracts.
-
-## Escalation and handoff
-
-- **Provides**: a deterministic fixture patch for manager transition characterization.
-- **Safe intermediate state**: every round remains a clean committed worktree.
-
-Stop if a transition cannot be reached through public manager events.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep assertions on durable state rather than incidental prose.
-`;
+const FIXTURE_PLAN = (originalHead: string) => fixturePlan({
+	head: originalHead.slice(0, 8),
+	plannedAt: "2026-08-10",
+	parentObjective: "Prove the deterministic Reviewer and Judge transitions through public manager events.",
+	acceptance: "Accepted Reviewer and Judge results persist the documented next state.",
+	implementation: "Change the exported numeric value while preserving the module interface.",
+	verificationCommand: "npm run test:herder -- extensions/herder/tests/unit/core/run-manager-review-judge.test.ts",
+});
 
 function payload(value: unknown): JsonRecord {
 	assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));

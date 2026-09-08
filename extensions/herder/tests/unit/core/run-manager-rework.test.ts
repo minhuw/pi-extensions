@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { sha256, stableJson, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
+import { fixturePlan } from "../../support/plan-v2.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Fixture = { repo: string; planDirectory: string };
@@ -56,85 +57,14 @@ function object(value: unknown): JsonRecord {
 }
 
 function writePlan(id: string, title: string, scope: string): string {
-	return `# Plan ${id}: ${title}
-
-## Status
-
-- **Priority**: P1
-- **Effort**: S
-- **Risk**: LOW
-- **Depends on**: none
-- **Category**: tests
-- **Planned at**: commit \`abc1234\`, 2026-08-11
-- **Kind**: behavioral
-- **Parent objective**: Exercise plan rework.
-
-## Outcome and acceptance
-
-The fixture proves rework discards one plan's execution without touching siblings.
-
-| ID | Required behavior | Proof |
-|---|---|---|
-| A1 | the manager can rework this target. | V1 |
-
-## Boundaries
-
-**Write paths**
-- \`${scope}\`
-
-**Out of scope**:
-- Manager state and plan graph files.
-
-- **Modified symbols**: the fixture value.
-- **Direct contracts**: the manager rework protocol.
-- **Expected unchanged behavior**: unrelated plans continue.
-- **Expected diff**: one fixture path.
-
-## Starting conditions
-
-**Observed baseline**
-
-- The target starts as TODO.
-
-**Required starting state**
-
-The stated fixture assumptions and direct interfaces still hold. Run the T1 probe before edits; report unavailable prerequisites without treating them as code defects.
-
-**Expected dependency changes**
-
-Dependencies: none.
-
-## Implementation route
-
-### Step 1: Keep the fixture bounded
-
-Use the declared fixture path only.
-
-Suggested route above implements A1; V1 is its acceptance proof. Binding decisions: retain the declared boundaries and direct interfaces.
-
-## Verification
-
-| ID | Phase | Criteria | Toolchain | Command | Expected |
-|---|---|---|---|---|---|
-| V1 | acceptance | A1 | T1 | \`npm run test:herder -- extensions/herder/tests/unit/core/run-manager-rework.test.ts\` | exit 0; named fixture assertions preserve the documented lifecycle and safety behavior |
-
-| ID | Owner | Cwd | Prerequisites | Probe | Evidence |
-|---|---|---|---|---|---|
-| T1 | npm project scripts | . | Node >=22.19; repository locked dependencies installed | \`node --version\` | \`package.json\`; \`package-lock.json\` |
-
-- Keep this plan independent and deterministic.
-
-## Escalation and handoff
-
-- **Provides**: a bounded rework fixture.
-- **Safe intermediate state**: only the declared fixture path changes.
-
-Stop if rework would touch an unrelated plan or graph edge.
-
-Environment or invocation failure: report the exact manager, command, cwd, error, and missing prerequisite; do not guess a substitute. Missing product authority requires a decision.
-
-Deferred work: Keep the target-local rework evidence exact.
-`;
+	return fixturePlan({
+		id,
+		title,
+		writePaths: [scope],
+		acceptance: "The manager can rework this target without touching siblings.",
+		implementation: "Use the declared fixture path only.",
+		verificationCommand: "npm run test:herder -- extensions/herder/tests/unit/core/run-manager-rework.test.ts",
+	});
 }
 
 function fixture(root: string): Fixture {

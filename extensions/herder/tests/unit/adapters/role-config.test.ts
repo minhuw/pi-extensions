@@ -108,10 +108,14 @@ test("roles encourage bounded Recon exploration without delegating judgment", as
 		assert.match(systemPrompt, /direct known-path reads need no scout/i);
 	}
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
-	assert.match(systemPrompt, /Prefer `recon` for a bounded unfamiliar-code/);
-	assert.match(systemPrompt, /not a runtime tester or general reviewer/);
-	assert.match(systemPrompt, /historical diff or external evidence inline in its prompt/);
-	assert.match(systemPrompt, /retain Git provenance checks yourself/);
+	assert.match(systemPrompt, /Prefer `recon` for unfamiliar static navigation/);
+	assert.match(systemPrompt, /not runtime testing or review/);
+	assert.match(systemPrompt, /self-contained packet.*frozen diff/);
+	assert.match(systemPrompt, /preserve exact frozen HEAD\/tree\/Git status/);
+	assert.match(systemPrompt, /excluding `\.git`, `\.herder`, and symlink traversal/);
+	assert.match(systemPrompt, /historical diff or external evidence excerpts inline/);
+	assert.match(systemPrompt, /keep Git provenance and runtime proof with yourself/);
+	assert.match(systemPrompt, /Denied access requires a scoped handoff/);
 });
 
 test("recon positively defines bounded static work and early caller-owned handoff", async () => {
@@ -138,14 +142,14 @@ test("recon positively defines bounded static work and early caller-owned handof
 test("subreviewer contract preserves sources and hands unresolved proof to its parent", async () => {
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
 	assert.match(systemPrompt, /source preservation is a behavioral contract, not a sandbox/);
-	assert.match(systemPrompt, /primary hunk\/subsystem ownership, named cross-boundary questions/);
-	assert.match(systemPrompt, /parent owns the compiled assignment, hash verification, and frozen authority/);
-	assert.match(systemPrompt, /parent runs required shared gates once/);
-	assert.match(systemPrompt, /writes in external scratch directories/);
-	assert.match(systemPrompt, /at most one concurrent recon and two launches total/);
+	assert.match(systemPrompt, /hunk\/subsystem ownership, cross-boundary questions/);
+	assert.match(systemPrompt, /self-contained packet is your authority/);
+	assert.match(systemPrompt, /parent owns shared gates/);
+	assert.match(systemPrompt, /external scratch/);
+	assert.match(systemPrompt, /at most one concurrent `recon` and two recon launches total/);
 	assert.match(systemPrompt, /uncollected grandchildren fail this review closed/);
 	assert.match(systemPrompt, /wait_any: true/);
-	assert.match(systemPrompt, /60 seconds, then returns running without cancelling/);
+	assert.match(systemPrompt, /60 seconds and return running without cancellation/);
 	assert.match(systemPrompt, /including timeout\/error/);
 	assert.match(systemPrompt, /UNRESOLVED: <COVERAGE_GAP or MATERIAL_CONCERN/);
 	assert.match(systemPrompt, /Missing proof alone neither rejects a credible concern nor promotes it to a blocker/);

@@ -9,13 +9,9 @@ import {
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
 	INTEGRATION_REPAIR_OPERATIONS,
 	isTerminalRunStatus,
-	type IntegrationRepairRequest,
-	type ManagerAttentionRequest,
 	type ManagerReply,
-	type ReigniteRequest,
 	type TerminalEvent,
 	type VerificationManifest,
-	type VerificationRequest,
 } from "../src/shared/protocol.ts";
 import {
 	invokeHerderTool,
@@ -49,10 +45,7 @@ import {
 } from "./profile.ts";
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import {
-	HERDER_ATTENTION_MESSAGE,
-	attentionMessageDetails,
 	attentionResolutionFromRequest,
-	buildAttentionPrompt,
 	confirmPlanAcceptance,
 	registerAttentionMessageRenderer,
 } from "./attention.ts";
@@ -61,8 +54,8 @@ import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
+import { MainSessionRequests, type IntegrationRepairBinding } from "./main-session-requests.ts";
 import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
-import { classifyVerificationRecovery, verificationRunnerEvidence, FINAL_VERIFICATION_SELECTION_GUIDANCE, ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE } from "./verification-recovery.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
@@ -101,22 +94,6 @@ interface WorkerBinding {
 	sessionEpoch: number;
 	planId?: string;
 	transcript?: HerderWorkerInputEntry;
-}
-
-interface IntegrationRepairBinding {
-	request: IntegrationRepairRequest;
-	planDirectory: string;
-	sessionEpoch: number;
-	verification?: VerificationRequest;
-}
-
-interface PendingVerificationFailure {
-	key: string;
-	runId: string;
-	planDirectory: string;
-	detail: string;
-	sessionId?: string;
-	repair?: IntegrationRepairRequest;
 }
 
 type HerderPiWorkerFactory = PiWorkerSessionFactory & {
@@ -195,12 +172,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let lastContext: ExtensionContext | undefined;
 	let lastSummary: PlanSummary | undefined;
 	let lastManagerMessage: string | undefined;
-	let currentAttention: ManagerAttentionRequest | undefined;
 	let currentPlanEdit: { planId: string; state: string } | undefined;
 	let currentReworkEdit: ReworkEditBinding | undefined;
-	let attentionHint: string | undefined;
-	let attentionDrain = Promise.resolve();
-	const deferredAttention = new Set<string>();
 	let managerQueue = Promise.resolve();
 	let admittedManagerTasks = 0;
 	let releaseOwnershipAfterManagerDrain = false;
@@ -209,16 +182,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let ownership: AdapterOwnership | undefined;
 	let ownershipEpoch = 0;
 	const fallbackPiSessionId = `fallback-${randomUUID()}`;
-	const verificationRequests = new Map<string, VerificationRequest>();
-	const promptedVerifications = new Set<string>();
-	const integrationRepairRequests = new Map<string, IntegrationRepairBinding>();
-	const reigniteRequests = new Map<string, ReigniteRequest>();
-	const promptedReignites = new Set<string>();
 	const verificationMonitors = new Map<string, number>();
-	const notifiedVerificationFailures = new Set<string>();
-	const deliveredVerificationFailureFollowUps = new Set<string>();
-	let pendingVerificationFailure: PendingVerificationFailure | undefined;
-	let sendingVerificationFailure = false;
 
 	const persist = (state: HerderRunState) => {
 		currentState = state;
@@ -299,6 +263,22 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		&& ownership.record.runId === runId,
 	);
 
+	const mainSessionRequests = new MainSessionRequests({
+		pi,
+		packageRoot: PACKAGE_ROOT,
+		current: () => ({
+			context: lastContext,
+			state: currentState,
+			epoch: sessionEpoch,
+			active: !shuttingDown,
+			sessionId: lastContext ? piSessionId(lastContext) : fallbackPiSessionId,
+		}),
+		ownsRun,
+		onAttentionHint: (hint) => {
+			if (currentState) persist({ ...currentState, attentionRequestId: hint, updatedAt: Date.now() });
+		},
+	});
+
 	const claimOwnership = async (planDir: string, runId: string, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
 		assertSessionActive(epoch);
 		if (ownership) {
@@ -339,22 +319,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		workers.clear();
 		await Promise.all(activeWorkers.map((worker) => engine.stop(worker.handle).catch(() => {})));
 		currentState = undefined;
-		currentAttention = undefined;
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
-		attentionHint = undefined;
-		deferredAttention.clear();
+		mainSessionRequests.reset("cleanup");
 		lastSummary = undefined;
 		lastManagerMessage = undefined;
-		pendingVerificationFailure = undefined;
-		verificationRequests.clear();
-		promptedVerifications.clear();
-		integrationRepairRequests.clear();
-		reigniteRequests.clear();
-		promptedReignites.clear();
 		verificationMonitors.clear();
-		notifiedVerificationFailures.clear();
-		deliveredVerificationFailureFollowUps.clear();
 		releaseOwnership();
 		render(ctx);
 	};
@@ -384,329 +354,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		await validateHerderRoleAgents(PI_AGENT_ROOT, profile, await engine.availableModels());
 	};
 
-	const bindIntegrationRepair = (reply: ManagerReply): IntegrationRepairBinding | undefined => {
-		const request = reply.integrationRepair;
-		if (!request || !ownsRun(reply.planDirectory, reply.runId)) return undefined;
-		const binding: IntegrationRepairBinding = {
-			request,
-			planDirectory: reply.planDirectory,
-			sessionEpoch,
-			verification: verificationRequests.get(request.requestId),
-		};
-		integrationRepairRequests.set(request.requestId, binding);
-		return binding;
-	};
-
-	const mergeDurableIntegrationRepair = (
-		binding: IntegrationRepairBinding,
-		durable: IntegrationRepairRequest,
-	): IntegrationRepairBinding => ({
-		...binding,
-		request: {
-			...binding.request,
-			repairId: durable.repairId ?? binding.request.repairId,
-			episodeId: durable.episodeId ?? binding.request.episodeId,
-			state: durable.state,
-			classification: durable.episodeId && durable.episodeId !== binding.request.episodeId
-				? durable.classification
-				: durable.classification ?? binding.request.classification,
-			episodeState: durable.episodeId && durable.episodeId !== binding.request.episodeId
-				? durable.episodeState
-				: durable.episodeState ?? binding.request.episodeState,
-			episodeRequestSha256: durable.episodeRequestSha256 ?? binding.request.episodeRequestSha256,
-			episodeIntegrationHead: durable.episodeIntegrationHead ?? binding.request.episodeIntegrationHead,
-			episodeIntegrationTree: durable.episodeIntegrationTree ?? binding.request.episodeIntegrationTree,
-			episodeCanonicalGatesSha256: durable.episodeCanonicalGatesSha256 ?? binding.request.episodeCanonicalGatesSha256,
-			round: durable.round,
-			maxRounds: durable.maxRounds,
-			acceptedCodeRounds: durable.acceptedCodeRounds ?? binding.request.acceptedCodeRounds,
-			transientRetryUsed: durable.transientRetryUsed ?? binding.request.transientRetryUsed,
-			ownerSessionId: durable.ownerSessionId ?? binding.request.ownerSessionId,
-			integrationBranch: durable.integrationBranch || binding.request.integrationBranch,
-			integrationWorktree: durable.integrationWorktree || binding.request.integrationWorktree,
-			parentCommit: durable.parentCommit,
-			currentCommit: durable.currentCommit,
-			currentTree: durable.currentTree,
-			failedGates: durable.failedGates,
-			canonicalGates: durable.canonicalGates,
-			successorRequestId: durable.successorRequestId,
-			successorRequestSha256: durable.successorRequestSha256,
-			supersededCommits: durable.supersededCommits,
-			detail: durable.detail,
-		},
-	});
-
-	const delegateVerification = (reply: ManagerReply, retryDetail?: string) => {
-		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId)) return;
-		const request = reply.verificationRequest;
-		if (!request) return;
-		verificationRequests.set(request.requestId, request);
-		if ((reply.operations ?? []).some((operation) => operation.kind === "verification" && operation.operationId.startsWith(`verification:${request.requestId}:`))) return;
-		if (promptedVerifications.has(request.requestId) || !lastContext) return;
-		promptedVerifications.add(request.requestId);
-		const repairVerification = Boolean(request.repairId);
-		const prompt = [
-			repairVerification ? "HERDER_MAIN_SESSION_VERIFICATION_REPAIR_V1" : "HERDER_MAIN_SESSION_VERIFICATION_V1",
-			...(repairVerification ? ["HERDER_MAIN_SESSION_VERIFICATION_V1"] : []),
-			repairVerification
-				? "Herder accepted the bounded integration repair and needs a fresh authoritative verification selection for the repaired frozen tree."
-				: "Herder has finished integrating the ordinary plans and needs this main Pi session to select final verification semantically.",
-			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
-			...(repairVerification ? [
-				"Retain the inherited ordered gate prefix exactly. Add a gate only when it directly covers a newly touched path, and explain every addition. This selection is still authoritative Herder verification, not a local diagnostic.",
-			] : []),
-			...FINAL_VERIFICATION_SELECTION_GUIDANCE,
-			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
-			"Represent every command as direct argv. Every argv element must be one non-empty line: never put literal newlines inside a shell script argument. Use [\"/bin/sh\", \"-lc\", \"single-line script\"] only when shell syntax is genuinely required; join multiple shell statements with && or semicolons.",
-			"PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot for inspection only. Each gate cwd is TreeRelative: use '.' for the worktree root or a relative path such as 'pkg'. Absolute paths in cwd are invalid; never copy INTEGRATION_WORKTREE into cwd.",
-			'EXAMPLE_GATE: {"gateId":"unit","label":"unit tests","cwd":".","argv":["npm","test"],"rationale":"Covers the integrated change."}',
-			...(retryDetail ? [`PREVIOUS_MANIFEST_ERROR: ${retryDetail.replace(/\s+/g, " ").slice(0, 1_000)}`, "Correct the rejected manifest and submit it again."] : []),
-			"Once prerequisites, authority, and gate selection are established, call herder_verification exactly once as your final action. If they are unresolved, report the concrete blocker and ask for the missing prerequisite or decision instead of submitting a known-invalid manifest. A prose-only success claim is never verification evidence.",
-			`REQUEST_ID: ${request.requestId}`,
-			`REQUEST_SHA256: ${request.requestSha256}`,
-			`RUN_ID: ${request.runId}`,
-			`PLAN_DIRECTORY: ${reply.planDirectory}`,
-			`GENERATION: ${request.generation}`,
-			`GRAPH_SHA256: ${request.graphSha256}`,
-			`RUN_ASSIGNMENT: ${request.runAssignmentPath}`,
-			`RUN_ASSIGNMENT_SHA256: ${request.runAssignmentSha256}`,
-			`INTEGRATION_WORKTREE: ${request.integrationWorktree}`,
-			`INTEGRATION_BRANCH: ${request.integrationBranch}`,
-			`INTEGRATION_HEAD: ${request.integrationHead}`,
-			`INTEGRATION_TREE: ${request.integrationTree}`,
-			...(request.predecessorRequestId ? [`PREDECESSOR_REQUEST_ID: ${request.predecessorRequestId}`] : []),
-			...(request.repairId ? [`REPAIR_ID: ${request.repairId}`, `REPAIR_ROUND: ${request.repairRound ?? 1}`] : []),
-		].join("\n");
-		try {
-			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-		} catch (error) {
-			promptedVerifications.delete(request.requestId);
-			lastContext.ui.notify(`Herder could not delegate final verification: ${message(error)}`, "warning");
-		}
-	};
-
-	const pendingStatusChangingOperations = (reply: ManagerReply, requestId: string): boolean =>
-		(reply.operations ?? []).some((operation) => {
-			if (!["accepted", "running"].includes(operation.state)) return false;
-			if (operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${requestId}:`)) return false;
-			return true;
-		});
-
-	const delegateReignite = (reply: ManagerReply) => {
-		if (shuttingDown || !ownsRun(reply.planDirectory, reply.runId) || reply.status !== "complete") return;
-		const request = reply.reigniteRequest;
-		if (!request || request.state !== "pending") return;
-		if (pendingStatusChangingOperations(reply, request.requestId)) return;
-		const live = readLiveRunFreshness(reply.planDirectory);
-		if (!live || live.runId !== reply.runId || live.status !== "complete") return;
-		if (live.pendingOperations > 0) return;
-		reigniteRequests.set(request.requestId, request);
-		if ((reply.operations ?? []).some((operation) => operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${request.requestId}:`))) return;
-		if (promptedReignites.has(request.requestId) || !lastContext) return;
-		promptedReignites.add(request.requestId);
-		const findings = request.findings.length > 0 ? request.findings.map((finding) => `- ${finding}`).join("\n") : "none";
-		const guidance = request.fixGuidance.length > 0 ? request.fixGuidance.map((item) => `- ${item}`).join("\n") : "none";
-		const prompt = [
-			"HERDER_MAIN_SESSION_REIGNITE_V1",
-			"The original Herder run is complete. Residual PLAN_REQUIREMENT and PATCH_REGRESSION findings must become a new fireable sibling plan directory in one shot.",
-			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
-			"Use herder_plan init with local tracking, write the plan files, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
-			"As your final action, call herder_reignite exactly once with written or failed. Pass SOURCE_PLAN_DIRECTORY as planDirectory; the allocated sibling is also accepted. Acknowledgement always targets the source run. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
-			`REQUEST_ID: ${request.requestId}`,
-			`REQUEST_SHA256: ${request.requestSha256}`,
-			`RUN_ID: ${request.runId}`,
-			`SOURCE_PLAN_DIRECTORY: ${request.sourcePlanDirectory}`,
-			`ALLOCATED_PLAN_DIRECTORY: ${request.allocatedPlanDirectory ?? "unallocated"}`,
-			`GENERATION: ${request.generation}`,
-			`GRAPH_SHA256: ${request.graphSha256}`,
-			`INTEGRATION_BRANCH: ${request.integrationBranch}`,
-			`INTEGRATION_HEAD: ${request.integrationHead}`,
-			`INTEGRATION_TREE: ${request.integrationTree}`,
-			`VERDICT: ${request.verdict}`,
-			`SCOPE: ${request.scope}`,
-			"FINDINGS:",
-			findings,
-			"FIX_GUIDANCE:",
-			guidance,
-			...(request.detail ? [`PREVIOUS_WRITE_ERROR: ${request.detail.replace(/\s+/g, " ").slice(0, 1_000)}`] : []),
-		].join("\n");
-		try {
-			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-		} catch (error) {
-			promptedReignites.delete(request.requestId);
-			lastContext.ui.notify(`Herder could not delegate the reignite write: ${message(error)}`, "warning");
-		}
-	};
-
-	const drainAttention = async (): Promise<void> => {
-		if (shuttingDown || !lastContext || !currentAttention || !currentState) return;
-		const request = currentAttention;
-		if (request.state === "resolved" || deferredAttention.has(request.requestId) || attentionHint === request.requestId) return;
-		const requestId = request.requestId;
-		const epoch = sessionEpoch;
-		try {
-			const prompt = await buildAttentionPrompt(PACKAGE_ROOT, currentState.planDir, request);
-			if (!sessionActive(epoch) || !lastContext || !currentAttention || currentAttention.requestId !== requestId) return;
-			pi.sendMessage({
-				customType: HERDER_ATTENTION_MESSAGE,
-				content: prompt,
-				display: true,
-				details: attentionMessageDetails(request),
-			}, { deliverAs: "followUp", triggerTurn: true });
-			// A successful injection is the only acknowledgement held by the adapter.
-			// SQLite remains authoritative, so a replacement session can re-expose the
-			// request when this hint was not persisted before shutdown.
-			attentionHint = requestId;
-			persist({ ...currentState, attentionRequestId: requestId, updatedAt: Date.now() });
-		} catch (error) {
-			lastContext?.ui.notify(`Herder could not delegate attention request ${requestId}: ${message(error)}`, "warning");
-		}
-	};
-
-	const requestAttentionDrain = (): Promise<void> => {
-		const next = attentionDrain.then(drainAttention, drainAttention);
-		attentionDrain = next.then(() => undefined, () => undefined);
-		return next;
-	};
-
-	const drainVerificationFailure = (): void => {
-		if (shuttingDown || sendingVerificationFailure || !lastContext || !pendingVerificationFailure) return;
-		const failure = pendingVerificationFailure;
-		const deliveryKey = `${sessionEpoch}:${failure.key}`;
-		if (deliveredVerificationFailureFollowUps.has(deliveryKey)) {
-			pendingVerificationFailure = undefined;
-			return;
-		}
-		const repair = failure.repair;
-		const currentMainSessionId = lastContext ? piSessionId(lastContext) : "";
-		const recovery = classifyVerificationRecovery(repair, currentMainSessionId);
-		const logPath = failure.detail.match(/\(log ([^)]+)\)/)?.[1] || "the verification failure detail";
-		const verification = repair ? verificationRequests.get(repair.requestId) : undefined;
-		const integrationWorktree = repair?.integrationWorktree || verification?.integrationWorktree || "unavailable: manager did not provide the recorded integration worktree";
-		const integrationBranch = repair?.integrationBranch || verification?.integrationBranch || "unavailable: manager did not provide the recorded integration branch";
-		const integrationHead = repair ? repair.currentCommit || repair.parentCommit : "unknown";
-		const integrationTree = repair?.currentTree || verification?.integrationTree || "unknown";
-		const gateJson = (repair?.canonicalGates || repair?.failedGates || []).map((gate) => JSON.stringify(gate)).join("\n");
-		const prompt = recovery.kind === "owner_mismatch"
-			? [
-				"HERDER_MAIN_SESSION_VERIFICATION_REPAIR_OWNER_V1",
-				"The recorded integration-repair capability belongs to a different main Pi session and cannot be used by this session.",
-				`RUN_ID: ${failure.runId}`,
-				`OWNER_SESSION_ID: ${repair!.ownerSessionId}`,
-				`CURRENT_MAIN_SESSION_ID: ${currentMainSessionId}`,
-				`REQUEST_ID: ${repair!.requestId}`,
-				`REPAIR_ID: ${repair!.repairId || "unknown"}`,
-				...(repair!.episodeId ? [`EPISODE_ID: ${repair!.episodeId}`, `EPISODE_STATE: ${repair!.episodeState || "unclassified"}`] : []),
-				`REPAIR_STATE: ${repair!.state}`,
-				`FAILURE_DETAIL: ${failure.detail}`,
-				`LOG_PATH: ${logPath}`,
-				`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
-				"Do not call herder_integration_repair, edit the integration worktree, or claim recovery. Ask the user to recover the former session or choose an explicit operator/corrective-plan path.",
-			].join("\n")
-			: recovery.kind === "decision_required"
-			? [
-				"HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1",
-				recovery.ambiguity
-					? `The authoritative failure is durably classified as ${repair!.classification}. No writable repair capability was opened; an explicit user decision is required.`
-					: "The bounded automatic verification-recovery allowance has been exhausted. Herder has paused the run for an explicit user decision and will not open another automatic capability for this failure.",
-				`RUN_ID: ${failure.runId}`,
-				`REQUEST_ID: ${repair!.requestId}`,
-				`REPAIR_ID: ${repair!.repairId || "unknown"}`,
-				...(repair!.episodeId ? [`EPISODE_ID: ${repair!.episodeId}`, `EPISODE_STATE: ${repair!.episodeState || "unclassified"}`] : []),
-				`REPAIR_ROUND: ${repair!.round}`,
-				`CODE_REPAIR_ROUNDS: ${repair!.acceptedCodeRounds ?? repair!.round}/${repair!.maxRounds}`,
-				`MAX_ROUNDS: ${repair!.maxRounds}`,
-				`FAILURE_DETAIL: ${failure.detail}`,
-				`LOG_PATH: ${logPath}`,
-				`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
-				...(repair?.classification === "environment" ? [ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE] : [
-					"Read the recorded log and ask the user whether to stop, defer, or continue through an explicitly revised/corrective plan. Do not call herder_integration_repair begin again, do not claim success, and do not execute Herder verification commands yourself.",
-					"/herder-resume remains operator recovery for a durable paused run; ordinary deterministic defects no longer require graph revision before the bounded rounds are exhausted, but this exhausted state requires the user's choice.",
-				]),
-			].join("\n")
-			: recovery.kind === "recoverable" && repair
-				? [
-					"HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1",
-					"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
-					"Herder authoritative final verification failed and has issued one request-bound recovery capability to the owning main Pi session.",
-					"Use read-only inspection commands to read the exact failure log, explain the concrete failure to the user, then classify exactly one recovery path. Do not claim success, silently retry, or execute Herder's authoritative verification commands yourself.",
-					`RUN_ID: ${failure.runId}`,
-					`MAIN_SESSION_ID: ${failure.sessionId || "unknown"}`,
-					`OWNER_SESSION_ID: ${repair.ownerSessionId || failure.sessionId || "unknown"}`,
-					`ADAPTER_EPOCH: ${sessionEpoch}`,
-					`REQUEST_ID: ${repair.requestId}`,
-					`REQUEST_SHA256: ${repair.requestSha256}`,
-					...(repair.episodeId ? [
-						`EPISODE_ID: ${repair.episodeId}`,
-						`EPISODE_REQUEST_SHA256: ${repair.episodeRequestSha256 || repair.requestSha256}`,
-						`EPISODE_INTEGRATION_HEAD: ${repair.episodeIntegrationHead || integrationHead}`,
-						`EPISODE_INTEGRATION_TREE: ${repair.episodeIntegrationTree || integrationTree}`,
-						`EPISODE_CANONICAL_GATES_SHA256: ${repair.episodeCanonicalGatesSha256 || "unknown"}`,
-					] : []),
-					`CAPABILITY_TOKEN: ${repair.capabilityToken}`,
-					`GENERATION: ${repair.generation}`,
-					`REPAIR_ID: ${repair.repairId || "none"}`,
-					...(repair.episodeId ? [`EPISODE_ID: ${repair.episodeId}`, `EPISODE_STATE: ${repair.episodeState || "unclassified"}`] : []),
-					`REPAIR_ROUND: ${repair.round}`,
-					`CODE_REPAIR_ROUNDS: ${repair.acceptedCodeRounds ?? repair.round}/${repair.maxRounds}`,
-					`TRANSIENT_RETRY_USED: ${repair.transientRetryUsed ? "yes" : "no"}`,
-					`MAX_ROUNDS: ${repair.maxRounds}`,
-					`REPAIR_STATE: ${repair.state}`,
-					`PARENT_COMMIT: ${repair.parentCommit}`,
-					`FAILED_HEAD: ${repair.parentCommit}`,
-					`CURRENT_COMMIT: ${repair.currentCommit || repair.parentCommit}`,
-					`CURRENT_TREE: ${integrationTree}`,
-					`FAILED_TREE: ${integrationTree}`,
-					`INTEGRATION_WORKTREE: ${integrationWorktree}`,
-					`INTEGRATION_BRANCH: ${integrationBranch}`,
-					`INTEGRATION_HEAD: ${integrationHead}`,
-					`FAILURE_DETAIL: ${failure.detail}`,
-					`LOG_PATH: ${logPath}`,
-					`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
-					"CLASSIFICATIONS: manifest_error | transient | code_defect | design_ambiguity | scope_ambiguity | credential | environment | product_ambiguity",
-					...(repair.episodeId ? [
-						`CLASSIFICATION_EPISODE: ${repair.episodeId}`,
-						"A classification is immutable only inside this episode. Every newly failed successor opens a fresh unclassified episode; classify the current evidence and do not carry forward a prior episode's classification.",
-					] : []),
-					...(repair.transientRetryUsed ? ["TRANSIENT_BUDGET: The unchanged transient retry for this exact head/tree/gate program is already consumed; select a different evidence-supported path."] : []),
-					"Gate outcomes (passed, command_failed, unavailable, timed_out, runner_error), errors, signals, and timeout flags are runner observations, not defect classifications. Even command_failed from uv/nix/package-manager wrappers may mean missing prerequisites. Inspect the recorded evidence; never infer code_defect from an exit code or log regex alone.",
-					"Separate setup from validation. Use repository-declared canonical uv run, nix develop --command, or package-script invocations when specified, not bare tools, global installs, uvx/npx downloads, or ambient HOME substitution. Record exact manager/argv/cwd/error and the required prerequisite.",
-					"For manifest_error (wrong argv, cwd, or manager invocation), call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree. Proven missing environment prerequisites are environment, not source defects or automatic transient retries.",
-					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
-					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the next bounded code-repair commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
-					"For design_ambiguity, scope_ambiguity, credential, environment, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. For environment, the operator may prepare the verified declared prerequisites externally, then explicitly use /herder-resume to replay the exact canonical gates without edits or a budget charge. Other decision classifications may use a corrective plan followed by /herder-revise when the user chooses it.",
-					"Before begin, do not edit the frozen integration worktree, move Git refs, update SQLite, or mutate manager state. If a started code repair cannot be completed safely, restore the assigned worktree to its recorded clean head and call cancel.",
-					"Do not edit the frozen integration worktree before the begin transition binds writable authority to this main session.",
-					"Before finish, stage and create or amend the session-authored repair commit in the assigned worktree, confirm git status --porcelain is empty, and pass observedCommit equal to git rev-parse HEAD. Herder never stages, creates, or amends commits; it validates the clean commit and reruns the retained authoritative gates, then either proceeds to the existing final audit or presents the next bounded recovery request. /herder-resume remains operator recovery, not the ordinary path.",
-					"FAILED_OR_INHERITED_GATES:",
-					gateJson || "none",
-				].join("\n")
-				: [
-					"HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1",
-					"Herder final verification failed in the active main Pi session.",
-					`RUN_ID: ${failure.runId}`,
-					`MAIN_SESSION_ID: ${failure.sessionId || "unknown"}`,
-					`FAILURE_DETAIL: ${failure.detail}`,
-					`LOG_PATH: ${logPath}`,
-					`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
-					"Inspect the log using read-only commands and explain the concrete failure to the user. Do not claim success, silently retry, or execute verification commands yourself.",
-					"Use /herder-resume for a fresh verification request after correcting a manifest or transient operational failure; for an integrated code defect, propose a corrective plan followed by /herder-revise.",
-					"Do not edit the frozen integration worktree, move Git refs, or mutate manager state.",
-				].join("\n");
-		sendingVerificationFailure = true;
-		try {
-			pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-			deliveredVerificationFailureFollowUps.add(deliveryKey);
-			pendingVerificationFailure = undefined;
-		} catch (error) {
-			// Keep the pending failure so agent_settled or the next durable status
-			// refresh retries delivery to this session.
-			lastContext.ui.notify(`Herder could not deliver final verification recovery to the main session: ${message(error)}`, "warning");
-		} finally {
-			sendingVerificationFailure = false;
-		}
-	};
-
 	const activeVerificationOperation = (reply: ManagerReply) => (reply.operations ?? []).find(
 		(operation) => operation.kind === "verification" && ["accepted", "running"].includes(operation.state),
 	);
@@ -727,29 +374,19 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	) => {
 		if (reply.status === "idle") {
 			currentState = undefined;
-			pendingVerificationFailure = undefined;
-			currentAttention = undefined;
+			mainSessionRequests.reset("idle");
 			currentPlanEdit = undefined;
 			currentReworkEdit = undefined;
-			attentionHint = undefined;
-			deferredAttention.clear();
 			lastSummary = undefined;
 			lastManagerMessage = undefined;
-			verificationRequests.clear();
-			promptedVerifications.clear();
-			integrationRepairRequests.clear();
-			reigniteRequests.clear();
-			promptedReignites.clear();
-			notifiedVerificationFailures.clear();
 			render();
 			return;
 		}
-		currentAttention = ownsRun(reply.planDirectory, reply.runId) ? reply.attention : undefined;
 		currentPlanEdit = ownsRun(reply.planDirectory, reply.runId) ? reply.planEdit : undefined;
-		if (!currentAttention || attentionHint !== currentAttention.requestId) attentionHint = undefined;
 		const previous = currentState;
 		const now = Date.now();
 		const displayed = displayedReply(reply);
+		mainSessionRequests.observeReply(reply, displayed);
 		persist({
 			version: 1,
 			mode: mode ?? previous?.mode ?? "resume",
@@ -761,7 +398,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			maxParallel: reply.maxParallel,
 			startedAt: previous?.startedAt ?? now,
 			updatedAt: now,
-			...(attentionHint ? { attentionRequestId: attentionHint } : {}),
+			...(mainSessionRequests.attentionRequestId ? { attentionRequestId: mainSessionRequests.attentionRequestId } : {}),
 			...(reply.dashboardUrl ? { dashboardUrl: reply.dashboardUrl } : {}),
 		});
 		lastSummary = {
@@ -769,39 +406,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			inProgress: reply.summary.inProgress,
 		};
 		lastManagerMessage = displayed.message;
-		const repairBinding = bindIntegrationRepair(reply);
-		const repair = repairBinding?.request;
-		const currentMainSessionId = repair?.ownerSessionId && lastContext ? piSessionId(lastContext) : "";
-		const recovery = classifyVerificationRecovery(repair, currentMainSessionId);
-		const verificationFailure = ( /verification/i.test(displayed.message)
-			&& (displayed.status === "failed" || recovery.actionable))
-			|| Boolean(repair && recovery.actionable)
-			|| recovery.ownerMismatch
-			|| recovery.ambiguity;
-		if (verificationFailure) {
-			const failureKey = `${reply.runId}:${repair?.episodeId || repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
-			pendingVerificationFailure = {
-				key: failureKey,
-				runId: reply.runId,
-				planDirectory: reply.planDirectory,
-				detail: displayed.message,
-				sessionId: lastContext ? piSessionId(lastContext) : undefined,
-				...(repair ? { repair } : {}),
-			};
-			if (!notifiedVerificationFailures.has(failureKey)) {
-				notifiedVerificationFailures.add(failureKey);
-				lastContext?.ui.notify(
-					recovery.ownerMismatch
-						? `Herder final verification recovery belongs to another main session; operator recovery is required.`
-						: ((recovery.atLimit || recovery.ambiguity)
-							? `Herder final verification recovery requires an explicit user decision.`
-						: `Herder final verification failed: ${displayed.message}\nAutomatic request-bound recovery is available; Use /herder-resume for operator recovery.`),
-					"error",
-				);
-			}
-		} else {
-			pendingVerificationFailure = undefined;
-		}
 		if (ownsRun(reply.planDirectory, reply.runId)) {
 			for (const operation of reply.operations ?? []) {
 				if (operation.kind !== "verification" || !["accepted", "running"].includes(operation.state)) continue;
@@ -821,38 +425,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			});
 		}
 		render();
-		delegateVerification(reply, verificationRetryDetail);
-		delegateReignite(reply);
-		drainVerificationFailure();
-		void requestAttentionDrain();
+		mainSessionRequests.deliverReply(reply, verificationRetryDetail);
 	};
 
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
 		const event = input as Record<string, unknown>;
 		return unwrapReply(await submitHerderEvent({ planDirectory: planDir, ...event }) as Record<string, unknown>);
-	};
-
-	const managerTransportRetriable = (error: unknown): boolean => {
-		if (error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError") return true;
-		const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
-		if (cause && typeof cause.code === "string" && ["ECONNREFUSED", "ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(cause.code)) return true;
-		return message(error).includes("fetch failed");
-	};
-
-	// The manager dedupes events by eventId, so resending the identical payload after a
-	// client-side abort or connection drop is safe and recovers replies that would
-	// otherwise be lost (a lost reply can strand proposed dispatches forever).
-	const postEventReliable = async (planDir: string, input: unknown): Promise<ManagerReply> => {
-		let lastError: unknown;
-		for (let attempt = 0; attempt < 6; attempt += 1) {
-			try { return await postEvent(planDir, input); }
-			catch (error) {
-				lastError = error;
-				if (!managerTransportRetriable(error) || attempt === 5) throw error;
-				await new Promise<void>((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 15_000) + Math.floor(Math.random() * 500)));
-			}
-		}
-		throw lastError;
 	};
 
 	const releaseOwnershipIfManagerIdle = (): void => {
@@ -909,7 +487,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			}
 			assertOwnership(reply.planDirectory, reply.runId);
 			try {
-				reply = await postEventReliable(reply.planDirectory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: results });
+				reply = await postEvent(reply.planDirectory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: results });
 			} catch (error) {
 				await discardPrepared(prepared);
 				throw error;
@@ -948,7 +526,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		let reply = initial;
 		const interrupted = interruptedPiWorkers(reply.active, (handle) => engine.has(handle));
 		if (interrupted.length > 0) {
-			reply = await postEventReliable(reply.planDirectory, {
+			reply = await postEvent(reply.planDirectory, {
 				eventId: randomUUID(),
 				kind: "terminals",
 				terminals: interrupted,
@@ -992,7 +570,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					}) as Record<string, unknown>);
 					assertSessionActive(epoch);
 					assertOwnership(reply.planDirectory, reply.runId);
-					if (reply.verificationRequest?.requestId === requestId) promptedVerifications.delete(requestId);
+					if (reply.verificationRequest?.requestId === requestId) mainSessionRequests.clearVerificationPrompt(requestId);
 					updateFromReply(reply, undefined, undefined, detail);
 				});
 			} catch (refreshError) {
@@ -1017,10 +595,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (options.mode === "resume") {
 			// Resume is an explicit re-exposure point for durable attention. The hint
 			// is not authority and must not suppress the manager's next request.
-			attentionHint = undefined;
-			currentAttention = undefined;
-			deferredAttention.clear();
-			promptedReignites.clear();
+			mainSessionRequests.reset("resume");
 		}
 		let acquired: AdapterOwnership | undefined;
 		let before: ManagerReply | undefined;
@@ -1172,13 +747,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const statusAttentionId = reply.attention?.requestId;
 		const reexposeAttention = Boolean(statusAttentionId
 			&& ownsRun(reply.planDirectory, reply.runId)
-			&& statusAttentionId === attentionHint);
+			&& statusAttentionId === mainSessionRequests.attentionRequestId);
 		updateFromReply(reply);
 		if (reexposeAttention && statusAttentionId) {
-			attentionHint = undefined;
-			deferredAttention.delete(statusAttentionId);
-			if (currentState) persist({ ...currentState, attentionRequestId: undefined, updatedAt: Date.now() });
-			await requestAttentionDrain();
+			mainSessionRequests.reexposeAttention(statusAttentionId);
+			await mainSessionRequests.drainAttentionNow();
 		}
 		render(ctx);
 		const displayed = displayedReply(reply);
@@ -1238,9 +811,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const action = context?.attentionAction?.trim().toLowerCase().replace(/[- ]+/g, "_");
 		if (action === "defer") {
 			const reply = value as ManagerReply;
-			if (reply.attention) deferredAttention.add(reply.attention.requestId);
-		} else if (action && currentAttention) {
-			deferredAttention.delete(currentAttention.requestId);
+			if (reply.attention) mainSessionRequests.deferAttention(reply.attention.requestId);
+		} else if (action && mainSessionRequests.attention) {
+			mainSessionRequests.resumeAttention(mainSessionRequests.attention.requestId);
 		}
 		assertSessionActive(epoch);
 		const reply = value as ManagerReply;
@@ -1250,7 +823,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const nextReworkEdit = reworkBindingAfterReply(currentReworkEdit, context?.planOperation, reply);
 		const dispatched = recover ? await recoverInterruptedWorkers(reply, epoch) : await dispatchReply(reply, epoch);
 		currentReworkEdit = nextReworkEdit;
-		await requestAttentionDrain();
+		await mainSessionRequests.drainAttentionNow();
 		return dispatched;
 	};
 
@@ -1294,7 +867,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			workers.delete(worker.handle);
 		}
 		await Promise.all(target.map((worker) => engine.stop(worker.handle).catch(() => {})));
-		const reply = await postEventReliable(binding.planDirectory, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
+		const reply = await postEvent(binding.planDirectory, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
 		assertOwnership(reply.planDirectory, reply.runId);
 		updateFromReply(reply);
 	};
@@ -1442,7 +1015,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				error: "Pi user requested Herder stop",
 			}));
 			if (interrupted.length > 0) {
-				reply = await postEventReliable(state.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
+				reply = await postEvent(state.planDir, { eventId: randomUUID(), kind: "terminals", terminals: interrupted });
 			}
 			assertSessionActive(epoch);
 			updateFromReply(reply);
@@ -1483,7 +1056,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	});
 
 	const activeFire = () => Boolean(currentState && !isTerminalRunStatus(currentState.status))
-		|| Boolean(currentAttention && currentAttention.state !== "resolved")
+		|| Boolean(mainSessionRequests.attention && mainSessionRequests.attention.state !== "resolved")
 		|| Boolean(currentPlanEdit)
 		|| workers.size > 0
 		|| engine.snapshots().length > 0;
@@ -1493,7 +1066,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 		bindAttention: async (input, ctx) => {
 			const epoch = sessionEpoch;
-			const request = currentAttention;
+			const request = mainSessionRequests.attention;
 			if (!request || request.state === "resolved") throw new Error("No unresolved Herder attention request is bound to this Pi session.");
 			assertOwnership(input.planDirectory, request.runId);
 			if (input.requestId !== request.requestId) {
@@ -1504,8 +1077,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				await confirmPlanAcceptance(request, input, ctx);
 				assertSessionActive(epoch);
 				assertOwnership(input.planDirectory, request.runId);
-				if (currentAttention?.requestId !== request.requestId
-					|| currentAttention.requestSha256 !== request.requestSha256 || currentAttention.state === "resolved") {
+				if (mainSessionRequests.attention?.requestId !== request.requestId
+					|| mainSessionRequests.attention.requestSha256 !== request.requestSha256 || mainSessionRequests.attention.state === "resolved") {
 					throw new Error("The attention request changed during confirmation; review its current evidence before accepting.");
 				}
 				return { ...binding, confirmed: true };
@@ -1712,7 +1285,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const repoRoot = await repositoryRoot(ctx);
 			assertSessionActive(epoch);
 			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
-			let binding = integrationRepairRequests.get(params.requestId);
+			let binding = mainSessionRequests.getIntegrationRepairRequest(params.requestId);
 			if (!binding || params.operation === "finish") {
 				const cachedBinding = binding;
 				const reply = await enqueueManager(async () => {
@@ -1724,10 +1297,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				updateFromReply(reply);
 				const durable = reply.integrationRepair;
 				if (cachedBinding && durable && cachedBinding.request.repairId && durable.repairId === cachedBinding.request.repairId) {
-					binding = mergeDurableIntegrationRepair(cachedBinding, durable);
-					integrationRepairRequests.set(params.requestId, binding);
+					binding = mainSessionRequests.mergeRepair(cachedBinding, durable);
 				} else {
-					binding = integrationRepairRequests.get(params.requestId) || cachedBinding;
+					binding = mainSessionRequests.getIntegrationRepairRequest(params.requestId) || cachedBinding;
 				}
 			}
 			if (!binding || binding.planDirectory !== planDirectory || binding.sessionEpoch !== epoch) {
@@ -1820,7 +1392,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const repoRoot = await repositoryRoot(ctx);
 			assertSessionActive(epoch);
 			const planDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
-			let request = verificationRequests.get(params.requestId);
+			let request = mainSessionRequests.getVerificationRequest(params.requestId);
 			if (!request) {
 				const reply = await enqueueManager(async () => {
 					assertSessionActive(epoch);
@@ -1829,7 +1401,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				assertOwnership(reply.planDirectory, reply.runId);
 				updateFromReply(reply);
-				request = verificationRequests.get(params.requestId);
+				request = mainSessionRequests.getVerificationRequest(params.requestId);
 			}
 			if (!request || request.requestId !== params.requestId || currentState?.runId !== request.runId || currentState.profile === "unknown") {
 				throw new Error(`Herder verification request ${params.requestId} is not bound to this main session`);
@@ -1899,7 +1471,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const repoRoot = await repositoryRoot(ctx);
 			assertSessionActive(epoch);
 			const requestedDirectory = resolvePlanDirectory(repoRoot, params.planDirectory);
-			let request = reigniteRequests.get(params.requestId);
+			let request = mainSessionRequests.getReigniteRequest(params.requestId);
 			if (!request) {
 				const refreshDirectories: string[] = [];
 				for (const candidate of [currentState?.planDir, requestedDirectory]) {
@@ -1916,7 +1488,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					if (reply.status === "idle" || !reply.runId) continue;
 					assertOwnership(reply.planDirectory, reply.runId);
 					updateFromReply(reply);
-					request = reigniteRequests.get(params.requestId);
+					request = mainSessionRequests.getReigniteRequest(params.requestId);
 					if (request) break;
 				}
 			}
@@ -1956,7 +1528,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const reply = value as ManagerReply;
 			assertOwnership(reply.planDirectory, reply.runId);
 			updateFromReply(reply);
-			if (params.state === "written") reigniteRequests.delete(request.requestId);
+			if (params.state === "written") mainSessionRequests.acknowledgeReignite(request.requestId);
 			const written = params.state === "written" && reply.status === "complete" && !reply.reigniteRequest;
 			return {
 				content: [{ type: "text" as const, text: written
@@ -1997,7 +1569,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				...(completed.error ? { error: completed.error } : {}),
 				usage: completed.usage,
 			};
-			const reply = await postEventReliable(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
+			const reply = await postEvent(binding.planDir, { eventId: randomUUID(), kind: "terminals", terminals: [terminal] });
 			assertSessionActive(epoch);
 			assertOwnership(reply.planDirectory, reply.runId);
 			updateFromReply(reply);
@@ -2010,8 +1582,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (shuttingDown) return;
 		lastContext = ctx;
-		drainVerificationFailure();
-		await requestAttentionDrain();
+		await mainSessionRequests.settled();
 		orcaBusy.onParentSettled(ctx);
 	});
 
@@ -2021,19 +1592,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		shuttingDown = false;
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
-		currentAttention = undefined;
+		mainSessionRequests.reset("session-start");
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
-		pendingVerificationFailure = undefined;
-		sendingVerificationFailure = false;
-		deliveredVerificationFailureFollowUps.clear();
-		deferredAttention.clear();
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
 		currentState = restoreLastRun(ctx.sessionManager.getEntries());
 		// A persisted hint only records that an earlier session injected a request;
 		// it is never an acknowledgement authority across replacement. Re-expose
 		// the manager's next durable request after the replacement status read.
-		attentionHint = undefined;
 		lastPersistedState = currentState;
 		if (currentState) {
 			const restored = currentState;
@@ -2090,17 +1656,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (ownership) registerAdapterOwnershipRetirement(ownership, managerQueue);
 		}
 		widget.dispose();
-		verificationRequests.clear();
-		integrationRepairRequests.clear();
-		reigniteRequests.clear();
-		pendingVerificationFailure = undefined;
-		sendingVerificationFailure = false;
-		promptedVerifications.clear();
-		promptedReignites.clear();
-		currentAttention = undefined;
+		mainSessionRequests.reset("shutdown");
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
-		deferredAttention.clear();
 		lastContext = undefined;
 	});
 }

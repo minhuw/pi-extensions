@@ -221,6 +221,7 @@ test("planning docs carry bounded caller/regression handoffs from audit findings
 test("deterministic manager owns scheduling while Pi workers delegate only through the scoped Agent tool", async () => {
 	const agentDir = path.join(extensionRoot, "assets/roles/pi");
 	const extension = await readFile(path.join(extensionRoot, "adapters/index.ts"), "utf8");
+	const mainSessionRequests = await readFile(path.join(extensionRoot, "adapters/main-session-requests.ts"), "utf8");
 	const engine = await readFile(path.join(extensionRoot, "adapters/worker-engine.ts"), "utf8");
 	const transcript = await readFile(path.join(extensionRoot, "adapters/worker-transcript.ts"), "utf8");
 	const nestedExecutor = await readFile(path.join(extensionRoot, "adapters/nested-agent-executor.ts"), "utf8");
@@ -233,30 +234,23 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(extension, /name: "herder_verification"/);
 	assert.match(extension, /name: "herder_integration_repair"/);
 	assert.match(extension, /name: "herder_reignite"/);
-	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_V1/);
-	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/);
-	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1/);
-	assert.match(extension, /HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1/);
-	assert.match(extension, /HERDER_MAIN_SESSION_REIGNITE_V1/);
-	assert.match(extension, /PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/);
+	for (const marker of [
+		/HERDER_MAIN_SESSION_VERIFICATION_V1/,
+		/HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/,
+		/HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1/,
+		/HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1/,
+		/HERDER_MAIN_SESSION_REIGNITE_V1/,
+		/PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/,
+		/EXAMPLE_GATE: \{"gateId":"unit"/,
+	]) assert.match(mainSessionRequests, marker);
 	assert.match(extension, /Tree-relative path inside the integration worktree/);
-	assert.match(extension, /EXAMPLE_GATE: \{"gateId":"unit"/);
-	assert.match(extension, /pi\.sendUserMessage\(prompt/);
-	assert.match(extension, /submitHerderVerification/);
-	assert.match(extension, /submitHerderIntegrationRepair/);
-	assert.match(extension, /appendWorkerEntry\(HERDER_WORKER_INPUT_ENTRY, binding\.transcript\)/);
-	assert.match(extension, /createWorkerOutputEntry\(binding\.transcript, completed\)/);
-	assert.match(extension, /session_shutdown[\s\S]*engine\.stop\(handle\)/);
-	assert.match(extension, /if \(!sessionActive\(epoch\)\) return/);
-	assert.match(extension, /await dispatchReply\(reply, epoch\)/);
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
 	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
 	assert.doesNotMatch(extension + engine + nestedExecutor + nestedTool + roleConfig, /extensions\/subagents|subagents\/src|subagents:telemetry|registerSubagentHost|getSubagentHost/);
-	assert.match(engine, /SessionManager\.create\(request\.action\.worktree, sessionRoot\)/);
+	// worker-engine.test.ts exercises clean sessions, exact tool envelopes,
+	// trusted extension loading and shutdown through the production factory.
 	assert.match(engine, /noExtensions: true/);
-	assert.match(engine, /additionalExtensionPaths: extensionPaths/);
-	assert.match(engine, /additionalExtensionPaths: roleExtensionPaths/);
 	assert.match(engine, /getInstalledPath\(source, "user"\)/);
 	assert.doesNotMatch(engine, /getInstalledPath\(source, "project"\)/);
 	assert.match(engine, /realpathSync\(path\.join\(agentDir, "npm"\)\)/);
@@ -272,21 +266,11 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(engine, /SEARCHER_LOCAL_TOOL_NAMES/);
 	assert.match(engine, /input\.workflow = "none"/);
 	assert.match(engine, /Herder searcher may fetch only remote URLs/);
-	assert.doesNotMatch(engine, /nestedExtensionPaths|const cacheKey/);
-	assert.match(engine, /missing required tools/);
 	assert.match(engine, /noSkills: true/);
 	assert.match(engine, /noPromptTemplates: true/);
 	assert.match(engine, /noThemes: true/);
 	assert.match(engine, /noContextFiles: true/);
-	assert.match(engine, /customTools: \[\.\.\.nestedTools\]/);
-	assert.match(engine, /await child\.bindExtensions\(\{/);
-	assert.match(engine, /await session\.bindExtensions\(\{/);
-	assert.match(engine, /mode: "print"/);
-	assert.match(engine, /unexpected tools/);
-	assert.match(nestedExecutor, /session\??\.shutdown\?\.\(\)/);
-	assert.match(engine, /createNestedAgentTools/);
 	assert.doesNotMatch(engine + nestedExecutor + nestedTool, /shouldStopAfterTurn|turnLimitReached|max_turns|maxTurns/);
-	assert.match(engine, /session\.messages\.length !== 0/);
 	assert.doesNotMatch(engine, /forkFrom|parentSession:/);
 	assert.match(nestedTool, /executionMode: "parallel"/);
 	assert.match(nestedTool, /run_in_background/);
@@ -378,9 +362,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly the envelope below/);
 		assert.match(contract, /^SETUP: </m);
-		assert.match(contract, /repository-declared locked|repository-prescribed, locked/);
+		assert.match(contract, /repository-declared locked|repository-prescribed,? locked/);
 		assert.match(contract, /tracked manifest\/lock changes.*only when this assignment explicitly authorizes|Never modify tracked manifests, locks, source/);
-		assert.match(contract, /opportunistic unpinned `uvx`\/`npx`/);
+		assert.match(contract, /[Nn]ever[^.]*unpinned `uvx`\/`npx`/);
 		assert.match(contract, /BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/);
 		assert.match(contract, /(?:omit|omitting|omitted).*BLOCKER_KIND|BLOCKER_KIND omitted/);
 		if (role === "plan-reviewer") {
@@ -390,66 +374,86 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	}
 });
 
-test("bounded review policy preserves risk floors, materiality, scoped verification, and fail-closed evidence", async () => {
+test("bounded review policy is owned by the protocol and assembled with the reviewer contract", async () => {
 	const [protocol, contract, root, child] = await Promise.all([
 		"assets/review/code-review-protocol.md",
 		"assets/roles/contracts/plan-reviewer.md",
 		"assets/roles/pi/plan-reviewer.md",
 		"assets/roles/pi/nested/reviewer.md",
 	].map((file) => readFile(path.join(extensionRoot, file), "utf8")));
-	for (const text of [protocol, contract]) {
-		assert.match(text, /LOW = 1, MED = 2, HIGH = 4/);
-		assert.match(text, /[Mm]issing risk[^.]*HIGH/);
-		assert.match(text, /[Ee]scalate[^.]*authorization\/authentication, persistence, concurrency, public boundaries, and executable Markdown\/prompt policies/);
-		assert.match(text, /[Nn]ever downgrade[^.]*diff\/file (?:count|size)[^.]*documentation extension/);
-		assert.match(text, /`FINAL_AUDIT`[^\n]*four[^\n]*full aggregate coverage/);
-		assert.match(text, /(?:same Plan V2 risk rule|same risk rule)[^.]*regardless of round|first discovery in a later round uses this same risk rule/i);
-		assert.match(text, /[Dd]efault(?:s)? to one scoped/);
-		assert.match(text, /[Ss]cale up only for distinct risky repair boundaries, up to four|scaling only for distinct risky repair boundaries up to four/);
-		assert.match(text, /counts are prompt policy|counts[^.]*prompt policy/);
-		assert.doesNotMatch(text, /first required discovery with four parallel|initial four reviewers|four actual reviewers remain mandatory/i);
-	}
-	for (const text of [protocol, contract, child]) {
-		assert.match(text, /[Mm]ateriality before (?:expensive )?proof/);
-		assert.match(text, /concrete plausible trigger and material consequence, or an explicit failed acceptance\/scope obligation/);
-		assert.match(text, /Do not actively seek optional P2\/P3 improvements/);
-		assert.match(text, /Zero findings is valid; never suppress confirmed serious defects to meet a count/);
-		assert.match(text, /COVERAGE_GAP/);
-		assert.match(text, /MATERIAL_CONCERN/);
-		assert.match(text, /(?:[Rr]eject unsupported|\*\*Unsupported) speculation[^.]*concise reason/);
-		assert.match(text, /every hypothetical[^.]*false/);
-		assert.match(text, /[Ss]erious unresolved concerns[^.]*missing required checks\/coverage[^.]*incomplete[^.]*never approval/);
-		assert.match(text, /[Mm]issing finding from a partial report is not resolution/);
-		assert.match(text, /[Dd]o not reopen[^.]*resolved\/rejected findings without new evidence/);
-		assert.match(text, /(?:[Ii]ndependently checks materiality|[Ii]ndependently check[^.]*materiality)/);
-		assert.match(text, /all four lenses|four review lenses|coverage checklist regardless of child count/);
-		assert.doesNotMatch(text, /retain missing-proof claims as explicit unresolved work|Missing proof belongs in UNRESOLVED|neither silently discard it nor promote it/);
-	}
-	assert.match(root, /Before any repository action, read the complete `ROLE_CONTRACT_PATH` and the complete `REVIEW_PROTOCOL_PATH` from the exact paths supplied/);
-	assert.match(root, /If either is missing or unreadable, return `BLOCK`, never inferred approval/);
-	assert.match(root, /You alone establish compiled assignment and frozen authority/);
-	assert.match(root, /Return only the contract's exact terminal envelope/);
-	assert.ok(root.split("---")[2].trim().split(/\s+/).length <= 250, "Pi wrapper stays a short loader, not a duplicated policy");
-	assert.doesNotMatch(root, /LOW =|MED =|HIGH =|PASS_DOCUMENT|wait_any|SETUP|COVERAGE_GAP|HERDER_REVIEW_TIMEOUT_MS/);
-	assert.match(protocol, /A separate skeptic is not mandatory/);
-	assert.match(protocol, /Verify all accepted open IDs and concrete P0\/P1 repair-delta regressions/);
-	assert.match(protocol, /For later review passes, do not reopen broad discovery/);
-	assert.match(protocol, /exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk\/commit/);
-	assert.match(protocol, /evidence-complete P0\/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`/);
-	assert.match(protocol, /failed explicit acceptance criterion, a failed required acceptance gate, or a material scope violation/);
-	assert.match(protocol, /Confirmed P2\/P3 findings remain advisory/);
-	assert.match(protocol, /`FOLLOWUP` and `INVALID` never block/);
-	assert.match(protocol, /No round-3 Judge or fourth automatic mutation is allowed/);
-	assert.match(contract, /hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/);
-	assert.match(contract, /Verify frozen branch\/HEAD\/tree integrity before returning/);
-	assert.match(contract, /final-phase V rows[^.]*cannot be the only prerequisite acceptance proof/);
-	assert.match(contract, /ENVIRONMENT\/INVOCATION enters durable `operator_attention`[^.]*same role\/ready phase and substantive round without automatic retry or code repair/);
-	assert.match(contract, /`APPROVE` only when required acceptance checks and explicit criteria pass, mandatory coverage is complete, and no serious material concern remains unresolved/);
+	for (const pattern of [
+		/LOW = 1, MED = 2, HIGH = 4/,
+		/[Mm]issing risk[^.]*HIGH/,
+		/[Ee]scalate[^.]*authorization\/authentication, persistence, concurrency, public boundaries, and executable Markdown\/prompt policies/,
+		/[Nn]ever downgrade[^.]*diff\/file (?:count|size)[^.]*documentation extension/,
+		/`FINAL_AUDIT`[^\n]*four[^\n]*full aggregate coverage/,
+		/(?:same Plan V2 risk rule|same risk rule)[^.]*regardless of round|first discovery in a later round uses this same risk rule/i,
+		/[Dd]efault(?:s)? to one scoped/,
+		/[Ss]cale up only for distinct risky repair boundaries, up to four|scaling only for distinct risky repair boundaries up to four/,
+		/counts are prompt policy|counts[^.]*prompt policy/,
+		/[Mm]ateriality before (?:expensive )?proof/,
+		/concrete plausible trigger and material consequence, or an explicit failed acceptance\/scope obligation/,
+		/Do not actively seek optional P2\/P3 improvements/,
+		/COVERAGE_GAP/,
+		/MATERIAL_CONCERN/,
+		/[Rr]eject unsupported speculation[^.]*concise reason/,
+		/[Ss]erious unresolved concerns[^.]*missing required checks\/coverage[^.]*incomplete[^.]*never approval/,
+		/[Mm]issing finding from a partial report is not resolution/,
+		/[Dd]o not reopen[^.]*resolved\/rejected findings without new evidence/,
+	]) assert.match(protocol, pattern);
+	assert.doesNotMatch(contract, /LOW =|MED =|HIGH =|MATERIAL_CONCERN|COVERAGE_GAP|wait_any|FINAL_AUDIT/);
+	for (const pattern of [
+		/hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/,
+		/Verify frozen branch\/HEAD\/tree integrity before every terminal report/,
+		/[Ff]inal-phase V rows[^.]*cannot be the only prerequisite acceptance proof/,
+		/SETUP: </,
+		/BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/,
+		/Only `ENVIRONMENT` and `INVOCATION` reject defect findings or `SCOPE: FAIL`/,
+		/`REQUIREMENT` blocker and retains confirmed `plan_recovery`\/`user_decision` authority/,
+		/Return exactly the envelope below/,
+	]) assert.match(contract, pattern);
 	const envelope = contract.match(/```text\n(VERDICT:[\s\S]*?)\n```/)?.[1];
 	assert.ok(envelope);
 	assert.deepEqual([...envelope.matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), [
 		"VERDICT", "BLOCKER_KIND", "FINDINGS", "FIX_GUIDANCE", "DISCOVERED_PATHS", "SCOPE", "SETUP", "CHECKS", "RATIONALE", "USAGE",
 	]);
+	for (const pattern of [
+		/Classify each discovered path independently/,
+		/unplanned public-contract or migration transition/,
+		/nonoverlapping with unordered live work/,
+		/`SCOPE: FAIL` requires material out-of-plan work or an explicit constraint violation/,
+		/Severity measures consequence, not confidence/,
+		/suggested direction is optional and nonbinding/,
+		/Before returning, collect every background direct result/,
+	]) assert.match(protocol, pattern);
+	assert.match(contract, /host-provided token accounting; use `unknown`/);
+	assert.match(contract, /exact-tree verification evidence rather than creating a second manifest/);
+	assert.match(root, /read the complete `ROLE_CONTRACT_PATH` and the complete `REVIEW_PROTOCOL_PATH` from the exact paths supplied/);
+	assert.match(root, /If either is missing or unreadable, return `BLOCK`, never inferred approval/);
+	assert.match(root, /Return only the contract's exact terminal envelope/);
+	assert.ok(root.split("---")[2].trim().split(/\s+/).length <= 250, "Pi wrapper stays a short loader, not a duplicated policy");
+	assert.doesNotMatch(root, /LOW =|MED =|HIGH =|PASS_DOCUMENT|wait_any|SETUP|COVERAGE_GAP|HERDER_REVIEW_TIMEOUT_MS/);
+	const assembledRoot = `${contract}\n${protocol}`;
+	assert.match(assembledRoot, /assignment authority/);
+	assert.match(assembledRoot, /LOW = 1, MED = 2, HIGH = 4/);
+	assert.match(assembledRoot, /Return exactly the envelope below/);
+	assert.match(protocol, /A separate skeptic is not mandatory/);
+	assert.match(protocol, /Verify all accepted open IDs and concrete P0\/P1 repair-delta regressions/);
+	assert.match(protocol, /For later review passes, do not reopen broad discovery/);
+	assert.match(protocol, /evidence-complete P0\/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`/);
+	assert.match(protocol, /No round-3 Judge or fourth automatic mutation is allowed/);
+	for (const pattern of [
+		/source preservation is a behavioral contract, not a sandbox/,
+		/hunk\/subsystem ownership, cross-boundary questions/,
+		/at most one concurrent `recon` and two recon launches total/,
+		/uncollected grandchildren fail this review closed/,
+		/UNRESOLVED: <COVERAGE_GAP or MATERIAL_CONCERN/,
+		/Missing proof alone neither rejects a credible concern nor promotes it to a blocker/,
+		/Reject unsupported speculation with a concise reason/,
+		/never suppress confirmed serious defects to meet a count/,
+		/not owned-hunk coverage or required checks/,
+		/`CONFIRM`, `REJECT`, or `INSUFFICIENT`/,
+	]) assert.match(child, pattern);
 });
 
 test("review docs separate policy counts, opt-in deadlines, material-only Reignite, and unmeasured calibration", async () => {

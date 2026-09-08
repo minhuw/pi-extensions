@@ -34,21 +34,49 @@ function delay(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+class TransportRequestError extends Error {
+	constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		this.name = "TransportRequestError";
+	}
+}
+
+class ServiceResponseError extends Error {
+	readonly retryablePollNotFound: boolean;
+
+	constructor(message: string, retryablePollNotFound: boolean) {
+		super(message);
+		this.name = "ServiceResponseError";
+		this.retryablePollNotFound = retryablePollNotFound;
+	}
+}
+
 async function rawRequest(service: StoredService, pathname: string, input?: unknown, timeoutMs = 30_000): Promise<Record<string, unknown>> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetch(`http://127.0.0.1:${service.port}${pathname}`, {
-			method: input === undefined ? "GET" : "POST",
-			headers: {
-				Authorization: `Bearer ${service.authToken}`,
-				...(input === undefined ? {} : { "Content-Type": "application/json" }),
-			},
-			...(input === undefined ? {} : { body: JSON.stringify(input) }),
-			signal: controller.signal,
-		});
+		const serialized = input === undefined ? undefined : JSON.stringify(input);
+		let response: Response;
+		try {
+			response = await fetch(`http://127.0.0.1:${service.port}${pathname}`, {
+				method: input === undefined ? "GET" : "POST",
+				headers: {
+					Authorization: `Bearer ${service.authToken}`,
+					...(input === undefined ? {} : { "Content-Type": "application/json" }),
+				},
+				...(input === undefined ? {} : { body: serialized }),
+				signal: controller.signal,
+			});
+		} catch (error) {
+			throw new TransportRequestError(error);
+		}
 		const body = await response.json() as Record<string, unknown>;
-		if (!response.ok || body.ok === false) throw new Error(String(body.error || `Herder service returned HTTP ${response.status}`));
+		if (!response.ok || body.ok === false) {
+			const operationNotFound = pathname.startsWith("/v1/operation?id=")
+				&& response.status === 404
+				&& body.error === "operation-not-found";
+			throw new ServiceResponseError(String(body.error || `Herder service returned HTTP ${response.status}`), operationNotFound);
+		}
 		return body;
 	} finally {
 		clearTimeout(timer);
@@ -498,6 +526,7 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 }
 
 const CLEANUP_EXCLUSION_WAIT_MS = 5_000;
+const STARTUP_RETRY_ATTEMPTS = 6;
 
 function ownerLockIsPresent(planDirectory: string): boolean {
 	try { fs.lstatSync(serviceOwnershipLockPath(planDirectory)); return true; }
@@ -594,20 +623,35 @@ export async function withServiceExclusion<T>(
 
 
 function transportFailure(error: unknown): boolean {
-	const text = error instanceof Error ? error.message : String(error);
+	if (error instanceof TransportRequestError) return true;
+	if (error instanceof ServiceResponseError) return error.retryablePollNotFound;
 	const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
 	return Boolean(cause && typeof cause.code === "string" && ["ECONNREFUSED", "ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(cause.code))
-		|| /fetch failed|socket|operation-not-found|service did not become healthy/i.test(text)
 		|| Boolean(error && typeof error === "object" && (error as { name?: unknown }).name === "AbortError");
 }
 
+async function ensureServiceWithRetry(planDirectory: string): Promise<StoredService> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < STARTUP_RETRY_ATTEMPTS; attempt += 1) {
+		try {
+			return await ensureService(planDirectory);
+		} catch (error) {
+			lastError = error;
+			const startupTimeout = error instanceof Error && error.message.startsWith("Herder service did not become healthy");
+			if ((!transportFailure(error) && !startupTimeout) || attempt === STARTUP_RETRY_ATTEMPTS - 1) throw error;
+			await delay(Math.min(1000 * 2 ** attempt, 15_000) + Math.floor(Math.random() * 500));
+		}
+	}
+	throw lastError;
+}
+
 async function withReliableService<T>(planDirectory: string, attempt: (service: StoredService) => Promise<T>): Promise<T> {
-	let service = await ensureService(planDirectory);
+	let service = await ensureServiceWithRetry(planDirectory);
 	for (;;) {
 		try { return await attempt(service); }
 		catch (error) {
 			if (!transportFailure(error)) throw error;
-			service = await ensureService(planDirectory);
+			service = await ensureServiceWithRetry(planDirectory);
 		}
 	}
 }
