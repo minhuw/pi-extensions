@@ -414,6 +414,17 @@ export default function (pi) {
 		const afterDiscard = await eventLines();
 		assert.deepEqual(afterDiscard.slice(beforeDiscard.length).sort(), ["ponytail-shutdown", "ponytail-start"]);
 
+		// Exercise the production override, not just advertised tool names, at both Recon depths.
+		await mkdir(path.join(worktree, "src"));
+		await mkdir(path.join(worktree, ".herder"), { recursive: true });
+		await writeFile(path.join(worktree, "src/probe.ts"), "RECON_PROBE allowed source\n");
+		await writeFile(path.join(worktree, ".herder/transcript.jsonl"), "RECON_PROBE forbidden transcript\n");
+		await writeFile(path.join(root, "outside-secret"), "forbidden coordinator\n");
+		const probeCalls = [
+			fauxToolCall("read", { path: "../outside-secret" }),
+			fauxToolCall("read", { path: "src/probe.ts" }),
+			fauxToolCall("grep", { pattern: "RECON_PROBE", glob: "**/*" }),
+		];
 		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
 		const nestedCases = [
 			{ type: "recon", tools: ["read", "grep", "find", "ls"], events: [] },
@@ -423,10 +434,23 @@ export default function (pi) {
 		for (const nestedCase of nestedCases) {
 			const beforeNested = await eventLines();
 			let providerTools: string[] = [];
-			faux.setResponses([(context) => {
+			const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
 				providerTools = (context.tools ?? []).map((tool) => tool.name).sort();
+				if (nestedCase.type === "recon") {
+					const results = context.messages.filter((entry) => entry.role === "toolResult");
+					if (results.length === 0) return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
+					assert.equal(results.length, 3);
+					assert.equal(results[0]!.isError, true);
+					assert.match(JSON.stringify(results[0]!.content), /Recon filesystem scope denied/);
+					assert.equal(results[1]!.isError, false);
+					assert.match(JSON.stringify(results[1]!.content), /allowed source/);
+					assert.equal(results[2]!.isError, false);
+					assert.match(JSON.stringify(results[2]!.content), /probe.ts:1:/);
+					assert.doesNotMatch(JSON.stringify(results[2]!.content), /forbidden/);
+				}
 				return fauxAssistantMessage(`Nested ${nestedCase.type} result`);
-			}]);
+			};
+			faux.setResponses([respond, respond]);
 			const nestedResult = await prepared.nested.run({
 				type: nestedCase.type,
 				prompt: `Run the bounded ${nestedCase.type} task`,
@@ -453,9 +477,21 @@ export default function (pi) {
 				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
 				if (model.id === "gpt-5.6-luna") {
 					assert.deepEqual(tools, ["read", "grep", "find", "ls"].sort());
-					assert.equal(context.messages.length, 1, "scout starts with its own task only");
 					assert.equal(options?.reasoning, "max");
-					return fauxAssistantMessage("STATUS: ANSWERED\nANSWER: source trace\nEVIDENCE: src/test.ts:1\nREMAINING: none");
+					const results = context.messages.filter((entry) => entry.role === "toolResult");
+					if (results.length === 0) {
+						assert.equal(context.messages.length, 1, "scout starts with its own task only");
+						return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
+					}
+					assert.equal(results.length, 3);
+					assert.equal(results[0]!.isError, true);
+					assert.match(JSON.stringify(results[0]!.content), /Recon filesystem scope denied/);
+					assert.equal(results[1]!.isError, false);
+					assert.match(JSON.stringify(results[1]!.content), /allowed source/);
+					assert.equal(results[2]!.isError, false);
+					assert.match(JSON.stringify(results[2]!.content), /probe.ts:1:/);
+					assert.doesNotMatch(JSON.stringify(results[2]!.content), /forbidden/);
+					return fauxAssistantMessage("STATUS: ANSWERED\nANSWER: source trace\nEVIDENCE: src/probe.ts:1\nREMAINING: none");
 				}
 				assert.equal(model.id, "test-model");
 				assert.equal(options?.reasoning, "high");
@@ -481,13 +517,13 @@ export default function (pi) {
 				assert.equal(results.filter((entry) => entry.isError).length, 2, "reviewer scope rejects wider delegation");
 				return fauxAssistantMessage("Review complete with source and runtime evidence");
 			};
-			faux.setResponses(Array.from({ length: 16 }, () => respond));
+			faux.setResponses(Array.from({ length: 20 }, () => respond));
 			const results = await Promise.all(Array.from({ length: 4 }, (_, index) => review.nested.run({
 				type: "reviewer", prompt: `Review shard ${index}`, description: `review shard ${index}`,
 			})));
 			for (const result of results) assert.equal(result.status, "completed", result.error ?? result.output);
 			assert.equal(observedModels.filter((model) => model === "test-model").length, 12);
-			assert.equal(observedModels.filter((model) => model === "gpt-5.6-luna").length, 4);
+			assert.equal(observedModels.filter((model) => model === "gpt-5.6-luna").length, 8);
 			const snapshots = review.nested.treeSnapshots();
 			assert.equal(snapshots.length, 8);
 			for (const result of results) {

@@ -49,7 +49,7 @@ The four review lenses remain a coverage checklist for the combined assignments,
 3. **Contextual regression** — trace necessary callers, contracts, persistence, concurrency, and compatibility boundaries.
 4. **Tests and trust boundaries** — inspect failure paths, validation, authorization, unsafe inputs, cleanup, and operational behavior, especially introduced P0/P1 failures.
 
-Each subreviewer inspects and reasons about its assignment, may run targeted safe bash reproductions, and optionally asks recon for a precise static trace. Recon is a source-navigation leaf, not a code detector, runtime tester, or candidate validator. Its `ANSWERED`, `PARTIAL`, or `HANDOFF_REQUIRED` report is useful evidence or an early handoff to the caller.
+Each subreviewer inspects and reasons about its assignment, may run targeted safe bash reproductions, and optionally asks recon for a precise static trace. Recon is a source-navigation leaf, not a code detector, runtime tester, or candidate validator. Its read/grep/find/ls tools enforce the assigned-worktree boundary, excluding `.git`, `.herder` and symlink traversal. Supply necessary historical diff or external evidence excerpts inline in its prompt; a scratch path is not an access grant. Keep Git provenance and runtime proof with the caller. Denied access calls for a scoped handoff, never transcript searches, sibling-worktree inspection, or unchanged retries. Its `ANSWERED`, `PARTIAL`, or `HANDOFF_REQUIRED` report is useful evidence or an early handoff to the caller.
 
 ### Materiality before proof
 

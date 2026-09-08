@@ -88,7 +88,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			"recon uses gpt-5.6-luna at max on the fast tier. searcher uses this run's profile binding when supplied, otherwise the same package scout binding. worker and reviewer inherit this role's exact model, thinking level, and service tier.",
 			"Every child inherits this action's stable worktree and lifetime.",
 			`Allowed types in this scope: ${scope.allowedTypes.join(", ")}. recon is repository-read-only; searcher is web research with delegated local read-only search; worker may mutate (Implementer only); reviewer independently reviews (root Reviewer only).`,
-			"All children use Pi's built-in grep and find tools; searcher loads only pi-web-access, worker loads only Ponytail's trusted pi-extension entry, and recon/reviewer load no extensions.",
+			"Recon uses worktree-scoped read/grep/find/ls overrides; other children use Pi's built-in local tools. searcher loads only pi-web-access, worker loads only Ponytail's trusted pi-extension entry, and recon/reviewer load no extensions.",
 			"Only reviewer children get Agent/result tools, restricted to recon leaves: one concurrent scout and two launches total. Other children cannot delegate. No child inherits conversation, skills, scheduling, resume, or a secondary worktree.",
 			"recon has a fixed one-hour execution deadline, including setup and retries; timeouts return partial output and never retry automatically.",
 		].join(" "),
@@ -99,6 +99,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			"Collect every background child before your final response. For parallel reviews use get_subagent_result with wait_any: true repeatedly, rather than batch waits for specific IDs.",
 			"Only nested reviewers may delegate again, to recon leaves only. recon keeps the package scout model; searcher honors the profile override; worker/reviewer inherit this role's binding and share the stable worktree.",
 			"Prefer recon for bounded unfamiliar-code navigation and static caller/data-flow traces. Supply a concrete question, starting paths, a stopping boundary, and a compact evidence request; consume its handoff instead of repeating the whole exploration. Keep implementation, runtime proof, and review judgment with the capable role. Direct known-path reads need no scout.",
+			"Recon can inspect only the assigned worktree, excluding .git, .herder and symlink traversal. Supply required historical diffs or external evidence inline in the Agent prompt; paths in a prompt do not grant access. Keep Git provenance and runtime proof with the parent; handle denied access as a scoped handoff, not a reason for transcript searches or unchanged retries.",
 			"The parent role remains accountable for verifying child claims and repository effects, including concurrent edits in the shared worktree.",
 		],
 		parameters: Type.Object({

@@ -32,6 +32,7 @@ import {
 	type PiNestedAgentSnapshot,
 } from "./nested-agent-executor.ts";
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
+import { createReconTools } from "./recon-tools.ts";
 import {
 	loadHerderPiRole,
 	PONYTAIL_EXTENSION_SOURCE,
@@ -390,7 +391,10 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 					model: childModel as Model<any>,
 					thinkingLevel: binding.effort as ThinkingLevel,
 					tools: childDefinition.tools,
-					customTools: nestedScope ? [...createNestedAgentTools(nestedScope)] : [],
+					customTools: [
+						...(nestedScope ? createNestedAgentTools(nestedScope) : []),
+						...(childDefinition.name === "recon" ? createReconTools(request.action.worktree, signal, this.agentDir) : []),
+					],
 					resourceLoader: childLoader,
 					sessionManager: childManager,
 				});

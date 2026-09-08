@@ -110,12 +110,14 @@ test("roles encourage bounded Recon exploration without delegating judgment", as
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
 	assert.match(systemPrompt, /Prefer `recon` for a bounded unfamiliar-code/);
 	assert.match(systemPrompt, /not a runtime tester or general reviewer/);
+	assert.match(systemPrompt, /historical diff or external evidence inline in its prompt/);
+	assert.match(systemPrompt, /retain Git provenance checks yourself/);
 });
 
 test("recon positively defines bounded static work and early caller-owned handoff", async () => {
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "recon");
 	assert.match(systemPrompt, /source-navigation child in the supplied current worktree/);
-	assert.match(systemPrompt, /reading files, locating paths and symbols with Pi's built-in search tools/);
+	assert.match(systemPrompt, /reading files, locating paths and symbols with guarded read\/grep\/find\/ls tools/);
 	assert.match(systemPrompt, /tracing static callers, data flow, and contracts/);
 	assert.match(systemPrompt, /Start with capability triage/);
 	assert.match(systemPrompt, /runtime execution, implementation, or general code-review objective, return `HANDOFF_REQUIRED` immediately/);
@@ -125,7 +127,12 @@ test("recon positively defines bounded static work and early caller-owned handof
 	assert.match(systemPrompt, /fixed hard one-hour \(1h\) wall-clock deadline, including compaction and retries/);
 	assert.match(systemPrompt, /STATUS: ANSWERED \| PARTIAL \| HANDOFF_REQUIRED/);
 	for (const field of ["ANSWER", "EVIDENCE", "REMAINING"]) assert.match(systemPrompt, new RegExp(`^${field}:`, "m"));
-	assert.doesNotMatch(systemPrompt, /\b(?:do not|don't|don’t|never|cannot|must not|forbidden)\b/i);
+	assert.match(systemPrompt, /runtime restricts filesystem access to the assigned worktree/);
+	assert.match(systemPrompt, /excluding `\.git`, `\.herder`, and symlink traversal below that root/);
+	assert.match(systemPrompt, /path mentioned in a task is context, not an access grant/);
+	assert.match(systemPrompt, /caller-supplied inline diff\/history excerpts/);
+	assert.match(systemPrompt, /denied access or unavailable search tooling, return `PARTIAL`/);
+	assert.match(systemPrompt, /source JSONL fixtures remain readable/);
 });
 
 test("subreviewer contract preserves sources and hands unresolved proof to its parent", async () => {

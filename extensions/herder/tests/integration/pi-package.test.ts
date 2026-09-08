@@ -324,6 +324,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	const recon = await readFile(path.join(agentDir, "nested/recon.md"), "utf8");
 	assert.doesNotMatch(recon, /^extensions:/m);
 	assert.match(recon, /^tools: read, grep, find, ls$/m);
+	assert.match(recon, /runtime restricts filesystem access to the assigned worktree/);
+	assert.match(nestedTool, /paths in a prompt do not grant access/);
+	assert.match(nestedTool, /historical diffs or external evidence inline/);
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
 	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
 	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content, find, grep$/m);
@@ -355,6 +358,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(reviewProtocol, /wait_any: true/);
 	assert.match(reviewProtocol, /60 seconds, then returns running without cancelling/);
 	assert.match(reviewProtocol, /Root `recon` and `searcher` remain available/);
+	assert.match(reviewProtocol, /tools enforce the assigned-worktree boundary/);
+	assert.match(reviewProtocol, /scratch path is not an access grant/);
+	assert.match(reviewProtocol, /Denied access calls for a scoped handoff/);
 	assert.doesNotMatch(reviewProtocol, /CONFIDENCE:|confidence at least 80|four fresh `recon` children/);
 	assert.doesNotMatch(reviewProtocol, /subagent type.*(?:critic|validator)/i);
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"]) {
