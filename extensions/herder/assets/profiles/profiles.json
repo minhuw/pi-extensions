@@ -45,7 +45,7 @@
     {
       "name": "universe",
       "description": "Astra orchestrates, implements, rescues, and judges while Sol reviews and searches; Luna scouts.",
-      "orchestrator": { "model": "gpt-6-astra", "effort": "xhigh" },
+      "orchestrator": { "model": "gpt-6-astra", "effort": "high" },
       "roles": {
         "plan-implementer": { "model": "gpt-6-astra", "effort": "medium" },
         "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
