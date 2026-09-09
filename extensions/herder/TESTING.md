@@ -61,7 +61,7 @@ Before selecting a default budget or claiming improvements, compare approximatel
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.
 
-Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies, the pinned Pi provider, and this checkout:
+Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies and this checkout, which includes the vendored Pi provider:
 
 ```sh
 set -eu
@@ -70,18 +70,17 @@ npm --version
 npm ci
 
 pi_bin="${HERDER_PI_BIN:-$PWD/node_modules/.bin/pi}"
-provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$HOME/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts}"
+provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/cliproxyapi-provider/index.ts}"
 herder_entry="$PWD/extensions/herder/adapters/index.ts"
 test -x "$pi_bin"
 test -f "$herder_entry"
-"$pi_bin" install npm:@router-for-me/pi-cliproxyapi-provider@1.4.13 --approve
 "$pi_bin" install "$PWD" --approve
 test -f "$provider_extension"
 export HERDER_PI_BIN="$pi_bin"
 export HERDER_PI_PROVIDER_EXTENSION="$provider_extension"
 ```
 
-The default installed provider extension path is `$HOME/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts`. Set `HERDER_PI_BIN` or `HERDER_PI_PROVIDER_EXTENSION` before running the setup when using a different binary or installed extension. Keep those exports in the shell used for the preflight and test. The fixture disables extension discovery and explicitly loads both the provider extension and this checkout's `extensions/herder/adapters/index.ts`, so it does not depend on a globally discovered Herder copy.
+The default provider extension is this checkout's `extensions/cliproxyapi-provider/index.ts`. Do not also install the upstream npm provider. Set `HERDER_PI_BIN` or `HERDER_PI_PROVIDER_EXTENSION` before running the setup when using a different binary or provider extension. Keep those exports in the shell used for the preflight and test. The fixture disables extension discovery and explicitly loads both the provider extension and this checkout's `extensions/herder/adapters/index.ts`, so it does not depend on a globally discovered Herder copy.
 
 ### Provider variables and secret-safe preflight
 
@@ -115,7 +114,7 @@ The probe checks authorization and endpoint reachability without writing a respo
 ```sh
 set -eu
 pi_bin="${HERDER_PI_BIN:-$PWD/node_modules/.bin/pi}"
-provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$HOME/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts}"
+provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/cliproxyapi-provider/index.ts}"
 test -x "$pi_bin"
 test -f "$provider_extension"
 models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models cliproxyapi)
@@ -168,13 +167,13 @@ After inspecting a retained run, delete the exact fixture path printed by the te
 
 ## Live CI
 
-`.github/workflows/herder-live-e2e.yml` runs the Pi/Poorman fixture after Herder-related pushes to `master` and through manual dispatch. It uses Node 22.19.0, `npm ci`, installs `@router-for-me/pi-cliproxyapi-provider@1.4.13`, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
+`.github/workflows/herder-live-e2e.yml` runs the Pi/Poorman fixture after Herder- or provider-related pushes to `master` and through manual dispatch. It uses Node 22.19.0, `npm ci`, loads this checkout's vendored CLIProxyAPI provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
 
 CI sets `HERDER_E2E_TIMEOUT_MS` to 2,400,000 ms (40 minutes) while the job has a 45-minute workflow timeout. It sets `HERDER_KEEP_E2E=1` so diagnostics remain available, maps the `CLIPROXY_API_KEY` and `CLIPROXY_BASE_URL` repository secrets to the provider's `CLIPROXYAPI_API_KEY` and `CLIPROXYAPI_BASE_URL` variables, and passes the normalized root to the provider. Never place credential values in workflow files, logs, fixtures, committed environment files, or documentation.
 
 ## Troubleshooting
 
-- **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun the pinned provider install, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
+- **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun `npm ci` and verify the vendored provider exists in this checkout, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
 - **Endpoint authorization or normalization:** check that the runtime variables are set without printing them, apply the trailing-slash/`/backend-api`/`/v1` normalization, and rerun the body-free `curl` probe. Do not substitute the CI/artifact variable names for the provider runtime names.
 - **Missing model or effort:** rerun the explicit `--list-models` check and compare both exact IDs (gpt-5.6-luna and deepseek-v4-flash). A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
 - **Early RPC exit:** inspect `pi.log` and verify the provider install, `--no-extensions`, the explicit provider extension, and the checkout's `extensions/herder/adapters/index.ts`. Treat logs as potentially sensitive before copying or uploading them.

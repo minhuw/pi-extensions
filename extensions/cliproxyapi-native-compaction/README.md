@@ -1,6 +1,6 @@
 # CLIProxyAPI Native Compaction
 
-A Pi extension that bridges [`@router-for-me/pi-cliproxyapi-provider`](https://www.npmjs.com/package/@router-for-me/pi-cliproxyapi-provider) to CLIProxyAPI's native OpenAI Responses compact endpoint.
+A Pi extension that bridges the sibling [CLIProxyAPI Provider](../cliproxyapi-provider/README.md) to CLIProxyAPI's native OpenAI Responses compact endpoint.
 
 It participates in Pi's ordinary compaction lifecycle and uses OpenAI's current remote-compaction-v2 contract:
 
@@ -13,14 +13,13 @@ Remote compaction v2 returns an opaque compaction item rather than a complete re
 
 ## Install
 
-Install this extension collection and the CLIProxyAPI provider:
+Install this extension collection, which includes the CLIProxyAPI provider and TPS:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
-pi install npm:@router-for-me/pi-cliproxyapi-provider
 ```
 
-Configure the provider normally, then select an eligible model. The extension remains inert for every provider, API, or model that does not pass its exact gate.
+Follow the [provider setup](../cliproxyapi-provider/README.md#setup) using the existing `/login` and configuration, then select an eligible model. Do not also install the upstream npm provider in the same Pi profile. The extension remains inert for every provider, API, or model that does not pass its exact gate.
 
 ## Usage
 

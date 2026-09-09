@@ -7,6 +7,7 @@ The published extension table and installation details live in the root [README]
 
 ## Layout
 
+- `extensions/cliproxyapi-provider/` — editable locally patched CLIProxyAPI 1.4.15 snapshot, provider/TPS wrapper, and offline catalog/entrypoint tests.
 - `extensions/cliproxyapi-native-compaction/` — native OpenAI Responses compaction for eligible CLIProxyAPI-backed Pi sessions.
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
@@ -24,7 +25,8 @@ Run commands from the repository root with Node `>=22.19.0`.
 | --- | --- |
 | `npm ci` | Install the locked dependencies. |
 | `npm run typecheck` | Run strict, no-emit TypeScript checking for the configured `extensions` sources; `extensions/subagents` is excluded. |
-| `npm test` | Run the safe collection suite: Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
+| `npm test` | Run the safe collection suite: CLIProxyAPI Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
+| `npm run test:cliproxyapi-provider` | Run 53 offline Node catalog regression scenarios and the mocked Vitest provider/TPS entrypoint checks. |
 | `npm run test:commit` | Run Commit's strict TypeScript `node --test` suite. |
 | `npm run test:writer` | Run Writer's strict TypeScript `node --test` suite. |
 | `npm run test:statusline` | Run Statusline Footer's Vitest suite. |
@@ -39,7 +41,7 @@ Run commands from the repository root with Node `>=22.19.0`.
 
 - Use conventional commits with a scope, for example `fix(herder): persist restack targets` and `test(client): cover terminal operation failure recovery`.
 - TypeScript is strict and configured with `noEmit`.
-- Commit, Writer, and Herder tests use strict TypeScript with Node's `node --test`; Statusline Footer, Subagents, and native compaction tests use Vitest.
+- Commit, Writer, and Herder tests use strict TypeScript with Node's `node --test`; Statusline Footer, Subagents, and native compaction tests use Vitest. CLIProxyAPI Provider uses a dependency-free Node catalog regression script and a Vitest entrypoint check.
 - Herder integration tests run sequentially within each file, and temporary fixtures under `os.tmpdir()` are removed in `finally` blocks.
 
 ## Do not touch

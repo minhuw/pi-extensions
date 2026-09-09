@@ -12,7 +12,7 @@ const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const fixtureScript = path.join(extensionRoot, "tests/e2e/support/live-manager-fixture.ts");
 const extensionEntry = path.join(extensionRoot, "adapters/index.ts");
 const providerExtension = process.env.HERDER_PI_PROVIDER_EXTENSION
-	|| path.join(os.homedir(), ".pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts");
+	|| path.resolve(extensionRoot, "../cliproxyapi-provider/index.ts");
 const enabled = process.env.HERDER_LIVE_E2E === "1";
 const keep = process.env.HERDER_KEEP_E2E === "1";
 const timeout = Number(process.env.HERDER_E2E_TIMEOUT_MS || 30 * 60_000);
