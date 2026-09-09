@@ -4,8 +4,8 @@ Use this protocol only as the root `plan-reviewer` for the frozen assignment sup
 
 ## Non-negotiable invariants
 
-- Delegate review evidence to fresh `reviewer` children. Only the root plan-reviewer may launch them; each subreviewer may optionally delegate source navigation to `recon` leaves, at most one concurrently and two total per subreview. This is a bounded two-level tree, not a general recursive agent.
-- Use at most eight root `Agent` launches total and at most four direct children concurrently. These are hard runtime caps, not target counts. Remaining calls permit optional targeted fresh second opinions, not a mandatory full second discovery wave. Root `recon` and `searcher` remain available for narrow source or external-documentation lookups within this budget; neither replaces an actual reviewer.
+- Delegate review evidence to fresh `reviewer` children. Only the root plan-reviewer may launch them; each subreviewer may optionally delegate source navigation or bounded static defect candidate scouting to `recon` leaves, at most one concurrently and two total per subreview. This is a bounded two-level tree, not a general recursive agent.
+- Use at most eight root `Agent` launches total and at most four direct children concurrently. These are hard runtime caps, not target counts. Remaining calls permit optional targeted fresh second opinions, not a mandatory full second discovery wave. Root `recon` and `searcher` remain available for narrow source navigation/candidate scouting or external-documentation lookups within this budget; neither replaces an actual reviewer.
 - Never use `worker` for review, edit source or plans, commit, or integrate. Children provide evidence, never a verdict; the contract governs source preservation and frozen authority. Stops cascade through the tree.
 - Review only introduced behavior against the compiled assignment, explicit repository rules, changed-code contracts, required checks, and demonstrated regressions. Suppress style, speculation, pre-existing defects, and unrelated improvement ideas. Plan V2 A rows and explicitly binding decisions govern requirements within Boundaries; the route is suggested. A routine fix satisfying acceptance and scope does not violate the plan merely by using another approach.
 
@@ -43,7 +43,11 @@ The four review lenses remain a coverage checklist for the combined assignments,
 3. **Contextual regression** — trace necessary callers, contracts, persistence, concurrency, and compatibility boundaries.
 4. **Tests and trust boundaries** — inspect failure paths, validation, authorization, unsafe inputs, cleanup, and operational behavior, especially introduced P0/P1 failures.
 
-Each subreviewer inspects and reasons about its assignment, may run targeted safe bash reproductions, and optionally asks recon for a precise static trace. Recon is a source-navigation leaf, not a code detector, runtime tester, or candidate validator. Its read/grep/find/ls tools enforce the assigned-worktree boundary, excluding `.git`, `.herder` and symlink traversal. Supply necessary historical diff or external evidence excerpts inline in its prompt; a scratch path is not an access grant. Keep Git provenance and runtime proof with the caller. Denied access calls for a scoped handoff, never transcript searches, sibling-worktree inspection, or unchanged retries. Its `ANSWERED`, `PARTIAL`, or `HANDOFF_REQUIRED` report is useful evidence or an early handoff to the caller.
+Each subreviewer inspects and reasons about its assignment, may run targeted safe bash reproductions, and optionally asks recon for a precise static trace or bounded static defect candidate scouting. Skip delegation for simple known files. Supply an explicit narrow question, named paths and stopping boundary; include relevant diff/history and constraint excerpts inline for candidate scouting or revision-dependent questions. Never delegate the whole review. Work on distinct owned coverage or required checks while the scout runs in the background. Reuse navigation evidence without repeating the whole exploration, but independently validate candidate triggers, materiality, evidence, and introducing changes. Retain complete owned-hunk coverage and required checks: zero scout candidates do not mean reviewed or approved.
+
+Recon returns possible defects with a concrete trigger, material consequence, file:line/static evidence, and remaining runtime proof inside its existing `STATUS`/`ANSWER`/`EVIDENCE`/`REMAINING` fields, not a verdict, authoritative severity, or claim of complete review. It immediately hands off runtime execution, implementation, or wholesale-review objectives. Recon stops once the bounded question is answered: no finding quota or optional P2/P3 hunting. Exhausted static evidence or unsupported tooling calls for early handoff, not repeated unchanged searches.
+
+Its read/grep/find/ls tools enforce the assigned-worktree boundary, excluding `.git`, `.herder` and symlink traversal. Supply necessary historical diff or external evidence excerpts inline in its prompt; a scratch path is not an access grant. Keep Git provenance and runtime proof with the caller. Denied access calls for a scoped handoff, never transcript searches, sibling-worktree inspection, or unchanged retries. Its `ANSWERED`, `PARTIAL`, or `HANDOFF_REQUIRED` report is useful evidence or an early handoff to the caller.
 
 ### Materiality before proof
 
@@ -57,7 +61,7 @@ Keep three dispositions distinct:
 
 Missing proof alone neither rejects a credible material concern nor promotes it to a blocker. Serious unresolved concerns and missing required checks/coverage mean incomplete review, never approval. No child confidence threshold is a prerequisite for parent investigation or final adjudication.
 
-Require evidence-backed proposed findings in this shape:
+Require evidence-backed proposed findings from `reviewer` children in this shape:
 
 ```text
 CANDIDATE: <existing finding id or NEW-local-id>
@@ -120,7 +124,7 @@ For later review passes, do not reopen broad discovery. Round-3 rescue review is
 
 ## Optional source or external-documentation lookup
 
-Prefer bounded Recon for unfamiliar static source-navigation questions, with a concrete question, starting paths, stopping boundary, and compact evidence request; direct known-path reads need no scout. Each subreviewer's optional recon has that same leaf capability. Root `searcher` handles narrow current external API, platform, protocol, or library questions and explicitly delegated local evidence. Require primary-source URLs for external claims, keep local built-in searches inside the frozen worktree, and independently connect returned evidence to code paths. A lookup is never a review verdict and never substitutes for parent verification.
+Prefer bounded Recon for unfamiliar static source-navigation or candidate-scouting questions, with a concrete question, starting paths, stopping boundary, and compact evidence request under the same packet and handoff rules above; direct known-path reads need no scout. Each subreviewer's optional recon has that same leaf capability. Root `searcher` handles narrow current external API, platform, protocol, or library questions and explicitly delegated local evidence. Require primary-source URLs for external claims, keep local built-in searches inside the frozen worktree, and independently connect returned evidence to code paths. A lookup is never a review verdict and never substitutes for parent verification.
 
 ## Parent adjudication and checks
 

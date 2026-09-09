@@ -113,7 +113,7 @@ pi --model <provider>/gpt-6-astra --thinking high
 /herder-fire herder-plans --profile universe
 ```
 
-Roles prefer bounded Recon lookups for unfamiliar code, not for runtime proof or review judgment; known-path reads stay direct. Delegation may reduce expensive repeated exploration but adds scout latency, so any speed/quality gain needs measurement.
+Roles prefer bounded Recon lookups for unfamiliar code and named narrow static defect-candidate questions, not for runtime proof or review judgment; known-path reads stay direct. Delegate only when cheaper than direct reading, reuse evidence without a duplicate full audit, and work on other coverage concurrently. Candidates need concrete trigger/consequence and `file:line` evidence plus remaining proof, never a verdict or authoritative severity. Reviewers retain independent verification, complete coverage, and required checks; zero candidates never implies complete review or approval. These are [prompt policies](adapters/README.md#scoped-nested-delegation), not wholesale review delegation or new runtime enforcement. Delegation may reduce expensive repeated exploration but adds scout latency, so any speed/quality gain needs measurement.
 
 ## Runtime model
 

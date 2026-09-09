@@ -109,7 +109,14 @@ test("roles encourage bounded Recon exploration without delegating judgment", as
 	}
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "reviewer");
 	assert.match(systemPrompt, /Prefer `recon` for unfamiliar static navigation/);
-	assert.match(systemPrompt, /not runtime testing or review/);
+	assert.match(systemPrompt, /bounded static (?:defect[- ])?candidate scouting/);
+	assert.doesNotMatch(systemPrompt, /not runtime testing or review/);
+	assert.match(systemPrompt, /never delegate the whole review/i);
+	assert.match(systemPrompt, /independently validate each candidate/);
+	assert.match(systemPrompt, /Zero scout candidates do not mean reviewed or approved/);
+	assert.match(systemPrompt, /retain complete owned-hunk coverage and required checks/);
+	assert.match(systemPrompt, /without repeating the whole exploration/);
+	assert.match(systemPrompt, /background[^\n]*distinct owned hunks/);
 	assert.match(systemPrompt, /self-contained packet.*frozen diff/);
 	assert.match(systemPrompt, /preserve exact frozen HEAD\/tree\/Git status/);
 	assert.match(systemPrompt, /excluding `\.git`, `\.herder`, and symlink traversal/);
@@ -124,13 +131,26 @@ test("recon positively defines bounded static work and early caller-owned handof
 	assert.match(systemPrompt, /reading files, locating paths and symbols with guarded read\/grep\/find\/ls tools/);
 	assert.match(systemPrompt, /tracing static callers, data flow, and contracts/);
 	assert.match(systemPrompt, /Start with capability triage/);
-	assert.match(systemPrompt, /runtime execution, implementation, or general code-review objective, return `HANDOFF_REQUIRED` immediately/);
+	assert.match(systemPrompt, /runtime execution, implementation,[^\n]*`HANDOFF_REQUIRED` immediately/);
+	assert.match(systemPrompt, /bounded static (?:defect[- ])?candidate scouting/);
+	for (const concept of [/concrete trigger/, /material consequence/, /file:line/, /remaining.*proof/, /no (?:finding )?quota/i]) {
+		assert.match(systemPrompt, concept);
+	}
+	assert.doesNotMatch(systemPrompt, /runtime execution, implementation, or general code-review objective/);
+	assert.match(systemPrompt, /wholesale-review objective/);
+	assert.match(systemPrompt, /Ordinary static navigation needs no diff/);
+	assert.match(systemPrompt, /for candidate scouting or revision-dependent questions, also require relevant inline diff\/history and constraint excerpts/);
+	assert.match(systemPrompt, /add no fields, verdict, authoritative severity, or claim of complete review/);
+	assert.match(systemPrompt, /Stop once the bounded question is answered, even with zero candidates/);
+	assert.match(systemPrompt, /Do not repeat unchanged searches/);
 	assert.match(systemPrompt, /Return `PARTIAL` as soon as relevant static sources are exhausted or a tool mismatch appears/);
 	assert.match(systemPrompt, /Success includes an early useful handoff/);
 	assert.match(systemPrompt, /caller owns continuation; relaunch requires an explicit caller decision and a revised task or added capability/);
 	assert.match(systemPrompt, /fixed hard one-hour \(1h\) wall-clock deadline, including compaction and retries/);
 	assert.match(systemPrompt, /STATUS: ANSWERED \| PARTIAL \| HANDOFF_REQUIRED/);
-	for (const field of ["ANSWER", "EVIDENCE", "REMAINING"]) assert.match(systemPrompt, new RegExp(`^${field}:`, "m"));
+	const envelope = systemPrompt.match(/```text\n([\s\S]*?)\n```/)?.[1];
+	assert.ok(envelope);
+	assert.deepEqual([...envelope.matchAll(/^([A-Z_]+):/gm)].map((match) => match[1]), ["STATUS", "ANSWER", "EVIDENCE", "REMAINING"]);
 	assert.match(systemPrompt, /runtime restricts filesystem access to the assigned worktree/);
 	assert.match(systemPrompt, /excluding `\.git`, `\.herder`, and symlink traversal below that root/);
 	assert.match(systemPrompt, /path mentioned in a task is context, not an access grant/);

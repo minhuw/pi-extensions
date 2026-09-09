@@ -430,6 +430,14 @@ test("bounded review policy is owned by the protocol and assembled with the revi
 		/[Mm]issing finding from a partial report is not resolution/,
 		/[Dd]o not reopen[^.]*resolved\/rejected findings without new evidence/,
 	]) assert.match(protocol, pattern);
+	for (const text of [protocol, child]) {
+		assert.match(text, /bounded static (?:defect[- ])?candidate scouting/);
+		assert.match(text, /never delegate the whole review/i);
+		assert.match(text, /independently validate/);
+		assert.match(text, /complete owned-hunk coverage and required checks/);
+		assert.match(text, /zero scout candidates do not mean reviewed or approved/i);
+		assert.doesNotMatch(text, /not a code detector|not runtime testing or review/);
+	}
 	assert.doesNotMatch(contract, /LOW =|MED =|HIGH =|MATERIAL_CONCERN|COVERAGE_GAP|wait_any|FINAL_AUDIT/);
 	for (const pattern of [
 		/hash the manager-provided assignment bundle inside the worktree and require it to equal the supplied bundle SHA-256/,
@@ -501,11 +509,17 @@ test("review docs separate policy counts, opt-in deadlines, material-only Reigni
 		assert.match(text, /P0\/P1 `BLOCKING`[^\n]*`PLAN_REQUIREMENT`[^\n]*`PATCH_REGRESSION`/);
 		assert.match(text, /[Aa]dvisories remain[^\n]*reports, not executable scope/);
 	}
+	for (const text of [readme, adapter, testing]) {
+		assert.match(text, /defect-candidate|candidate scouting/);
+	}
 	assert.match(adapter, /advisory-only reports do not trigger automatic Reignite drafting/);
 	assert.match(testing, /approximately 30 representative historical changes[^\n]*model bindings held constant/);
 	assert.match(testing, /Human-audit material defects and misses/);
 	assert.match(testing, /latency, total tokens including descendants, and human triage effort/);
 	assert.match(testing, /not a completed benchmark; no live tests or benchmark are run/);
+	assert.match(testing, /parent[^\n]*descendant[^\n]*cost/);
+	assert.match(testing, /waiting[^\n]*scout/);
+	assert.match(testing, /false positives/);
 });
 
 test("Pi exposes current-session agentic workflows, direct plan commands, and the exact plan application tool", async () => {

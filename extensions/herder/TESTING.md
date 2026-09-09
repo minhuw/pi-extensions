@@ -57,6 +57,8 @@ Contract checks cover materiality before expensive proof, optional rather than m
 
 Before selecting a default budget or claiming improvements, compare approximately 30 representative historical changes under the old and bounded policies, with model bindings held constant. Include LOW/MED/HIGH risks, risky small and executable-policy diffs, repairs, and final audits. Human-audit material defects and misses (including serious unresolved coverage), not raw finding counts. Record latency, total tokens including descendants, and human triage effort/dispositions for material blockers, advisories, and rejected speculation. Report timeout/cleanup tails and quality-cost tradeoffs; do not hide misses behind faster runs. This is a calibration plan, not a completed benchmark; no live tests or benchmark are run as part of this policy update.
 
+Separately authorize representative comparisons of direct review versus bounded Recon candidate scouting, holding model bindings constant. Measure total parent+descendant tokens and cost, end-to-end wall time and waiting-for-scout time, and human-validated material findings, false positives, and misses—not candidate counts alone. No improvement is claimed, no live benchmark runs automatically, and no new benchmark framework, scripts, or configuration are introduced.
+
 ## Local live Pi/Poorman setup
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.

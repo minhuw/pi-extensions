@@ -132,6 +132,10 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 test("nested Agent runs one package-owned foreground recon child with the scout binding", async () => {
 	const { value, sessions } = scope();
 	const [tool] = createNestedAgentTools(value);
+	const guidance = tool.promptGuidelines?.join(" ") ?? "";
+	assert.match(guidance, /bounded static (?:defect[- ])?candidate scouting/);
+	assert.match(guidance, /historical diffs or external evidence inline/);
+	assert.match(guidance, /review judgment/);
 	const result = await tool.execute("call", params(), undefined, undefined, undefined as never);
 	assert.match(resultText(result), /^Agent completed \(↻1 · 1 tool · 16t · /);
 	assert.equal(sessions.length, 1);
