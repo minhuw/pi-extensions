@@ -17,6 +17,7 @@ import {
 	executionRotationMarkerIdentity,
 	executionRotationMarkerPath,
 	openExecutionDatabase,
+	initializeExecutionStore,
 } from "../../../src/daemon/execution-store.ts";
 import { readManagerState } from "../../../src/daemon/run-store.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
@@ -144,6 +145,98 @@ test("unsupported pre-19 execution schemas fail closed without mutation", () => 
 		} finally {
 			fs.rmSync(planDirectory, { recursive: true, force: true });
 		}
+	}
+});
+
+test("failed fresh initialization rolls back schema and version and can be retried", () => {
+	for (const stage of ["first-create", "version-publication"]) {
+		const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-rollback-"));
+		const originalExec = DatabaseSync.prototype.exec;
+		let injectedError: unknown;
+		let injected = false;
+		try {
+			DatabaseSync.prototype.exec = function(sql: string) {
+				if (!injected && sql.includes("CREATE TABLE attempts")) {
+					injected = true;
+					originalExec.call(this, stage === "first-create" ? sql.slice(0, sql.indexOf(";") + 1) : sql);
+					assert.ok(this.prepare("SELECT name FROM sqlite_master WHERE name = 'attempts'").get());
+					assert.equal(this.prepare("PRAGMA user_version").get()!.user_version, stage === "first-create" ? 0 : 19);
+					try { originalExec.call(this, "INVALID INITIALIZATION SQL"); } catch (error) {
+						injectedError = error;
+						throw error;
+					}
+				}
+				return originalExec.call(this, sql);
+			};
+			assert.throws(() => initializeExecutionStore(planDirectory), (error) => error === injectedError);
+			assert.equal(injected, true);
+			DatabaseSync.prototype.exec = originalExec;
+			const database = new DatabaseSync(executionDatabasePath(planDirectory), { readOnly: true });
+			try {
+				assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 0);
+				assert.deepEqual(database.prepare("SELECT name FROM sqlite_master").all(), []);
+			} finally { database.close(); }
+			assert.equal(initializeExecutionStore(planDirectory).schemaVersion, 19);
+			openExecutionDatabase(planDirectory, { readOnly: true })!.close();
+		} finally {
+			DatabaseSync.prototype.exec = originalExec;
+			fs.rmSync(planDirectory, { recursive: true, force: true });
+		}
+	}
+});
+
+test("serialized fresh opener rechecks the schema after another opener initializes", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-serialized-"));
+	const originalExec = DatabaseSync.prototype.exec;
+	let interleaved = false;
+	try {
+		DatabaseSync.prototype.exec = function(sql: string) {
+			if (!interleaved && sql === "BEGIN IMMEDIATE") {
+				interleaved = true;
+				assert.equal(initializeExecutionStore(planDirectory).schemaVersion, 19);
+			}
+			return originalExec.call(this, sql);
+		};
+		const database = openExecutionDatabase(planDirectory, { create: true });
+		try {
+			assert.equal(interleaved, true);
+			const version = Number(database.prepare("PRAGMA user_version").get()!.user_version);
+			const objects = database.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+			assert.equal(createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex"),
+				"ed70c843910bddf379984f9082395caa0d6f3977113567612779dd1269935c48");
+		} finally { database.close(); }
+	} finally {
+		DatabaseSync.prototype.exec = originalExec;
+		fs.rmSync(planDirectory, { recursive: true, force: true });
+	}
+});
+
+test("read-only empty and initialized opens and writable reopen never begin transactions", () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-read-only-empty-"));
+	const databasePath = executionDatabasePath(planDirectory);
+	const originalExec = DatabaseSync.prototype.exec;
+	try {
+		fs.mkdirSync(path.dirname(databasePath), { mode: 0o700 });
+		new DatabaseSync(databasePath).close();
+		fs.chmodSync(databasePath, 0o600);
+		const before = fs.readFileSync(databasePath);
+		DatabaseSync.prototype.exec = function(sql: string) {
+			assert.doesNotMatch(sql, /\bBEGIN\b/i);
+			return originalExec.call(this, sql);
+		};
+		assert.throws(() => openExecutionDatabase(planDirectory, { readOnly: true }), /no initialized schema/);
+		assert.deepEqual(fs.readFileSync(databasePath), before);
+		DatabaseSync.prototype.exec = originalExec;
+		initializeExecutionStore(planDirectory);
+		DatabaseSync.prototype.exec = function(sql: string) {
+			assert.doesNotMatch(sql, /\bBEGIN\b/i);
+			return originalExec.call(this, sql);
+		};
+		openExecutionDatabase(planDirectory, { readOnly: true })!.close();
+		openExecutionDatabase(planDirectory, { create: true }).close();
+	} finally {
+		DatabaseSync.prototype.exec = originalExec;
+		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
 });
 

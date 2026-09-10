@@ -579,12 +579,16 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
 }
 
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
-  const row = database.prepare("PRAGMA user_version").get() as SqlRow
-  const version = Number(row.user_version)
+  const version = databaseSchemaVersion(database)
   if (version === EXECUTION_SCHEMA_VERSION) return
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
   if (!allowInitialize) fail("Execution database has no initialized schema")
-  database.exec(`
+  withExecutionTransaction(database, () => {
+    // Another opener may have initialized while we waited for the write lock.
+    const currentVersion = databaseSchemaVersion(database)
+    if (currentVersion === EXECUTION_SCHEMA_VERSION) return
+    if (currentVersion !== 0) fail(`Execution database schema ${currentVersion} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
+    database.exec(`
 CREATE TABLE attempts (
         attempt_id TEXT PRIMARY KEY NOT NULL,
         plan_id TEXT NOT NULL,
@@ -928,7 +932,8 @@ CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       ON manager_attention_requests(run_id, plan_id, generation, cause)
       WHERE state <> 'resolved';
 PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION};
-  `)
+    `)
+  })
 }
 
 function assertHealthy(database: Database, databasePath: string): void {
