@@ -583,10 +583,14 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
   if (version === EXECUTION_SCHEMA_VERSION) return
   if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
   if (!allowInitialize) fail("Execution database has no initialized schema")
-  withExecutionTransaction(database, () => {
+  database.exec("BEGIN IMMEDIATE")
+  try {
     // Another opener may have initialized while we waited for the write lock.
     const currentVersion = databaseSchemaVersion(database)
-    if (currentVersion === EXECUTION_SCHEMA_VERSION) return
+    if (currentVersion === EXECUTION_SCHEMA_VERSION) {
+      database.exec("COMMIT")
+      return
+    }
     if (currentVersion !== 0) fail(`Execution database schema ${currentVersion} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
     database.exec(`
 CREATE TABLE attempts (
@@ -933,7 +937,15 @@ CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       WHERE state <> 'resolved';
 PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION};
     `)
-  })
+    database.exec("COMMIT")
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK")
+    } catch {
+      // SQLite may already have aborted the transaction; preserve the initialization error.
+    }
+    throw error
+  }
 }
 
 function assertHealthy(database: Database, databasePath: string): void {

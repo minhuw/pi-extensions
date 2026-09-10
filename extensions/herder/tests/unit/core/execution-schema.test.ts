@@ -149,7 +149,7 @@ test("unsupported pre-19 execution schemas fail closed without mutation", () => 
 });
 
 test("failed fresh initialization rolls back schema and version and can be retried", () => {
-	for (const stage of ["first-create", "version-publication"]) {
+	for (const stage of ["first-create", "version-publication", "automatic-rollback"]) {
 		const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-rollback-"));
 		const originalExec = DatabaseSync.prototype.exec;
 		let injectedError: unknown;
@@ -158,10 +158,14 @@ test("failed fresh initialization rolls back schema and version and can be retri
 			DatabaseSync.prototype.exec = function(sql: string) {
 				if (!injected && sql.includes("CREATE TABLE attempts")) {
 					injected = true;
-					originalExec.call(this, stage === "first-create" ? sql.slice(0, sql.indexOf(";") + 1) : sql);
+					originalExec.call(this, stage === "version-publication" ? sql : sql.slice(0, sql.indexOf(";") + 1));
 					assert.ok(this.prepare("SELECT name FROM sqlite_master WHERE name = 'attempts'").get());
-					assert.equal(this.prepare("PRAGMA user_version").get()!.user_version, stage === "first-create" ? 0 : 19);
-					try { originalExec.call(this, "INVALID INITIALIZATION SQL"); } catch (error) {
+					assert.equal(this.prepare("PRAGMA user_version").get()!.user_version, stage === "version-publication" ? 19 : 0);
+					try {
+						originalExec.call(this, stage === "automatic-rollback"
+							? "CREATE TABLE fault (value INTEGER CHECK (value > 0)); INSERT OR ROLLBACK INTO fault VALUES (0)"
+							: "INVALID INITIALIZATION SQL");
+					} catch (error) {
 						injectedError = error;
 						throw error;
 					}
