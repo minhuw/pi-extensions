@@ -70,6 +70,8 @@ jobs:
           set -euo pipefail
           pi_bin="$GITHUB_WORKSPACE/node_modules/.bin/pi"
           "$pi_bin" install "$GITHUB_WORKSPACE" --approve
+          "$pi_bin" install git:github.com/DietrichGebert/ponytail --approve
+          "$pi_bin" install npm:pi-web-access --approve
           echo "HERDER_PI_BIN=$pi_bin" >> "$GITHUB_ENV"
 
       - name: Run live Pi E2E

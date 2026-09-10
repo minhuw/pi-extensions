@@ -63,7 +63,7 @@ Separately authorize representative comparisons of direct review versus bounded 
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.
 
-Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies and this checkout, which includes the vendored Pi provider:
+Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies, this checkout (including the vendored Pi provider), and the required worker packages in Pi's user package store:
 
 ```sh
 set -eu
@@ -77,6 +77,8 @@ herder_entry="$PWD/extensions/herder/adapters/index.ts"
 test -x "$pi_bin"
 test -f "$herder_entry"
 "$pi_bin" install "$PWD" --approve
+"$pi_bin" install git:github.com/DietrichGebert/ponytail --approve
+"$pi_bin" install npm:pi-web-access --approve
 test -f "$provider_extension"
 export HERDER_PI_BIN="$pi_bin"
 export HERDER_PI_PROVIDER_EXTENSION="$provider_extension"

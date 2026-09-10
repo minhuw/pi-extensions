@@ -32,6 +32,34 @@ function testPlanV2Template(template: string): void {
 	assert.match(template, /agent SETUP\/CHECKS remain self-report/);
 }
 
+test("live setup installs trusted worker packages through the selected Pi before E2E", async () => {
+	const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/herder-live-e2e.yml"), "utf8");
+	const testing = await readFile(path.join(extensionRoot, "TESTING.md"), "utf8");
+	const workflowSetup = workflow.match(/      - name: Install and configure Pi\n([\s\S]*?)(?=\n      - name:)/)?.[1];
+	const localSetup = testing.match(/## Local live Pi\/Poorman setup\n[\s\S]*?```sh\n([\s\S]*?)\n```/)?.[1];
+	assert.ok(workflowSetup, "workflow Pi setup step exists");
+	assert.ok(localSetup, "local live setup shell block exists");
+	assert.match(workflowSetup, /^          set -euo pipefail$/m);
+	assert.match(workflowSetup, /^          pi_bin="\$GITHUB_WORKSPACE\/node_modules\/\.bin\/pi"$/m);
+	assert.match(localSetup, /^set -eu$/m);
+	assert.ok(localSetup.includes('pi_bin="${HERDER_PI_BIN:-$PWD/node_modules/.bin/pi}"'));
+	for (const [label, setup, checkout] of [
+		["workflow", workflowSetup, "$GITHUB_WORKSPACE"],
+		["local", localSetup, "$PWD"],
+	]) {
+		const lines = setup.split("\n").map((line) => line.trim());
+		const binary = lines.findIndex((line) => line.startsWith("pi_bin="));
+		for (const source of [`"${checkout}"`, "git:github.com/DietrichGebert/ponytail", "npm:pi-web-access"]) {
+			const install = lines.indexOf(`"$pi_bin" install ${source} --approve`);
+			assert.ok(install > binary, `${label} installs ${source} in the user store after selecting Pi`);
+		}
+	}
+	assert.match(workflowSetup, /echo "HERDER_PI_BIN=\$pi_bin" >> "\$GITHUB_ENV"/);
+	assert.match(localSetup, /^export HERDER_PI_BIN="\$pi_bin"$/m);
+	assert.ok(workflow.indexOf(workflowSetup) < workflow.indexOf("        run: npm run test:e2e:herder"));
+	assert.ok(testing.indexOf(localSetup) < testing.indexOf("\n```sh\nnpm run test:e2e:herder\n```"));
+});
+
 test("Pi package registers Herder while keeping planning skills command-owned", async () => {
 	const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
 	const lock = JSON.parse(await readFile(path.join(repositoryRoot, "package-lock.json"), "utf8"));
