@@ -698,3 +698,251 @@ test("deep cleanup revalidates checkout immediately before integration deletion 
     assert.equal(fs.existsSync(fixture.planDir), true)
   } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
 })
+
+// Ignore nested checkouts so ancestor cleanliness cannot mask containment bugs.
+function prepareNestedCleanup(fixture: Fixture, canonical: boolean): void {
+  fs.appendFileSync(path.join(fixture.repo, ".git", "info", "exclude"), "\n.herder/\nnested/\n")
+  if (canonical) {
+    const root = path.join(fixture.planDir, ".herder", "worktrees")
+    fs.mkdirSync(root, { recursive: true })
+    for (const key of ["planWorktree", "integrationWorktree"] as const) {
+      const destination = path.join(root, key)
+      git(fixture.repo, "worktree", "move", fixture[key], destination)
+      fixture[key] = destination
+    }
+  }
+}
+
+function addBlockedPlan(fixture: Fixture, worktree: string): void {
+  fs.appendFileSync(path.join(fixture.planDir, "README.md"), "| [002](002-cleanup-fixture.md) | Nested fixture | P1 | S | — | BLOCKED: fixture |\n")
+  fs.writeFileSync(path.join(fixture.planDir, "002-cleanup-fixture.md"), planBody("002"))
+  git(fixture.repo, "add", "plans/README.md", "plans/002-cleanup-fixture.md")
+  git(fixture.repo, "commit", "-q", "-m", "test: index nested blocked plan")
+  git(fixture.repo, "worktree", "add", "-q", "-b", "herder/plans/002", worktree, fixture.integrationBranch)
+}
+
+function fileEvidence(directory: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  function visit(current: string): void {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name)
+      if (entry.isDirectory() && entry.name === ".git") continue
+      const relative = path.relative(directory, absolute)
+      files[relative] = entry.isDirectory() ? "directory" : fs.readFileSync(absolute).toString("hex")
+      if (entry.isDirectory()) visit(absolute)
+    }
+  }
+  visit(directory)
+  return files
+}
+
+function cleanupEvidence(fixture: Fixture) {
+  return {
+    files: fileEvidence(fixture.root),
+    registry: git(fixture.repo, "worktree", "list", "--porcelain"),
+    refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+    checkout: git(fixture.repo, "rev-parse", "HEAD"),
+  }
+}
+
+function addUncheckedDescendant(fixture: Fixture, destination: string, kind: "detached" | "foreign", state: "clean" | "dirty" | "locked"): void {
+  git(fixture.repo, "worktree", "add", "-q", ...(kind === "detached" ? ["--detach"] : ["-b", "foreign/descendant"]), destination, "HEAD")
+  if (state === "dirty") fs.writeFileSync(path.join(destination, "base.txt"), "precious modified contents\n")
+  if (state === "locked") git(fixture.repo, "worktree", "lock", "--reason", "precious locked checkout", destination)
+}
+
+for (const canonical of [false, true]) {
+  for (const target of ["planDir", "planWorktree", "integrationWorktree"] as const) {
+    for (const kind of ["detached", "foreign"] as const) {
+      for (const state of ["clean", "dirty", "locked"] as const) {
+        test(`deep cleanup preserves all evidence for ${canonical ? "canonical" : "external"} ${target} with ${state} ${kind} descendant`, () => {
+          const fixture = setup()
+          try {
+            prepareNestedCleanup(fixture, canonical)
+            writeOverlay(fixture, { planId: "001", phase: "DONE" })
+            const descendant = path.join(fixture[target], "nested", "unchecked")
+            addUncheckedDescendant(fixture, descendant, kind, state)
+            const before = cleanupEvidence(fixture)
+            const preview = runCleanup(fixture, { deep: true })
+            assert.equal(preview.destruction.eligible, false)
+            assert.deepEqual(cleanupEvidence(fixture), before, "preview mutated evidence")
+            assert.throws(() => runCleanup(fixture, { deep: true, dryRun: false }), /worktree|descendant/i)
+            assert.deepEqual(cleanupEvidence(fixture), before, "apply mutated evidence before refusing")
+          } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+        })
+      }
+    }
+  }
+}
+
+for (const state of ["dirty", "locked"] as const) {
+  test(`deep cleanup preserves external DONE ancestor, ignored ${state} BLOCKED child, integration and foreign sibling`, () => {
+    const fixture = setup()
+    try {
+      prepareNestedCleanup(fixture, false)
+      const child = path.join(fixture.planWorktree, "nested", "002")
+      addBlockedPlan(fixture, child)
+      if (state === "dirty") fs.writeFileSync(path.join(child, "base.txt"), "blocked evidence\n")
+      else git(fixture.repo, "worktree", "lock", child)
+      const sibling = path.join(fixture.root, "worktrees", "foreign")
+      addUncheckedDescendant(fixture, sibling, "foreign", "dirty")
+      writeOverlay(fixture, { planId: "001", phase: "DONE" })
+      assert.equal(git(fixture.planWorktree, "status", "--porcelain=v1", "--untracked-files=all"), "")
+      const before = cleanupEvidence(fixture)
+      const preview = runCleanup(fixture, { deep: true })
+      assert.equal(preview.actions.some((item) => item.branch === fixture.planBranch), true)
+      assert.equal(preview.destruction.eligible, false)
+      assert.throws(() => runCleanup(fixture, { deep: true, dryRun: false }), /worktree|descendant|plan-branch-would-remain/i)
+      assert.deepEqual(cleanupEvidence(fixture), before)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+}
+
+for (const hook of ["beforeMutation", "beforeIntegrationDeletion"] as const) {
+  for (const target of ["planDir", "planWorktree", "integrationWorktree"] as const) {
+    test(`deep cleanup refuses late detached ${target} descendant at ${hook} before any mutation`, () => {
+      const fixture = setup()
+      try {
+        prepareNestedCleanup(fixture, false)
+        writeOverlay(fixture, { planId: "001", phase: "DONE" })
+        assert.equal(runCleanup(fixture, { deep: true }).destruction.eligible, true)
+        let injected: ReturnType<typeof cleanupEvidence> | undefined
+        assert.throws(() => runCleanup(fixture, {
+          deep: true, dryRun: false,
+          testHooks: {
+            [hook]: () => {
+              addUncheckedDescendant(fixture, path.join(fixture[target], "nested", "late"), "detached", "clean")
+              injected = cleanupEvidence(fixture)
+            },
+          },
+        }), /worktree|descendant/i)
+        assert.ok(injected, "race hook must run")
+        assert.deepEqual(cleanupEvidence(fixture), injected)
+      } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+    })
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+for (const target of ["planWorktree", "integrationWorktree", "planDir"] as const) {
+  for (const kind of ["detached", "foreign"] as const) {
+    test(`deep cleanup guards remaining ${target} against ${kind} after a post-preflight Git removal race`, () => {
+      const fixture = setup()
+      try {
+        prepareNestedCleanup(fixture, false)
+        const second = path.join(fixture.root, "worktrees", "002")
+        addBlockedPlan(fixture, second)
+        // The first removal is 001; inject into the still-pending 002, integration, or final directory.
+        const ancestor = target === "planWorktree" ? second : fixture[target]
+        const descendant = path.join(ancestor, "nested", "late")
+        const marker = path.join(fixture.root, "injected")
+        const originalPath = process.env.PATH ?? ""
+        const beforeFiles = fileEvidence(ancestor)
+        assert.equal(runCleanup(fixture, { deep: true }).destruction.eligible, true)
+        assert.throws(() => withTemporaryExecutableOnPath({
+          prefix: "herder-cleanup-late-descendant-",
+          script: `#!/bin/sh
+PATH=${shellQuote(originalPath)}; export PATH
+case "$*" in
+  *"worktree remove"*)
+    if [ ! -f ${shellQuote(marker)} ]; then
+      command git -C ${shellQuote(fixture.repo)} worktree add -q ${kind === "detached" ? "--detach" : "-b foreign/late"} ${shellQuote(descendant)} HEAD || exit 91
+      printf 'injected' > ${shellQuote(marker)}
+    fi ;;
+esac
+exec git "$@"
+`,
+        }, () => runCleanup(fixture, { deep: true, dryRun: false })), /worktree|descendant/i)
+        assert.equal(fs.readFileSync(marker, "utf8"), "injected", "must inject after fresh preflight")
+        assert.equal(fs.existsSync(fixture.planWorktree), false, "earlier legitimate removal should complete")
+        const inventory = listWorktreeInventory(fixture.repo)
+        assert.equal(inventory.some((item) => item.path === fs.realpathSync(descendant) && (kind === "detached" ? item.detached : item.branch === "foreign/late")), true)
+        assert.equal(fs.readFileSync(path.join(descendant, "base.txt"), "utf8"), "base\n")
+        assert.equal(git(descendant, "status", "--porcelain=v1", "--untracked-files=all"), "", "all injected checkout files remain intact")
+        const afterFiles = fileEvidence(ancestor)
+        for (const [file, contents] of Object.entries(beforeFiles)) assert.equal(afterFiles[file], contents, file)
+        if (target !== "planDir") {
+          assert.equal(inventory.some((item) => item.path === fs.realpathSync(ancestor)), true)
+          assert.notEqual(git(fixture.repo, "branch", "--list", target === "planWorktree" ? "herder/plans/002" : fixture.integrationBranch), "")
+        }
+        assert.equal(fs.existsSync(fixture.planDir), true)
+      } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+    })
+  }
+}
+
+for (const canonical of [false, true]) {
+  test(`deep cleanup refuses clean foreign sibling beneath ${canonical ? "canonical" : "external"} eligible ancestor before removing checked descendants`, () => {
+    const fixture = setup()
+    try {
+      prepareNestedCleanup(fixture, canonical)
+      const second = path.join(fixture.planWorktree, "nested", "002")
+      addBlockedPlan(fixture, second)
+      const integration = path.join(fixture.planWorktree, "nested", "integration")
+      git(fixture.repo, "worktree", "move", fixture.integrationWorktree, integration)
+      fixture.integrationWorktree = integration
+      addUncheckedDescendant(fixture, path.join(fixture.planWorktree, "nested", "foreign"), "foreign", "clean")
+      writeOverlay(fixture, { planId: "001", phase: "DONE" })
+      for (const worktree of [fixture.planWorktree, second, integration]) {
+        assert.equal(git(worktree, "status", "--porcelain=v1", "--untracked-files=all"), "")
+      }
+      const before = cleanupEvidence(fixture)
+      const preview = runCleanup(fixture, { deep: true })
+      assert.deepEqual(preview.actions.map((item) => item.branch).sort(), [fixture.planBranch, "herder/plans/002"])
+      assert.equal(preview.destruction.eligible, false)
+      assert.ok(preview.destruction.blockers.some((item) => item.reason === "unchecked-worktree-descendant"))
+      assert.deepEqual(cleanupEvidence(fixture), before)
+      assert.throws(() => runCleanup(fixture, { deep: true, dryRun: false }), /unchecked-worktree-descendant/)
+      assert.deepEqual(cleanupEvidence(fixture), before)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+
+  test(`deep cleanup removes all-owned nested 002 and integration before ${canonical ? "canonical" : "external"} 001 and plan directory last`, () => {
+    const fixture = setup()
+    try {
+      prepareNestedCleanup(fixture, canonical)
+      const second = path.join(fixture.planWorktree, "nested", "002")
+      addBlockedPlan(fixture, second)
+      const integration = path.join(second, "nested", "integration")
+      fs.mkdirSync(path.dirname(integration), { recursive: true })
+      git(fixture.repo, "worktree", "move", fixture.integrationWorktree, integration)
+      fixture.integrationWorktree = integration
+      const sibling = path.join(fixture.root, "worktrees", "foreign")
+      addUncheckedDescendant(fixture, sibling, "foreign", "dirty")
+      const siblingFiles = fileEvidence(sibling)
+      const siblingHead = git(sibling, "rev-parse", "HEAD")
+      const expectedRemovalOrder = [integration, second, fixture.planWorktree].map((directory) => fs.realpathSync(directory))
+      const removals = path.join(fixture.root, "removals")
+      const originalPath = process.env.PATH ?? ""
+      assert.equal(runCleanup(fixture, { deep: true }).destruction.eligible, true)
+      const result = withTemporaryExecutableOnPath({
+        prefix: "herder-cleanup-removal-order-",
+        script: `#!/bin/sh
+PATH=${shellQuote(originalPath)}; export PATH
+case "$*" in
+  *"worktree remove"*|*"update-ref -d"*)
+    [ -d ${shellQuote(fixture.planDir)} ] || exit 92
+    printf '%s\\n' "$*" >> ${shellQuote(removals)} ;;
+esac
+exec git "$@"
+`,
+      }, () => runCleanup(fixture, { deep: true, dryRun: false }))
+      assert.equal(result.destruction.planDirectoryRemoved, true)
+      assert.equal(result.destruction.integrationRemoved, true)
+      assert.deepEqual(result.removed.map((item) => item.branch).sort(), [fixture.planBranch, "herder/plans/002"])
+      const commands = fs.readFileSync(removals, "utf8").trim().split("\n")
+      const removedPaths = commands.filter((line) => line.includes("worktree remove")).map((line) => line.split(" -- ")[1])
+      assert.deepEqual(removedPaths, expectedRemovalOrder)
+      const integrationBranchDeletion = commands.findIndex((line) => line.includes(`update-ref -d refs/heads/${fixture.integrationBranch} `))
+      assert.ok(integrationBranchDeletion > commands.findLastIndex((line) => line.includes("worktree remove")), "integration branch deletion stays late")
+      assert.equal(git(fixture.repo, "for-each-ref", "--format=%(refname)", "refs/heads/herder/plans/", "refs/plan-herder/plans/"), "")
+      assert.deepEqual(listWorktreeInventory(fixture.repo).map((item) => item.path).sort(), [fs.realpathSync(fixture.repo), fs.realpathSync(sibling)].sort())
+      for (const directory of [fixture.planDir, fixture.planWorktree, second, integration]) assert.equal(fs.existsSync(directory), false)
+      assert.deepEqual(fileEvidence(sibling), siblingFiles)
+      assert.equal(git(sibling, "rev-parse", "HEAD"), siblingHead)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+}

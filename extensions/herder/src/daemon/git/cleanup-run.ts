@@ -80,8 +80,18 @@ function assertNotUserCheckout(repoRoot: string, worktreePath: string): void {
   }
 }
 
-function removeOwnedWorktree(repoRoot: string, worktreePath: string): void {
+function containedWorktrees(items: WorktreeRecord[], target: string, allowEqual = true): WorktreeRecord[] {
+  return items.filter((item) => item.path && isInside(realpathIfPresent(target), realpathIfPresent(item.path), { allowEqual }))
+}
+
+function assertNoContainedWorktrees(repoRoot: string, target: string, allowEqual = true): void {
+  const remaining = containedWorktrees(listWorktreeInventory(repoRoot), target, allowEqual)
+  if (remaining.length) fail(`Cannot remove ${target}: registered worktree descendants remain: ${remaining.map((item) => item.path).join(", ")}`)
+}
+
+function removeOwnedWorktree(repoRoot: string, worktreePath: string, deep = false): void {
   assertNotUserCheckout(repoRoot, worktreePath)
+  if (deep) assertNoContainedWorktrees(repoRoot, worktreePath, false)
   runGit(repoRoot, ["worktree", "remove", "--", worktreePath])
 }
 
@@ -419,6 +429,20 @@ export function cleanupRun(input: CleanupInput) {
     if (plannedRun.present && !plannedRun.terminal) {
       destruction.blockers.push({ reason: "run-not-terminal", status: plannedRun.status })
     }
+    // Location is not ownership. Check the complete removal set before deleting
+    // anything, including siblings nested beneath supported external worktrees.
+    const removableWorktrees = actions.filter((action) => action.worktree)
+      .map((action) => ({ path: realpathIfPresent(action.worktree), branch: action.branch }))
+    if (integrationWorktree && !destruction.blockers.some((item) => item.reason.startsWith("integration-worktree-") || item.reason === "integration-is-user-checkout")) {
+      removableWorktrees.push({ path: realpathIfPresent(integrationWorktree.path), branch: integrationBranch })
+    }
+    const targets = [planDir, ...removableWorktrees.map((item) => item.path)]
+    for (const item of initialWorktrees) {
+      if (targets.some((target) => containedWorktrees([item], target).length)
+        && !removableWorktrees.some((owned) => owned.path === realpathIfPresent(item.path) && owned.branch === item.branch)) {
+        destruction.blockers.push({ reason: "unchecked-worktree-descendant", worktree: item.path, branch: item.branch })
+      }
+    }
     destruction.eligible = destruction.blockers.length === 0
   }
 
@@ -464,10 +488,20 @@ export function cleanupRun(input: CleanupInput) {
       const fresh = cleanupRun({ ...input, dryRun: true, testHooks: undefined })
       if (!fresh.destruction.eligible) fail(`Deep cleanup preflight changed: ${fresh.destruction.blockers.map((item) => item.reason).join(", ")}`)
     }
-    for (const action of actions) {
+    // Descendants must be unregistered before Git recursively removes an ancestor.
+    const orderedActions = input.deep ? [...actions].sort((a, b) =>
+      (b.worktree ? realpathIfPresent(b.worktree).split(path.sep).length : 0)
+      - (a.worktree ? realpathIfPresent(a.worktree).split(path.sep).length : 0)) : actions
+    let integrationWorktreeRemoved = false
+    for (const action of orderedActions) {
       assertPlanStatusesUnchanged()
       assertMutationAllowed()
-      if (action.worktree) removeOwnedWorktree(repoRoot, action.worktree)
+      if (input.deep && action.worktree && integrationWorktree && !integrationWorktreeRemoved
+        && containedWorktrees([integrationWorktree], action.worktree, false).length) {
+        removeOwnedWorktree(repoRoot, integrationWorktree.path, true)
+        integrationWorktreeRemoved = true
+      }
+      if (action.worktree) removeOwnedWorktree(repoRoot, action.worktree, input.deep)
       deleteBranchIfPresent(repoRoot, action.branch, action.head)
       removed.push(action)
     }
@@ -505,9 +539,8 @@ export function cleanupRun(input: CleanupInput) {
       if (!isAncestor(repoRoot, integrationHead, checkoutHead)) {
         fail(`Cannot remove integration because ${checkout.branch} no longer contains ${integrationHead}`)
       }
-      if (integrationWorktree) {
-        assertNotUserCheckout(repoRoot, integrationWorktree.path)
-        removeOwnedWorktree(repoRoot, integrationWorktree.path)
+      if (integrationWorktree && !integrationWorktreeRemoved) {
+        removeOwnedWorktree(repoRoot, integrationWorktree.path, true)
       }
       deleteBranchIfPresent(repoRoot, integrationBranch, integrationHead)
       destruction.integrationRemoved = true
@@ -518,6 +551,7 @@ export function cleanupRun(input: CleanupInput) {
       if (!fs.existsSync(planDir) || !fs.statSync(planDir).isDirectory()) {
         fail(`Refusing to remove changed or missing plan directory: ${planDir}`)
       }
+      assertNoContainedWorktrees(repoRoot, planDir)
       fs.rmSync(planDir, { recursive: true, force: true })
       destruction.planDirectoryRemoved = true
     }
