@@ -159,7 +159,14 @@ async function initializedFixture(): Promise<Fixture> {
 }
 
 function namespaceSnapshot(value: Fixture): string {
+	const store = new RunStore(value.planDir, { readOnly: true });
+	let evidence;
+	try {
+		const run = store.getRun();
+		evidence = { run, actions: run && store.getActions(run.runId), specs: run && store.getPlanSpecs(run.runId) };
+	} finally { store.close(); }
 	return JSON.stringify({
+		evidence,
 		branches: git(value.repo, "for-each-ref", "--format=%(refname) %(objectname)", `refs/heads/herder/${value.planName}/`),
 		refs: git(value.repo, "for-each-ref", "--format=%(refname) %(objectname)", `refs/plan-herder/${value.planName}/`),
 		worktrees: git(value.repo, "worktree", "list", "--porcelain"),
@@ -265,6 +272,52 @@ test("foreign and missing worktrees refuse before mutation", { timeout: 30_000 }
 	}
 });
 
+for (const location of ["canonical", "legacy"] as const) {
+	for (const relative of ["001", "integration"]) {
+		for (const attachment of ["detached", "foreign"] as const) {
+			for (const empty of [false, true]) {
+				test(`reset refuses ${attachment} ${location}/${relative} with ${empty ? "empty" : "intact"} namespace`, { timeout: 30_000 }, async () => {
+					const value = await initializedFixture();
+					try {
+						const canonical = canonicalWorktreeRoot(value.planDir);
+						const root = location === "canonical" ? canonical : legacyWorktreeRoot(value.repo, value.planName);
+						const worktree = path.join(root, relative);
+						if (location === "legacy") {
+							fs.mkdirSync(root, { recursive: true });
+							// Keep the correctly owned canonical checkout too: both locations need independent validation.
+							command(value.repo, ["worktree", "add", "-q", "--detach", worktree, value.base]);
+						} else command(worktree, ["checkout", "--detach"]);
+						if (attachment === "foreign") command(worktree, ["checkout", "-b", "foreign"]);
+						fs.writeFileSync(path.join(worktree, "fixture.txt"), "staged\n");
+						command(worktree, ["add", "fixture.txt"]);
+						fs.appendFileSync(path.join(worktree, "fixture.txt"), "unstaged\n");
+						fs.writeFileSync(path.join(worktree, "untracked.txt"), "keep\n");
+						if (empty) {
+							for (const name of ["001", "integration"]) {
+								const owned = path.join(canonical, name);
+								if (owned !== worktree) command(value.repo, ["worktree", "remove", "--force", owned]);
+							}
+							for (const prefix of [`refs/heads/herder/${value.planName}/`, `refs/plan-herder/${value.planName}/`]) {
+								for (const ref of git(value.repo, "for-each-ref", "--format=%(refname)", prefix).split(/\r?\n/).filter(Boolean)) command(value.repo, ["update-ref", "-d", ref]);
+							}
+						}
+						projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "preserve evidence" }]);
+						const before = namespaceSnapshot(value);
+						const refs = git(value.repo, "show-ref");
+						const index = git(worktree, "diff", "--cached");
+						assert.throws(() => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /refused worktree attachment/);
+						assert.equal(namespaceSnapshot(value), before);
+						assert.equal(git(value.repo, "show-ref"), refs);
+						assert.equal(git(worktree, "diff", "--cached"), index);
+						assert.equal(fs.readFileSync(path.join(worktree, "fixture.txt"), "utf8"), "staged\nunstaged\n");
+						assert.equal(fs.readFileSync(path.join(worktree, "untracked.txt"), "utf8"), "keep\n");
+					} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+				});
+			}
+		}
+	}
+}
+
 test("dirty and locked Herder-owned worktrees reset successfully without changing the user checkout", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {
@@ -280,6 +333,9 @@ test("dirty and locked Herder-owned worktrees reset successfully without changin
 		fs.writeFileSync(path.join(value.repo, "fixture.txt"), "user changes\n");
 		fs.writeFileSync(path.join(value.repo, "untracked.txt"), "user file\n");
 		command(value.repo, ["worktree", "lock", "--reason", "test", planWorktree]);
+		const unrelated = path.join(value.root, "unrelated");
+		command(value.repo, ["worktree", "add", "-q", "--detach", unrelated, value.base]);
+		fs.writeFileSync(path.join(unrelated, "keep.txt"), "unrelated\n");
 		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
 		assert.deepEqual(result.removedWorktrees.map((worktree) => path.basename(worktree)).sort(), ["001", "integration"]);
 		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
@@ -288,6 +344,8 @@ test("dirty and locked Herder-owned worktrees reset successfully without changin
 		assert.equal(fs.existsSync(path.join(planRoot, "integration")), false);
 		assert.equal(fs.readFileSync(path.join(value.repo, "fixture.txt"), "utf8"), "user changes\n");
 		assert.equal(fs.readFileSync(path.join(value.repo, "untracked.txt"), "utf8"), "user file\n");
+		assert.equal(fs.readFileSync(path.join(unrelated, "keep.txt"), "utf8"), "unrelated\n");
+		assert.ok(git(value.repo, "worktree", "list", "--porcelain").includes(unrelated));
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 

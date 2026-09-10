@@ -75,6 +75,17 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const allBranches = listHerderBranches(repo, name);
   const allRefs = listCoordinationRefs(repo, name);
   const worktrees = listWorktreeInventory(repo);
+  const expectedAttachments = new Map<string, string>();
+  for (const relative of ["integration", ...specs.map((spec) => spec.planId)]) {
+    for (const candidate of allowedWorktreePaths(repo, planDir, name, relative)) {
+      expectedAttachments.set(realpathIfPresent(candidate), `herder/${name}/${relative}`);
+    }
+  }
+  for (const w of worktrees) {
+    if (!w.path) continue; // Owned pathless records are rejected below.
+    const expected = expectedAttachments.get(realpathIfPresent(w.path));
+    if (expected && (w.detached || w.branch !== expected)) fail(`Herder reset refused worktree attachment at ${w.path}: expected ${expected}, found ${w.detached ? "detached" : w.branch || "no branch"}.`);
+  }
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   const removedWorktrees: string[] = [];
