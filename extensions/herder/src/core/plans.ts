@@ -378,19 +378,21 @@ function findIndexTable(markdown: string, readme: string): IndexTable {
     if (!REQUIRED_INDEX_HEADERS.every((name) => normalized.includes(name))) continue
 
     if (table) fail(`${readme} has multiple visible Markdown tables containing the required index columns`)
+    // Match the last-wins column map used by graph and projection consumers.
+    const statusColumn = normalized.lastIndexOf("status")
     const rows: IndexTable["rows"] = []
     for (let rowIndex = index + 2; rowIndex < visible.length; rowIndex += 1) {
       const cells = parseTableRow(visible[rowIndex])
       if (!cells || cells.length < header.length) break
       const raw = lines[rowIndex]
       const rawCells = raw.split("|")
-      const rawStatusColumn = normalized.indexOf("status") + (raw.trimStart().startsWith("|") ? 1 : 0)
+      const rawStatusColumn = statusColumn + (raw.trimStart().startsWith("|") ? 1 : 0)
       // Rework counts every raw pipe. Refuse hidden separators or shifted outer
       // boundaries rather than letting it mask a non-status cell.
       if (rawCells.length !== visible[rowIndex].split("|").length
         || raw.trimStart().startsWith("|") !== visible[rowIndex].trimStart().startsWith("|")
         || raw.trimEnd().endsWith("|") !== visible[rowIndex].trimEnd().endsWith("|")
-        || rawCells[rawStatusColumn]?.trim() !== cells[normalized.indexOf("status")]) {
+        || rawCells[rawStatusColumn]?.trim() !== cells[statusColumn]) {
         fail(`${readme} row ${rowIndex + 1} cannot safely map the visible Status cell to the source`)
       }
       rows.push({ cells: cells.slice(0, header.length), rawCells, rawStatusColumn, lineIndex: rowIndex })

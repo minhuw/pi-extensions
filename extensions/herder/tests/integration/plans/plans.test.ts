@@ -584,6 +584,55 @@ test("inline index comments preserve source bytes or fail closed before edits", 
 })
 
 
+test("duplicate Status projection and raw safety follow the graph's last column", () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "herder-duplicate-status-"))
+  try {
+    fs.writeFileSync(path.join(planDir, "002-second.md"), planBody("002", "Second", "none"))
+    const readme = path.join(planDir, "README.md")
+    for (const newline of ["\n", "\r\n"]) {
+      for (const outerPipes of [true, false]) {
+        for (const header of ["Status", "**sTaTuS**"]) {
+          const source = [
+            "# Plans", "",
+            `| Plan | Title | Priority | Effort | Depends on | Status | ${header} | Notes |`,
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| 002 | Second <!-- retain title --> | P1 | S | — | TODO |\tTODO   | keep <!-- retain note --> |",
+            "", "Unchanged footer.", "",
+          ].map((line) => outerPipes ? line : line.replace(/^\|/, "").replace(/\|$/, "")).join(newline)
+          for (const earlier of ["TODO", "IN PROGRESS <!-- retain duplicate -->"]) {
+            const original = source.replace("| TODO |", `| ${earlier} |`)
+            fs.writeFileSync(readme, original)
+            assert.equal(buildGraph(planDir).plans[0].status, "TODO")
+            projectStatuses(planDir, [{ id: "002", status: "TODO" }])
+            assert.equal(fs.readFileSync(readme, "utf8"), original)
+            projectStatuses(planDir, [{ id: "002", status: "DONE" }])
+            const expected = original.replace("\tTODO   ", "\tDONE   ")
+            assert.equal(fs.readFileSync(readme, "utf8"), expected)
+            assert.equal(buildGraph(planDir).plans[0].status, "DONE")
+            const projectedInode = fs.statSync(readme).ino
+            projectStatuses(planDir, [{ id: "002", status: "DONE" }])
+            assert.equal(fs.readFileSync(readme, "utf8"), expected)
+            assert.equal(fs.statSync(readme).ino, projectedInode)
+          }
+          for (const comment of ["<!-- status note -->", "<!-- status | note -->"]) {
+            const unsafe = source.replace("\tTODO   ", `\tTODO ${comment}   `)
+            fs.writeFileSync(readme, unsafe)
+            const originalInode = fs.statSync(readme).ino
+            assert.throws(() => buildGraph(planDir), /cannot safely map/)
+            assert.throws(() => planIndexReworkLayout(unsafe, readme), /cannot safely map/)
+            assert.throws(() => projectStatuses(planDir, [{ id: "002", status: "DONE" }]), /cannot safely map/)
+            assert.equal(fs.readFileSync(readme, "utf8"), unsafe)
+            assert.equal(fs.statSync(readme).ino, originalInode)
+          }
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(planDir, { recursive: true, force: true })
+  }
+})
+
+
 test("graph snapshots bind contracts and hashes to the same unchanged source inputs", () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-snapshot-inputs-"))
   try {
