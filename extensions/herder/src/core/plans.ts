@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto"
 import { initializeExecutionStore } from "../daemon/execution-store.ts"
 import { isInside, runGit } from "../daemon/git/primitives.ts"
 import { sha256 } from "../shared/protocol.ts"
-import { parseDependencyIds, parsePlanContract, parseSharedToolchains, type PlanContract, type PlanToolchain } from "./plan-contract.ts"
+import { parseDependencyIds, parsePlanContract, parseSharedToolchains, structuralLines, type PlanContract, type PlanToolchain } from "./plan-contract.ts"
 export type { PlanContract, AcceptanceCriterion, PlanVerification, PlanToolchain, PlanKind, VerificationPhase } from "./plan-contract.ts"
 
 const DEFAULT_PLAN_DIR = "herder-plans"
@@ -368,21 +368,25 @@ function parsePlanFile(file: string, id: string, sharedToolchains: readonly Plan
 
 function findIndexTable(markdown: string, readme: string): IndexTable {
   const lines = markdown.split(/\r?\n/)
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const header = parseTableRow(lines[index])
-    const separator = parseTableRow(lines[index + 1])
+  const visible = structuralLines(markdown, readme)
+  let table: IndexTable | undefined
+  for (let index = 0; index < visible.length - 1; index += 1) {
+    const header = parseTableRow(visible[index])
+    const separator = parseTableRow(visible[index + 1])
     if (!header || !separator || !isSeparatorRow(separator)) continue
     const normalized = header.map(normalizeHeader)
     if (!REQUIRED_INDEX_HEADERS.every((name) => normalized.includes(name))) continue
 
+    if (table) fail(`${readme} has multiple visible Markdown tables containing the required index columns`)
     const rows: IndexTable["rows"] = []
-    for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
-      const cells = parseTableRow(lines[rowIndex])
+    for (let rowIndex = index + 2; rowIndex < visible.length; rowIndex += 1) {
+      const cells = parseTableRow(visible[rowIndex])
       if (!cells || cells.length < header.length) break
       rows.push({ cells: cells.slice(0, header.length), lineIndex: rowIndex })
     }
-    return { header, normalized, rows, lines }
+    table = { header, normalized, rows, lines }
   }
+  if (table) return table
   fail(`${readme} has no Markdown table containing the required columns: Plan, Title, Priority, Effort, Depends on, Status`)
 }
 
@@ -872,7 +876,7 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
     row.cells[column.status!] = status
     table.lines[row.lineIndex] = `| ${row.cells.join(" | ")} |`
   }
-  const nextMarkdown = table.lines.join("\n")
+  const nextMarkdown = table.lines.join(markdown.includes("\r\n") ? "\r\n" : "\n")
   if (nextMarkdown !== markdown) {
     atomicReplaceRegularFile(readme, nextMarkdown, readmeFile.identity, readmeFile.mode)
   }

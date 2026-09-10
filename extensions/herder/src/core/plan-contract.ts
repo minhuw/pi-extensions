@@ -65,7 +65,7 @@ function fail(label: string, message: string): never {
 }
 
 /** Ignore code/comments and reject raw-text HTML blocks rather than binding their examples. */
-function structuralLines(text: string, label: string): string[] {
+export function structuralLines(text: string, label: string): string[] {
   let fence: { character: string; length: number } | null = null
   let comment = false
   const lines = text.split(/\r?\n/).map((line) => {

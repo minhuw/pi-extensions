@@ -12,6 +12,7 @@ import {
   buildWaves,
   getShapeReport,
   initPlanDir,
+  planIndexReworkLayout,
   projectStatuses,
   setTracking,
   snapshotPlan,
@@ -459,6 +460,71 @@ ${["Why this matters", "Current state", "Commands you will need", "Scope", "Git 
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }
+})
+
+
+test("only one visible index supplies graph, layout, projection, and source provenance", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-visible-index-"))
+  try {
+    const planDir = writeFixture(temporary)
+    const readme = path.join(planDir, "README.md")
+    const original = fs.readFileSync(readme, "utf8")
+    const table = original.slice(original.indexOf("| Plan"))
+    const hidden = table.replace("| DONE |", "| TODO |").replace("| 001 | TODO |", "| — | DONE |")
+    const examples = [
+      `<!--\n${hidden}-->`,
+      `\`\`\`markdown\n${hidden}\`\`\``,
+      `~~~markdown\n${hidden}~~~`,
+      hidden.trimEnd().split("\n").map((line) => `    ${line}`).join("\n"),
+      hidden.trimEnd().split("\n").map((line) => `\t${line}`).join("\n"),
+    ]
+    // An extra column must not change which table is authoritative.
+    const visible = table.trimEnd().split("\n").map((line, index) => `${line} ${index === 0 ? "Notes" : index === 1 ? "---" : "kept"} |`).join("\n") + "\n"
+    for (const newline of ["\n", "\r\n"] as const) {
+      for (const example of examples) {
+        const prefix = `# Plans\n\n${example}\n\n## Real index\n\n`.replaceAll("\n", newline)
+        const source = prefix + visible.replaceAll("\n", newline)
+        fs.writeFileSync(readme, source)
+        const graph = buildGraph(planDir)
+        assert.deepEqual(graph.ready, ["002"])
+        assert.deepEqual(graph.plans.map(({ id, status, dependencies }) => ({ id, status, dependencies })), [
+          { id: "001", status: "DONE", dependencies: [] },
+          { id: "002", status: "TODO", dependencies: ["001"] },
+          { id: "003", status: "BLOCKED", dependencies: [] },
+        ])
+        assert.equal(graph.indexSha256, createHash("sha256").update(source).digest("hex"))
+        assert.ok(snapshotPlansFromGraph(graph).every((snapshot) => snapshot.indexText === source))
+        const layout = planIndexReworkLayout(source, readme)
+        assert.deepEqual(layout.lines, source.split(newline))
+        assert.equal(layout.newline, newline)
+        assert.equal(layout.statusColumn, 5)
+        const firstRow = prefix.split(newline).length - 1 + 2
+        assert.deepEqual(layout.rows, ["001", "002", "003"].map((planId, index) => ({ planId, lineIndex: firstRow + index })))
+        projectStatuses(planDir, [{ id: "002", status: "DONE" }])
+        assert.equal(fs.readFileSync(readme, "utf8"), prefix + visible.replace("| TODO |", "| DONE |").replaceAll("\n", newline))
+        assert.throws(() => snapshotPlansFromGraph(graph), /changed since graph validation/)
+      }
+    }
+    for (const source of [...examples, `${table}\n${table}`, `${table}\n${table.split("\n").slice(0, 2).join("\n")}\n`]) {
+      fs.writeFileSync(readme, source)
+      const error = examples.includes(source) ? /no Markdown table/ : /multiple visible Markdown tables/
+      assert.throws(() => buildGraph(planDir), error)
+      assert.throws(() => planIndexReworkLayout(source, readme), error)
+      assert.throws(() => projectStatuses(planDir, [{ id: "002", status: "DONE" }]), error)
+      assert.equal(fs.readFileSync(readme, "utf8"), source)
+    }
+    for (const name of ["001-first.md", "002-second.md", "003-parallel.md"]) fs.unlinkSync(path.join(planDir, name))
+    const empty = table.split("\n").slice(0, 2).join("\n") + "\n"
+    fs.writeFileSync(readme, empty)
+    assert.equal(buildGraph(planDir).complete, true)
+    assert.deepEqual(planIndexReworkLayout(empty, readme).rows, [])
+    projectStatuses(planDir, [])
+    assert.equal(fs.readFileSync(readme, "utf8"), empty)
+    fs.writeFileSync(readme, empty.replace("Depends on", "Other"))
+    assert.throws(() => buildGraph(planDir), /required columns/)
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true })
+  }
 })
 
 
