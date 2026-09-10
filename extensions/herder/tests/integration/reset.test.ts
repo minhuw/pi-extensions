@@ -394,7 +394,7 @@ test("empty namespace revalidates a detached worktree registered after preflight
 			script: `#!/bin/sh
 real_git() { ( PATH=${quote(process.env.PATH ?? "")}; export PATH; command git "$@"; ); }
 case "$*" in
-	*"worktree list --porcelain -z"*)
+	*"worktree list --porcelain -z"|*"worktree list --porcelain")
 		real_git "$@" || exit $?
 		if [ ! -e ${quote(marker)} ]; then
 			real_git -C ${quote(value.repo)} worktree add -q --detach ${quote(worktree)} ${quote(value.base)} || exit $?
