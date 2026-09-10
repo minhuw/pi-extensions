@@ -18,6 +18,8 @@ import {
   snapshotPlan,
   snapshotPlansFromGraph,
 } from "../../../src/core/plans.ts"
+import { captureReworkSnapshot, validateReworkGraphFiles } from "../../../src/core/plan-edit.ts"
+import type { StoredRun } from "../../../src/daemon/run-store.ts"
 import { getExecutionReport } from "../../../src/core/plan-report.ts"
 import {
   executionDatabasePath,
@@ -522,6 +524,60 @@ test("only one visible index supplies graph, layout, projection, and source prov
     assert.equal(fs.readFileSync(readme, "utf8"), empty)
     fs.writeFileSync(readme, empty.replace("Depends on", "Other"))
     assert.throws(() => buildGraph(planDir), /required columns/)
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true })
+  }
+})
+
+
+test("inline index comments preserve source bytes or fail closed before edits", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-index-comments-"))
+  try {
+    const planDir = writeFixture(temporary)
+    const readme = path.join(planDir, "README.md")
+    const base = fs.readFileSync(readme, "utf8")
+    const run = { runId: "fixture", planDirectory: planDir } as StoredRun
+    const capture = () => captureReworkSnapshot(run, "001", "11111111-1111-1111-1111-111111111111",
+      "a".repeat(40), "b".repeat(40), "001-first.md", []).snapshot
+    for (const newline of ["\n", "\r\n"]) {
+      for (const outerPipes of [true, false]) {
+        let source = base.replace("Second |", "Second <!-- retain me --> |")
+          .replace("| TODO |", "|\tTODO   |")
+        if (!outerPipes) source = source.split("\n").map((line) => line.replace(/^\|/, "").replace(/\|$/, "")).join("\n")
+        source = source.replaceAll("\n", newline)
+        fs.writeFileSync(readme, source)
+        const snapshot = capture()
+        const graph = buildGraph(planDir)
+        assert.equal(graph.indexSha256, createHash("sha256").update(source).digest("hex"))
+        assert.deepEqual(planIndexReworkLayout(source, readme).lines, source.split(newline))
+        projectStatuses(planDir, [{ id: "002", status: "TODO" }])
+        assert.equal(fs.readFileSync(readme, "utf8"), source)
+        projectStatuses(planDir, [{ id: "002", status: "DONE" }])
+        const projected = source.replace("\tTODO   ", "\tDONE   ")
+        assert.equal(fs.readFileSync(readme, "utf8"), projected)
+        assert.doesNotThrow(() => validateReworkGraphFiles(run, snapshot, "001-first.md"))
+        for (const changed of [projected.replace("retain me", "changed"), projected.replace("| 001 |", "| 003 |")]) {
+          fs.writeFileSync(readme, changed)
+          assert.throws(() => validateReworkGraphFiles(run, snapshot, "001-first.md"), /outside plan 001/)
+        }
+      }
+      for (const unsafe of [
+        base.replace("Second |", "Second <!-- note | x --> |"),
+        base.replace("| TODO |", "| TODO <!-- note | x --> |"),
+        base.replace("| TODO |", "| TODO <!-- retain me --> |"),
+        base.replace("| [002]", "<!-- prefix --> | [002]"),
+        base.replace("| TODO |", "| TODO | <!-- suffix -->"),
+      ]) {
+        const source = unsafe.replaceAll("\n", newline)
+        fs.writeFileSync(readme, source)
+        const snapshot = capture()
+        assert.throws(() => buildGraph(planDir), /cannot safely map/)
+        assert.throws(() => planIndexReworkLayout(source, readme), /cannot safely map/)
+        assert.throws(() => projectStatuses(planDir, [{ id: "001", status: "TODO" }, { id: "002", status: "DONE" }]), /cannot safely map/)
+        assert.equal(fs.readFileSync(readme, "utf8"), source)
+        assert.throws(() => validateReworkGraphFiles(run, snapshot, "001-first.md"), /cannot safely map/)
+      }
+    }
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true })
   }

@@ -107,7 +107,7 @@ export interface PlanGraph {
 interface IndexTable {
   header: string[]
   normalized: string[]
-  rows: Array<{ cells: string[]; lineIndex: number }>
+  rows: Array<{ cells: string[]; rawCells: string[]; rawStatusColumn: number; lineIndex: number }>
   lines: string[]
 }
 
@@ -382,7 +382,18 @@ function findIndexTable(markdown: string, readme: string): IndexTable {
     for (let rowIndex = index + 2; rowIndex < visible.length; rowIndex += 1) {
       const cells = parseTableRow(visible[rowIndex])
       if (!cells || cells.length < header.length) break
-      rows.push({ cells: cells.slice(0, header.length), lineIndex: rowIndex })
+      const raw = lines[rowIndex]
+      const rawCells = raw.split("|")
+      const rawStatusColumn = normalized.indexOf("status") + (raw.trimStart().startsWith("|") ? 1 : 0)
+      // Rework counts every raw pipe. Refuse hidden separators or shifted outer
+      // boundaries rather than letting it mask a non-status cell.
+      if (rawCells.length !== visible[rowIndex].split("|").length
+        || raw.trimStart().startsWith("|") !== visible[rowIndex].trimStart().startsWith("|")
+        || raw.trimEnd().endsWith("|") !== visible[rowIndex].trimEnd().endsWith("|")
+        || rawCells[rawStatusColumn]?.trim() !== cells[normalized.indexOf("status")]) {
+        fail(`${readme} row ${rowIndex + 1} cannot safely map the visible Status cell to the source`)
+      }
+      rows.push({ cells: cells.slice(0, header.length), rawCells, rawStatusColumn, lineIndex: rowIndex })
     }
     table = { header, normalized, rows, lines }
   }
@@ -873,8 +884,9 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
     const id = canonicalId(row.cells[column.plan!], "Plan column")
     const status = byId.get(id)
     if (!status) continue
-    row.cells[column.status!] = status
-    table.lines[row.lineIndex] = `| ${row.cells.join(" | ")} |`
+    const original = row.rawCells[row.rawStatusColumn]
+    row.rawCells[row.rawStatusColumn] = original.replace(/^(\s*)[\s\S]*?(\s*)$/, (_, leading: string, trailing: string) => leading + status + trailing)
+    table.lines[row.lineIndex] = row.rawCells.join("|")
   }
   const nextMarkdown = table.lines.join(markdown.includes("\r\n") ? "\r\n" : "\n")
   if (nextMarkdown !== markdown) {
