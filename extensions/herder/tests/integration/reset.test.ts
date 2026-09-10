@@ -246,13 +246,12 @@ test("merged integration refuses without mutating artifacts or statuses", { time
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
-test("dirty, foreign, and missing worktrees refuse before mutation", { timeout: 30_000 }, async () => {
-	for (const mode of ["dirty", "foreign", "missing"] as const) {
+test("foreign and missing worktrees refuse before mutation", { timeout: 30_000 }, async () => {
+	for (const mode of ["foreign", "missing"] as const) {
 		const value = await initializedFixture();
 		try {
 			const planRoot = canonicalWorktreeRoot(value.planDir);
 			const planWorktree = path.join(planRoot, "001");
-			if (mode === "dirty") fs.writeFileSync(path.join(planWorktree, "dirty.txt"), "dirty\n");
 			if (mode === "foreign") {
 				const foreign = path.join(value.root, "foreign");
 				command(value.repo, ["worktree", "add", "-q", "--detach", foreign, value.base]);
@@ -260,17 +259,26 @@ test("dirty, foreign, and missing worktrees refuse before mutation", { timeout: 
 			}
 			if (mode === "missing") fs.rmSync(planWorktree, { recursive: true, force: true });
 			const before = namespaceSnapshot(value);
-			await assert.rejects(async () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /dirty|foreign|moved|missing|cannot remove/i);
+			await assert.rejects(async () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /foreign|moved|missing|cannot remove/i);
 			assert.equal(namespaceSnapshot(value), before, mode);
 		} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 	}
 });
 
-test("locked Herder-owned worktrees reset successfully", { timeout: 30_000 }, async () => {
+test("dirty and locked Herder-owned worktrees reset successfully without changing the user checkout", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {
 		const planRoot = canonicalWorktreeRoot(value.planDir);
 		const planWorktree = path.join(planRoot, "001");
+		for (const name of ["001", "integration"]) {
+			const worktree = path.join(planRoot, name);
+			fs.writeFileSync(path.join(worktree, "fixture.txt"), "staged\n");
+			command(worktree, ["add", "fixture.txt"]);
+			fs.appendFileSync(path.join(worktree, "fixture.txt"), "unstaged\n");
+			fs.writeFileSync(path.join(worktree, "untracked.txt"), "untracked\n");
+		}
+		fs.writeFileSync(path.join(value.repo, "fixture.txt"), "user changes\n");
+		fs.writeFileSync(path.join(value.repo, "untracked.txt"), "user file\n");
 		command(value.repo, ["worktree", "lock", "--reason", "test", planWorktree]);
 		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
 		assert.deepEqual(result.removedWorktrees.map((worktree) => path.basename(worktree)).sort(), ["001", "integration"]);
@@ -278,6 +286,8 @@ test("locked Herder-owned worktrees reset successfully", { timeout: 30_000 }, as
 		assert.equal(git(value.repo, "worktree", "list", "--porcelain").includes(planRoot), false);
 		assert.equal(fs.existsSync(path.join(planRoot, "001")), false);
 		assert.equal(fs.existsSync(path.join(planRoot, "integration")), false);
+		assert.equal(fs.readFileSync(path.join(value.repo, "fixture.txt"), "utf8"), "user changes\n");
+		assert.equal(fs.readFileSync(path.join(value.repo, "untracked.txt"), "utf8"), "user file\n");
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 

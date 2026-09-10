@@ -14,11 +14,9 @@ type Worktree = WorktreeRecord;
 
 function target(repo: string, ref: string): string | null { const r = runGit(repo, ["rev-parse", "--verify", ref], { allowFailure: true }); return r.status === 0 ? r.stdout.trim() : null; }
 function snapshot<T>(items: T[]): string { return JSON.stringify(items); }
-function cleanWorktree(repo: string, item: Worktree): void {
+function validateWorktree(repo: string, item: Worktree): void {
   if (!fs.existsSync(item.path)) fail(`Herder reset cannot remove missing worktree: ${item.path}`);
   if (realpathIfPresent(item.path) === realpathIfPresent(repo)) fail("Herder reset cannot remove the user checkout.");
-  const status = runGit(item.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  if (status.stdout !== "") fail(`Herder reset cannot remove dirty worktree: ${item.path}`);
 }
 function deleteRef(repo: string, ref: string, expected: string): void { const current = target(repo, ref); if (current !== expected) fail(`Herder reset found moved ref ${ref}; expected ${expected}, found ${current ?? "missing"}`); if (runGit(repo, ["update-ref", "-d", ref, expected], { allowFailure: true }).status !== 0) fail(`Herder reset could not delete moved ref ${ref}`); }
 function deleteBranch(repo: string, branch: string, expected: string): void { deleteRef(repo, `refs/heads/${branch}`, expected); }
@@ -99,7 +97,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     for (const w of owned) {
       if (!w.path) fail(`Herder reset refused pathless worktree record for branch: ${w.branch}`);
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
-      cleanWorktree(repo, w);
+      validateWorktree(repo, w);
       const expected = allowedWorktreePaths(repo, planDir, name, worktreeRelativeName(w.branch, name, integration));
       if (!expected.some((candidate) => realpathIfPresent(w.path) === realpathIfPresent(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
     }
@@ -108,7 +106,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(listCoordinationRefs(repo, name)) !== currentRefSnapshot || snapshot(listWorktreeInventory(repo)) !== currentWorktreeSnapshot || JSON.stringify(currentCheckout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
     for (const w of owned) {
       if (w.locked) runGit(repo, ["worktree", "unlock", "--", w.path]);
-      runGit(repo, ["worktree", "remove", "--", w.path]);
+      runGit(repo, ["worktree", "remove", "--force", "--", w.path]);
       removedWorktrees.push(w.path);
     }
     for (const b of allBranches) { deleteBranch(repo, b.branch, b.head); removedBranches.push(b.branch); }
