@@ -318,6 +318,98 @@ for (const location of ["canonical", "legacy"] as const) {
 	}
 }
 
+test("reset checks filesystem-equivalent case variants without folding unrelated paths", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const root = canonicalWorktreeRoot(value.planDir);
+		for (const relative of ["001", "integration"]) command(value.repo, ["worktree", "remove", "--force", path.join(root, relative)]);
+		for (const prefix of [`refs/heads/herder/${value.planName}/`, `refs/plan-herder/${value.planName}/`]) {
+			for (const ref of git(value.repo, "for-each-ref", "--format=%(refname)", prefix).split(/\r?\n/).filter(Boolean)) command(value.repo, ["update-ref", "-d", ref]);
+		}
+		const alternate = path.join(root, "Integration");
+		command(value.repo, ["worktree", "add", "-q", "--detach", alternate, value.base]);
+		fs.writeFileSync(path.join(alternate, "keep.txt"), "keep\n");
+		const expected = path.join(root, "integration");
+		if (fs.existsSync(expected)) {
+			const a = fs.statSync(alternate, { bigint: true }), b = fs.statSync(expected, { bigint: true });
+			assert.equal(a.dev, b.dev);
+			assert.equal(a.ino, b.ino);
+			const before = namespaceSnapshot(value);
+			assert.throws(() => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /refused worktree attachment/);
+			assert.equal(namespaceSnapshot(value), before);
+		} else {
+			// On case-sensitive storage this is an unrelated worktree, not an expected path.
+			assert.deepEqual(resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }).removedWorktrees, []);
+		}
+		assert.ok(git(value.repo, "worktree", "list", "--porcelain").includes(alternate));
+		assert.equal(fs.readFileSync(path.join(alternate, "keep.txt"), "utf8"), "keep\n");
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset refuses conflicting expected-path aliases without losing either identity", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const canonical = canonicalWorktreeRoot(value.planDir);
+		const legacy = legacyWorktreeRoot(value.repo, value.planName);
+		fs.mkdirSync(legacy, { recursive: true });
+		const integration = path.join(legacy, "integration"), plan = path.join(canonical, "integration");
+		command(value.repo, ["worktree", "move", plan, integration]);
+		command(value.repo, ["worktree", "move", path.join(canonical, "001"), plan]);
+		fs.symlinkSync(plan, path.join(canonical, "001"), "dir");
+		for (const worktree of [integration, plan]) {
+			fs.writeFileSync(path.join(worktree, "fixture.txt"), "dirty\n");
+			command(worktree, ["add", "fixture.txt"]);
+			fs.appendFileSync(path.join(worktree, "fixture.txt"), "unstaged\n");
+			fs.writeFileSync(path.join(worktree, "keep.txt"), "keep\n");
+		}
+		const before = namespaceSnapshot(value);
+		const indexes = [integration, plan].map((worktree) => git(worktree, "diff", "--cached"));
+		assert.throws(() => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /refused worktree attachment/);
+		assert.equal(namespaceSnapshot(value), before);
+		assert.deepEqual([integration, plan].map((worktree) => git(worktree, "diff", "--cached")), indexes);
+		for (const worktree of [integration, plan]) {
+			assert.equal(fs.readFileSync(path.join(worktree, "fixture.txt"), "utf8"), "dirty\nunstaged\n");
+			assert.equal(fs.readFileSync(path.join(worktree, "keep.txt"), "utf8"), "keep\n");
+		}
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("empty namespace revalidates a detached worktree registered after preflight", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const root = canonicalWorktreeRoot(value.planDir);
+		for (const relative of ["001", "integration"]) command(value.repo, ["worktree", "remove", "--force", path.join(root, relative)]);
+		for (const prefix of [`refs/heads/herder/${value.planName}/`, `refs/plan-herder/${value.planName}/`]) {
+			for (const ref of git(value.repo, "for-each-ref", "--format=%(refname)", prefix).split(/\r?\n/).filter(Boolean)) command(value.repo, ["update-ref", "-d", ref]);
+		}
+		const worktree = path.join(root, "001");
+		// Record the exact expected post-injection state, then recreate it after the first inventory read.
+		command(value.repo, ["worktree", "add", "-q", "--detach", worktree, value.base]);
+		const before = namespaceSnapshot(value);
+		command(value.repo, ["worktree", "remove", worktree]);
+		const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+		const marker = path.join(value.root, "injected");
+		assert.throws(() => withTemporaryExecutableOnPath({
+			prefix: "herder-reset-inventory-race-",
+			script: `#!/bin/sh
+real_git() { ( PATH=${quote(process.env.PATH ?? "")}; export PATH; command git "$@"; ); }
+case "$*" in
+	*"worktree list --porcelain -z"*)
+		real_git "$@" || exit $?
+		if [ ! -e ${quote(marker)} ]; then
+			real_git -C ${quote(value.repo)} worktree add -q --detach ${quote(worktree)} ${quote(value.base)} || exit $?
+			printf 'injected' > ${quote(marker)}
+		fi
+		exit 0 ;;
+esac
+real_git "$@"
+`,
+		}, () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir })), /namespace changed after preflight|refused worktree attachment/);
+		assert.equal(fs.readFileSync(marker, "utf8"), "injected");
+		assert.equal(namespaceSnapshot(value), before);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
 test("dirty and locked Herder-owned worktrees reset successfully without changing the user checkout", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {

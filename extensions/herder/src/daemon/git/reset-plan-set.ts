@@ -14,6 +14,16 @@ type Worktree = WorktreeRecord;
 
 function target(repo: string, ref: string): string | null { const r = runGit(repo, ["rev-parse", "--verify", ref], { allowFailure: true }); return r.status === 0 ? r.stdout.trim() : null; }
 function snapshot<T>(items: T[]): string { return JSON.stringify(items); }
+// Filesystem identity handles case-insensitive paths and symlinks without case-folding unrelated paths.
+function pathIdentity(candidate: string): string {
+  try {
+    const stat = fs.statSync(candidate, { bigint: true });
+    return `inode:${stat.dev}:${stat.ino}`;
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    return `path:${realpathIfPresent(candidate)}`;
+  }
+}
 function validateWorktree(repo: string, item: Worktree): void {
   if (!fs.existsSync(item.path)) fail(`Herder reset cannot remove missing worktree: ${item.path}`);
   if (realpathIfPresent(item.path) === realpathIfPresent(repo)) fail("Herder reset cannot remove the user checkout.");
@@ -75,17 +85,24 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const allBranches = listHerderBranches(repo, name);
   const allRefs = listCoordinationRefs(repo, name);
   const worktrees = listWorktreeInventory(repo);
-  const expectedAttachments = new Map<string, string>();
-  for (const relative of ["integration", ...specs.map((spec) => spec.planId)]) {
-    for (const candidate of allowedWorktreePaths(repo, planDir, name, relative)) {
-      expectedAttachments.set(realpathIfPresent(candidate), `herder/${name}/${relative}`);
+  function validateAttachments(inventory: typeof worktrees): void {
+    const expectedAttachments = new Map<string, Set<string>>();
+    for (const relative of ["integration", ...specs.map((spec) => spec.planId)]) {
+      for (const candidate of allowedWorktreePaths(repo, planDir, name, relative)) {
+        const identity = pathIdentity(candidate);
+        const expected = expectedAttachments.get(identity) ?? new Set<string>();
+        expected.add(`herder/${name}/${relative}`);
+        expectedAttachments.set(identity, expected);
+      }
+    }
+    for (const w of inventory) {
+      if (!w.path) continue; // Owned pathless records are rejected below.
+      for (const expected of expectedAttachments.get(pathIdentity(w.path)) ?? []) {
+        if (w.detached || w.branch !== expected) fail(`Herder reset refused worktree attachment at ${w.path}: expected ${expected}, found ${w.detached ? "detached" : w.branch || "no branch"}.`);
+      }
     }
   }
-  for (const w of worktrees) {
-    if (!w.path) continue; // Owned pathless records are rejected below.
-    const expected = expectedAttachments.get(realpathIfPresent(w.path));
-    if (expected && (w.detached || w.branch !== expected)) fail(`Herder reset refused worktree attachment at ${w.path}: expected ${expected}, found ${w.detached ? "detached" : w.branch || "no branch"}.`);
-  }
+  validateAttachments(worktrees);
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   const removedWorktrees: string[] = [];
@@ -110,11 +127,14 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
       validateWorktree(repo, w);
       const expected = allowedWorktreePaths(repo, planDir, name, worktreeRelativeName(w.branch, name, integration));
-      if (!expected.some((candidate) => realpathIfPresent(w.path) === realpathIfPresent(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
+      if (!expected.some((candidate) => pathIdentity(w.path) === pathIdentity(candidate))) fail(`Herder reset refused moved or foreign worktree: ${w.path}`);
     }
-    const currentBranchSnapshot = snapshot(allBranches), currentRefSnapshot = snapshot(allRefs), currentWorktreeSnapshot = snapshot(worktrees);
-    // Revalidate every identity immediately before the first mutation.
-    if (snapshot(listHerderBranches(repo, name)) !== currentBranchSnapshot || snapshot(listCoordinationRefs(repo, name)) !== currentRefSnapshot || snapshot(listWorktreeInventory(repo)) !== currentWorktreeSnapshot || JSON.stringify(currentCheckout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+  }
+  // Revalidate even an empty namespace before changing the README or execution evidence.
+  const finalWorktrees = listWorktreeInventory(repo);
+  validateAttachments(finalWorktrees);
+  if (snapshot(listHerderBranches(repo, name)) !== snapshot(allBranches) || snapshot(listCoordinationRefs(repo, name)) !== snapshot(allRefs) || snapshot(finalWorktrees) !== snapshot(worktrees) || JSON.stringify(currentCheckout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
+  if (!namespaceEmpty) {
     for (const w of owned) {
       if (w.locked) runGit(repo, ["worktree", "unlock", "--", w.path]);
       runGit(repo, ["worktree", "remove", "--force", "--", w.path]);
