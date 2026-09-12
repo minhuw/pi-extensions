@@ -250,13 +250,25 @@ export function parseDependencyIds(value: string, label = "Dependencies"): strin
   return ids
 }
 
-/** Lexical safety only: future dependency-provided paths need not exist yet. */
+/**
+ * A whole path segment spelled as a Next.js dynamic route: `[id]`, `[...slug]`, or `[[...slug]]`.
+ * Brackets are accepted only in this literal form; a bracket anywhere else stays a rejected glob class.
+ */
+const DYNAMIC_ROUTE_SEGMENT = /^\[(?:\[\.\.\.[A-Za-z_][A-Za-z0-9_]*\]|\.\.\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)\]$/
+
+function safeSegment(part: string): boolean {
+  if (!part || part === "." || part === ".." || part === ".git" || part === ".herder") return false
+  return !/[\[\]]/.test(part) || DYNAMIC_ROUTE_SEGMENT.test(part)
+}
+
+/** Lexical safety only: future dependency-provided paths need not exist yet. Paths are exact literals, never glob patterns. */
 export function validateRepositoryPath(value: string, { cwd = false, label = "Path" }: { cwd?: boolean; label?: string } = {}): string {
   if (cwd && value === ".") return value
-  if (!value || value !== value.trim() || /^[\/~]/.test(value) || /[\\:*?\[\]{}$`%\x00-\x1f\x7f]/.test(value)
+  if (!value || value !== value.trim() || /^[\/~]/.test(value) || /[\\:*?{}$`%\x00-\x1f\x7f]/.test(value)
     || /[!+@]\(/.test(value)
-    || value.split("/").some((part) => !part || part === "." || part === ".." || part === ".git" || part === ".herder")) {
-    fail(label, `unsafe ${cwd ? "Cwd" : "write path"} ${JSON.stringify(value)}; use a clean exact repository-relative ${cwd ? "directory or '.'" : "file path"}`)
+    || value.split("/").some((part) => !safeSegment(part))) {
+    const hint = /[\[\]]/.test(value) ? "; brackets are allowed only as whole Next.js dynamic-route segments such as [id], [...slug], or [[...slug]]" : ""
+    fail(label, `unsafe ${cwd ? "Cwd" : "write path"} ${JSON.stringify(value)}; use a clean exact repository-relative ${cwd ? "directory or '.'" : "file path"}${hint}`)
   }
   return value
 }

@@ -85,7 +85,7 @@ IDs match `A[1-9][0-9]*`, are unique per plan, and number at most 64. Behavior i
 
 ### Boundaries
 
-Use **Write paths**, followed by backticked exact repository-relative file paths. **Out of scope** ends that list. Reject absolute paths, traversal, and ambiguous globs. Declare preserved invariants, direct callers/contracts, and the bounded review surface here, once.
+Use **Write paths**, followed by backticked exact repository-relative file paths. **Out of scope** ends that list. Reject absolute paths, traversal, and ambiguous globs. Every path is an exact literal, never a pattern; brackets are accepted only as whole Next.js dynamic-route segments with identifier-style names (`[id]`, `[...slug]`, `[[...slug]]`), such as `src/app/api/rpc/[[...rest]]/route.ts`. Declare preserved invariants, direct callers/contracts, and the bounded review surface here, once.
 
 Semantic scope governs companion paths, not counts. A discovered companion requires direct necessity for the same outcome and bounded subsystem, no unplanned public-contract/migration transition or unordered live overlap, Implementer justification linked to an A ID or route item, Reviewer acceptance, and Judge acceptance in escalated rounds. Explicit exclusions or subsystem/transition crossings require stop/replan before editing.
 

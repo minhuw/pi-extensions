@@ -235,6 +235,30 @@ test("safe write/cwd paths are lexical and need not exist before dependencies in
   assert.throws(() => validateRepositoryPath("."), /unsafe write path/)
   assert.equal(validateRepositoryPath(".", { cwd: true }), ".")
   for (const clean of ["new/module.ts", "AGENTS.md", "LICENSE", "src/file with spaces.ts"]) assert.equal(validateRepositoryPath(clean), clean)
+})
+
+test("Next.js dynamic-route segments are accepted as exact literal paths, not glob classes", () => {
+  const routes = [
+    "src/app/experiments/[id]/page.tsx",
+    "src/app/api/artifacts/[...path]/route.ts",
+    "src/app/api/rpc/[[...rest]]/route.ts",
+    "rhea-dashboard/src/app/api/rpc/[[...rest]]/route.ts",
+    "src/app/[locale]/[slug_2]/page.tsx",
+  ]
+  for (const route of routes) {
+    assert.equal(validateRepositoryPath(route), route)
+    assert.equal(validateRepositoryPath(route, { cwd: true }), route)
+    assert.deepEqual(parsePlanContract(replaced("src/inspect.ts", route)).writePaths, [route, "tests/inspect.test.ts"])
+  }
+  assert.equal(parsePlanContract(replaced("| . |", "| `src/app/[id]` |")).toolchains[0].cwd, "src/app/[id]")
+  for (const glob of ["src/[ab].ts", "src/[a-z]/page.tsx", "src/[!a]/page.tsx", "src/[]/page.tsx", "src/[id]x/page.tsx", "src/x[id]/page.tsx", "src/[[id]]/page.tsx", "src/[...]/page.tsx", "src/[[...]]/page.tsx", "src/[..]/page.tsx", "src/[.]/page.tsx", "src/[[...rest]/page.tsx", "src/[...rest]]/page.tsx", "src/[id/page.tsx", "src/id]/page.tsx", "src/[a/b]/page.tsx", "src/[a.b]/page.tsx", "src/[a b]/page.tsx", "src/[id*]/page.tsx", "src/[$id]/page.tsx", "src/[../x]/page.tsx", "src/[slug-2]/page.tsx", "src/[2fa]/page.tsx"]) {
+    assert.throws(() => validateRepositoryPath(glob), /unsafe write path .*brackets are allowed only as whole Next\.js dynamic-route segments/, glob)
+    assert.throws(() => validateRepositoryPath(glob, { cwd: true }), /unsafe Cwd/, glob)
+    rejects(replaced("src/inspect.ts", glob), /unsafe write path/)
+  }
+  // Same literal spelled twice is still a duplicate; different dynamic segments are distinct exact paths.
+  rejects(replaced("- `src/inspect.ts`", "- `src/app/[id]/page.tsx`\n- `src/app/[id]/page.tsx`"), /duplicate write path/)
+  assert.deepEqual(parsePlanContract(replaced("- `src/inspect.ts`", "- `src/app/[id]/page.tsx`\n- `src/app/[slug]/page.tsx`")).writePaths, ["src/app/[id]/page.tsx", "src/app/[slug]/page.tsx", "tests/inspect.test.ts"])
   assert.equal(parsePlanContract(replaced("| . |", "| future/package |" )).toolchains[0].cwd, "future/package")
   rejects(replaced("- `src/inspect.ts`", "- `src/inspect.ts`\n- `src/inspect.ts`"), /duplicate write path/)
   rejects(source.replace("- `src/inspect.ts`", "").replace("- `tests/inspect.test.ts`", "No writes listed"), /requires backticked/)
