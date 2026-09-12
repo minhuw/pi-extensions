@@ -157,6 +157,11 @@ function nestedActivity(agent: PiNestedAgentSnapshot): string {
 	return "thinking…";
 }
 
+/** Manager messages may be multi-line dossiers; the widget owns exactly one row for them. */
+function singleLine(text: string): string {
+	return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" ");
+}
+
 function rightAlign(left: string, right: string, width: number): string {
 	if (width <= 0) return "";
 	const rightWidth = visibleWidth(right);
@@ -284,7 +289,7 @@ export function workerFleetTreeLines(
 			failed: "Failed.",
 			stopped: "Stopped.",
 		};
-		const idleDetail = model.idleDetail || fallbackDetail[model.status];
+		const idleDetail = singleLine(model.idleDetail ?? "") || fallbackDetail[model.status];
 		lines.push(truncateToWidth(`${theme.fg("dim", "└─")} ${theme.fg("dim", idleDetail)}`, width));
 		return lines;
 	}

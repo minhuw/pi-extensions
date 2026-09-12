@@ -239,6 +239,23 @@ test("failed worker fleet renders the terminal manager detail", () => {
 	assert.equal(lines[1], "└─ Verification gate dashboard-ci failed (log /tmp/dashboard-ci.log).");
 });
 
+test("multi-line manager dossiers collapse into a single truncated widget row", () => {
+	const dossier = [
+		"EXHAUSTION_DECISION_DOSSIER — evidence, not an approval or waiver",
+		"REASON: The rescue resolves the originally demonstrated ordinary numeric vectors and most facts completeness cases, but the reviewer still found gaps.",
+		"",
+		"EXACT_IDENTITY: {\"branch\":\"herder/002\"}",
+	].join("\n");
+	const failed = { ...model([]), status: "failed" as const, idleDetail: dossier };
+	const lines = workerFleetTreeLines(failed, theme, 120);
+	assert.equal(lines.length, 2);
+	assert.ok(!lines.some((line) => line.includes("\n")), "no widget row may contain a newline");
+	assert.match(lines[1]!, /^└─ EXHAUSTION_DECISION_DOSSIER — evidence, not an approval or waiver REASON: The rescue/);
+	assert.ok(visibleWidth(lines[1]!) <= 120);
+	const blank = { ...model([]), status: "failed" as const, idleDetail: "\n  \n" };
+	assert.equal(workerFleetTreeLines(blank, theme, 120)[1], "└─ Failed.");
+});
+
 test("worker elapsed time uses compact whole-second formatting", () => {
 	assert.equal(formatWorkerElapsed(1_000, 1_050), "0s");
 	assert.equal(formatWorkerElapsed(1_000, 2_250), "1s");
