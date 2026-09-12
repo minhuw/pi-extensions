@@ -224,6 +224,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			...(summary ? { summaryLine: summary } : {}),
 			...(currentState.dashboardUrl ? { dashboardUrl: currentState.dashboardUrl } : {}),
 			...(lastManagerMessage ? { idleDetail: lastManagerMessage } : {}),
+			startedAt: currentState.startedAt,
+			...(isTerminalRunStatus(currentState.status) ? { finishedAt: currentState.updatedAt } : {}),
 			workers: engine.snapshots(),
 		});
 		orcaBusy.set("herder", !isTerminalRunStatus(currentState.status), ctx);

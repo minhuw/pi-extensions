@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import { formatAgentIdentity, formatWorkerElapsed, HerderWidget, workerFleetTreeLines, type HerderWidgetModel } from "../../../adapters/worker-fleet.ts";
@@ -270,4 +270,51 @@ test("live widget registers once and requests lightweight rerenders", () => {
 	assert.equal(setWidgetCalls, 1);
 	assert.equal(requestRenderCalls, 1);
 	widget.dispose();
+});
+
+test("header shows the total run elapsed time to the right of progress", () => {
+	const current = { ...model([]), startedAt: 1_000 };
+	const lines = workerFleetTreeLines(current, theme, 200, 66_250);
+	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected ·  Elapsed 1m 05s");
+	const later = workerFleetTreeLines(current, theme, 200, 3_667_250);
+	assert.match(later[0]!, / ·  Elapsed 1h 01m 06s$/);
+	const withoutStart = workerFleetTreeLines(model([]), theme, 200, 66_250);
+	assert.doesNotMatch(withoutStart[0]!, /Elapsed/);
+});
+
+test("terminal runs freeze the header elapsed time at the finish timestamp", () => {
+	const complete = { ...model([]), status: "complete" as const, startedAt: 1_000, finishedAt: 582_000 };
+	const lines = workerFleetTreeLines(complete, theme, 200, 9_999_999);
+	assert.match(lines[0]!, / ·  Elapsed 9m 41s$/);
+});
+
+test("live widget keeps the elapsed timer ticking while a run waits without workers", () => {
+	mock.timers.enable({ apis: ["setInterval"] });
+	try {
+		let requestRenderCalls = 0;
+		let factory: ((tui: TUI, theme: Theme) => Component) | undefined;
+		const ui = {
+			theme,
+			setWidget: (_key: string, content: string[] | ((tui: TUI, theme: Theme) => Component) | undefined) => {
+				factory = typeof content === "function" ? content : undefined;
+			},
+		} as unknown as ExtensionContext["ui"];
+		const ctx = { mode: "tui", ui } as unknown as ExtensionContext;
+		const widget = new HerderWidget();
+		const waiting = { ...model([]), startedAt: 1_000 };
+
+		widget.update(ctx, waiting);
+		factory!({ requestRender: () => { requestRenderCalls += 1; } } as unknown as TUI, theme);
+		mock.timers.tick(999);
+		assert.equal(requestRenderCalls, 0);
+		mock.timers.tick(1);
+		assert.equal(requestRenderCalls, 1);
+
+		widget.update(ctx, { ...waiting, status: "complete", finishedAt: 5_000 });
+		mock.timers.tick(5_000);
+		assert.equal(requestRenderCalls, 2, "terminal runs stop the idle timer (one rerender from the update itself)");
+		widget.dispose();
+	} finally {
+		mock.timers.reset();
+	}
 });

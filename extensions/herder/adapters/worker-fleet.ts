@@ -1,10 +1,11 @@
 import type { ExtensionContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
-import type { RunStatus } from "../src/shared/protocol.ts";
+import { isTerminalRunStatus, type RunStatus } from "../src/shared/protocol.ts";
 import type { PiNestedAgentSnapshot, PiWorkerSnapshot } from "./worker-engine.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 200;
+const IDLE_TICK_MS = 1_000;
 const MAX_VISIBLE_AGENTS = 16;
 
 const I = {
@@ -21,6 +22,7 @@ const I = {
 	parallel: "\uF0E8",
 	plans: "\uF07C",
 	progress: "\uF0AE",
+	elapsed: "\uF017",
 } as const;
 
 const ACTIVITY_LABELS: Record<string, string> = {
@@ -42,6 +44,10 @@ export interface HerderWidgetModel {
 	summaryLine?: string;
 	dashboardUrl?: string;
 	idleDetail?: string;
+	/** Epoch milliseconds when the run started; enables the header elapsed timer. */
+	startedAt?: number;
+	/** Epoch milliseconds when the run reached a terminal status; freezes the timer. */
+	finishedAt?: number;
 	workers: readonly PiWorkerSnapshot[];
 }
 
@@ -264,6 +270,7 @@ export function workerFleetTreeLines(
 		theme.fg("syntaxFunction", `${I.parallel} `) + theme.fg("muted", `max ${model.maxParallel}`),
 		theme.fg("syntaxType", `${I.plans} `) + theme.fg("muted", model.planName),
 		...(model.summaryLine ? [theme.fg("success", `${I.progress} `) + theme.fg("muted", `Progress ${model.summaryLine}`)] : []),
+		...(model.startedAt !== undefined ? [theme.fg("syntaxKeyword", `${I.elapsed} `) + theme.fg("muted", `Elapsed ${formatWorkerElapsed(model.startedAt, model.finishedAt ?? now)}`)] : []),
 	];
 	const lines = [truncateToWidth(headerParts.join(separator), width)];
 	const rows = agentRows(model.workers);
@@ -295,6 +302,7 @@ export class HerderWidget {
 	private model?: HerderWidgetModel;
 	private widgetKind?: WidgetKind;
 	private timer?: ReturnType<typeof setInterval>;
+	private timerIntervalMs?: number;
 	private frame = 0;
 
 	update(ctx: ExtensionContext, model: HerderWidgetModel | undefined): void {
@@ -309,7 +317,9 @@ export class HerderWidget {
 		}
 
 		const active = model.workers.some((worker) => worker.status === "prepared" || worker.status === "running" || worker.status === "stopping");
-		if (ctx.mode === "tui" && active) this.ensureTimer();
+		const timing = model.startedAt !== undefined && model.finishedAt === undefined && !isTerminalRunStatus(model.status);
+		if (ctx.mode === "tui" && active) this.ensureTimer(TICK_MS);
+		else if (ctx.mode === "tui" && timing) this.ensureTimer(IDLE_TICK_MS);
 		else this.stopTimer();
 
 		if (ctx.mode !== "tui") {
@@ -341,18 +351,21 @@ export class HerderWidget {
 		this.ui = undefined;
 	}
 
-	private ensureTimer(): void {
-		if (this.timer) return;
+	private ensureTimer(intervalMs: number): void {
+		if (this.timer && this.timerIntervalMs === intervalMs) return;
+		this.stopTimer();
+		this.timerIntervalMs = intervalMs;
 		this.timer = setInterval(() => {
 			this.frame = (this.frame + 1) % SPINNER.length;
 			this.tui?.requestRender();
-		}, TICK_MS);
+		}, intervalMs);
 	}
 
 	private stopTimer(): void {
 		if (!this.timer) return;
 		clearInterval(this.timer);
 		this.timer = undefined;
+		this.timerIntervalMs = undefined;
 	}
 
 	private clearWidget(): void {
