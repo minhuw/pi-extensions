@@ -1,4 +1,4 @@
-import { assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending } from "./run-revision.ts";
+import { assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -889,7 +889,7 @@ export class HerderRunManager {
 			`REMAINING_FINDINGS_AND_IMPACT: ${boundedEvidence(stableJson(finishing?.result && "findings" in finishing.result ? finishing.result.findings : plan.findings), 1_000)}`,
 			`RECORDED_GATES: ${boundedEvidence(stableJson(plan.gates), 600)}`,
 			plan.planId === "RUN" ? "RECOMMENDATION: Stop unless the exact clean reviewed patch is acceptable with explicitly acknowledged gaps. OPTIONS: accept (confirmed, accepted gaps and rationale; only a clean terminal round-3 reviewed tree), stop (preserve artifacts), or explicitly revise the target in a new generation. Pure transport exhaustion remains operator attention, not authorization to rewrite or waive requirements."
-				: "RECOMMENDATION: Inspect this failure and propose a concrete whole-run graph revision directly for user refinement and approval. OPTIONS: revise_run or explicit abandon_run. Approval replaces all unmerged execution on the original trusted base; dismissal never abandons or retries unchanged.",
+				: "RECOMMENDATION: Inspect this failure and propose a concrete whole-run graph revision directly for user refinement and approval. OPTIONS: revise_run or explicit abandon_run. Approval reruns changed plans, their downstream dependents, and unfinished execution while preserving validated unrelated DONE work; conflicts require another proposal. Dismissal never abandons or retries unchanged.",
 			boundedEvidence(this.passDocumentEvidence(run, plan), 3_000),
 			this.terminalEvidence(run, plan, finishing ? { ...finishing, detail } : undefined),
 		].join("\n"), 16_384);
@@ -1070,7 +1070,7 @@ export class HerderRunManager {
 	async start(input: StartInput): Promise<ManagerReply> {
 		validateStartInput(input);
 		const revision = readRunRevision(this.planDirectory);
-		if (revisionPending(revision) && revision.state !== "restarting") throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
+		if (revisionPending(revision) && (revision.state !== "restarting" || revision.selective)) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
 		if (revisionPending(revision) && (input.repositoryRoot !== revision.run.repositoryRoot || input.profile !== revision.run.profileName || input.maxParallel !== revision.run.maxParallel)) throw new Error("Replacement Fire must preserve the original run configuration");
 		const existing = this.store.getRun();
 		if (existing) {
@@ -1165,7 +1165,7 @@ export class HerderRunManager {
 	async resume(input: StartInput): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		const revision = readRunRevision(this.planDirectory);
-		if (revisionPending(revision) && (revision.state !== "restarting" || run?.runId !== revision.successorRunId)) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
+		if (revisionPending(revision) && (revision.state !== "restarting" || run?.runId !== (revision.selective ? revision.run.runId : revision.successorRunId) || (revision.selective && run?.currentGeneration !== revision.selective.nextGeneration))) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
 		if (!run) throw new Error("No deterministic Herder run exists");
 		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Resume repository does not match the recorded run");
 		if (input.planName && input.planName !== run.planName) throw new Error(`Resume plan name must remain ${run.planName}`);
@@ -1291,6 +1291,7 @@ export class HerderRunManager {
 		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
 		detail: string,
 		completedEdit?: StoredPlanEdit,
+		invalidatedPlanIds?: string[],
 	): void {
 		const driver = this.driver(run);
 		const namespace = driver.inspectNamespace("resume");
@@ -1310,6 +1311,10 @@ export class HerderRunManager {
 				runSnapshotSha256: assignment.snapshotSha256,
 			});
 			this.store.deletePlan(run.runId, "RUN");
+			if (invalidatedPlanIds) {
+				for (const planId of invalidatedPlanIds) this.store.deletePlan(run.runId, planId);
+				for (const request of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) this.store.resolveAttention(request.requestId);
+			}
 			if (completedEdit) {
 				this.store.recordPlanEditOutcome(completedEdit, "finish");
 				this.store.deletePlanEdit(run.runId);
@@ -1322,6 +1327,28 @@ export class HerderRunManager {
 			});
 		});
 		this.cacheSpecs(compiled.specs);
+	}
+
+	/** Validate original approval actions without rewriting a restacked DONE runtime. */
+	validateSelectiveApprovals(run: StoredRun): void {
+		for (const plan of this.store.getPlans(run.runId).filter(plan => plan.phase === "DONE" && plan.planId !== "RUN")) {
+			const approval = this.store.getApproval(run.runId, plan.planId, plan.generation);
+			if (!approval) throw new Error(`Completed plan ${plan.planId} has no original approval`);
+			this.driver(run).verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
+			this.validateApproval(run, { ...plan, approvedBase: approval.approvedBase, approvedHead: approval.approvedHead, approvedTree: approval.approvedTree }, approval);
+		}
+	}
+
+	adoptSelectiveRevision(record: RunRevision): void {
+		if (record.state !== "restarting" || stableJson(readRunRevision(this.planDirectory)) !== stableJson(record)) throw new Error("Selective adoption requires its durable confirmed cutover intent");
+		const selective = record.selective;
+		const run = this.store.getRun();
+		if (!selective || !run || run.runId !== record.run.runId) throw new Error("Selective adoption lost its original run");
+		if (run.currentGeneration === selective.nextGeneration && run.graphSha256 === record.graphSha256) return;
+		if (run.currentGeneration !== selective.sourceGeneration || run.graphSha256 !== record.run.graphSha256) throw new Error("Selective adoption generation changed");
+		assertApprovedRevisionGraph(record);
+		this.adoptCompiledRevision(run, { specs: selective.specs, graphSha256: record.graphSha256! },
+			`Adopted selective revision generation ${selective.nextGeneration}.`, undefined, [...selective.rerunPlanIds, ...selective.removedPlanIds]);
 	}
 
 	async revise(input: StartInput): Promise<ManagerReply> {
@@ -1378,7 +1405,7 @@ export class HerderRunManager {
 	}
 
 	private reservedEditIsRework(run: StoredRun, planId: string): boolean {
-		return Boolean(this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId }) > 0);
+		return Boolean(this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) > 0);
 	}
 
 	private reworkGitHeads(driver: GitDriver, plan: StoredPlan): { expectedHead: string; expectedTree: string } {
@@ -1414,7 +1441,7 @@ export class HerderRunManager {
 		}
 		this.spec(run, planId);
 		const plan = this.store.getPlan(run.runId, planId);
-		if (!plan && this.store.countActions(run.runId, { planId }) === 0) {
+		if (!plan && this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) === 0) {
 			throw new Error(`Plan ${planId} has not started; use /herder-grill --plan`);
 		}
 		if (!plan) throw new Error(`Plan ${planId} has no runtime record to rework`);
@@ -1750,7 +1777,7 @@ export class HerderRunManager {
 				return { edit: { planId, state: edit.state, editToken: edit.editToken }, reply: this.reply() };
 			}
 			if (!["TODO", "BLOCKED"].includes(spec.initialStatus)) throw new Error(`Plan ${planId} is ${spec.initialStatus}, not an unstarted editable plan`);
-			if (this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId }) > 0) {
+			if (this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) > 0) {
 				throw new Error(`Plan ${planId} cannot be grilled because execution already started`);
 			}
 			const edit = this.store.putPlanEdit({

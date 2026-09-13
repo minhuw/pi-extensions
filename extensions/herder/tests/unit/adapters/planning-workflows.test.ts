@@ -404,6 +404,9 @@ test("adapter binds complete attention evidence, including recovery Git identity
 	assert.ok(prompt.includes(recovery.worktreeTree));
 	assert.match(prompt, /A dismissed confirmation leaves the proposal recoverable/);
 	assert.match(prompt, /previously integrated plans may change/);
+	assert.match(prompt, /Whole-graph editing does not mean whole-graph recomputation/);
+	assert.match(prompt, /unchanged completed work outside the affected dependency closure is retained/);
+	assert.doesNotMatch(prompt, /Set every replacement plan TODO|No selective reuse|discards ALL old/);
 	assert.match(prompt, /Final RUN attention and exact-tree final integration repair/);
 	assert.doesNotMatch(prompt, /ALLOWED_OPERATIONS: defer|For acceptance|submit action "unchanged_retry"/);
 });

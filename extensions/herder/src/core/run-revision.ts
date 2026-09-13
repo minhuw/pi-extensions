@@ -3,13 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolvePiProfile } from "./profile-registry.ts";
 import { buildGraph, projectStatuses } from "./plans.ts";
-import { compileGraphIdentity } from "./plan-identity.ts";
+import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
 import { captureReworkSnapshot, ensurePrivateDirectory, fsyncDirectory, graphInputSha256, readRegularBytes, readReworkSnapshotFile, restoreGraphSnapshot } from "./plan-edit.ts";
 import { GitDriver } from "../daemon/git-driver.ts";
 import type { StoredRun, StoredPlanEdit } from "../daemon/run-store.ts";
 import { sha256, stableJson, type AttentionResolutionInput } from "../shared/protocol.ts";
 
+import { prepareSelectiveRevision, validateSelectiveArtifacts, selectivePreviewSha256, type SelectiveRevision } from "../daemon/git/selective-revision.ts";
+
 export interface RunRevision {
+	selective?: SelectiveRevision;
+	/** Completed same-run revision attribution, carried into the next draft. */
+	priorSelectiveCommits?: string[];
 	version: 1;
 	editToken: string;
 	run: StoredRun;
@@ -40,17 +45,21 @@ export function readRunRevision(directory: string): RunRevision | null {
 		|| record.run.planDirectory !== fs.realpathSync(directory) || record.request.runId !== record.run.runId
 		|| !["draft", "prepared", "confirmed", "resetting", "restarting", "complete", "abandoned"].includes(record.state)
 		|| !["revise_run", "abandon_run"].includes(record.decision)) throw new Error("Invalid whole-run revision identity");
+	if (record.selective && (record.selective.version !== 1 || record.selective.sourceGeneration !== record.run.currentGeneration
+		|| record.selective.nextGeneration !== record.run.currentGeneration + 1 || selectivePreviewSha256(record.selective) !== record.selective.previewSha256)) throw new Error("Invalid selective revision generation or preview identity");
 	return record;
 }
 
 export function writeRunRevision(directory: string, record: RunRevision, expected: RunRevision | null): void {
 	if (stableJson(readRunRevision(directory)) !== stableJson(expected)) throw new Error("Whole-run revision changed concurrently");
+	const bytes = stableJson({ record, sha256: sha256(stableJson(record)) });
+	if (Buffer.byteLength(bytes) > 1_000_000) throw new Error("Whole-run revision exceeds the durable record size limit");
 	const runtime = path.join(directory, ".herder");
 	ensurePrivateDirectory(runtime);
 	const temporary = path.join(runtime, `.run-revision-${randomUUID()}.tmp`);
 	const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
 	try {
-		fs.writeFileSync(fd, stableJson({ record, sha256: sha256(stableJson(record)) }));
+		fs.writeFileSync(fd, bytes);
 		fs.fsyncSync(fd);
 	} finally { fs.closeSync(fd); }
 	try { fs.renameSync(temporary, recordPath(directory)); fsyncDirectory(runtime); }
@@ -71,12 +80,13 @@ export async function verifyRevisionCheckout(record: RunRevision): Promise<void>
 
 export async function beginRunRevision(run: StoredRun, request: AttentionResolutionInput): Promise<RunRevision> {
 	const previous = readRunRevision(run.planDirectory);
+	const priorSelective = previous?.run.runId === run.runId ? previous.selective : undefined;
 	if (revisionPending(previous)) {
 		if (previous.run.runId !== run.runId || previous.request.requestId !== request.requestId || previous.request.requestSha256 !== request.requestSha256) throw new Error("Another whole-run revision owns this execution");
 		if (!["draft", "prepared"].includes(previous.state)) throw new Error(`Continue confirmed whole-run finish_edit with token ${previous.editToken}; do not replay attention begin`);
 		return previous;
 	}
-	const record: RunRevision = { version: 1, editToken: randomUUID(), run, request, state: "draft", decision: request.action as RunRevision["decision"], successorRunId: randomUUID(), snapshotSha256: "" };
+	const record: RunRevision = { version: 1, editToken: randomUUID(), run, request, state: "draft", decision: request.action as RunRevision["decision"], successorRunId: randomUUID(), snapshotSha256: "", ...(priorSelective ? { priorSelectiveCommits: [...priorSelective.knownCommits, ...(priorSelective.publication && priorSelective.publication.head !== priorSelective.integrationHead ? [priorSelective.publication.head] : [])] } : {}) };
 	await verifyRevisionCheckout(record);
 	if (compileGraphIdentity(buildGraph(run.planDirectory)) !== run.graphSha256) throw new Error("Resolve graph drift before opening whole-run revision");
 	const driver = revisionDriver(run);
@@ -100,25 +110,33 @@ export async function prepareRunRevision(directory: string, editToken: string, d
 	await verifyRevisionCheckout(record);
 	if (decision === "abandon_run") {
 		const captured = captureReworkSnapshot(record.run, "RUN", record.successorRunId, record.run.baseCommit, revisionDriver(record.run).worktreeTree(record.run.repositoryRoot), "README.md", []);
-		const prepared: RunRevision = { ...record, state: "prepared", decision, graphSha256: record.run.graphSha256, inputSha256: graphInputSha256(directory), abandonSnapshotSha256: captured.sha256 };
+		const { selective: _selective, ...abandonRecord } = record;
+		const prepared: RunRevision = { ...abandonRecord, state: "prepared", decision, graphSha256: record.run.graphSha256, inputSha256: graphInputSha256(directory), abandonSnapshotSha256: captured.sha256 };
 		writeRunRevision(directory, prepared, record);
 		return prepared;
 	}
 	const graph = buildGraph(directory);
 	if (!graph.shapeReady || graph.plans.length === 0) throw new Error("Whole-run replacement must be a nonempty, shape-ready valid graph");
-	if (decision === "revise_run" && graph.plans.some(plan => plan.status !== "TODO")) throw new Error("Whole-run replacement requires every plan TODO; no inherited execution or approvals");
+
 	const graphSha256 = compileGraphIdentity(graph);
 	if (decision === "revise_run" && graphSha256 === record.run.graphSha256) throw new Error("Propose a concrete graph revision; unchanged retry is not allowed");
-	projectStatuses(directory, graph.plans.map(plan => ({ id: plan.id, status: "TODO" })));
-	const prepared: RunRevision = { ...record, decision, state: "prepared", graphSha256, inputSha256: graphInputSha256(directory) };
+	const compiled = compilePlanSpecs({ runId: record.run.runId, graphGeneration: record.run.currentGeneration + 1, graph });
+	const selective = prepareSelectiveRevision(record.run, compiled.specs, revisionDriver(record.run), record.priorSelectiveCommits);
+	// Reuse the manager's exact terminal approval validator, including human acceptance evidence.
+	const { HerderRunManager } = await import("./run-manager.ts");
+	const manager = new HerderRunManager(directory);
+	try { manager.validateSelectiveApprovals(record.run); } finally { manager.close(); }
+	validateSelectiveArtifacts(record.run, selective, revisionDriver(record.run));
+	projectStatuses(directory, graph.plans.map(plan => ({ id: plan.id, status: selective.retainedPlanIds.includes(plan.id) ? "DONE" : "TODO" })));
+	const prepared: RunRevision = { ...record, selective, decision, state: "prepared", graphSha256, inputSha256: graphInputSha256(directory) };
 	writeRunRevision(directory, prepared, record);
 	return prepared;
 }
 
-/** Status is deliberately absent from graph identity, so approval also binds exact Markdown and TODO lifecycle. */
+/** Status is absent from semantic identity; bind exact Markdown and proof-backed lifecycle too. */
 export function assertApprovedRevisionGraph(record: RunRevision, graph = buildGraph(record.run.planDirectory)): void {
 	if (graphInputSha256(record.run.planDirectory) !== record.inputSha256) throw new Error("Replacement Markdown changed after host confirmation");
-	if (!graph.shapeReady || graph.plans.length === 0 || graph.plans.some(plan => plan.status !== "TODO")) throw new Error("Whole-run replacement requires a valid nonempty graph with every plan TODO");
+	if (!graph.shapeReady || graph.plans.length === 0 || graph.plans.some(plan => plan.status !== (record.selective?.retainedPlanIds.includes(plan.id) ? "DONE" : "TODO"))) throw new Error("Whole-run replacement requires a valid nonempty graph with every plan TODO except proof-backed retained DONE plans");
 	if (compileGraphIdentity(graph) !== record.graphSha256) throw new Error("Replacement graph changed after host confirmation");
 }
 
@@ -126,6 +144,7 @@ export async function confirmRunRevision(prepared: RunRevision): Promise<RunRevi
 	const directory = prepared.run.planDirectory;
 	await verifyRevisionCheckout(prepared);
 	if (prepared.state !== "prepared" || graphInputSha256(directory) !== prepared.inputSha256 || (prepared.decision === "revise_run" && compileGraphIdentity(buildGraph(directory)) !== prepared.graphSha256)) throw new Error("Whole-run replacement changed after confirmation was requested");
+	if (prepared.selective) validateSelectiveArtifacts(prepared.run, prepared.selective, revisionDriver(prepared.run));
 	const confirmed: RunRevision = { ...prepared, state: "confirmed" };
 	writeRunRevision(directory, confirmed, prepared);
 	return confirmed;

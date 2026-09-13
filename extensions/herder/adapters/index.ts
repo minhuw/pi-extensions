@@ -1064,8 +1064,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 	});
 
+	const revisionTargetRunId = (record: RunRevision): string => record.selective ? record.run.runId : record.successorRunId;
 	const ownsWholeRunRevision = (record: RunRevision): boolean => ownsRun(record.run.planDirectory, record.run.runId)
-		|| (["restarting", "complete"].includes(record.state) && ownsRun(record.run.planDirectory, record.successorRunId));
+		|| (["restarting", "complete"].includes(record.state) && ownsRun(record.run.planDirectory, revisionTargetRunId(record)));
 
 	const recoverWholeRunRevision = async (record: RunRevision, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
 		const directory = record.run.planDirectory;
@@ -1074,6 +1075,15 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		let attention: ManagerAttentionRequest | undefined;
 		try {
 			run = store.getRun();
+			if (record.selective && run?.runId === record.run.runId) {
+				const original = run.currentGeneration === record.run.currentGeneration && run.graphSha256 === record.run.graphSha256;
+				const adopted = ["resetting", "restarting", "complete"].includes(record.state)
+					&& run.currentGeneration === record.selective.nextGeneration && run.graphSha256 === record.graphSha256;
+				if ((!original && !adopted) || (record.state === "complete" && !adopted)
+					|| run.baseCommit !== record.run.baseCommit || run.checkoutStateToken !== record.run.checkoutStateToken) {
+					throw new Error("Whole-run recovery refuses a changed execution generation or graph");
+				}
+			}
 			if (["draft", "prepared"].includes(record.state) && run?.runId === record.run.runId) {
 				const request = store.getAttention(record.request.requestId);
 				if (!request || request.state === "resolved" || request.runId !== run.runId
@@ -1086,9 +1096,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				attention = request;
 			}
 		} finally { store.close(); }
-		if (run && run.runId !== record.run.runId && !(run.runId === record.successorRunId && ["restarting", "complete"].includes(record.state))) throw new Error("Whole-run recovery refuses an unrelated execution");
-		if (!run && !["resetting", "restarting", "abandoned"].includes(record.state)) throw new Error("Whole-run recovery lost its execution");
-		const runId = ownsWholeRunRevision(record) ? ownership!.record.runId : run?.runId ?? (record.state === "restarting" ? record.successorRunId : record.run.runId);
+		if (run && run.runId !== record.run.runId && !(run.runId === revisionTargetRunId(record) && ["restarting", "complete"].includes(record.state))) throw new Error("Whole-run recovery refuses an unrelated execution");
+		if (!run && ((record.selective && record.decision === "revise_run") || !["resetting", "restarting", "abandoned"].includes(record.state))) throw new Error("Whole-run recovery lost its execution");
+		const runId = ownsWholeRunRevision(record) ? ownership!.record.runId : run?.runId ?? (record.state === "restarting" ? revisionTargetRunId(record) : record.run.runId);
 		const acquired = await claimOwnership(directory, runId, ctx, epoch);
 		currentRunRevision = record;
 		persist({ version: 1, mode: "resume", status: run?.status ?? "paused", runId,
@@ -1127,6 +1137,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					if (record.state === "restarting" && run.runId === record.successorRunId) return;
 					throw new Error("Whole-run settlement refuses a successor execution");
 				}
+				if (record.selective && ["resetting", "restarting"].includes(record.state)
+					&& run.currentGeneration === record.selective.nextGeneration && run.graphSha256 === record.graphSha256) return;
 				active = store.getActions(run.runId, ["proposed", "dispatched"]);
 			} finally { store.close(); }
 			const dispatched = active.filter(action => action.state === "dispatched");
@@ -1139,7 +1151,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		finished: async (result, record) => {
 			assertSessionActive(epoch);
 			if (result.abandoned) { await clearCurrentStateForPlanDirectory(record.run.planDirectory, ctx); return; }
-			if (!result.reply || result.reply.runId !== record.successorRunId || !ownership) throw new Error("Replacement run has no matching host ownership");
+			if (!result.reply || result.reply.runId !== revisionTargetRunId(record) || !ownership) throw new Error("Revised run has no matching host ownership");
 			bindAdapterOwnershipRun(ownership, result.reply.runId);
 			currentRunRevision = undefined;
 			mainSessionRequests.reset("cleanup");
@@ -1729,7 +1741,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				await enqueueManager(async () => {
 					assertSessionActive(epoch);
 					const revision = readRunRevision(restored.planDir);
-					if (revision && ((revision.state === "complete" && restored.runId === revision.run.runId) || revisionPending(revision))) {
+					if (revision && ((revision.state === "complete" && restored.runId === revision.run.runId && !revision.selective?.resumed) || revisionPending(revision))) {
 						if (![revision.run.runId, revision.successorRunId].includes(restored.runId)) throw new Error("Persisted Herder run does not match the whole-run revision");
 						acquired = await recoverWholeRunRevision(revision, ctx, epoch);
 						ctx.ui.notify(`Recovered whole-run revision ${revision.state}. Continue finish_edit with editToken ${revision.editToken}; no workers were resumed.`, "info");

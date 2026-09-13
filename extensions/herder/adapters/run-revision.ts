@@ -26,8 +26,16 @@ export async function finishWholeRunEdit(directory: string, editToken: string, c
 		const approved = await ctx.ui.confirm(decision === "abandon_run" ? "Abandon this entire Herder execution?" : "Approve this whole-run revision?", [
 			`Request: ${record.request.requestId}`, `Run: ${record.run.runId}`, `Original base: ${record.run.baseCommit}`,
 			`Exact graph: ${record.graphSha256}`, `Exact Markdown: ${record.inputSha256}`,
-			"All workers will be settled before deleting every old execution worktree, branch, and proof. Your source checkout and branch will not be reset.",
-			decision === "abandon_run" ? "Preserve plan Markdown. Do not restart any workers." : "Rerun every revised plan from TODO on the original base, with no selective reuse.",
+			...(decision === "abandon_run" ? [
+				"All workers will be settled before deleting every old execution worktree, branch, and proof. Preserve plan Markdown. Do not restart any workers.",
+			] : record.selective ? [
+				`Retain completed plans: ${record.selective.retainedPlanIds.join(", ") || "none"}`,
+				`Rerun plans: ${record.selective.rerunPlanIds.join(", ") || "none"}`,
+				`Remove plans: ${record.selective.removedPlanIds.join(", ") || "none"}`,
+				`Integration before revision: ${record.selective.integrationHead}`,
+				"Retain unrelated completed work and its original evidence. Reverse invalidated contributions and discard only affected execution surfaces; unfinished work restarts. Conflicts keep recovery blocked rather than discarding extra work. Final verification and approval run again.",
+			] : ["Legacy revision: discard every old execution worktree, branch, and proof and rerun every revised plan from TODO on the original base."]),
+			"Your source checkout and branch will not be reset.",
 		].join("\n\n"));
 		host.assert(record);
 		if (!approved) throw new Error("Confirmation dismissed: revision remains recoverable, old execution is intact, and no unchanged workers will restart. Refine the graph and call finish_edit again, or explicitly choose abandon_run.");
@@ -49,7 +57,7 @@ export async function beginWholeRunAttention(directory: string, resolution: Atte
 	host.assert(record);
 	await host.settle(record);
 	if (resolution.action === "abandon_run") return finishWholeRunEdit(directory, record.editToken, ctx, host, "abandon_run");
-	return { ...result, editToken: record.editToken, scope: "whole-run plan-graph Markdown only", instructions: "Inspect the failure and propose concrete graph edits directly for user refinement. All IDs, dependencies, shared context, additions/removals, and previously integrated plans may change. Set every replacement plan TODO. Source code and runtime files are not writable. Call finish_edit with this editToken for final host confirmation; dismissal never abandons or retries." };
+	return { ...result, editToken: record.editToken, scope: "whole-run plan-graph Markdown only", instructions: "Inspect the failure and propose concrete graph edits directly for user refinement. All IDs, dependencies, shared context, additions/removals, and previously integrated plans may change. Change only what is needed; unrelated completed plans need not be rewritten. Herder derives retained/rerun/removed plans from immutable assignments, dependency changes, and completion evidence, not authored statuses. Final confirmation previews that impact; conflicts remain blocked rather than discarding extra work. Source code and runtime files are not writable. Call finish_edit with this editToken for final host confirmation; dismissal never abandons or retries." };
 }
 
 export async function cancelWholeRunEdit(directory: string, editToken: string, host: RunRevisionHost): Promise<unknown> {
@@ -58,7 +66,7 @@ export async function cancelWholeRunEdit(directory: string, editToken: string, h
 	host.assert(record);
 	await verifyRevisionCheckout(record);
 	restoreRevisionGraph(record);
-	const { graphSha256: _graph, inputSha256: _input, ...draft } = record;
+	const { graphSha256: _graph, inputSha256: _input, selective: _selective, ...draft } = record;
 	writeRunRevision(directory, { ...draft, state: "draft", decision: "revise_run" }, record);
 	return { editToken, state: "draft", message: "Original Markdown restored; the whole-run revision remains open. No unchanged workers resume. Propose another revision or explicitly abandon_run." };
 }

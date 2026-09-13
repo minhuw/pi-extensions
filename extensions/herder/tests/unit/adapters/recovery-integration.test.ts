@@ -1145,7 +1145,9 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		assert.ok(confirmations.every(body => body.includes(record.run.runId) && body.includes(record.run.baseCommit) && body.includes(String(requestId))));
 		assert.equal(fs.existsSync(sentinel), false);
 		assert.equal(factory.requests.length, 3);
-		assert.ok(factory.requests.slice(1).every(request => request.action.runId === record.successorRunId));
+		assert.ok(factory.requests.slice(1).every(request => request.action.runId === record.run.runId && request.action.generation === record.run.currentGeneration + 1));
+		assert.ok(confirmations.every(body => /Retain completed plans: none/.test(body) && /Rerun plans: 001, 002/.test(body)));
+		assert.ok(confirmations.every(body => !/deleting every old execution|no selective reuse/.test(body)));
 		assert.ok(factory.requests.slice(1).some(request => fs.readFileSync(request.action.assignmentPath, "utf8").includes("Entire execution uses the revised assignment")));
 		assert.equal(readRunRevision(value.planDirectory)?.state, "complete");
 	} finally {
@@ -1345,9 +1347,22 @@ for (const point of ["after_restarting", "after_restart", "after_complete"]) {
 			assert.equal(notifications.some(entry => /recovery failed|refusing recovery/.test(entry.message)), false, JSON.stringify(notifications));
 			assert.ok(notifications.some(entry => entry.message.includes(record.editToken)));
 			const owner = JSON.parse(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"));
-			assert.equal(owner.runId, record.successorRunId);
+			assert.equal(owner.runId, record.run.runId);
 			if (point !== "after_complete") await assertWholeRunHook(api, ctx, value);
 			assert.equal(factory.requests.length, 0, "startup must not resume workers inside the revision barrier");
+			if (point === "after_complete") {
+				ctx = { ...freshContext(value, notifications), sessionManager: ctx.sessionManager };
+				const finished = object(await api.tool("herder_plan").execute("recover-completed-revision", {
+					operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken,
+				}, undefined, undefined, ctx));
+				assert.equal(finished.isError, undefined, JSON.stringify(finished));
+				assert.equal(readRunRevision(value.planDirectory)?.selective?.resumed, true);
+				await api.invoke("session_shutdown", ctx);
+				const laterNotifications: Warning[] = [];
+				ctx = restoredContext(value, record.run.runId, laterNotifications);
+				await api.invoke("session_start", ctx);
+				assert.equal(laterNotifications.some(entry => /Recovered whole-run revision|recovery failed/.test(entry.message)), false, JSON.stringify(laterNotifications));
+			}
 		} finally {
 			if (ctx) await api.invoke("session_shutdown", ctx);
 			await stopService(value.planDirectory).catch(() => {});

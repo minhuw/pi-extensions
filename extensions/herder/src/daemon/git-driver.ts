@@ -200,7 +200,7 @@ function linearCommits(repoRoot: string, range: string): string[] | null {
 	return commits.status === 0 ? commits.stdout.split(/\r?\n/).filter(Boolean) : null;
 }
 
-function commitPatchIdentity(repoRoot: string, commit: string): string | null {
+export function commitPatchIdentity(repoRoot: string, commit: string): string | null {
 	const empty = git(repoRoot, ["diff", "--quiet", `${commit}^`, commit], true);
 	if (empty.status === 0) return "empty";
 	if (empty.status !== 1) return null;
@@ -217,7 +217,7 @@ function commitPatchIdentity(repoRoot: string, commit: string): string | null {
 	return match?.[1]?.toLowerCase() ?? null;
 }
 
-function patchEquivalentBothWays(repoRoot: string, integrationHead: string, restackedHead: string, approvedBase: string, checkpoint: string): boolean {
+export function patchEquivalentBothWays(repoRoot: string, integrationHead: string, restackedHead: string, approvedBase: string, checkpoint: string): boolean {
 	// `git cherry` is a useful patch-membership check, but it omits merges and
 	// collapses repeated patch IDs. Replay the exact reviewed linear sequence so
 	// recovery is also bound to patch order, multiplicity, and the resulting tree.

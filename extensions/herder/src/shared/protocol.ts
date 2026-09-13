@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 14;
+export const MANAGER_PROTOCOL_VERSION = 15;
 export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
