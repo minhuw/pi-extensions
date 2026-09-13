@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
+import type { AttentionResolutionInput } from "../../../src/shared/protocol.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { RunStore, type StoredPlan } from "../../../src/daemon/run-store.ts";
 import {
@@ -77,9 +79,9 @@ function userDecisionRequest(planId: string, requestId: string, detail = "The Ju
 	return { ...request, requestSha256: attentionRequestSha256(request) } as AttentionRequestInput;
 }
 
-function applyUserInput(manager: HerderRunManager, value: string, eventId: string, attentionRequestId?: string): void {
-	(manager as unknown as { applyUserInput: (value: string, eventId: string, attentionRequestId?: string) => void })
-		.applyUserInput(value, eventId, attentionRequestId);
+function applyUserInput(manager: HerderRunManager, _value: string, _eventId: string, attentionRequestId?: string): void {
+	(manager as unknown as { applyUserInput: (attentionRequestId?: string) => void })
+		.applyUserInput(attentionRequestId);
 }
 
 function recoveryRequest(
@@ -270,7 +272,7 @@ test("oversized recovery path evidence persists as a bounded hashed dossier", ()
 	}
 });
 
-test("input routing skips record-only recovery dossiers and preserves public answer compatibility", () => {
+test("legacy input fails closed for recovery and user-decision dossiers", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-input-"));
 	const store = new RunStore(planDirectory);
 	try {
@@ -284,12 +286,12 @@ test("input routing skips record-only recovery dossiers and preserves public ans
 
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			assert.throws(() => applyUserInput(manager, "not a recovery answer", "recovery-answer", recovery.requestId), /does not accept user input/);
-			applyUserInput(manager, "Use the recorded decision", "decision-answer", decision.requestId);
-			assert.equal(manager.store.getPlan("run-1", "002")?.phase, "READY_JUDGE");
-			assert.equal(manager.store.getAttention(decision.requestId)?.state, "resolved");
+			assert.throws(() => applyUserInput(manager, "not a recovery answer", "recovery-answer", recovery.requestId), /Legacy user_input.*request-bound/);
+			assert.throws(() => applyUserInput(manager, "Use the recorded decision", "decision-answer", decision.requestId), /Legacy user_input.*request-bound/);
+			assert.equal(manager.store.getPlan("run-1", "002")?.phase, "NEEDS_INPUT");
+			assert.equal(manager.store.getAttention(decision.requestId)?.state, "awaiting_input");
 			assert.equal(manager.store.getAttention(recovery.requestId)?.state, "pending");
-			assert.equal(manager.store.getRun()?.status, "running");
+			assert.equal(manager.store.getRun()?.status, "needs_input");
 		} finally {
 			manager.close();
 		}
@@ -309,7 +311,7 @@ test("missing attention IDs are rejected before any request can be selected", ()
 		const decision = store.putAttention(userDecisionRequest("001", "attention-compat"));
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			assert.throws(() => applyUserInput(manager, "Answer without a binding", "compat-answer"), /requires an attention request ID/);
+			assert.throws(() => applyUserInput(manager, "Answer without a binding", "compat-answer"), /Legacy user_input.*request-bound/);
 			assert.equal(manager.store.getAttention(decision.requestId)?.state, "awaiting_input");
 			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
 		} finally {
@@ -333,8 +335,8 @@ test("unbound answers with different text cannot advance either attention reques
 		const second = store.putAttention(userDecisionRequest("002", "attention-unbound-second"));
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			assert.throws(() => applyUserInput(manager, "Answer request one", "fresh-event-a"), /requires an attention request ID/);
-			assert.throws(() => applyUserInput(manager, "Answer request two", "fresh-event-b"), /requires an attention request ID/);
+			assert.throws(() => applyUserInput(manager, "Answer request one", "fresh-event-a"), /Legacy user_input.*request-bound/);
+			assert.throws(() => applyUserInput(manager, "Answer request two", "fresh-event-b"), /Legacy user_input.*request-bound/);
 			assert.equal(manager.store.getAttention(first.requestId)?.state, "awaiting_input");
 			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
 			assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
@@ -348,7 +350,7 @@ test("unbound answers with different text cannot advance either attention reques
 	}
 });
 
-test("a committed answer replays idempotently after a later request becomes current", () => {
+test("a committed record-only answer replays idempotently after a later request becomes current", async () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-replay-"));
 	const store = new RunStore(planDirectory);
 	try {
@@ -357,10 +359,14 @@ test("a committed answer replays idempotently after a later request becomes curr
 		store.putPlan(inputPlan("run-1", "001"));
 		store.putPlan(inputPlan("run-1", "002"));
 		const first = store.putAttention(userDecisionRequest("001", "attention-first"));
+		const resolution: AttentionResolutionInput = { ...attentionResolutionFromRequest(first), action: "answer", answer: "Answer request one" };
+		const resolve = (manager: HerderRunManager) => (manager as unknown as {
+			applyAttentionResolution: (resolution: AttentionResolutionInput) => Promise<void>;
+		}).applyAttentionResolution(resolution);
 		const second = store.putAttention(userDecisionRequest("002", "attention-second"));
 		const manager = new HerderRunManager(planDirectory);
 		try {
-			applyUserInput(manager, "Answer request one", "answer-one", first.requestId);
+			await resolve(manager);
 			assert.equal(manager.store.getAttention(first.requestId)?.state, "resolved");
 			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
 			assert.equal(manager.store.getRun()?.status, "needs_input");
@@ -373,8 +379,9 @@ test("a committed answer replays idempotently after a later request becomes curr
 		// against the now-current second request.
 		const replacement = new HerderRunManager(planDirectory);
 		try {
-			applyUserInput(replacement, "Answer request one", "answer-one", first.requestId);
-			assert.deepEqual(replacement.store.getPlan("run-1", "001")?.repair, ["USER_INPUT [answer-one]: Answer request one"]);
+			await resolve(replacement);
+			assert.deepEqual(replacement.store.getPlan("run-1", "001")?.repair, ["ATTENTION_ANSWER [attention-first]: Answer request one"]);
+			assert.equal(replacement.store.getPlan("run-1", "001")?.phase, "BLOCKED");
 			assert.equal(replacement.store.getPlan("run-1", "002")?.phase, "NEEDS_INPUT");
 			assert.equal(replacement.store.getAttention(second.requestId)?.state, "awaiting_input");
 		} finally {

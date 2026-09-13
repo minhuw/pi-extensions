@@ -260,7 +260,10 @@ export async function buildAttentionPrompt(
 			`QUESTION: ${question}`,
 			`RECOMMENDED_ACTION: ${request.recommendedAction ?? "none"}`,
 			binding,
-			"After the user answers, call herder_plan exactly once with operation \"attention\", planDirectory and requestId from the evidence above, action \"answer\", and the exact answer text. The adapter supplies immutable request evidence. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.",
+			'After the user answers, call herder_plan exactly once with operation "attention", planDirectory and requestId from the evidence above, and the exact nonempty answer text. Default to action "answer": it durably records the answer and resolves this request, but leaves the plan BLOCKED (final RUN paused), never scheduling its worker. Manual intervention is still needed; /herder-resume does not unblock a recorded-only answer.',
+			'Use action "answer_and_resume" only for an explicit user clarification within existing scope that makes the current immutable assignment runnable; it resumes the recorded role/phase at the same round. Upstream, scope, acceptance, or dependency revisions are not clarifications. If unresolved or a revision is needed, use record-only "answer"; never use "retry" for user_decision or infer permission from prose.',
+			'Manual recovery must be explicitly user-invoked: /herder-rework can rewrite a blocked non-integrated target, not final RUN or a target with active/integrated downstream consumers. /herder-revise adopts validated graph changes after workers settle but cannot change already-started plans. Neither permits editing integrated upstream plans. When those guards cannot express the change, ask the user to stop, replan standalone, and start a fresh run from a trusted base. Do not invoke recovery automatically.',
+			'The adapter supplies immutable request evidence. Do not use an unbound user_input event. Do not edit source, plans, Git state, SQLite, or run-control state.',
 		].join("\n");
 	}
 

@@ -318,9 +318,10 @@ test("Judge repair requires a bounded pass document while other decisions may om
 });
 
 test("attention acceptance requires adapter confirmation and explicit waivers through round three", () => {
-	assert.equal(MANAGER_PROTOCOL_VERSION, 12);
+	assert.equal(MANAGER_PROTOCOL_VERSION, 13);
 	assert.equal(MAX_PLAN_ROUNDS, 3);
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("accept"));
+	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("answer_and_resume"));
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("stop"));
 	const acceptance = {
 		schemaVersion: 1,
@@ -333,6 +334,11 @@ test("attention acceptance requires adapter confirmation and explicit waivers th
 		rationale: "The reviewed tree is sufficient for this release.",
 	};
 	assert.doesNotThrow(() => validateAttentionResolution(acceptance));
+	assert.doesNotThrow(() => validateAttentionResolution({ ...acceptance, action: "answer_and_resume" }));
+	for (const answer of [undefined, "", "   ", 7]) {
+		assert.throws(() => validateAttentionResolution({ ...acceptance, action: "answer_and_resume", answer }), /answer/);
+	}
+	assert.throws(() => validateAttentionResolution({ ...acceptance, action: "invented_action" }), /Unsupported attention/);
 	for (const patch of [{ confirmed: false }, { confirmed: undefined }, { answer: undefined }, { answer: "   " }, { rationale: undefined }, { rationale: "   " }]) {
 		assert.throws(() => validateAttentionResolution({ ...acceptance, ...patch }), /requires human confirmation/);
 	}

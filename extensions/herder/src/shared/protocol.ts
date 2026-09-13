@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 12;
+export const MANAGER_PROTOCOL_VERSION = 13;
 export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
@@ -149,6 +149,7 @@ export interface AttentionContinuation {
 /** Actions accepted by the manager-owned attention resolution operation. */
 export const ATTENTION_RESOLUTION_ACTIONS = [
 	"answer",
+	"answer_and_resume",
 	"accept",
 	"stop",
 	"defer",
@@ -220,10 +221,17 @@ export function validateAttentionResolution(value: unknown): asserts value is At
 	if (typeof resolution.action !== "string" || resolution.action.length === 0 || resolution.action.length > 64 || /[\0\r\n]/.test(resolution.action)) {
 		throw new Error("Attention resolution action is invalid");
 	}
+	const action = resolution.action.trim().toLowerCase().replace(/[- ]+/g, "_");
+	if (![...ATTENTION_RESOLUTION_ACTIONS, "unchanged", "retry_unchanged", "replace", "reject_revision"].includes(action)) {
+		throw new Error(`Unsupported attention resolution action: ${resolution.action}`);
+	}
 	for (const [name, candidate, limit] of [["answer", resolution.answer, 16_384], ["rationale", resolution.rationale, 16_384]] as const) {
 		if (candidate !== undefined && (typeof candidate !== "string" || candidate.length === 0 || candidate.length > limit || /\0/.test(candidate))) {
 			throw new Error(`Attention resolution ${name} is invalid`);
 		}
+	}
+	if (action === "answer_and_resume" && !resolution.answer?.trim()) {
+		throw new Error("answer_and_resume requires a nonempty exact answer");
 	}
 	if (resolution.confirmed !== undefined && typeof resolution.confirmed !== "boolean") throw new Error("Attention resolution confirmed must be a boolean");
 	if (resolution.action.trim().toLowerCase() === "accept"

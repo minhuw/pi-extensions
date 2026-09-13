@@ -258,6 +258,7 @@ function normalizeAttentionAction(value: string): AttentionResolutionAction {
 	const normalized = value.trim().toLowerCase().replace(/[- ]+/g, "_");
 	const aliases: Record<string, AttentionResolutionAction> = {
 		answer: "answer",
+		answer_and_resume: "answer_and_resume",
 		defer: "defer",
 		retry: "retry",
 		cancel: "cancel",
@@ -1192,8 +1193,10 @@ export class HerderRunManager {
 		}
 		const finalPlan = this.store.getPlan(run.runId, "RUN");
 		const finalCancellation = finalPlan?.phase === "BLOCKED" ? finalPlan.repair.findLast((detail) => detail.startsWith("ATTENTION_CANCEL [")) : undefined;
-		if (finalCancellation) {
-			this.store.updateRun({ status: "paused", terminalDetail: `Final RUN audit remains cancelled. ${finalCancellation}` });
+		if (finalPlan?.phase === "BLOCKED") {
+			this.store.updateRun({ status: "paused", terminalDetail: finalCancellation
+				? `Final RUN audit remains cancelled. ${finalCancellation}`
+				: "Final RUN audit remains BLOCKED; manual intervention is needed. Resume cannot resolve a recorded-only answer." });
 			return this.reply();
 		}
 		const failedVerification = this.store.getVerification(run.runId, run.currentGeneration);
@@ -2020,7 +2023,7 @@ export class HerderRunManager {
 			schedule = !applied.capacityRejected;
 		} else if (input.kind === "terminals") {
 			batchDrift = await this.applyTerminals(input.terminals, input.eventId, input);
-		} else if (input.kind === "user_input") this.applyUserInput(input.userInput, input.eventId, input.attentionRequestId);
+		} else if (input.kind === "user_input") this.applyUserInput(input.attentionRequestId);
 		else await this.applyAttentionResolution(input.attention);
 		const current = this.store.getRun()!;
 		const drift = batchDrift ?? this.graphDrift(current);
@@ -2612,57 +2615,12 @@ export class HerderRunManager {
 		};
 	}
 
-	private applyUserInput(value: string, eventId: string, attentionRequestId?: string): void {
-		if (!attentionRequestId) throw new Error("User input requires an attention request ID");
-		const run = this.store.getRun()!;
-		const marker = `USER_INPUT [${eventId}]: ${value}`;
-		const plans = this.store.getPlans(run.runId);
-		const suppliedAttention = this.store.getAttention(attentionRequestId);
-		if (suppliedAttention?.cause === "verification_environment" || suppliedAttention?.cause === "review_budget_exhausted") {
+	private applyUserInput(attentionRequestId?: string): never {
+		const attention = attentionRequestId ? this.store.getAttention(attentionRequestId) : null;
+		if (attention?.cause === "verification_environment" || attention?.cause === "review_budget_exhausted") {
 			throw new Error("Environment or review-budget attention requires a request-bound explicit retry or cancel resolution");
 		}
-		// The event may have committed its plan/attention transaction before the
-		// process was replaced and before the event journal write. Recognize that
-		// durable marker only on the explicitly bound request's plan.
-		if (suppliedAttention?.runId === run.runId && plans.some((plan) => plan.planId === suppliedAttention.planId && plan.repair.includes(marker))) return;
-		if (run.status !== "needs_input") throw new Error("Run is not waiting for user input");
-
-		// Recovery dossiers are record-only in this phase. They retain the
-		// deterministic global attention order, but must not mask an input-bearing
-		// dossier when selecting a user answer.
-		const nextInputAttention = this.store.getNextInputAttention(run.runId);
-		if (!nextInputAttention) throw new Error("No durable attention request is waiting for user input");
-		const attention = suppliedAttention;
-		if (!attention || attention.runId !== run.runId || attention.state === "resolved") {
-			throw new Error(`Attention request ${attentionRequestId} is not an unresolved request for this run`);
-		}
-		if (!["user_decision", "operator_attention"].includes(attention.kind)) {
-			throw new Error(`Attention request ${attention.requestId} does not accept user input`);
-		}
-		if (attention.requestId !== nextInputAttention.requestId) {
-			throw new Error(`Attention request ${attention.requestId} is not the next eligible input request`);
-		}
-		const plan = this.store.getPlan(run.runId, attention.planId);
-		if (!plan || plan.phase !== "NEEDS_INPUT") throw new Error(`Attention request ${attention.requestId} has no matching input-waiting plan`);
-		if (plan.generation !== attention.generation || plan.round !== attention.round) {
-			throw new Error(`Attention request ${attention.requestId} does not match the input-waiting generation and round`);
-		}
-		if (readyPhaseForRole(attention.continuation.role) !== attention.continuation.phase) {
-			throw new Error(`Attention request ${attention.requestId} has an invalid continuation phase`);
-		}
-		this.store.transaction(() => {
-			this.updatePlan(plan, {
-				phase: attention.continuation.phase,
-				repair: [...plan.repair, marker],
-			});
-			this.store.resolveAttention(attention.requestId);
-			const remainingInput = this.store.getNextInputAttention(run.runId);
-			const remaining = this.store.getNextAttention(run.runId);
-			this.store.updateRun({
-				status: remainingInput ? "needs_input" : "running",
-				terminalDetail: remainingInput?.detail ?? remaining?.detail ?? null,
-			});
-		});
+		throw new Error('Legacy user_input cannot resolve attention or resume workers. Use request-bound attention action "answer" to record only, or "answer_and_resume" with the exact nonempty user clarification that makes the immutable assignment runnable; operator attention requires retry/cancel.');
 	}
 
 	private attentionResolutionRequest(run: StoredRun, resolution: AttentionResolutionInput) {
@@ -2936,8 +2894,14 @@ export class HerderRunManager {
 		if ((attention.cause === "verification_environment" || attention.cause === "review_budget_exhausted") && !["retry", "cancel"].includes(action)) {
 			throw new Error("Environment or review-budget attention requires explicit retry or cancel; it cannot approve or waive checks");
 		}
-		if (!["answer", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
-		if (attention.kind === "user_decision" && action === "answer" && !(resolution.answer || "").trim()) {
+		if (attention.kind === "user_decision" && action === "retry") {
+			throw new Error('User-decision retry is not allowed; use answer_and_resume with an exact nonempty clarification, or answer to record only.');
+		}
+		if (action === "answer_and_resume" && attention.kind !== "user_decision") {
+			throw new Error("answer_and_resume is only valid for user_decision attention");
+		}
+		if (!["answer", "answer_and_resume", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
+		if (attention.kind === "user_decision" && ["answer", "answer_and_resume"].includes(action) && !(resolution.answer || "").trim()) {
 			throw new Error(`Attention request ${attention.requestId} requires an answer`);
 		}
 		const plan = this.store.getPlan(run.runId, attention.planId);
@@ -2945,18 +2909,19 @@ export class HerderRunManager {
 			throw new Error(`Attention request ${attention.requestId} has no matching input-waiting continuation`);
 		}
 		const continuationPhase = attention.continuation.phase;
+		const recordOnly = attention.kind === "user_decision" && action === "answer";
 		const marker = action === "cancel"
 			? `ATTENTION_CANCEL [${attention.requestId}]: ${(resolution.rationale || resolution.answer || "operator cancelled").trim()}`
 			: `ATTENTION_ANSWER [${attention.requestId}]: ${(resolution.answer || resolution.rationale || "retry").trim()}`;
 		this.store.transaction(() => {
 			this.updatePlan(plan, {
-				phase: action === "cancel" ? "BLOCKED" : continuationPhase,
+				phase: action === "cancel" || recordOnly ? "BLOCKED" : continuationPhase,
 				repair: [...plan.repair, marker],
 			});
 			this.store.recordEvent(run.runId, `manager-attention-resolution:${attention.requestId}`, "attention_resolution", resolution);
 			this.store.resolveAttention(attention.requestId);
 			this.attentionStatusAfterResolution(run.runId);
-			if (action === "cancel" && attention.planId === "RUN") {
+			if ((action === "cancel" || recordOnly) && attention.planId === "RUN") {
 				this.store.updateRun({ status: "paused", terminalDetail: marker });
 			}
 		});
@@ -3569,9 +3534,10 @@ export class HerderRunManager {
 				available: Math.max(0, run.maxParallel - active.length),
 			},
 			scheduler,
-			message: planEdit
+			message: (plans.some((plan) => plan.phase === "BLOCKED")
+				? "BLOCKED work requires manual intervention; recorded answers do not resume it. Use explicit user-invoked recovery. " : "") + (planEdit
 				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
-				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`,
+				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`),
 			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),

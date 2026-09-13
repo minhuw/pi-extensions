@@ -94,6 +94,15 @@ test("typed attention prompts preserve request bindings and route each variant",
 		question: "Which recorded decision should the Judge use?",
 	} as ManagerAttentionRequest);
 	assert.match(userPrompt, /^HERDER_MAIN_SESSION_USER_DECISION_V1/m);
+	assert.match(userPrompt, /Default to action "answer"/);
+	assert.match(userPrompt, /BLOCKED \(final RUN paused\), never scheduling/);
+	assert.match(userPrompt, /Manual intervention is still needed/);
+	assert.match(userPrompt, /"answer_and_resume" only.*immutable assignment runnable/);
+	assert.match(userPrompt, /Upstream, scope, acceptance, or dependency revisions are not clarifications/);
+	assert.match(userPrompt, /never use "retry" for user_decision/);
+	assert.match(userPrompt, /cannot change already-started plans/);
+	assert.match(userPrompt, /Neither permits editing integrated upstream plans/);
+	assert.match(userPrompt, /stop, replan standalone, and start a fresh run/);
 	assert.match(userPrompt, /QUESTION: Which recorded decision should the Judge use\?/);
 	assert.match(userPrompt, /PLAN_DIRECTORY: \/repo\/herder-plans/);
 	assert.match(userPrompt, /REQUEST_ID: request-001/);
@@ -436,6 +445,10 @@ test("attention schema is minimal and normalizes legacy stored calls", () => {
 	registerPiPlanningWorkflows(pi, "/repo/herder", async () => "/repo", { assertMutationAllowed: () => {} });
 	const tool = tools.find((candidate) => candidate.name === "herder_plan");
 	assert.ok(tool?.parameters);
+	const actionDescription = (tool.parameters as { properties: { action: { description: string } } }).properties.action.description;
+	assert.match(actionDescription, /answer records.*BLOCKED \(RUN paused\).*manual intervention/);
+	assert.match(actionDescription, /answer_and_resume is user_decision-only/);
+	assert.match(actionDescription, /retry is not allowed for user_decision/);
 	assert.ok(tool.prepareArguments);
 	const minimal = {
 		operation: "attention",

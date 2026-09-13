@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
+import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
 import { submitHerderEvent } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { initPlanDir } from "../../../src/core/plans.ts";
@@ -639,7 +641,7 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 	});
 });
 
-test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round", { timeout: 45_000 }, async () => {
+test("Judge NEEDS_INPUT requires explicit clarification to reschedule the same Judge round", { timeout: 45_000 }, async () => {
 	await withFixture("judge-input", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-input");
 		const question = "Which approved repair boundary | should the Judge apply?";
@@ -669,19 +671,15 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 			before.store.close();
 		}
 
-		const publicSubmission = payload(await submitHerderEvent({
+		const submission = {
 			planDirectory: fixture.planDirectory,
-			kind: "user_input",
-			attentionRequestId: attention.requestId,
-			userInput: "Use only the declared repair contract.",
-		}));
+			kind: "attention",
+			attention: { ...attentionResolutionFromRequest(attention as unknown as ManagerAttentionRequest),
+				action: "answer_and_resume", answer: "Use only the declared repair contract." },
+		};
+		const publicSubmission = payload(await submitHerderEvent(submission));
 		const resumed = payload(publicSubmission.reply);
-		const publicReplay = payload(await submitHerderEvent({
-			planDirectory: fixture.planDirectory,
-			kind: "user_input",
-			attentionRequestId: attention.requestId,
-			userInput: "Use only the declared repair contract.",
-		}));
+		const publicReplay = payload(await submitHerderEvent(submission));
 		assert.equal(payload(publicReplay.reply).status, "running", "a public replay must remain bound to the resolved request");
 		assert.equal(resumed.status, "running");
 		assert.equal(resumed.attention, undefined);
@@ -696,7 +694,7 @@ test("Judge NEEDS_INPUT pauses and user input reschedules the same Judge round",
 			assert.equal(after.plan.round, 2);
 			assert.equal(after.plan.repair.length, 2);
 			assert.equal(after.plan.repair[0], question);
-			assert.match(after.plan.repair[1]!, /^USER_INPUT \[attention:[0-9a-f]{64}\]: Use only the declared repair contract\.$/);
+			assert.match(after.plan.repair[1]!, /^ATTENTION_ANSWER \[[^\]]+\]: Use only the declared repair contract\.$/);
 			assertNoApproval(after.store, after.run!.runId);
 		} finally {
 			after.store.close();

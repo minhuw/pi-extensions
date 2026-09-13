@@ -73,7 +73,7 @@ const planningWorkflowSchema = Type.Object({
 	editToken: Type.Optional(Type.String()),
 	track: Type.Optional(Type.Boolean()),
 	requestId: Type.Optional(Type.String()),
-	action: Type.Optional(Type.String()),
+	action: Type.Optional(Type.String({ description: "Attention decision: user_decision answer records the exact nonempty answer only and leaves work BLOCKED (RUN paused), requiring manual intervention. answer_and_resume is user_decision-only, for explicit within-scope clarification making the immutable assignment runnable at its recorded phase; retry is not allowed for user_decision. Operator attention uses retry/cancel; recovery uses unchanged_retry/revise/reject or exhaustion accept/stop; defer leaves a request unresolved." })),
 	answer: Type.Optional(Type.String()),
 	rationale: Type.Optional(Type.String()),
 }, { additionalProperties: false });

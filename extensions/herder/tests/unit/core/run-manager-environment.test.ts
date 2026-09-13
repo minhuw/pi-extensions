@@ -506,16 +506,18 @@ test("round-two requirement review requests recovery instead of adjudication or 
 });
 
 
-test("requirement decision resumes INITIAL without inventing guided code-repair authority", { timeout: 30_000 }, async () => {
+for (const final of [false, true]) test(`explicit requirement clarification resumes the recorded phase (final=${final})`, { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	try {
-		const a = action(f.reply);
+		const a = final ? await finalReviewer(f) : action(f.reply);
 		await dispatch(f, a);
 		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
 		f.restart();
-		const next = action(await f.manager.event({ eventId: "requirement-answer", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer", answer: "Keep the original value export requirement; do not expand scope." } }));
+		const next = action(await f.manager.event({ eventId: "requirement-answer", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Keep the original value export requirement; do not expand scope." } }));
 		assert.equal(next.round, 1);
-		assert.equal(next.workerMode, "INITIAL");
+		assert.equal(next.workerMode, final ? "FINAL_AUDIT" : "INITIAL");
+		assert.equal(next.role, a.role);
+		assert.equal(next.planId, a.planId);
 		assert.equal(next.assignmentSha256, a.assignmentSha256);
 		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
 	} finally { f.close(); }
@@ -682,5 +684,76 @@ test("manager resume also reuses an environment successor interrupted after veri
 		assert.equal(action(await resume(f)).workerMode, "FINAL_AUDIT");
 		assert.equal(f.manager.store.getVerificationByRequestId(sealed.successorRequestId!)?.state, "passed");
 		assert.equal(f.manager.store.getIntegrationRepairAudits(sealed.repairId).filter((audit) => audit.action === "environment-retry").length, 1);
+	} finally { f.close(); }
+});
+
+for (const final of [false, true]) test(`record-only requirement answer stays blocked across scheduling and reopen/resume (final=${final})`, { timeout: 45_000 }, async () => {
+	const f = await fixture(final ? 1 : 2);
+	try {
+		const a = final ? await finalReviewer(f) : action(f.reply);
+		await dispatch(f, a);
+		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
+		assert.equal(request.kind, "user_decision");
+		const answer = "  Fix the upstream requirement first; revise dependencies before continuing.\nDo not expand this worker's scope.  ";
+		const resolution = { ...attentionResolutionFromRequest(request), action: "answer", answer };
+		const reply = await f.manager.event({ eventId: "record-only", kind: "attention", attention: resolution });
+		assert.match(reply.message, /BLOCKED.*manual intervention/);
+		assert.equal(runtime(f, a.planId).phase, "BLOCKED");
+		assert.equal(reply.actions.some((candidate) => candidate.planId === a.planId), false);
+		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "resolved");
+		assert.equal(f.manager.store.readEvent(`manager-attention-resolution:${request.requestId}`)?.payloadSha256, sha256(stableJson(resolution)));
+		assert.ok(runtime(f, a.planId).repair.includes(`ATTENTION_ANSWER [${request.requestId}]: ${answer.trim()}`));
+		const count = f.manager.store.countActions(a.runId, { planId: a.planId });
+		if (!final) {
+			const sibling = action(reply);
+			assert.equal(sibling.planId, "002");
+			const review = action(await implemented(f, sibling), "plan-reviewer");
+			await dispatch(f, review);
+			await terminal(f, review, approve);
+			assert.equal(runtime(f, "002").phase, "DONE", "unrelated work integrates despite the recorded blocker");
+		}
+		f.restart();
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			for (const resumed of [await f.manager.auditScheduler(), await resume(f), await f.manager.event({ eventId: "record-only", kind: "attention", attention: resolution })]) {
+				assert.equal(resumed.actions.some((candidate) => candidate.planId === a.planId), false);
+				assert.match(resumed.message, /manual intervention/);
+				if (final) assert.equal(resumed.status, "paused");
+			}
+			assert.equal(runtime(f, a.planId).phase, "BLOCKED");
+			assert.equal(f.manager.store.countActions(a.runId, { planId: a.planId }), count);
+			assert.equal(f.manager.store.readEvent(`manager-attention-resolution:${request.requestId}`)?.payloadSha256, sha256(stableJson(resolution)));
+		}
+		await assert.rejects(f.manager.event({ eventId: "late-resume", kind: "attention", attention: { ...resolution, action: "answer_and_resume" } }), /different resolution/);
+	} finally { f.close(); }
+});
+
+test("user decisions reject legacy prose, retry, and missing answers without consuming the request", { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = action(f.reply);
+		await dispatch(f, a);
+		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
+		await assert.rejects(f.manager.event({ eventId: "legacy", kind: "user_input", attentionRequestId: request.requestId, userInput: "Proceed now" }), /Legacy user_input.*request-bound/);
+		for (const action of ["answer", "answer_and_resume", "retry", "invented_action"]) {
+			for (const answer of [undefined, "", "   ", 7]) {
+				await assert.rejects(f.manager.event({ eventId: `bad:${action}:${answer}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer } as never }));
+			}
+		}
+		await assert.rejects(retry(f, request), /use answer_and_resume/);
+		assert.equal(runtime(f).phase, "NEEDS_INPUT");
+		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "awaiting_input");
+		assert.equal(f.manager.store.countActions(a.runId, { planId: a.planId }), 1);
+	} finally { f.close(); }
+});
+
+for (const recovery of [false, true]) test(`answer_and_resume rejects wrong attention kind (recovery=${recovery})`, { timeout: 30_000 }, async () => {
+	const f = await fixture();
+	try {
+		const a = recovery ? await reviewer(f) : action(f.reply);
+		await dispatch(f, a);
+		const request = (await terminal(f, a, blocked(a.role, recovery ? "REQUIREMENT" : "ENVIRONMENT"))).attention!;
+		assert.equal(request.kind, recovery ? "plan_recovery" : "operator_attention");
+		await assert.rejects(f.manager.event({ eventId: "wrong-kind", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Within scope clarification" } }), /cannot resolve plan-recovery|explicit retry or cancel|only valid for user_decision/);
+		assert.notEqual(f.manager.store.getAttention(request.requestId)?.state, "resolved");
 	} finally { f.close(); }
 });
