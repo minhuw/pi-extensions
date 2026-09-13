@@ -1,3 +1,4 @@
+import { assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending } from "./run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -887,7 +888,8 @@ export class HerderRunManager {
 			`IMPLEMENTED_STATUS: inspect recorded COMPLETE/FAILED outcomes and checks below; failed checks remain failed. Worktree status: ${boundedEvidence(this.driver(run).worktreeStatus(plan.worktree) || "clean", 500)}`,
 			`REMAINING_FINDINGS_AND_IMPACT: ${boundedEvidence(stableJson(finishing?.result && "findings" in finishing.result ? finishing.result.findings : plan.findings), 1_000)}`,
 			`RECORDED_GATES: ${boundedEvidence(stableJson(plan.gates), 600)}`,
-			"RECOMMENDATION: Stop unless the exact clean reviewed patch is acceptable with explicitly acknowledged gaps. OPTIONS: accept (confirmed, accepted gaps and rationale; only a clean terminal round-3 reviewed tree), stop (preserve artifacts), or explicitly revise the target in a new generation. Pure transport exhaustion remains operator attention, not authorization to rewrite or waive requirements.",
+			plan.planId === "RUN" ? "RECOMMENDATION: Stop unless the exact clean reviewed patch is acceptable with explicitly acknowledged gaps. OPTIONS: accept (confirmed, accepted gaps and rationale; only a clean terminal round-3 reviewed tree), stop (preserve artifacts), or explicitly revise the target in a new generation. Pure transport exhaustion remains operator attention, not authorization to rewrite or waive requirements."
+				: "RECOMMENDATION: Inspect this failure and propose a concrete whole-run graph revision directly for user refinement and approval. OPTIONS: revise_run or explicit abandon_run. Approval replaces all unmerged execution on the original trusted base; dismissal never abandons or retries unchanged.",
 			boundedEvidence(this.passDocumentEvidence(run, plan), 3_000),
 			this.terminalEvidence(run, plan, finishing ? { ...finishing, detail } : undefined),
 		].join("\n"), 16_384);
@@ -982,6 +984,7 @@ export class HerderRunManager {
 	}
 
 	private graphDrift(run: StoredRun): { changed: boolean; detail: string | null } {
+		if (revisionPending(readRunRevision(this.planDirectory))) return { changed: false, detail: null };
 		const edit = this.store.getPlanEdit(run.runId);
 		if (edit?.state === "reserved") return { changed: false, detail: null };
 		try {
@@ -1034,6 +1037,7 @@ export class HerderRunManager {
 	}
 
 	private projectLifecycle(run: StoredRun, changedAfter?: string): void {
+		if (revisionPending(readRunRevision(this.planDirectory))) return;
 		const plans = this.store.getPlans(run.runId);
 		const runtime = new Map(plans.map((plan) => [plan.planId, plan]));
 		const attentionDetails = new Map(this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })
@@ -1065,6 +1069,9 @@ export class HerderRunManager {
 
 	async start(input: StartInput): Promise<ManagerReply> {
 		validateStartInput(input);
+		const revision = readRunRevision(this.planDirectory);
+		if (revisionPending(revision) && revision.state !== "restarting") throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
+		if (revisionPending(revision) && (input.repositoryRoot !== revision.run.repositoryRoot || input.profile !== revision.run.profileName || input.maxParallel !== revision.run.maxParallel)) throw new Error("Replacement Fire must preserve the original run configuration");
 		const existing = this.store.getRun();
 		if (existing) {
 			if (input.mode === "fire") throw new Error(`Run ${existing.runId} already exists; use resume`);
@@ -1106,10 +1113,12 @@ export class HerderRunManager {
 				...(profile.searcher ? { searcher: { agent_type: "herder.searcher", ...profile.searcher } } : {}),
 			},
 		});
-		const runId = randomUUID();
+		const runId = revisionPending(revision) ? revision.successorRunId : randomUUID();
+		if (revisionPending(revision) && (baseCommit !== revision.run.baseCommit || checkoutStateToken !== revision.run.checkoutStateToken || compilePlanSpecs({ runId, graphGeneration: 1, graph }).graphSha256 !== revision.graphSha256)) throw new Error("Replacement Fire identity changed");
 		const graphGeneration = 1;
 		const compiled = compilePlanSpecs({ runId, graphGeneration, graph });
 		const specs = compiled.specs;
+		if (revisionPending(revision)) assertApprovedRevisionGraph(revision, graph);
 		this.store.transaction(() => {
 			this.store.createRun({
 				runId,
@@ -1155,6 +1164,8 @@ export class HerderRunManager {
 
 	async resume(input: StartInput): Promise<ManagerReply> {
 		let run = this.store.getRun();
+		const revision = readRunRevision(this.planDirectory);
+		if (revisionPending(revision) && (revision.state !== "restarting" || run?.runId !== revision.successorRunId)) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
 		if (!run) throw new Error("No deterministic Herder run exists");
 		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Resume repository does not match the recorded run");
 		if (input.planName && input.planName !== run.planName) throw new Error(`Resume plan name must remain ${run.planName}`);
@@ -1171,6 +1182,7 @@ export class HerderRunManager {
 		}
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
+		if (revisionPending(revision)) assertApprovedRevisionGraph(revision);
 		const drift = this.graphDrift(run);
 		if (drift.changed) throw new Error(`${drift.detail} Use revise instead of resume.`);
 		if (run.status === "initializing") {
@@ -1313,6 +1325,7 @@ export class HerderRunManager {
 	}
 
 	async revise(input: StartInput): Promise<ManagerReply> {
+		if (revisionPending(readRunRevision(this.planDirectory))) throw new Error("Finish the whole-run revision first");
 		const run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
 		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Revision repository does not match the recorded run");
@@ -1649,6 +1662,7 @@ export class HerderRunManager {
 	}
 
 	async edit(input: PlanEditInput): Promise<PlanEditReply> {
+		if (revisionPending(readRunRevision(this.planDirectory))) throw new Error("Whole-run revision owns graph editing; use its bound finish_edit flow");
 		validatePlanEditInput(input);
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
@@ -2073,6 +2087,7 @@ export class HerderRunManager {
 				continue;
 			}
 			if (action.state !== "proposed") throw new Error(`Action ${result.actionId} cannot dispatch from ${action.state}`);
+			if (result.accepted && revisionPending(readRunRevision(this.planDirectory))) throw new Error("Whole-run revision barrier forbids new worker dispatch");
 			if (!result.accepted && result.hostHandle) throw new Error(`Rejected action ${result.actionId} cannot have a host handle`);
 			if (result.accepted && !result.hostHandle) throw new Error(`Accepted action ${result.actionId} has no host handle`);
 			const plan = this.store.getPlan(run.runId, action.planId);
@@ -2777,6 +2792,19 @@ export class HerderRunManager {
 		const run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
 		const attention = this.attentionResolutionRequest(run, resolution);
+		if (attention.planId !== "RUN") {
+			if (!["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Plan attention requires revise_run or explicit abandon_run; unchanged retry, defer, answer, and target-local recovery are not allowed");
+			if (attention.state === "resolved") throw new Error("Whole-run request is already resolved");
+			if (attention.kind === "plan_recovery" && resolution.git) {
+				for (const key of ["assignmentPath", "assignmentSha256", "snapshotSha256", "generationBase", "branch", "worktree", "worktreeHead", "worktreeTree"] as const) {
+					if (resolution.git[key] !== attention.recovery[key]) throw new Error("Whole-run attention Git identity does not match immutable request evidence");
+				}
+			}
+			if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the target edit before whole-run revision");
+			await beginRunRevision(run, resolution);
+			if (run.status !== "needs_input") this.store.updateRun({ status: "needs_input", terminalDetail: "Review the whole-run revision; abandonment requires explicit confirmation." });
+			return;
+		}
 		if (attention.state === "resolved") return;
 		const action = normalizeAttentionAction(String(resolution.action));
 		if (action === "defer") return;
@@ -3019,6 +3047,7 @@ export class HerderRunManager {
 	private async reconcile(profile: ResolvedProfile, options: { schedule?: boolean } = {}): Promise<ManagerReply> {
 		let run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
+		if (revisionPending(readRunRevision(this.planDirectory))) return this.reply("revision-barrier");
 		if (run.status !== "running" && run.status !== "needs_input") return this.reply();
 		const driver = this.driver(run);
 		await driver.verifyCheckout(run.checkoutStateToken);
@@ -3391,7 +3420,7 @@ export class HerderRunManager {
 	): ManagerReply["scheduler"] {
 		const active = state?.active ?? activeActions(this.store, run.runId);
 		const edit = this.store.getPlanEdit(run.runId);
-		if (edit?.state === "barrier") suppression = "revision-barrier";
+		if (edit?.state === "barrier" || revisionPending(readRunRevision(this.planDirectory))) suppression = "revision-barrier";
 		const reservedPlanId = edit?.planId;
 		const owned = new Set(active.map((action) => action.planId));
 		const plans = state?.plans ?? this.store.getPlans(run.runId);
@@ -3502,6 +3531,7 @@ export class HerderRunManager {
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
 		const proposed = active.filter((action) => action.state === "proposed");
 		const planEdit = this.store.getPlanEdit(run.runId);
+		const runRevision = readRunRevision(this.planDirectory);
 		const nextAttention = planEdit ? null : this.store.getNextAttention(run.runId);
 		const exposedAttention = nextAttention ? (({ sequence: _sequence, ...request }) => request)(nextAttention) : undefined;
 		const verification = this.store.getVerification(run.runId, run.currentGeneration);
@@ -3519,7 +3549,8 @@ export class HerderRunManager {
 			maxParallel: run.maxParallel,
 			planDirectory: run.planDirectory,
 			...(run.dashboardUrl ? { dashboardUrl: run.dashboardUrl } : {}),
-			actions: proposed.map((action) => this.managerAction(run, action)),
+			actions: revisionPending(runRevision) ? [] : proposed.map((action) => this.managerAction(run, action)),
+			...(revisionPending(runRevision) ? { runRevision: { editToken: runRevision.editToken, requestId: runRevision.request.requestId, state: runRevision.state } } : {}),
 			active: active.map((action) => ({
 				actionId: action.actionId,
 				planId: action.planId,

@@ -318,7 +318,7 @@ test("Judge repair requires a bounded pass document while other decisions may om
 });
 
 test("attention acceptance requires adapter confirmation and explicit waivers through round three", () => {
-	assert.equal(MANAGER_PROTOCOL_VERSION, 13);
+	assert.equal(MANAGER_PROTOCOL_VERSION, 14);
 	assert.equal(MAX_PLAN_ROUNDS, 3);
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("accept"));
 	assert.ok(ATTENTION_RESOLUTION_ACTIONS.includes("answer_and_resume"));

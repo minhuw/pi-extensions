@@ -1,3 +1,8 @@
+import { confirmRunRevision, prepareRunRevision, readRunRevision, writeRunRevision } from "../../../src/core/run-revision.ts";
+import { HerderRunManager } from "../../../src/core/run-manager.ts";
+import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -312,7 +317,7 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-test("main-session attention queues concurrent plans and re-exposes only the current request", { timeout: 30_000 }, async () => {
+test("main-session attention re-exposes the current request and refuses obsolete selective rejection", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
@@ -356,7 +361,7 @@ test("main-session attention queues concurrent plans and re-exposes only the cur
 		assert.equal(messageDetails.cause, "initial_decision_blocked");
 		assert.equal(messageDetails.role, "plan-implementer");
 		assert.equal(messageDetails.round, 1);
-		assert.equal(messageDetails.nextAction, "Review the dossier, then retry unchanged, revise, reject, or defer.");
+		assert.equal(messageDetails.nextAction, "Propose/review a whole-run revision; abandon is available.");
 		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
 		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
 
@@ -382,22 +387,12 @@ test("main-session attention queues concurrent plans and re-exposes only the cur
 			undefined,
 			ctx,
 		));
-		assert.equal(resolved.isError, undefined);
-		assert.equal(object(resolved.details).result && object(object(resolved.details).result).ok, true);
-		const accepted = object((await requestService(service, "/v1/status")).reply);
-		const next = object(accepted.attention);
-		assert.equal(next.planId, "002");
-		assert.notEqual(next.requestId, attention.requestId);
-		assert.equal(api.customMessages.length, 3, "the next plan is surfaced only after resolving the first");
-		assert.match(api.customMessages[2]!.content, /PLAN_ID: 002/);
-		await api.invoke("agent_settled", ctx);
-		assert.equal(api.customMessages.length, 3, "queued requests are not duplicated");
-		const second = object(await api.tool("herder_plan").execute("attention-002", {
-			operation: "attention", planDirectory: "herder-plans", requestId: next.requestId,
-			action: "reject", rationale: "Reject the second blocked fixture without modifying its plan.",
-		}, undefined, undefined, ctx));
-		assert.equal(second.isError, undefined);
-		assert.equal(object((await requestService(service, "/v1/status")).reply).attention, undefined);
+		assert.equal(resolved.isError, true);
+		assert.match(String((resolved.content as Array<{ text: string }>)[0]!.text), /requires revise_run or explicit abandon_run/);
+		const unchanged = object((await requestService(service, "/v1/status")).reply);
+		assert.equal(object(unchanged.attention).requestId, attention.requestId);
+		assert.equal(api.customMessages.length, 2, "no selective action consumes the current request");
+		assert.equal(factory.requests.length, 0);
 
 		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
 		shutdown = true;
@@ -413,7 +408,7 @@ test("main-session attention queues concurrent plans and re-exposes only the cur
 	}
 });
 
-test("accepting exhausted work requires host confirmation and preserves the failed review", { timeout: 60_000 }, async () => {
+test("exhausted plan attention refuses acceptance even with a forged confirmation and preserves failed evidence", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-acceptance-"));
 	let fixture: Fixture | undefined;
 	let api: CapturedExtensionAPI | undefined;
@@ -473,7 +468,7 @@ test("accepting exhausted work requires host confirmation and preserves the fail
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
 		const delivered = await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
-		assert.equal(object(delivered.details).nextAction, "Review the dossier, then accept, revise, stop, or defer.");
+		assert.equal(object(delivered.details).nextAction, "Propose/review a whole-run revision; abandon is available.");
 		const params = {
 			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
 			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",
@@ -482,35 +477,17 @@ test("accepting exhausted work requires host confirmation and preserves the fail
 		};
 		const declined = object(await api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx));
 		assert.equal(declined.isError, true);
-		assert.match(String((declined.content as Array<{ text: string }>)[0]!.text), /Acceptance declined/);
+		assert.match(String((declined.content as Array<{ text: string }>)[0]!.text), /requires revise_run or explicit abandon_run/);
 		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
-		assert.equal(confirmations.length, 1);
-		const before = new RunStore(fixture.planDirectory);
-		try { assert.equal(before.getApproval(String(reply.runId), "001", 1), null); } finally { before.close(); }
-		consent = true;
-		shutdownDuringConfirmation = true;
-		const retired = object(await api.tool("herder_plan").execute("retired-session", params, undefined, undefined, ctx));
-		assert.equal(retired.isError, true, "a confirmation from a retired session cannot authorize acceptance");
-		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
-		shutdownDuringConfirmation = false;
-		await api.invoke("session_start", ctx);
-		const accepted = object(await api.tool("herder_plan").execute("accept", { ...params, confirmed: false }, undefined, undefined, ctx));
-		assert.equal(accepted.isError, undefined, JSON.stringify(accepted));
-		assert.equal(confirmations.length, 3);
+		assert.equal(confirmations.length, 0, "obsolete acceptance never opens a host confirmation");
 		const store = new RunStore(fixture.planDirectory);
 		try {
-			const plan = store.getPlan(String(reply.runId), "001")!;
-			assert.equal(plan.phase, "DONE");
-			assert.match(plan.findings.join("\n"), /required regression check fails/);
-			const proof = store.getApproval(String(reply.runId), "001", 1)!;
-			assert.equal(proof.decisionRole, "user");
-			assert.equal(proof.userAcceptance?.confirmed, true);
-			assert.equal(proof.userAcceptance?.answer, params.answer);
-			assert.ok(confirmations.every((text) => text.includes(proof.approvedHead) && text.includes(proof.approvedTree)));
-			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
-			assert.equal(store.getVerification(String(reply.runId), 1)?.state, "awaiting_manifest", "acceptance never waives final verification");
+			assert.equal(store.getApproval(String(reply.runId), "001", 1), null);
+			assert.equal(store.getAttention(String(attention.requestId))?.state === "resolved", false);
+			assert.match(store.getPlan(String(reply.runId), "001")!.findings.join("\n"), /required regression check fails/);
 		} finally { store.close(); }
-		assert.equal(factory.requests.length, 0, "acceptance never dispatches another implementation or Judge");
+		assert.equal(factory.requests.length, 0);
+
 	} finally {
 		if (api && ctx) await api.invoke("session_shutdown", ctx).catch(() => {});
 		if (fixture) await stopService(fixture.planDirectory).catch(() => {});
@@ -1108,3 +1085,273 @@ test("foreign worker handles fail closed without changing manager evidence", { t
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("actual planning tool settles every worker, retains dismissed draft, and dispatches fresh whole-run assignments", { timeout: 60_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-whole-run-"));
+	let value: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let ctx: ExtensionContext | undefined;
+	try {
+		value = writeBlockedAttentionFixture(root);
+		const index = path.join(value.planDirectory, "README.md");
+		const row = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | BLOCKED — needs attention |";
+		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n| [002](002-active.md) | Active sibling | P1 | S | — | TODO |`));
+		fs.writeFileSync(path.join(value.planDirectory, "002-active.md"), fixturePlan({ id: "002", title: "Active sibling", writePaths: ["src/other.mjs"] }));
+		const factory = new PendingWorkerFactory();
+		api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		let consent = false;
+		const confirmations: string[] = [];
+		const base = freshContext(value, []);
+		ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async (_title: string, text: string) => { confirmations.push(text); return consent; },
+		} } as ExtensionContext;
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+		const message = await withDeadline(api.waitForAttentionMessage(), "whole-run attention delivery");
+		assert.match(message.content, /PROPOSE a concrete whole-run graph revision directly/);
+		assert.match(message.content, /skills\/plans\/references\/plan-format\.md.*skills\/plans\/references\/plan-template\.md completely/);
+		assert.match(message.content, /product\/execution boundary/);
+		assert.match(message.content, /cold-read the complete affected plan snapshots/);
+		assert.match(message.content, /draft Markdown writes are allowed without execution approval/);
+		assert.match(message.content, /Do not run source setup, dependency installation, tests, builds/);
+		assert.equal(factory.sessions.length, 1);
+		await withDeadline(factory.sessions[0]!.started, "initial sibling started");
+		const oldWorktree = factory.requests[0]!.action.worktree;
+		const sentinel = path.join(oldWorktree, "old-execution-evidence.txt");
+		fs.writeFileSync(sentinel, "keep until final approval");
+		const requestId = object(message.details).requestId;
+		const opened = object(await api.tool("herder_plan").execute("revise", { operation: "attention", planDirectory: value.planDirectory, requestId, action: "revise_run" }, undefined, undefined, ctx));
+		assert.equal(opened.isError, undefined, JSON.stringify(opened));
+		const record = readRunRevision(value.planDirectory)!;
+		assert.equal(factory.sessions[0]!.aborted, true, "begin returns graph authority only after all old workers settle");
+		assert.ok(fs.existsSync(sentinel));
+		const store = new RunStore(value.planDirectory, { readOnly: true });
+		try { assert.equal(store.countActions(record.run.runId, { states: ["proposed", "dispatched"] }), 0); } finally { store.close(); }
+		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
+		fs.writeFileSync(path.join(value.planDirectory, "001-recover-worker.md"), fixturePlan({ title: "Recover a lost worker", acceptance: "Entire execution uses the revised assignment." }));
+		const params = { operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken, confirmed: true };
+		const dismissed = object(await api.tool("herder_plan").execute("dismiss", params, undefined, undefined, ctx));
+		assert.equal(dismissed.isError, true);
+		assert.match(String((dismissed.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+		assert.ok(fs.existsSync(sentinel));
+		assert.equal(factory.requests.length, 1);
+		assert.equal(readRunRevision(value.planDirectory)?.state, "prepared");
+		consent = true;
+		const finished = object(await api.tool("herder_plan").execute("approve", params, undefined, undefined, ctx));
+		assert.equal(finished.isError, undefined, JSON.stringify(finished));
+		assert.equal(confirmations.length, 2);
+		assert.ok(confirmations.every(body => body.includes(record.run.runId) && body.includes(record.run.baseCommit) && body.includes(String(requestId))));
+		assert.equal(fs.existsSync(sentinel), false);
+		assert.equal(factory.requests.length, 3);
+		assert.ok(factory.requests.slice(1).every(request => request.action.runId === record.successorRunId));
+		assert.ok(factory.requests.slice(1).some(request => fs.readFileSync(request.action.assignmentPath, "utf8").includes("Entire execution uses the revised assignment")));
+		assert.equal(readRunRevision(value.planDirectory)?.state, "complete");
+	} finally {
+		if (api && ctx) await withDeadline(api.invoke("session_shutdown", ctx), "whole-run fixture shutdown").catch(() => {});
+		if (value) await stopService(value.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+async function reserveWholeRunFixture(value: Fixture) {
+	const manager = new HerderRunManager(value.planDirectory);
+	try {
+		const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 1 });
+		await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(reply.attention!), action: "revise_run" } });
+	} finally { manager.close(); }
+	const record = readRunRevision(value.planDirectory)!;
+	const index = path.join(value.planDirectory, "README.md");
+	fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
+	fs.writeFileSync(path.join(value.planDirectory, "001-recover-worker.md"), fixturePlan({ title: "Recover a lost worker", acceptance: "The replacement executes the revised contract." }));
+	return record;
+}
+
+async function assertWholeRunHook(api: CapturedExtensionAPI, ctx: ExtensionContext, value: Fixture) {
+	const hook = api.handlers.get("tool_call")!;
+	for (const event of [
+		{ toolName: "bash", input: { command: "npm test" } },
+		{ toolName: "write", input: { path: "src/value.mjs", content: "unauthorized" } },
+		{ toolName: "edit", input: { path: "src/value.mjs", edits: [] } },
+		{ toolName: "write", input: { path: "herder-plans/.herder/run-revision.json", content: "unauthorized" } },
+	]) assert.equal(object(await hook(event, ctx)).block, true, JSON.stringify(event));
+	assert.equal(await hook({ toolName: "read", input: { path: "src/value.mjs" } }, ctx), undefined);
+	assert.equal(fs.readFileSync(path.join(value.repo, "src/value.mjs"), "utf8"), "export const value = 1\n");
+}
+
+for (const operation of ["finish_edit", "cancel_edit"]) {
+	test(`fresh-session ${operation} keeps whole-run tool restrictions after dismissal/cancellation`, { timeout: 40_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-revision-recover-"));
+		const value = writeBlockedAttentionFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const base = freshContext(value, []);
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async () => false,
+		} } as unknown as ExtensionContext;
+		try {
+			const record = await reserveWholeRunFixture(value);
+			await api.invoke("session_start", ctx);
+			const result = object(await api.tool("herder_plan").execute("recover", { operation, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx));
+			if (operation === "finish_edit") {
+				assert.equal(result.isError, true);
+				assert.match(String((result.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+			} else assert.equal(result.isError, undefined, JSON.stringify(result));
+			assert.equal(readRunRevision(value.planDirectory)?.state, operation === "finish_edit" ? "prepared" : "draft");
+			await assertWholeRunHook(api, ctx, value);
+			assert.equal(await api.handlers.get("tool_call")!({ toolName: "write", input: { path: "herder-plans/001-recover-worker.md" } }, ctx), undefined);
+			// An idle status read clears currentState but must not clear the recovered edit binding.
+			initPlanDir(path.join(value.repo, "idle-plans"));
+			await api.command("herder-status").handler("idle-plans", ctx);
+			await assertWholeRunHook(api, ctx, value);
+			assert.equal(factory.requests.length, 0);
+		} finally {
+			await api.invoke("session_shutdown", ctx);
+			await stopService(value.planDirectory).catch(() => {});
+			await stopService(path.join(value.repo, "idle-plans")).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "session_start prepared"] as const) {
+	test(`${recovery} restores exact whole-run attention for confirmed abandonment without status`, { timeout: 40_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-revision-abandon-"));
+		const value = writeBlockedAttentionFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		let ctx: ExtensionContext | undefined;
+		try {
+			// Keep another durable request queued: recovery must bind the reserved one.
+			const index = path.join(value.planDirectory, "README.md");
+			const row = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | BLOCKED — needs attention |";
+			fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n${row.replaceAll("001", "002")}`));
+			fs.writeFileSync(path.join(value.planDirectory, "002-recover-worker.md"), fixturePlan({ id: "002", writePaths: ["src/other.mjs"] }));
+			const record = await reserveWholeRunFixture(value);
+			fs.writeFileSync(index, fs.readFileSync(index, "utf8").replaceAll("BLOCKED — needs attention", "TODO"));
+			if (recovery === "session_start prepared") await prepareRunRevision(value.planDirectory, record.editToken);
+			const store = new RunStore(value.planDirectory, { readOnly: true });
+			let queued;
+			try { queued = store.getAttentionRequests(record.run.runId, { unresolvedOnly: true }); }
+			finally { store.close(); }
+			assert.equal(queued.length, 2);
+			assert.equal(queued[0]!.requestId, record.request.requestId);
+			const base = recovery.startsWith("session_start") ? restoredContext(value, record.run.runId, []) : freshContext(value, []);
+			let consent = false;
+			const confirmations: string[] = [];
+			ctx = { ...base, hasUI: true, ui: { ...base.ui,
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				confirm: async (title: string, body: string) => { confirmations.push(`${title}\n${body}`); return consent; },
+			} } as unknown as ExtensionContext;
+			await api.invoke("session_start", ctx);
+			if (recovery === "finish_edit" || recovery === "cancel_edit") {
+				const recovered = object(await api.tool("herder_plan").execute("recover", { operation: recovery, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx));
+				assert.equal(recovered.isError, recovery === "finish_edit" ? true : undefined, JSON.stringify(recovered));
+				if (recovery === "finish_edit") assert.match(String((recovered.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+			}
+			await api.invoke("agent_settled", ctx);
+			const delivered = await withDeadline(api.waitForAttentionMessage(), "recovered revision attention");
+			assert.equal(object(delivered.details).requestId, record.request.requestId);
+			assert.ok(api.customMessages.every(message => object(message.details).requestId === record.request.requestId));
+			const params = { operation: "attention", planDirectory: value.planDirectory, requestId: record.request.requestId, action: "abandon_run" };
+			const count = confirmations.length;
+			const wrong = object(await api.tool("herder_plan").execute("wrong-request", { ...params, requestId: queued[1]!.requestId }, undefined, undefined, ctx));
+			assert.equal(wrong.isError, true);
+			assert.equal(confirmations.length, count);
+			const dismissed = object(await api.tool("herder_plan").execute("dismiss-abandon", params, undefined, undefined, ctx));
+			assert.equal(dismissed.isError, true);
+			assert.match(String((dismissed.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+			assert.equal(confirmations.length, count + 1);
+			assert.match(confirmations.at(-1)!, /^Abandon this entire Herder execution\?/);
+			assert.ok(confirmations.at(-1)!.includes(record.request.requestId));
+			const pending = new RunStore(value.planDirectory, { readOnly: true });
+			try {
+				assert.equal(pending.getRun()!.runId, record.run.runId);
+				assert.deepEqual(pending.getAttentionRequests(record.run.runId, { unresolvedOnly: true }), queued);
+				assert.equal(pending.getActions(record.run.runId).length, 0);
+			} finally { pending.close(); }
+			assert.equal(factory.requests.length, 0);
+			consent = true;
+			const abandoned = object(await api.tool("herder_plan").execute("confirm-abandon", params, undefined, undefined, ctx));
+			assert.equal(abandoned.isError, undefined, JSON.stringify(abandoned));
+			assert.equal(readRunRevision(value.planDirectory)?.state, "abandoned");
+			const after = new RunStore(value.planDirectory, { readOnly: true });
+			try { assert.equal(after.getRun(), null); } finally { after.close(); }
+			assert.equal(factory.requests.length, 0, "recovery and abandonment must never resume or dispatch workers");
+		} finally {
+			if (ctx) await api.invoke("session_shutdown", ctx);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const stale of ["resolved request", "request hash", "current generation"] as const) {
+	test(`whole-run attention recovery refuses ${stale} drift without binding or scheduling`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-revision-stale-"));
+		const value = writeBlockedAttentionFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		let ctx: ExtensionContext | undefined;
+		try {
+			const record = await reserveWholeRunFixture(value);
+			const store = new RunStore(value.planDirectory);
+			try {
+				if (stale === "resolved request") store.resolveAttention(record.request.requestId);
+				if (stale === "current generation") store.updateRun({ currentGeneration: record.run.currentGeneration + 1 });
+			} finally { store.close(); }
+			if (stale === "request hash") writeRunRevision(value.planDirectory, { ...record, request: { ...record.request, requestSha256: "0".repeat(64) } }, record);
+			const warnings: Warning[] = [];
+			ctx = restoredContext(value, record.run.runId, warnings);
+			await api.invoke("session_start", ctx);
+			assert.ok(warnings.some(warning => /attention no longer matches the current request identity/.test(warning.message)), JSON.stringify(warnings));
+			await api.invoke("agent_settled", ctx);
+			assert.equal(api.customMessages.length, 0);
+			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
+			const rejected = object(await api.tool("herder_plan").execute("stale-abandon", { operation: "attention", planDirectory: value.planDirectory, requestId: record.request.requestId, action: "abandon_run" }, undefined, undefined, ctx));
+			assert.equal(rejected.isError, true);
+			assert.match(String((rejected.content as Array<{ text: string }>)[0]!.text), /No unresolved Herder attention request/);
+			assert.equal(factory.requests.length, 0);
+		} finally {
+			if (ctx) await api.invoke("session_shutdown", ctx);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const point of ["after_restarting", "after_restart", "after_complete"]) {
+	test(`session startup recovers whole-run record across ${point} instead of rejecting the old run hint`, { timeout: 40_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-revision-startup-"));
+		const value = writeBlockedAttentionFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		let ctx: ExtensionContext | undefined;
+		try {
+			const record = await reserveWholeRunFixture(value);
+			await confirmRunRevision(await prepareRunRevision(value.planDirectory, record.editToken));
+			const module = new URL("../../../src/application/run-revision.ts", import.meta.url).href;
+			const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `import { finishRunRevision } from ${JSON.stringify(module)}; await finishRunRevision(${JSON.stringify(value.planDirectory)}, ${JSON.stringify(record.editToken)});`], { env: { ...process.env, HERDER_TEST_RUN_REVISION_CRASH_AT: point }, encoding: "utf8", timeout: 25_000 });
+			assert.equal(child.signal, "SIGKILL", child.stderr);
+			const notifications: Warning[] = [];
+			ctx = restoredContext(value, record.run.runId, notifications);
+			await api.invoke("session_start", ctx);
+			assert.equal(notifications.some(entry => /recovery failed|refusing recovery/.test(entry.message)), false, JSON.stringify(notifications));
+			assert.ok(notifications.some(entry => entry.message.includes(record.editToken)));
+			const owner = JSON.parse(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"));
+			assert.equal(owner.runId, record.successorRunId);
+			if (point !== "after_complete") await assertWholeRunHook(api, ctx, value);
+			assert.equal(factory.requests.length, 0, "startup must not resume workers inside the revision barrier");
+		} finally {
+			if (ctx) await api.invoke("session_shutdown", ctx);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}

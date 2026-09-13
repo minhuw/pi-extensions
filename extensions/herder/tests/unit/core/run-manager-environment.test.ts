@@ -140,7 +140,26 @@ async function budgetReviewer(f: Fixture, stage: "discovery" | "verification" | 
 	return action(await implemented(f, action(await terminal(f, a, revise))), "plan-reviewer");
 }
 
-for (const stage of ["discovery", "verification", "rescue", "final"] as const) test(`${stage} reviewer budget ignores partial APPROVE, preserves evidence, and retries only by explicit decision`, { timeout: 45_000 }, async () => {
+async function assertWholeRunRecovery(f: Awaited<ReturnType<typeof fixture>>, request: ManagerAttentionRequest): Promise<void> {
+	const before = f.manager.store.getPlan(request.runId, request.planId);
+	const generation = f.manager.store.getRun()!.currentGeneration;
+	for (const action of ["answer", "answer_and_resume", "retry", "defer", "cancel", "accept", "revise", "stop", "reject", "unchanged_retry"]) {
+		await assert.rejects(f.manager.event({ eventId: `retired:${action}:${request.requestId}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer: "Explicit user input", rationale: "Explicit rationale", confirmed: true } }), /requires revise_run or explicit abandon_run/);
+	}
+	const revision = await f.manager.event({ eventId: `whole-run:${request.requestId}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "revise_run" } });
+	assert.deepEqual(revision.actions, []);
+	assert.equal(revision.scheduler.reason, "revision-barrier");
+	assert.ok(revision.runRevision?.editToken);
+	assert.equal(f.manager.store.getRun()!.currentGeneration, generation);
+	assert.deepEqual(f.manager.store.getPlan(request.runId, request.planId), before);
+	assert.notEqual(f.manager.store.getAttention(request.requestId)?.state, "resolved");
+	assert.ok(before && fs.existsSync(before.worktree));
+	f.restart();
+	assert.deepEqual(f.manager.reply().actions, []);
+	await assert.rejects(resume(f), /unchanged resume/);
+}
+
+for (const stage of ["discovery", "verification", "rescue", "final"] as const) test(`${stage} reviewer budget ignores partial APPROVE, preserves evidence, and uses whole-run recovery except for final RUN`, { timeout: 45_000 }, async () => {
 	const f = await fixture();
 	try {
 		const a = await budgetReviewer(f, stage);
@@ -189,6 +208,7 @@ for (const stage of ["discovery", "verification", "rescue", "final"] as const) t
 		const usageCount = f.manager.store.database.prepare("SELECT COUNT(*) AS count FROM attempts WHERE attempt_id = ?").get(a.attemptId) as { count: number };
 		assert.equal(usageCount.count, 1);
 		await assert.rejects(f.manager.event({ eventId: "legacy-budget-answer", kind: "user_input", attentionRequestId: request.requestId, userInput: "retry" }), /request-bound explicit retry or cancel/);
+		if (stage !== "final") { await assertWholeRunRecovery(f, request); return; }
 		for (const decision of ["answer", "accept", "revise"] as const) {
 			await assert.rejects(f.manager.event({ eventId: `invalid-budget-${decision}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: decision, answer: "continue", rationale: "continue", confirmed: true } }), /explicit retry or cancel/);
 		}
@@ -224,6 +244,7 @@ for (const stage of ["discovery", "final"] as const) test(`${stage} reviewer bud
 		await dispatch(f, a);
 		const before = runtime(f, a.planId);
 		const request = (await budgetTerminal(f, a)).attention!;
+		if (stage !== "final") { await assertWholeRunRecovery(f, request); return; }
 		const cancel = () => f.manager.event({ eventId: "cancel-budget", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "cancel", rationale: "Stop the incomplete review" } });
 		assert.equal((await cancel()).actions.length, 0);
 		f.restart();
@@ -331,7 +352,7 @@ test("environment block preserves dirty implementation, findings and round while
 	} finally { f.close(); }
 });
 
-for (const kind of ["ENVIRONMENT", "INVOCATION"]) test(`${kind} needs explicit request-bound retry, survives replay/restart, and retains INITIAL mode`, { timeout: 30_000 }, async () => {
+for (const kind of ["ENVIRONMENT", "INVOCATION"]) test(`${kind} requires a whole-run revision after escalation and survives host restart`, { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	try {
 		const a = action(f.reply);
@@ -344,18 +365,8 @@ for (const kind of ["ENVIRONMENT", "INVOCATION"]) test(`${kind} needs explicit r
 		assert.deepEqual(f.manager.reply().attention, request);
 		await terminal(f, a, response);
 		assert.equal(f.manager.store.getAttentionRequests(a.runId).length, 1);
-		await assert.rejects(f.manager.event({ eventId: "bad-answer", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer", answer: "continue" } }), /explicit retry or cancel/);
-		await assert.rejects(f.manager.event({ eventId: "bad-accept", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "accept", answer: "waive", rationale: "waive", confirmed: true } }), /cannot approve or waive/);
-		await assert.rejects(f.manager.event({ eventId: "bad-hash", kind: "attention", attention: { ...attentionResolutionFromRequest(request), requestSha256: "0".repeat(64), action: "retry" } }), /hash does not match/);
-		const next = action(await retry(f, request));
-		assert.equal(next.round, a.round);
-		assert.equal(next.workerMode, a.workerMode);
-		assert.equal(next.assignmentSha256, a.assignmentSha256);
-		assert.equal(next.worktree, a.worktree);
-		f.restart();
-		assert.equal(action(await retry(f, request)).actionId, next.actionId);
-		await assert.rejects(f.manager.event({ eventId: "divergent-retry", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "cancel" } }), /different resolution/);
-		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "resolved");
+		await assert.rejects(f.manager.event({ eventId: "bad-hash", kind: "attention", attention: { ...attentionResolutionFromRequest(request), requestSha256: "0".repeat(64), action: "revise_run" } }), /hash does not match/);
+		await assertWholeRunRecovery(f, request);
 	} finally { f.close(); }
 });
 
@@ -371,7 +382,7 @@ test("ordinary code failure still consumes a substantive round", { timeout: 30_0
 	} finally { f.close(); }
 });
 
-for (const role of ["plan-reviewer", "plan-judge"] as const) test(`${role} environment retry preserves frozen evidence and original review mode`, { timeout: 45_000 }, async () => {
+for (const role of ["plan-reviewer", "plan-judge"] as const) test(`${role} environment escalation preserves frozen evidence while opening whole-run revision`, { timeout: 45_000 }, async () => {
 	const f = await fixture();
 	try {
 		const a = role === "plan-reviewer" ? await reviewer(f) : await judge(f);
@@ -385,11 +396,7 @@ for (const role of ["plan-reviewer", "plan-judge"] as const) test(`${role} envir
 		assert.equal(reply.actions.length, 0);
 		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
 		f.restart();
-		const next = action(await retry(f, reply.attention!));
-		assert.equal(next.role, role);
-		assert.equal(next.round, a.round);
-		assert.equal(next.workerMode, a.workerMode);
-		assert.match(next.prompt, /WORKER_SELF_REPORT: ENVIRONMENT/);
+		await assertWholeRunRecovery(f, reply.attention!);
 	} finally { f.close(); }
 });
 
@@ -440,7 +447,7 @@ for (const stage of ["implementer", "reviewer", "judge", "final"] as const) test
 });
 
 
-test("round-three environment retry retains RESCUE without inventing round four", { timeout: 30_000 }, async () => {
+test("round-three environment escalation opens whole-run revision without inventing round four", { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	try {
 		let a = action(f.reply);
@@ -455,10 +462,7 @@ test("round-three environment retry retains RESCUE without inventing round four"
 		assert.equal(reply.attention?.round, 3);
 		assert.equal(runtime(f).round, 3);
 		assert.equal(reply.actions.length, 0);
-		const next = action(await retry(f, reply.attention!));
-		assert.equal(next.round, 3);
-		assert.equal(next.workerMode, "RESCUE");
-		assert.equal(next.model, a.model);
+		await assertWholeRunRecovery(f, reply.attention!);
 	} finally { f.close(); }
 });
 
@@ -513,6 +517,7 @@ for (const final of [false, true]) test(`explicit requirement clarification resu
 		await dispatch(f, a);
 		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
 		f.restart();
+		if (!final) { await assertWholeRunRecovery(f, request); return; }
 		const next = action(await f.manager.event({ eventId: "requirement-answer", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Keep the original value export requirement; do not expand scope." } }));
 		assert.equal(next.round, 1);
 		assert.equal(next.workerMode, final ? "FINAL_AUDIT" : "INITIAL");
@@ -523,27 +528,14 @@ for (const final of [false, true]) test(`explicit requirement clarification resu
 	} finally { f.close(); }
 });
 
-test("requirement non-review preserves first discovery; old environment resolutions cannot override later review evidence", { timeout: 30_000 }, async () => {
+test("environment non-review preserves first discovery and cannot resume unchanged", { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	try {
 		let a = await reviewer(f);
 		await dispatch(f, a);
 		const environmentRequest = (await terminal(f, a, blocked(a.role))).attention!;
-		a = action(await retry(f, environmentRequest));
-		assert.equal(a.workerMode, "DISCOVERY");
-		await dispatch(f, a);
-		const requirementRequest = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
 		assert.equal(runtime(f).reviewPass, 0);
-		assert.equal(requirementRequest.kind, "plan_recovery");
-		// A completed review supersedes historical environment attention. This unit
-		// seeds the ready continuation because ordinary recovery starts a generation.
-		const plan = runtime(f);
-		f.manager.store.resolveAttention(requirementRequest.requestId);
-		f.manager.store.putPlan({ ...plan, reviewPass: 1, phase: "READY_REVIEWER" });
-		f.manager.store.updateRun({ status: "running" });
-		const next = action(await f.manager.auditScheduler());
-		assert.equal(next.workerMode, "VERIFICATION");
-		assert.equal(next.round, a.round);
+		await assertWholeRunRecovery(f, environmentRequest);
 	} finally { f.close(); }
 });
 
@@ -694,6 +686,7 @@ for (const final of [false, true]) test(`record-only requirement answer stays bl
 		await dispatch(f, a);
 		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
 		assert.equal(request.kind, "user_decision");
+		if (!final) { await assertWholeRunRecovery(f, request); return; }
 		const answer = "  Fix the upstream requirement first; revise dependencies before continuing.\nDo not expand this worker's scope.  ";
 		const resolution = { ...attentionResolutionFromRequest(request), action: "answer", answer };
 		const reply = await f.manager.event({ eventId: "record-only", kind: "attention", attention: resolution });
@@ -739,7 +732,7 @@ test("user decisions reject legacy prose, retry, and missing answers without con
 				await assert.rejects(f.manager.event({ eventId: `bad:${action}:${answer}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer } as never }));
 			}
 		}
-		await assert.rejects(retry(f, request), /use answer_and_resume/);
+		await assert.rejects(retry(f, request), /requires revise_run or explicit abandon_run/);
 		assert.equal(runtime(f).phase, "NEEDS_INPUT");
 		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "awaiting_input");
 		assert.equal(f.manager.store.countActions(a.runId, { planId: a.planId }), 1);
@@ -753,7 +746,7 @@ for (const recovery of [false, true]) test(`answer_and_resume rejects wrong atte
 		await dispatch(f, a);
 		const request = (await terminal(f, a, blocked(a.role, recovery ? "REQUIREMENT" : "ENVIRONMENT"))).attention!;
 		assert.equal(request.kind, recovery ? "plan_recovery" : "operator_attention");
-		await assert.rejects(f.manager.event({ eventId: "wrong-kind", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Within scope clarification" } }), /cannot resolve plan-recovery|explicit retry or cancel|only valid for user_decision/);
+		await assert.rejects(f.manager.event({ eventId: "wrong-kind", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Within scope clarification" } }), /requires revise_run or explicit abandon_run/);
 		assert.notEqual(f.manager.store.getAttention(request.requestId)?.state, "resolved");
 	} finally { f.close(); }
 });

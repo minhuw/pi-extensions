@@ -42,6 +42,7 @@ interface PiPlanningManagerReplyContext {
 }
 
 interface PiPlanningRuntime {
+	handleAttention?: (input: { planDirectory: string; resolution: import("../src/shared/protocol.ts").AttentionResolutionInput }, ctx: ExtensionContext) => Promise<{ handled: true; result: unknown } | undefined>;
 	assertMutationAllowed: () => void;
 	bindAttention?: (
 		input: { planDirectory: string; requestId?: string; action?: string; answer?: string; rationale?: string },
@@ -73,7 +74,7 @@ const planningWorkflowSchema = Type.Object({
 	editToken: Type.Optional(Type.String()),
 	track: Type.Optional(Type.Boolean()),
 	requestId: Type.Optional(Type.String()),
-	action: Type.Optional(Type.String({ description: "Attention decision: user_decision answer records the exact nonempty answer only and leaves work BLOCKED (RUN paused), requiring manual intervention. answer_and_resume is user_decision-only, for explicit within-scope clarification making the immutable assignment runnable at its recorded phase; retry is not allowed for user_decision. Operator attention uses retry/cancel; recovery uses unchanged_retry/revise/reject or exhaustion accept/stop; defer leaves a request unresolved." })),
+	action: Type.Optional(Type.String({ description: "Plan attention: revise_run opens a whole-run Markdown revision; abandon_run requires explicit host confirmation. No defer, answer, unchanged retry, or target-local revision. Final RUN attention retains its existing actions." })),
 	answer: Type.Optional(Type.String()),
 	rationale: Type.Optional(Type.String()),
 }, { additionalProperties: false });
@@ -269,7 +270,7 @@ export function registerPiPlanningWorkflows(
 				const planDirectory = params.operation === "init"
 					? resolvePlanDirectoryTarget(repoRoot, params.planDirectory)
 					: resolvePlanDirectory(repoRoot, params.planDirectory);
-				const handled = params.operation === "finish_edit" || params.operation === "cancel_edit"
+				let handled = params.operation === "finish_edit" || params.operation === "cancel_edit"
 					? await runtime.beforePlanOperation?.(params.operation, { planDirectory, editToken: params.editToken }, ctx)
 					: undefined;
 				if (params.operation === "attention" && !runtime.bindAttention) {
@@ -291,6 +292,7 @@ export function registerPiPlanningWorkflows(
 					...(params.answer !== undefined ? { answer: params.answer } : {}),
 					...(params.rationale !== undefined ? { rationale: params.rationale } : {}),
 				};
+				if (!handled && params.operation === "attention") handled = await runtime.handleAttention?.({ planDirectory, resolution: applicationParams as unknown as import("../src/shared/protocol.ts").AttentionResolutionInput }, ctx);
 				const result = handled?.result ?? await invokeHerderTool("herder_plan", applicationParams);
 				if (!handled && result && typeof result === "object" && !Array.isArray(result)) {
 					const reply = (result as JsonObject).reply;

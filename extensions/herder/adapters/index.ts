@@ -1,3 +1,6 @@
+import { beginWholeRunAttention, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "./run-revision.ts";
+import { readRunRevision, revisionPending, type RunRevision } from "../src/core/run-revision.ts";
+import { RunStore } from "../src/daemon/run-store.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
@@ -9,6 +12,8 @@ import {
 	INTEGRATION_REPAIR_CLASSIFICATIONS,
 	INTEGRATION_REPAIR_OPERATIONS,
 	isTerminalRunStatus,
+	stableJson,
+	type ManagerAttentionRequest,
 	type ManagerReply,
 	type TerminalEvent,
 	type VerificationManifest,
@@ -174,6 +179,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let lastManagerMessage: string | undefined;
 	let currentPlanEdit: { planId: string; state: string } | undefined;
 	let currentReworkEdit: ReworkEditBinding | undefined;
+	let currentRunRevision: RunRevision | undefined;
 	let managerQueue = Promise.resolve();
 	let admittedManagerTasks = 0;
 	let releaseOwnershipAfterManagerDrain = false;
@@ -315,7 +321,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const clearCurrentStateForPlanDirectory = async (planDir: string, ctx: ExtensionContext): Promise<void> => {
-		if (!currentState || path.resolve(currentState.planDir) !== path.resolve(planDir)) return;
+		if (path.resolve(currentState?.planDir ?? currentRunRevision?.run.planDirectory ?? ".") !== path.resolve(planDir)) return;
+		currentRunRevision = undefined;
 		sessionEpoch += 1;
 		const activeWorkers = [...workers.values()];
 		workers.clear();
@@ -1057,14 +1064,105 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 	});
 
+	const ownsWholeRunRevision = (record: RunRevision): boolean => ownsRun(record.run.planDirectory, record.run.runId)
+		|| (["restarting", "complete"].includes(record.state) && ownsRun(record.run.planDirectory, record.successorRunId));
+
+	const recoverWholeRunRevision = async (record: RunRevision, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
+		const directory = record.run.planDirectory;
+		const store = new RunStore(directory, { readOnly: true });
+		let run;
+		let attention: ManagerAttentionRequest | undefined;
+		try {
+			run = store.getRun();
+			if (["draft", "prepared"].includes(record.state) && run?.runId === record.run.runId) {
+				const request = store.getAttention(record.request.requestId);
+				if (!request || request.state === "resolved" || request.runId !== run.runId
+					|| run.baseCommit !== record.run.baseCommit || run.checkoutStateToken !== record.run.checkoutStateToken
+					|| run.currentGeneration !== record.run.currentGeneration || run.graphSha256 !== record.run.graphSha256
+					|| store.getNextAttention(run.runId)?.requestId !== request.requestId
+					|| Object.entries(attentionResolutionFromRequest(request)).some(([key, value]) => stableJson(value) !== stableJson(record.request[key as keyof typeof record.request]))) {
+					throw new Error("Whole-run recovery attention no longer matches the current request identity");
+				}
+				attention = request;
+			}
+		} finally { store.close(); }
+		if (run && run.runId !== record.run.runId && !(run.runId === record.successorRunId && ["restarting", "complete"].includes(record.state))) throw new Error("Whole-run recovery refuses an unrelated execution");
+		if (!run && !["resetting", "restarting", "abandoned"].includes(record.state)) throw new Error("Whole-run recovery lost its execution");
+		const runId = ownsWholeRunRevision(record) ? ownership!.record.runId : run?.runId ?? (record.state === "restarting" ? record.successorRunId : record.run.runId);
+		const acquired = await claimOwnership(directory, runId, ctx, epoch);
+		currentRunRevision = record;
+		persist({ version: 1, mode: "resume", status: run?.status ?? "paused", runId,
+			repoRoot: record.run.repositoryRoot, planDir: directory, profile: record.run.profileName,
+			maxParallel: record.run.maxParallel, startedAt: currentState?.startedAt ?? Date.now(), updatedAt: Date.now() });
+		if (attention) mainSessionRequests.restoreAttention(directory, attention);
+		return acquired;
+	};
+
+	const wholeRunHost = (ctx: ExtensionContext, epoch: number): RunRevisionHost => ({
+		assert: (record) => {
+			assertSessionActive(epoch);
+			if (!ownsWholeRunRevision(record)) throw new Error("This session does not own the whole-run revision");
+			currentRunRevision = record;
+		},
+		observe: (reply) => updateFromReply(reply),
+		settle: async (record) => {
+			if (["complete", "abandoned"].includes(record.state)) return;
+			assertSessionActive(epoch);
+			const directory = record.run.planDirectory;
+			const owned = [...workers.values()].filter(worker => worker.managerRunId === record.run.runId && path.resolve(worker.planDir) === directory);
+			const handles = new Set(owned.map(worker => worker.handle));
+			if (engine.snapshots().some(worker => !handles.has(worker.handle))) throw new Error("Whole-run settlement found foreign or unbound worker sessions");
+			// Remove listeners' bindings before stop: terminal callbacks must not enqueue
+			// behind this barrier while engine.stop waits for those same callbacks.
+			for (const worker of owned) workers.delete(worker.handle);
+			await Promise.all(owned.map(worker => engine.stop(worker.handle)));
+			if (engine.snapshots().length) throw new Error("Whole-run workers have not settled");
+			assertSessionActive(epoch);
+			const store = new RunStore(directory, { readOnly: true });
+			let active;
+			try {
+				const run = store.getRun();
+				if (!run) return; // Reset completed before a previous host was interrupted.
+				if (run.runId !== record.run.runId) {
+					if (record.state === "restarting" && run.runId === record.successorRunId) return;
+					throw new Error("Whole-run settlement refuses a successor execution");
+				}
+				active = store.getActions(run.runId, ["proposed", "dispatched"]);
+			} finally { store.close(); }
+			const dispatched = active.filter(action => action.state === "dispatched");
+			const foreign = dispatched.find(action => !action.hostHandle?.startsWith("pi-worker:"));
+			if (foreign) throw new Error(`Cannot settle foreign worker ${foreign.actionId}`);
+			if (dispatched.length) updateFromReply(await postEvent(directory, { eventId: randomUUID(), kind: "terminals", terminals: dispatched.map(action => ({ actionId: action.actionId, hostHandle: action.hostHandle, interrupted: true, error: "Whole-run revision barrier: all host sessions settled" })) }));
+			const proposed = active.filter(action => action.state === "proposed");
+			if (proposed.length) updateFromReply(await postEvent(directory, { eventId: randomUUID(), kind: "dispatch_results", dispatchResults: proposed.map(action => ({ actionId: action.actionId, accepted: false, error: "Whole-run revision capacity barrier" })) }));
+		},
+		finished: async (result, record) => {
+			assertSessionActive(epoch);
+			if (result.abandoned) { await clearCurrentStateForPlanDirectory(record.run.planDirectory, ctx); return; }
+			if (!result.reply || result.reply.runId !== record.successorRunId || !ownership) throw new Error("Replacement run has no matching host ownership");
+			bindAdapterOwnershipRun(ownership, result.reply.runId);
+			currentRunRevision = undefined;
+			mainSessionRequests.reset("cleanup");
+			updateFromReply(result.reply, undefined, "fire", undefined, record.run.repositoryRoot);
+			await dispatchReply(result.reply, epoch);
+		},
+	});
+
 	const activeFire = () => Boolean(currentState && !isTerminalRunStatus(currentState.status))
 		|| Boolean(mainSessionRequests.attention && mainSessionRequests.attention.state !== "resolved")
 		|| Boolean(currentPlanEdit)
+		|| revisionPending(currentRunRevision ?? null)
 		|| workers.size > 0
 		|| engine.snapshots().length > 0;
 	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, {
 		assertMutationAllowed: () => {
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
+		},
+		handleAttention: async ({ planDirectory, resolution }, ctx) => {
+			if (resolution.planId === "RUN") return;
+			if (!["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Plan attention requires revise_run or explicit abandon_run");
+			const epoch = sessionEpoch;
+			return enqueueManager(async () => ({ handled: true as const, result: await beginWholeRunAttention(planDirectory, resolution, ctx, wholeRunHost(ctx, epoch)) }));
 		},
 		bindAttention: async (input, ctx) => {
 			const epoch = sessionEpoch;
@@ -1074,6 +1172,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (input.requestId !== request.requestId) {
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
+			if (request.planId !== "RUN" && !["revise_run", "abandon_run"].includes(input.action ?? "")) throw new Error("Plan attention requires revise_run or explicit abandon_run");
 			const binding = attentionResolutionFromRequest(request);
 			if (input.action?.trim().toLowerCase() === "accept") {
 				await confirmPlanAcceptance(request, input, ctx);
@@ -1089,6 +1188,16 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		},
 		beforePlanOperation: async (operation, params, ctx) => {
 			if (operation !== "finish_edit" && operation !== "cancel_edit") return;
+			const revision = readRunRevision(params.planDirectory);
+			if (revision && params.editToken === revision.editToken) {
+				const epoch = sessionEpoch;
+				await recoverWholeRunRevision(revision, ctx, epoch);
+				const profile = await resolveProfile(ctx, revision.run.profileName);
+				await preflight(ctx, profile);
+				return enqueueManager(async () => ({ handled: true as const, result: operation === "finish_edit"
+					? await finishWholeRunEdit(params.planDirectory, revision.editToken, ctx, wholeRunHost(ctx, epoch))
+					: await cancelWholeRunEdit(params.planDirectory, revision.editToken, wholeRunHost(ctx, epoch)) }));
+			}
 			const requestedBinding = currentReworkEdit;
 			if (!requestedBinding) return;
 			if (!currentState || path.resolve(currentState.planDir) !== requestedBinding.planDirectory) {
@@ -1581,6 +1690,15 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		});
 	});
 
+	pi.on("tool_call", async (event, ctx) => {
+		const directory = currentRunRevision?.run.planDirectory ?? currentState?.planDir;
+		if (!directory) return;
+		const record = readRunRevision(directory);
+		if (currentRunRevision && (!record || record.editToken !== currentRunRevision.editToken)) return { block: true, reason: "The bound whole-run revision changed; recover it before using tools." };
+		if (!record || (!currentRunRevision && !ownsWholeRunRevision(record))) return;
+		return wholeRunToolPolicy(record, event.toolName, event.input as Record<string, unknown>, ctx.cwd);
+	});
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		if (shuttingDown) return;
 		lastContext = ctx;
@@ -1595,6 +1713,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		mainSessionRequests.reset("session-start");
+		currentRunRevision = undefined;
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
 		sessionFactory.bindModelRegistry?.(ctx.modelRegistry);
@@ -1609,6 +1728,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			try {
 				await enqueueManager(async () => {
 					assertSessionActive(epoch);
+					const revision = readRunRevision(restored.planDir);
+					if (revision && ((revision.state === "complete" && restored.runId === revision.run.runId) || revisionPending(revision))) {
+						if (![revision.run.runId, revision.successorRunId].includes(restored.runId)) throw new Error("Persisted Herder run does not match the whole-run revision");
+						acquired = await recoverWholeRunRevision(revision, ctx, epoch);
+						ctx.ui.notify(`Recovered whole-run revision ${revision.state}. Continue finish_edit with editToken ${revision.editToken}; no workers were resumed.`, "info");
+						return;
+					}
 					const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: restored.planDir }) as Record<string, unknown>);
 					assertSessionActive(epoch);
 					if (reply.runId !== restored.runId) {
@@ -1659,6 +1785,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 		widget.dispose();
 		mainSessionRequests.reset("shutdown");
+		currentRunRevision = undefined;
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
 		lastContext = undefined;

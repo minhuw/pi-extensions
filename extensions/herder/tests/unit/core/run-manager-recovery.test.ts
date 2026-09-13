@@ -196,357 +196,43 @@ test("restart backfills terminal usage without duplicating the attempt", { timeo
 	}
 });
 
-test("target recovery advances a fresh generation while unrelated work remains schedulable", { timeout: 45_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-"));
-	const fixtureValue = fixture(root);
+test("plan recovery freezes the entire execution and rejects old selective actions across service restart", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-whole-recovery-"));
+	const value = fixture(root);
 	let service: Service | undefined;
 	try {
-		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "start", {
-			mode: "fire",
-			repositoryRoot: fixtureValue.repo,
-			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
-			maxParallel: 2,
-		});
-		assert.equal(started.status, "running");
+		service = await ensureService(value.planDirectory);
+		const started = await managerReply(service, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 2 });
 		const attention = object(started.attention);
 		assert.equal(attention.planId, "001");
-		assert.equal(attention.kind, "plan_recovery");
-		const actions = (started.actions as unknown[]).map(object);
-		assert.deepEqual(actions.map((action) => action.planId), ["002"]);
-
-		const resolution = attentionResolution(attention, String(started.runId), "unchanged_retry", "The compiled target remains valid and can retry unchanged.");
-		const resolved = await managerReply(service, "event", {
-			eventId: `recovery:${sha256(stableJson(resolution))}`,
-			kind: "attention",
-			attention: resolution,
-		});
-		assert.equal(resolved.status, "running");
-		const store = new RunStore(fixtureValue.planDirectory);
-		try {
-			const run = store.getRun();
-			assert.ok(run);
-			assert.equal(run.currentGeneration, 2);
-			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
-			const specs = store.getPlanSpecs(run.runId);
-			assert.equal(specs.find((spec) => spec.planId === "001")?.initialStatus, "TODO");
-			assert.equal(store.getPlan(run.runId, "001")?.generation, 2, "the target runtime is recreated in the new generation");
-			assert.ok(store.getAction(run.runId + ":002-g1-r1-implementer-1"));
-		} finally {
-			store.close();
+		const original = (started.actions as unknown[]).map(object);
+		assert.deepEqual(original.map(action => action.planId), ["002"]);
+		for (const action of ["unchanged_retry", "revise", "reject", "defer", "retry", "answer", "answer_and_resume", "accept", "stop", "cancel"]) {
+			await assert.rejects(managerReply(service, "event", { eventId: `retired-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Explicit choice"), answer: "Explicit answer", confirmed: true } }), /requires revise_run or explicit abandon_run/);
 		}
-		assert.ok((resolved.actions as unknown[]).map(object).some((action) => action.planId === "001"), "the recovered target is backfillable");
+		const resolution = attentionResolution(attention, String(started.runId), "revise_run", "Propose a replacement for the whole graph.");
+		const opened = await managerReply(service, "event", { eventId: "open-whole-run", kind: "attention", attention: resolution });
+		assert.deepEqual(opened.actions, []);
+		assert.equal(object(opened.scheduler).reason, "revision-barrier");
+		assert.ok(object(opened.runRevision).editToken);
+		const store = new RunStore(value.planDirectory);
+		try {
+			assert.equal(store.getRun()?.currentGeneration, 1);
+			assert.equal(store.getAttention(String(attention.requestId))?.state, "pending");
+			assert.equal(store.getPlan(String(started.runId), "001"), null, "authored BLOCKED plan needs no runtime to revise the graph");
+			assert.ok(store.getAction(String(original[0]!.actionId)), "old execution remains intact before approval");
+		} finally { store.close(); }
+		await stopService(value.planDirectory);
+		service = await ensureService(value.planDirectory);
+		const replay = await managerReply(service, "event", { eventId: "open-whole-run", kind: "attention", attention: resolution });
+		assert.deepEqual(replay.runRevision, opened.runRevision);
+		assert.deepEqual(replay.actions, []);
+		await assert.rejects(managerReply(service, "start", { mode: "resume", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 2 }), /unchanged resume/);
+		await assert.rejects(managerReply(service, "event", { eventId: "stale-dispatch", kind: "dispatch_results", dispatchResults: [{ actionId: original[0]!.actionId, accepted: true, hostHandle: "pi-worker:stale" }] }), /barrier forbids new worker dispatch/);
 	} finally {
-		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
-		cleanup(fixtureValue);
+		if (service) await stopService(value.planDirectory).catch(() => {});
+		cleanup(value);
 		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
-
-test("remaining generation-one recovery requests survive an earlier recovery", { timeout: 45_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-multiple-"));
-	const fixtureValue = fixture(root, { secondBlocked: true });
-	let service: Service | undefined;
-	try {
-		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "start", {
-			mode: "fire",
-			repositoryRoot: fixtureValue.repo,
-			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
-			maxParallel: 2,
-		});
-		const first = object(started.attention);
-		assert.equal(first.planId, "001");
-		const store = new RunStore(fixtureValue.planDirectory);
-		let second: JsonRecord;
-		try {
-			const requests = store.getAttentionRequests(String(started.runId), { unresolvedOnly: true });
-			second = object(requests.find((request) => request.planId === "002"));
-			assert.equal(second.generation, 1);
-		} finally {
-			store.close();
-		}
-
-		const firstResolved = await managerReply(service, "event", {
-			eventId: "multiple-recovery-first",
-			kind: "attention",
-			attention: attentionResolution(first, String(started.runId), "unchanged_retry", "The first blocked target remains valid."),
-		});
-		assert.equal(firstResolved.status, "running");
-		const afterFirst = new RunStore(fixtureValue.planDirectory);
-		try {
-			assert.equal(afterFirst.getRun()?.currentGeneration, 2);
-			assert.equal(afterFirst.getAttention(String(second.requestId))?.state, "pending");
-		} finally {
-			afterFirst.close();
-		}
-
-		const secondResolved = await managerReply(service, "event", {
-			eventId: "multiple-recovery-second",
-			kind: "attention",
-			attention: attentionResolution(second, String(started.runId), "unchanged_retry", "The second blocked target remains valid."),
-		});
-		assert.equal(secondResolved.status, "running");
-		const afterSecond = new RunStore(fixtureValue.planDirectory);
-		try {
-			const run = afterSecond.getRun();
-			assert.ok(run);
-			assert.equal(run.currentGeneration, 3);
-			assert.equal(afterSecond.getAttention(String(second.requestId))?.state, "resolved");
-			assert.ok(afterSecond.getActions(run.runId, ["proposed", "dispatched"]).some((action) => action.planId === "002"));
-		} finally {
-			afterSecond.close();
-		}
-	} finally {
-		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
-		cleanup(fixtureValue);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
-
-test("explicit exhausted target revision replaces failed execution and carries its evidence-only dossier", { timeout: 60_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-dirty-"));
-	const fixtureValue = fixture(root);
-	let service: Service | undefined;
-	try {
-		const readme = path.join(fixtureValue.planDirectory, "README.md");
-		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("BLOCKED — needs attention", "TODO"));
-		service = await ensureService(fixtureValue.planDirectory);
-		let reply = await managerReply(service, "start", {
-			mode: "fire",
-			repositoryRoot: fixtureValue.repo,
-			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
-			maxParallel: 2,
-		});
-		let target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
-		assert.ok(target);
-		let oldWorktree = String(target.worktree);
-		for (let round = 1; round <= 3; round += 1) {
-			await managerReply(service, "event", {
-				eventId: `dirty-dispatch-${round}`,
-				kind: "dispatch_results",
-				dispatchResults: [{ actionId: target.actionId, accepted: true, hostHandle: `dirty-${round}` }],
-			});
-			oldWorktree = String(target.worktree);
-			if (round === 3) fs.writeFileSync(path.join(oldWorktree, "discarded-untracked.txt"), "discard me\n");
-			reply = await managerReply(service, "event", {
-				eventId: `dirty-terminal-${round}`,
-				kind: "terminals",
-				terminals: [{ actionId: target.actionId, hostHandle: `dirty-${round}`, response: "STATUS: FAILED\nCOMMITS: none\nCHECKS: none\nFILES CHANGED: none\nDISCOVERED_PATHS: none\nNOTES: bounded failure\nUSAGE: input_tokens=1; output_tokens=1; source=test-host" }],
-			});
-			if (round < 3) target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
-		}
-		const attention = object(reply.attention);
-		assert.equal(attention.cause, "implementer_exhausted");
-		const targetFile = path.join(fixtureValue.planDirectory, "001-blocked.md");
-		fs.writeFileSync(targetFile, fs.readFileSync(targetFile, "utf8").replace("Use the declared fixture path only.", "Use the declared fixture path only and retain the integer API."));
-		const resolved = await managerReply(service, "event", {
-			eventId: "dirty-recovery-apply",
-			kind: "attention",
-			attention: attentionResolution(attention, String(reply.runId), "revise", "Clarify the integer API requirement after the bounded retry budget."),
-		});
-		assert.equal(resolved.status, "running");
-		const replacement = object((resolved.actions as unknown[]).map(object).find((candidate) => candidate.planId === "001"));
-		assert.match(String(replacement.prompt), /PREVIOUS_GENERATION_RECOVERY_EVIDENCE_ONLY/);
-		assert.match(String(replacement.prompt), /current revised assignment supersedes all old requirements/);
-		assert.match(String(replacement.prompt), /bounded failure/);
-		assert.equal(fs.existsSync(path.join(oldWorktree, "discarded-untracked.txt")), false);
-		const store = new RunStore(fixtureValue.planDirectory);
-		try {
-			const run = store.getRun();
-			assert.ok(run);
-			assert.equal(run.currentGeneration, 2);
-			assert.equal(store.getPlan(run.runId, "001")?.round, 1);
-			assert.equal(store.getPlan(run.runId, "001")?.generation, 2);
-			assert.equal(store.getActions(run.runId).filter((action) => action.planId === "001").length, 4);
-		} finally {
-			store.close();
-		}
-	} finally {
-		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
-		cleanup(fixtureValue);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
-
-test("target-only revisions and permitted rejection produce immutable next generations", { timeout: 45_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-decisions-"));
-	const fixtureValue = fixture(root);
-	let service: Service | undefined;
-	try {
-		service = await ensureService(fixtureValue.planDirectory);
-		const started = await managerReply(service, "start", {
-			mode: "fire",
-			repositoryRoot: fixtureValue.repo,
-			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
-			maxParallel: 2,
-		});
-		const attention = object(started.attention);
-		fs.writeFileSync(path.join(fixtureValue.planDirectory, "001-blocked.md"), fs.readFileSync(path.join(fixtureValue.planDirectory, "001-blocked.md"), "utf8").replace("# Plan 001: Blocked target", "# Plan 001: Revised target"));
-		const revised = await managerReply(service, "event", {
-			eventId: "recovery-revise-target",
-			kind: "attention",
-			attention: attentionResolution(attention, String(started.runId), "revise", "The target revision keeps the same graph identity and scope."),
-		});
-		assert.equal(revised.status, "running");
-		const store = new RunStore(fixtureValue.planDirectory);
-		try {
-			const run = store.getRun();
-			assert.ok(run);
-			assert.equal(run.currentGeneration, 2);
-			const revisedSpec = store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001");
-			assert.equal(revisedSpec?.initialStatus, "TODO");
-			assert.equal(revisedSpec?.initialStatusDetail, "");
-			assert.match(revisedSpec?.assignment.planText || "", /Revised target/);
-			assert.equal(store.getGenerations(run.runId).length, 2);
-			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
-		} finally {
-			store.close();
-		}
-	} finally {
-		if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
-		cleanup(fixtureValue);
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-
-	const rejectedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-reject-"));
-	const rejectedFixture = fixture(rejectedRoot);
-	service = undefined;
-	try {
-		service = await ensureService(rejectedFixture.planDirectory);
-		const started = await managerReply(service, "start", {
-			mode: "fire",
-			repositoryRoot: rejectedFixture.repo,
-			planDirectory: rejectedFixture.planDirectory,
-			profile: "eclipse",
-			maxParallel: 2,
-		});
-		const attention = object(started.attention);
-		const rejected = await managerReply(service, "event", {
-			eventId: "recovery-reject-target",
-			kind: "attention",
-			attention: attentionResolution(attention, String(started.runId), "reject", "The target is not justified for this run."),
-		});
-		assert.equal(rejected.status, "running");
-		const store = new RunStore(rejectedFixture.planDirectory);
-		try {
-			const run = store.getRun();
-			assert.ok(run);
-			const rejectedSpec = store.getPlanSpecs(run.runId).find((spec) => spec.planId === "001");
-			assert.equal(rejectedSpec?.initialStatus, "REJECTED");
-			assert.equal(rejectedSpec?.initialStatusDetail, "The target is not justified for this run.");
-			assert.equal(store.getAttention(String(attention.requestId))?.state, "resolved");
-			assert.equal(store.getActions(run.runId, ["proposed", "dispatched"]).some((action) => action.planId === "001"), false);
-		} finally {
-			store.close();
-		}
-	} finally {
-		if (service) await stopService(rejectedFixture.planDirectory).catch(() => {});
-		cleanup(rejectedFixture);
-		fs.rmSync(rejectedRoot, { recursive: true, force: true });
-	}
-});
-
-test("recovery rejects target-only graph identity drift before mutating state", { timeout: 45_000 }, async () => {
-	const cases: Array<{ name: string; mutate: (value: Fixture) => void; expected: RegExp }> = [
-		{
-			name: "sibling content",
-			mutate: (value) => {
-				const file = path.join(value.planDirectory, "002-ready.md");
-				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("# Plan 002: Unrelated ready plan", "# Plan 002: Revised sibling"));
-			},
-			expected: /Recovery revision changed sibling plan 002/,
-		},
-		{
-			name: "target filename",
-			mutate: (value) => {
-				fs.renameSync(path.join(value.planDirectory, "001-blocked.md"), path.join(value.planDirectory, "001-renamed.md"));
-				const readme = path.join(value.planDirectory, "README.md");
-				fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("[001](001-blocked.md)", "[001](001-renamed.md)"));
-			},
-			expected: /Recovery target 001 cannot change its identity, filename, or dependencies/,
-		},
-		{
-			name: "target dependency",
-			mutate: (value) => {
-				const readme = path.join(value.planDirectory, "README.md");
-				fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace(
-					"| [001](001-blocked.md) | Blocked target | P1 | S | — | BLOCKED — needs attention |",
-					"| [001](001-blocked.md) | Blocked target | P1 | S | 002 | BLOCKED — needs attention |",
-				));
-				const file = path.join(value.planDirectory, "001-blocked.md");
-				fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- **Depends on**: none", "- **Depends on**: 002").replace("Dependencies: none.", fixtureDependencies("002")));
-			},
-			expected: /Recovery target 001 cannot change its identity, filename, or dependencies/,
-		},
-	];
-
-	for (const scenario of cases) {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-target-recovery-graph-drift-"));
-		const fixtureValue = fixture(root);
-		let service: Service | undefined;
-		try {
-			service = await ensureService(fixtureValue.planDirectory);
-			const started = await managerReply(service, "start", {
-				mode: "fire",
-				repositoryRoot: fixtureValue.repo,
-				planDirectory: fixtureValue.planDirectory,
-				profile: "eclipse",
-				maxParallel: 2,
-			});
-			const attention = object(started.attention);
-			const beforeStore = new RunStore(fixtureValue.planDirectory);
-			let before: string;
-			try {
-				const run = beforeStore.getRun();
-				assert.ok(run);
-				before = stableJson({
-					currentGeneration: run.currentGeneration,
-					generations: beforeStore.getGenerations(run.runId),
-					attentionRequests: beforeStore.getAttentionRequests(run.runId),
-					siblingSpec: beforeStore.getPlanSpecs(run.runId).find((spec) => spec.planId === "002"),
-					siblingPlan: beforeStore.getPlan(run.runId, "002"),
-					siblingActions: beforeStore.getActions(run.runId).filter((action) => action.planId === "002"),
-				});
-			} finally {
-				beforeStore.close();
-			}
-
-			scenario.mutate(fixtureValue);
-			await assert.rejects(
-				() => managerReply(service!, "event", {
-					eventId: `recovery-graph-drift-${scenario.name.replaceAll(" ", "-")}`,
-					kind: "attention",
-					attention: attentionResolution(attention, String(started.runId), "unchanged_retry", "The recorded target evidence must remain immutable."),
-				}),
-				scenario.expected,
-				scenario.name,
-			);
-
-			const afterStore = new RunStore(fixtureValue.planDirectory);
-			try {
-				const run = afterStore.getRun();
-				assert.ok(run);
-				assert.equal(stableJson({
-					currentGeneration: run.currentGeneration,
-					generations: afterStore.getGenerations(run.runId),
-					attentionRequests: afterStore.getAttentionRequests(run.runId),
-					siblingSpec: afterStore.getPlanSpecs(run.runId).find((spec) => spec.planId === "002"),
-					siblingPlan: afterStore.getPlan(run.runId, "002"),
-					siblingActions: afterStore.getActions(run.runId).filter((action) => action.planId === "002"),
-				}), before, scenario.name);
-			} finally {
-				afterStore.close();
-			}
-		} finally {
-			if (service) await stopService(fixtureValue.planDirectory).catch(() => {});
-			cleanup(fixtureValue);
-			fs.rmSync(root, { recursive: true, force: true });
-		}
 	}
 });
 
@@ -564,7 +250,7 @@ test("recovery resolution rejects a mismatched capability or Git identity before
 			maxParallel: 1,
 		});
 		const attention = object(started.attention);
-		const resolution = attentionResolution(attention, String(started.runId), "unchanged_retry", "The target remains valid.");
+		const resolution = attentionResolution(attention, String(started.runId), "revise_run", "Revise the whole execution.");
 		await assert.rejects(
 			() => managerReply(service!, "event", { eventId: "bad-capability", kind: "attention", attention: { ...resolution, capabilityToken: "0".repeat(64) } }),
 			/capability token/,

@@ -34,7 +34,7 @@ function isPlanGraphFile(name: string): boolean {
 	return name === "README.md" || name === "CONTEXT.md" || /^\d{3,}-.*\.md$/i.test(path.basename(name));
 }
 
-function planGraphFiles(planDirectory: string, directory = planDirectory): string[] {
+export function planGraphFiles(planDirectory: string, directory = planDirectory): string[] {
 	const files: string[] = [];
 	for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
 		if (directory === planDirectory && entry.name === ".herder") continue;
@@ -61,7 +61,7 @@ function safeEditToken(editToken: string): string {
 	return editToken.toLowerCase();
 }
 
-function ensurePrivateDirectory(candidate: string): void {
+export function ensurePrivateDirectory(candidate: string): void {
 	try { fs.mkdirSync(candidate, { mode: 0o700 }); }
 	catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
 	const stat = fs.lstatSync(candidate);
@@ -69,13 +69,13 @@ function ensurePrivateDirectory(candidate: string): void {
 	fs.chmodSync(candidate, 0o700);
 }
 
-function fsyncDirectory(candidate: string): void {
+export function fsyncDirectory(candidate: string): void {
 	const descriptor = fs.openSync(candidate, fs.constants.O_RDONLY);
 	try { fs.fsyncSync(descriptor); }
 	finally { fs.closeSync(descriptor); }
 }
 
-function readRegularBytes(candidate: string, label: string): { bytes: Buffer; mode: number } {
+export function readRegularBytes(candidate: string, label: string): { bytes: Buffer; mode: number } {
 	if (!fs.constants.O_NOFOLLOW) throw new Error(`Safe ${label} opening is unavailable`);
 	const named = fs.lstatSync(candidate);
 	if (named.isSymbolicLink() || !named.isFile()) throw new Error(`${label} must be a regular file: ${candidate}`);
@@ -168,6 +168,12 @@ export function readReworkSnapshot(run: StoredRun, edit: StoredPlanEdit, store: 
 
 export function restoreReworkSnapshot(run: StoredRun, edit: StoredPlanEdit, store: RunStore): void {
 	const snapshot = readReworkSnapshot(run, edit, store);
+	restoreGraphSnapshot(run.planDirectory, snapshot);
+}
+
+export function restoreGraphSnapshot(planDirectory: string, snapshot: ReworkGraphSnapshot): void {
+	const run = { planDirectory };
+	const edit = { editToken: snapshot.editToken };
 	const current = planGraphFiles(run.planDirectory);
 	for (const name of current) readRegularBytes(path.join(run.planDirectory, name), "current plan graph file");
 	const retained = new Set(snapshot.files.map((entry) => entry.name));

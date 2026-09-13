@@ -1,3 +1,4 @@
+import { readRunRevision } from "../src/core/run-revision.ts";
 import { keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
@@ -123,6 +124,7 @@ function attentionReason(request: ManagerAttentionRequest): string {
 }
 
 function nextAction(request: ManagerAttentionRequest): string {
+	if (request.planId !== "RUN") return "Propose/review a whole-run revision; abandon is available.";
 	if (request.kind === "user_decision") return "Answer the question, or defer.";
 	if (request.kind === "operator_attention") return "Retry the recorded role, cancel it, or defer.";
 	return request.round === MAX_PLAN_ROUNDS
@@ -204,6 +206,25 @@ export async function buildAttentionPrompt(
 	planDirectory: string,
 	request: ManagerAttentionRequest,
 ): Promise<string> {
+	if (request.planId !== "RUN") {
+		const revision = readRunRevision(planDirectory);
+		return [
+			"HERDER_MAIN_SESSION_ATTENTION_V1", "HERDER_WHOLE_RUN_REVISION_V1",
+			...requestBinding(request, planDirectory),
+			`FAILURE_EVIDENCE: ${request.detail}`, ...(request.question ? [`QUESTION: ${request.question}`] : []),
+			...(request.kind === "plan_recovery" ? [`RECOVERY_DOSSIER: ${JSON.stringify(request.recovery)}`] : []),
+			"Inspect the failure and the entire graph, including upstream DONE/integrated plans. PROPOSE a concrete whole-run graph revision directly: explain what changes and why, then let the user refine/approve it. Do not first ask permission to think, inspect, or propose a revision.",
+			"ALLOWED_ACTIONS: revise_run, abandon_run. No defer menu, unchanged retry, answer-only resolution, target-only rewrite, or acceptance of incomplete work.",
+			"Call herder_plan operation attention with action revise_run, this planDirectory and requestId to open the run-wide edit barrier. This stops all run workers before granting graph editing, but preserves their branches, worktrees, and proofs until final approval. Beginning a proposal does not require prior user permission.",
+			`Before drafting, read ${packageRoot}/skills/plans/references/plan-format.md and ${packageRoot}/skills/plans/references/plan-template.md completely; follow canonical Plan V2 for every replacement plan.`,
+			"Preserve confirmed product intent and the product/execution boundary: Herder delivers repository implementation, not release operations. Cloud provisioning, deployment/publishing, live migrations, and live database restore/undo are outside execution, even for disposable targets. Do not make them executable acceptance, verification, toolchain/setup, or dependency requirements; record operator workflows and outstanding live evidence in Escalation and handoff. Clarify and confirm any change to an existing live criterion instead of silently dropping it or treating local simulation as live proof. Propose substantive changes in conversation for user refinement. After begin, draft Markdown writes are allowed without execution approval; the host's later exact-graph confirmation authorizes destruction/restart, not merely drafting. Never treat a draft as user-approved product intent.",
+			"After begin returns an editToken, edit ONLY plan-graph Markdown: README index, CONTEXT, and numbered plan files. All IDs, dependencies, shared context, additions/removals, and previously integrated plans may change. Set every replacement plan TODO. Use read/grep/find for inspection and write/edit for Markdown. For graph file removal/rename only, literal rm -- <path> or mv -- <old-path> <new-path> is allowed; no other shell commands. Never edit source code, Git refs, runtime files, SQLite, or worker worktrees. Do not run source setup, dependency installation, tests, builds, or other execution commands during graph planning; record verification commands in Markdown for future workers.",
+			"Before shape/validate, cold-read the complete affected plan snapshots via herder_plan snapshot (collect every page), plus the README and shared context, as a fresh worker would. Check source facts by read-only inspection, standalone clarity, cross-plan dependencies, A/V/T sufficiency, acceptance evidence, and product/execution boundaries; record not-run evidence honestly and repair omissions in Markdown only. Run herder_plan shape and validate on the entire graph, then call finish_edit with that editToken. The host binds final approval to the exact request, run, graph, original checkout and base. Confirmed revision discards ALL old unmerged execution and automatically reruns the entire revised graph on the original trusted base. No selective reuse and no source checkout reset.",
+			"A dismissed confirmation leaves the proposal recoverable with workers stopped; it is neither abandonment nor permission for an unchanged retry. Continue refining the proposal. Only an explicit user choice of abandon_run may stop/discard the entire unmerged execution without restart, preserving plan Markdown and the user's checkout; the host separately confirms abandonment.",
+			"Final RUN attention and exact-tree final integration repair/verification remain separate existing mechanisms; this flow does not waive their trust gates or budgets.",
+			...(revision?.request.requestId === request.requestId ? [`EXISTING_EDIT_TOKEN: ${revision.editToken}`, `REVISION_STATE: ${revision.state}`, "Continue this durable revision; do not open a new request or reset manually."] : []),
+		].join("\n\n");
+	}
 	if (request.kind === "plan_recovery") {
 		const recovery = request.recovery;
 		const exhausted = request.round === MAX_PLAN_ROUNDS;

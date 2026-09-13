@@ -134,7 +134,7 @@ test("adapter registration exposes the complete live surface", () => {
 		"herder_reignite",
 		"herder_verification",
 	].sort());
-	assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start"]);
+	assert.deepEqual([...api.handlers.keys()].sort(), ["agent_settled", "session_shutdown", "session_start", "tool_call"]);
 	assert.deepEqual([...api.renderers].sort(), [
 		"herder-attention-v1",
 		"herder-cleanup-v2",

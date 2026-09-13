@@ -641,7 +641,7 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 	});
 });
 
-test("Judge NEEDS_INPUT requires explicit clarification to reschedule the same Judge round", { timeout: 45_000 }, async () => {
+test("Judge NEEDS_INPUT delegates a whole-run revision rather than rescheduling the same Judge", { timeout: 45_000 }, async () => {
 	await withFixture("judge-input", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-input");
 		const question = "Which approved repair boundary | should the Judge apply?";
@@ -677,28 +677,18 @@ test("Judge NEEDS_INPUT requires explicit clarification to reschedule the same J
 			attention: { ...attentionResolutionFromRequest(attention as unknown as ManagerAttentionRequest),
 				action: "answer_and_resume", answer: "Use only the declared repair contract." },
 		};
-		const publicSubmission = payload(await submitHerderEvent(submission));
-		const resumed = payload(publicSubmission.reply);
-		const publicReplay = payload(await submitHerderEvent(submission));
-		assert.equal(payload(publicReplay.reply).status, "running", "a public replay must remain bound to the resolved request");
-		assert.equal(resumed.status, "running");
-		assert.equal(resumed.attention, undefined);
-		const judge = action(resumed, "plan-judge");
-		assert.equal(judge.round, 2);
-		assert.equal(judge.workerMode, "ADJUDICATE");
-
+		await assert.rejects(submitHerderEvent(submission), /requires revise_run or explicit abandon_run/);
+		const opened = payload(payload(await submitHerderEvent({ ...submission, attention: { ...submission.attention, action: "revise_run" } })).reply);
+		assert.deepEqual(opened.actions, []);
+		assert.equal(payload(opened.scheduler).reason, "revision-barrier");
+		assert.ok(payload(opened.runRevision).editToken);
 		const after = inspectPlan(fixture);
 		try {
-			assert.equal(after.run!.status, "running");
-			assert.equal(after.plan.phase, "JUDGING");
-			assert.equal(after.plan.round, 2);
-			assert.equal(after.plan.repair.length, 2);
-			assert.equal(after.plan.repair[0], question);
-			assert.match(after.plan.repair[1]!, /^ATTENTION_ANSWER \[[^\]]+\]: Use only the declared repair contract\.$/);
+			assert.equal(after.plan.phase, "NEEDS_INPUT");
+			assert.deepEqual(after.plan.repair, [question]);
 			assertNoApproval(after.store, after.run!.runId);
-		} finally {
-			after.store.close();
-		}
+		} finally { after.store.close(); }
+
 	});
 });
 
@@ -752,7 +742,7 @@ async function exhaustReview(service: Service, fixture: Fixture, prefix: string)
 	return { reply, reviewer, judge: state.judge };
 }
 
-function resolutionFor(reply: JsonRecord, action: "accept" | "stop" | "revise" | "unchanged_retry"): AttentionResolutionInput {
+function resolutionFor(reply: JsonRecord, action: "accept" | "stop" | "revise" | "unchanged_retry" | "revise_run"): AttentionResolutionInput {
 	const request = payload(reply.attention);
 	return {
 		schemaVersion: 1, requestId: String(request.requestId), requestSha256: String(request.requestSha256),
@@ -787,95 +777,35 @@ test("round-3 Reviewer nonapproval exhausts without Judge or round 4 and include
 			assert.ok(inspected.store.getActions(inspected.run!.runId).every((a) => a.round <= 3));
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally { inspected.store.close(); }
-		await assert.rejects(resolve(service, resolutionFor(state.reply, "unchanged_retry"), "no-retry"), /Exhausted round-3/);
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "unchanged_retry"), "no-retry"), /requires revise_run or explicit abandon_run/);
 	});
 });
 
-test("confirmed human acceptance integrates the exact reviewed tree with genuine failed-review proof", { timeout: 60_000 }, async () => {
-	await withFixture("human-accept", async (service, fixture) => {
-		const state = await exhaustReview(service, fixture, "human-accept");
-		const resolution = { ...resolutionFor(state.reply, "accept"), action: " ACCEPT " };
-		const reply = await resolve(service, resolution, "accept-exact-tree");
-		assert.equal(reply.status, "paused");
+test("exhausted plan acceptance and stop are rejected without altering failed-review evidence", { timeout: 60_000 }, async () => {
+	await withFixture("retired-acceptance", async (service, fixture) => {
+		const state = await exhaustReview(service, fixture, "retired-acceptance");
+		const resolution = resolutionFor(state.reply, "accept");
+		await assert.rejects(resolve(service, { ...resolution, requestSha256: "0".repeat(64) }, "stale"), /hash/);
+		await assert.rejects(resolve(service, { ...resolution, capabilityToken: "0".repeat(64) }, "foreign"), /capability/);
+		for (const action of ["accept", "stop", "revise", "unchanged_retry"] as const) {
+			await assert.rejects(resolve(service, resolutionFor(state.reply, action), `retired-${action}`), /requires revise_run or explicit abandon_run/);
+		}
+		const worktree = String(state.reviewer.worktree);
+		const head = git(worktree, ["rev-parse", "HEAD"]).stdout;
+		const opened = await resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-proposal");
+		assert.deepEqual(opened.actions, []);
+		assert.ok(payload(opened.runRevision).editToken);
+		assert.equal(git(worktree, ["rev-parse", "HEAD"]).stdout, head);
 		const inspected = inspectPlan(fixture);
 		try {
-			assert.equal(inspected.plan.phase, "DONE");
+			assert.equal(inspected.plan.phase, "BLOCKED");
+			assert.equal(inspected.plan.round, 3);
 			assert.deepEqual(inspected.plan.findings, ["[BLOCKING][P1] remaining impact: incorrect value"]);
-			const approval = inspected.store.getApproval(inspected.run!.runId, "001", 1)!;
-			assert.equal(approval.decisionRole, "user");
-			assert.equal(approval.reviewerActionId, state.reviewer.actionId);
-			assert.equal(approval.decisionActionId, state.reviewer.actionId);
-			assert.deepEqual(approval.userAcceptance, resolution);
-			assert.equal(approval.decisionResultSha256, sha256(stableJson(resolution)));
-			const workerResult = payload(inspected.store.getAction(approval.reviewerActionId)!.result).workerResult;
-			assert.equal(approval.reviewResultSha256, sha256(stableJson(workerResult)));
-			assert.match(stableJson(workerResult), /failed: incorrect value/);
-			assert.equal(inspected.store.getAttention(resolution.requestId)?.state, "resolved");
+			assertNoApproval(inspected.store, inspected.run!.runId);
+			assert.notEqual(inspected.store.getAttention(resolution.requestId)?.state, "resolved");
 		} finally { inspected.store.close(); }
-		await assert.rejects(resolve(service, { ...resolution, answer: "different gaps" }, "accept-replay-changed"), /different resolution/);
-		const request = payload(reply.verificationRequest);
-		const verified = payload(payload(await requestManagerOperation(service, "verification", {
-			schemaVersion: 1, requestId: request.requestId, requestSha256: request.requestSha256,
-			runId: request.runId, generation: request.generation, graphSha256: request.graphSha256,
-			runAssignmentSha256: request.runAssignmentSha256, integrationHead: request.integrationHead, integrationTree: request.integrationTree,
-			rationale: "Run the unchanged final verification gate independently of human exceptions",
-			gates: [{ gateId: "final-fixture", label: "fixture tests", cwd: ".", argv: ["npm", "test"], rationale: "Checks the integrated fixture" }],
-		})).reply);
-		const audit = action(verified, "plan-reviewer");
-		assert.equal(audit.planId, "RUN");
-		for (const text of ["RECORDED_HUMAN_EXCEPTIONS", resolution.answer!, "APPROVAL_PROOF_SHA256", "REVIEWER_ACTION_ID", "not PASS evidence"]) assert.ok(String(audit.prompt).includes(text), text);
-		const completed = await finishReviewer(service, audit, "human-final-audit", {
-			verdict: "BLOCK", findings: ["[PATCH_REGRESSION][P1] acknowledged incorrect-value gap"],
-		});
-		assert.equal(completed.status, "complete", "human acceptance does not change the informational final audit or REIGNITE behavior");
-
 	});
 });
-
-test("human accept fails closed for stale, dirty, unconfirmed, changed-graph or missing-reviewer evidence; stop preserves artifacts", { timeout: 60_000 }, async () => {
-	await withFixture("accept-guards", async (service, fixture) => {
-		const state = await exhaustReview(service, fixture, "accept-guards");
-		const resolution = resolutionFor(state.reply, "accept");
-		await assert.rejects(resolve(service, { ...resolution, confirmed: false }, "accept-unconfirmed"), /confirm/i);
-		await assert.rejects(resolve(service, { ...resolution, requestSha256: "0".repeat(64) }, "accept-stale"), /hash/);
-		await assert.rejects(resolve(service, { ...resolution, capabilityToken: "0".repeat(64) }, "accept-capability"), /capability/);
-		await assert.rejects(resolve(service, { ...resolution, git: { ...resolution.git!, worktreeHead: "0".repeat(40) } }, "accept-head"), /Git identity/);
-		const worktree = String(state.reviewer.worktree);
-		const file = path.join(worktree, "src/value.mjs");
-		const original = fs.readFileSync(file, "utf8");
-		fs.writeFileSync(file, "dirty unreviewed change\n");
-		await assert.rejects(resolve(service, resolution, "accept-dirty"), /clean worktree/);
-		fs.writeFileSync(file, original);
-		const planFile = path.join(fixture.planDirectory, "001-update-value.md");
-		const source = fs.readFileSync(planFile, "utf8");
-		fs.writeFileSync(planFile, source.replace("Change the exported numeric value", "Change the exported numeric value to a different requirement"));
-		await assert.rejects(resolve(service, resolution, "accept-graph"), /graph-equivalent/);
-		fs.writeFileSync(planFile, source);
-		await stopService(fixture.planDirectory);
-		const manager = new HerderRunManager(fixture.planDirectory);
-		try {
-			const reviewer = manager.store.getAction(String(state.reviewer.actionId))!;
-			manager.store.database.prepare("UPDATE manager_actions SET result_json = '{}' WHERE action_id = ?").run(reviewer.actionId);
-			await assert.rejects(manager.event({ eventId: "accept-missing-reviewer", kind: "attention", attention: resolution }), /Reviewer evidence/);
-			manager.store.database.prepare("UPDATE manager_actions SET result_json = ? WHERE action_id = ?").run(JSON.stringify(reviewer.result), reviewer.actionId);
-			const stopped = resolutionFor(state.reply, "stop");
-			const retained = path.join(worktree, "retained-untracked.txt");
-			fs.writeFileSync(retained, "operator scratch remains intact\n");
-			const head = git(worktree, ["rev-parse", "HEAD"]).stdout;
-			const reply = await manager.event({ eventId: "stop-preserve", kind: "attention", attention: stopped });
-			assert.equal(reply.status, "failed");
-			assert.equal(manager.store.getPlan(stopped.runId, "001")?.phase, "BLOCKED");
-			assert.equal(manager.store.getAttention(stopped.requestId)?.state, "resolved");
-			assert.equal(fs.readFileSync(file, "utf8"), original);
-			assert.equal(fs.readFileSync(retained, "utf8"), "operator scratch remains intact\n");
-			assert.equal(git(worktree, ["rev-parse", "HEAD"]).stdout, head);
-			assert.ok(fs.existsSync(String(state.reviewer.assignmentPath)));
-			assertNoApproval(manager.store, stopped.runId);
-			await assert.rejects(manager.event({ eventId: "stop-replayed-different", kind: "attention", attention: { ...stopped, rationale: "different" } }), /different resolution/);
-		} finally { manager.close(); }
-	});
-});
-
 
 test("mutated transport uses the three-round budget and rescue without a Judge document retains operational evidence", { timeout: 30_000 }, async () => {
 	await withFixture("transport-rescue", async (service, fixture) => {
@@ -914,7 +844,7 @@ test("mutated transport uses the three-round budget and rescue without a Judge d
 	});
 });
 
-test("exhaustion keeps siblings schedulable, acceptance unlocks dependencies with scoped exceptions, and stop preserves the attention queue", { timeout: 60_000 }, async () => {
+test("exhaustion permits sibling evidence before the whole-run barrier but never selectively unlocks dependencies", { timeout: 60_000 }, async () => {
 	await withFixture("accept-scheduling", async (service, fixture) => {
 		const readme = path.join(fixture.planDirectory, "README.md");
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("\n\n## Dependency notes", ["",
@@ -934,62 +864,16 @@ test("exhaustion keeps siblings schedulable, acceptance unlocks dependencies wit
 		git(siblingWorktree, ["commit", "-qm", "test: independent patch"]);
 		let reply = await terminal(service, sibling, "sibling", implementerResponse(git(siblingWorktree, ["rev-parse", "HEAD"]).stdout.trim()).replaceAll("src/value.mjs", "src/independent.mjs"));
 		reply = await finishReviewer(service, action(reply, "plan-reviewer"), "sibling", { verdict: "BLOCK", rationale: "Independent operator decision" });
-		const acceptance = resolutionFor(state.reply, "accept");
-		reply = await resolve(service, acceptance, "accept-unlocks-dependent");
-		const dependent = action(reply, "plan-implementer");
-		assert.equal(dependent.planId, "003");
-		assert.match(String(dependent.prompt), /RECORDED_HUMAN_EXCEPTIONS/);
-		assert.ok(String(dependent.prompt).includes(acceptance.answer!));
-		assert.equal(payload(reply.attention).planId, "002", "next unresolved request remains queued");
-		const stopped = resolutionFor(reply, "stop");
-		reply = await resolve(service, stopped, "stop-independent");
-		assert.equal(reply.status, "running");
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "accept"), "retired-unlock"), /requires revise_run or explicit abandon_run/);
+		reply = await resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-barrier");
+		assert.deepEqual(reply.actions, []);
+		assert.equal(payload(reply.scheduler).reason, "revision-barrier");
 		assert.equal(fs.readFileSync(path.join(siblingWorktree, "src/independent.mjs"), "utf8"), "export const independent = 1\n");
 		const inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.store.getPlan(inspected.run!.runId, "002")?.phase, "BLOCKED");
-			assert.equal(inspected.store.getPlan(inspected.run!.runId, "003")?.phase, "IMPLEMENTING");
-			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).length, 0);
+			assert.equal(inspected.store.getPlan(inspected.run!.runId, "003"), null);
+			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).length, 2);
 		} finally { inspected.store.close(); }
 	});
 });
-
-
-for (const decision of ["accept", "stop"] as const) {
-	test(`queued generation-one ${decision} survives an unrelated target revision to global generation two`, { timeout: 60_000 }, async () => {
-		await withFixture(`queued-${decision}`, async (service, fixture) => {
-			const readme = path.join(fixture.planDirectory, "README.md");
-			fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("\n\n## Dependency notes", "\n| [002](002-independent.md) | Independent | P1 | S | — | TODO |\n\n## Dependency notes"));
-			fs.writeFileSync(path.join(fixture.planDirectory, "002-independent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 002:").replaceAll("src/value.mjs", "src/independent.mjs"));
-			const first = await exhaustReview(service, fixture, `queued-${decision}-first`);
-			let reply = first.reply;
-			const prefix = `queued-${decision}-second`;
-			for (const round of [1, 2, 3]) {
-				const implementer = action(reply, "plan-implementer");
-				assert.equal(implementer.planId, "002");
-				assert.equal(implementer.round, round);
-				reply = await finishImplementer(service, implementer, prefix);
-				reply = await finishReviewer(service, action(reply, "plan-reviewer"), prefix, blocker(round));
-				if (round === 2) reply = await finishJudge(service, action(reply, "plan-judge"), prefix, { decision: "REPAIR", authorizedBlockers: ["recorded blocker"], repairContracts: ["Fix the recorded blocker"] });
-			}
-			assert.equal(payload(reply.attention).planId, "001");
-			const sourcePath = path.join(fixture.planDirectory, "001-update-value.md");
-			fs.writeFileSync(sourcePath, fs.readFileSync(sourcePath, "utf8").replace("Change the exported numeric value", "Change the exported numeric value while also preserving integer compatibility"));
-			reply = await resolve(service, resolutionFor(reply, "revise"), `queued-${decision}-revise-first`);
-			assert.equal(payload(reply.attention).planId, "002");
-			assert.equal(payload(reply.attention).generation, 1);
-			const resolution = resolutionFor(reply, decision);
-			await assert.rejects(resolve(service, { ...resolution, git: { ...resolution.git!, worktreeHead: "0".repeat(40) } }, `queued-${decision}-stale`), /Git identity/);
-			reply = await resolve(service, resolution, `queued-${decision}-resolve-second`);
-			const inspected = inspectPlan(fixture);
-			try {
-				assert.equal(inspected.run!.currentGeneration, 2);
-				assert.equal(inspected.store.getPlan(inspected.run!.runId, "002")?.generation, 1);
-				assert.equal(inspected.store.getPlan(inspected.run!.runId, "002")?.phase, decision === "accept" ? "DONE" : "BLOCKED");
-				assert.equal(inspected.store.getAttention(resolution.requestId)?.state, "resolved");
-				assert.equal(inspected.plan.generation, 2);
-				assert.equal(inspected.plan.phase, "IMPLEMENTING");
-			} finally { inspected.store.close(); }
-		});
-	});
-}

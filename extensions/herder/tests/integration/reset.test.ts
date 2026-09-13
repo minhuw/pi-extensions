@@ -6,10 +6,11 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { applyHerderReset } from "../../src/application/tools.ts";
-import { initPlanDir, projectStatuses } from "../../src/core/plans.ts";
+import { buildGraph, initPlanDir, projectStatuses } from "../../src/core/plans.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../src/client/index.ts";
 import { resetHerderPlanSet } from "../../src/daemon/git/reset-plan-set.ts";
+import { compileGraphIdentity } from "../../src/core/plan-identity.ts";
 import { canonicalWorktreeRoot, legacyWorktreeRoot } from "../../src/daemon/git/worktree-locations.ts";
 import { RunStore } from "../../src/daemon/run-store.ts";
 import { withTemporaryExecutableOnPath } from "../support/temp-executable.ts";
@@ -204,36 +205,38 @@ real_git "$@"
 		assert.equal(namespaceSnapshot(value), before);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
-test("reset removes the real Herder namespace, restores immutable statuses, preserves setup, and permits a fresh fire", { timeout: 30_000 }, async () => {
+test("reset removes the real Herder namespace, restores immutable statuses, preserves setup, and permits two complete reset/fire cycles", { timeout: 60_000 }, async () => {
 	const value = await initializedFixture();
 	try {
 		const beforePlan = fs.readFileSync(value.planFile, "utf8");
 		const beforeIgnore = value.ignore;
-		projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "temporary execution detail" }]);
-		const store = new RunStore(value.planDir);
-		try { store.updateRun({ status: "complete" }); } finally { store.close(); }
-		const planRoot = canonicalWorktreeRoot(value.planDir);
-		assert.equal(fs.realpathSync(path.join(planRoot, "integration")), fs.realpathSync(path.join(planRoot, "integration")));
-		command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/completed/001`, value.base]);
-		const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
-		assert.deepEqual(result.resetPlans, ["001"]);
-		assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
-		assert.equal(git(value.repo, "for-each-ref", `refs/plan-herder/${value.planName}/`), "");
-		assert.equal(git(value.repo, "worktree", "list", "--porcelain").includes(planRoot), false);
-		assert.equal(fs.existsSync(path.join(planRoot, "integration")), false);
-		assert.equal(fs.existsSync(path.join(planRoot, "001")), false);
-		assert.equal(fs.readFileSync(value.planFile, "utf8"), beforePlan);
-		assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
-		assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /temporary execution detail/);
-		assert.equal(fs.readFileSync(path.join(value.planDir, ".gitignore"), "utf8"), beforeIgnore);
-		const empty = new RunStore(value.planDir);
-		try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
-		const fresh = await ensureService(value.planDir);
-		const started = await requestManagerOperation(fresh, "start", {
-			mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
-		});
-		assert.equal((started.reply as Record<string, unknown>).status, "running");
-		await stopService(value.planDir);
+		for (let cycle = 0; cycle < 2; cycle++) {
+			projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "temporary execution detail" }]);
+			const store = new RunStore(value.planDir);
+			try { store.updateRun({ status: "complete" }); } finally { store.close(); }
+			const planRoot = canonicalWorktreeRoot(value.planDir);
+			assert.equal(fs.realpathSync(path.join(planRoot, "integration")), fs.realpathSync(path.join(planRoot, "integration")));
+			command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/completed/001`, value.base]);
+			const result = resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir });
+			assert.deepEqual(result.resetPlans, ["001"]);
+			assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+			assert.equal(git(value.repo, "for-each-ref", `refs/plan-herder/${value.planName}/`), "");
+			assert.equal(git(value.repo, "worktree", "list", "--porcelain").includes(planRoot), false);
+			assert.equal(fs.existsSync(path.join(planRoot, "integration")), false);
+			assert.equal(fs.existsSync(path.join(planRoot, "001")), false);
+			assert.equal(fs.readFileSync(value.planFile, "utf8"), beforePlan);
+			assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
+			assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /temporary execution detail/);
+			assert.equal(fs.readFileSync(path.join(value.planDir, ".gitignore"), "utf8"), beforeIgnore);
+			const empty = new RunStore(value.planDir);
+			try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+			const fresh = await ensureService(value.planDir);
+			const started = await requestManagerOperation(fresh, "start", {
+				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
+			});
+			assert.equal((started.reply as Record<string, unknown>).status, "running");
+			await stopService(value.planDir);
+		}
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
@@ -524,5 +527,338 @@ test("applyHerderReset stops an active service before resetting", async () => {
 		const result = await applyHerderReset({ repoRoot: value.repo, planDirectory: value.planDir });
 		assert.equal(result.planName, "herder-plans");
 		assert.equal((await requestService(await ensureService(value.planDir), "/v1/status", undefined)).reply !== undefined, true);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+function resetInput(value: Fixture) { return { repoRoot: value.repo, planDirectory: value.planDir }; }
+function resetIntent(value: Fixture) {
+	return JSON.parse(fs.readFileSync(path.join(value.planDir, ".herder", "reset-intent.json"), "utf8"));
+}
+function interruptDeletion(value: Fixture, operation: "worktree" | "branch" | "ref" | "unlock" = "worktree"): void {
+	const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+	const pattern = operation === "worktree" ? "worktree remove --force" : operation === "unlock" ? "worktree unlock" :
+		`update-ref --no-deref -d refs/${operation === "branch" ? "heads/herder" : "plan-herder"}/${value.planName}/`;
+	assert.throws(() => withTemporaryExecutableOnPath({
+		prefix: "herder-reset-interrupt-",
+		script: `#!/bin/sh
+real_git() { ( PATH=${quote(process.env.PATH ?? "")}; export PATH; command git "$@"; ); }
+case "$*" in
+	*${quote(pattern)}*) real_git "$@" || exit $?; echo 'injected deletion boundary' >&2; exit 73 ;;
+esac
+real_git "$@"
+`,
+	}, () => resetHerderPlanSet(resetInput(value))), operation === "branch" || operation === "ref" ? /could not delete moved ref/ : /injected deletion boundary/);
+}
+
+for (const operation of ["worktree", "branch", "ref", "unlock"] as const) {
+	test(`durable reset resumes interrupted ${operation} deletion and replays its original result`, { timeout: 30_000 }, async () => {
+		const value = await initializedFixture();
+		try {
+			if (operation === "unlock") command(value.repo, ["worktree", "lock", "--reason", "test", path.join(canonicalWorktreeRoot(value.planDir), "001")]);
+			const plan = fs.readFileSync(value.planFile, "utf8");
+			interruptDeletion(value, operation);
+			const intent = resetIntent(value);
+			assert.equal(intent.pending, true);
+			assert.equal(fs.statSync(path.join(value.planDir, ".herder", "reset-intent.json")).mode & 0o777, 0o600);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+			assert.equal(resetIntent(value).completed, true);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+			assert.equal(fs.readFileSync(value.planFile, "utf8"), plan);
+			assert.equal(git(value.repo, "for-each-ref", `refs/heads/herder/${value.planName}/`), "");
+			assert.equal(git(value.repo, "for-each-ref", `refs/plan-herder/${value.planName}/`), "");
+		} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+	});
+}
+
+test("interrupted reset survives service restart presentation updates but rejects changed execution identity", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const store = new RunStore(value.planDir);
+		try { store.updateRun({ dashboardUrl: "http://127.0.0.1:1/" }); } finally { store.close(); }
+		command(value.repo, ["worktree", "lock", "--reason", "test", path.join(canonicalWorktreeRoot(value.planDir), "001")]);
+		interruptDeletion(value, "unlock");
+		const intent = resetIntent(value);
+		await ensureService(value.planDir);
+		await stopService(value.planDir);
+		const restarted = new RunStore(value.planDir);
+		try {
+			const run = restarted.getRun()!;
+			assert.equal(run.runId, intent.manifest.run.runId);
+			assert.notEqual(run.dashboardUrl, intent.manifest.run.dashboardUrl);
+			assert.notEqual(run.updatedAt, intent.manifest.run.updatedAt);
+			restarted.updateRun({ status: "paused", terminalDetail: "Service restarted during reset." });
+			for (const change of [{ graphSha256: "0".repeat(64) }, { currentGeneration: run.currentGeneration + 1 }]) {
+				restarted.updateRun(change);
+				const before = namespaceSnapshot(value);
+				assert.throws(() => resetHerderPlanSet(resetInput(value)), /run identity changed/);
+				assert.equal(namespaceSnapshot(value), before);
+				restarted.updateRun({ graphSha256: run.graphSha256, currentGeneration: run.currentGeneration });
+			}
+		} finally { restarted.close(); }
+		assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+		assert.equal(resetIntent(value).completed, true);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const boundary of ["before", "after"] as const) {
+	test(`durable reset resumes ${boundary} the execution DB clear`, { timeout: 30_000 }, async (t) => {
+		const value = await initializedFixture();
+		try {
+			projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "execution failure" }]);
+			const original = RunStore.prototype.resetExecutionState;
+			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
+				if (boundary === "after") original.call(this);
+				throw new Error("injected DB boundary");
+			});
+			assert.throws(() => resetHerderPlanSet(resetInput(value)), /injected DB boundary/);
+			mocked.mock.restore();
+			const intent = resetIntent(value);
+			assert.equal(intent.databasePending, true);
+			assert.equal(intent.completed, false);
+			const store = new RunStore(value.planDir, { readOnly: true });
+			try { assert.equal(!!store.getRun(), boundary === "before"); } finally { store.close(); }
+			assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+		} finally { t.mock.restoreAll(); await stopService(value.planDir).catch(() => {}); remove(value); }
+	});
+}
+
+function revisionInput(value: Fixture) {
+	const store = new RunStore(value.planDir, { readOnly: true });
+	try {
+		const run = store.getRun()!;
+		return { ...resetInput(value), revision: { runId: run.runId, baseCommit: run.baseCommit, graphSha256: compileGraphIdentity(buildGraph(value.planDir)) } };
+	} finally { store.close(); }
+}
+
+test("revision uses stored ownership after IDs/topology change, discards integrated work and resets every revised status to TODO", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const root = canonicalWorktreeRoot(value.planDir);
+		const planWorktree = path.join(root, "001"), integration = path.join(root, "integration");
+		fs.writeFileSync(path.join(planWorktree, "fixture.txt"), "old implementation\n");
+		command(planWorktree, ["commit", "-qam", "test: old implementation"]);
+		command(integration, ["merge", "--ff-only", `herder/${value.planName}/001`]);
+		command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/completed/001`, git(integration, "rev-parse", "HEAD")]);
+		const store = new RunStore(value.planDir);
+		try {
+			const run = store.getRun()!;
+			store.putPlanSpecs(store.getPlanSpecs(run.runId).map((spec) => ({ ...spec, initialStatus: "DONE" })));
+			store.updateRun({ status: "complete" });
+		} finally { store.close(); }
+		// Author removes 001, adds a dependency chain with mixed initial statuses.
+		fs.renameSync(value.planFile, path.join(value.planDir, "old-reset.txt"));
+		const rows: string[] = [];
+		for (const [id, dependency, status] of [["002", "none", "DONE"], ["003", "002", "BLOCKED — revise"], ["004", "003", "REJECTED — revise"]]) {
+			fs.writeFileSync(path.join(value.planDir, `${id}-reset.md`), planBody(id, "Revised reset").replace("**Depends on**: none", `**Depends on**: ${dependency}`).replace("Dependencies: none.", dependency === "none" ? "Dependencies: none." : `| Plan | Consumes |\n|---|---|\n| ${dependency} | Reset coverage from the dependency. |`));
+			rows.push(`| [${id}](${id}-reset.md) | Revised reset | P1 | S | ${dependency === "none" ? "—" : dependency} | ${status} |`);
+		}
+		fs.writeFileSync(value.readme, fs.readFileSync(value.readme, "utf8").replace(/^\| \[001\].*$/m, rows.join("\n")));
+		assert.equal(buildGraph(value.planDir).shapeReady, true);
+		assert.throws(() => resetHerderPlanSet(resetInput(value)), /stored plan graph/);
+		const input = revisionInput(value);
+		const plans = ["002", "003", "004"].map((id) => fs.readFileSync(path.join(value.planDir, `${id}-reset.md`), "utf8"));
+		const result = resetHerderPlanSet(input);
+		assert.deepEqual(result.resetPlans, ["002", "003", "004"]);
+		assert.ok(result.removedBranches.includes(`herder/${value.planName}/001`));
+		assert.ok(result.removedRefs.includes(`refs/plan-herder/${value.planName}/completed/001`));
+		assert.deepEqual(buildGraph(value.planDir).plans.map((p) => p.status), ["TODO", "TODO", "TODO"]);
+		assert.deepEqual(["002", "003", "004"].map((id) => fs.readFileSync(path.join(value.planDir, `${id}-reset.md`), "utf8")), plans);
+		assert.equal(fs.readFileSync(path.join(value.repo, "fixture.txt"), "utf8"), "base\n");
+		assert.equal(git(value.repo, "rev-parse", "HEAD"), input.revision.baseCommit);
+		assert.deepEqual(resetHerderPlanSet(input), result);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("revision authorization rejects wrong run/hash/base, changed HEAD and invalid shape before mutation", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const input = revisionInput(value);
+		for (const revision of [
+			{ ...input.revision, runId: "foreign-run" },
+			{ ...input.revision, graphSha256: "0".repeat(64) },
+			{ ...input.revision, baseCommit: value.base },
+		]) {
+			const before = namespaceSnapshot(value);
+			assert.throws(() => resetHerderPlanSet({ ...input, revision }), /graph hash|recorded runId/);
+			assert.equal(namespaceSnapshot(value), before);
+		}
+		command(value.repo, ["commit", "--allow-empty", "-qm", "test: moved HEAD"]);
+		const before = namespaceSnapshot(value);
+		assert.throws(() => resetHerderPlanSet(input), /checkout HEAD/);
+		assert.equal(namespaceSnapshot(value), before);
+		fs.appendFileSync(value.planFile, `\n${"word ".repeat(1300)}\n`);
+		const invalid = revisionInput(value);
+		assert.equal(buildGraph(value.planDir).shapeReady, false);
+		assert.throws(() => resetHerderPlanSet(invalid), /shape-ready/);
+		assert.equal(fs.existsSync(path.join(value.planDir, ".herder", "reset-intent.json")), false);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("pending reset rejects changed input/graph, new/moved/unexpectedly missing refs and foreign/symlink attachments", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const revision = revisionInput(value);
+		interruptDeletion(value);
+		const intent = resetIntent(value);
+		const expectUnchanged = (pattern: RegExp) => {
+			const before = namespaceSnapshot(value);
+			assert.throws(() => resetHerderPlanSet(resetInput(value)), pattern);
+			assert.equal(namespaceSnapshot(value), before);
+		};
+		assert.throws(() => resetHerderPlanSet(revision), /input or graph/);
+		const plan = fs.readFileSync(value.planFile, "utf8");
+		fs.appendFileSync(value.planFile, "\nA newly authorized requirement.\n");
+		expectUnchanged(/input or graph/);
+		fs.writeFileSync(value.planFile, plan);
+		const foreignRef = `refs/plan-herder/${value.planName}/completed/999`;
+		command(value.repo, ["update-ref", foreignRef, value.base]);
+		expectUnchanged(/new or foreign (refs|loose ref)/);
+		command(value.repo, ["update-ref", "-d", foreignRef]);
+		const baseRef = `refs/plan-herder/${value.planName}/base`, base = git(value.repo, "rev-parse", baseRef);
+		command(value.repo, ["update-ref", baseRef, value.base]);
+		expectUnchanged(/moved ref/);
+		command(value.repo, ["update-ref", "-d", baseRef]);
+		expectUnchanged(/unexpectedly missing/);
+		command(value.repo, ["update-ref", baseRef, base]);
+		command(value.repo, ["symbolic-ref", baseRef, "refs/heads/main"]);
+		expectUnchanged(/symbolic ref artifact/);
+		command(value.repo, ["update-ref", "--no-deref", "-d", baseRef]);
+		command(value.repo, ["update-ref", baseRef, base]);
+		const danglingRef = path.join(value.repo, ".git", foreignRef);
+		fs.mkdirSync(path.dirname(danglingRef), { recursive: true });
+		fs.symlinkSync("missing-ref", danglingRef);
+		expectUnchanged(/symlink artifact/);
+		fs.unlinkSync(danglingRef);
+		const deleted = intent.manifest.owned[intent.next].path;
+		fs.symlinkSync(value.repo, deleted, "dir");
+		expectUnchanged(/symlink artifact/);
+		fs.unlinkSync(deleted);
+		command(value.repo, ["worktree", "add", "-q", "--detach", deleted, base]);
+		expectUnchanged(/foreign worktree attachment/);
+		command(value.repo, ["worktree", "remove", "--force", deleted]);
+		assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+		// Recreated deleted refs are not "already missing" on a completed replay.
+		command(value.repo, ["update-ref", baseRef, base]);
+		expectUnchanged(/new or unexpectedly missing artifact/);
+		command(value.repo, ["update-ref", "-d", baseRef]);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const completed of [false, true]) test(`${completed ? "completed" : "DB-cleared pending"} reset refuses stale revision authority over a successor run`, { timeout: 30_000 }, async (t) => {
+	const value = await initializedFixture();
+	try {
+		const input = revisionInput(value);
+		if (completed) resetHerderPlanSet(input);
+		else {
+			const original = RunStore.prototype.resetExecutionState;
+			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
+				original.call(this);
+				throw new Error("injected after DB clear");
+			});
+			assert.throws(() => resetHerderPlanSet(input), /injected after DB clear/);
+			mocked.mock.restore();
+		}
+		const fresh = await ensureService(value.planDir);
+		await requestManagerOperation(fresh, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1 });
+		await stopService(value.planDir);
+		const before = namespaceSnapshot(value);
+		assert.throws(() => resetHerderPlanSet(input), /successor run/);
+		assert.equal(namespaceSnapshot(value), before);
+		const receipt = fs.readFileSync(path.join(value.planDir, ".herder", "reset-intent.json"), "utf8");
+		const freshInput = revisionInput(value);
+		if (completed) {
+			assert.notEqual(freshInput.revision.runId, input.revision.runId);
+			assert.throws(() => resetHerderPlanSet({ ...freshInput, revision: { ...freshInput.revision, baseCommit: value.base } }), /recorded runId/);
+			assert.equal(namespaceSnapshot(value), before);
+			assert.equal(fs.readFileSync(path.join(value.planDir, ".herder", "reset-intent.json"), "utf8"), receipt);
+			assert.deepEqual(resetHerderPlanSet(freshInput).resetPlans, ["001"]);
+			assert.equal(resetIntent(value).manifest.run.runId, freshInput.revision.runId);
+			assert.equal(resetIntent(value).completed, true);
+			assert.throws(() => resetHerderPlanSet(input), /input or graph/);
+		} else {
+			assert.throws(() => resetHerderPlanSet(freshInput), /input or graph/);
+			assert.equal(namespaceSnapshot(value), before);
+		}
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset intent refuses symlinks and public files without following them", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const file = path.join(value.planDir, ".herder", "reset-intent.json");
+		fs.symlinkSync(value.planFile, file);
+		let before = namespaceSnapshot(value);
+		assert.throws(() => resetHerderPlanSet(resetInput(value)), /symlink artifact/);
+		assert.equal(namespaceSnapshot(value), before);
+		fs.unlinkSync(file);
+		interruptDeletion(value);
+		fs.chmodSync(file, 0o644);
+		before = namespaceSnapshot(value);
+		assert.throws(() => resetHerderPlanSet(resetInput(value)), /private, owned regular file/);
+		assert.equal(namespaceSnapshot(value), before);
+		fs.chmodSync(file, 0o600);
+		resetHerderPlanSet(resetInput(value));
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const partial of ["directory", "attachment"] as const) test(`pending worktree removal accepts only its own missing ${partial} with the original registration`, { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+		assert.throws(() => withTemporaryExecutableOnPath({
+			prefix: "herder-reset-partial-worktree-",
+			script: `#!/bin/sh
+real_git() { ( PATH=${quote(process.env.PATH ?? "")}; export PATH; command git "$@"; ); }
+case "$*" in
+	*"worktree remove --force"*)
+		for worktree do :; done
+		${partial === "directory" ? 'rm -rf -- "$worktree"' : 'rm -- "$worktree/.git"'}
+		echo 'injected partial worktree removal' >&2
+		exit 73 ;;
+esac
+real_git "$@"
+`,
+		}, () => resetHerderPlanSet(resetInput(value))), /injected partial worktree removal/);
+		const intent = resetIntent(value);
+		const pending = intent.manifest.owned[intent.next];
+		assert.equal(fs.existsSync(pending.path), partial === "attachment");
+		assert.equal(fs.existsSync(path.join(pending.path, ".git")), false);
+		assert.ok(git(value.repo, "worktree", "list", "--porcelain").includes(pending.path));
+		if (partial === "attachment") {
+			const stat = fs.statSync(pending.path, { bigint: true });
+			assert.equal(`inode:${stat.dev}:${stat.ino}`, pending.identity);
+			// A replacement directory without .git must not inherit the pending deletion.
+			const original = `${pending.path}-original`;
+			fs.renameSync(pending.path, original);
+			fs.mkdirSync(pending.path);
+			fs.writeFileSync(path.join(pending.path, "keep.txt"), "foreign\n");
+			const before = namespaceSnapshot(value);
+			assert.throws(() => resetHerderPlanSet(resetInput(value)), /foreign worktree attachment/);
+			assert.equal(namespaceSnapshot(value), before);
+			assert.equal(fs.readFileSync(path.join(pending.path, "keep.txt"), "utf8"), "foreign\n");
+			fs.rmSync(pending.path, { recursive: true });
+			fs.renameSync(original, pending.path);
+		}
+		assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+		assert.equal(fs.existsSync(pending.path), false);
+		assert.equal(git(value.repo, "worktree", "list", "--porcelain").includes(pending.path), false);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset preserves filesystem-equivalent owned path spelling across replay", { timeout: 30_000 }, async (t) => {
+	const value = await initializedFixture();
+	try {
+		const root = canonicalWorktreeRoot(value.planDir);
+		const canonical = path.join(root, "integration"), alternate = path.join(root, "Integration");
+		if (!fs.existsSync(alternate)) { t.skip("Requires case-insensitive storage"); return; }
+		command(value.repo, ["worktree", "move", canonical, path.join(root, "moving")]);
+		command(value.repo, ["worktree", "move", path.join(root, "moving"), alternate]);
+		const registeredPath = fs.realpathSync(alternate);
+		interruptDeletion(value, "branch");
+		const intent = resetIntent(value);
+		assert.ok(intent.manifest.result.removedWorktrees.includes(registeredPath));
+		assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });

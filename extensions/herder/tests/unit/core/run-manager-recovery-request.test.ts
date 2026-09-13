@@ -350,45 +350,24 @@ test("unbound answers with different text cannot advance either attention reques
 	}
 });
 
-test("a committed record-only answer replays idempotently after a later request becomes current", async () => {
-	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-replay-"));
+test("record-only plan answers remain rejected across manager restart without consuming any request", async () => {
+	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-policy-"));
 	const store = new RunStore(planDirectory);
 	try {
 		insertRun(store, planDirectory);
-		store.updateRun({ status: "needs_input", terminalDetail: "Two Judges need input" });
 		store.putPlan(inputPlan("run-1", "001"));
-		store.putPlan(inputPlan("run-1", "002"));
 		const first = store.putAttention(userDecisionRequest("001", "attention-first"));
-		const resolution: AttentionResolutionInput = { ...attentionResolutionFromRequest(first), action: "answer", answer: "Answer request one" };
-		const resolve = (manager: HerderRunManager) => (manager as unknown as {
-			applyAttentionResolution: (resolution: AttentionResolutionInput) => Promise<void>;
-		}).applyAttentionResolution(resolution);
 		const second = store.putAttention(userDecisionRequest("002", "attention-second"));
-		const manager = new HerderRunManager(planDirectory);
-		try {
-			await resolve(manager);
-			assert.equal(manager.store.getAttention(first.requestId)?.state, "resolved");
-			assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
-			assert.equal(manager.store.getRun()?.status, "needs_input");
-		} finally {
-			manager.close();
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const manager = new HerderRunManager(planDirectory);
+			try {
+				const resolve = manager as unknown as { applyAttentionResolution: (input: AttentionResolutionInput) => Promise<void> };
+				await assert.rejects(resolve.applyAttentionResolution({ ...attentionResolutionFromRequest(first), action: "answer", answer: "Answer request one" }), /requires revise_run or explicit abandon_run/);
+				assert.equal(manager.store.getPlan("run-1", "001")?.phase, "NEEDS_INPUT");
+				assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
+				assert.equal(manager.store.getAttention(first.requestId)?.state, "awaiting_input");
+				assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
+			} finally { manager.close(); }
 		}
-
-		// The first transaction is durable, but its event journal write is absent;
-		// a replacement service must accept the identical event without routing it
-		// against the now-current second request.
-		const replacement = new HerderRunManager(planDirectory);
-		try {
-			await resolve(replacement);
-			assert.deepEqual(replacement.store.getPlan("run-1", "001")?.repair, ["ATTENTION_ANSWER [attention-first]: Answer request one"]);
-			assert.equal(replacement.store.getPlan("run-1", "001")?.phase, "BLOCKED");
-			assert.equal(replacement.store.getPlan("run-1", "002")?.phase, "NEEDS_INPUT");
-			assert.equal(replacement.store.getAttention(second.requestId)?.state, "awaiting_input");
-		} finally {
-			replacement.close();
-		}
-	} finally {
-		store.close();
-		fs.rmSync(planDirectory, { recursive: true, force: true });
-	}
+	} finally { store.close(); fs.rmSync(planDirectory, { recursive: true, force: true }); }
 });

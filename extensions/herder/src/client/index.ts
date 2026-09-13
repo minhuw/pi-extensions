@@ -547,10 +547,10 @@ function managerReplyFromStatus(value: Record<string, unknown>): Record<string, 
 	return reply as Record<string, unknown>;
 }
 
-export type ServiceExclusionPurpose = "cleanup" | "reset" | "force";
+export type ServiceExclusionPurpose = "cleanup" | "reset" | "force" | "revision";
 
 function mayStopLiveRun(purpose: ServiceExclusionPurpose): boolean {
-	return purpose === "reset" || purpose === "force";
+	return purpose === "reset" || purpose === "force" || purpose === "revision";
 }
 
 async function killOwnedService(pid: number): Promise<void> {
@@ -597,7 +597,7 @@ export async function withServiceExclusion<T>(
 				const serviceStatus = String(status.status || "");
 				if (!isTerminalRunStatus(serviceStatus)) {
 					if (!mayStopLiveRun(purpose)) throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
-					try { await requestManagerOperation(service, "stop", {}); }
+					try { if (purpose !== "revision") await requestManagerOperation(service, "stop", {}); }
 					catch {
 						if (purpose !== "force") throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
 						await killOwnedService(registered.pid);

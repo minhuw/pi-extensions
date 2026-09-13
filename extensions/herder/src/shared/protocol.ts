@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MANAGER_PROTOCOL_VERSION = 13;
+export const MANAGER_PROTOCOL_VERSION = 14;
 export const MAX_PLAN_ROUNDS = 3;
 export const MAIN_SESSION_VERIFICATION_PAUSE_DETAIL = "Waiting for the main Pi session to submit an exact-tree verification manifest.";
 export const TERMINAL_RUN_STATUSES = ["complete", "failed", "stopped"] as const;
@@ -148,6 +148,8 @@ export interface AttentionContinuation {
 
 /** Actions accepted by the manager-owned attention resolution operation. */
 export const ATTENTION_RESOLUTION_ACTIONS = [
+	"revise_run",
+	"abandon_run",
 	"answer",
 	"answer_and_resume",
 	"accept",
@@ -854,6 +856,7 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 }
 
 export interface ManagerReply {
+	runRevision?: { editToken: string; requestId: string; state: string };
 	protocolVersion: number;
 	runId: string;
 	status: RunStatus | "idle";

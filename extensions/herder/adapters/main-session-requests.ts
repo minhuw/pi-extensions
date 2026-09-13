@@ -118,6 +118,14 @@ export class MainSessionRequests {
 		this.deferredAttention.delete(requestId);
 	}
 
+	restoreAttention(planDirectory: string, request: ManagerAttentionRequest): void {
+		if (!this.host.ownsRun(planDirectory, request.runId) || this.host.current().state?.runId !== request.runId || request.state === "resolved") {
+			throw new Error("Cannot restore attention outside the current owned run");
+		}
+		this.currentAttention = request;
+		if (this.attentionHint !== request.requestId) this.attentionHint = undefined;
+	}
+
 	observeReply(reply: ManagerReply, displayed?: { status: string; message: string }): void {
 		const owned = this.host.ownsRun(reply.planDirectory, reply.runId);
 		this.currentAttention = owned ? reply.attention : undefined;
