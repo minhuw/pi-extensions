@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { acquireAdapterOwnership, adapterOwnershipLockPath, releaseAdapterOwnership, markAdapterOwnershipCleanupRequired, bindAdapterOwnershipRun, withAdapterResetOwnership, type AdapterResetOptions } from "../../../adapters/ownership.ts";
 import { applyHerderReset } from "../../../src/application/tools.ts";
+import { openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
 
 function fixture() {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-owner-"));
@@ -270,6 +271,8 @@ for (const failure of ["truncate", "invalidation sync", "torn write", "final syn
 		const root = fixture();
 		const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
 		try {
+			// Inject failures into ownership persistence, not execution DB initialization/permission repair.
+			openExecutionDatabase(root, { create: true }).close();
 			if (failure === "truncate") t.mock.method(fs, "ftruncateSync", () => { throw Error("fixture persistence failure"); });
 			else if (failure === "torn write") {
 				const write = fs.writeSync;
@@ -294,4 +297,61 @@ for (const failure of ["truncate", "invalidation sync", "torn write", "final syn
 			}
 		} finally { t.mock.restoreAll(); releaseAdapterOwnership(held); fs.rmSync(root, { recursive: true, force: true }); }
 	});
+}
+
+test("stale reaper retains a cleanup marker published by its liveness probe", () => {
+	const root = fixture();
+	const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+	let unexpected: ReturnType<typeof acquireAdapterOwnership> | undefined;
+	try {
+		const original = JSON.parse(fs.readFileSync(held.lockPath, "utf8"));
+		const stat = fs.statSync(held.lockPath);
+		assert.throws(() => {
+			unexpected = acquireAdapterOwnership(root, "next", "next", {
+				...fake, isProcessAlive: () => { markAdapterOwnershipCleanupRequired(held); return false; },
+			});
+		}, /manual child-process cleanup/);
+		assert.deepEqual(JSON.parse(fs.readFileSync(held.lockPath, "utf8")), { ...original, resetCleanupRequired: true });
+		for (const field of ["dev", "ino", "mode", "uid", "gid"] as const) assert.equal(fs.statSync(held.lockPath)[field], stat[field]);
+	} finally {
+		if (unexpected) releaseAdapterOwnership(unexpected);
+		releaseAdapterOwnership(held);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+for (const marked of [false, true]) {
+	for (const replacement of ["lock", "runtime"] as const) {
+		test(`marker rejects ${replacement} replacement during final fsync (already marked: ${marked})`, (t) => {
+			const root = fixture();
+			const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+			try {
+				const original = fs.readFileSync(held.lockPath, "utf8");
+				const stat = fs.fstatSync(held.descriptor);
+				if (marked) markAdapterOwnershipCleanupRequired(held);
+				const sync = fs.fsyncSync;
+				let calls = 0;
+				t.mock.method(fs, "fsyncSync", (fd: number) => {
+					sync(fd);
+					const synced = fs.fstatSync(fd);
+					if (synced.dev !== stat.dev || synced.ino !== stat.ino || ++calls !== (marked ? 1 : 2)) return;
+					if (replacement === "lock") {
+						fs.renameSync(held.lockPath, path.join(root, "old-lock"));
+						fs.writeFileSync(held.lockPath, original);
+					} else {
+						fs.renameSync(path.join(root, ".herder"), path.join(root, "old-runtime"));
+						fs.mkdirSync(path.join(root, ".herder"));
+						fs.linkSync(path.join(root, "old-runtime", path.basename(held.lockPath)), held.lockPath);
+					}
+				});
+				assert.throws(() => markAdapterOwnershipCleanupRequired(held), /replaced/);
+				assert.equal(calls, marked ? 1 : 2);
+				if (replacement === "lock") assert.equal(fs.readFileSync(held.lockPath, "utf8"), original);
+			} finally {
+				t.mock.restoreAll();
+				fs.closeSync(held.descriptor);
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
 }

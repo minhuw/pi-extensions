@@ -188,7 +188,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let releaseOwnershipAfterManagerDrain = false;
 	let sessionEpoch = 0;
 	let shuttingDown = false;
-	let shutdownDrained = false;
 	let resetting = false;
 	let resetPending = false;
 	let ownership: AdapterOwnership | undefined;
@@ -295,6 +294,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const claimOwnership = async (planDir: string, runId: string, ctx: ExtensionContext, epoch: number): Promise<AdapterOwnership | undefined> => {
 		assertSessionActive(epoch);
+		if (ownership?.record.resetCleanupRequired) {
+			await waitForAdapterOwnershipRetirement(planDir);
+			assertSessionActive(epoch);
+			if (ownership?.record.resetCleanupRequired) throw new Error("Herder ownership cleanup is incomplete; ownership evidence retained.");
+		}
 		if (ownership) {
 			if (ownsRun(planDir, runId)) {
 				const inherited = ownershipEpoch !== epoch;
@@ -318,8 +322,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 	};
 
-	const releaseOwnership = (): void => {
-		if (resetting || ((shuttingDown || ownership?.record.resetCleanupRequired) && !shutdownDrained)) return;
+	const releaseOwnership = (drained?: AdapterOwnership): void => {
+		if (drained && ownership !== drained) return;
+		if (resetting || ((shuttingDown || ownership?.record.resetCleanupRequired) && ownership !== drained)) return;
 		if (!ownership) return;
 		const held = ownership;
 		ownership = undefined;
@@ -1777,7 +1782,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		sessionEpoch += 1;
 		const epoch = sessionEpoch;
 		shuttingDown = false;
-		shutdownDrained = false;
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		mainSessionRequests.reset("session-start");
@@ -1843,7 +1847,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.on("session_shutdown", async () => {
 		sessionEpoch += 1;
 		shuttingDown = true;
-		shutdownDrained = false;
 		widget.dispose();
 		mainSessionRequests.reset("shutdown");
 		currentRunRevision = undefined;
@@ -1851,14 +1854,14 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		currentReworkEdit = undefined;
 		lastContext = undefined;
 		releaseOwnershipAfterManagerDrain = false;
-		if (ownership) markAdapterOwnershipCleanupRequired(ownership);
+		const held = ownership;
+		if (held) markAdapterOwnershipCleanupRequired(held);
 		await engine.drain();
 		workers.clear();
-		if (admittedManagerTasks === 0) { shutdownDrained = true; releaseOwnership(); }
+		if (admittedManagerTasks === 0) { if (held) releaseOwnership(held); }
 		else {
-			const held = ownership;
 			const drain = managerQueue.then(() => engine.drain()).then(() => {
-				if (ownership === held && shuttingDown) { shutdownDrained = true; releaseOwnership(); }
+				if (held) releaseOwnership(held);
 			});
 			if (held) registerAdapterOwnershipRetirement(held, drain);
 			void drain.catch(error => lastContext?.ui.notify(message(error), "error"));

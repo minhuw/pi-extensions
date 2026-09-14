@@ -173,38 +173,50 @@ function reapStaleOwnership(
 ): void {
 	const database = openExecutionDatabase(planDirectory, { create: true });
 	try {
-		withExecutionTransaction(database, () => {
-			let existing: ReturnType<typeof inspectExisting>;
-			try { existing = inspectExisting(lockPath); }
+		const probed = withExecutionTransaction(database, () => {
+			try { return inspectExisting(lockPath); }
 			catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 				throw error;
 			}
-			try {
-				if (isProcessAlive(existing.record.pid)) {
-					throw new Error(`Herder run ${existing.record.runId} is already owned by live Pi pid ${existing.record.pid} (session ${existing.record.piSessionId}); refusing to attach.`);
-				}
-				if (existing.record.resetCleanupRequired) {
-					throw new Error(`Herder Pi reset requires manual child-process cleanup before removing the ownership lock; ownership evidence retained: ${lockPath}`);
-				}
-				let named: fs.Stats;
-				try { named = fs.lstatSync(lockPath); }
+		});
+		if (!probed) return;
+		try {
+			// Probes can publish a cleanup marker; never invoke them under the writer lock.
+			const alive = isProcessAlive(probed.record.pid);
+			withExecutionTransaction(database, () => {
+				let existing: ReturnType<typeof inspectExisting>;
+				try { existing = inspectExisting(lockPath); }
 				catch (error) {
 					if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 					throw error;
 				}
-				if (named.isSymbolicLink() || !named.isFile()) {
-					throw new Error(`Herder Pi ownership lock changed to an unsafe file; refusing to replace it: ${lockPath}`);
+				try {
+					if (!sameIdentity(probed.stat, existing.stat)
+						|| (["pid", "runId", "piSessionId", "processIdentity"] as const).some(key => probed.record[key] !== existing.record[key])) return;
+					if (alive) {
+						throw new Error(`Herder run ${existing.record.runId} is already owned by live Pi pid ${existing.record.pid} (session ${existing.record.piSessionId}); refusing to attach.`);
+					}
+					if (existing.record.resetCleanupRequired) {
+						throw new Error(`Herder Pi reset requires manual child-process cleanup before removing the ownership lock; ownership evidence retained: ${lockPath}`);
+					}
+					let named: fs.Stats;
+					try { named = fs.lstatSync(lockPath); }
+					catch (error) {
+						if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+						throw error;
+					}
+					if (named.isSymbolicLink() || !named.isFile()) {
+						throw new Error(`Herder Pi ownership lock changed to an unsafe file; refusing to replace it: ${lockPath}`);
+					}
+					if (!sameIdentity(existing.stat, named)) return;
+					fs.unlinkSync(lockPath);
+				} finally {
+					try { fs.closeSync(existing.descriptor); } catch {}
 				}
-				if (!sameIdentity(existing.stat, named)) return;
-				fs.unlinkSync(lockPath);
-			} finally {
-				try { fs.closeSync(existing.descriptor); } catch {}
-			}
-		});
-	} finally {
-		database.close();
-	}
+			});
+		} finally { fs.closeSync(probed.descriptor); }
+	} finally { database.close(); }
 }
 
 export function acquireAdapterOwnership(
@@ -297,27 +309,35 @@ export function markAdapterOwnershipCleanupRequired(ownership: AdapterOwnership)
 	ownership.record = { ...ownership.record, resetCleanupRequired: true };
 	const planDirectory = path.dirname(path.dirname(ownership.lockPath));
 	assertAdapterOwnership(ownership, planDirectory);
-	const descriptor = fs.openSync(ownership.lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+	const database = openExecutionDatabase(planDirectory, { create: true });
 	try {
-		assertAdapterOwnership({ ...ownership, descriptor }, planDirectory);
-		if (!sameIdentity(fs.fstatSync(descriptor), fs.fstatSync(ownership.descriptor))) {
-			throw new Error("Herder Pi ownership lock was replaced; refusing reset/signals");
-		}
-		const stat = fs.fstatSync(descriptor);
-		if (stat.size < 1 || stat.size > MAX_LOCK_BYTES) throw new Error("Herder Pi ownership lock is malformed; refusing cleanup");
-		// Use the persisted identity: startup run binding intentionally changes only memory.
-		const record = parseRecord(fs.readFileSync(descriptor, "utf8"), ownership.lockPath);
-		if (record.resetCleanupRequired) { fs.fsyncSync(descriptor); return; }
-		const text = `${JSON.stringify({ ...record, resetCleanupRequired: true })}\n`;
-		if (Buffer.byteLength(text) > MAX_LOCK_BYTES) throw new Error("Herder Pi cleanup-required lock exceeds size limit; refusing reset/signals");
-		// Persist invalidation first: interrupted writes cannot leave a valid unmarked claim.
-		fs.ftruncateSync(descriptor, 0);
-		fs.fsyncSync(descriptor);
-		if (fs.writeSync(descriptor, text, 0, "utf8") !== Buffer.byteLength(text)) {
-			throw new Error("Herder Pi cleanup-required lock write was incomplete; refusing cleanup");
-		}
-		fs.fsyncSync(descriptor);
-	} finally { fs.closeSync(descriptor); }
+		withExecutionTransaction(database, () => {
+			const descriptor = fs.openSync(ownership.lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+			try {
+				assertAdapterOwnership({ ...ownership, descriptor }, planDirectory);
+				if (!sameIdentity(fs.fstatSync(descriptor), fs.fstatSync(ownership.descriptor))) {
+					throw new Error("Herder Pi ownership lock was replaced; refusing reset/signals");
+				}
+				const stat = fs.fstatSync(descriptor);
+				if (stat.size < 1 || stat.size > MAX_LOCK_BYTES) throw new Error("Herder Pi ownership lock is malformed; refusing cleanup");
+				// Use the persisted identity: startup run binding intentionally changes only memory.
+				const record = parseRecord(fs.readFileSync(descriptor, "utf8"), ownership.lockPath);
+				if (!record.resetCleanupRequired) {
+					const text = `${JSON.stringify({ ...record, resetCleanupRequired: true })}\n`;
+					if (Buffer.byteLength(text) > MAX_LOCK_BYTES) throw new Error("Herder Pi cleanup-required lock exceeds size limit; refusing reset/signals");
+					// Persist invalidation first: interrupted writes cannot leave a valid unmarked claim.
+					fs.ftruncateSync(descriptor, 0);
+					fs.fsyncSync(descriptor);
+					if (fs.writeSync(descriptor, text, 0, "utf8") !== Buffer.byteLength(text)) {
+						throw new Error("Herder Pi cleanup-required lock write was incomplete; refusing cleanup");
+					}
+				}
+				fs.fsyncSync(descriptor);
+				assertAdapterOwnership(ownership, planDirectory);
+				assertAdapterOwnership({ ...ownership, descriptor }, planDirectory);
+			} finally { fs.closeSync(descriptor); }
+		});
+	} finally { database.close(); }
 }
 
 export interface AdapterResetOptions extends AdapterOwnershipOptions {

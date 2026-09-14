@@ -1526,50 +1526,67 @@ for (const resetFirst of [true, false]) {
 	}
 }
 
-test("shutdown retains ownership when late admitted preparation fails disposal", { timeout: 30_000 }, async () => {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-shutdown-late-cleanup-"));
-	const value = writeFixture(root);
-	const api = new CapturedExtensionAPI();
-	let original: ReturnType<typeof ownershipEvidence>;
-	const factory = new class extends GatedPrepareWorkerFactory {
-		protected override createSession(request: PiWorkerRequest) {
-			const created = super.createSession(request);
-			created.session.dispose = () => {
-				assertCleanupMarker(original);
-				throw Error("fixture late disposal failed");
-			};
-			return created;
+for (const outcome of ["success", "success with queued recovery", "failure"] as const) {
+	const disposalFails = outcome === "failure";
+	test(`shutdown ${disposalFails ? "retains" : "releases"} ownership after session replacement and late preparation disposal ${outcome}`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-shutdown-late-cleanup-"));
+		const value = writeFixture(root);
+		const api = new CapturedExtensionAPI();
+		let original: ReturnType<typeof ownershipEvidence>;
+		const factory = new class extends GatedPrepareWorkerFactory {
+			protected override createSession(request: PiWorkerRequest) {
+				const created = super.createSession(request);
+				if (this.sessions.length !== 1) return created;
+				const dispose = created.session.dispose.bind(created.session);
+				created.session.dispose = () => {
+					assertCleanupMarker(original);
+					if (disposalFails) throw Error("fixture late disposal failed");
+					dispose();
+				};
+				return created;
+			}
+		}();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ctx = freshContext(value, []);
+		let attaching: Promise<unknown> | undefined;
+		try {
+			await startFixture(value, "pi-worker:late-cleanup-lost");
+			await api.invoke("session_start", ctx);
+			attaching = api.command("herder-attach").handler("herder-plans", ctx);
+			await withDeadline(factory.createEntered.promise, "late preparation admitted");
+			original = ownershipEvidence(value);
+			await withDeadline(api.invoke("session_shutdown", ctx), "shutdown before late preparation", 2_000);
+			assertCleanupMarker(original);
+			// A new session schedules idle retirement while the old admitted task is still pending.
+			await api.invoke("session_start", ctx);
+			const freshRecovery = outcome === "success with queued recovery"
+				? api.invoke("session_start", restoredContext(value, original.record.runId, []))
+				: undefined;
+			factory.allowCreate.resolve();
+			await withDeadline(attaching, "late attach completion");
+			await withDeadline(waitForAdapterOwnershipRetirement(value.planDirectory), "ownership retirement");
+			assert.equal(factory.sessions[0]!.prompted, false);
+			assert.equal(factory.sessions[0]!.disposed, !disposalFails);
+			if (!freshRecovery) {
+				assert.equal(factory.sessions.length, 1);
+				assert.equal(evidence(value).actions.some(action => action.state === "dispatched"), false);
+			}
+			if (disposalFails) await assertDeadOwnerRefused(value, original);
+			else {
+				if (!freshRecovery) assert.equal(fs.existsSync(original.lockPath), false, "successful retirement must release the marked claim despite session_start");
+				await withDeadline(freshRecovery ?? api.invoke("session_start", restoredContext(value, original.record.runId, [])), "fresh session recovery");
+				await withDeadline(factory.sessions[1]!.started, "fresh session worker start");
+				assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
+			}
+		} finally {
+			factory.allowCreate.resolve();
+			if (attaching) await withDeadline(attaching, "late attach cleanup").catch(() => {});
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
 		}
-	}();
-	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
-	const ctx = freshContext(value, []);
-	let attaching: Promise<unknown> | undefined;
-	try {
-		await startFixture(value, "pi-worker:late-cleanup-lost");
-		await api.invoke("session_start", ctx);
-		attaching = api.command("herder-attach").handler("herder-plans", ctx);
-		await withDeadline(factory.createEntered.promise, "late preparation admitted");
-		original = ownershipEvidence(value);
-		await withDeadline(api.invoke("session_shutdown", ctx), "shutdown before late preparation", 2_000);
-		assertCleanupMarker(original);
-		// A new session schedules idle retirement while the old admitted task is still pending.
-		await api.invoke("session_start", ctx);
-		factory.allowCreate.resolve();
-		await withDeadline(attaching, "late attach completion");
-		await withDeadline(waitForAdapterOwnershipRetirement(value.planDirectory), "failed ownership retirement");
-		assert.equal(factory.sessions.length, 1);
-		assert.equal(factory.sessions[0]!.prompted, false);
-		assert.equal(factory.sessions[0]!.disposed, false);
-		await assertDeadOwnerRefused(value, original);
-		assert.equal(evidence(value).actions.some(action => action.state === "dispatched"), false);
-	} finally {
-		factory.allowCreate.resolve();
-		if (attaching) await withDeadline(attaching, "late attach cleanup").catch(() => {});
-		await api.invoke("session_shutdown", ctx).catch(() => {});
-		await stopService(value.planDirectory).catch(() => {});
-		fs.rmSync(root, { recursive: true, force: true });
-	}
-});
+	});
+}
 
 test("shutdown marker persistence failure never aborts or disposes workers", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-shutdown-marker-failure-"));
