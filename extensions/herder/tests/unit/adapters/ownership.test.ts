@@ -33,7 +33,7 @@ test("live foreign Pi ownership refuses attachment", () => {
 	try {
 		const lockPath = writeOwner(planDir, { version: 1, pid: 4242, runId: "run-live", piSessionId: "session-live" });
 		assert.throws(
-			() => acquireAdapterOwnership(planDir, "run-next", "session-next", { pid: 5252, isProcessAlive: (pid) => pid === 4242 }),
+			() => acquireAdapterOwnership(planDir, "run-next", "session-next", { processIdentity: () => "fake-birth", pid: 5252, isProcessAlive: (pid) => pid === 4242 }),
 			/already owned by live Pi pid 4242.*refusing to attach/,
 		);
 		assert.equal(fs.existsSync(lockPath), true);
@@ -47,10 +47,11 @@ test("dead stale Pi ownership is reaped and atomically replaced", () => {
 	let ownership;
 	try {
 		writeOwner(planDir, { version: 1, pid: 4242, runId: "run-stale", piSessionId: "session-stale" });
-		ownership = acquireAdapterOwnership(planDir, "run-next", "session-next", { pid: 5252, isProcessAlive: () => false });
+		ownership = acquireAdapterOwnership(planDir, "run-next", "session-next", { processIdentity: () => "fake-birth", pid: 5252, isProcessAlive: () => false });
 		assert.deepEqual(JSON.parse(fs.readFileSync(ownership.lockPath, "utf8")), {
 			version: 1,
 			pid: 5252,
+			processIdentity: "fake-birth",
 			runId: "run-next",
 			piSessionId: "session-next",
 		});
@@ -94,7 +95,7 @@ test("malformed and symlink ownership state fail closed", async (t) => {
 
 test("release only unlinks the inode opened by this session", () => {
 	const { root, planDir } = fixture();
-	const ownership = acquireAdapterOwnership(planDir, "run-old", "session-old", { pid: 111, isProcessAlive: () => false });
+	const ownership = acquireAdapterOwnership(planDir, "run-old", "session-old", { processIdentity: () => "fake-birth", pid: 111, isProcessAlive: () => false });
 	try {
 		fs.unlinkSync(ownership.lockPath);
 		fs.writeFileSync(ownership.lockPath, `${JSON.stringify({ version: 1, pid: 222, runId: "run-new", piSessionId: "session-new" })}\n`, { mode: 0o600 });

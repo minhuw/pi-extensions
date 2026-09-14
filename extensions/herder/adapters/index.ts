@@ -19,6 +19,7 @@ import {
 	type VerificationManifest,
 } from "../src/shared/protocol.ts";
 import {
+	applyHerderReset,
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
 	submitHerderEvent,
@@ -62,6 +63,7 @@ import { interruptedPiWorkers } from "./recovery.ts";
 import { MainSessionRequests, type IntegrationRepairBinding } from "./main-session-requests.ts";
 import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
 import {
+	withAdapterResetOwnership,
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
 	bindAdapterOwnershipRun,
@@ -185,6 +187,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let releaseOwnershipAfterManagerDrain = false;
 	let sessionEpoch = 0;
 	let shuttingDown = false;
+	let shutdownDrained = false;
+	let resetting = false;
+	let resetPending = false;
 	let ownership: AdapterOwnership | undefined;
 	let ownershipEpoch = 0;
 	const fallbackPiSessionId = `fallback-${randomUUID()}`;
@@ -313,6 +318,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const releaseOwnership = (): void => {
+		if (resetting || (shuttingDown && !shutdownDrained)) return;
 		if (!ownership) return;
 		const held = ownership;
 		ownership = undefined;
@@ -342,7 +348,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (acquired && ownership === acquired && epoch === sessionEpoch) releaseOwnership();
 	};
 
-	const sessionActive = (epoch: number): boolean => epoch === sessionEpoch && !shuttingDown;
+	const sessionActive = (epoch: number): boolean => epoch === sessionEpoch && !shuttingDown && !resetting;
 
 	const assertSessionActive = (epoch: number): void => {
 		if (!sessionActive(epoch)) throw new Error("Herder operation was cancelled because the Pi session changed or shut down.");
@@ -449,6 +455,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const enqueueManager = <T>(task: () => Promise<T>): Promise<T> => {
+		if (resetting) return Promise.reject(new Error("Herder reset is in progress"));
 		admittedManagerTasks += 1;
 		const next = managerQueue.then(task, task);
 		const tracked = next.finally(() => {
@@ -799,16 +806,52 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const parsed = parseResetArguments(args);
 		const repoRoot = await repositoryRoot(ctx);
 		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir);
-		const result = await runResetCommand({
+		return runResetCommand({
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
+			apply: async (request) => {
+				if (resetPending) throw new Error("Herder reset is in progress");
+				resetPending = true;
+				const matching = ownership?.lockPath === adapterOwnershipLockPath(planDir) ? ownership : undefined;
+				let drained = false;
+				try {
+					const result = await withAdapterResetOwnership(planDir, piSessionId(ctx), {
+						ownership: matching,
+						confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
+						quiesce: async () => {
+							if (!matching && path.resolve(currentState?.planDir ?? currentRunRevision?.run.planDirectory ?? ".") !== path.resolve(planDir)) return;
+							resetting = true;
+							sessionEpoch += 1;
+							releaseOwnershipAfterManagerDrain = false;
+							// Invalidate admitted callbacks, then wait for their prepared handles to settle.
+							await managerQueue;
+							const active = [...workers.values()].filter(worker => path.resolve(worker.planDir) === path.resolve(planDir));
+							for (const worker of active) workers.delete(worker.handle);
+							await engine.drain(planDir);
+							await managerQueue;
+							drained = true;
+						},
+					}, held => applyHerderReset(request, { ownership: held }));
+					return result;
+				} finally {
+					if (drained) {
+						if (ownership === matching) { ownership = undefined; ownershipEpoch = 0; }
+						currentState = undefined;
+						currentRunRevision = undefined;
+						currentPlanEdit = undefined;
+						currentReworkEdit = undefined;
+						mainSessionRequests.reset("cleanup");
+						lastSummary = undefined;
+						lastManagerMessage = undefined;
+						verificationMonitors.clear();
+						render(ctx);
+					}
+					resetting = false;
+					resetPending = false;
+				}
+			},
 		});
-		// Reset removes the durable run after the service exclusion has stopped its
-		// terminal owner. Drop the adapter's matching in-memory ownership/state too,
-		// otherwise the next Fire in this Pi session would be blocked by stale state.
-		await clearCurrentStateForPlanDirectory(planDir, ctx);
-		return result;
 	};
 
 	const processPlanningManagerReply = async (
@@ -1035,7 +1078,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const command = (handler: (args: string, ctx: ExtensionContext) => Promise<string>) => async (args: string, ctx: ExtensionContext) => {
 		lastContext = ctx;
-		try { ctx.ui.notify(await handler(args, ctx), "info"); }
+		try {
+			if (resetPending) throw new Error("Herder reset is in progress");
+			ctx.ui.notify(await handler(args, ctx), "info");
+		}
 		catch (error) { ctx.ui.notify(message(error), "error"); }
 	};
 
@@ -1051,7 +1097,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		description: "Rewrite a blocked or exhausted non-integrated plan and rerun it from the current integration HEAD.",
 		handler: async (args, ctx) => {
 			lastContext = ctx;
-			try { ctx.ui.notify(await rework(args, ctx), "info"); }
+			try {
+				if (resetPending) throw new Error("Herder reset is in progress");
+				ctx.ui.notify(await rework(args, ctx), "info");
+			}
 			catch (error) { ctx.ui.notify(message(error), "error"); }
 		},
 	});
@@ -1060,7 +1109,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		handler: async (_args, ctx) => {
 			lastContext = ctx;
 			if (ctx.hasUI && !(await ctx.ui.confirm("Stop Herder?", "Active workers will stop; repository state remains preserved."))) return;
-			try { ctx.ui.notify(await stop(), "info"); } catch (error) { ctx.ui.notify(message(error), "error"); }
+			try {
+				if (resetPending) throw new Error("Herder reset is in progress");
+				ctx.ui.notify(await stop(), "info");
+			} catch (error) { ctx.ui.notify(message(error), "error"); }
 		},
 	});
 
@@ -1168,6 +1220,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		|| engine.snapshots().length > 0;
 	registerPiPlanningWorkflows(pi, PACKAGE_ROOT, repositoryRoot, {
 		assertMutationAllowed: () => {
+			if (resetPending) throw new Error("Herder reset is in progress");
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
 		},
 		handleAttention: async ({ planDirectory, resolution }, ctx) => {
@@ -1703,6 +1756,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (resetPending && event.toolName.startsWith("herder_")) return { block: true, reason: "Herder reset is in progress" };
 		const directory = currentRunRevision?.run.planDirectory ?? currentState?.planDir;
 		if (!directory) return;
 		const record = readRunRevision(directory);
@@ -1722,6 +1776,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		sessionEpoch += 1;
 		const epoch = sessionEpoch;
 		shuttingDown = false;
+		shutdownDrained = false;
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		mainSessionRequests.reset("session-start");
@@ -1787,19 +1842,25 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.on("session_shutdown", async () => {
 		sessionEpoch += 1;
 		shuttingDown = true;
-		const handles = engine.snapshots().map((worker) => worker.handle);
-		await Promise.all(handles.map((handle) => engine.stop(handle).catch(() => {})));
-		workers.clear();
-		if (admittedManagerTasks === 0) releaseOwnership();
-		else {
-			releaseOwnershipAfterManagerDrain = true;
-			if (ownership) registerAdapterOwnershipRetirement(ownership, managerQueue);
-		}
+		shutdownDrained = false;
 		widget.dispose();
 		mainSessionRequests.reset("shutdown");
 		currentRunRevision = undefined;
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;
 		lastContext = undefined;
+		releaseOwnershipAfterManagerDrain = false;
+		await engine.drain();
+		workers.clear();
+		if (admittedManagerTasks === 0) { shutdownDrained = true; releaseOwnership(); }
+		else {
+			const held = ownership;
+			const drain = managerQueue.then(() => engine.drain()).then(() => {
+				if (ownership === held && shuttingDown) { shutdownDrained = true; releaseOwnership(); }
+			});
+			if (held) registerAdapterOwnershipRetirement(held, drain);
+			void drain.catch(error => lastContext?.ui.notify(message(error), "error"));
+		}
+
 	});
 }

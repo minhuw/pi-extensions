@@ -1370,3 +1370,104 @@ for (const point of ["after_restarting", "after_restart", "after_complete"]) {
 		}
 	});
 }
+
+for (const phase of ["active worker", "admitted startup"] as const) {
+	test(`nuclear reset drains ${phase}, cancellation preserves ownership, fresh Fire succeeds`, { timeout: 45_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-nuclear-reset-"));
+		const value = writeFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = phase === "admitted startup" ? new GatedPrepareWorkerFactory() : new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const base = freshContext(value, notifications);
+		let consent = false;
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async () => consent,
+		} } as unknown as ExtensionContext;
+		try {
+			await api.invoke("session_start", ctx);
+			const firing = api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			if (factory instanceof GatedPrepareWorkerFactory) await withDeadline(factory.createEntered.promise, "startup admitted");
+			else await withDeadline(firing, "Fire");
+			const lock = fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8");
+			await api.command("herder-reset").handler("herder-plans", ctx);
+			assert.equal(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"), lock);
+			assert.ok(factory.sessions.every(session => !session.aborted && !session.disposed));
+			consent = true;
+			const stopped = new Deferred<void>();
+			const allowStop = new Deferred<void>();
+			if (!(factory instanceof GatedPrepareWorkerFactory)) {
+				const session = factory.sessions[0]!;
+				const abort = session.abort.bind(session);
+				session.abort = async () => {
+					assert.ok(evidence(value).run, "destructive reset must wait for worker abort/disposal");
+					assert.ok(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)));
+					stopped.resolve(); await allowStop.promise; await abort();
+				};
+			}
+			const resetting = api.command("herder-reset").handler("herder-plans", ctx);
+			if (factory instanceof GatedPrepareWorkerFactory) {
+				await new Promise(resolve => setTimeout(resolve, 150));
+				assert.ok(evidence(value).run, "reset must wait for admitted manager task");
+				factory.allowCreate.resolve();
+			} else {
+				await withDeadline(stopped.promise, "reset worker stop");
+				await api.command("herder-fire").handler("herder-plans --profile eclipse", ctx);
+				assert.ok(notifications.some(entry => /reset is in progress/.test(entry.message)));
+				allowStop.resolve();
+			}
+			await withDeadline(Promise.all([firing, resetting]), "reset drain and apply", 25_000);
+			assert.ok(notifications.some(entry => /Herder reset executed/.test(entry.message)), JSON.stringify(notifications));
+			assert.ok(factory.sessions.every(session => session.disposed));
+			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
+			await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "fresh Fire");
+			assert.ok(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)));
+		} finally {
+			if (factory instanceof GatedPrepareWorkerFactory) factory.allowCreate.resolve();
+			await api.invoke("session_shutdown", ctx);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const failure of ["abort", "disposal"] as const) {
+	test(`nuclear reset and session shutdown retain ownership after ${failure} failure`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-cleanup-failure-"));
+		const value = writeFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const notifications: Warning[] = [];
+		const base = freshContext(value, notifications);
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async () => true,
+		} } as unknown as ExtensionContext;
+		try {
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			const lock = fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8");
+			const runId = evidence(value).run!.runId;
+			const session = factory.sessions[0]!;
+			if (failure === "abort") {
+				const abort = session.abort.bind(session);
+				session.abort = async () => { await abort(); throw Error("fixture abort cleanup failed"); };
+			} else session.dispose = () => { throw Error("fixture disposal failed"); };
+			for (let attempt = 0; attempt < 2; attempt++) {
+				await api.command("herder-reset").handler("herder-plans", ctx);
+				assert.equal(evidence(value).run!.runId, runId);
+				assert.equal(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"), lock);
+			}
+			assert.ok(notifications.some(entry => /worker cleanup failed/.test(entry.message)), JSON.stringify(notifications));
+			assert.ok(!notifications.some(entry => /Herder reset executed/.test(entry.message)));
+			await assert.rejects(() => api.invoke("session_shutdown", ctx), /worker cleanup failed/);
+			assert.equal(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"), lock);
+		} finally {
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}

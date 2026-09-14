@@ -27,6 +27,7 @@ import {
 	type ThinkingEffort,
 } from "./profile.ts";
 import {
+	HerderCleanupError,
 	abortSession,
 	HerderNestedAgentScope,
 	type NestedWorkerSession,
@@ -412,10 +413,12 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			if (unexpectedTools.length > 0) throw new Error(`${label} exposed unexpected tools: ${unexpectedTools.join(", ")}.`);
 		} catch (error) {
 			if (session) {
-				await Promise.allSettled([
+				const cleanup = await Promise.allSettled([
 					...(options.signal?.aborted ? [session.abort()] : []),
 					disposeWorkerSession(session),
 				]);
+				const failures = cleanup.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+				if (failures.length) throw new HerderCleanupError([error, ...failures], "Failed session creation cleanup");
 			}
 			throw error;
 		}
@@ -482,7 +485,8 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 				customTools: [...nestedTools],
 			});
 		} catch (error) {
-			await Promise.allSettled([nested.stop("Parent Herder session creation failed")]);
+			await nested.stop("Parent Herder session creation failed");
+			try { nested.assertDrained(); } catch (cleanup) { throw new HerderCleanupError([error, cleanup], "Failed nested creation cleanup"); }
 			throw error;
 		}
 		return { session, nested };
@@ -492,6 +496,23 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 export class PiWorkerEngine {
 	private readonly factory: PiWorkerSessionFactory;
 	private readonly workers = new Map<string, WorkerRecord>();
+	private readonly cleanupErrors = new Map<string, unknown[]>();
+	private cleanupFailed(planDirectory: string, error: unknown): void {
+		const errors = this.cleanupErrors.get(planDirectory) ?? [];
+		errors.push(error);
+		this.cleanupErrors.set(planDirectory, errors);
+	}
+
+	/** Sticky evidence includes workers already removed by ordinary terminal handling. */
+	async drain(planDirectory?: string): Promise<void> {
+		const workers = [...this.workers.entries()].filter(([, worker]) => !planDirectory || worker.request.planDirectory === planDirectory);
+		const results = await Promise.allSettled(workers.map(([handle]) => this.stop(handle)));
+		const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+		for (const [directory, failures] of this.cleanupErrors) if (!planDirectory || directory === planDirectory) errors.push(...failures);
+		if (workers.some(([handle]) => this.has(handle))) errors.push(new Error("Worker cleanup did not settle"));
+		if (errors.length) throw new AggregateError(errors, "Herder worker cleanup failed; ownership retained, manual cleanup required");
+	}
+
 	private readonly updates = new Set<UpdateListener>();
 	private readonly terminals = new Set<TerminalListener>();
 	private readonly reviewTimeoutMs?: number;
@@ -543,21 +564,28 @@ export class PiWorkerEngine {
 		if ([...this.workers.values()].some((worker) => worker.request.action.actionId === request.action.actionId)) {
 			throw new Error(`Pi worker action ${request.action.actionId} is already prepared.`);
 		}
-		const prepared = await this.factory.create(request);
+		const prepared = await this.factory.create(request).catch(error => {
+			if (error instanceof HerderCleanupError) this.cleanupFailed(request.planDirectory, error);
+			throw error;
+		});
 		const { session, nested } = prepared;
 		if (session.messages.length !== 0) {
-			await Promise.allSettled([
+			const cleanup = await Promise.allSettled([
 				disposeWorkerSession(session),
 				nested.stop("Parent Herder session contained inherited history"),
 			]);
+			for (const result of cleanup) if (result.status === "rejected") this.cleanupFailed(request.planDirectory, result.reason);
+			try { nested.assertDrained(); } catch (error) { this.cleanupFailed(request.planDirectory, error); }
 			throw new Error("Herder Pi workers require a session with zero inherited messages.");
 		}
 		const handle = `pi-worker:${session.sessionId}`;
 		if (this.workers.has(handle)) {
-			await Promise.allSettled([
+			const cleanup = await Promise.allSettled([
 				disposeWorkerSession(session),
 				nested.stop("Duplicate parent Herder session"),
 			]);
+			for (const result of cleanup) if (result.status === "rejected") this.cleanupFailed(request.planDirectory, result.reason);
+			try { nested.assertDrained(); } catch (error) { this.cleanupFailed(request.planDirectory, error); }
 			throw new Error(`Duplicate Pi worker session ${session.sessionId}.`);
 		}
 		const snapshot: PiWorkerSnapshot = {
@@ -593,7 +621,7 @@ export class PiWorkerEngine {
 		};
 		worker.unsubscribe = session.subscribe((event) => {
 			if (worker.stopRequested && (event.type === "agent_start" || event.type === "compaction_start")) {
-				worker.aborting = abortSession(session, worker.aborting);
+				worker.aborting = abortSession(session, worker.aborting, error => this.cleanupFailed(worker.request.planDirectory, error));
 			}
 			if (observeSessionEvent(worker, event, () => { if (!worker.stopRequested) worker.snapshot.status = "running"; })) this.emitUpdate();
 		});
@@ -621,7 +649,7 @@ export class PiWorkerEngine {
 		}
 		this.emitUpdate();
 		worker.completion = this.run(handle, worker).finally(() => clearTimeout(worker.reviewTimer));
-		void worker.completion.catch(() => {});
+		void worker.completion.catch(error => this.cleanupFailed(worker.request.planDirectory, error));
 	}
 
 	async discard(handle: string): Promise<void> {
@@ -630,10 +658,14 @@ export class PiWorkerEngine {
 		if (worker.started) throw new Error(`Cannot discard running Pi worker ${handle}.`);
 		clearTimeout(worker.reviewTimer);
 		await worker.nested.stop("Prepared Herder worker was discarded");
+		try { worker.nested.assertDrained(); } catch (error) { this.cleanupFailed(worker.request.planDirectory, error); }
 		worker.unsubscribeNested();
 		worker.unsubscribe();
 		try {
 			await disposeWorkerSession(worker.session);
+		} catch (error) {
+			this.cleanupFailed(worker.request.planDirectory, error);
+			throw error;
 		} finally {
 			this.workers.delete(handle);
 			this.emitUpdate();
@@ -656,7 +688,7 @@ export class PiWorkerEngine {
 		clearTimeout(worker.reviewTimer);
 		worker.stopRequested = true;
 		worker.snapshot.status = "stopping";
-		worker.aborting ??= abortSession(worker.session);
+		worker.aborting ??= abortSession(worker.session, undefined, error => this.cleanupFailed(worker.request.planDirectory, error));
 		// Close launches and cascade immediately, but never await our own run completion.
 		void worker.nested.stop(reason).catch(() => {});
 		this.emitUpdate();
@@ -681,6 +713,7 @@ export class PiWorkerEngine {
 		// A failure that arrived first must not become a budget failure during cleanup.
 		if (failure || result.failed || !result.text) clearTimeout(worker.reviewTimer);
 		await worker.nested.stop("Parent Herder worker completed");
+		try { worker.nested.assertDrained(); } catch (error) { this.cleanupFailed(worker.request.planDirectory, error); }
 		clearTimeout(worker.reviewTimer);
 		// The prompt can settle before SDK abort cleanup (including Bash) finishes.
 		await worker.aborting?.catch(() => {});
@@ -709,6 +742,7 @@ export class PiWorkerEngine {
 			try {
 				await disposeWorkerSession(worker.session);
 			} catch (error) {
+				this.cleanupFailed(worker.request.planDirectory, error);
 				terminal.interrupted = true;
 				terminal.error = [terminal.error, message(error)].filter(Boolean).join("\n");
 			}

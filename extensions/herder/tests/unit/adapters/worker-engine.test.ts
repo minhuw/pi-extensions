@@ -1427,3 +1427,34 @@ for (const owner of ["root", "reviewer", "recon"] as const) {
 		});
 	}
 }
+
+for (const failure of ["abort", "disposal", "nested disposal"] as const) {
+	test(`strict drain remembers ${failure} failure after normal stop removed the worker`, async () => {
+		const gate = new Deferred<void>();
+		const factory = new FakeFactory([], gate.promise);
+		const create = factory.create.bind(factory);
+		factory.create = async request => {
+			const prepared = await create(request);
+			if (failure === "nested disposal") {
+				prepared.nested = new HerderNestedAgentScope({ action: action(), agentRoot, createSession: async () => {
+					const child = new FakeSession("bad-child");
+					child.dispose = () => { throw Error("nested dispose failed"); };
+					return child;
+				} });
+				await prepared.nested.run({ type: "recon", prompt: "Inspect", description: "inspect" });
+			}
+			return prepared;
+		};
+		const engine = new PiWorkerEngine(factory);
+		const directory = "/tmp/strict-drain-fixture";
+		const handle = await engine.prepare({ action: action(), planDirectory: directory });
+		const session = factory.sessions[0]!;
+		session.abort = async () => { gate.resolve(); if (failure === "abort") throw Error("abort failed"); };
+		if (failure === "disposal") session.dispose = () => { throw Error("dispose failed"); };
+		engine.start(handle);
+		await engine.stop(handle); // Ordinary stop remains best-effort.
+		assert.equal(engine.has(handle), false);
+		await assert.rejects(() => engine.drain(directory), /worker cleanup failed/);
+		await assert.rejects(() => engine.drain(directory), /worker cleanup failed/, "failure evidence is sticky");
+	});
+}

@@ -2,7 +2,7 @@ import { applyHerderReset } from "../src/application/tools.ts";
 import type { HerderResetInput, HerderResetResult } from "../src/daemon/git/reset-plan-set.ts";
 
 export interface ResetCommandDependencies {
-	apply?: (request: HerderResetInput) => Promise<HerderResetResult>;
+	apply?: (request: HerderResetInput) => Promise<HerderResetResult | undefined>;
 	confirm?: (title: string, message: string) => Promise<boolean>;
 }
 
@@ -17,5 +17,5 @@ export async function runResetCommand(
 	const confirm = context.confirm ?? (async () => false);
 	if (!(await confirm("Reset Herder plan set?", "This removes all Herder branches, worktrees, coordination refs, and execution state. Uncommitted changes and untracked files in Herder-owned worktrees will be permanently discarded. Plan Markdown and tracking setup are preserved."))) return "Herder reset cancelled; no Git or plan state was changed.";
 	const result = await (context.apply ?? ((value) => applyHerderReset(value)))(request);
-	return formatResetResult(result);
+	return result ? formatResetResult(result) : "Herder reset cancelled; no Git or plan state was changed.";
 }

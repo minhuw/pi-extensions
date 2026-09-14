@@ -156,17 +156,19 @@ async function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Prom
 }
 
 /** Scouts have bounded cleanup; unrestricted sessions retain ownership until settled. */
-async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void>, bounded = true): Promise<void> {
+async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void>, bounded = true, onError: (error: unknown) => void = () => {}): Promise<void> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const settled = Promise.allSettled([abort, Promise.resolve().then(() => session.shutdown?.())]);
+		const settled = Promise.allSettled([abort, Promise.resolve().then(() => session.shutdown?.())]).then(results => {
+			for (const result of results) if (result.status === "rejected") onError(result.reason);
+		});
 		await (bounded ? Promise.race([
 			settled,
-			new Promise<void>((resolve) => { timer = setTimeout(resolve, CLEANUP_GRACE_MS); }),
+			new Promise<void>((resolve) => { timer = setTimeout(() => { onError(new Error("Nested cleanup timed out")); resolve(); }, CLEANUP_GRACE_MS); }),
 		]) : settled);
 	} finally {
 		clearTimeout(timer);
-		try { session.dispose(); } catch { /* cleanup must not prevent result settlement */ }
+		try { session.dispose(); } catch (error) { onError(error); }
 	}
 }
 
@@ -174,13 +176,16 @@ async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void
 export function abortSession(
 	session: Pick<NestedWorkerSession, "abort"> & { abortCompaction?(): void },
 	previous?: Promise<void>,
+	onError: (error: unknown) => void = () => {},
 ): Promise<void> {
 	const abort = Promise.resolve().then(() => {
 		session.abortCompaction?.();
 		return session.abort();
 	});
 	// Do not chain cancellation behind an earlier abort: it may await this new phase.
-	return Promise.allSettled([previous, abort]).then(() => {});
+	return Promise.allSettled([previous, abort]).then(results => {
+		for (const result of results) if (result.status === "rejected") onError(result.reason);
+	});
 }
 
 function sliceKey(slice: Pick<NestedUsageSlice, "type" | "model" | "effort" | "serviceTier">): string {
@@ -220,6 +225,8 @@ export function nestedUsageSlices(results: readonly NestedAgentResult[]): Nested
 	});
 }
 
+export class HerderCleanupError extends AggregateError {}
+
 export class HerderNestedAgentScope {
 	private readonly action: ManagerAction;
 	private readonly agentRoot: string;
@@ -235,6 +242,13 @@ export class HerderNestedAgentScope {
 	private calls = 0;
 	private active = 0;
 	private stopped = false;
+	private readonly cleanupErrors: unknown[] = [];
+	private readonly cleanupFailed = (error: unknown): void => { this.cleanupErrors.push(error); };
+
+	assertDrained(): void {
+		for (const item of this.records.values()) item.nestedScope?.assertDrained();
+		if (this.cleanupErrors.length) throw new AggregateError(this.cleanupErrors, "Nested worker cleanup failed");
+	}
 
 	constructor(options: {
 		action: ManagerAction;
@@ -470,13 +484,15 @@ export class HerderNestedAgentScope {
 		let unsubscribe = () => {};
 		let aborting: Promise<void> | undefined;
 		const abort = () => {
-			if (item.session) aborting ??= abortSession(item.session);
+			if (item.session) aborting ??= abortSession(item.session, undefined, this.cleanupFailed);
 			void item.nestedScope?.stop("Parent nested reviewer stopped");
 		};
 		signal.addEventListener("abort", abort, { once: true });
 		let failure: string | undefined;
+		let creating = false;
 		try {
 			signal.throwIfAborted();
+			creating = true;
 			const creation = this.createSession({
 				id: item.snapshot.agentId,
 				definition,
@@ -485,12 +501,13 @@ export class HerderNestedAgentScope {
 				...(item.nestedScope ? { nestedScope: item.nestedScope } : {}),
 			}).then(async (session) => {
 				if (signal.aborted) {
-					await cleanupSession(session, abortSession(session), bounded);
+					await cleanupSession(session, abortSession(session, undefined, this.cleanupFailed), bounded, this.cleanupFailed);
 					return;
 				}
 				item.session = session;
 				return session;
 			});
+			void creation.finally(() => { creating = false; }).catch(() => {});
 			const session = await (bounded ? waitWithSignal(creation, signal) : creation);
 			signal.throwIfAborted();
 			if (!session) throw new Error("Nested session creation aborted.");
@@ -498,7 +515,7 @@ export class HerderNestedAgentScope {
 			if (session.messages.length !== 0) throw new Error("Herder nested agents require a session with zero inherited messages.");
 			unsubscribe = session.subscribe((event) => {
 				if (signal.aborted && (event.type === "agent_start" || event.type === "compaction_start")) {
-					aborting = abortSession(session, aborting);
+					aborting = abortSession(session, aborting, this.cleanupFailed);
 				}
 				if (observeSessionEvent(item, event)) this.emitUpdate();
 			});
@@ -507,6 +524,7 @@ export class HerderNestedAgentScope {
 			await (bounded ? waitWithSignal(prompting, signal) : prompting);
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
+			if (error instanceof HerderCleanupError || creating) this.cleanupFailed(error);
 		}
 		clearDeadline();
 		unsubscribe();
@@ -518,7 +536,7 @@ export class HerderNestedAgentScope {
 		if (signal.aborted) abort();
 		await Promise.all([
 			item.nestedScope?.stop("Parent nested reviewer completed"),
-			item.session ? cleanupSession(item.session, aborting, bounded) : undefined,
+			item.session ? cleanupSession(item.session, aborting, bounded, this.cleanupFailed) : undefined,
 		]);
 		signal.removeEventListener("abort", abort);
 		const completedAt = Date.now();
@@ -566,6 +584,7 @@ export class HerderNestedAgentScope {
 			this.scopeController.abort(new Error(reason));
 		}
 		await Promise.allSettled([...this.pendingLaunches]);
-		await Promise.allSettled([...this.records.values()].map((item) => item.promise));
+		const results = await Promise.allSettled([...this.records.values()].map((item) => item.promise));
+		for (const result of results) if (result.status === "rejected") this.cleanupFailed(result.reason);
 	}
 }

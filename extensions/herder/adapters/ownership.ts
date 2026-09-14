@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { openExecutionDatabase, withExecutionTransaction } from "../src/daemon/execution-store.ts";
@@ -23,6 +24,8 @@ export interface AdapterOwnershipRecord {
 	pid: number;
 	runId: string;
 	piSessionId: string;
+	processIdentity?: string;
+	resetCleanupRequired?: true;
 }
 
 export interface AdapterOwnership {
@@ -34,6 +37,7 @@ export interface AdapterOwnership {
 export interface AdapterOwnershipOptions {
 	isProcessAlive?: (pid: number) => boolean;
 	pid?: number;
+	processIdentity?: (pid: number) => string;
 }
 
 export function adapterProcessAlive(pid: number): boolean {
@@ -41,7 +45,9 @@ export function adapterProcessAlive(pid: number): boolean {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
+		if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
 	}
 }
 
@@ -100,6 +106,8 @@ function parseRecord(text: string, lockPath: string): AdapterOwnershipRecord {
 	const record = value as Partial<AdapterOwnershipRecord>;
 	if (record.version !== 1
 		|| !Number.isSafeInteger(record.pid) || Number(record.pid) < 1
+		|| (record.resetCleanupRequired !== undefined && record.resetCleanupRequired !== true)
+		|| (record.processIdentity !== undefined && (typeof record.processIdentity !== "string" || record.processIdentity.length < 1 || record.processIdentity.length > 512))
 		|| typeof record.runId !== "string" || record.runId.length < 1 || record.runId.length > 512
 		|| typeof record.piSessionId !== "string" || record.piSessionId.length < 1 || record.piSessionId.length > 512) {
 		throw new Error(`Herder Pi ownership lock is malformed; refusing to replace it: ${lockPath}`);
@@ -174,6 +182,9 @@ function reapStaleOwnership(
 				if (isProcessAlive(existing.record.pid)) {
 					throw new Error(`Herder run ${existing.record.runId} is already owned by live Pi pid ${existing.record.pid} (session ${existing.record.piSessionId}); refusing to attach.`);
 				}
+				if (existing.record.resetCleanupRequired) {
+					throw new Error(`Herder Pi reset requires manual child-process cleanup before removing the ownership lock; ownership evidence retained: ${lockPath}`);
+				}
 				let named: fs.Stats;
 				try { named = fs.lstatSync(lockPath); }
 				catch (error) {
@@ -209,6 +220,7 @@ export function acquireAdapterOwnership(
 		pid: options.pid ?? process.pid,
 		runId,
 		piSessionId,
+		processIdentity: (options.processIdentity ?? adapterProcessIdentity)(options.pid ?? process.pid),
 	};
 	const isProcessAlive = options.isProcessAlive ?? adapterProcessAlive;
 
@@ -228,7 +240,14 @@ export function bindAdapterOwnershipRun(ownership: AdapterOwnership, runId: stri
 	ownership.record = { ...ownership.record, runId };
 }
 
-export function releaseAdapterOwnership(ownership: AdapterOwnership): void {
+export function releaseAdapterOwnership(ownership: AdapterOwnership, strict = false): void {
+	if (strict) {
+		try {
+			assertAdapterOwnership(ownership, path.dirname(path.dirname(ownership.lockPath)));
+			fs.unlinkSync(ownership.lockPath);
+		} finally { fs.closeSync(ownership.descriptor); }
+		return;
+	}
 	try {
 		const opened = fs.fstatSync(ownership.descriptor);
 		const named = fs.lstatSync(ownership.lockPath);
@@ -237,4 +256,133 @@ export function releaseAdapterOwnership(ownership: AdapterOwnership): void {
 		}
 	} catch {}
 	try { fs.closeSync(ownership.descriptor); } catch {}
+}
+
+/** Native birth identity, never a command-name heuristic. Failure is deliberately fatal. */
+export function adapterProcessIdentity(pid: number): string {
+	if (process.platform === "linux") {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+		if (!ticks || !/^\d+$/.test(ticks)) throw new Error("Cannot read Pi process start ticks");
+		return `linux:${fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${ticks}`;
+	}
+	if (process.platform === "darwin") {
+		const birth = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+			encoding: "utf8", timeout: 2_000, maxBuffer: 4096, env: { ...process.env, LC_ALL: "C" },
+		}).trim();
+		if (!birth) throw new Error("Cannot read Pi process birth identity");
+		return `darwin:${birth}`;
+	}
+	throw new Error("Safe Pi process identity is unsupported on this platform; exit the owning Pi once.");
+}
+
+export function assertAdapterOwnership(ownership: AdapterOwnership, planDirectory: string): void {
+	if (ownership.lockPath !== adapterOwnershipLockPath(planDirectory)
+		|| !sameIdentity(fs.fstatSync(ownership.descriptor), fs.lstatSync(ownership.lockPath))) {
+		throw new Error("Herder Pi ownership lock was replaced; refusing reset");
+	}
+}
+
+export interface AdapterResetOptions extends AdapterOwnershipOptions {
+	ownership?: AdapterOwnership;
+	confirm: (title: string, message: string) => Promise<boolean>;
+	quiesce: () => Promise<void>;
+	signal?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+	wait?: (milliseconds: number) => Promise<void>;
+	waitAttempts?: number;
+}
+
+/** Confirmation precedes all lifecycle changes; retain an exclusive inode through the drain/reset. */
+export async function withAdapterResetOwnership<T>(
+	planDirectory: string, piSessionId: string, options: AdapterResetOptions,
+	reset: (ownership: AdapterOwnership) => Promise<T>,
+): Promise<T | undefined> {
+	const runtime = ensureRuntimeDirectory(planDirectory);
+	const runtimeIdentity = fs.lstatSync(runtime);
+	const verifyRuntime = () => {
+		const named = fs.lstatSync(runtime);
+		if (named.isSymbolicLink() || !named.isDirectory() || !sameIdentity(runtimeIdentity, named)) {
+			throw new Error("Herder Pi runtime directory was replaced; refusing reset/signals");
+		}
+	};
+	const alive = options.isProcessAlive ?? adapterProcessAlive;
+	const identity = options.processIdentity ?? adapterProcessIdentity;
+	const signal = options.signal ?? ((pid, value) => { process.kill(pid, value); });
+	const wait = options.wait ?? ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
+	let held = options.ownership;
+	if (held) assertAdapterOwnership(held, planDirectory);
+	else {
+		let existing: ReturnType<typeof inspectExisting> | undefined;
+		try { existing = inspectExisting(adapterOwnershipLockPath(planDirectory)); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+		if (existing) {
+			try {
+				const record = existing.record;
+				if (alive(record.pid)) {
+					if (record.pid === process.pid || record.pid === options.pid) throw new Error("This Pi owns the lock in another adapter; exit the owning Pi once before reset.");
+					const verify = () => {
+						verifyRuntime();
+						assertAdapterOwnership({ ...existing!, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory);
+						if (!record.processIdentity) throw new Error("Legacy live Pi ownership has no process identity; exit the owning Pi once, then retry reset.");
+						if (identity(record.pid) !== record.processIdentity) throw new Error("Pi PID identity mismatch; refusing to signal. Exit the owning Pi once and retry.");
+					};
+					verify();
+					if (!await options.confirm("Terminate foreign Pi?", `PID ${record.pid}, session ${record.piSessionId}: the ENTIRE foreign Pi exits, affecting other work in that Pi. Terminate it and reset?`)) return undefined;
+					verify();
+					const lockPath = adapterOwnershipLockPath(planDirectory);
+					const descriptor = fs.openSync(lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+					try {
+						const opened = fs.fstatSync(descriptor);
+						const named = fs.lstatSync(lockPath);
+						if (!opened.isFile() || named.isSymbolicLink() || !named.isFile()
+							|| !sameIdentity(opened, fs.fstatSync(existing.descriptor))
+							|| !sameIdentity(opened, existing.stat) || !sameIdentity(opened, named)) {
+							throw new Error("Herder Pi ownership lock was replaced; refusing reset/signals");
+						}
+						const text = `${JSON.stringify({ ...record, resetCleanupRequired: true })}\n`;
+						if (Buffer.byteLength(text) > MAX_LOCK_BYTES) throw new Error("Herder Pi cleanup-required lock exceeds size limit; refusing reset/signals");
+						// Persist invalidation first: interrupted writes must never leave a valid unmarked claim.
+						fs.ftruncateSync(descriptor, 0);
+						fs.fsyncSync(descriptor);
+						fs.writeFileSync(descriptor, text, "utf8");
+						fs.fsyncSync(descriptor);
+					} finally { fs.closeSync(descriptor); }
+					for (const value of ["SIGTERM", "SIGKILL"] as const) {
+						if (!alive(record.pid)) break;
+						verify(); // Best effort: Node cannot make identity inspection and kill atomic.
+						signal(record.pid, value);
+						for (let attempt = 0; attempt < (options.waitAttempts ?? 50) && alive(record.pid); attempt++) {
+							if (identity(record.pid) !== record.processIdentity) throw new Error("Pi PID identity changed while waiting; refusing reset");
+							await wait(100);
+						}
+					}
+					if (alive(record.pid)) throw new Error("Timed out waiting for foreign Pi exit; refusing reset");
+					verifyRuntime();
+					// Exit alone (especially KILL) says nothing about detached shell cleanup.
+					if (fs.existsSync(adapterOwnershipLockPath(planDirectory))) {
+						throw new Error("Foreign Pi exited without releasing its cleanup lock; manual child-process cleanup required before reset. Ownership evidence preserved.");
+					}
+				}
+				verifyRuntime();
+				// Do not reap a replacement claim, even if its PID appears dead.
+				try { assertAdapterOwnership({ ...existing, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory); }
+				catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+			} finally { fs.closeSync(existing.descriptor); }
+		}
+		await waitForAdapterOwnershipRetirement(planDirectory);
+		verifyRuntime();
+		held = acquireAdapterOwnership(planDirectory, "pending-reset", piSessionId, options);
+	}
+	let drained = false;
+	try {
+		verifyRuntime();
+		await options.quiesce();
+		verifyRuntime();
+		drained = true;
+		assertAdapterOwnership(held, planDirectory);
+		return await reset(held);
+	} finally {
+		// A replaced lock is never removed and is not reported as reset success.
+		if (drained) { verifyRuntime(); releaseAdapterOwnership(held, true); }
+	}
 }
