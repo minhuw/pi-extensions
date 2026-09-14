@@ -291,7 +291,7 @@ for (const kind of ["start", "service"] as const) {
 			loser.resume();
 			const refusal = await loser.expect("refused");
 			if (kind === "start") assert.equal(refusal.error, undefined);
-			else assert.match(refusal.error, /already held by pid/);
+			else assert.match(refusal.error, /already held by pid|Cannot safely read/);
 			refuses(lock);
 			assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
 			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
@@ -438,6 +438,31 @@ for (const kind of ["start", "service"] as const) {
 			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), lock.payload(dead));
 		} finally { fs.rmSync(paths.root, { recursive: true, force: true }); }
 	});
+
+	for (const evidence of ["short read", "invalid UTF-8"]) {
+		test(`${kind}: ${evidence} is not reclaimable evidence`, async (t) => {
+			const paths = fixture();
+			try {
+				const lock = api(paths);
+				const prefix = Buffer.from(lock.payload(await spawnDeadOwner()));
+				const payload = evidence === "short read" ? Buffer.concat([prefix, Buffer.from("garbage")])
+					: Buffer.concat([Buffer.from(prefix.toString().split(/[ \n]/)[0] + " "), Buffer.from([0xff, 10])]);
+				fs.writeFileSync(lock.lockPath, payload);
+				const identity = fs.statSync(lock.lockPath);
+				const read = fs.readSync;
+				if (evidence === "short read") {
+					t.mock.method(fs, "readSync", ((fd, buffer, offset, length, position) =>
+						read(fd, buffer, offset, Math.min(length, prefix.length), position)) as typeof fs.readSync);
+				}
+				try { refuses(lock); } finally { t.mock.restoreAll(); }
+				assert.deepEqual(fs.readFileSync(lock.lockPath), payload);
+				assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
+			} finally {
+				t.mock.restoreAll();
+				fs.rmSync(paths.root, { recursive: true, force: true });
+			}
+		});
+	}
 
 	test(`${kind}: failed publication closes its descriptor without deleting a replacement`, () => {
 		const paths = fixture();

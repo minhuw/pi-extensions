@@ -48,20 +48,26 @@ function sameFile(left: FileIdentity, right: FileIdentity): boolean {
 
 // Ambiguous evidence is never permission to unlink. O_NONBLOCK also prevents a
 // replaced FIFO from blocking between lstat and open; O_NOFOLLOW rejects links.
-function lockOwner(lockPath: string, service: boolean): { pid: number; identity: FileIdentity } | null {
+function lockOwner(lockPath: string, service: boolean): { pid: number; instanceId?: string; identity: FileIdentity } | null {
 	let descriptor: number | undefined;
 	try {
 		const named = fs.lstatSync(lockPath);
 		if (!named.isFile()) return null;
 		descriptor = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 		const opened = fs.fstatSync(descriptor);
-		if (!opened.isFile() || !sameFile(named, opened) || opened.size > 4096) return null;
-		const buffer = Buffer.alloc(4097);
+		if (!opened.isFile() || !sameFile(named, opened) || opened.size < 1 || opened.size > 4096) return null;
+		const buffer = Buffer.alloc(opened.size + 1);
 		const size = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
-		const match = (service ? /^([1-9]\d*) [^\s]+\n$/ : /^([1-9]\d*)\n$/).exec(buffer.subarray(0, size).toString("utf8"));
-		if (!match || match[0].length !== size) return null;
+		const after = fs.fstatSync(descriptor);
+		// A short read is ambiguous, not EOF evidence. Refuse growth or changes
+		// during inspection too; no retry is needed for an unsafe snapshot.
+		if (size !== opened.size || after.size !== opened.size
+			|| after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) return null;
+		const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
+		const match = (service ? /^([1-9]\d*) ([^\s]+)\n$/ : /^([1-9]\d*)\n$/).exec(text);
+		if (!match || match[0] !== text) return null;
 		const pid = Number(match[1]);
-		return Number.isSafeInteger(pid) && pid <= 2147483647 ? { pid, identity: opened } : null;
+		return Number.isSafeInteger(pid) && pid <= 2147483647 ? { pid, instanceId: match[2], identity: opened } : null;
 	} catch {
 		return null;
 	} finally {
@@ -96,7 +102,10 @@ function acquireLock(lockPath: string, payload: string, service: boolean): Servi
 			: `Cannot safely read service lock ${lockPath}; verify quiescence and inspect the exact lock before manual recovery.`);
 		return null;
 	};
-	const alive = service ? serviceProcessAlive : processAlive;
+	// Operation owners run in Pi/CLI hosts, whose argv need not identify a daemon.
+	const alive = (owner: NonNullable<ReturnType<typeof lockOwner>>) =>
+		service && !/^(cleanup|reset|force|revision)-/.test(owner.instanceId ?? "")
+			? serviceProcessAlive(owner.pid) : processAlive(owner.pid);
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try { fs.lstatSync(guardPath); throw guardError(); }
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw guardError(); }
@@ -111,14 +120,14 @@ function acquireLock(lockPath: string, payload: string, service: boolean): Servi
 			throw guardError();
 		}
 		const owner = lockOwner(lockPath, service);
-		if (!owner || alive(owner.pid)) return refuse(owner);
+		if (!owner || alive(owner)) return refuse(owner);
 		try { fs.mkdirSync(guardPath, { mode: 0o700 }); }
 		catch { throw guardError(); }
 		let replacement: ServiceOwnership | null = null;
 		try {
 			// Re-read inside cross-process exclusion, not the pre-guard snapshot.
 			const current = lockOwner(lockPath, service);
-			if (!current || alive(current.pid)) return refuse(current);
+			if (!current || alive(current)) return refuse(current);
 			const named = fs.lstatSync(lockPath);
 			if (!named.isFile() || !sameFile(current.identity, named)) continue;
 			fs.unlinkSync(lockPath);

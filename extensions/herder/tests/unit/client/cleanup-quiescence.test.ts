@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { withServiceExclusion, ensureService, stopService } from "../../../src/client/index.ts";
 import { openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
-import { serviceOwnershipLockPath } from "../../../src/daemon/service-ownership.ts";
+import { startHerderService } from "../../../src/daemon/service.ts";
+import { serviceProcessAlive, serviceOwnershipLockPath } from "../../../src/daemon/service-ownership.ts";
 
 function planDirectory(): string {
 	const root = mkdtempSync(path.join(os.tmpdir(), "herder-cleanup-quiescence-"));
@@ -100,3 +104,51 @@ test("force exclusion stops a healthy nonterminal service and then runs the call
 		rmSync(path.dirname(planDir), { recursive: true, force: true });
 	}
 });
+
+for (const purpose of ["cleanup", "reset", "force", "revision"] as const) {
+	for (const fails of [false, true]) {
+		test(`${purpose}: neutral process holds exclusion through ${fails ? "failure" : "success"}`, { timeout: 15_000 }, async () => {
+			const planDir = planDirectory();
+			// Pass paths via the environment so argv cannot accidentally satisfy daemon classification.
+			const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+const { withServiceExclusion } = await import(process.env.CLIENT_MODULE);
+const { once } = await import('node:events');
+try {
+  await withServiceExclusion(process.env.PLAN_DIR, async () => {
+    console.log('held');
+    await once(process.stdin, 'data');
+    if (process.env.FAILS === 'true') throw new Error('callback failure');
+  }, { purpose: process.env.PURPOSE });
+  console.log('success');
+} catch (error) { console.log(error.message); }
+process.stdin.destroy();
+`], { env: { ...process.env, CLIENT_MODULE: new URL("../../../src/client/index.ts", import.meta.url).href,
+				PLAN_DIR: planDir, PURPOSE: purpose, FAILS: String(fails) }, stdio: ["pipe", "pipe", "pipe"] });
+			const exited = once(child, "exit");
+			let stderr = "";
+			child.stderr.on("data", (chunk) => { stderr += chunk; });
+			const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+			let service: Awaited<ReturnType<typeof startHerderService>> | undefined;
+			try {
+				assert.equal((await lines.next()).value, "held", stderr);
+				assert.equal(serviceProcessAlive(child.pid!), false);
+				const lockPath = serviceOwnershipLockPath(planDir);
+				const payload = readFileSync(lockPath, "utf8");
+				await assert.rejects(async () => { service = await startHerderService({ planDirectory: planDir }); }, /already held by pid/);
+				assert.equal(readFileSync(lockPath, "utf8"), payload);
+				await assert.rejects(withServiceExclusion(planDir, () => assert.fail("competitor entered")), /startup is already in progress/);
+				child.stdin.write("release");
+				assert.equal((await lines.next()).value, fails ? "callback failure" : "success", stderr);
+				await exited;
+				assert.equal(existsSync(lockPath), false);
+				assert.equal(existsSync(path.join(planDir, ".herder", "service-start.lock")), false);
+				service = await startHerderService({ planDirectory: planDir });
+			} finally {
+				await service?.close();
+				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+				await exited;
+				rmSync(path.dirname(planDir), { recursive: true, force: true });
+			}
+		});
+	}
+}
