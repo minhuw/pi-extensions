@@ -150,12 +150,33 @@ function send(
 
 function matchesStateTag(value: string | string[] | undefined, etag: string): boolean {
   if (value === undefined) return false
-  const condition = (Array.isArray(value) ? value.join(",") : value).replace(/^[ \t]+|[ \t]+$/g, "")
-  if (condition === "*") return true
-  // Validate the entire list before comparing; commas can occur inside opaque tags.
-  const tag = '(?:W/)?"[\\x21\\x23-\\x7e\\x80-\\xff]*"'
-  if (new RegExp(`^[ \t]*(?:${tag})?[ \t]*(?:,[ \t]*(?:${tag})?[ \t]*)*$`).exec(condition)?.[0] !== condition) return false
-  return [...condition.matchAll(new RegExp(tag, "g"))].some(([value]) => value.replace(/^W\//, "") === etag)
+  const condition = Array.isArray(value) ? value.join(",") : value
+  if (/^[ \t]*\*[ \t]*$/.exec(condition)?.[0] === condition) return true
+  // Scan once, including the suffix after a match: malformed lists must never match.
+  // Commas inside quoted opaque tags are not list separators.
+  let index = 0
+  let matched = false
+  while (index < condition.length) {
+    while (condition[index] === " " || condition[index] === "\t") index++
+    if (index === condition.length) break
+    if (condition[index] === ",") {
+      index++
+      continue
+    }
+    if (condition.startsWith("W/", index)) index += 2
+    const start = index
+    if (condition[index++] !== '"') return false
+    while (index < condition.length && condition[index] !== '"') {
+      const code = condition.charCodeAt(index++)
+      if (!(code === 0x21 || (code >= 0x23 && code <= 0x7e) || (code >= 0x80 && code <= 0xff))) return false
+    }
+    if (index === condition.length) return false
+    index++
+    if (condition.slice(start, index) === etag) matched = true
+    while (condition[index] === " " || condition[index] === "\t") index++
+    if (index < condition.length && condition[index++] !== ",") return false
+  }
+  return matched
 }
 
 function readAssets(): Map<string, { file: string; type: string; content: Buffer }> {

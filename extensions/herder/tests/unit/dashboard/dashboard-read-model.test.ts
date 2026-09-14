@@ -274,7 +274,7 @@ test("conditional GET and HEAD use weak representation comparison and reject mal
       assert.equal(output.headers["cache-control"], "no-store")
       assert.equal(output.headers["x-frame-options"], "DENY")
     }
-    for (const condition of ["", '"other"', etag.slice(1, -1), `w/${etag}`, `${etag}, garbage`, `${etag}, *`, `${etag} trailing`, `${etag}\n`, `\u00a0${etag}`,  `"unterminated, ${etag}`, `"bad\nvalue", ${etag}`]) {
+    for (const condition of ["", "*\n", '"other"', etag.slice(1, -1), `w/${etag}`, `${etag}, garbage`, `${etag}, *`, `${etag} trailing`, `${etag}\n`, `\u00a0${etag}`,  `"unterminated, ${etag}`, `"bad\nvalue", ${etag}`]) {
       const output = response()
       const input = request("/api/state")
       input.method = method
@@ -284,6 +284,23 @@ test("conditional GET and HEAD use weak representation comparison and reject mal
       assert.equal(output.body, method === "HEAD" ? "" : initial.body)
       assert.equal(output.headers["content-length"], Buffer.byteLength(initial.body))
     }
+  }
+})
+
+test("malformed empty-member lists do not stall validator handling", async () => {
+  const dashboard = createDashboardHandler({ revisionProvider: () => 1, stateProvider: () => ({ ok: true }) })
+  const initial = response()
+  await dashboard.handle(request("/api/state"), initial)
+  for (const prefix of ["", `${initial.headers.etag}, `]) {
+    const input = request("/api/state")
+    input.headers["if-none-match"] = `${prefix}${", ".repeat(24)}x`
+    const output = response()
+    const started = performance.now()
+    await dashboard.handle(input, output)
+    const elapsed = performance.now() - started
+    assert.equal(output.statusCode, 200)
+    assert.equal(output.body, initial.body)
+    assert.ok(elapsed < 500, `malformed validator blocked handling for ${elapsed}ms`)
   }
 })
 
