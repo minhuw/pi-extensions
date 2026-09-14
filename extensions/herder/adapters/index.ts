@@ -2,7 +2,7 @@ import { beginWholeRunAttention, finishWholeRunEdit, cancelWholeRunEdit, wholeRu
 import { readRunRevision, revisionPending, type RunRevision } from "../src/core/run-revision.ts";
 import { RunStore } from "../src/daemon/run-store.ts";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -846,12 +846,29 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const planDir = parsed.force && !existsSync(requested)
 			? resolvePlanDirectoryTarget(repoRoot, parsed.planDir)
 			: resolvePlanDirectory(repoRoot, parsed.planDir);
-		assertSafe(planDir);
+		const assertCleanupSafe = () => {
+			assertSafe(planDir);
+			// Replacement adapters have no volatile exclusion; inspect the durable claim
+			// again after confirmation, without acquiring or acknowledging ownership.
+			const lockPath = adapterOwnershipLockPath(planDir);
+			let descriptor: number;
+			try { descriptor = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+			try {
+				const stat = fstatSync(descriptor);
+				if (!stat.isFile() || stat.size < 1 || stat.size > 4_096) throw new Error("Invalid ownership lock");
+				const record = JSON.parse(readFileSync(descriptor, "utf8"));
+				if (!record || record.version !== 1 || record.resetCleanupRequired !== undefined) throw new Error("Unsafe ownership lock");
+			} catch {
+				throw new Error(`Herder ownership evidence requires manual child-process cleanup and explicit ownership lock removal before cleanup: ${lockPath}`);
+			} finally { closeSync(descriptor); }
+		};
+		assertCleanupSafe();
 		const result = await runCleanupCommand(parsed, {
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
 			apply: (request, preview) => {
-				assertSafe(planDir);
+				assertCleanupSafe();
 				return applyHerderCleanup(request, preview);
 			},
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
@@ -1297,7 +1314,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (resolution.planId === "RUN") return;
 			if (!["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Plan attention requires revise_run or explicit abandon_run");
 			const epoch = sessionEpoch;
-			return enqueueManager(async () => ({ handled: true as const, result: await beginWholeRunAttention(planDirectory, resolution, ctx, wholeRunHost(ctx, epoch)) }));
+			return enqueueManager(async () => {
+				assertSessionActive(epoch);
+				assertOwnership(planDirectory, resolution.runId);
+				return { handled: true as const, result: await beginWholeRunAttention(planDirectory, resolution, ctx, wholeRunHost(ctx, epoch)) };
+			});
 		},
 		bindAttention: async (input, ctx) => {
 			const epoch = sessionEpoch;
@@ -1799,12 +1820,15 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	engine.onTerminal(async (completed: PiWorkerTerminal) => {
 		const binding = workers.get(completed.handle);
 		if (!binding || binding.actionId !== completed.actionId) return;
-		if (unsafeCleanup(binding.planDir)) { workers.delete(completed.handle); return; }
+		const unsafe = unsafeCleanup(binding.planDir);
 		if (binding.transcript) appendWorkerEntry(
 			HERDER_WORKER_OUTPUT_ENTRY,
-			createWorkerOutputEntry(binding.transcript, completed),
+			createWorkerOutputEntry(binding.transcript, unsafe
+				? { ...completed, interrupted: true, error: completed.error ?? unsafe.message }
+				: completed),
 		);
 		workers.delete(completed.handle);
+		if (unsafe) return;
 		const epoch = binding.sessionEpoch;
 		if (!sessionActive(epoch)) return;
 		await enqueueManager(async () => {

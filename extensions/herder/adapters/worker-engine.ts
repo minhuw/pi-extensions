@@ -693,7 +693,8 @@ export class PiWorkerEngine {
 		}
 		this.emitUpdate();
 		worker.completion = this.run(handle, worker).finally(() => clearTimeout(worker.reviewTimer));
-		void worker.completion.catch(error => this.cleanupFailed(worker.request.planDirectory, error));
+		// Cleanup operations report unsafety directly; completion also includes consumer callbacks.
+		void worker.completion.catch(error => this.cleanupFailed(worker.request.planDirectory, error, false));
 	}
 
 	async discard(handle: string): Promise<void> {

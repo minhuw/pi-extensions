@@ -16,6 +16,7 @@ import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
+	markAdapterOwnershipCleanupRequired,
 	releaseAdapterOwnership,
 	waitForAdapterOwnershipRetirement,
 	type AdapterOwnership,
@@ -1647,6 +1648,8 @@ for (const duringPreparation of [false, true]) {
 			protected override createSession(request: PiWorkerRequest) {
 				const created = super.createSession(request);
 				created.session.dispose = () => { throw Error("fixture unsafe disposal"); };
+				const stats = created.session.getSessionStats();
+				created.session.getSessionStats = () => ({ ...stats, tokens: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, total: 10 } });
 				if (duringPreparation) created.session.messages.push({ role: "user", content: "inherited" });
 				return created;
 			}
@@ -1701,11 +1704,143 @@ for (const duringPreparation of [false, true]) {
 			assert.deepEqual(evidence(value).actions, before.actions);
 			assert.equal(factory.sessions.length, duringPreparation ? 1 : 2, "no successor or transport retry");
 			assertCleanupMarker(original);
+			if (!duringPreparation) {
+				const outputs = api.appendedEntries.filter(entry => entry.customType === "herder-worker-output-v1");
+				const output = outputs.map(entry => object(entry.data)).find(entry => String(entry.response).includes("implementation complete"));
+				assert.ok(output, "unsafe root output retained");
+				assert.equal(output.status, "interrupted");
+				assert.match(String(output.error), /fixture unsafe disposal/);
+				assert.equal(object(output.usage).inputTokens, 7);
+				assert.equal(object(output.usage).outputTokens, 3);
+			}
 			const unrelated = path.join(value.repo, "unrelated-plans");
 			initPlanDir(unrelated);
 			const claim = acquireAdapterOwnership(unrelated, "unrelated", "unrelated-session");
 			releaseAdapterOwnership(claim);
 		} finally {
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const markDuringConfirmation of [false, true]) {
+	test(`fresh adapter refuses durable cleanup evidence ${markDuringConfirmation ? "at apply" : "before preview"}`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-durable-cleanup-"));
+		const value = writeFixture(root);
+		const held = acquireAdapterOwnership(value.planDirectory, "fixture-run", "departed-session");
+		const api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, new PendingWorkerFactory());
+		const warnings: Warning[] = [];
+		const base = freshContext(value, warnings);
+		let confirmations = 0;
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			confirm: async () => { confirmations++; markAdapterOwnershipCleanupRequired(held); return true; },
+		} } as ExtensionContext;
+		try {
+			if (!markDuringConfirmation) markAdapterOwnershipCleanupRequired(held);
+			const before = fs.statSync(held.lockPath);
+			await api.command("herder-cleanup").handler("herder-plans --force", ctx);
+			assert.ok(warnings.some(warning => /manual.*cleanup/i.test(warning.message)), JSON.stringify(warnings));
+			assert.equal(confirmations, markDuringConfirmation ? 1 : 0);
+			assert.ok(fs.existsSync(value.planDirectory));
+			assert.equal(fs.statSync(held.lockPath).ino, before.ino);
+			assert.equal(JSON.parse(fs.readFileSync(held.lockPath, "utf8")).resetCleanupRequired, true);
+		} finally {
+			releaseAdapterOwnership(held);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const action of ["revise_run", "abandon_run"] as const) {
+	test(`queued ${action} attention cannot mutate after root disposal latches exclusion`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-queued-attention-"));
+		const value = writeBlockedAttentionFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const unsafe = new Deferred<void>();
+		const queueHeld = new Deferred<void>();
+		const releaseQueue = new Deferred<void>();
+		const bound = new Deferred<void>();
+		const base = freshContext(value, []);
+		const ctx = { ...base, ui: { ...base.ui, notify(text: string) {
+			if (/manual.*cleanup/i.test(text)) unsafe.resolve();
+		} } } as ExtensionContext;
+		const originalFetch = globalThis.fetch;
+		let attaching: Promise<unknown> | undefined;
+		let attention: Promise<unknown> | undefined;
+		try {
+			const index = path.join(value.planDirectory, "README.md");
+			const row = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | BLOCKED — needs attention |";
+			fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n| [002](002-active.md) | Active sibling | P1 | S | — | TODO |`));
+			fs.writeFileSync(path.join(value.planDirectory, "002-active.md"), fixturePlan({ id: "002", title: "Active sibling", writePaths: ["src/other.mjs"] }));
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			const message = await withDeadline(api.waitForAttentionMessage(), "queued attention delivery");
+			assert.equal(factory.sessions.length, 1);
+			const session = factory.sessions[0]!;
+			await withDeadline(session.started, "active sibling started");
+			const original = ownershipEvidence(value);
+			assert.equal(original.record.resetCleanupRequired, undefined);
+			const snapshot = () => {
+				const store = new RunStore(value.planDirectory, { readOnly: true });
+				try {
+					const run = store.getRun()!;
+					return { run, plans: store.getPlans(run.runId), actions: store.getActions(run.runId), attention: store.getAttentionRequests(run.runId) };
+				} finally { store.close(); }
+			};
+			const before = snapshot();
+			assert.equal(before.actions.length, 1);
+			assert.equal(before.actions[0]!.state, "dispatched");
+			assert.equal(before.actions[0]!.planId, "002");
+			assert.equal(readRunRevision(value.planDirectory), null);
+			const markdown = fs.readFileSync(index, "utf8");
+			// Attach's second status read runs inside managerQueue; hold its response, not the service.
+			let statusReads = 0;
+			globalThis.fetch = async (input, init) => {
+				const response = await originalFetch(input, init);
+				if (new URL(String(input)).pathname === "/v1/status" && ++statusReads === 2) {
+					queueHeld.resolve();
+					await releaseQueue.promise;
+				}
+				return response;
+			};
+			attaching = api.command("herder-attach").handler("herder-plans", ctx);
+			await withDeadline(queueHeld.promise, "attach holds manager queue");
+			let actionReads = 0;
+			let attentionSettled = false;
+			attention = api.tool("herder_plan").execute("queued-attention", {
+				operation: "attention", planDirectory: value.planDirectory, requestId: object(message.details).requestId,
+				// The second read builds applicationParams only after bindAttention returned safely.
+				get action() { if (++actionReads === 2) bound.resolve(); return action; },
+			}, undefined, undefined, ctx).finally(() => { attentionSettled = true; });
+			await withDeadline(bound.promise, "attention bound before exclusion");
+			assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
+			assert.equal(attentionSettled, false, "attention is waiting behind attach");
+			session.dispose = () => { throw Error("fixture queued attention root disposal failed"); };
+			session.messages.push({ role: "assistant", content: [{ type: "text", text: "STATUS: COMPLETE\nSUMMARY: implementation complete" }], stopReason: "stop" });
+			session.finish();
+			await withDeadline(unsafe.promise, "root disposal exclusion");
+			assertCleanupMarker(original);
+			assert.deepEqual(snapshot(), before, "failed root cleanup must not advance a terminal");
+			releaseQueue.resolve();
+			await withDeadline(attaching, "attach releases manager queue");
+			const result = object(await withDeadline(attention, "queued attention rejected"));
+			assert.equal(result.isError, true);
+			assert.match(String((result.content as Array<{ text: string }>)[0]!.text), /manual.*cleanup/i);
+			assert.equal(readRunRevision(value.planDirectory), null, "queued attention must not reserve a draft before checking exclusion");
+			assert.deepEqual(snapshot(), before, "run, plans, actions and attention must remain unchanged");
+			assert.equal(fs.readFileSync(index, "utf8"), markdown);
+			assert.equal(factory.requests.length, 1, "no successor or transport retry");
+			assertCleanupMarker(original);
+		} finally {
+			releaseQueue.resolve();
+			await Promise.all([attaching, attention].map(task => task && withDeadline(task, "queued attention cleanup").catch(() => {})));
+			globalThis.fetch = originalFetch;
 			await api.invoke("session_shutdown", ctx).catch(() => {});
 			await stopService(value.planDirectory).catch(() => {});
 			fs.rmSync(root, { recursive: true, force: true });

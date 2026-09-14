@@ -1550,3 +1550,41 @@ test("root creation cleanup excludes only its run and asynchronously cancels adm
 	await assert.rejects(engine.prepare({ action: action("retry"), planDirectory: directory }), /Unsafe/);
 	await engine.discard(unrelated);
 });
+
+for (const observer of ["final update", "terminal", "async terminal"] as const) {
+	test(`${observer} failure after successful disposal does not exclude ordinary recovery`, async () => {
+		const factory = new FakeFactory();
+		const engine = new PiWorkerEngine(factory);
+		const request = { action: action(), planDirectory: "/tmp/observer-recovery" };
+		const handle = await engine.prepare(request);
+		const sibling = await engine.prepare({ ...request, action: action("sibling") });
+		const failure = Error(`${observer} observer failed`);
+		let notifications = 0;
+		engine.onUnsafeCleanup(() => { notifications += 1; });
+		const fail = () => { throw failure; };
+		const unsubscribe = observer === "final update"
+			? engine.onUpdate(() => { if (!engine.has(handle)) fail(); })
+			: engine.onTerminal(observer === "terminal" ? fail : async () => fail());
+		engine.start(handle);
+		await nextTurn();
+		unsubscribe();
+		assert.equal(factory.sessions[0]!.shutdowns, 1);
+		assert.equal(factory.sessions[0]!.disposed, true);
+		assert.equal(engine.has(handle), false);
+		assert.doesNotThrow(() => engine.assertSafe(request.planDirectory));
+		assert.equal(notifications, 0);
+		assert.equal(engine.has(sibling), true, "observer failure must not cancel siblings");
+		const retry = await engine.prepare({ ...request, action: action("retry") });
+		engine.start(retry);
+		await nextTurn();
+		assert.equal(factory.sessions[2]!.disposed, true);
+		await engine.discard(sibling);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await assert.rejects(engine.drain(request.planDirectory), (error: unknown) => {
+				assert.ok(error instanceof AggregateError);
+				assert.ok(error.errors.includes(failure), "observer diagnostics remain sticky");
+				return true;
+			});
+		}
+	});
+}
