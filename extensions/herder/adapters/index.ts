@@ -43,6 +43,8 @@ import {
 } from "./arguments.ts";
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "./run-guidance.ts";
 import { runCleanupCommand } from "./cleanup-command.ts";
+import { cleanupRun } from "../src/daemon/git/cleanup-run.ts";
+import { forceCleanupRun } from "../src/daemon/git/force-cleanup-run.ts";
 import { runResetCommand } from "./reset-command.ts";
 import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
 import {
@@ -870,7 +872,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planDirectory: planDir,
 			apply: (request, preview) => {
 				assertCleanupSafe();
-				return applyHerderCleanup(request, preview);
+				return applyHerderCleanup(request, preview, {
+					// Exclusion and revalidation await: recheck at each synchronous runner boundary.
+					cleanupRunner: (input) => { assertCleanupSafe(); return cleanupRun(input); },
+					forceRunner: (input) => { assertCleanupSafe(); return forceCleanupRun(input); },
+				});
 			},
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
 			appendEntry: (entry) => pi.appendEntry(HERDER_CLEANUP_ENTRY, entry),

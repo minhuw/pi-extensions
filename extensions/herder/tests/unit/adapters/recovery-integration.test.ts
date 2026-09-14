@@ -1921,3 +1921,128 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 		}
 	});
 }
+
+for (const failure of ["durable marker", "worker disposal", "marker persistence", "none"] as const) {
+	test(`force cleanup rechecks ${failure} after service exclusion`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-cleanup-exclusion-"));
+		const value = writeFixture(root);
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const unsafe = new Deferred<void>();
+		const excluding = new Deferred<void>();
+		const release = new Deferred<void>();
+		const base = freshContext(value, warnings);
+		let confirmations = 0;
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async () => { confirmations++; return true; },
+			notify: (message: string, level: string) => {
+				warnings.push({ message, level });
+				if (/manual.*cleanup/i.test(message)) unsafe.resolve();
+			},
+		} } as unknown as ExtensionContext;
+		const originalFetch = globalThis.fetch;
+		const truncate = fs.ftruncateSync;
+		let held: AdapterOwnership | undefined;
+		let cleaning: Promise<unknown> | undefined;
+		try {
+			if (failure === "durable marker" || failure === "none") {
+				await startFixture(value, "pi-worker:departed");
+				held = acquireAdapterOwnership(value.planDirectory, "fixture-run", "departed-session");
+			} else {
+				await api.invoke("session_start", ctx);
+				await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+				await withDeadline(factory.sessions[0]!.started, "worker started");
+			}
+			const original = ownershipEvidence(value);
+			const lock = fs.readFileSync(original.lockPath, "utf8");
+			assert.equal(original.record.resetCleanupRequired, undefined);
+			const database = path.join(value.planDirectory, ".herder/execution.sqlite3");
+			const databaseStat = fs.statSync(database);
+			const git = (...args: string[]) => {
+				const result = spawnSync("git", ["-C", value.repo, ...args], { encoding: "utf8" });
+				assert.equal(result.status, 0, result.stderr);
+				return result.stdout;
+			};
+			const refs = git("show-ref");
+			const worktrees = git("worktree", "list", "--porcelain");
+			const worktree = evidence(value).plan!.worktree;
+			assert.ok(fs.existsSync(worktree));
+			globalThis.fetch = async (input, init) => {
+				if (new URL(String(input)).pathname === "/shutdown") {
+					excluding.resolve();
+					await release.promise;
+				}
+				return originalFetch(input, init);
+			};
+			cleaning = api.command("herder-cleanup").handler("herder-plans --force", ctx);
+			void cleaning.catch(() => {});
+			await withDeadline(excluding.promise, "confirmed cleanup awaits service shutdown");
+			assert.equal(confirmations, 1);
+			assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock);
+			if (failure === "durable marker") markAdapterOwnershipCleanupRequired(held!);
+			if (failure === "worker disposal" || failure === "marker persistence") {
+				let persistenceAttempted = false;
+				if (failure === "marker persistence") fs.ftruncateSync = (descriptor, length) => {
+					const stat = fs.fstatSync(descriptor);
+					if (stat.dev === original.stat.dev && stat.ino === original.stat.ino) {
+						persistenceAttempted = true;
+						throw Error("fixture marker persistence failed before truncation");
+					}
+					truncate(descriptor, length);
+				};
+				const session = factory.sessions[0]!;
+				session.dispose = () => { throw Error("fixture exclusion-window disposal failed"); };
+				session.finish();
+				await withDeadline(unsafe.promise, "worker cleanup exclusion");
+				if (failure === "marker persistence") {
+					assert.equal(persistenceAttempted, true);
+					assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock, "only the local latch is available");
+				}
+			}
+			const before = evidence(value);
+			const warningOffset = warnings.length;
+			release.resolve();
+			await withDeadline(cleaning, "cleanup after exclusion");
+			globalThis.fetch = originalFetch;
+			if (failure === "none") {
+				assert.equal(fs.existsSync(value.planDirectory), false);
+				assert.equal(fs.existsSync(worktree), false);
+				assert.ok(!git("for-each-ref", "refs/heads/herder/herder-plans", "refs/herder/herder-plans").trim());
+			} else {
+				assert.ok(warnings.slice(warningOffset).some(warning => warning.level === "error" && /manual.*cleanup/i.test(warning.message)), JSON.stringify(warnings));
+				assert.ok(fs.existsSync(value.planDirectory));
+				assert.equal(fs.statSync(database).ino, databaseStat.ino);
+				assert.equal(fs.statSync(database).dev, databaseStat.dev);
+				assert.deepEqual(evidence(value), before);
+				assert.equal(git("show-ref"), refs);
+				assert.equal(git("worktree", "list", "--porcelain"), worktrees);
+				assert.ok(fs.existsSync(worktree));
+				if (failure === "marker persistence") {
+					assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock);
+					assert.equal(fs.statSync(original.lockPath).ino, original.stat.ino);
+				} else assertCleanupMarker(original);
+				const offset = warnings.length;
+				await api.command("herder-cleanup").handler("herder-plans --force", ctx);
+				assert.equal(confirmations, 1, "affected directory remains excluded before preview");
+				assert.ok(warnings.slice(offset).some(warning => /manual.*cleanup/i.test(warning.message)));
+				assert.equal(factory.requests.length, failure === "durable marker" ? 0 : 1, "no successor worker");
+			}
+			const unrelated = path.join(value.repo, "unrelated-plans");
+			initPlanDir(unrelated);
+			await api.command("herder-cleanup").handler("unrelated-plans --force", ctx);
+			assert.equal(fs.existsSync(unrelated), false, "unrelated cleanup is not quarantined");
+		} finally {
+			release.resolve();
+			await cleaning?.catch(() => {});
+			globalThis.fetch = originalFetch;
+			fs.ftruncateSync = truncate;
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			if (held) releaseAdapterOwnership(held);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
