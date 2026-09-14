@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "default": "eclipse",
+  "default": "universe",
   "profiles": [
     {
       "name": "eclipse",

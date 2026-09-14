@@ -84,7 +84,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 		assert.equal(Object.hasOwn(profile, "rescue"), false);
 		assert.equal(Object.hasOwn(profile, "searcher"), false);
 	}
-	assert.equal(catalog.default, "eclipse");
+	assert.equal(catalog.default, "universe");
 	const universe = resolvePiProfile("universe");
 	assert.deepEqual(universe.orchestrator, { model: "gpt-6-astra", effort: "high" });
 	assert.deepEqual(universe.roles, {
@@ -96,7 +96,9 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.deepEqual(universe.searcher, { model: "gpt-5.6-sol", effort: "xhigh" });
 	assert.deepEqual(Object.keys(universe.roles), WORKER_ROLES);
 
-	const eclipse = resolvePiProfile();
+	assert.deepEqual(resolvePiProfile(), universe);
+
+	const eclipse = resolvePiProfile("eclipse");
 	assert.equal(eclipse.profile, "eclipse");
 	assert.equal(eclipse.host, "pi");
 	assert.deepEqual(eclipse.orchestrator, expectedProfiles.eclipse.orchestrator);

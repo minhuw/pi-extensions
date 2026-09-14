@@ -23,8 +23,8 @@ SQLite schema version **19** is fresh-run only. Older run databases are retained
 Each execution profile binds exact root and worker models. Start Pi with the selected profile's orchestrator model and thinking level, then fire a validated plan directory:
 
 ```text
-pi --model <provider>/gpt-5.6-sol --thinking xhigh
-/herder-fire herder-plans --profile eclipse
+pi --model <provider>/gpt-6-astra --thinking high
+/herder-fire herder-plans
 ```
 
 Herder refuses to start when Pi's active providers cannot resolve every required model and thinking level. It never substitutes a different model after failure.
@@ -108,21 +108,21 @@ This policy applies to ordinary-plan recovery, requirement questions, and operat
 
 | Profile | Role intent |
 | --- | --- |
-| `eclipse` (default) | Sol orchestrates, reviews, and judges while Luna implements. |
+| `eclipse` | Sol orchestrates, reviews, and judges while Luna implements. |
 | `poorman` | Luna orchestrates, reviews, and judges while DeepSeek implements. |
 | `epic` | Fable orchestrates and judges, Opus implements, and Sol reviews. |
 | `lightspeed` | Grok 4.6 orchestrates and implements while Luna reviews and judges. |
-| `universe` | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Luna max/fast is Recon-only. |
+| `universe` (default) | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Luna max/fast is Recon-only. |
 
 Exact model, effort, and service-tier bindings live in `assets/profiles/profiles.json` and are resolved by the runtime.
 
-Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`. Optional `rescue` and `searcher` bindings override only round-3 Implementer and nested web Searcher; existing profiles retain their bindings and `eclipse` remains the default. Astra/Sol bindings in `universe` do not pin a service tier.
+Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`. Optional `rescue` and `searcher` bindings override only round-3 Implementer and nested web Searcher; existing profiles retain their bindings and `universe` is the default for new runs. Astra/Sol bindings in `universe` do not pin a service tier.
 
-To select `universe`:
+To use the default `universe` profile (or select it explicitly with `--profile universe`):
 
 ```text
 pi --model <provider>/gpt-6-astra --thinking high
-/herder-fire herder-plans --profile universe
+/herder-fire herder-plans
 ```
 
 Roles prefer bounded Recon lookups for unfamiliar code and named narrow static defect-candidate questions, not for runtime proof or review judgment; known-path reads stay direct. Delegate only when cheaper than direct reading, reuse evidence without a duplicate full audit, and work on other coverage concurrently. Candidates need concrete trigger/consequence and `file:line` evidence plus remaining proof, never a verdict or authoritative severity. Reviewers retain independent verification, complete coverage, and required checks; zero candidates never implies complete review or approval. These are [prompt policies](adapters/README.md#scoped-nested-delegation), not wholesale review delegation or new runtime enforcement. Delegation may reduce expensive repeated exploration but adds scout latency, so any speed/quality gain needs measurement.
