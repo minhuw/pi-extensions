@@ -146,8 +146,7 @@ function fixture(initialStatus = "TODO"): Fixture {
 	};
 }
 
-async function initializedFixture(): Promise<Fixture> {
-	const value = fixture();
+async function initializedFixture(value = fixture()): Promise<Fixture> {
 	const service = await ensureService(value.planDir);
 	const response = await requestManagerOperation(service, "start", {
 		mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
@@ -157,6 +156,48 @@ async function initializedFixture(): Promise<Fixture> {
 	const worktreeRoot = canonicalWorktreeRoot(value.planDir);
 	for (const worktree of [path.join(worktreeRoot, "integration"), path.join(worktreeRoot, "001")]) command(value.repo, ["worktree", "unlock", worktree], true);
 	return value;
+}
+
+const retainedResetProjection = [
+	{ id: "001", status: "TODO", detail: "" },
+	{ id: "002", status: "DONE", detail: "" },
+	{ id: "003", status: "TODO", detail: "" },
+	{ id: "004", status: "BLOCKED", detail: "authored prerequisite unavailable" },
+	{ id: "005", status: "REJECTED", detail: "authored alternative declined" },
+];
+
+async function retainedDoneFixture(): Promise<Fixture> {
+	const value = fixture();
+	const rows: string[] = [];
+	for (const { id, status, detail } of retainedResetProjection.slice(1)) {
+		fs.writeFileSync(path.join(value.planDir, `${id}-reset.md`), planBody(id, "Reset fixture").replace("`fixture.txt`", `\`fixture-${id}.txt\``));
+		rows.push(`| [${id}](${id}-reset.md) | Reset fixture | P1 | S | — | ${status}${detail ? ` — ${detail}` : ""} |`);
+	}
+	fs.writeFileSync(value.readme, fs.readFileSync(value.readme, "utf8").replace(/^(\| \[001\].*)$/m, `$1\n${rows.join("\n")}`));
+	command(value.repo, ["add", "herder-plans"]);
+	command(value.repo, ["commit", "-q", "-m", "test: mixed authored statuses"]);
+	await initializedFixture(value);
+	const store = new RunStore(value.planDir);
+	try {
+		const run = store.getRun()!;
+		const runtime = store.getPlan(run.runId, "001")!;
+		assert.ok(runtime);
+		assert.equal(store.getPlan(run.runId, "002"), null);
+		// Seed a retained DONE spec while keeping its execution evidence in the older generation.
+		store.putPlanSpecs(store.getPlanSpecs(run.runId).map((spec) => ({
+			...spec, graphGeneration: run.currentGeneration + 1,
+			initialStatus: spec.planId === "001" ? "DONE" : spec.initialStatus,
+		})));
+		store.putPlan({ ...runtime, phase: "DONE" });
+		store.updateRun({ currentGeneration: run.currentGeneration + 1, status: "complete" });
+		assert.ok(store.getPlan(run.runId, "001")!.generation < store.getRun()!.currentGeneration);
+	} finally { store.close(); }
+	projectStatuses(value.planDir, [{ id: "001", status: "DONE" }]);
+	return value;
+}
+
+function statusProjection(value: Fixture) {
+	return buildGraph(value.planDir).plans.map(({ id, status, statusDetail }) => ({ id, status, detail: statusDetail }));
 }
 
 function namespaceSnapshot(value: Fixture): string {
@@ -236,6 +277,36 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 			});
 			assert.equal((started.reply as Record<string, unknown>).status, "running");
 			await stopService(value.planDir);
+		}
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("ordinary reset reruns retained execution-backed DONE but preserves authored DONE and mixed statuses across reset/fire cycles", { timeout: 60_000 }, async () => {
+	const value = await retainedDoneFixture();
+	try {
+		const plans = buildGraph(value.planDir).plans.map((plan) => fs.readFileSync(plan.file, "utf8"));
+		projectStatuses(value.planDir, [{ id: "002", status: "TODO" }]); // Mutable lifecycle text is not authored provenance.
+		for (let cycle = 0; cycle < 2; cycle++) {
+			const result = resetHerderPlanSet(resetInput(value));
+			assert.deepEqual(result.resetPlans, retainedResetProjection.map(({ id }) => id));
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), result);
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
+			assert.deepEqual(buildGraph(value.planDir).plans.map((plan) => fs.readFileSync(plan.file, "utf8")), plans);
+			const empty = new RunStore(value.planDir);
+			try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+			const service = await ensureService(value.planDir);
+			const started = await requestManagerOperation(service, "start", {
+				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
+			});
+			assert.equal((started.reply as Record<string, unknown>).status, "running");
+			await stopService(value.planDir);
+			const fresh = new RunStore(value.planDir, { readOnly: true });
+			try {
+				const run = fresh.getRun()!;
+				assert.ok(fresh.getPlan(run.runId, "001"));
+				assert.equal(fresh.getPlan(run.runId, "002"), null);
+			} finally { fresh.close(); }
 		}
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
@@ -552,13 +623,14 @@ real_git "$@"
 
 for (const operation of ["worktree", "branch", "ref", "unlock"] as const) {
 	test(`durable reset resumes interrupted ${operation} deletion and replays its original result`, { timeout: 30_000 }, async () => {
-		const value = await initializedFixture();
+		const value = operation === "worktree" ? await retainedDoneFixture() : await initializedFixture();
 		try {
 			if (operation === "unlock") command(value.repo, ["worktree", "lock", "--reason", "test", path.join(canonicalWorktreeRoot(value.planDir), "001")]);
 			const plan = fs.readFileSync(value.planFile, "utf8");
 			interruptDeletion(value, operation);
 			const intent = resetIntent(value);
 			assert.equal(intent.pending, true);
+			if (operation === "worktree") assert.deepEqual(intent.manifest.projected, retainedResetProjection);
 			assert.equal(fs.statSync(path.join(value.planDir, ".herder", "reset-intent.json")).mode & 0o777, 0o600);
 			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
 			assert.equal(resetIntent(value).completed, true);
@@ -601,8 +673,8 @@ test("interrupted reset survives service restart presentation updates but reject
 });
 
 for (const boundary of ["before", "after"] as const) {
-	test(`durable reset resumes ${boundary} the execution DB clear`, { timeout: 30_000 }, async (t) => {
-		const value = await initializedFixture();
+	test(`durable reset replays frozen retained-DONE projection ${boundary} the execution DB clear`, { timeout: 30_000 }, async (t) => {
+		const value = await retainedDoneFixture();
 		try {
 			projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "execution failure" }]);
 			const original = RunStore.prototype.resetExecutionState;
@@ -617,9 +689,19 @@ for (const boundary of ["before", "after"] as const) {
 			assert.equal(intent.completed, false);
 			const store = new RunStore(value.planDir, { readOnly: true });
 			try { assert.equal(!!store.getRun(), boundary === "before"); } finally { store.close(); }
-			assert.match(fs.readFileSync(value.readme, "utf8"), /\| TODO \|/);
+			assert.deepEqual(intent.manifest.projected, retainedResetProjection);
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
+			projectStatuses(value.planDir, [{ id: "001", status: "DONE" }]);
 			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
+			assert.deepEqual(resetIntent(value).manifest, intent.manifest);
 			assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
+			const empty = new RunStore(value.planDir, { readOnly: true });
+			try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+			await initializedFixture(value);
+			resetHerderPlanSet(resetInput(value));
+			assert.deepEqual(statusProjection(value), retainedResetProjection);
 		} finally { t.mock.restoreAll(); await stopService(value.planDir).catch(() => {}); remove(value); }
 	});
 }

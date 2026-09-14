@@ -42,12 +42,13 @@ function validateWorktree(repo: string, item: Worktree): void {
 }
 function deleteRef(repo: string, ref: string, expected: string): void { const current = target(repo, ref); if (current !== expected) fail(`Herder reset found moved ref ${ref}; expected ${expected}, found ${current ?? "missing"}`); if (runGit(repo, ["update-ref", "--no-deref", "-d", ref, expected], { allowFailure: true }).status !== 0) fail(`Herder reset could not delete moved ref ${ref}`); }
 function deleteBranch(repo: string, branch: string, expected: string): void { deleteRef(repo, `refs/heads/${branch}`, expected); }
-function readExecution(planDir: string): { specs: StoredPlanSpec[]; run: StoredRun | null } {
+function readExecution(planDir: string): { specs: StoredPlanSpec[]; run: StoredRun | null; executedPlanIds: Set<string> } {
   let store: RunStore;
   try { store = new RunStore(planDir, { readOnly: true }); } catch { fail("Herder reset requires an intact initialized execution database."); }
   try {
     const run = store.getRun();
-    return { run, specs: run ? store.getPlanSpecs(run.runId, run.currentGeneration) : [] };
+    return { run, specs: run ? store.getPlanSpecs(run.runId, run.currentGeneration) : [],
+      executedPlanIds: new Set(run ? store.getPlans(run.runId).map((plan) => plan.planId) : []) };
   } finally { store.close(); }
 }
 
@@ -69,7 +70,7 @@ function validateSpecs(graph: ReturnType<typeof buildGraph>, specs: StoredPlanSp
   }
 }
 
-function projectedResetStatuses(specs: StoredPlanSpec[]): Array<{ id: string; status: string; detail: string }> {
+function projectedResetStatuses(specs: StoredPlanSpec[], executedPlanIds: Set<string>): Array<{ id: string; status: string; detail: string }> {
   return specs.map((spec) => {
     const detail = String(spec.initialStatusDetail ?? "").trim();
     if (spec.initialStatus === "BLOCKED" || spec.initialStatus === "REJECTED") {
@@ -79,7 +80,10 @@ function projectedResetStatuses(specs: StoredPlanSpec[]): Array<{ id: string; st
     }
     // Recovery retry/revise used to persist the rationale on TODO. That is not a
     // README status detail; drop it rather than failing after Git mutations.
-    return { id: spec.planId, status: spec.initialStatus, detail: "" };
+    // Selective retention can promote DONE while keeping an older generation's runtime.
+    // Reset discards that work, but an authored DONE without runtime remains authored.
+    const status = spec.initialStatus === "DONE" && executedPlanIds.has(spec.planId) ? "TODO" : spec.initialStatus;
+    return { id: spec.planId, status, detail: "" };
   });
 }
 
@@ -346,7 +350,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   // Validate the README projection before any Git mutation so a later
   // status-format failure cannot leave a half-deleted namespace.
   if (input.revision && (input.revision.runId !== run.runId || input.revision.baseCommit !== run.baseCommit || current.head !== run.baseCommit)) fail("Herder revision reset requires the recorded runId and checkout HEAD equal to run.baseCommit and revision.baseCommit.");
-  const projected = input.revision ? graph.plans.map((plan) => ({ id: plan.id, status: "TODO", detail: "" })) : projectedResetStatuses(specs);
+  const projected = input.revision ? graph.plans.map((plan) => ({ id: plan.id, status: "TODO", detail: "" })) : projectedResetStatuses(specs, execution.executedPlanIds);
   const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
   const allBranches = listHerderBranches(repo, name);
   const allRefs = listCoordinationRefs(repo, name);

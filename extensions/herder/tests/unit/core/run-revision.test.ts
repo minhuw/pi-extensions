@@ -18,16 +18,17 @@ import { graphInputSha256 } from "../../../src/core/plan-edit.ts";
 import { selectivePlanSets, stageSelectiveReversal, SelectiveReversalConflict } from "../../../src/daemon/git/selective-revision.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "../../../adapters/run-revision.ts";
+import { resetHerderPlanSet } from "../../../src/daemon/git/reset-plan-set.ts";
 import { buildCompletionProofPayload } from "../../../src/daemon/git/completion-proof.ts";
 import { parseWorkerResult, normalizeUsage, sha256, stableJson, attentionRequestSha256, attentionCapabilityToken } from "../../../src/shared/protocol.ts";
 import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
 
-function fixture() {
+function fixture(upstreamStatus = "DONE") {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-run-revision-"));
 	const { repo, originalHead } = initFixtureRepo(root, { name: "Revision", email: "revision@example.invalid", files: { "src/value.mjs": "export const value = 1;\n", "src/other.mjs": "export const other = 1;\n" } });
 	const directory = path.join(repo, "herder-plans");
 	initPlanDir(directory);
-	fs.writeFileSync(path.join(directory, "README.md"), `# Revision\n\n## Execution order & status\n\n| Plan | Title | Priority | Effort | Depends on | Status |\n|---|---|---|---|---|---|\n| [001](001-upstream.md) | Upstream | P1 | S | — | DONE |\n| [002](002-downstream.md) | Downstream | P1 | S | 001 | BLOCKED — revise the upstream contract |\n\n## Dependency notes\n\n002 consumes 001.\n\n## Considered and rejected\n\nNone.\n`);
+	fs.writeFileSync(path.join(directory, "README.md"), `# Revision\n\n## Execution order & status\n\n| Plan | Title | Priority | Effort | Depends on | Status |\n|---|---|---|---|---|---|\n| [001](001-upstream.md) | Upstream | P1 | S | — | ${upstreamStatus} |\n| [002](002-downstream.md) | Downstream | P1 | S | 001 | BLOCKED — revise the upstream contract |\n\n## Dependency notes\n\n002 consumes 001.\n\n## Considered and rejected\n\nNone.\n`);
 	fs.writeFileSync(path.join(directory, "001-upstream.md"), fixturePlan({ id: "001", title: "Upstream" }));
 	fs.writeFileSync(path.join(directory, "002-downstream.md"), fixturePlan({ id: "002", title: "Downstream", dependencies: "001", writePaths: ["src/other.mjs"] }));
 	return { root, repo, directory, originalHead, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
@@ -349,6 +350,65 @@ for (const restack of [false, true]) test(`selective revision retains independen
 			assert.equal(fs.readFileSync(path.join(record.run.integrationWorktree, "src/before.mjs"), "utf8"), "export const before = 3;\n");
 			assert.equal(fs.readFileSync(path.join(record.run.integrationWorktree, "src/after.mjs"), "utf8"), "export const after = 4;\n");
 		} finally { current.close(); }
+	} finally { value.dispose(); }
+});
+
+test("ordinary reset requeues TODO-origin completion retained from an earlier selective generation", { timeout: 60_000 }, async () => {
+	const value = fixture("TODO");
+	try {
+		const manager = new HerderRunManager(value.directory);
+		let record;
+		let retained;
+		let approval;
+		let ref;
+		try {
+			const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			assert.deepEqual(reply.actions.map(action => [action.planId, action.role]), [["001", "plan-implementer"]]);
+			const store = new RunStore(value.directory);
+			try {
+				assert.equal(store.getPlanSpecs(reply.runId!).find(spec => spec.planId === "001")!.initialStatus, "TODO");
+				// Settle the local fixture's proposed worker before opening revision authority.
+				for (const action of reply.actions) {
+					store.markDispatched(action.actionId, "fixture");
+					const workerResult = parseWorkerResult("plan-implementer", "STATUS: COMPLETE\nCOMMITS: none\nADDRESSED: none\nSETUP: none\nCHECKS: none\nFILES CHANGED: src/value.mjs\nDISCOVERED_PATHS: none\nNOTES: fixture");
+					store.markTerminal(action.actionId, { workerResult, usage: normalizeUsage(workerResult, { actionId: action.actionId, response: "" }), outcome: "complete", terminal: { interrupted: false, error: null, hostHandle: "fixture" } });
+					revisionDriver(store.getRun()!).release(action.worktree, action.leaseReason);
+				}
+				completeFixturePlan(value, store, "001", "src/value.mjs", "export const value = 2;\n");
+				retained = store.getPlan(reply.runId!, "001")!;
+				approval = store.getApproval(reply.runId!, "001", 1);
+				ref = git(value.repo, ["rev-parse", "refs/plan-herder/herder-plans/completed/001"]).stdout.trim();
+			} finally { store.close(); }
+			const request = reply.attention!;
+			assert.equal(request.planId, "002");
+			await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "revise_run" } });
+			record = readRunRevision(value.directory)!;
+		} finally { manager.close(); }
+		fs.appendFileSync(path.join(value.directory, "002-downstream.md"), "\nRevise the downstream implementation only.\n");
+		const prepared = await prepareRunRevision(value.directory, record.editToken);
+		assert.deepEqual(prepared.selective!.retainedPlanIds, ["001"]);
+		await confirmRunRevision(prepared);
+		const revised = (await finishRunRevision(value.directory, record.editToken)).reply!;
+		assert.deepEqual(revised.actions.map(action => action.planId), ["002"], "selective revision alone keeps the prerequisite complete");
+		const store = new RunStore(value.directory);
+		try {
+			assert.equal(store.getRun()!.currentGeneration, 2);
+			assert.equal(retained.generation, 1);
+			assert.deepEqual(store.getPlan(record.run.runId, "001"), retained);
+			assert.deepEqual(store.getApproval(record.run.runId, "001", 1), approval);
+			assert.equal(store.getPlanSpecs(record.run.runId).find(spec => spec.planId === "001")!.initialStatus, "DONE");
+			assert.equal(git(value.repo, ["rev-parse", "refs/plan-herder/herder-plans/completed/001"]).stdout.trim(), ref);
+		} finally { store.close(); }
+		assert.equal(fs.readFileSync(path.join(record.run.integrationWorktree, "src/value.mjs"), "utf8"), "export const value = 2;\n");
+		resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.directory });
+		assert.deepEqual(buildGraph(value.directory).plans.map(plan => [plan.id, plan.status, plan.statusDetail]), [["001", "TODO", ""], ["002", "TODO", ""]]);
+		const fresh = new HerderRunManager(value.directory);
+		try {
+			const reply = await fresh.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			assert.notEqual(reply.runId, record.run.runId);
+			assert.deepEqual(reply.actions.map(action => [action.planId, action.role]), [["001", "plan-implementer"]], "discarded prerequisite must run before its dependent");
+			assert.equal(fs.readFileSync(path.join(reply.actions[0]!.worktree, "src/value.mjs"), "utf8"), "export const value = 1;\n");
+		} finally { fresh.close(); }
 	} finally { value.dispose(); }
 });
 
