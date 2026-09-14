@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import test from "node:test"
 import { createDashboardHandler } from "../../../src/dashboard/herder-dashboard.ts"
@@ -74,6 +75,7 @@ test("same revision coalesces concurrent projections and reuses the exact body",
   await Promise.all([first, second])
   assert.equal(firstResponse.body, '{"revision":7,"build":1}\n')
   assert.equal(firstResponse.headers["x-herder-revision"], "7")
+  assert.equal(secondResponse.headers.etag, firstResponse.headers.etag)
   assert.equal(secondResponse.body, firstResponse.body)
   assert.equal(secondResponse.headers["x-herder-revision"], "7")
 
@@ -99,7 +101,9 @@ test("revision rollover during a projection discards the stale body and retries"
 
   const firstResponse = response()
   const secondResponse = response()
-  const first = dashboard.handle(request("/api/state"), firstResponse)
+  const conditional = request("/api/state")
+  conditional.headers["if-none-match"] = `"${createHash("sha256").update('{"revision":1,"build":1}\n').digest("hex")}"`
+  const first = dashboard.handle(conditional, firstResponse)
   const second = dashboard.handle(request("/api/state"), secondResponse)
   await new Promise<void>((resolve) => setImmediate(resolve))
   assert.equal(builds, 1)
@@ -110,8 +114,11 @@ test("revision rollover during a projection discards the stale body and retries"
   assert.equal(builds, 2)
   releases.shift()!("current")
   await Promise.all([first, second])
+  assert.equal(firstResponse.statusCode, 200)
+  assert.notEqual(firstResponse.headers.etag, conditional.headers["if-none-match"])
   assert.equal(firstResponse.body, '{"revision":2,"build":2}\n')
   assert.equal(firstResponse.headers["x-herder-revision"], "2")
+  assert.equal(secondResponse.headers.etag, firstResponse.headers.etag)
   assert.equal(secondResponse.body, firstResponse.body)
   assert.equal(secondResponse.headers["x-herder-revision"], "2")
 })
@@ -208,6 +215,7 @@ test("slow no-revision projections are accepted and coalesced", async () => {
   ])
   assert.equal(builds, 1)
   assert.equal(firstResponse.body, '{"build":1}\n')
+  assert.equal(secondResponse.headers.etag, firstResponse.headers.etag)
   assert.equal(secondResponse.body, firstResponse.body)
 
   now = 1999
@@ -243,4 +251,90 @@ test("health is served while a dashboard projection is awaiting its worker", asy
   projection.resolve('{"ok":true}\n')
   await state
   assert.equal(stateResponse.body, '{"ok":true}\n')
+})
+
+test("conditional GET and HEAD use weak representation comparison and reject malformed lists", async () => {
+  const dashboard = createDashboardHandler({ revisionProvider: () => 7, stateProvider: () => ({ ok: true }) })
+  const initial = response()
+  await dashboard.handle(request("/api/state"), initial)
+  const etag = String(initial.headers.etag)
+  assert.match(etag, /^"[a-f0-9]{64}"$/)
+  for (const method of ["GET", "HEAD"]) {
+    for (const condition of [etag, `W/${etag}`, `"other", W/${etag}`, `"comma,inside", ${etag}`, ` , ${etag}, `, "*"]) {
+      const output = response()
+      const input = request("/api/state")
+      input.method = method
+      input.headers["if-none-match"] = condition
+      await dashboard.handle(input, output)
+      assert.equal(output.statusCode, 304, condition)
+      assert.equal(output.body, "")
+      assert.equal(output.headers["content-length"], undefined)
+      assert.equal(output.headers.etag, etag)
+      assert.equal(output.headers["x-herder-revision"], "7")
+      assert.equal(output.headers["cache-control"], "no-store")
+      assert.equal(output.headers["x-frame-options"], "DENY")
+    }
+    for (const condition of ["", '"other"', etag.slice(1, -1), `w/${etag}`, `${etag}, garbage`, `${etag}, *`, `${etag} trailing`, `${etag}\n`, `\u00a0${etag}`,  `"unterminated, ${etag}`, `"bad\nvalue", ${etag}`]) {
+      const output = response()
+      const input = request("/api/state")
+      input.method = method
+      input.headers["if-none-match"] = condition
+      await dashboard.handle(input, output)
+      assert.equal(output.statusCode, 200, condition)
+      assert.equal(output.body, method === "HEAD" ? "" : initial.body)
+      assert.equal(output.headers["content-length"], Buffer.byteLength(initial.body))
+    }
+  }
+})
+
+test("validators identify bodies across equal-revision instances and failures cannot return 304", async () => {
+  let revision = 1
+  let fail = false
+  const first = createDashboardHandler({ revisionProvider: () => revision, stateBodyProvider: () => {
+    if (fail) throw new Error("offline")
+    return '{"instance":1}\n'
+  } })
+  const initial = response()
+  await first.handle(request("/api/state"), initial)
+  const conditional = request("/api/state")
+  conditional.headers["if-none-match"] = String(initial.headers.etag)
+  const second = createDashboardHandler({ revisionProvider: () => 1, stateProvider: () => ({ instance: 2 }) })
+  const changed = response()
+  await second.handle(conditional, changed)
+  assert.equal(changed.statusCode, 200)
+  assert.notEqual(changed.headers.etag, initial.headers.etag)
+  revision++
+  fail = true
+  for (const condition of [String(initial.headers.etag), "*"]) {
+    conditional.headers["if-none-match"] = condition
+    const unavailable = response()
+    await first.handle(conditional, unavailable)
+    assert.equal(unavailable.statusCode, 503)
+    assert.equal(unavailable.headers.etag, undefined)
+  }
+  fail = false
+  const recovered = response()
+  await first.handle(conditional, recovered)
+  assert.equal(recovered.statusCode, 304)
+})
+
+test("conditional fallback expires locally and refreshes before evaluating its validator", async () => {
+  let now = 0
+  let builds = 0
+  const dashboard = createDashboardHandler({ clock: () => now, stateProvider: () => ({ build: ++builds }) })
+  const initial = response()
+  await dashboard.handle(request("/api/state"), initial)
+  const input = request("/api/state")
+  input.headers["if-none-match"] = String(initial.headers.etag)
+  now = 999
+  const cached = response()
+  await dashboard.handle(input, cached)
+  assert.equal(cached.statusCode, 304)
+  assert.equal(builds, 1)
+  now = 1000
+  const refreshed = response()
+  await dashboard.handle(input, refreshed)
+  assert.equal(refreshed.statusCode, 200)
+  assert.notEqual(refreshed.headers.etag, initial.headers.etag)
+  assert.equal(builds, 2)
 })

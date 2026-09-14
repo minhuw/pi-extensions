@@ -45,9 +45,9 @@ function addCompletionProof(repo: string, planId: string): void {
   writeCompletionProof(repo, `refs/plan-herder/demo/completed/${planId}`, payload, `herder-demo-${planId}-generation-1`)
 }
 
-function requestWithHost(url: string, host: string): Promise<{ status: number | undefined; body: string }> {
+function requestWithHost(url: string, host: string, etag?: string): Promise<{ status: number | undefined; body: string }> {
   return new Promise((resolve, reject) => {
-    const request = http.get(url, { headers: { Host: host } }, (response) => {
+    const request = http.get(url, { headers: { Host: host, ...(etag ? { "If-None-Match": etag } : {}) } }, (response) => {
       const chunks: Buffer[] = []
       response.on("data", (chunk) => chunks.push(chunk))
       response.on("end", () => resolve({
@@ -887,7 +887,7 @@ async function runTests(): Promise<void> {
       emptyFixture.cleanup()
     }
 
-    const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0 })
+    const dashboard = await createDashboardServer({ planDir: fixture.planDir, planName: "demo", port: 0, revisionProvider: () => 7 })
     try {
       const page = await fetch(dashboard.url)
       assert.equal(page.status, 200)
@@ -934,6 +934,31 @@ async function runTests(): Promise<void> {
       const apiState = await api.json() as { planSet: { name: string }; accounting: { attempts: number } }
       assert.equal(apiState.planSet.name, "demo")
       assert.equal(apiState.accounting.attempts, 7)
+      const etag = api.headers.get("etag")
+      assert.ok(etag)
+      assert.match(etag, /^"[a-f0-9]{64}"$/)
+      assert.equal(api.headers.get("x-herder-revision"), "7")
+      for (const method of ["GET", "HEAD"]) {
+        const unchanged: Response = await fetch(new URL("api/state", dashboard.url), {
+          method, headers: { "If-None-Match": `"other", W/${etag}` },
+        })
+        assert.equal(unchanged.status, 304)
+        assert.equal((await unchanged.arrayBuffer()).byteLength, 0)
+        assert.equal(unchanged.headers.get("content-length"), null)
+        assert.equal(unchanged.headers.get("transfer-encoding"), null)
+        assert.equal(unchanged.headers.get("etag"), etag)
+        assert.equal(unchanged.headers.get("x-herder-revision"), "7")
+        for (const header of ["cache-control", "content-security-policy", "x-content-type-options", "x-frame-options", "cross-origin-resource-policy"]) {
+          assert.equal(unchanged.headers.get(header), api.headers.get(header))
+        }
+        const nonmatching = await fetch(new URL("api/state", dashboard.url), {
+          method, headers: { "If-None-Match": '"other"' },
+        })
+        assert.equal(nonmatching.status, 200)
+        assert.equal(nonmatching.headers.get("content-length"), api.headers.get("content-length"))
+        if (method === "HEAD") assert.equal((await nonmatching.arrayBuffer()).byteLength, 0)
+        else assert.deepEqual(await nonmatching.json(), apiState)
+      }
 
       const emptyFixtureForServer = createFixture(false)
       try {
@@ -993,13 +1018,13 @@ async function runTests(): Promise<void> {
       const head = await fetch(dashboard.url, { method: "HEAD" })
       assert.equal(head.status, 200)
       assert.equal(await head.text(), "")
-      const post = await fetch(new URL("api/state", dashboard.url), { method: "POST" })
+      const post = await fetch(new URL("api/state", dashboard.url), { method: "POST", headers: { "If-None-Match": etag } })
       assert.equal(post.status, 405)
       assert.equal(post.headers.get("allow"), "GET, HEAD")
       assert.equal((await requestWithHost(dashboard.url, `localhost:${dashboard.port}`)).status, 200)
       dashboard.allowHost("forwarded.example.invalid")
       assert.equal((await requestWithHost(dashboard.url, "forwarded.example.invalid")).status, 200)
-      const rebound = await requestWithHost(dashboard.url, "dashboard.example.invalid")
+      const rebound = await requestWithHost(new URL("api/state", dashboard.url).href, "dashboard.example.invalid", etag)
       assert.equal(rebound.status, 421)
       assert.deepEqual(JSON.parse(rebound.body), { error: "invalid-host" })
       assert.equal((await fetch(new URL("missing", dashboard.url))).status, 404)

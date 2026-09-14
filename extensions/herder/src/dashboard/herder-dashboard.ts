@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import http from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
@@ -141,10 +142,20 @@ function send(
   const payload = Buffer.isBuffer(body) ? body : Buffer.from(body)
   response.writeHead(status, {
     ...securityHeaders(contentType, cacheControl),
-    "Content-Length": payload.length,
+    ...(status === 304 ? {} : { "Content-Length": payload.length }),
   })
-  if (method === "HEAD") response.end()
+  if (method === "HEAD" || status === 304) response.end()
   else response.end(payload)
+}
+
+function matchesStateTag(value: string | string[] | undefined, etag: string): boolean {
+  if (value === undefined) return false
+  const condition = (Array.isArray(value) ? value.join(",") : value).replace(/^[ \t]+|[ \t]+$/g, "")
+  if (condition === "*") return true
+  // Validate the entire list before comparing; commas can occur inside opaque tags.
+  const tag = '(?:W/)?"[\\x21\\x23-\\x7e\\x80-\\xff]*"'
+  if (new RegExp(`^[ \t]*(?:${tag})?[ \t]*(?:,[ \t]*(?:${tag})?[ \t]*)*$`).exec(condition)?.[0] !== condition) return false
+  return [...condition.matchAll(new RegExp(tag, "g"))].some(([value]) => value.replace(/^W\//, "") === etag)
 }
 
 function readAssets(): Map<string, { file: string; type: string; content: Buffer }> {
@@ -164,7 +175,7 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
   const clock = input.clock ?? Date.now
   const allowedHosts = new Set<string>()
   const assets = readAssets()
-  type StateBody = { body: string; revision: number | null }
+  type StateBody = { body: string; revision: number | null; etag: string }
   let cachedState: StateBody & { expiresAt: number } | null = null
   let inFlight: { revision: number | null; promise: Promise<StateBody> } | null = null
 
@@ -175,7 +186,7 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
       if (cachedState
         && cachedState.revision === revision
         && (revision !== null || now < cachedState.expiresAt)) {
-        return { body: cachedState.body, revision: cachedState.revision }
+        return cachedState
       }
       if (inFlight && inFlight.revision === revision) {
         await inFlight.promise
@@ -184,7 +195,7 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
 
       const build = Promise.resolve().then(stateBodyProvider).then((body) => {
         if (typeof body !== "string") throw new Error("Dashboard state body provider must return a string")
-        return { body, revision }
+        return { body, revision, etag: `"${createHash("sha256").update(body).digest("hex")}"` }
       })
       const pending = { revision, promise: build }
       inFlight = pending
@@ -226,7 +237,9 @@ export function createDashboardHandler(input: DashboardHandlerInput = {}) {
       try {
         const result = await stateBody()
         if (result.revision !== null) response.setHeader("x-herder-revision", String(result.revision))
-        send(response, 200, result.body, "application/json; charset=utf-8", method)
+        response.setHeader("ETag", result.etag)
+        const status = matchesStateTag(request.headers["if-none-match"], result.etag) ? 304 : 200
+        send(response, status, result.body, "application/json; charset=utf-8", method)
       } catch (error) {
         send(response, 503, `${JSON.stringify({ error: "snapshot-unavailable", message: error instanceof Error ? error.message : String(error) })}\n`, "application/json; charset=utf-8", method)
       }

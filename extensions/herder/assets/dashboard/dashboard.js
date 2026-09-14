@@ -19,7 +19,7 @@ const view = {
   filter: "all",
   paused: false,
   fetching: false,
-  lastRevision: null,
+  etag: null,
 }
 
 function byId(id) {
@@ -577,7 +577,6 @@ function selectDefaultPlan(state) {
 }
 
 function render(state) {
-  view.state = state
   selectDefaultPlan(state)
   document.title = `${state.planSet.name} · Herder Dashboard`
   byId("plan-name").textContent = state.planSet.name
@@ -594,6 +593,7 @@ function render(state) {
   renderIntegration(state)
   renderFinished(state)
   renderAccounting(state.accounting)
+  view.state = state
 }
 
 function showConnectionError(message) {
@@ -607,16 +607,28 @@ async function refresh() {
   if (view.paused || view.fetching) return
   view.fetching = true
   try {
-    const response = await fetch("/api/state", { cache: "no-store" })
-    if (!response.ok) throw new Error(`snapshot request returned ${response.status}`)
-    const revision = response.headers.get("x-herder-revision") || null
+    const response = await fetch("/api/state", {
+      cache: "no-store",
+      headers: view.etag ? { "If-None-Match": view.etag } : {},
+    })
+    if (response.status === 304) {
+      if (!view.state || !view.etag) throw new Error("snapshot not retained; retrying unconditionally")
+    } else {
+      if (!response.ok) throw new Error(`snapshot request returned ${response.status}`)
+      const etag = response.headers.get("etag") || null
+      const state = await response.json()
+      if (state.version !== 2 || state.readOnly !== true) throw new Error("unsupported dashboard state")
+      try {
+        render(state)
+      } catch (error) {
+        // A partial render may have changed the DOM; force a full snapshot next time.
+        view.etag = null
+        throw error
+      }
+      view.etag = etag
+    }
     byId("connection-toast").hidden = true
     byId("snapshot-state").textContent = view.paused ? "PAUSED" : "LIVE"
-    if (revision !== null && revision === view.lastRevision) return
-    const state = await response.json()
-    if (state.version !== 2 || state.readOnly !== true) throw new Error("unsupported dashboard state")
-    render(state)
-    view.lastRevision = revision
   } catch (error) {
     showConnectionError(error.message)
   } finally {
