@@ -633,6 +633,67 @@ test("duplicate Status projection and raw safety follow the graph's last column"
 })
 
 
+test("rework uses authoritative duplicate Plan and Status columns without widening sibling edits", () => {
+  const planDir = fs.mkdtempSync(path.join(os.tmpdir(), "herder-duplicate-rework-"))
+  try {
+    fs.writeFileSync(path.join(planDir, "001-first.md"), planBody("001", "First", "none"))
+    fs.writeFileSync(path.join(planDir, "002-second.md"), planBody("002", "Second", "none"))
+    const readme = path.join(planDir, "README.md")
+    const run = { runId: "fixture", planDirectory: planDir } as StoredRun
+    for (const [duplicatePlan, duplicateStatus] of [[false, true], [true, false], [true, true]]) {
+      for (const newline of ["\n", "\r\n"] as const) {
+        for (const outerPipes of [true, false]) {
+          const headers = ["Plan", "Title", "Priority", "Effort", "Depends on", "Status",
+            ...(duplicatePlan ? ["**pLaN**"] : []), ...(duplicateStatus ? ["**sTaTuS**"] : []), "Notes"]
+          const row = (id: string, title: string) => [
+            duplicatePlan ? (id === "001" ? "002" : "001") : id,
+            title, "P1", "S", "—", duplicateStatus ? "BLOCKED" : "\tTODO  ",
+            ...(duplicatePlan ? [id] : []), ...(duplicateStatus ? ["\tTODO  "] : []), "keep <!-- note -->",
+          ]
+          const render = (cells: string[]) => `${outerPipes ? "|" : ""} ${cells.join(" | ")} ${outerPipes ? "|" : ""}`
+          const target = render(row("001", "First"))
+          const sibling = render(row("002", "Second"))
+          const source = ["# Plans", "", render(headers), render(headers.map(() => "---")), target, sibling, "", "Footer.", ""].join(newline)
+          fs.writeFileSync(readme, source)
+          const snapshot = captureReworkSnapshot(run, "001", "11111111-1111-1111-1111-111111111111",
+            "a".repeat(40), "b".repeat(40), "001-first.md", []).snapshot
+          const layout = planIndexReworkLayout(source, readme)
+          assert.equal(layout.statusColumn, duplicateStatus ? headers.length - 2 : 5)
+          assert.equal(layout.newline, newline)
+          assert.deepEqual(layout.lines, source.split(newline))
+          assert.deepEqual(layout.rows, [{ lineIndex: 4, planId: "001" }, { lineIndex: 5, planId: "002" }])
+          assert.deepEqual(buildGraph(planDir).plans.map(({ id, status }) => ({ id, status })), [
+            { id: "001", status: "TODO" }, { id: "002", status: "TODO" },
+          ])
+          projectStatuses(planDir, [{ id: "002", status: "DONE" }])
+          const projectedSibling = sibling.replace("\tTODO  ", "\tDONE  ")
+          const projected = source.replace(sibling, projectedSibling)
+          assert.equal(fs.readFileSync(readme, "utf8"), projected)
+          assert.deepEqual(buildGraph(planDir).plans.map(({ id, status }) => ({ id, status })), [
+            { id: "001", status: "TODO" }, { id: "002", status: "DONE" },
+          ])
+          assert.doesNotThrow(() => validateReworkGraphFiles(run, snapshot, "001-first.md"))
+          fs.writeFileSync(readme, projected.replace(target, target.replace("First", "Reworked target")))
+          assert.doesNotThrow(() => validateReworkGraphFiles(run, snapshot, "001-first.md"))
+          const forbidden = [
+            projectedSibling.replace("Second", "Changed sibling"),
+            projectedSibling.replace("keep", "changed"),
+            ...(duplicatePlan ? [projectedSibling.replace("001", "003")] : []),
+            ...(duplicateStatus ? [projectedSibling.replace("BLOCKED", "DONE")] : []),
+          ]
+          for (const changed of forbidden) {
+            fs.writeFileSync(readme, projected.replace(projectedSibling, changed))
+            assert.throws(() => validateReworkGraphFiles(run, snapshot, "001-first.md"), /outside plan 001/)
+          }
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(planDir, { recursive: true, force: true })
+  }
+})
+
+
 test("graph snapshots bind contracts and hashes to the same unchanged source inputs", () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "herder-snapshot-inputs-"))
   try {

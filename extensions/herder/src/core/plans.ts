@@ -410,8 +410,8 @@ export function planIndexReworkLayout(markdown: string, readme: string): {
   rows: Array<{ lineIndex: number; planId: string }>
 } {
   const table = findIndexTable(markdown, readme)
-  const statusColumn = table.normalized.indexOf("status")
-  const planColumn = table.normalized.indexOf("plan")
+  const statusColumn = table.normalized.lastIndexOf("status")
+  const planColumn = table.normalized.lastIndexOf("plan")
   return {
     lines: markdown.split(/\r?\n/),
     newline: markdown.includes("\r\n") ? "\r\n" : "\n",
