@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import test from "node:test";
 import {
 	acquireServiceOwnership,
@@ -155,3 +156,363 @@ test("reclaims locks held by a dead process", async () => {
 		fs.rmSync(paths.root, { recursive: true, force: true });
 	}
 });
+
+// The child blocks synchronously inside the real synchronous acquisition API.
+// Each byte on stdin advances exactly one publication/reclamation boundary.
+const contenderSource = `
+import fs from 'node:fs';
+import * as ownership from ${JSON.stringify(new URL("../../../src/daemon/service-ownership.ts", import.meta.url).href)};
+const [kind, target, lockPath, phase] = process.argv.slice(1);
+// Node creates nonblocking child pipes on some platforms; readSync must wait.
+process.stdin._handle.setBlocking(true);
+const send = message => fs.writeSync(1, JSON.stringify(message) + '\\n');
+const wait = () => {
+  if (fs.readSync(0, Buffer.alloc(1), 0, 1, null) !== 1) throw new Error('handshake closed');
+};
+let paused = false;
+const pause = () => { paused = true; send({ status: 'paused' }); wait(); };
+const write = fs.writeFileSync;
+fs.writeFileSync = function(fd, payload, ...args) {
+  if (!paused && typeof fd === 'number' && (phase === 'empty' || phase === 'partial')) {
+    if (phase === 'partial') fs.writeSync(fd, payload.slice(0, -1));
+    pause();
+    if (phase === 'partial') { fs.writeSync(fd, '\\n'); return; }
+  }
+  return write.call(this, fd, payload, ...args);
+};
+const mkdir = fs.mkdirSync;
+fs.mkdirSync = function(name, ...args) {
+  if (!paused && name === lockPath + '.reclaim' && phase === 'mkdir') pause();
+  const result = mkdir.call(this, name, ...args);
+  if (!paused && name === lockPath + '.reclaim' && phase === 'guard') pause();
+  return result;
+};
+const read = fs.readSync;
+fs.readSync = function(...args) {
+  const result = read.apply(this, args);
+  if (!paused && args[0] !== 0 && phase === 'inspection') pause();
+  return result;
+};
+let lock, failure;
+try {
+  lock = kind === 'start' ? ownership.acquireStartExclusion(target)
+    : ownership.acquireServiceOwnership(target, 'child-instance');
+} catch (error) { failure = error.message; }
+if (lock) {
+  send({ status: 'acquired' }); wait();
+  if (kind === 'start') ownership.releaseStartExclusion(lock);
+  else ownership.releaseServiceOwnership(lock);
+  send({ status: 'released' });
+} else { send({ status: 'refused', error: failure }); }
+`;
+
+function contender(kind: string, target: string, lockPath: string, phase: string) {
+	const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", contenderSource,
+		kind, target, lockPath, phase], { stdio: ["pipe", "pipe", "pipe"] });
+	let stderr = "";
+	child.stderr.on("data", (chunk) => { stderr += chunk; });
+	const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+	return {
+		child,
+		resume: () => child.stdin.write("x"),
+		async expect(status: string) {
+			const line = await lines.next();
+			assert.equal(line.done, false, `child exited before ${status}: ${stderr}`);
+			const message = JSON.parse(line.value!);
+			assert.equal(message.status, status, JSON.stringify(message));
+			return message;
+		},
+	};
+}
+
+for (const kind of ["start", "service"] as const) {
+	function api(paths: ReturnType<typeof fixture>) {
+		const lockPath = kind === "start" ? paths.startLockPath : serviceOwnershipLockPath(paths.planDirectory);
+		fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+		return {
+			lockPath,
+			target: kind === "start" ? lockPath : paths.planDirectory,
+			acquire: () => kind === "start" ? acquireStartExclusion(lockPath) : acquireServiceOwnership(paths.planDirectory, "test-instance"),
+			release: kind === "start" ? releaseStartExclusion : releaseServiceOwnership,
+			payload: (pid: number) => kind === "start" ? `${pid}\n` : `${pid} test-instance\n`,
+		};
+	}
+
+	function refuses(lock: ReturnType<typeof api>) {
+		if (kind === "start") assert.equal(lock.acquire(), null);
+		else assert.throws(lock.acquire, /already held|Cannot safely read/);
+	}
+
+	for (const phase of ["empty", "partial"]) {
+		test(`${kind}: cross-process ${phase} publisher retains its lock`, { timeout: 10_000 }, async () => {
+			const paths = fixture();
+			let publisher: ReturnType<typeof contender> | undefined;
+			try {
+				const lock = api(paths);
+				publisher = contender(kind, lock.target, lock.lockPath, phase);
+				await publisher.expect("paused");
+				const identity = fs.statSync(lock.lockPath);
+				const payload = fs.readFileSync(lock.lockPath, "utf8");
+				assert.equal(payload, phase === "empty" ? "" : kind === "start"
+					? `${publisher.child.pid}` : `${publisher.child.pid} child-instance`);
+				refuses(lock);
+				assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
+				assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+				publisher.resume();
+				await publisher.expect("acquired");
+				refuses(lock);
+				assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
+				publisher.resume();
+				await publisher.expect("released");
+				assert.equal(fs.existsSync(lock.lockPath), false);
+			} finally {
+				await stopProcess(publisher?.child);
+				fs.rmSync(paths.root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	test(`${kind}: stale pre-guard snapshots cannot reclaim the winning replacement`, { timeout: 10_000 }, async () => {
+		const paths = fixture();
+		const children: ReturnType<typeof contender>[] = [];
+		try {
+			const lock = api(paths);
+			fs.writeFileSync(lock.lockPath, lock.payload(await spawnDeadOwner()));
+			const winner = contender(kind, lock.target, lock.lockPath, "mkdir");
+			children.push(winner);
+			await winner.expect("paused");
+			const loser = contender(kind, lock.target, lock.lockPath, "inspection");
+			children.push(loser);
+			await loser.expect("paused");
+			winner.resume();
+			await winner.expect("acquired");
+			const identity = fs.statSync(lock.lockPath);
+			const payload = fs.readFileSync(lock.lockPath, "utf8");
+			loser.resume();
+			const refusal = await loser.expect("refused");
+			if (kind === "start") assert.equal(refusal.error, undefined);
+			else assert.match(refusal.error, /already held by pid/);
+			refuses(lock);
+			assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
+			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+			assert.equal(fs.existsSync(`${lock.lockPath}.reclaim`), false);
+			winner.resume();
+			await winner.expect("released");
+		} finally {
+			await Promise.all(children.map(({ child }) => stopProcess(child)));
+			fs.rmSync(paths.root, { recursive: true, force: true });
+		}
+	});
+
+	test(`${kind}: a held reclamation guard excludes another process`, { timeout: 10_000 }, async () => {
+		const paths = fixture();
+		let reclaimer: ReturnType<typeof contender> | undefined;
+		try {
+			const lock = api(paths);
+			const payload = lock.payload(await spawnDeadOwner());
+			fs.writeFileSync(lock.lockPath, payload);
+			reclaimer = contender(kind, lock.target, lock.lockPath, "guard");
+			await reclaimer.expect("paused");
+			assert.throws(lock.acquire, /reclamation guard/);
+			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+			reclaimer.resume();
+			await reclaimer.expect("acquired");
+			refuses(lock);
+			reclaimer.resume();
+			await reclaimer.expect("released");
+		} finally {
+			await stopProcess(reclaimer?.child);
+			fs.rmSync(paths.root, { recursive: true, force: true });
+		}
+	});
+
+	test(`${kind}: repeated identity replacement is preserved and bounded`, async (t) => {
+		const paths = fixture();
+		const lstat = fs.lstatSync;
+		try {
+			const lock = api(paths);
+			const payload = lock.payload(await spawnDeadOwner());
+			fs.writeFileSync(lock.lockPath, payload);
+			let inspections = 0;
+			let replacements = 0;
+			try {
+				t.mock.method(fs, "lstatSync", ((name, ...args) => {
+					if (name === lock.lockPath && ++inspections % 3 === 0) {
+						assert.ok(++replacements <= 3, "acquisition must not retry indefinitely");
+						const next = `${lock.lockPath}.next`;
+						fs.writeFileSync(next, payload);
+						fs.renameSync(next, lock.lockPath);
+					}
+					return lstat(name, ...args);
+				}) as typeof fs.lstatSync);
+				refuses(lock);
+			} finally { t.mock.restoreAll(); }
+			assert.equal(replacements, 3);
+			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+			assert.equal(fs.existsSync(`${lock.lockPath}.reclaim`), false);
+		} finally {
+			t.mock.restoreAll();
+			fs.rmSync(paths.root, { recursive: true, force: true });
+		}
+	});
+
+	for (const failure of ["detached publication", "guard cleanup"]) {
+		test(`${kind}: ${failure} failure closes the acquired descriptor`, async () => {
+			const paths = fixture();
+			const write = fs.writeFileSync;
+			const rmdir = fs.rmdirSync;
+			let descriptor: number | undefined;
+			try {
+				const lock = api(paths);
+				if (failure === "guard cleanup") fs.writeFileSync(lock.lockPath, lock.payload(await spawnDeadOwner()));
+				try {
+					fs.writeFileSync = ((file, ...args) => {
+						const result = write(file, ...args);
+						if (typeof file === "number") {
+							descriptor = file;
+							if (failure === "detached publication") {
+								fs.unlinkSync(lock.lockPath);
+								write(lock.lockPath, "replacement");
+							}
+						}
+						return result;
+					}) as typeof fs.writeFileSync;
+					fs.rmdirSync = ((name, ...args) => {
+						if (name === `${lock.lockPath}.reclaim`) throw new Error("guard cleanup failed");
+						return rmdir(name, ...args);
+					}) as typeof fs.rmdirSync;
+					assert.throws(lock.acquire, /replaced during publication|guard cleanup failed/);
+				} finally { fs.writeFileSync = write; fs.rmdirSync = rmdir; }
+				assert.notEqual(descriptor, undefined);
+				assert.throws(() => fs.fstatSync(descriptor!), { code: "EBADF" });
+				if (failure === "detached publication") assert.equal(fs.readFileSync(lock.lockPath, "utf8"), "replacement");
+				else {
+					assert.equal(fs.existsSync(lock.lockPath), false);
+					assert.throws(lock.acquire, /reclamation guard/);
+				}
+			} finally {
+				fs.writeFileSync = write;
+				fs.rmdirSync = rmdir;
+				fs.rmSync(paths.root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	test(`${kind}: malformed, symlink, nonregular and unreadable locks fail closed`, async () => {
+		const paths = fixture();
+		try {
+			const lock = api(paths);
+			const dead = await spawnDeadOwner();
+			for (const payload of ["", `${dead}`, `${dead} instance`, `0\n`, `-1\n`, `${dead}\nextra\n`,
+				`${dead} instance\nextra`, `${dead} a b\n`, lock.payload(Number.MAX_SAFE_INTEGER + 1), "x".repeat(4097)]) {
+				fs.writeFileSync(lock.lockPath, payload);
+				refuses(lock);
+				assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+			}
+			fs.unlinkSync(lock.lockPath);
+			const target = path.join(paths.root, "target");
+			fs.writeFileSync(target, lock.payload(dead));
+			fs.symlinkSync(target, lock.lockPath);
+			refuses(lock);
+			assert.equal(fs.lstatSync(lock.lockPath).isSymbolicLink(), true);
+			assert.equal(fs.readFileSync(target, "utf8"), lock.payload(dead));
+			fs.unlinkSync(lock.lockPath);
+			fs.mkdirSync(lock.lockPath);
+			refuses(lock);
+			assert.equal(fs.statSync(lock.lockPath).isDirectory(), true);
+			fs.rmdirSync(lock.lockPath);
+			fs.writeFileSync(lock.lockPath, lock.payload(dead));
+			const open = fs.openSync;
+			let injected = false;
+			try {
+				fs.openSync = ((name, flags, ...args) => {
+					if (name === lock.lockPath && flags !== "wx") {
+						injected = true;
+						throw Object.assign(new Error("injected unreadable lock"), { code: "EACCES" });
+					}
+					return open(name, flags, ...args);
+				}) as typeof fs.openSync;
+				refuses(lock);
+			} finally { fs.openSync = open; }
+			assert.equal(injected, true);
+			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), lock.payload(dead));
+		} finally { fs.rmSync(paths.root, { recursive: true, force: true }); }
+	});
+
+	test(`${kind}: failed publication closes its descriptor without deleting a replacement`, () => {
+		const paths = fixture();
+		const write = fs.writeFileSync;
+		let descriptor: number | undefined;
+		try {
+			const lock = api(paths);
+			const replacement = lock.payload(process.pid);
+			const failure = new Error("injected publication failure");
+			try {
+				fs.writeFileSync = ((file, ...args) => {
+					if (typeof file === "number") {
+						descriptor = file;
+						fs.unlinkSync(lock.lockPath);
+						write(lock.lockPath, replacement);
+						throw failure;
+					}
+					return write(file, ...args);
+				}) as typeof fs.writeFileSync;
+				assert.throws(lock.acquire, (error) => error === failure);
+			} finally { fs.writeFileSync = write; }
+			assert.notEqual(descriptor, undefined);
+			assert.throws(() => fs.fstatSync(descriptor!), { code: "EBADF" });
+			assert.equal(fs.readFileSync(lock.lockPath, "utf8"), replacement);
+		} finally {
+			fs.writeFileSync = write;
+			if (descriptor !== undefined) { try { fs.closeSync(descriptor); } catch {} }
+			fs.rmSync(paths.root, { recursive: true, force: true });
+		}
+	});
+
+	for (const removed of [false, true]) {
+		test(`${kind}: release closes descriptor with ${removed ? "removed namespace" : "replacement lock"}`, () => {
+			const paths = fixture();
+			const lock = api(paths);
+			let held: ReturnType<typeof lock.acquire> = null;
+			try {
+				held = lock.acquire();
+				assert.ok(held);
+				if (removed) fs.rmSync(paths.root, { recursive: true, force: true });
+				else {
+					fs.unlinkSync(lock.lockPath);
+					fs.writeFileSync(lock.lockPath, lock.payload(process.pid));
+				}
+				lock.release(held);
+				assert.throws(() => fs.fstatSync(held!.descriptor), { code: "EBADF" });
+				if (removed) assert.equal(fs.existsSync(paths.root), false);
+				else assert.equal(fs.readFileSync(lock.lockPath, "utf8"), lock.payload(process.pid));
+				held = null;
+			} finally {
+				if (held) lock.release(held);
+				fs.rmSync(paths.root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	for (const missing of [false, true]) {
+		test(`${kind}: abandoned reclaim guard fails closed with ${missing ? "missing" : "stale"} main lock`, async () => {
+			const paths = fixture();
+			try {
+				const lock = api(paths);
+				const payload = lock.payload(await spawnDeadOwner());
+				if (!missing) fs.writeFileSync(lock.lockPath, payload);
+				const guard = `${lock.lockPath}.reclaim`;
+				fs.mkdirSync(guard);
+				assert.throws(lock.acquire, (error: Error) => {
+					assert.ok(error.message.includes(guard));
+					assert.match(error.message, /quiescen/i);
+					assert.match(error.message, /manual/i);
+					return true;
+				});
+				assert.equal(fs.statSync(guard).isDirectory(), true);
+				if (missing) assert.equal(fs.existsSync(lock.lockPath), false);
+				else assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
+			} finally { fs.rmSync(paths.root, { recursive: true, force: true }); }
+		});
+	}
+}

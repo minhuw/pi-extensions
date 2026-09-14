@@ -35,6 +35,33 @@ test("cleanup exclusion holds startup and daemon ownership through the callback"
 	}
 });
 
+for (const fails of [false, true]) {
+	test(`cleanup competitors cannot enter during a ${fails ? "failing" : "successful"} callback`, async () => {
+		const planDir = planDirectory();
+		try {
+			let entered = false;
+			const operation = withServiceExclusion(planDir, async () => {
+				await assert.rejects(
+					withServiceExclusion(planDir, () => { entered = true; }),
+					/startup is already in progress/,
+				);
+				assert.equal(entered, false);
+				assert.equal(existsSync(serviceOwnershipLockPath(planDir)), true);
+				assert.equal(existsSync(path.join(planDir, ".herder", "service-start.lock")), true);
+				if (fails) throw new Error("callback failure");
+			});
+			if (fails) await assert.rejects(operation, /callback failure/);
+			else await operation;
+			assert.equal(existsSync(serviceOwnershipLockPath(planDir)), false);
+			assert.equal(existsSync(path.join(planDir, ".herder", "service-start.lock")), false);
+			await withServiceExclusion(planDir, () => { entered = true; });
+			assert.equal(entered, true);
+		} finally {
+			rmSync(path.dirname(planDir), { recursive: true, force: true });
+		}
+	});
+}
+
 test("cleanup exclusion releases safely when deep cleanup deletes the plan directory", async () => {
 	const planDir = planDirectory();
 	const root = path.dirname(planDir);
