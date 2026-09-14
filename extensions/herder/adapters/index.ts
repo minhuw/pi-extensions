@@ -67,6 +67,7 @@ import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
 	bindAdapterOwnershipRun,
+	markAdapterOwnershipCleanupRequired,
 	registerAdapterOwnershipRetirement,
 	releaseAdapterOwnership,
 	waitForAdapterOwnershipRetirement,
@@ -318,7 +319,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const releaseOwnership = (): void => {
-		if (resetting || (shuttingDown && !shutdownDrained)) return;
+		if (resetting || ((shuttingDown || ownership?.record.resetCleanupRequired) && !shutdownDrained)) return;
 		if (!ownership) return;
 		const held = ownership;
 		ownership = undefined;
@@ -1850,6 +1851,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		currentReworkEdit = undefined;
 		lastContext = undefined;
 		releaseOwnershipAfterManagerDrain = false;
+		if (ownership) markAdapterOwnershipCleanupRequired(ownership);
 		await engine.drain();
 		workers.clear();
 		if (admittedManagerTasks === 0) { shutdownDrained = true; releaseOwnership(); }

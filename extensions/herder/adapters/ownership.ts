@@ -30,6 +30,7 @@ export interface AdapterOwnershipRecord {
 
 export interface AdapterOwnership {
 	descriptor: number;
+	runtimeIdentity: fs.Stats;
 	lockPath: string;
 	record: AdapterOwnershipRecord;
 }
@@ -147,12 +148,13 @@ function inspectExisting(lockPath: string): { descriptor: number; stat: fs.Stats
 }
 
 function createOwnershipLock(lockPath: string, record: AdapterOwnershipRecord): AdapterOwnership {
+	const runtimeIdentity = fs.lstatSync(path.dirname(lockPath));
 	const descriptor = fs.openSync(lockPath, "wx", 0o600);
 	try {
 		fs.fchmodSync(descriptor, 0o600);
 		fs.writeFileSync(descriptor, `${JSON.stringify(record)}\n`, "utf8");
 		fs.fsyncSync(descriptor);
-		return { descriptor, lockPath, record };
+		return { descriptor, runtimeIdentity, lockPath, record };
 	} catch (error) {
 		try {
 			const opened = fs.fstatSync(descriptor);
@@ -277,10 +279,45 @@ export function adapterProcessIdentity(pid: number): string {
 }
 
 export function assertAdapterOwnership(ownership: AdapterOwnership, planDirectory: string): void {
+	const runtime = fs.lstatSync(path.dirname(ownership.lockPath));
+	if (runtime.isSymbolicLink() || !runtime.isDirectory() || !sameIdentity(ownership.runtimeIdentity, runtime)) {
+		throw new Error("Herder Pi runtime directory was replaced; refusing reset/signals");
+	}
+	const opened = fs.fstatSync(ownership.descriptor);
+	const named = fs.lstatSync(ownership.lockPath);
 	if (ownership.lockPath !== adapterOwnershipLockPath(planDirectory)
-		|| !sameIdentity(fs.fstatSync(ownership.descriptor), fs.lstatSync(ownership.lockPath))) {
+		|| !opened.isFile() || named.isSymbolicLink() || !named.isFile() || !sameIdentity(opened, named)) {
 		throw new Error("Herder Pi ownership lock was replaced; refusing reset");
 	}
+}
+
+/** Invalidate the exact claim durably before any cleanup can begin. */
+export function markAdapterOwnershipCleanupRequired(ownership: AdapterOwnership): void {
+	// Also inhibit asynchronous local release if persistence itself fails.
+	ownership.record = { ...ownership.record, resetCleanupRequired: true };
+	const planDirectory = path.dirname(path.dirname(ownership.lockPath));
+	assertAdapterOwnership(ownership, planDirectory);
+	const descriptor = fs.openSync(ownership.lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+	try {
+		assertAdapterOwnership({ ...ownership, descriptor }, planDirectory);
+		if (!sameIdentity(fs.fstatSync(descriptor), fs.fstatSync(ownership.descriptor))) {
+			throw new Error("Herder Pi ownership lock was replaced; refusing reset/signals");
+		}
+		const stat = fs.fstatSync(descriptor);
+		if (stat.size < 1 || stat.size > MAX_LOCK_BYTES) throw new Error("Herder Pi ownership lock is malformed; refusing cleanup");
+		// Use the persisted identity: startup run binding intentionally changes only memory.
+		const record = parseRecord(fs.readFileSync(descriptor, "utf8"), ownership.lockPath);
+		if (record.resetCleanupRequired) { fs.fsyncSync(descriptor); return; }
+		const text = `${JSON.stringify({ ...record, resetCleanupRequired: true })}\n`;
+		if (Buffer.byteLength(text) > MAX_LOCK_BYTES) throw new Error("Herder Pi cleanup-required lock exceeds size limit; refusing reset/signals");
+		// Persist invalidation first: interrupted writes cannot leave a valid unmarked claim.
+		fs.ftruncateSync(descriptor, 0);
+		fs.fsyncSync(descriptor);
+		if (fs.writeSync(descriptor, text, 0, "utf8") !== Buffer.byteLength(text)) {
+			throw new Error("Herder Pi cleanup-required lock write was incomplete; refusing cleanup");
+		}
+		fs.fsyncSync(descriptor);
+	} finally { fs.closeSync(descriptor); }
 }
 
 export interface AdapterResetOptions extends AdapterOwnershipOptions {
@@ -322,31 +359,14 @@ export async function withAdapterResetOwnership<T>(
 					if (record.pid === process.pid || record.pid === options.pid) throw new Error("This Pi owns the lock in another adapter; exit the owning Pi once before reset.");
 					const verify = () => {
 						verifyRuntime();
-						assertAdapterOwnership({ ...existing!, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory);
+						assertAdapterOwnership({ ...existing!, runtimeIdentity, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory);
 						if (!record.processIdentity) throw new Error("Legacy live Pi ownership has no process identity; exit the owning Pi once, then retry reset.");
 						if (identity(record.pid) !== record.processIdentity) throw new Error("Pi PID identity mismatch; refusing to signal. Exit the owning Pi once and retry.");
 					};
 					verify();
 					if (!await options.confirm("Terminate foreign Pi?", `PID ${record.pid}, session ${record.piSessionId}: the ENTIRE foreign Pi exits, affecting other work in that Pi. Terminate it and reset?`)) return undefined;
 					verify();
-					const lockPath = adapterOwnershipLockPath(planDirectory);
-					const descriptor = fs.openSync(lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
-					try {
-						const opened = fs.fstatSync(descriptor);
-						const named = fs.lstatSync(lockPath);
-						if (!opened.isFile() || named.isSymbolicLink() || !named.isFile()
-							|| !sameIdentity(opened, fs.fstatSync(existing.descriptor))
-							|| !sameIdentity(opened, existing.stat) || !sameIdentity(opened, named)) {
-							throw new Error("Herder Pi ownership lock was replaced; refusing reset/signals");
-						}
-						const text = `${JSON.stringify({ ...record, resetCleanupRequired: true })}\n`;
-						if (Buffer.byteLength(text) > MAX_LOCK_BYTES) throw new Error("Herder Pi cleanup-required lock exceeds size limit; refusing reset/signals");
-						// Persist invalidation first: interrupted writes must never leave a valid unmarked claim.
-						fs.ftruncateSync(descriptor, 0);
-						fs.fsyncSync(descriptor);
-						fs.writeFileSync(descriptor, text, "utf8");
-						fs.fsyncSync(descriptor);
-					} finally { fs.closeSync(descriptor); }
+					markAdapterOwnershipCleanupRequired({ ...existing, runtimeIdentity, lockPath: adapterOwnershipLockPath(planDirectory) });
 					for (const value of ["SIGTERM", "SIGKILL"] as const) {
 						if (!alive(record.pid)) break;
 						verify(); // Best effort: Node cannot make identity inspection and kill atomic.
@@ -365,7 +385,7 @@ export async function withAdapterResetOwnership<T>(
 				}
 				verifyRuntime();
 				// Do not reap a replacement claim, even if its PID appears dead.
-				try { assertAdapterOwnership({ ...existing, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory); }
+				try { assertAdapterOwnership({ ...existing, runtimeIdentity, lockPath: adapterOwnershipLockPath(planDirectory) }, planDirectory); }
 				catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 			} finally { fs.closeSync(existing.descriptor); }
 		}
@@ -376,6 +396,7 @@ export async function withAdapterResetOwnership<T>(
 	let drained = false;
 	try {
 		verifyRuntime();
+		markAdapterOwnershipCleanupRequired(held);
 		await options.quiesce();
 		verifyRuntime();
 		drained = true;

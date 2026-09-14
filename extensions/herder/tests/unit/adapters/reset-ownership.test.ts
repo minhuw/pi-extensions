@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { acquireAdapterOwnership, adapterOwnershipLockPath, releaseAdapterOwnership, withAdapterResetOwnership, type AdapterResetOptions } from "../../../adapters/ownership.ts";
+import { acquireAdapterOwnership, adapterOwnershipLockPath, releaseAdapterOwnership, markAdapterOwnershipCleanupRequired, bindAdapterOwnershipRun, withAdapterResetOwnership, type AdapterResetOptions } from "../../../adapters/ownership.ts";
 import { applyHerderReset } from "../../../src/application/tools.ts";
 
 function fixture() {
@@ -135,13 +135,26 @@ test("reset failure releases claim only after drain; replacement never removed",
 
 test("failed local drain retains exclusive ownership and never applies reset", async () => {
 	const root = fixture();
-	const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+	const held = acquireAdapterOwnership(root, "pending-fire", "own", { ...fake, pid: 2147483646 });
+	const original = JSON.parse(fs.readFileSync(held.lockPath, "utf8"));
+	const stat = fs.statSync(held.lockPath);
 	try {
 		await assert.rejects(() => withAdapterResetOwnership(root, "own", {
 			...fake, ownership: held, confirm: async () => true,
-			quiesce: async () => { throw Error("worker disposal failed"); },
+			quiesce: async () => {
+				assert.deepEqual(JSON.parse(fs.readFileSync(held.lockPath, "utf8")), { ...original, resetCleanupRequired: true });
+				throw Error("worker disposal failed");
+			},
 		}, async () => { assert.fail("must not reset before drain"); }), /disposal failed/);
-		assert.ok(fs.existsSync(held.lockPath));
+		assert.equal(fs.statSync(held.lockPath).ino, stat.ino);
+		assert.equal(fs.statSync(held.lockPath).mode, stat.mode);
+		for (let retry = 0; retry < 2; retry++) {
+			assert.throws(() => acquireAdapterOwnership(root, "next", "next", fake), /manual child-process cleanup/);
+			await assert.rejects(() => applyHerderReset({ repoRoot: root, planDirectory: root }, {
+				withExclusion: async () => assert.fail("must refuse before service exclusion"),
+			}), /manual child-process cleanup/);
+		}
+		assert.deepEqual(JSON.parse(fs.readFileSync(held.lockPath, "utf8")), { ...original, resetCleanupRequired: true });
 	} finally { releaseAdapterOwnership(held); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -197,3 +210,88 @@ test("unmarked dead foreign ownership remains reclaimable for reset", async () =
 		assert.equal(fs.existsSync(adapterOwnershipLockPath(root)), false);
 	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("local marking is idempotent and preserves persisted startup identity, inode and permissions", () => {
+	const root = fixture();
+	const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+	try {
+		const record = JSON.parse(fs.readFileSync(held.lockPath, "utf8"));
+		const stat = fs.statSync(held.lockPath);
+		bindAdapterOwnershipRun(held, "bound-run");
+		markAdapterOwnershipCleanupRequired(held);
+		const marked = fs.readFileSync(held.lockPath, "utf8");
+		markAdapterOwnershipCleanupRequired(held);
+		assert.equal(fs.readFileSync(held.lockPath, "utf8"), marked);
+		assert.deepEqual(JSON.parse(marked), { ...record, resetCleanupRequired: true });
+		const after = fs.statSync(held.lockPath);
+		for (const field of ["dev", "ino", "mode", "uid", "gid"] as const) assert.equal(after[field], stat[field]);
+		assert.equal(held.record.runId, "bound-run");
+	} finally { releaseAdapterOwnership(held); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const unsafe of ["lock replacement", "lock symlink", "lock directory", "runtime replacement", "runtime symlink", "runtime file"] as const) {
+	test(`local marking rejects ${unsafe} before quiescence`, async () => {
+		const root = fixture();
+		const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+		const original = fs.readFileSync(held.lockPath, "utf8");
+		let retained: string;
+		try {
+			if (unsafe.startsWith("lock")) {
+				retained = path.join(root, "old-lock");
+				fs.renameSync(held.lockPath, retained);
+				if (unsafe === "lock replacement") fs.writeFileSync(held.lockPath, original);
+				else if (unsafe === "lock symlink") fs.symlinkSync(retained, held.lockPath);
+				else fs.mkdirSync(held.lockPath);
+			} else {
+				const runtime = path.join(root, ".herder");
+				const old = path.join(root, "old-runtime");
+				fs.renameSync(runtime, old);
+				retained = path.join(old, path.basename(held.lockPath));
+				if (unsafe === "runtime symlink") fs.symlinkSync(old, runtime);
+				else if (unsafe === "runtime file") fs.writeFileSync(runtime, "unsafe");
+				else {
+					fs.mkdirSync(runtime);
+					// Even the original lock inode moved into a new runtime is not the held namespace.
+					fs.linkSync(retained, held.lockPath);
+				}
+			}
+			await assert.rejects(() => withAdapterResetOwnership(root, "own", {
+				...fake, ownership: held, confirm: async () => true,
+				quiesce: async () => assert.fail("must not drain unsafe ownership"),
+			}, async () => assert.fail("must not reset")), /unsafe|replaced/);
+			assert.throws(() => markAdapterOwnershipCleanupRequired(held), /unsafe|replaced/);
+			assert.equal(fs.readFileSync(retained, "utf8"), original);
+		} finally { fs.closeSync(held.descriptor); fs.rmSync(root, { recursive: true, force: true }); }
+	});
+}
+
+for (const failure of ["truncate", "invalidation sync", "torn write", "final sync"] as const) {
+	test(`local marker ${failure} failure prevents drain and destruction`, async (t) => {
+		const root = fixture();
+		const held = acquireAdapterOwnership(root, "pending-fire", "own", fake);
+		try {
+			if (failure === "truncate") t.mock.method(fs, "ftruncateSync", () => { throw Error("fixture persistence failure"); });
+			else if (failure === "torn write") {
+				const write = fs.writeSync;
+				t.mock.method(fs, "writeSync", (fd: number) => { write(fd, "{", 0, "utf8"); return 1; });
+			} else {
+				const sync = fs.fsyncSync;
+				let calls = 0;
+				t.mock.method(fs, "fsyncSync", (fd: number) => {
+					if (++calls === (failure === "final sync" ? 2 : 1)) throw Error("fixture persistence failure");
+					sync(fd);
+				});
+			}
+			await assert.rejects(() => withAdapterResetOwnership(root, "own", {
+				...fake, ownership: held, confirm: async () => true,
+				quiesce: async () => assert.fail("must not drain after persistence error"),
+			}, async () => assert.fail("must not reset")), /persistence failure|incomplete/);
+			t.mock.restoreAll();
+			assert.equal(held.record.resetCleanupRequired, true);
+			if (failure !== "truncate") {
+				assert.throws(() => acquireAdapterOwnership(root, "next", "next", fake), /malformed|manual child-process cleanup/);
+				assert.ok(fs.existsSync(held.lockPath));
+			}
+		} finally { t.mock.restoreAll(); releaseAdapterOwnership(held); fs.rmSync(root, { recursive: true, force: true }); }
+	});
+}

@@ -1,4 +1,5 @@
 import { confirmRunRevision, prepareRunRevision, readRunRevision, writeRunRevision } from "../../../src/core/run-revision.ts";
+import { applyHerderReset } from "../../../src/application/tools.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
 import { randomUUID } from "node:crypto";
@@ -16,6 +17,7 @@ import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
 	releaseAdapterOwnership,
+	waitForAdapterOwnershipRetirement,
 	type AdapterOwnership,
 } from "../../../adapters/ownership.ts";
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
@@ -1432,42 +1434,176 @@ for (const phase of ["active worker", "admitted startup"] as const) {
 	});
 }
 
-for (const failure of ["abort", "disposal"] as const) {
-	test(`nuclear reset and session shutdown retain ownership after ${failure} failure`, { timeout: 30_000 }, async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-cleanup-failure-"));
-		const value = writeFixture(root);
-		const api = new CapturedExtensionAPI();
-		const factory = new PendingWorkerFactory();
-		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
-		const notifications: Warning[] = [];
-		const base = freshContext(value, notifications);
-		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
-			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
-			confirm: async () => true,
-		} } as unknown as ExtensionContext;
-		try {
-			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
-			const lock = fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8");
-			const runId = evidence(value).run!.runId;
-			const session = factory.sessions[0]!;
-			if (failure === "abort") {
-				const abort = session.abort.bind(session);
-				session.abort = async () => { await abort(); throw Error("fixture abort cleanup failed"); };
-			} else session.dispose = () => { throw Error("fixture disposal failed"); };
-			for (let attempt = 0; attempt < 2; attempt++) {
-				await api.command("herder-reset").handler("herder-plans", ctx);
-				assert.equal(evidence(value).run!.runId, runId);
-				assert.equal(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"), lock);
-			}
-			assert.ok(notifications.some(entry => /worker cleanup failed/.test(entry.message)), JSON.stringify(notifications));
-			assert.ok(!notifications.some(entry => /Herder reset executed/.test(entry.message)));
-			await assert.rejects(() => api.invoke("session_shutdown", ctx), /worker cleanup failed/);
-			assert.equal(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"), lock);
-		} finally {
-			await api.invoke("session_shutdown", ctx).catch(() => {});
-			await stopService(value.planDirectory).catch(() => {});
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
+function ownershipEvidence(value: Fixture) {
+	const lockPath = adapterOwnershipLockPath(value.planDirectory);
+	return { lockPath, record: JSON.parse(fs.readFileSync(lockPath, "utf8")), stat: fs.statSync(lockPath) };
 }
+
+function assertCleanupMarker(original: ReturnType<typeof ownershipEvidence>) {
+	assert.deepEqual(JSON.parse(fs.readFileSync(original.lockPath, "utf8")), { ...original.record, resetCleanupRequired: true });
+	const stat = fs.statSync(original.lockPath);
+	assert.equal(stat.dev, original.stat.dev);
+	assert.equal(stat.ino, original.stat.ino);
+	assert.equal(stat.mode, original.stat.mode);
+	assert.equal(stat.uid, original.stat.uid);
+	assert.equal(stat.gid, original.stat.gid);
+}
+
+async function assertDeadOwnerRefused(value: Fixture, original: ReturnType<typeof ownershipEvidence>) {
+	assertCleanupMarker(original);
+	const marked = fs.readFileSync(original.lockPath, "utf8");
+	const kill = process.kill;
+	assert.equal(original.record.pid, process.pid);
+	try {
+		process.kill = ((pid, signal) => {
+			if (pid === original.record.pid && signal === 0) throw Object.assign(new Error("fixture owner exited"), { code: "ESRCH" });
+			return kill(pid, signal);
+		}) as typeof process.kill;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			assert.throws(() => acquireAdapterOwnership(value.planDirectory, "replacement", "replacement-session", {
+				isProcessAlive: () => false,
+			}), /manual child-process cleanup/);
+			await assert.rejects(() => applyHerderReset({ repoRoot: value.repo, planDirectory: value.planDirectory }, {
+				withExclusion: async () => { assert.fail("must refuse before service exclusion"); },
+			}), /manual child-process cleanup/);
+			assertCleanupMarker(original);
+			assert.equal(fs.readFileSync(original.lockPath, "utf8"), marked);
+		}
+	} finally { process.kill = kill; }
+}
+
+for (const resetFirst of [true, false]) {
+	for (const failure of ["abort", "disposal"] as const) {
+		test(`${resetFirst ? "nuclear reset and session shutdown" : "immediate session shutdown"} retain ownership after ${failure} failure`, { timeout: 30_000 }, async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-cleanup-failure-"));
+			const value = writeFixture(root);
+			const api = new CapturedExtensionAPI();
+			const factory = new PendingWorkerFactory();
+			registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+			const notifications: Warning[] = [];
+			const base = freshContext(value, notifications);
+			const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				confirm: async () => true,
+			} } as unknown as ExtensionContext;
+			try {
+				await api.invoke("session_start", ctx);
+				await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+				const original = ownershipEvidence(value);
+				assert.equal(original.record.resetCleanupRequired, undefined);
+				const runId = evidence(value).run!.runId;
+				const session = factory.sessions[0]!;
+				const abort = session.abort.bind(session);
+				session.abort = async () => {
+					assertCleanupMarker(original);
+					await abort();
+					if (failure === "abort") throw Error("fixture abort cleanup failed");
+				};
+				if (failure === "disposal") session.dispose = () => {
+					assertCleanupMarker(original);
+					throw Error("fixture disposal failed");
+				};
+				if (resetFirst) {
+					for (let attempt = 0; attempt < 2; attempt++) {
+						await api.command("herder-reset").handler("herder-plans", ctx);
+						assert.equal(evidence(value).run!.runId, runId);
+						await assertDeadOwnerRefused(value, original);
+					}
+					assert.ok(notifications.some(entry => /worker cleanup failed/.test(entry.message)), JSON.stringify(notifications));
+					assert.ok(!notifications.some(entry => /Herder reset executed/.test(entry.message)));
+					await api.invoke("session_start", ctx);
+					assertCleanupMarker(original);
+				}
+				await assert.rejects(() => api.invoke("session_shutdown", ctx), /worker cleanup failed/);
+				await assertDeadOwnerRefused(value, original);
+				assert.equal(evidence(value).run!.runId, runId);
+			} finally {
+				await api.invoke("session_shutdown", ctx).catch(() => {});
+				await stopService(value.planDirectory).catch(() => {});
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+}
+
+test("shutdown retains ownership when late admitted preparation fails disposal", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-shutdown-late-cleanup-"));
+	const value = writeFixture(root);
+	const api = new CapturedExtensionAPI();
+	let original: ReturnType<typeof ownershipEvidence>;
+	const factory = new class extends GatedPrepareWorkerFactory {
+		protected override createSession(request: PiWorkerRequest) {
+			const created = super.createSession(request);
+			created.session.dispose = () => {
+				assertCleanupMarker(original);
+				throw Error("fixture late disposal failed");
+			};
+			return created;
+		}
+	}();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const ctx = freshContext(value, []);
+	let attaching: Promise<unknown> | undefined;
+	try {
+		await startFixture(value, "pi-worker:late-cleanup-lost");
+		await api.invoke("session_start", ctx);
+		attaching = api.command("herder-attach").handler("herder-plans", ctx);
+		await withDeadline(factory.createEntered.promise, "late preparation admitted");
+		original = ownershipEvidence(value);
+		await withDeadline(api.invoke("session_shutdown", ctx), "shutdown before late preparation", 2_000);
+		assertCleanupMarker(original);
+		// A new session schedules idle retirement while the old admitted task is still pending.
+		await api.invoke("session_start", ctx);
+		factory.allowCreate.resolve();
+		await withDeadline(attaching, "late attach completion");
+		await withDeadline(waitForAdapterOwnershipRetirement(value.planDirectory), "failed ownership retirement");
+		assert.equal(factory.sessions.length, 1);
+		assert.equal(factory.sessions[0]!.prompted, false);
+		assert.equal(factory.sessions[0]!.disposed, false);
+		await assertDeadOwnerRefused(value, original);
+		assert.equal(evidence(value).actions.some(action => action.state === "dispatched"), false);
+	} finally {
+		factory.allowCreate.resolve();
+		if (attaching) await withDeadline(attaching, "late attach cleanup").catch(() => {});
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(value.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("shutdown marker persistence failure never aborts or disposes workers", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-shutdown-marker-failure-"));
+	const value = writeFixture(root);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const ctx = freshContext(value, []);
+	const fsync = fs.fsyncSync;
+	try {
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		const original = ownershipEvidence(value);
+		let attempted = false;
+		fs.fsyncSync = descriptor => {
+			const stat = fs.fstatSync(descriptor);
+			if (stat.dev === original.stat.dev && stat.ino === original.stat.ino) {
+				attempted = true;
+				throw Error("fixture marker fsync failed");
+			}
+			fsync(descriptor);
+		};
+		await assert.rejects(() => api.invoke("session_shutdown", ctx), /fixture marker fsync failed/);
+		assert.equal(attempted, true);
+		assert.equal(factory.sessions[0]!.aborted, false);
+		assert.equal(factory.sessions[0]!.disposed, false);
+		const stat = fs.statSync(original.lockPath);
+		assert.equal(stat.dev, original.stat.dev);
+		assert.equal(stat.ino, original.stat.ino);
+		assert.equal(stat.mode, original.stat.mode);
+	} finally {
+		fs.fsyncSync = fsync;
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(value.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
