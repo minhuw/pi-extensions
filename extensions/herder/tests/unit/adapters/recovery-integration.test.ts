@@ -1725,6 +1725,80 @@ for (const duringPreparation of [false, true]) {
 	});
 }
 
+test("unsafe shutdown retains the original root output after drain without advancing the manager", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-unsafe-shutdown-output-"));
+	const value = writeFixture(root);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const notifications: Warning[] = [];
+	const ctx = freshContext(value, notifications);
+	const abortEntered = new Deferred<void>();
+	const releaseAbort = new Deferred<void>();
+	let shutdown: Promise<void> | undefined;
+	try {
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		const session = factory.sessions[0]!;
+		await withDeadline(session.started, "pending root start");
+		const original = ownershipEvidence(value);
+		const before = evidence(value);
+		assert.equal(original.record.resetCleanupRequired, undefined);
+		const input = object(api.appendedEntries.find(entry => entry.customType === "herder-worker-input-v1")!.data);
+		const response = "STATUS: COMPLETE\nSUMMARY: response retained through unsafe shutdown";
+		session.messages.push({ role: "assistant", content: [{ type: "text", text: response }], stopReason: "stop" });
+		const stats = session.getSessionStats();
+		session.getSessionStats = () => ({ ...stats, tokens: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, total: 10 } });
+		const abort = session.abort.bind(session);
+		session.abort = async () => {
+			assertCleanupMarker(original);
+			abortEntered.resolve();
+			await releaseAbort.promise;
+			await abort();
+		};
+		session.dispose = () => { throw Error("fixture shutdown disposal failed"); };
+		shutdown = assert.rejects(withDeadline(api.invoke("session_shutdown", ctx), "unsafe shutdown drain"), /worker cleanup failed/);
+		await withDeadline(abortEntered.promise, "shutdown abort requested");
+		assert.deepEqual(evidence(value), before, "shutdown does not advance while abort is unsettled");
+		assertCleanupMarker(original);
+		releaseAbort.resolve();
+		await shutdown;
+		assert.equal(session.aborted, true);
+		const outputs = () => api.appendedEntries.filter(entry => entry.customType === "herder-worker-output-v1");
+		assert.equal(outputs().length, 1, "unsafe root output remains collectable after worker retirement");
+		const output = object(outputs()[0]!.data);
+		assert.equal(output.actionId, input.actionId);
+		assert.equal(output.handle, `pi-worker:${session.sessionId}`);
+		assert.equal(output.handle, input.handle);
+		assert.equal(output.runId, before.run!.runId);
+		assert.equal(output.worktree, input.worktree);
+		assert.equal(output.status, "interrupted");
+		assert.equal(output.response, response);
+		assert.match(String(output.error), /fixture shutdown disposal failed/);
+		const usage = object(output.usage);
+		assert.equal(usage.inputTokens, 7);
+		assert.equal(usage.outputTokens, 3);
+		assert.equal(usage.cachedInputTokens, 0);
+		assert.equal(usage.source, "herder pi worker session");
+		await assertDeadOwnerRefused(value, original);
+		await api.command("herder-resume").handler("herder-plans", ctx);
+		assert.ok(notifications.some(entry => /session changed or shut down/.test(entry.message)), "shutdown control authority remains invalid");
+		await api.invoke("session_start", restoredContext(value, before.run!.runId, notifications));
+		assert.ok(notifications.some(entry => /manual.*cleanup/i.test(entry.message)), "recovery remains excluded");
+		await assert.rejects(() => api.invoke("session_shutdown", ctx), /worker cleanup failed/);
+		assert.equal(outputs().length, 1, "retired terminal is not published twice");
+		assert.deepEqual(evidence(value), before, "no success, retryable interruption or manager advancement");
+		assert.equal(factory.requests.length, 1, "no successor or replacement");
+		assertCleanupMarker(original);
+	} finally {
+		releaseAbort.resolve();
+		await shutdown?.catch(() => {});
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(value.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 for (const markDuringConfirmation of [false, true]) {
 	test(`fresh adapter refuses durable cleanup evidence ${markDuringConfirmation ? "at apply" : "before preview"}`, { timeout: 30_000 }, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-durable-cleanup-"));

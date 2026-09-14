@@ -233,7 +233,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const appendWorkerEntry = <T>(customType: string, data: T): void => {
-		if (!lastContext) return;
+		// The session-bound API stays valid through shutdown drain, even after the
+		// UI context and control authority are cleared. The SDK rejects stale APIs.
 		try { pi.appendEntry(customType, data); }
 		catch { /* Transcript rendering is best-effort and must never block manager progress. */ }
 	};
