@@ -2562,14 +2562,18 @@ export class HerderRunManager {
 		if (verification?.state !== "passed"
 			|| verification.request.integrationHead !== plan.approvedHead
 			|| verification.request.integrationTree !== plan.approvedTree) return null;
-		const action = this.store.getLatestAction(run.runId, {
-			planId: "RUN", generation: plan.generation, round: plan.round, role: "plan-reviewer",
+		// Retry timestamps and lexical action IDs do not establish which result completed the audit.
+		const results = this.store.getActions(run.runId, ["terminal"]).flatMap((action) => {
+			if (action.planId !== "RUN" || action.generation !== plan.generation || action.round !== plan.round
+				|| action.role !== "plan-reviewer" || action.workerMode !== "FINAL_AUDIT") return [];
+			const record = storedTerminalRecord(action);
+			const result = storedWorkerResult(action);
+			return record?.terminal.interrupted === false && result?.kind === "reviewer" && !result.blockerKind
+				? [result] : [];
 		});
-		if (!action || action.state !== "terminal" || action.workerMode !== "FINAL_AUDIT") return null;
-		const record = storedTerminalRecord(action);
-		const result = storedWorkerResult(action);
-		if (!record || record.terminal.interrupted
-			|| result?.kind !== "reviewer" || result.blockerKind) return null;
+		// Exactly one eligible terminal can have made this generation FINAL_APPROVED.
+		if (results.length !== 1) return null;
+		const result = results[0]!;
 		try {
 			if (process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE) throw new Error("injected dossier failure");
 			return this.store.putReigniteRequest(this.buildReigniteDossier(run, plan, result, verification));

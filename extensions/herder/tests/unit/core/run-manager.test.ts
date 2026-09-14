@@ -13,7 +13,7 @@ import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type IntegrationRepairClassification, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type IntegrationRepairClassification, type ManagerAction, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { planFixture } from "../../support/plan-fixture.ts";
@@ -927,6 +927,16 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 		};
 		const before = new RunStore(fixture.planDirectory);
 		const usageBefore = usageCount(before);
+		// Retained retries must not hide the causal terminal when clocks move backwards
+		// or equal timestamps leave selection to lexical action IDs.
+		const cancelledId = `${finalReviewer.actionId}-9`;
+		before.putAction({ ...finalReviewer, actionId: cancelledId, attemptId: cancelledId } as ManagerAction);
+		before.markCancelled(cancelledId, { error: "host capacity" });
+		before.database.prepare("UPDATE manager_actions SET created_at = ? WHERE action_id = ?")
+			.run(recovery === "replay" ? before.getAction(String(finalReviewer.actionId))!.createdAt : "9999-01-01T00:00:00.000Z", cancelledId);
+		assert.equal(before.getLatestAction(String(finalReviewer.runId), {
+			planId: "RUN", generation: Number(finalReviewer.generation), round: Number(finalReviewer.round), role: "plan-reviewer",
+		})?.actionId, cancelledId);
 		before.close();
 		const completed = payload(payload(await requestManagerOperation(service, "event", event)).reply);
 		assert.equal(completed.status, "complete");
@@ -982,6 +992,22 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 					manager.refreshReply();
 					assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
 				} finally { store.database.exec("ROLLBACK TO invalid_result; RELEASE invalid_result"); }
+			}
+			const interruptedId = `${finalReviewer.actionId}-interrupted`;
+			store.putAction({ ...finalReviewer, actionId: interruptedId, attemptId: interruptedId } as ManagerAction);
+			store.markDispatched(interruptedId, "interrupted-worker");
+			const terminalRecord = payload(store.getAction(String(finalReviewer.actionId))!.result);
+			store.markTerminal(interruptedId, {
+				...terminalRecord, terminal: { ...payload(terminalRecord.terminal), interrupted: true },
+			});
+			if (recovery === "refresh") {
+				store.database.exec("SAVEPOINT ambiguous_result");
+				try {
+					store.database.prepare("UPDATE manager_actions SET result_json = ? WHERE action_id = ?")
+						.run(JSON.stringify(terminalRecord), interruptedId);
+					manager.refreshReply();
+					assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null, "ambiguous terminal evidence must fail closed");
+				} finally { store.database.exec("ROLLBACK TO ambiguous_result; RELEASE ambiguous_result"); }
 			}
 			const recovered = recovery === "refresh" ? manager.refreshReply()
 				: recovery === "replay" ? await manager.event(event)
