@@ -901,7 +901,8 @@ test("exact dispatch replay preserves capacity suppression and rejects changed p
 	}
 });
 
-test("Reignite persistence failure does not roll back a completed terminal event", { timeout: 30_000 }, async () => {
+for (const recovery of ["refresh", "replay", "resume"] as const) {
+test(`Reignite persistence failure recovers through ${recovery} after restart`, { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-reignite-test-"));
 	const fixture = writeFixture(root);
 	process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE = "atomic-reignite-terminal";
@@ -921,7 +922,7 @@ test("Reignite persistence failure does not roll back a completed terminal event
 			terminals: [{
 				actionId: String(finalReviewer.actionId),
 				hostHandle: "atomic-reignite-worker",
-				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
+				response: "VERDICT: REVISE\nFINDINGS: [recover-1][P1][BLOCKING][PLAN_REQUIREMENT] retain residual work\nFIX_GUIDANCE: [recover-1] implement the residual requirement\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
 			}],
 		};
 		const before = new RunStore(fixture.planDirectory);
@@ -942,8 +943,100 @@ test("Reignite persistence failure does not roll back a completed terminal event
 		const afterReplay = new RunStore(fixture.planDirectory);
 		try { assert.equal(usageCount(afterReplay), usageBefore + 1); }
 		finally { afterReplay.close(); }
+		await stopService(fixture.planDirectory);
+		delete process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE;
+		appendIndependentPlan(fixture);
+		const manager = new HerderRunManager(fixture.planDirectory);
+		try {
+			const run = manager.store.getRun()!;
+			const store = manager.store;
+			assert.equal(manager.reply().reigniteRequest, undefined, "serialization must not recover");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+			if (recovery === "refresh") {
+				const invalidEvidence = [
+					"UPDATE manager_runs SET status = 'paused'",
+					"UPDATE manager_plans SET generation = generation + 1 WHERE plan_id = 'RUN'",
+					"UPDATE manager_plans SET phase = 'NEEDS_INPUT' WHERE plan_id = 'RUN'",
+					"DELETE FROM manager_verifications",
+					"UPDATE manager_verifications SET state = 'failed'",
+					"UPDATE manager_verifications SET integration_head = 'wrong-head'",
+					"UPDATE manager_verifications SET integration_tree = 'wrong-tree'",
+					"UPDATE manager_actions SET generation = generation + 1 WHERE plan_id = 'RUN'",
+					"UPDATE manager_actions SET worker_mode = 'INITIAL' WHERE plan_id = 'RUN'",
+					"UPDATE manager_actions SET state = 'cancelled' WHERE plan_id = 'RUN'",
+				];
+				for (const sql of invalidEvidence) {
+					store.database.exec("SAVEPOINT invalid_evidence");
+					try {
+						store.database.exec(sql);
+						manager.refreshReply();
+						assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null, sql);
+					} finally { store.database.exec("ROLLBACK TO invalid_evidence; RELEASE invalid_evidence"); }
+				}
+				const action = store.getAction(String(finalReviewer.actionId))!;
+				const record = payload(action.result);
+				store.database.exec("SAVEPOINT invalid_result");
+				try {
+					store.database.prepare("UPDATE manager_actions SET result_json = ? WHERE action_id = ?")
+						.run(JSON.stringify({ ...record, workerResult: { ...payload(record.workerResult), blockerKind: "REQUIREMENT" } }), action.actionId);
+					manager.refreshReply();
+					assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+				} finally { store.database.exec("ROLLBACK TO invalid_result; RELEASE invalid_result"); }
+			}
+			const recovered = recovery === "refresh" ? manager.refreshReply()
+				: recovery === "replay" ? await manager.event(event)
+				: await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse" });
+			assert.equal(recovered.status, "complete");
+			assert.equal(recovered.actions.length, 0);
+			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
+			assert.equal(dossier.state, "pending");
+			assert.deepEqual(dossier.findings, ["[recover-1][P1][BLOCKING][PLAN_REQUIREMENT] retain residual work"]);
+			assert.deepEqual(dossier.fixGuidance, ["[recover-1] implement the residual requirement"]);
+			assert.ok(dossier.allocatedPlanDirectory);
+			manager.refreshReply();
+			await manager.event(event);
+			await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse" });
+			assert.deepEqual(store.getReigniteRequest(run.runId, run.currentGeneration), dossier);
+			assert.equal(usageCount(store), usageBefore + 1);
+			assert.ok(store.readEvent(event.eventId));
+			for (const state of ["pending", "written", "skipped"] as const) {
+				store.updateReigniteRequest(dossier.requestId, { state, detail: "existing acknowledgement detail" });
+				const acknowledged = store.getReigniteRequest(run.runId, run.currentGeneration);
+				manager.refreshReply();
+				await manager.event(event);
+				assert.deepEqual(store.getReigniteRequest(run.runId, run.currentGeneration), acknowledged);
+			}
+		} finally { manager.close(); }
+
 	} finally {
 		delete process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE;
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+}
+
+test("missing no-findings dossier recovers as skipped", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-recover-skipped-"));
+	const fixture = writeFixture(root);
+	try {
+		const service = await ensureService(fixture.planDirectory);
+		await completeSinglePlan(service, fixture, "recover-skipped");
+		await stopService(fixture.planDirectory);
+		const manager = new HerderRunManager(fixture.planDirectory);
+		try {
+			const run = manager.store.getRun()!;
+			manager.store.database.exec("DELETE FROM manager_reignite_requests");
+			assert.equal(manager.refreshReply().reigniteRequest, undefined);
+			const dossier = manager.store.getReigniteRequest(run.runId, run.currentGeneration)!;
+			assert.equal(dossier.state, "skipped");
+			assert.deepEqual(dossier.findings, []);
+			assert.equal(dossier.allocatedPlanDirectory, undefined);
+			manager.refreshReply();
+			assert.deepEqual(manager.store.getReigniteRequest(run.runId, run.currentGeneration), dossier);
+		} finally { manager.close(); }
+	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
 		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });

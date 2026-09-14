@@ -1177,7 +1177,7 @@ export class HerderRunManager {
 		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
 			throw new Error(`Resume must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
 		}
-		if (run.status === "complete" && this.store.getReigniteRequest(run.runId, run.currentGeneration)?.state === "pending") {
+		if (run.status === "complete" && this.recoverReigniteDossier(run)?.state === "pending") {
 			return this.refreshReply();
 		}
 		const driver = this.driver(run);
@@ -2552,6 +2552,33 @@ export class HerderRunManager {
 		};
 	}
 
+	private recoverReigniteDossier(run: StoredRun): ReigniteRequest | null {
+		const existing = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+		if (existing || run.status !== "complete") return existing;
+		const plan = this.store.getPlan(run.runId, "RUN");
+		if (!plan || plan.generation !== run.currentGeneration || plan.phase !== "FINAL_APPROVED"
+			|| !plan.approvedHead || !plan.approvedTree || activeActionCount(this.store, run.runId) !== 0) return null;
+		const verification = this.store.getVerification(run.runId, run.currentGeneration);
+		if (verification?.state !== "passed"
+			|| verification.request.integrationHead !== plan.approvedHead
+			|| verification.request.integrationTree !== plan.approvedTree) return null;
+		const action = this.store.getLatestAction(run.runId, {
+			planId: "RUN", generation: plan.generation, round: plan.round, role: "plan-reviewer",
+		});
+		if (!action || action.state !== "terminal" || action.workerMode !== "FINAL_AUDIT") return null;
+		const record = storedTerminalRecord(action);
+		const result = storedWorkerResult(action);
+		if (!record || record.terminal.interrupted
+			|| result?.kind !== "reviewer" || result.blockerKind) return null;
+		try {
+			if (process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE) throw new Error("injected dossier failure");
+			return this.store.putReigniteRequest(this.buildReigniteDossier(run, plan, result, verification));
+		} catch {
+			// Completion is durable; a later demand-driven refresh can retry persistence.
+			return null;
+		}
+	}
+
 	private buildReigniteDossier(
 		run: StoredRun,
 		plan: StoredPlan,
@@ -3532,7 +3559,7 @@ export class HerderRunManager {
 			if (drift.changed) run = this.store.updateRun({ status: "paused", terminalDetail: drift.detail });
 		}
 		if (run.status === "complete") {
-			const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
+			const reignite = this.recoverReigniteDossier(run);
 			if (reignite?.state === "pending") this.ensureReigniteAllocation(run, reignite);
 		}
 		return this.reply(suppression);
