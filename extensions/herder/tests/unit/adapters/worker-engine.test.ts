@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
-import { HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
+import { HerderCleanupError, HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
 import { Deferred } from "./helpers/harness.ts";
 import {
 	applyNestedAbortSignal,
@@ -1454,7 +1454,99 @@ for (const failure of ["abort", "disposal", "nested disposal"] as const) {
 		engine.start(handle);
 		await engine.stop(handle); // Ordinary stop remains best-effort.
 		assert.equal(engine.has(handle), false);
+		if (failure === "nested disposal") assert.doesNotThrow(() => engine.assertSafe(directory), "scout cleanup remains diagnostic only");
+		else assert.throws(() => engine.assertSafe(directory), /Unsafe/);
 		await assert.rejects(() => engine.drain(directory), /worker cleanup failed/);
 		await assert.rejects(() => engine.drain(directory), /worker cleanup failed/, "failure evidence is sticky");
 	});
 }
+
+for (const phase of ["shutdown", "dispose", "abort"] as const) {
+	test(`unsafe nested ${phase} synchronously excludes its run and cancels the root without self-await`, async () => {
+		const child = new BudgetSession("unsafe-reviewer");
+		child.abortDone.resolve();
+		if (phase === "shutdown") child.shutdown = async () => { throw Error("child shutdown failed"); };
+		if (phase === "dispose") child.dispose = () => { throw Error("child dispose failed"); };
+		if (phase === "abort") child.abortError = "child abort failed";
+		const { engine, session, nested, request, terminal } = budgetFixture(undefined, reviewerAction(), async () => child);
+		const handle = await engine.prepare(request);
+		let notifications = 0;
+		engine.onUnsafeCleanup((directory) => {
+			notifications += 1;
+			assert.equal(directory, request.planDirectory);
+			assert.throws(() => engine.assertSafe(directory), /Unsafe/);
+			assert.throws(() => engine.start(handle), /Unsafe/);
+		});
+		engine.start(handle);
+		const launched = await nested.spawnBackground(reviewChild);
+		await child.started.promise;
+		if (phase === "abort") void nested.stop();
+		else child.promptDone.resolve();
+		await nextTurn();
+		assert.equal(notifications, 1);
+		assert.equal(session.aborted, true, "root cancellation does not await the child/root prompt");
+		assert.equal(engine.has(handle), true);
+		await assert.rejects(engine.prepare({ ...request, action: action("next") }), /Unsafe/);
+		child.promptDone.resolve(); session.promptDone.resolve(); session.abortDone.resolve();
+		const result = await terminal;
+		assert.equal(result.interrupted, true);
+		assert.match(result.error!, /child .* failed/);
+		assert.equal((await nested.result(launched.id, true)).result!.status, "error");
+		await engine.stop(handle);
+		assert.throws(() => engine.assertSafe(request.planDirectory), /Unsafe/);
+		assert.doesNotThrow(() => engine.assertSafe("/another-run"));
+		await assert.rejects(engine.drain(request.planDirectory), /cleanup failed/);
+	});
+}
+
+test("unsafe root discard rejects in-flight preparation and stays excluded after records disappear", async () => {
+	const factory = new FakeFactory();
+	const create = factory.create.bind(factory);
+	const pending = new Deferred<void>();
+	let late: Awaited<ReturnType<typeof create>> | undefined;
+	factory.create = async request => {
+		const prepared = await create(request);
+		if (request.action.actionId === "late") { late = prepared; await pending.promise; }
+		return prepared;
+	};
+	const engine = new PiWorkerEngine(factory);
+	const request = { action: action(), planDirectory: "/tmp/unsafe-discard" };
+	const handle = await engine.prepare(request);
+	const preparing = engine.prepare({ ...request, action: action("late") });
+	await nextTurn();
+	factory.sessions[0]!.dispose = () => { throw Error("discard failed"); };
+	let notifications = 0;
+	const unsubscribe = engine.onUnsafeCleanup(() => { notifications += 1; });
+	await assert.rejects(engine.discard(handle), /discard failed/);
+	pending.resolve();
+	await assert.rejects(preparing, /Unsafe/);
+	assert.equal(late!.session.disposed, true);
+	assert.equal(late!.session.prompted, false);
+	assert.deepEqual(engine.snapshots(), []);
+	assert.equal(notifications, 1);
+	unsubscribe();
+	await assert.rejects(engine.prepare(request), /Unsafe/);
+});
+
+test("root creation cleanup excludes only its run and asynchronously cancels admitted siblings", async () => {
+	const factory = new FakeFactory();
+	const create = factory.create.bind(factory);
+	factory.create = async request => {
+		if (request.action.actionId === "bad") throw new HerderCleanupError([Error("creation disposal failed")], "creation cleanup failed");
+		return create(request);
+	};
+	const engine = new PiWorkerEngine(factory);
+	const directory = "/tmp/creation-exclusion";
+	const prepared = await engine.prepare({ action: action("prepared"), planDirectory: directory });
+	const unrelated = await engine.prepare({ action: action("unrelated"), planDirectory: "/tmp/unrelated-run" });
+	let notifications = 0;
+	engine.onUnsafeCleanup(() => { notifications += 1; });
+	await assert.rejects(engine.prepare({ action: action("bad"), planDirectory: directory }), /creation cleanup failed/);
+	await engine.stop(prepared);
+	assert.equal(factory.sessions[0]!.disposed, true);
+	assert.equal(factory.sessions[0]!.prompted, false);
+	assert.equal(engine.has(unrelated), true);
+	assert.equal(notifications, 1);
+	await assert.rejects(engine.prepare({ action: action("retry"), planDirectory: directory }), /Unsafe/);
+	await engine.discard(unrelated);
+});

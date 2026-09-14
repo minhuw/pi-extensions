@@ -121,6 +121,8 @@ class PendingSession extends BaseSession {
 		await this.promptReleased;
 	}
 
+	finish(): void { this.releasePrompt(); }
+
 	async abort(): Promise<void> {
 		this.aborted = true;
 		this.releasePrompt();
@@ -1624,3 +1626,89 @@ test("shutdown marker persistence failure never aborts or disposes workers", { t
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+for (const duringPreparation of [false, true]) {
+	test(`unsafe ${duringPreparation ? "rejected preparation" : "successful-prompt cleanup"} halts locally without success or transport retry`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-unsafe-completion-"));
+		const value = writeFixture(root);
+		if (!duringPreparation) {
+			const index = path.join(value.planDirectory, "README.md");
+			const row = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | TODO |";
+			fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n${row.replaceAll("001", "002")}`));
+			fs.writeFileSync(path.join(value.planDirectory, "002-recover-worker.md"), fixturePlan({ id: "002", writePaths: ["src/other.mjs"] }));
+		}
+		const api = new CapturedExtensionAPI();
+		const unsafe = new Deferred<void>();
+		const confirming = new Deferred<void>();
+		const confirmed = new Deferred<boolean>();
+		let cleanup: Promise<unknown> | undefined;
+		const notifications: Warning[] = [];
+		const factory = new class extends PendingWorkerFactory {
+			protected override createSession(request: PiWorkerRequest) {
+				const created = super.createSession(request);
+				created.session.dispose = () => { throw Error("fixture unsafe disposal"); };
+				if (duringPreparation) created.session.messages.push({ role: "user", content: "inherited" });
+				return created;
+			}
+		}();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const base = freshContext(value, notifications);
+		const ctx = { ...base, ui: { ...base.ui,
+			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			confirm: async () => { confirming.resolve(); return confirmed.promise; }, notify(text: string, level: string) {
+			notifications.push({ message: text, level });
+			if (/manual.*cleanup/i.test(text)) unsafe.resolve();
+		} } } as unknown as ExtensionContext;
+		try {
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			const original = ownershipEvidence(value);
+			if (!duringPreparation) {
+				assert.equal(original.record.resetCleanupRequired, undefined);
+				const session = factory.sessions[0]!;
+				await session.started;
+				cleanup = api.command("herder-cleanup").handler("herder-plans --force", { ...ctx, hasUI: true });
+				await withDeadline(confirming.promise, "cleanup confirmation");
+				session.messages.push({ role: "assistant", content: [{ type: "text", text: "STATUS: COMPLETE\nSUMMARY: implementation complete" }], stopReason: "stop" });
+				session.finish();
+			}
+			await withDeadline(unsafe.promise, "unsafe cleanup signal");
+			assertCleanupMarker(original);
+			if (cleanup) {
+				confirmed.resolve(true);
+				await cleanup;
+				assert.equal(factory.sessions[1]!.aborted, true, "admitted sibling cancellation requested");
+			}
+			const before = evidence(value);
+			assert.equal(before.actions.length, duringPreparation ? 1 : 2);
+			assert.equal(before.actions[0]!.state, duringPreparation ? "proposed" : "dispatched");
+			for (const [name, args] of [
+				["herder-stop", ""], ["herder-resume", "herder-plans"], ["herder-revise", "herder-plans"],
+				["herder-attach", "herder-plans"], ["herder-rework", "001"], ["herder-reset", "herder-plans"],
+			] as const) {
+				const offset = notifications.length;
+				await api.command(name).handler(args, ctx);
+				assert.ok(notifications.slice(offset).some(entry => /manual.*cleanup/i.test(entry.message)), name);
+			}
+			const result = await api.tool("herder_plan").execute("unsafe-edit", { operation: "finish_edit", planDirectory: value.planDirectory, editToken: "unsafe" }, undefined, undefined, ctx);
+			assert.equal(object(result).isError, true);
+			const toolCall = api.handlers.get("tool_call")!;
+			assert.equal(object(await toolCall({ toolName: "herder_plan", input: { operation: "begin_edit", planDirectory: value.planDirectory } }, ctx)).block, true);
+			assert.equal(await toolCall({ toolName: "herder_plan", input: { operation: "snapshot", planDirectory: value.planDirectory } }, ctx), undefined);
+			assert.equal(await toolCall({ toolName: "herder_plan", input: { operation: "init", planDirectory: "unrelated-plans" } }, ctx), undefined);
+			await api.command("herder-status").handler("herder-plans", ctx);
+			await api.invoke("session_start", restoredContext(value, before.run!.runId, notifications));
+			assert.deepEqual(evidence(value).actions, before.actions);
+			assert.equal(factory.sessions.length, duringPreparation ? 1 : 2, "no successor or transport retry");
+			assertCleanupMarker(original);
+			const unrelated = path.join(value.repo, "unrelated-plans");
+			initPlanDir(unrelated);
+			const claim = acquireAdapterOwnership(unrelated, "unrelated", "unrelated-session");
+			releaseAdapterOwnership(claim);
+		} finally {
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}

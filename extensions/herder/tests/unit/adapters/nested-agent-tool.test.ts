@@ -827,7 +827,8 @@ for (const phase of ["agent_start", "compaction_start"] as const) {
 			assert.equal(value.activeCount(), 1);
 			firstAbort.reject(new Error("initial abort failed"));
 			await stopping;
-			assert.equal((await running).status, "stopped");
+			assert.equal((await running).status, "error");
+			assert.match((await running).error!, /late abort failed/);
 			assert.equal(session.disposed, true);
 			assert.equal(session.listenerCount, 0);
 			assert.equal(value.activeCount(), 0);
@@ -836,4 +837,51 @@ for (const phase of ["agent_start", "compaction_start"] as const) {
 			await Promise.allSettled([running, stopping, value.stop()]);
 		}
 	});
+}
+
+for (const type of ["worker", "reviewer"] as const) {
+	for (const phase of ["abort", "shutdown", "dispose"] as const) {
+		test(`${type} ${phase} failure closes launches promptly and remains collectable with diagnostics`, async () => {
+			const shutdown = deferred<void>();
+			const abort = deferred<void>();
+			const lateCreation = deferred<NestedWorkerSession>();
+			const child = new FakeNestedSession("unsafe-child");
+			const late = new FakeNestedSession("late-child");
+			const failure = new Error(`${phase} unsafe`);
+			child.abort = async () => { if (phase === "abort") throw failure; await abort.promise; };
+			child.dispose = () => { child.disposed = true; if (phase === "dispose") throw failure; };
+			const session: NestedWorkerSession = Object.assign(child, {
+				shutdown: async () => { if (phase === "shutdown") throw failure; await shutdown.promise; },
+			});
+			let creates = 0;
+			const value = new HerderNestedAgentScope({
+				action: action(type === "reviewer" ? "plan-reviewer" : "plan-implementer"), agentRoot,
+				createSession: async () => ++creates === 1 ? session : lateCreation.promise,
+			});
+			let notifications = 0;
+			value.onUnsafeCleanup(() => { notifications += 1; });
+			const launched = await value.spawnBackground({ ...reconRequest, type });
+			// Shutdown failure can close the scope before a second launch; other failures exercise pending creation.
+			if (phase !== "shutdown") {
+				await value.spawnBackground({ ...reconRequest, type });
+				await nextTurn();
+			}
+			if (phase === "abort") void value.stop();
+			if (phase === "dispose") shutdown.resolve();
+			await nextTurn();
+			assert.equal(notifications, 1);
+			await assert.rejects(value.spawnBackground({ ...reconRequest, type }), /scope is closed/);
+			if (phase === "shutdown") assert.equal(child.disposed, false, "failure still waits for the newly triggered abort");
+			abort.resolve(); shutdown.resolve(); lateCreation.resolve(late);
+			await value.stop();
+			const result = (await value.result(launched.id, true)).result!;
+			assert.equal(result.status, "error");
+			assert.match(result.error!, new RegExp(`${phase} unsafe`));
+			assert.equal(result.output, "Child result");
+			assert.equal(result.usage.inputTokens, 10);
+			assert.equal(notifications, 1);
+			assert.equal(late.messages.length, 0, "in-flight creation cannot prompt after exclusion");
+			assert.throws(() => value.assertDrained(), /cleanup failed/);
+		});
+	}
 }

@@ -156,18 +156,17 @@ async function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Prom
 }
 
 /** Scouts have bounded cleanup; unrestricted sessions retain ownership until settled. */
-async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void>, bounded = true, onError: (error: unknown) => void = () => {}): Promise<void> {
+async function cleanupSession(session: NestedWorkerSession, abort?: Promise<void>, bounded = true, onError: (error: unknown) => void = () => {}, latestAbort?: () => Promise<void> | undefined): Promise<void> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const settled = Promise.allSettled([abort, Promise.resolve().then(() => session.shutdown?.())]).then(results => {
-			for (const result of results) if (result.status === "rejected") onError(result.reason);
-		});
+		const settled = Promise.all([abort?.catch(onError), Promise.resolve().then(() => session.shutdown?.()).catch(onError)]);
 		await (bounded ? Promise.race([
 			settled,
 			new Promise<void>((resolve) => { timer = setTimeout(() => { onError(new Error("Nested cleanup timed out")); resolve(); }, CLEANUP_GRACE_MS); }),
 		]) : settled);
 	} finally {
 		clearTimeout(timer);
+		if (!bounded) await latestAbort?.();
 		try { session.dispose(); } catch (error) { onError(error); }
 	}
 }
@@ -183,9 +182,7 @@ export function abortSession(
 		return session.abort();
 	});
 	// Do not chain cancellation behind an earlier abort: it may await this new phase.
-	return Promise.allSettled([previous, abort]).then(results => {
-		for (const result of results) if (result.status === "rejected") onError(result.reason);
-	});
+	return Promise.all([previous?.catch(onError), abort.catch(onError)]).then(() => {});
 }
 
 function sliceKey(slice: Pick<NestedUsageSlice, "type" | "model" | "effort" | "serviceTier">): string {
@@ -244,6 +241,24 @@ export class HerderNestedAgentScope {
 	private stopped = false;
 	private readonly cleanupErrors: unknown[] = [];
 	private readonly cleanupFailed = (error: unknown): void => { this.cleanupErrors.push(error); };
+	private unsafeError?: HerderCleanupError;
+	private readonly unsafeListeners = new Set<(error: unknown) => void>();
+
+	onUnsafeCleanup(listener: (error: unknown) => void): () => void {
+		this.unsafeListeners.add(listener);
+		if (this.unsafeError) listener(this.unsafeError);
+		return () => this.unsafeListeners.delete(listener);
+	}
+
+	private unsafeCleanup(error: unknown): void {
+		if (this.unsafeError) return;
+		this.unsafeError = new HerderCleanupError([error], "Unsafe nested worker cleanup: " + String(error));
+		this.stopped = true;
+		this.scopeController.abort(this.unsafeError);
+		for (const listener of this.unsafeListeners) {
+			try { listener(this.unsafeError); } catch { /* keep cancellation and result collection live */ }
+		}
+	}
 
 	assertDrained(): void {
 		for (const item of this.records.values()) item.nestedScope?.assertDrained();
@@ -481,10 +496,18 @@ export class HerderNestedAgentScope {
 	): Promise<NestedAgentResult> {
 		// Bash/write-capable sessions retain the worktree until their SDK operations settle.
 		const bounded = definition.readOnly;
+		const cleanupErrors: unknown[] = [];
+		const cleanupFailed = (error: unknown) => {
+			this.cleanupFailed(error);
+			if (!bounded) {
+				cleanupErrors.push(error);
+				this.unsafeCleanup(error);
+			}
+		};
 		let unsubscribe = () => {};
 		let aborting: Promise<void> | undefined;
 		const abort = () => {
-			if (item.session) aborting ??= abortSession(item.session, undefined, this.cleanupFailed);
+			if (item.session) aborting ??= abortSession(item.session, undefined, cleanupFailed);
 			void item.nestedScope?.stop("Parent nested reviewer stopped");
 		};
 		signal.addEventListener("abort", abort, { once: true });
@@ -500,8 +523,8 @@ export class HerderNestedAgentScope {
 				signal,
 				...(item.nestedScope ? { nestedScope: item.nestedScope } : {}),
 			}).then(async (session) => {
-				if (signal.aborted) {
-					await cleanupSession(session, abortSession(session, undefined, this.cleanupFailed), bounded, this.cleanupFailed);
+				if (signal.aborted && bounded) {
+					await cleanupSession(session, abortSession(session, undefined, cleanupFailed), bounded, cleanupFailed);
 					return;
 				}
 				item.session = session;
@@ -515,7 +538,7 @@ export class HerderNestedAgentScope {
 			if (session.messages.length !== 0) throw new Error("Herder nested agents require a session with zero inherited messages.");
 			unsubscribe = session.subscribe((event) => {
 				if (signal.aborted && (event.type === "agent_start" || event.type === "compaction_start")) {
-					aborting = abortSession(session, aborting, this.cleanupFailed);
+					aborting = abortSession(session, aborting, cleanupFailed);
 				}
 				if (observeSessionEvent(item, event)) this.emitUpdate();
 			});
@@ -524,7 +547,8 @@ export class HerderNestedAgentScope {
 			await (bounded ? waitWithSignal(prompting, signal) : prompting);
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
-			if (error instanceof HerderCleanupError || creating) this.cleanupFailed(error);
+			if (error instanceof HerderCleanupError) cleanupFailed(error);
+			else if (creating) this.cleanupFailed(error);
 		}
 		clearDeadline();
 		unsubscribe();
@@ -536,15 +560,16 @@ export class HerderNestedAgentScope {
 		if (signal.aborted) abort();
 		await Promise.all([
 			item.nestedScope?.stop("Parent nested reviewer completed"),
-			item.session ? cleanupSession(item.session, aborting, bounded, this.cleanupFailed) : undefined,
+			item.session ? cleanupSession(item.session, aborting, bounded, cleanupFailed, () => aborting) : undefined,
 		]);
+		if (!bounded) await aborting;
 		signal.removeEventListener("abort", abort);
 		const completedAt = Date.now();
 		const final = item.session
 			? decodeAssistantResult(item.session.messages) ?? { failed: true, error: "Nested Herder agent returned no assistant result." }
 			: { failed: true, error: failure || "Nested session was not created." };
-		const errors = [...new Set([failure, final.error].filter((value): value is string => Boolean(value)))];
-		item.snapshot.status = timedOut() ? "timed_out" : signal.aborted
+		const errors = [...new Set([failure, final.error, ...cleanupErrors.map(String)].filter((value): value is string => Boolean(value)))];
+		item.snapshot.status = cleanupErrors.length ? "error" : timedOut() ? "timed_out" : signal.aborted
 			? (this.stopped ? "stopped" : "aborted")
 			: errors.length || final.failed ? "error" : "completed";
 		item.snapshot.completedAt = completedAt;
