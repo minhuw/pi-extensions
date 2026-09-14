@@ -220,6 +220,7 @@ test("missing ripgrep never downloads; existing Pi bin fallback supports errors 
 	if (process.platform === "win32") return;
 	const binary = path.join(agentDir, "bin/rg");
 	await mkdir(path.dirname(binary), { recursive: true });
+	await writeFile(path.join(agentDir, "package.json"), JSON.stringify({ type: "module" }));
 	await writeFile(binary, "#!/bin/sh\nprintf 'src/main.ts\\0'\n");
 	await chmod(binary, 0o755);
 	assert.equal((await run("find", { pattern: "*.ts" })).text, "src/main.ts");
@@ -228,7 +229,7 @@ test("missing ripgrep never downloads; existing Pi bin fallback supports errors 
 	await writeFile(binary, "#!/bin/sh\necho 'traversal warning' >&2\nexit 1\n");
 	await assert.rejects(run("grep", { pattern: "needle" }), /Recon search failed: traversal warning/);
 	// A real subprocess, not a mocked promise: cancellation must terminate native work.
-	await writeFile(binary, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(path.join(root, "started"))}, 'ready'); setInterval(() => {}, 1000);\n`);
+	await writeFile(binary, `#!${process.execPath}\nprocess.getBuiltinModule('node:fs').writeFileSync(${JSON.stringify(path.join(root, "started"))}, 'ready'); setInterval(() => {}, 1000);\n`);
 	const running = run("grep", { pattern: "needle" });
 	const rejected = assert.rejects(running, /cancelled/);
 	for (let attempt = 0; attempt < 200; attempt++) {
