@@ -708,8 +708,12 @@ export class PiWorkerEngine {
 		});
 		worker.unsubscribeNested = () => { unsubscribeNested(); unsubscribeUnsafe(); };
 		this.workers.set(handle, worker);
-		this.emitUpdate();
-		if (preparation.retired) throw new Error("Herder worker preparation was retired by drain.");
+		// Subscription callbacks may retire us before drain can see the worker.
+		if (!preparation.retired) this.emitUpdate();
+		if (preparation.retired) {
+			await this.discard(handle).catch(error => this.cleanupFailed(request.planDirectory, error, false));
+			throw new Error("Herder worker preparation was retired by drain.");
+		}
 		return handle;
 	}
 

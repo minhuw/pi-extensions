@@ -1763,3 +1763,58 @@ test("reentrant factory drain owns preparation through asynchronous disposal", a
 	assert.equal(drained, true);
 	assert.equal(disposals, 1);
 });
+
+for (const failure of [false, true]) {
+	test(`reentrant subscription drain awaits disposal${failure ? " and retains failure" : " without publishing a usable handle"}`, async () => {
+		const factory = new FakeFactory();
+		const create = factory.create.bind(factory);
+		const disposal = new Deferred<void>();
+		let disposals = 0;
+		factory.create = async request => {
+			const prepared = await create(request);
+			const subscribe = prepared.session.subscribe.bind(prepared.session);
+			prepared.session.subscribe = listener => {
+				const unsubscribe = subscribe(listener);
+				listener({ type: "agent_start" });
+				return unsubscribe;
+			};
+			prepared.session.dispose = async () => {
+				disposals += 1;
+				await disposal.promise;
+				if (failure) throw Error("subscription disposal failed");
+			};
+			return prepared;
+		};
+		const engine = new PiWorkerEngine(factory);
+		const request = { action: action(), planDirectory: "/tmp/subscription-drain" };
+		let drain: Promise<void> | undefined;
+		let drained = false;
+		let prepared = false;
+		engine.onUpdate(snapshots => {
+			if (!drain) {
+				const draining = engine.drain(request.planDirectory);
+				drain = (failure ? assert.rejects(draining, /cleanup failed/) : draining).then(() => { drained = true; });
+			}
+			assert.deepEqual(snapshots, [], "retired preparation must not publish a usable handle");
+		});
+		const preparing = assert.rejects(engine.prepare(request), /retired/).then(() => { prepared = true; });
+		await nextTurn();
+		assert.ok(drain);
+		assert.equal(disposals, 1);
+		assert.equal(drained, false);
+		assert.equal(prepared, false);
+		await assert.rejects(engine.prepare({ ...request, action: action("blocked") }), /admission is closed/);
+		const overlap = engine.drain();
+		const overlapping = failure ? assert.rejects(overlap, /cleanup failed/) : overlap;
+		disposal.resolve();
+		await Promise.all([preparing, drain, overlapping]);
+		assert.equal(factory.sessions[0]!.prompted, false);
+		assert.equal(factory.sessions[0]!.shutdowns, 1);
+		assert.equal(disposals, 1);
+		assert.equal(engine.has("pi-worker:session-1"), false);
+		assert.deepEqual(engine.snapshots(), []);
+		if (failure) await assert.rejects(engine.drain(request.planDirectory), /cleanup failed/);
+		else await engine.drain(request.planDirectory);
+		assert.equal(disposals, 1);
+	});
+}
