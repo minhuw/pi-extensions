@@ -173,7 +173,12 @@ export function readAdapterOwnershipEvidence(planDirectory: string): { stat: fs.
 		if (!currentRuntime || !sameIdentity(runtime, currentRuntime)) {
 			throw new Error("Herder recovery runtime was removed or replaced; refusing recovery");
 		}
-		if (!existing) return undefined;
+		if (!existing) {
+			// Runtime identity alone cannot validate an earlier absent lock lookup.
+			try { fs.lstatSync(lockPath); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+			throw new Error("Herder ownership evidence changed while reading; refusing recovery");
+		}
 		const named = fs.lstatSync(lockPath);
 		const current = fs.fstatSync(existing.descriptor);
 		const previous = existing.stat;

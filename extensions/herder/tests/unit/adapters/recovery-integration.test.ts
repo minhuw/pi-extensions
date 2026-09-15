@@ -2785,6 +2785,107 @@ for (const scenario of ["confirmation collision", "marker persistence", "distinc
 	});
 }
 
+test("force B settles an admitted A terminal HTTP 500 without attributing A's failure to B", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-terminal-isolation-"));
+	const value = writeFixture(root);
+	const other = path.join(value.repo, "other-plans");
+	initPlanDir(other);
+	const otherLock = adapterOwnershipLockPath(other);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const warnings: Warning[] = [];
+	const ctx = cleanupContext(value, warnings);
+	const submitted = new Deferred<void>();
+	const releaseResponse = new Deferred<void>();
+	const terminalHandled = new Deferred<void>();
+	const marked = new Deferred<void>();
+	const fetch = globalThis.fetch;
+	const fsync = fs.fsyncSync;
+	const notify = ctx.ui.notify.bind(ctx.ui);
+	ctx.ui.notify = (text, level) => {
+		notify(text, level);
+		if (/completion handling failed/.test(text)) terminalHandled.resolve();
+	};
+	let cleaning: Promise<unknown> | undefined;
+	let settled = false;
+	let exclusions = 0;
+	let terminals = 0;
+	try {
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await withDeadline(factory.sessions[0]!.started, "A worker start");
+		await ensureService(other);
+		const before = evidence(value);
+		const owner = ownershipEvidence(value);
+		const ownerBytes = fs.readFileSync(owner.lockPath);
+		const states = structuredClone(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY));
+		globalThis.fetch = async (input, init) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/shutdown") exclusions++;
+			if (url.pathname === "/v1/operation" && init?.method === "POST") {
+				const body = object(JSON.parse(String(init.body)));
+				if (body.kind === "event" && object(body.input).kind === "terminals" && ++terminals === 1) {
+					submitted.resolve();
+					await releaseResponse.promise;
+					return Response.json({ ok: false, error: "fixture unrelated A terminal failed" }, { status: 500 });
+				}
+			}
+			return fetch(input, init);
+		};
+		factory.sessions[0]!.finish();
+		await withDeadline(submitted.promise, "A terminal admitted before B settlement snapshot");
+		fs.fsyncSync = descriptor => {
+			fsync(descriptor);
+			try {
+				if (fs.fstatSync(descriptor).ino === fs.statSync(otherLock).ino
+					&& JSON.parse(fs.readFileSync(otherLock, "utf8")).resetCleanupRequired === true) marked.resolve();
+			} catch { /* Other descriptors and the intermediate invalidation are not the durable marker. */ }
+		};
+		cleaning = api.command("herder-cleanup").handler("other-plans --force", ctx).finally(() => { settled = true; });
+		await withDeadline(marked.promise, "B durable marker before A rejection");
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.equal(settled, false, "B still waits admitted manager work, even for A");
+		assert.equal(exclusions, 0);
+		assert.equal(fs.existsSync(other), true);
+		releaseResponse.resolve();
+		await withDeadline(Promise.all([cleaning, terminalHandled.promise]), "A failure and B cleanup settle");
+		assert.equal(exclusions, 1, "A failure must not prevent B service exclusion");
+		assert.equal(fs.existsSync(other), false);
+		assert.equal(fs.existsSync(`${other}.cleanup-required`), false, "no spurious retained B evidence");
+		assert.equal(terminals, 1);
+		assert.equal(factory.sessions[0]!.aborted, false, "B must not cancel A");
+		assert.deepEqual(evidence(value), before, "A's failed HTTP request cannot mutate its durable run");
+		assert.equal(fs.statSync(owner.lockPath).ino, owner.stat.ino);
+		assert.equal(fs.statSync(owner.lockPath).dev, owner.stat.dev);
+		assert.deepEqual(fs.readFileSync(owner.lockPath), ownerBytes, "B must not mark or release A ownership");
+		assert.deepEqual(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY), states);
+		assert.equal(warnings.filter(w => /completion handling failed: fixture unrelated A terminal failed/.test(w.message)).length, 1);
+		assert.ok(warnings.some(w => /Force cleanup executed/.test(w.message)), JSON.stringify(warnings));
+		assert.ok(!warnings.some(w => /settlement failed; ownership retained/.test(w.message)), JSON.stringify(warnings));
+
+		// A keeps its ownership and can legitimately recover its unrecorded terminal.
+		await api.command("herder-attach").handler("herder-plans", ctx);
+		assert.equal(factory.sessions.length, 2, JSON.stringify(warnings));
+		await withDeadline(factory.sessions[1]!.started, "A recovery dispatches its retry after B deletion");
+		assert.equal(terminals, 2);
+		assert.equal(evidence(value).run!.runId, before.run!.runId);
+		assert.equal(evidence(value).actions.find(a => a.actionId === before.actions[0]!.actionId)!.state, "terminal");
+		assert.deepEqual(fs.readFileSync(owner.lockPath), ownerBytes);
+		assert.ok(warnings.some(w => /Attached to Herder run/.test(w.message)), JSON.stringify(warnings));
+		assert.equal(fs.existsSync(other), false, "unrelated progress must not recreate B");
+	} finally {
+		releaseResponse.resolve();
+		await cleaning?.catch(() => {});
+		globalThis.fetch = fetch;
+		fs.fsyncSync = fsync;
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(value.planDirectory).catch(() => {});
+		await stopService(other).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 for (const first of ["manager", "worker"] as const) {
 	test(`force retains marked ownership after admitted terminal HTTP 500 (${first} settles first)`, { timeout: 30_000 }, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-pending-terminal-"));

@@ -197,6 +197,58 @@ test("recovery evidence reads are non-creating and reject marked, malformed, rep
 	}
 });
 
+for (const change of ["marked replacement", "unmarked replacement", "stable absence"] as const) {
+	test(`read-only recovery revalidates ${change} after an absent named-lock lookup`, (t) => {
+		const { root, planDir } = fixture();
+		const lockPath = adapterOwnershipLockPath(planDir);
+		const directory = path.dirname(lockPath);
+		fs.mkdirSync(directory, { mode: 0o700 });
+		const runtime = readAdapterRuntimeIdentity(planDir)!;
+		const snapshot = () => fs.readdirSync(directory).sort().map(name => {
+			const file = path.join(directory, name);
+			const stat = fs.lstatSync(file);
+			return { name, dev: stat.dev, ino: stat.ino, bytes: fs.readFileSync(file) };
+		});
+		let expected = snapshot();
+		let replacement: ReturnType<typeof acquireAdapterOwnership> | undefined;
+		let intercepted = false;
+		const original = fs.lstatSync;
+		const lookup = t.mock.method(fs, "lstatSync", (...args: Parameters<typeof fs.lstatSync>) => {
+			try { return original(...args); }
+			catch (error) {
+				if (String(args[0]) === lockPath && !intercepted && (error as NodeJS.ErrnoException).code === "ENOENT") {
+					intercepted = true;
+					// The competing owner publishes after the kernel reports absence,
+					// before that result returns to the read-only inspector.
+					if (change !== "stable absence") {
+						replacement = acquireAdapterOwnership(planDir, "replacement", "replacement", { processIdentity: () => "fake-birth" });
+						if (change === "marked replacement") markAdapterOwnershipCleanupRequired(replacement);
+					}
+					expected = snapshot();
+				}
+				throw error;
+			}
+		});
+		try {
+			if (change === "stable absence") assertAdapterRecoveryEvidence(planDir, runtime);
+			else assert.throws(() => assertAdapterRecoveryEvidence(planDir, runtime), /refusing recovery|manual child-process cleanup/);
+			assert.equal(intercepted, true);
+			assert.deepEqual(snapshot(), expected, "inspection must not create, remove, or rewrite ownership/SQLite state");
+			assert.equal(fs.lstatSync(directory).ino, runtime.ino);
+			assert.equal(fs.lstatSync(directory).dev, runtime.dev);
+			if (replacement) {
+				assert.equal(fs.lstatSync(lockPath).ino, fs.fstatSync(replacement.descriptor).ino);
+				assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).resetCleanupRequired,
+					change === "marked replacement" ? true : undefined);
+			} else assert.deepEqual(fs.readdirSync(directory), [], "stable absence must not initialize runtime state");
+		} finally {
+			lookup.mock.restore();
+			if (replacement) fs.closeSync(replacement.descriptor);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
 for (const change of ["replacement", "mark", "runtime", "quarantine", "final-removal", "unchanged"] as const) {
 	test(`read-only recovery revalidates ${change} evidence after descriptor read`, (t) => {
 		const { root, planDir } = fixture();
