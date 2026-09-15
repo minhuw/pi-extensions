@@ -111,6 +111,12 @@ export interface PiWorkerSessionFactory {
 	create(request: PiWorkerRequest): Promise<PreparedWorkerSession>;
 }
 
+interface WorkerPreparation {
+	request: PiWorkerRequest;
+	retired: boolean;
+	settled: Promise<void>;
+}
+
 interface WorkerRecord {
 	request: PiWorkerRequest;
 	session: WorkerSession;
@@ -140,7 +146,7 @@ async function disposeWorkerSession(session: Pick<WorkerSession, "extensionRunne
 	try {
 		await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
 	} finally {
-		session.dispose();
+		await session.dispose();
 	}
 }
 
@@ -497,6 +503,8 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 export class PiWorkerEngine {
 	private readonly factory: PiWorkerSessionFactory;
 	private readonly workers = new Map<string, WorkerRecord>();
+	private readonly preparations = new Set<WorkerPreparation>();
+	private readonly drains = new Set<{ planDirectory?: string }>();
 	private readonly cleanupErrors = new Map<string, unknown[]>();
 	private readonly unsafeErrors = new Map<string, HerderCleanupError>();
 	private readonly unsafeListeners = new Set<(planDirectory: string, error: unknown) => void>();
@@ -533,12 +541,23 @@ export class PiWorkerEngine {
 
 	/** Sticky evidence includes workers already removed by ordinary terminal handling. */
 	async drain(planDirectory?: string): Promise<void> {
-		const workers = [...this.workers.entries()].filter(([, worker]) => !planDirectory || worker.request.planDirectory === planDirectory);
-		const results = await Promise.allSettled(workers.map(([handle]) => this.stop(handle)));
-		const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
-		for (const [directory, failures] of this.cleanupErrors) if (!planDirectory || directory === planDirectory) errors.push(...failures);
-		if (workers.some(([handle]) => this.has(handle))) errors.push(new Error("Worker cleanup did not settle"));
-		if (errors.length) throw new AggregateError(errors, "Herder worker cleanup failed; ownership retained, manual cleanup required");
+		const drain = { planDirectory };
+		this.drains.add(drain);
+		try {
+			const preparations = [...this.preparations].filter(item => !planDirectory || item.request.planDirectory === planDirectory);
+			for (const preparation of preparations) preparation.retired = true;
+			const workers = [...this.workers.entries()].filter(([, worker]) => !planDirectory || worker.request.planDirectory === planDirectory);
+			const results = await Promise.allSettled([
+				...preparations.map(item => item.settled),
+				...workers.map(([handle]) => this.stop(handle)),
+			]);
+			const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+			for (const [directory, failures] of this.cleanupErrors) if (!planDirectory || directory === planDirectory) errors.push(...failures);
+			if (workers.some(([handle]) => this.has(handle))) errors.push(new Error("Worker cleanup did not settle"));
+			if (errors.length) throw new AggregateError(errors, "Herder worker cleanup failed; ownership retained, manual cleanup required");
+		} finally {
+			this.drains.delete(drain);
+		}
 	}
 
 	private readonly updates = new Set<UpdateListener>();
@@ -590,9 +609,25 @@ export class PiWorkerEngine {
 
 	async prepare(request: PiWorkerRequest): Promise<string> {
 		this.assertSafe(request.planDirectory);
-		if ([...this.workers.values()].some((worker) => worker.request.action.actionId === request.action.actionId)) {
+		if ([...this.drains].some(drain => !drain.planDirectory || drain.planDirectory === request.planDirectory)) {
+			throw new Error("Herder worker preparation admission is closed while draining.");
+		}
+		if ([...this.workers.values(), ...this.preparations].some(worker => worker.request.action.actionId === request.action.actionId)) {
 			throw new Error(`Pi worker action ${request.action.actionId} is already prepared.`);
 		}
+		let settle!: () => void;
+		const preparation: WorkerPreparation = { request, retired: false, settled: new Promise(resolve => { settle = resolve; }) };
+		// Register before invoking the factory: even reentrant drains own this preparation.
+		this.preparations.add(preparation);
+		try {
+			return await this.prepareWorker(request, preparation);
+		} finally {
+			this.preparations.delete(preparation);
+			settle();
+		}
+	}
+
+	private async prepareWorker(request: PiWorkerRequest, preparation: WorkerPreparation): Promise<string> {
 		const prepared = await this.factory.create(request).catch(error => {
 			if (error instanceof HerderCleanupError) this.cleanupFailed(request.planDirectory, error);
 			throw error;
@@ -601,6 +636,7 @@ export class PiWorkerEngine {
 		const unsubscribeUnsafe = nested.onUnsafeCleanup(error => this.cleanupFailed(request.planDirectory, error));
 		try {
 			this.assertSafe(request.planDirectory);
+			if (preparation.retired) throw new Error("Herder worker preparation was retired by drain.");
 		} catch (error) {
 			const cleanup = await Promise.allSettled([disposeWorkerSession(session), nested.stop("Unsafe Herder run")]);
 			for (const result of cleanup) if (result.status === "rejected") this.cleanupFailed(request.planDirectory, result.reason);
@@ -673,6 +709,7 @@ export class PiWorkerEngine {
 		worker.unsubscribeNested = () => { unsubscribeNested(); unsubscribeUnsafe(); };
 		this.workers.set(handle, worker);
 		this.emitUpdate();
+		if (preparation.retired) throw new Error("Herder worker preparation was retired by drain.");
 		return handle;
 	}
 

@@ -1963,16 +1963,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseOwnershipAfterManagerDrain = false;
 		const held = ownership;
 		if (held) markAdapterOwnershipCleanupRequired(held);
-		await engine.drain();
-		workers.clear();
-		if (admittedManagerTasks === 0) { if (held) releaseOwnership(held); }
-		else {
-			const drain = managerQueue.then(() => engine.drain()).then(() => {
-				if (held) releaseOwnership(held);
-			});
-			if (held) registerAdapterOwnershipRetirement(held, drain);
-			void drain.catch(error => lastContext?.ui.notify(message(error), "error"));
-		}
+		// Freeze old admitted work before yielding: replacement recovery may queue
+		// during preparation cleanup and must not become its own retirement prerequisite.
+		const oldManagerQueue = managerQueue;
+		const localDrain = engine.drain();
+		const retirement = localDrain.then(async () => {
+			workers.clear();
+			await oldManagerQueue;
+			await engine.drain();
+			if (held) releaseOwnership(held);
+		});
+		if (held) registerAdapterOwnershipRetirement(held, retirement);
+		void retirement.catch(error => lastContext?.ui.notify(message(error), "error"));
+		// Remote reconciliation can remain pending; retirement retains the exact claim.
+		await localDrain;
 
 	});
 }

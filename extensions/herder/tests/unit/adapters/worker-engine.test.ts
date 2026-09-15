@@ -1588,3 +1588,178 @@ for (const observer of ["final update", "terminal", "async terminal"] as const) 
 		}
 	});
 }
+
+for (const globalFirst of [false, true]) {
+	test(`overlapping ${globalFirst ? "global/target" : "target/global"} drains retire pending factories and keep admission closed`, async () => {
+		const factory = new FakeFactory();
+		const create = factory.create.bind(factory);
+		const gates = [new Deferred<void>(), new Deferred<void>()];
+		factory.create = async request => {
+			if (request.action.actionId === "late-a") await gates[0]!.promise;
+			if (request.action.actionId === "late-b") await gates[1]!.promise;
+			return create(request);
+		};
+		const engine = new PiWorkerEngine(factory);
+		const a = { action: action("late-a"), planDirectory: "/tmp/drain-a" };
+		const b = { action: action("late-b"), planDirectory: "/tmp/drain-b" };
+		const preparingA = assert.rejects(engine.prepare(a), /retired/);
+		const preparingB = assert.rejects(engine.prepare(b), /retired/);
+		let targetDone = false;
+		let globalDone = false;
+		const target = () => engine.drain(a.planDirectory).then(() => { targetDone = true; });
+		const global = () => engine.drain().then(() => { globalDone = true; });
+		const drains = globalFirst ? [global(), target()] : [target(), global()];
+		await nextTurn();
+		assert.equal(targetDone, false);
+		assert.equal(globalDone, false);
+		assert.equal(factory.sessions.length, 0, "drain owns factories before sessions exist");
+		gates[0]!.resolve();
+		await preparingA;
+		await nextTurn();
+		assert.equal(targetDone, true);
+		assert.equal(globalDone, false);
+		await assert.rejects(engine.prepare({ ...a, action: action("blocked-a") }), /admission is closed/);
+		await assert.rejects(engine.prepare({ ...b, action: action("blocked-b") }), /admission is closed/);
+		gates[1]!.resolve();
+		await Promise.all([...drains, preparingB]);
+		assert.deepEqual(engine.snapshots(), []);
+		for (const session of factory.sessions) {
+			assert.equal(session.prompted, false);
+			assert.equal(session.disposed, true);
+			assert.equal(session.shutdowns, 1);
+			assert.throws(() => engine.start(`pi-worker:${session.sessionId}`), /Unknown/);
+		}
+		const reopened = await engine.prepare(a);
+		await engine.discard(reopened);
+	});
+}
+
+test("target drains isolate pending factories and new admission in other targets", async () => {
+	const factory = new FakeFactory();
+	const create = factory.create.bind(factory);
+	const gate = new Deferred<void>();
+	factory.create = async request => {
+		if (request.planDirectory === "/tmp/isolated-a") await gate.promise;
+		return create(request);
+	};
+	const engine = new PiWorkerEngine(factory);
+	const request = { action: action("pending"), planDirectory: "/tmp/isolated-a" };
+	const preparing = assert.rejects(engine.prepare(request), /retired/);
+	const drains = [engine.drain(request.planDirectory), engine.drain(request.planDirectory)];
+	await assert.rejects(engine.prepare({ ...request, action: action("blocked") }), /admission is closed/);
+	const other = await engine.prepare({ action: action("other"), planDirectory: "/tmp/isolated-b" });
+	await engine.drain("/tmp/isolated-c");
+	assert.equal(engine.has(other), true);
+	gate.resolve();
+	await Promise.all([...drains, preparing]);
+	assert.equal(engine.has(other), true);
+	assert.equal(factory.sessions[0]!.disposed, false);
+	const reopened = await engine.prepare(request);
+	await engine.drain();
+	assert.equal(engine.has(reopened), false);
+});
+
+for (const cleanupFailure of [false, true]) {
+	test(`drain awaits factory rejection ${cleanupFailure ? "and retains cleanup evidence" : "without treating ordinary admission failure as cleanup failure"}`, async () => {
+		const gate = new Deferred<void>();
+		const failure = cleanupFailure ? new HerderCleanupError([Error("late creation cleanup")], "creation cleanup failed") : Error("factory rejected");
+		const engine = new PiWorkerEngine({
+			availableModels: async () => [],
+			create: async () => { await gate.promise; throw failure; },
+		});
+		const request = { action: action(), planDirectory: "/tmp/rejected-factory" };
+		const preparing = assert.rejects(engine.prepare(request), error => error === failure);
+		let done = false;
+		const drain = engine.drain(request.planDirectory).finally(() => { done = true; });
+		const checked = cleanupFailure ? assert.rejects(drain, /cleanup failed/) : drain;
+		await nextTurn();
+		assert.equal(done, false);
+		gate.resolve();
+		await Promise.all([preparing, checked]);
+		if (cleanupFailure) {
+			assert.throws(() => engine.assertSafe(request.planDirectory), /Unsafe/);
+			await assert.rejects(engine.drain(request.planDirectory), /cleanup failed/);
+		} else await engine.drain(request.planDirectory);
+	});
+}
+
+for (const failure of ["shutdown", "dispose", "recon", "worker"] as const) {
+	test(`retired preparation awaits late ${failure} cleanup and retains its safety policy`, async () => {
+		const creation = new Deferred<void>();
+		const shutdown = new Deferred<void>();
+		const childCreation = new Deferred<NestedWorkerSession>();
+		const session = new FakeSession("retired-root");
+		let disposals = 0;
+		session.dispose = () => { disposals += 1; if (failure === "dispose") throw Error("late dispose failed"); session.disposed = true; };
+		(session.extensionRunner as unknown as { emit: () => Promise<void> }).emit = async () => {
+			session.shutdowns += 1;
+			await shutdown.promise;
+			if (failure === "shutdown") throw Error("late shutdown failed");
+		};
+		const request = { action: action(), planDirectory: "/tmp/retired-cleanup" };
+		const nested = new HerderNestedAgentScope({ action: request.action, agentRoot, createSession: async () => childCreation.promise });
+		const engine = new PiWorkerEngine({ availableModels: async () => [], create: async () => {
+			await creation.promise;
+			return { session, nested };
+		} });
+		let notifications = 0;
+		engine.onUnsafeCleanup(() => { notifications += 1; });
+		const preparing = assert.rejects(engine.prepare(request), /retired/);
+		if (failure === "recon") {
+			const child = new FakeSession("failed-scout");
+			child.dispose = () => { throw Error("late scout dispose failed"); };
+			childCreation.resolve(child);
+			await nested.run({ type: "recon", prompt: "inspect", description: "failed scout" });
+		}
+		if (failure === "worker") await nested.spawnBackground({ type: failure, prompt: "inspect", description: "late child" });
+		let drained = false;
+		const drain = assert.rejects(engine.drain(request.planDirectory), /cleanup failed/).then(() => { drained = true; });
+		creation.resolve();
+		await nextTurn();
+		assert.equal(session.shutdowns, 1);
+		assert.equal(disposals, 0);
+		assert.equal(drained, false);
+		shutdown.resolve();
+		if (failure === "worker") {
+			await nextTurn();
+			assert.equal(drained, false, "nested creation still owns cleanup");
+			const child = new FakeSession("late-child");
+			child.dispose = () => { throw Error("late child dispose failed"); };
+			childCreation.resolve(child);
+		}
+		await Promise.all([preparing, drain]);
+		assert.equal(disposals, 1);
+		assert.equal(session.prompted, false);
+		assert.deepEqual(engine.snapshots(), []);
+		assert.equal(notifications, failure === "recon" ? 0 : 1);
+		if (failure === "recon") assert.doesNotThrow(() => engine.assertSafe(request.planDirectory));
+		else assert.throws(() => engine.assertSafe(request.planDirectory), /Unsafe/);
+		await assert.rejects(engine.drain(request.planDirectory), /cleanup failed/);
+		assert.equal(disposals, 1);
+	});
+}
+
+test("reentrant factory drain owns preparation through asynchronous disposal", async () => {
+	const factory = new FakeFactory();
+	const create = factory.create.bind(factory);
+	const disposal = new Deferred<void>();
+	let disposals = 0;
+	let drained = false;
+	let drain!: Promise<void>;
+	const engine = new PiWorkerEngine(factory);
+	factory.create = async request => {
+		drain = engine.drain(request.planDirectory).then(() => { drained = true; });
+		const prepared = await create(request);
+		prepared.session.dispose = async () => { disposals += 1; await disposal.promise; };
+		return prepared;
+	};
+	const preparing = assert.rejects(engine.prepare({ action: action(), planDirectory: "/tmp/reentrant-drain" }), /retired/);
+	await nextTurn();
+	assert.equal(disposals, 1);
+	assert.equal(drained, false);
+	assert.equal(factory.sessions[0]!.prompted, false);
+	disposal.resolve();
+	await Promise.all([preparing, drain]);
+	assert.equal(drained, true);
+	assert.equal(disposals, 1);
+});
