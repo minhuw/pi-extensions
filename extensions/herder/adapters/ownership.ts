@@ -162,12 +162,29 @@ function inspectExisting(lockPath: string): { descriptor: number; stat: fs.Stats
 
 /** Read bounded regular-file evidence without creating runtime or SQLite state. */
 export function readAdapterOwnershipEvidence(planDirectory: string): { stat: fs.Stats; record: AdapterOwnershipRecord } | undefined {
-	if (!readAdapterRuntimeIdentity(planDirectory)) return undefined;
-	let existing: ReturnType<typeof inspectExisting>;
-	try { existing = inspectExisting(adapterOwnershipLockPath(planDirectory)); }
-	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-	try { return { stat: existing.stat, record: existing.record }; }
-	finally { fs.closeSync(existing.descriptor); }
+	const runtime = readAdapterRuntimeIdentity(planDirectory);
+	if (!runtime) return undefined;
+	const lockPath = adapterOwnershipLockPath(planDirectory);
+	let existing: ReturnType<typeof inspectExisting> | undefined;
+	try {
+		try { existing = inspectExisting(lockPath); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+		const currentRuntime = readAdapterRuntimeIdentity(planDirectory);
+		if (!currentRuntime || !sameIdentity(runtime, currentRuntime)) {
+			throw new Error("Herder recovery runtime was removed or replaced; refusing recovery");
+		}
+		if (!existing) return undefined;
+		const named = fs.lstatSync(lockPath);
+		const current = fs.fstatSync(existing.descriptor);
+		const previous = existing.stat;
+		// A descriptor can retain stale bytes after replacement or in-place invalidation.
+		if (named.isSymbolicLink() || !named.isFile() || !sameIdentity(previous, named)
+			|| (["size", "mtimeMs", "ctimeMs", "nlink"] as const).some(key =>
+				previous[key] !== current[key] || current[key] !== named[key])) {
+			throw new Error("Herder ownership evidence changed while reading; refusing recovery");
+		}
+		return { stat: current, record: existing.record };
+	} finally { if (existing) fs.closeSync(existing.descriptor); }
 }
 
 /** Recovery is bound to this runtime, never merely to a reusable directory name. */
@@ -182,11 +199,11 @@ export function readAdapterRuntimeIdentity(planDirectory: string): fs.Stats | un
 }
 
 export function assertAdapterRecoveryEvidence(planDirectory: string, identity: fs.Stats | undefined): void {
-	const runtime = readAdapterRuntimeIdentity(planDirectory);
-	if (!identity || !runtime || !sameIdentity(identity, runtime)) throw new Error("Herder recovery runtime was removed or replaced; refusing recovery");
 	if (readAdapterOwnershipEvidence(planDirectory)?.record.resetCleanupRequired) {
 		throw new Error("Herder ownership requires manual child-process cleanup; refusing recovery");
 	}
+	const runtime = readAdapterRuntimeIdentity(planDirectory);
+	if (!identity || !runtime || !sameIdentity(identity, runtime)) throw new Error("Herder recovery runtime was removed or replaced; refusing recovery");
 }
 
 function createOwnershipLock(lockPath: string, record: AdapterOwnershipRecord): AdapterOwnership {

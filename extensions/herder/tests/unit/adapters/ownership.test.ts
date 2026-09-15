@@ -197,6 +197,53 @@ test("recovery evidence reads are non-creating and reject marked, malformed, rep
 	}
 });
 
+for (const change of ["replacement", "mark", "runtime", "quarantine", "final-removal", "unchanged"] as const) {
+	test(`read-only recovery revalidates ${change} evidence after descriptor read`, (t) => {
+		const { root, planDir } = fixture();
+		try {
+			const record = { version: 1, pid: 2_147_483_647, runId: "dead", piSessionId: "departed" };
+			const lockPath = writeOwner(planDir, record);
+			const runtime = readAdapterRuntimeIdentity(planDir);
+			const original = fs.readFileSync;
+			let intercepted = false;
+			let retained: string | undefined;
+			const reader = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+				const bytes = original(...args);
+				if (typeof args[0] === "number" && !intercepted) {
+					intercepted = true;
+					if (change === "replacement") {
+						retained = `${lockPath}.old`;
+						fs.renameSync(lockPath, retained);
+						writeOwner(planDir, { ...record, resetCleanupRequired: true });
+					} else if (change === "mark") {
+						writeOwner(planDir, { ...record, resetCleanupRequired: true });
+					} else if (change === "runtime") {
+						retained = path.join(root, "old-runtime");
+						fs.renameSync(path.dirname(lockPath), retained);
+						writeOwner(planDir, record);
+					} else if (change === "quarantine" || change === "final-removal") {
+						retained = `${change === "quarantine" ? lockPath : planDir}.cleanup-required`;
+						fs.linkSync(lockPath, retained);
+					}
+				}
+				return bytes;
+			});
+			try {
+				if (change === "unchanged") assertAdapterRecoveryEvidence(planDir, runtime);
+				else assert.throws(() => assertAdapterRecoveryEvidence(planDir, runtime), /refusing recovery|manual child-process cleanup/);
+				assert.equal(intercepted, true);
+			} finally { reader.mock.restore(); }
+			assert.deepEqual(JSON.parse(fs.readFileSync(lockPath, "utf8")),
+				change === "replacement" || change === "mark" ? { ...record, resetCleanupRequired: true } : record);
+			if (retained) assert.equal(fs.existsSync(retained), true, "inspection must retain evidence");
+			assert.deepEqual(fs.readdirSync(path.dirname(lockPath)).sort(),
+				["pi-session-owner.lock", ...(change === "replacement" ? ["pi-session-owner.lock.old"]
+					: change === "quarantine" ? ["pi-session-owner.lock.cleanup-required"] : [])].sort(),
+				"inspection must not initialize SQLite or create ownership state");
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+}
+
 test("retained final-removal evidence excludes acquisition and recovery without recreating runtime", () => {
 	const { root, planDir } = fixture();
 	const held = acquireAdapterOwnership(planDir, "run", "session");

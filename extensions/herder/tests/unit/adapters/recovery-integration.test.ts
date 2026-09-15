@@ -2645,13 +2645,14 @@ process.exit(0);
 	});
 }
 
-for (const scenario of ["confirmation collision", "marker persistence", "cancelled confirmation", "unrelated target"] as const) {
+for (const scenario of ["confirmation collision", "marker persistence", "distinct registration", "cancelled confirmation", "unrelated target"] as const) {
 	test(`A8 active Fire terminal after force: ${scenario}`, { timeout: 30_000 }, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-late-terminal-"));
 		const value = writeFixture(root);
 		const other = path.join(value.repo, "other-plans");
 		const api = new CapturedExtensionAPI();
 		const factory = new PendingWorkerFactory();
+		const cleaner = scenario === "distinct registration" ? new CapturedExtensionAPI() : api;
 		const terminalHandled = new Deferred<void>();
 		const onTerminal = PiWorkerEngine.prototype.onTerminal;
 		const fetch = globalThis.fetch;
@@ -2663,7 +2664,7 @@ for (const scenario of ["confirmation collision", "marker persistence", "cancell
 		let terminalSubmissions = 0;
 		let exclusions = 0;
 		let markerAttempts = 0;
-		const refused = scenario === "confirmation collision" || scenario === "marker persistence";
+		const refused = scenario === "confirmation collision" || scenario === "marker persistence" || scenario === "distinct registration";
 		const ctx = cleanupContext(value, warnings, async () => {
 			confirmations++;
 			if (scenario === "confirmation collision") {
@@ -2690,6 +2691,7 @@ for (const scenario of ["confirmation collision", "marker persistence", "cancell
 			};
 			registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 			PiWorkerEngine.prototype.onTerminal = onTerminal;
+			if (cleaner !== api) registerHerderPiWithWorkerFactory(cleaner as unknown as ExtensionAPI, new PendingWorkerFactory());
 			await api.invoke("session_start", ctx);
 			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
 			const session = factory.sessions[0]!;
@@ -2721,7 +2723,7 @@ for (const scenario of ["confirmation collision", "marker persistence", "cancell
 				}
 				return fetch(input, init);
 			};
-			await withDeadline(api.command("herder-cleanup").handler(`${scenario === "unrelated target" ? "other-plans" : "herder-plans"} --force`, ctx), "A8 force decision");
+			await withDeadline(cleaner.command("herder-cleanup").handler(`${scenario === "unrelated target" ? "other-plans" : "herder-plans"} --force`, ctx), "A8 force decision");
 			assert.equal(confirmations, 1, JSON.stringify(warnings));
 			assert.equal(session.aborted, false);
 			assert.equal(session.disposed, false);
@@ -2736,7 +2738,12 @@ for (const scenario of ["confirmation collision", "marker persistence", "cancell
 			const retainedQuarantine = fileEvidence(quarantine);
 			assert.equal(retainedLock!.ino, original.stat.ino);
 			assert.deepEqual(retainedLock!.bytes, beforeLock.bytes);
-			if (refused) assert.ok(retainedQuarantine);
+			if (refused && scenario !== "distinct registration") assert.ok(retainedQuarantine);
+			if (scenario === "distinct registration") {
+				assert.ok(warnings.some(w => /already owned by live Pi pid/.test(w.message)), JSON.stringify(warnings));
+				assert.equal(original.record.pid, process.pid);
+				assert.equal(retainedQuarantine, null);
+			}
 			if (scenario === "confirmation collision") {
 				assert.equal(retainedQuarantine!.bytes.toString(), "independent cleanup evidence\n");
 				assert.notEqual(retainedQuarantine!.ino, retainedLock!.ino);
@@ -2769,9 +2776,119 @@ for (const scenario of ["confirmation collision", "marker persistence", "cancell
 			PiWorkerEngine.prototype.onTerminal = onTerminal;
 			globalThis.fetch = fetch;
 			fs.ftruncateSync = truncate;
+			if (cleaner !== api) await cleaner.invoke("session_shutdown", ctx).catch(() => {});
 			await api.invoke("session_shutdown", ctx).catch(() => {});
 			await stopService(value.planDirectory).catch(() => {});
 			await stopService(other).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const first of ["manager", "worker"] as const) {
+	test(`force retains marked ownership after admitted terminal HTTP 500 (${first} settles first)`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-pending-terminal-"));
+		const value = writeFixture(root);
+		const index = path.join(value.planDirectory, "README.md");
+		const row = "| [001](001-recover-worker.md) | Recover a lost worker | P1 | S | — | TODO |";
+		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n${row.replaceAll("001", "002")}`));
+		fs.writeFileSync(path.join(value.planDirectory, "002-recover-worker.md"),
+			fs.readFileSync(path.join(value.planDirectory, "001-recover-worker.md"), "utf8").replaceAll("001", "002").replaceAll("src/value.mjs", "src/other.mjs"));
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const ctx = cleanupContext(value, warnings);
+		const submitted = new Deferred<void>();
+		const releaseResponse = new Deferred<void>();
+		const abortEntered = new Deferred<void>();
+		const releaseAbort = new Deferred<void>();
+		const terminalHandled = new Deferred<void>();
+		const workerDisposed = new Deferred<void>();
+		const notify = ctx.ui.notify.bind(ctx.ui);
+		ctx.ui.notify = (text, level) => {
+			notify(text, level);
+			if (/completion handling failed/.test(text)) terminalHandled.resolve();
+		};
+		const fetch = globalThis.fetch;
+		let cleaning: Promise<unknown> | undefined;
+		let settled = false;
+		let exclusions = 0;
+		let terminals = 0;
+		try {
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			assert.equal(factory.sessions.length, 2);
+			await Promise.all(factory.sessions.map(session => session.started));
+			const original = ownershipEvidence(value);
+			const before = evidence(value);
+			const states = structuredClone(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY));
+			const worker = factory.sessions[1]!;
+			const abort = worker.abort.bind(worker);
+			worker.abort = async () => {
+				assertCleanupMarker(original);
+				abortEntered.resolve();
+				await releaseAbort.promise;
+				await abort();
+			};
+			const dispose = worker.dispose.bind(worker);
+			worker.dispose = () => { dispose(); workerDisposed.resolve(); };
+			globalThis.fetch = async (input, init) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/shutdown") exclusions++;
+				if (url.pathname === "/v1/operation" && init?.method === "POST") {
+					const body = object(JSON.parse(String(init.body)));
+					if (body.kind === "event" && object(body.input).kind === "terminals") {
+						terminals++;
+						submitted.resolve();
+						await releaseResponse.promise;
+						assertCleanupMarker(original);
+						return Response.json({ ok: false, error: "fixture admitted terminal failed" }, { status: 500 });
+					}
+				}
+				return fetch(input, init);
+			};
+			factory.sessions[0]!.finish();
+			await withDeadline(submitted.promise, "terminal submit admitted before force");
+			cleaning = api.command("herder-cleanup").handler("herder-plans --force", ctx).finally(() => { settled = true; });
+			await withDeadline(abortEntered.promise, "marked force starts worker drain");
+			assert.equal(settled, false);
+			if (first === "manager") {
+				releaseResponse.resolve();
+				await withDeadline(terminalHandled.promise, "HTTP failure handled while worker remains pending");
+			} else {
+				releaseAbort.resolve();
+				await withDeadline(workerDisposed.promise, "worker disposed while manager remains pending");
+			}
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(settled, false, "force must await both manager and worker settlement, even after rejection");
+			assert.equal(exclusions, 0);
+			assertCleanupMarker(original);
+			assert.deepEqual(evidence(value), before);
+			releaseResponse.resolve(); releaseAbort.resolve();
+			await withDeadline(Promise.all([cleaning, terminalHandled.promise, workerDisposed.promise]), "failed force settlement");
+			assert.ok(factory.sessions.every(session => session.disposed));
+			assert.equal(terminals, 1);
+			assert.equal(exclusions, 0, "failed admitted manager task forbids service exclusion/deletion");
+			assertCleanupMarker(original);
+			assert.deepEqual(evidence(value), before);
+			assert.deepEqual(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY), states);
+			assert.ok(warnings.some(w => /settlement failed; ownership retained/.test(w.message)), JSON.stringify(warnings));
+			assert.ok(!warnings.some(w => /Force cleanup executed/.test(w.message)));
+			const offset = warnings.length;
+			await api.command("herder-attach").handler("herder-plans", ctx);
+			await api.command("herder-cleanup").handler("herder-plans --force", ctx);
+			assert.ok(warnings.slice(offset).every(w => w.level === "error" && /force cleanup closed this target/.test(w.message)), JSON.stringify(warnings.slice(offset)));
+			assert.equal(warnings.length - offset, 2);
+			assert.equal(factory.requests.length, 2, "local exclusion prevents successors and recovery");
+			assert.equal(exclusions, 0);
+			assertCleanupMarker(original);
+		} finally {
+			releaseResponse.resolve(); releaseAbort.resolve();
+			await cleaning?.catch(() => {});
+			globalThis.fetch = fetch;
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});

@@ -174,6 +174,10 @@ export default function registerHerderPi(pi: ExtensionAPI): void {
 	registerHerderPiWithWorkerFactory(pi, sessionFactory);
 }
 
+// Confirmation must fence every adapter registration in this process, including
+// an owner whose claim makes a different registration's cleanup refuse.
+const cleanupClosed = new Set<string>();
+
 export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFactory: HerderPiWorkerFactory): void {
 	registerAttentionMessageRenderer(pi);
 	registerWorkerTranscriptRenderers(pi);
@@ -201,7 +205,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const fallbackPiSessionId = `fallback-${randomUUID()}`;
 	const verificationMonitors = new Map<string, number>();
 	const pendingOperations = new Map<Promise<unknown>, string>();
-	const cleanupClosed = new Set<string>();
+	const pendingManagerTasks = new Set<Promise<unknown>>();
 	const unsafeDirectories = new Map<string, Error>();
 	const unsafeCleanup = (planDir: string): Error | undefined => {
 		for (const [directory, error] of unsafeDirectories) if (sameResolvedDirectory(directory, planDir)) return error;
@@ -524,9 +528,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		admittedManagerTasks += 1;
 		const next = managerQueue.then(task, task);
 		const tracked = next.finally(() => {
+			pendingManagerTasks.delete(tracked);
 			admittedManagerTasks -= 1;
 			releaseOwnershipIfManagerIdle();
 		});
+		pendingManagerTasks.add(tracked);
 		managerQueue = tracked.then(() => undefined, () => undefined);
 		return tracked;
 	};
@@ -940,13 +946,17 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					}
 					unlinkSync(quarantine);
 					const markedRecord = JSON.stringify(readAdapterOwnershipEvidence(planDir)?.record);
-					const oldManagerQueue = managerQueue;
-					const localDrain = engine.drain(planDir);
+					// Capture raw admitted work before drain yields: the queue tail and
+					// completion handlers deliberately normalize failures for normal use.
+					const admitted = [
+						...pendingManagerTasks,
+						...[...pendingOperations].filter(([, directory]) => sameResolvedDirectory(directory, planDir)).map(([operation]) => operation),
+					];
 					const retirement = (async () => {
-						await localDrain;
-						await oldManagerQueue;
-						await Promise.allSettled([...pendingOperations].filter(([, directory]) => sameResolvedDirectory(directory, planDir)).map(([operation]) => operation));
-						await engine.drain(planDir);
+						const results = await Promise.allSettled([...admitted, engine.drain(planDir)]);
+						results.push(...await Promise.allSettled([engine.drain(planDir)]));
+						const failures = results.filter(result => result.status === "rejected");
+						if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Herder force cleanup settlement failed; ownership retained");
 					})();
 					registerAdapterOwnershipRetirement(held, retirement);
 					await retirement;
