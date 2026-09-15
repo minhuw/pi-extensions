@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { acquireAdapterOwnership, markAdapterOwnershipCleanupRequired, releaseAdapterOwnership } from "../../adapters/ownership.ts";
 import { runCleanupCommand } from "../../adapters/cleanup-command.ts";
 import {
 	applyHerderCleanup,
@@ -401,6 +402,14 @@ test("force cleanup destroys an active unmerged plan set that deep cleanup would
 			planDirectory: fixture.planDir,
 			confirm: async (title) => { confirmations.push(title); return true; },
 			appendEntry: (entry) => entries.push(entry),
+			apply: async (request, preview) => {
+				const claim = acquireAdapterOwnership(fixture.planDir, "force-run", "force-session");
+				try {
+					// This fixture has no admitted workers; the command owner supplies authorization.
+					markAdapterOwnershipCleanupRequired(claim);
+					return await applyHerderCleanup(request, preview, { ownership: claim });
+				} finally { releaseAdapterOwnership(claim); }
+			},
 		});
 		assert.equal(result.cancelled, false);
 		assert.equal(result.preview.canApply, true);
@@ -434,3 +443,154 @@ test("deep cleanup blocks when integration is not merged into the current branch
 		assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
 	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
 });
+
+test("force application forwards exact ownership validation through every runner phase", async () => {
+	for (const replacement of ["claim", "runtime", "marker"] as const) {
+		const fixture = setup();
+		const claim = acquireAdapterOwnership(fixture.planDir, "force-run", "force-session");
+		try {
+			markAdapterOwnershipCleanupRequired(claim);
+			const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+			const preview = await previewHerderCleanup(request);
+			await assert.rejects(() => applyHerderCleanup(request, preview, {
+				ownership: claim,
+				withExclusion: async (_directory, callback) => callback(),
+				forceRunner: (input) => {
+					assert.equal(typeof input.validateBeforeMutation, "function");
+					input.validateBeforeMutation!("unlock", fixture.completed);
+					const runtime = path.join(fixture.planDir, ".herder");
+					const lock = path.join(runtime, "pi-session-owner.lock");
+					if (replacement === "runtime") {
+						fs.renameSync(runtime, `${runtime}-retained`);
+						fs.mkdirSync(runtime);
+					} else if (replacement === "claim") {
+						fs.renameSync(lock, `${lock}-retained`);
+						fs.writeFileSync(lock, "replacement evidence");
+					} else fs.writeFileSync(lock, "changed evidence");
+					input.validateBeforeMutation!("remove", fixture.completed);
+					throw new Error("validation unexpectedly passed");
+				},
+			}), /replaced|evidence changed/);
+			assert.equal(fs.existsSync(fixture.completed), true);
+			assert.notEqual(git(fixture.repo, "branch", "--list", fixture.planBranch), "");
+			assert.equal(fs.existsSync(path.join(fixture.planDir, ".herder")), true);
+		} finally {
+			releaseAdapterOwnership(claim);
+			fs.rmSync(fixture.root, { recursive: true, force: true });
+		}
+	}
+});
+
+test("force missing-directory validation refuses a runtime appearing after preview", async () => {
+	const fixture = setup();
+	try {
+		fs.rmSync(fixture.planDir, { recursive: true });
+		const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+		const preview = await previewHerderCleanup(request);
+		assert.equal(fs.existsSync(fixture.planDir), false);
+		await assert.rejects(() => applyHerderCleanup(request, preview, {
+			forceRunner: (input) => {
+				fs.mkdirSync(path.join(fixture.planDir, ".herder"), { recursive: true });
+				input.validateBeforeMutation!("unlock", fixture.completed);
+				throw new Error("validation unexpectedly passed");
+			},
+		}), /appeared/);
+		assert.equal(fs.existsSync(fixture.completed), true);
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+
+test("direct force refuses another claim; only the supplied marked drained claim authorizes destruction", async () => {
+	const fixture = setup();
+	const claim = acquireAdapterOwnership(fixture.planDir, "owned-run", "owned-session");
+	try {
+		const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+		const preview = await previewHerderCleanup(request);
+		await assert.rejects(() => applyHerderCleanup(request, preview), /exact marked/);
+		await assert.rejects(() => applyHerderCleanup(request, preview, { ownership: claim }), /exact marked/);
+		assert.equal(fs.existsSync(fixture.completed), true);
+		markAdapterOwnershipCleanupRequired(claim);
+		const result = await applyHerderCleanup(request, preview, { ownership: claim });
+		assert.equal(result.executed, true);
+		assert.equal(fs.existsSync(fixture.planDir), false);
+	} finally {
+		releaseAdapterOwnership(claim);
+		fs.rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("direct force without injected authorization refuses before acquiring or excluding", async () => {
+	const fixture = setup();
+	try {
+		const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+		const preview = await previewHerderCleanup(request);
+		let exclusions = 0;
+		let mutations = 0;
+		await assert.rejects(() => applyHerderCleanup(request, preview, {
+			withExclusion: async (_directory, callback) => { exclusions++; return callback(); },
+			forceRunner: () => { mutations++; return preview.outcomes[0]!.result; },
+		}), /exact marked, successfully drained/);
+		assert.equal(exclusions, 0);
+		assert.equal(mutations, 0);
+		assert.equal(fs.existsSync(path.join(fixture.planDir, ".herder", "pi-session-owner.lock")), false);
+		assert.equal(fs.existsSync(fixture.completed), true);
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+test("missing-directory force refuses runtime appearing during the final mutation", async () => {
+	const fixture = setup();
+	try {
+		fs.rmSync(fixture.planDir, { recursive: true });
+		const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+		const preview = await previewHerderCleanup(request);
+		const lock = path.join(fixture.planDir, ".herder", "pi-session-owner.lock");
+		await assert.rejects(() => applyHerderCleanup(request, preview, {
+			forceRunner: (input) => {
+				input.validateBeforeMutation!("ref", "final-ref");
+				fs.mkdirSync(path.dirname(lock), { recursive: true });
+				fs.writeFileSync(lock, "new runtime evidence");
+				return preview.outcomes[0]!.result;
+			},
+		}), /appeared/);
+		assert.equal(fs.readFileSync(lock, "utf8"), "new runtime evidence");
+	} finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
+for (const failure of ["retained file", "final directory tail"] as const) {
+	test(`force retains durable exclusion after partial removal: ${failure}`, async (t) => {
+		const fixture = setup();
+		const claim = acquireAdapterOwnership(fixture.planDir, "force-run", "force-session");
+		const remove = fs.rmSync;
+		try {
+			markAdapterOwnershipCleanupRequired(claim);
+			const marked = fs.readFileSync(claim.lockPath, "utf8");
+			const original = fs.fstatSync(claim.descriptor);
+			const request = { repositoryRoot: fixture.repo, planDirectory: fixture.planDir, force: true };
+			const preview = await previewHerderCleanup(request);
+			t.mock.method(fs, "rmSync", (target: fs.PathLike, options?: fs.RmOptions) => {
+				if (String(target) !== fs.realpathSync(fixture.planDir)) return remove(target, options);
+				remove(path.join(fixture.planDir, ".herder"), { recursive: true, force: true });
+				if (failure === "final directory tail") {
+					for (const entry of fs.readdirSync(fixture.planDir)) remove(path.join(fixture.planDir, entry), { recursive: true, force: true });
+				}
+				throw Object.assign(new Error(`fixture ${failure} removal failed`), { code: "ENOTEMPTY" });
+			});
+			await assert.rejects(() => applyHerderCleanup(request, preview, {
+				ownership: claim, withExclusion: async (_directory, callback) => callback(),
+			}), /removal failed/);
+			assert.equal(fs.existsSync(claim.lockPath), false, "recursive removal already removed the original path");
+			const retained = `${fixture.planDir}.cleanup-required`;
+			assert.equal(fs.readFileSync(retained, "utf8"), marked);
+			assert.equal(fs.statSync(retained).ino, original.ino, "the exact marked inode survives");
+			assert.throws(() => acquireAdapterOwnership(fixture.planDir, "replacement", "replacement", {
+				isProcessAlive: () => false,
+			}), /manual child-process cleanup/);
+			assert.equal(fs.existsSync(path.join(fixture.planDir, ".herder")), false, "refusal does not recreate runtime");
+			assert.equal(git(fixture.repo, "branch", "--list", fixture.planBranch), "", "prior ref removals are not rolled back");
+		} finally {
+			t.mock.restoreAll();
+			releaseAdapterOwnership(claim);
+			remove(fixture.root, { recursive: true, force: true });
+		}
+	});
+}

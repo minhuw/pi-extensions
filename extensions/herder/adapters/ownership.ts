@@ -78,7 +78,15 @@ function sameIdentity(left: fs.Stats, right: fs.Stats): boolean {
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
+function assertNoForceCleanupEvidence(retained: string): void {
+	// Any retained pathname is unsafe, even without a matching primary inode; never follow or adopt it.
+	try { fs.lstatSync(retained); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+	throw new Error(`Herder force cleanup retained ownership evidence; manual child-process cleanup required: ${retained}`);
+}
+
 function ensureRuntimeDirectory(planDirectory: string): string {
+	assertNoForceCleanupEvidence(`${path.resolve(planDirectory)}.cleanup-required`);
 	const runtimeDirectory = path.join(path.resolve(planDirectory), ".herder");
 	let stat: fs.Stats;
 	try {
@@ -94,6 +102,7 @@ function ensureRuntimeDirectory(planDirectory: string): string {
 	if (stat.isSymbolicLink() || !stat.isDirectory()) {
 		throw new Error(`Herder Pi ownership runtime path is unsafe: ${runtimeDirectory}`);
 	}
+	assertNoForceCleanupEvidence(`${adapterOwnershipLockPath(planDirectory)}.cleanup-required`);
 	return runtimeDirectory;
 }
 
@@ -117,6 +126,7 @@ function parseRecord(text: string, lockPath: string): AdapterOwnershipRecord {
 }
 
 function inspectExisting(lockPath: string): { descriptor: number; stat: fs.Stats; record: AdapterOwnershipRecord } {
+	assertNoForceCleanupEvidence(`${lockPath}.cleanup-required`);
 	if (!fs.constants.O_NOFOLLOW) throw new Error(`Safe Herder Pi ownership locking is unavailable: ${lockPath}`);
 	let named: fs.Stats;
 	try { named = fs.lstatSync(lockPath); }
@@ -129,12 +139,15 @@ function inspectExisting(lockPath: string): { descriptor: number; stat: fs.Stats
 	}
 	let descriptor: number | undefined;
 	try {
-		descriptor = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+		descriptor = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 		const opened = fs.fstatSync(descriptor);
 		if (!opened.isFile() || !sameIdentity(opened, named) || opened.size < 1 || opened.size > MAX_LOCK_BYTES) {
 			throw new Error(`Herder Pi ownership lock is malformed; refusing to replace it: ${lockPath}`);
 		}
 		const record = parseRecord(fs.readFileSync(descriptor, "utf8"), lockPath);
+		if (opened.nlink !== 1 && !record.resetCleanupRequired) {
+			throw new Error(`Herder Pi ownership has retained cleanup links; manual child-process cleanup required: ${lockPath}`);
+		}
 		return { descriptor, stat: opened, record };
 	} catch (error) {
 		if (descriptor !== undefined) {
@@ -147,7 +160,37 @@ function inspectExisting(lockPath: string): { descriptor: number; stat: fs.Stats
 	}
 }
 
+/** Read bounded regular-file evidence without creating runtime or SQLite state. */
+export function readAdapterOwnershipEvidence(planDirectory: string): { stat: fs.Stats; record: AdapterOwnershipRecord } | undefined {
+	if (!readAdapterRuntimeIdentity(planDirectory)) return undefined;
+	let existing: ReturnType<typeof inspectExisting>;
+	try { existing = inspectExisting(adapterOwnershipLockPath(planDirectory)); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+	try { return { stat: existing.stat, record: existing.record }; }
+	finally { fs.closeSync(existing.descriptor); }
+}
+
+/** Recovery is bound to this runtime, never merely to a reusable directory name. */
+export function readAdapterRuntimeIdentity(planDirectory: string): fs.Stats | undefined {
+	assertNoForceCleanupEvidence(`${path.resolve(planDirectory)}.cleanup-required`);
+	let runtime: fs.Stats;
+	try { runtime = fs.lstatSync(path.dirname(adapterOwnershipLockPath(planDirectory))); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+	if (runtime.isSymbolicLink() || !runtime.isDirectory()) throw new Error("Herder Pi runtime directory is unsafe");
+	assertNoForceCleanupEvidence(`${adapterOwnershipLockPath(planDirectory)}.cleanup-required`);
+	return runtime;
+}
+
+export function assertAdapterRecoveryEvidence(planDirectory: string, identity: fs.Stats | undefined): void {
+	const runtime = readAdapterRuntimeIdentity(planDirectory);
+	if (!identity || !runtime || !sameIdentity(identity, runtime)) throw new Error("Herder recovery runtime was removed or replaced; refusing recovery");
+	if (readAdapterOwnershipEvidence(planDirectory)?.record.resetCleanupRequired) {
+		throw new Error("Herder ownership requires manual child-process cleanup; refusing recovery");
+	}
+}
+
 function createOwnershipLock(lockPath: string, record: AdapterOwnershipRecord): AdapterOwnership {
+	assertNoForceCleanupEvidence(`${lockPath}.cleanup-required`);
 	const runtimeIdentity = fs.lstatSync(path.dirname(lockPath));
 	const descriptor = fs.openSync(lockPath, "wx", 0o600);
 	try {

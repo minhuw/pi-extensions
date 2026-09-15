@@ -946,3 +946,102 @@ exec git "$@"
     } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
   })
 }
+
+for (const phase of ["unlock", "remove", "ref", "legacy-root", "legacy-container", "plan-directory", "prune", "fallback-rm"]) {
+  test(`force validates before ${phase} and never swallows replacement refusal`, () => {
+    const fixture = setup()
+    try {
+      const legacy = path.join(`${fixture.repo}-herder-worktrees`, "plans")
+      fs.mkdirSync(legacy, { recursive: true })
+      const worktree = path.join(fixture.planDir, ".herder", "worktrees", "fallback")
+      const branch = "herder/plans/999"
+      git(fixture.repo, "worktree", "add", "-q", "-b", branch, worktree, fixture.integrationBranch)
+      const evidence = path.join(fixture.planDir, "evidence")
+      fs.writeFileSync(evidence, "original")
+      let reached = false
+      const refusal = new Error("replacement ownership evidence")
+      const run = () => forceCleanupRun({
+        repo: fixture.repo, planDir: fixture.planDir, dryRun: false,
+        validateBeforeMutation: (current, target) => {
+          if (current !== phase) return
+          reached = true
+          fs.writeFileSync(evidence, "replacement")
+          if (current === "ref") assert.notEqual(git(fixture.repo, "rev-parse", "--verify", target), "")
+          throw refusal
+        },
+      })
+      assert.throws(() => phase === "prune" || phase === "fallback-rm"
+        ? withGitShim("fail-remove", branch, run, worktree) : run(), error => error === refusal)
+      assert.equal(reached, true)
+      assert.equal(fs.readFileSync(evidence, "utf8"), "replacement")
+      if (phase === "fallback-rm" || phase === "prune") assert.equal(fs.existsSync(worktree), true)
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+}
+
+for (const retainedInRuntime of [false, true]) {
+  test(`force coordinated removal preserves the original claim on ${retainedInRuntime ? "runtime" : "plan"} entry failure`, (t) => {
+    const fixture = setup()
+    const runtime = path.join(fixture.planDir, ".herder")
+    const claim = path.join(runtime, "pi-session-owner.lock")
+    const marker = JSON.stringify({ resetCleanupRequired: true })
+    const retained = path.join(retainedInRuntime ? runtime : fs.realpathSync(fixture.planDir), "retained")
+    const failure = Object.assign(new Error("immutable retained file"), { code: "ENOTEMPTY" })
+    const remove = fs.rmSync
+    try {
+      fs.mkdirSync(runtime, { recursive: true })
+      fs.writeFileSync(claim, marker)
+      const original = fs.statSync(claim)
+      fs.writeFileSync(retained, "immutable evidence")
+      let validated = ""
+      let reached = false
+      t.mock.method(fs, "rmSync", (target: fs.PathLike, options?: fs.RmOptions) => {
+        assert.equal(String(target), validated, "each entry requires fresh validation")
+        validated = ""
+        if (String(target) === retained) {
+          reached = true
+          throw failure
+        }
+        return remove(target, options)
+      })
+      assert.throws(() => forceCleanupRun({
+        repo: fixture.repo, planDir: fixture.planDir, dryRun: false,
+        validateBeforeMutation: (_phase, target) => { validated = target },
+        removePlanDirectory: (directory, validate) => {
+          assert.equal(directory, fs.realpathSync(fixture.planDir))
+          // Application-owned ordering; the Git layer knows no owner filenames.
+          for (const [parent, excluded] of [[directory, ".herder"], [runtime, "pi-session-owner.lock"]]) {
+            for (const entry of fs.readdirSync(parent)) {
+              if (entry === excluded) continue
+              const target = path.join(parent, entry)
+              validate("plan-entry", target)
+              fs.rmSync(target, { recursive: true, force: true })
+            }
+          }
+          assert.fail("retained entry must fail before claim or directory removal")
+        },
+      }), error => error === failure)
+      assert.equal(reached, true)
+      assert.equal(fs.statSync(claim).ino, original.ino, "claim must not be recreated")
+      assert.equal(fs.statSync(claim).birthtimeMs, original.birthtimeMs)
+      assert.equal(fs.readFileSync(claim, "utf8"), marker)
+      assert.equal(fs.readFileSync(retained, "utf8"), "immutable evidence")
+      if (retainedInRuntime) assert.deepEqual(fs.readdirSync(fixture.planDir), [".herder"])
+      assert.equal(git(fixture.repo, "for-each-ref", "--format=%(refname)", "refs/heads/herder/plans/", "refs/plan-herder/plans/"), "")
+    } finally {
+      t.mock.restoreAll()
+      remove(fixture.root, { recursive: true, force: true })
+    }
+  })
+}
+
+test("force preview never invokes mutation validation", () => {
+  const fixture = setup()
+  try {
+    forceCleanupRun({ repo: fixture.repo, planDir: fixture.planDir, dryRun: true,
+      validateBeforeMutation: () => { throw new Error("preview mutated") },
+      removePlanDirectory: () => { throw new Error("preview removed directory") },
+    })
+    assert.equal(fs.existsSync(fixture.planWorktree), true)
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }) }
+})

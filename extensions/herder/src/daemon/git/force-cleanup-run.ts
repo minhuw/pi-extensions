@@ -11,6 +11,13 @@ export interface ForceCleanupInput {
 	planDir: string;
 	planName?: string | null;
 	dryRun: boolean;
+	/** Internal synchronous authority check; omitted by raw Git callers. */
+	validateBeforeMutation?: (phase: string, target: string) => void;
+	/** Synchronous coordinated remover; validates each mutation and retains exclusion on failure.
+	 * Must remove the directory before returning. Omitted by raw Git callers.
+	 * Exclusion must survive failures in the final directory-removal tail too.
+	 */
+	removePlanDirectory?: (planDirectory: string, validate: (phase: string, target: string) => void) => void;
 }
 
 function ownedWorktrees(repoRoot: string, planDir: string, planName: string, records: WorktreeRecord[]): WorktreeRecord[] {
@@ -24,30 +31,37 @@ function ownedWorktrees(repoRoot: string, planDir: string, planName: string, rec
 	});
 }
 
-function removeLegacyWorktreeContainer(repoRoot: string, planName: string): void {
+function removeLegacyWorktreeContainer(repoRoot: string, planName: string, validate: (phase: string, target: string) => void): void {
 	const leftoverRoot = legacyWorktreeRoot(repoRoot, planName);
 	if (fs.existsSync(leftoverRoot) && isInside(path.dirname(leftoverRoot), leftoverRoot)) {
+		validate("legacy-root", leftoverRoot);
 		fs.rmSync(leftoverRoot, { recursive: true, force: true });
 	}
 	const parent = legacyWorktreeContainer(repoRoot);
 	if (path.dirname(leftoverRoot) === parent && fs.existsSync(parent) && fs.readdirSync(parent).length === 0) {
+		validate("legacy-container", parent);
 		fs.rmSync(parent, { recursive: true, force: true });
 	}
 }
 
-function forceRemoveWorktree(repoRoot: string, worktreePath: string, allowedRoots: string[]): void {
+function forceRemoveWorktree(repoRoot: string, worktreePath: string, allowedRoots: string[], validate: (phase: string, target: string) => void): void {
 	const resolved = realpathIfPresent(worktreePath);
 	if (resolved === repoRoot) fail(`Refusing to remove the user checkout: ${repoRoot}`);
+	validate("unlock", worktreePath);
 	runGit(repoRoot, ["worktree", "unlock", "--", worktreePath], { allowFailure: true });
+	validate("remove", worktreePath);
 	const removed = runGit(repoRoot, ["worktree", "remove", "--force", "--force", "--", worktreePath], { allowFailure: true });
 	if (removed.status !== 0) {
+		validate("prune", worktreePath);
 		runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
 		const fallbackPath = realpathIfPresent(worktreePath);
 		if (fallbackPath === repoRoot || !allowedRoots.some((root) => isInside(root, fallbackPath))) {
 			fail(`Refusing raw removal of worktree ${worktreePath}: resolved path ${fallbackPath} is outside allowed roots ${allowedRoots.join(", ")}`);
 		}
 		if (fs.existsSync(fallbackPath)) {
+			validate("fallback-rm", fallbackPath);
 			fs.rmSync(fallbackPath, { recursive: true, force: true });
+			validate("prune", worktreePath);
 			runGit(repoRoot, ["worktree", "prune"], { allowFailure: true });
 		}
 		const stillListed = listWorktreeInventory(repoRoot).some((item) => item.path && realpathIfPresent(item.path) === resolved);
@@ -57,7 +71,8 @@ function forceRemoveWorktree(repoRoot: string, worktreePath: string, allowedRoot
 	}
 }
 
-function deleteRef(repoRoot: string, ref: string): void {
+function deleteRef(repoRoot: string, ref: string, validate: (phase: string, target: string) => void): void {
+	validate("ref", ref);
 	runGit(repoRoot, ["update-ref", "-d", ref], { allowFailure: true });
 }
 
@@ -194,10 +209,11 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		fail(`Force cleanup refused: ${blockers.map((item) => String(item.reason ?? "blocked")).join(", ")}`);
 	}
 
-	for (const item of owned) forceRemoveWorktree(repoRoot, item.path, allowedRoots);
-	for (const item of branches) deleteRef(repoRoot, `refs/heads/${item.branch}`);
+	const validate = "validateBeforeMutation" in input ? input.validateBeforeMutation ?? (() => {}) : () => {};
+	for (const item of owned) forceRemoveWorktree(repoRoot, item.path, allowedRoots, validate);
+	for (const item of branches) deleteRef(repoRoot, `refs/heads/${item.branch}`, validate);
 	for (const item of refs) {
-		deleteRef(repoRoot, item.ref);
+		deleteRef(repoRoot, item.ref, validate);
 		result.destruction.refsRemoved.push({
 			ref: item.ref,
 			target: item.target,
@@ -217,14 +233,19 @@ export function forceCleanupRun(input: ForceCleanupInput | CleanupInput): Cleanu
 		].join(", ")}`);
 	}
 
-	removeLegacyWorktreeContainer(repoRoot, planName);
+	removeLegacyWorktreeContainer(repoRoot, planName, validate);
 
 	if (planDirectoryPresent) {
 		const deletionTarget = realpathIfPresent(planDir);
 		if (deletionTarget !== planDir || deletionTarget === repoRoot || !isInside(repoRoot, deletionTarget)) {
 			fail(`Refusing to remove changed or unsafe plan directory: ${planDir}`);
 		}
-		fs.rmSync(planDir, { recursive: true, force: true });
+		validate("plan-directory", planDir);
+		if ("removePlanDirectory" in input && input.removePlanDirectory) {
+			input.removePlanDirectory(planDir, validate);
+		} else {
+			fs.rmSync(planDir, { recursive: true, force: true });
+		}
 		result.destruction.planDirectoryRemoved = true;
 	}
 

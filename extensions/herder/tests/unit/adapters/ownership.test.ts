@@ -6,6 +6,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	assertAdapterRecoveryEvidence,
+	readAdapterOwnershipEvidence,
+	readAdapterRuntimeIdentity,
+	markAdapterOwnershipCleanupRequired,
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
 	releaseAdapterOwnership,
@@ -164,4 +168,90 @@ try {
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("recovery evidence reads are non-creating and reject marked, malformed, replaced or deleted runtime", () => {
+	const { root, planDir } = fixture();
+	let held;
+	try {
+		assert.equal(readAdapterRuntimeIdentity(planDir), undefined);
+		assert.equal(readAdapterOwnershipEvidence(planDir), undefined);
+		assert.equal(fs.existsSync(path.join(planDir, ".herder")), false);
+		held = acquireAdapterOwnership(planDir, "run", "session");
+		const identity = readAdapterRuntimeIdentity(planDir);
+		assertAdapterRecoveryEvidence(planDir, identity);
+		const lock = fs.readFileSync(held.lockPath, "utf8");
+		assert.equal(readAdapterOwnershipEvidence(planDir)!.record.runId, "run");
+		assert.equal(fs.readFileSync(held.lockPath, "utf8"), lock);
+		markAdapterOwnershipCleanupRequired(held);
+		assert.throws(() => assertAdapterRecoveryEvidence(planDir, identity), /manual.*cleanup/);
+		fs.writeFileSync(held.lockPath, "{}");
+		assert.throws(() => readAdapterOwnershipEvidence(planDir), /malformed/);
+		fs.renameSync(path.join(planDir, ".herder"), path.join(root, "old-runtime"));
+		assert.throws(() => assertAdapterRecoveryEvidence(planDir, identity), /removed or replaced/);
+		fs.mkdirSync(path.join(planDir, ".herder"));
+		assert.throws(() => assertAdapterRecoveryEvidence(planDir, identity), /removed or replaced/);
+	} finally {
+		if (held) releaseAdapterOwnership(held);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("retained final-removal evidence excludes acquisition and recovery without recreating runtime", () => {
+	const { root, planDir } = fixture();
+	const held = acquireAdapterOwnership(planDir, "run", "session");
+	try {
+		markAdapterOwnershipCleanupRequired(held);
+		const runtime = readAdapterRuntimeIdentity(planDir);
+		fs.linkSync(held.lockPath, `${planDir}.cleanup-required`);
+		fs.rmSync(path.join(planDir, ".herder"), { recursive: true });
+		assert.throws(() => acquireAdapterOwnership(planDir, "replacement", "replacement", { isProcessAlive: () => false }), /manual child-process cleanup/);
+		assert.throws(() => assertAdapterRecoveryEvidence(planDir, runtime), /manual child-process cleanup/);
+		assert.equal(fs.existsSync(path.join(planDir, ".herder")), false);
+		assert.equal(fs.statSync(`${planDir}.cleanup-required`).ino, fs.fstatSync(held.descriptor).ino);
+	} finally {
+		releaseAdapterOwnership(held);
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+for (const kind of ["file", "symlink", "directory"] as const) {
+	for (const ownerPresent of [true, false]) {
+		test(`retained quarantine ${kind} excludes read-only recovery and acquisition with owner present: ${ownerPresent}`, () => {
+			const { root, planDir } = fixture();
+			try {
+				const lockPath = writeOwner(planDir, { version: 1, pid: 4242, runId: "dead", piSessionId: "departed" });
+				const runtime = readAdapterRuntimeIdentity(planDir);
+				if (!ownerPresent) fs.unlinkSync(lockPath);
+				const quarantine = `${lockPath}.cleanup-required`;
+				if (kind === "file") fs.writeFileSync(quarantine, "conflicting evidence");
+				else if (kind === "symlink") fs.symlinkSync(path.join(root, "absent"), quarantine);
+				else fs.mkdirSync(quarantine);
+				const retained = fs.lstatSync(quarantine);
+				const files = fs.readdirSync(path.dirname(lockPath)).sort();
+				assert.throws(() => readAdapterOwnershipEvidence(planDir), /manual child-process cleanup/);
+				assert.throws(() => assertAdapterRecoveryEvidence(planDir, runtime), /manual child-process cleanup/);
+				assert.throws(() => acquireAdapterOwnership(planDir, "replacement", "replacement", { isProcessAlive: () => false }), /manual child-process cleanup/);
+				assert.equal(fs.lstatSync(quarantine).ino, retained.ino);
+				assert.equal(fs.lstatSync(quarantine).dev, retained.dev);
+				assert.equal(fs.existsSync(lockPath), ownerPresent);
+				assert.deepEqual(fs.readdirSync(path.dirname(lockPath)).sort(), files, "inspection and refused acquisition must not initialize SQLite");
+			} finally { fs.rmSync(root, { recursive: true, force: true }); }
+		});
+	}
+}
+
+test("stale reaper retains a quarantine collision published by its liveness probe", () => {
+	const { root, planDir } = fixture();
+	try {
+		const lockPath = writeOwner(planDir, { version: 1, pid: 4242, runId: "dead", piSessionId: "departed" });
+		const original = fs.lstatSync(lockPath);
+		const bytes = fs.readFileSync(lockPath, "utf8");
+		assert.throws(() => acquireAdapterOwnership(planDir, "replacement", "replacement", {
+			isProcessAlive: () => { fs.writeFileSync(`${lockPath}.cleanup-required`, "conflict"); return false; },
+		}), /manual child-process cleanup/);
+		assert.equal(fs.lstatSync(lockPath).ino, original.ino);
+		assert.equal(fs.readFileSync(lockPath, "utf8"), bytes);
+		assert.equal(fs.readFileSync(`${lockPath}.cleanup-required`, "utf8"), "conflict");
+	} finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

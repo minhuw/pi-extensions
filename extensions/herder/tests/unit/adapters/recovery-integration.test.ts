@@ -10,12 +10,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry, SessionStats } from "@earendil-works/pi-coding-agent";
-import type { PiWorkerRequest, PiWorkerSessionFactory } from "../../../adapters/worker-engine.ts";
+import { PiWorkerEngine, type PiWorkerRequest, type PiWorkerSessionFactory } from "../../../adapters/worker-engine.ts";
 import { HerderNestedAgentScope } from "../../../adapters/nested-agent-executor.ts";
 import { HERDER_STATE_ENTRY } from "../../../adapters/state.ts";
 import {
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
+	assertAdapterRecoveryEvidence,
+	readAdapterRuntimeIdentity,
 	markAdapterOwnershipCleanupRequired,
 	releaseAdapterOwnership,
 	waitForAdapterOwnershipRetirement,
@@ -26,7 +28,7 @@ import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { fixturePlan } from "../../support/plan-v2.ts";
 import { ensureService, requestManagerOperation,
-	requestService, stopService } from "../../../src/client/index.ts";
+	requestService, stopService, waitManagerOperation } from "../../../src/client/index.ts";
 import { GitDriver, runCommand } from "../../../src/daemon/git-driver.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import {
@@ -1615,6 +1617,7 @@ for (const outcome of ["success", "success with queued recovery", "failure"] as 
 			else {
 				if (!freshRecovery) assert.equal(fs.existsSync(original.lockPath), false, "successful retirement must release the marked claim despite session_start");
 				await withDeadline(freshRecovery ?? api.invoke("session_start", restoredContext(value, original.record.runId, [])), "fresh session recovery");
+				assert.equal(factory.sessions.length, 2, JSON.stringify(warnings));
 				await withDeadline(factory.sessions[1]!.started, "fresh session worker start");
 				assert.equal(factory.sessions.length, 2, "exactly one replacement");
 				assert.equal(evidence(value).actions.filter(action => action.state === "dispatched").length, 1);
@@ -1679,7 +1682,7 @@ test("shutdown drains locally while old admitted remote reconciliation retains o
 		assert.equal(factory.sessions.length, 1);
 		allowReceipt.resolve();
 		await withDeadline(Promise.all([attaching, recovery]), "remote retirement and queued recovery");
-		assert.equal(warnings.length, 0);
+		assert.equal(warnings.length, 0, JSON.stringify(warnings));
 		assert.equal(factory.sessions.length, 2);
 		await withDeadline(factory.sessions[1]!.started, "remote retirement replacement");
 		assert.equal(factory.sessions[0]!.prompted, false, "old epoch never starts its accepted worker");
@@ -2026,126 +2029,749 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 	});
 }
 
-for (const failure of ["durable marker", "worker disposal", "marker persistence", "none"] as const) {
-	test(`force cleanup rechecks ${failure} after service exclusion`, { timeout: 30_000 }, async () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-cleanup-exclusion-"));
+function cleanupContext(value: Fixture, warnings: Warning[], confirm = async () => true): ExtensionContext {
+	const base = freshContext(value, warnings);
+	return { ...base, hasUI: true, ui: { ...base.ui,
+		theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text }, confirm,
+	} } as unknown as ExtensionContext;
+}
+
+for (const failure of ["marker persistence", "quarantine replacement", "abort", "disposal", "claim mutation", "none"] as const) {
+	test(`force settles before exclusion: ${failure}`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-settlement-"));
 		const value = writeFixture(root);
 		const api = new CapturedExtensionAPI();
 		const factory = new PendingWorkerFactory();
 		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 		const warnings: Warning[] = [];
-		const unsafe = new Deferred<void>();
-		const excluding = new Deferred<void>();
-		const release = new Deferred<void>();
-		const base = freshContext(value, warnings);
-		let confirmations = 0;
-		const ctx = { ...base, hasUI: true, ui: { ...base.ui,
-			theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
-			confirm: async () => { confirmations++; return true; },
-			notify: (message: string, level: string) => {
-				warnings.push({ message, level });
-				if (/manual.*cleanup/i.test(message)) unsafe.resolve();
-			},
-		} } as unknown as ExtensionContext;
-		const originalFetch = globalThis.fetch;
+		let consent = false;
+		const ctx = cleanupContext(value, warnings, async () => consent);
+		const fetch = globalThis.fetch;
 		const truncate = fs.ftruncateSync;
-		let held: AdapterOwnership | undefined;
+		const abortEntered = new Deferred<void>();
+		const releaseAbort = new Deferred<void>();
 		let cleaning: Promise<unknown> | undefined;
+		let exclusions = 0;
 		try {
-			if (failure === "durable marker" || failure === "none") {
-				await startFixture(value, "pi-worker:departed");
-				held = acquireAdapterOwnership(value.planDirectory, "fixture-run", "departed-session");
-			} else {
-				await api.invoke("session_start", ctx);
-				await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
-				await withDeadline(factory.sessions[0]!.started, "worker started");
-			}
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
 			const original = ownershipEvidence(value);
+			const before = evidence(value);
 			const lock = fs.readFileSync(original.lockPath, "utf8");
-			assert.equal(original.record.resetCleanupRequired, undefined);
-			const database = path.join(value.planDirectory, ".herder/execution.sqlite3");
-			const databaseStat = fs.statSync(database);
-			const git = (...args: string[]) => {
-				const result = spawnSync("git", ["-C", value.repo, ...args], { encoding: "utf8" });
-				assert.equal(result.status, 0, result.stderr);
-				return result.stdout;
+			await api.command("herder-cleanup").handler("herder-plans --force", ctx);
+			assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock);
+			assert.equal(factory.sessions[0]!.aborted, false);
+			assert.deepEqual(evidence(value), before);
+			const session = factory.sessions[0]!;
+			const abort = session.abort.bind(session);
+			session.abort = async () => {
+				assertCleanupMarker(original);
+				abortEntered.resolve();
+				await releaseAbort.promise;
+				await abort();
+				if (failure === "claim mutation") {
+					const record = JSON.parse(fs.readFileSync(original.lockPath, "utf8"));
+					fs.writeFileSync(original.lockPath, JSON.stringify({ ...record, piSessionId: "replacement-session" }));
+				}
+				if (failure === "abort") throw Error("fixture abort failed");
 			};
-			const refs = git("show-ref");
-			const worktrees = git("worktree", "list", "--porcelain");
-			const worktree = evidence(value).plan!.worktree;
-			assert.ok(fs.existsSync(worktree));
+			if (failure === "disposal") session.dispose = () => { throw Error("fixture disposal failed"); };
+			if (failure === "marker persistence" || failure === "quarantine replacement") fs.ftruncateSync = (descriptor, length) => {
+				if (fs.fstatSync(descriptor).ino === original.stat.ino) {
+					if (failure === "marker persistence") throw Error("fixture marker persistence failed");
+					fs.renameSync(`${original.lockPath}.cleanup-required`, path.join(root, "old-quarantine"));
+					fs.writeFileSync(`${original.lockPath}.cleanup-required`, "replacement evidence");
+				}
+				truncate(descriptor, length);
+			};
 			globalThis.fetch = async (input, init) => {
 				if (new URL(String(input)).pathname === "/shutdown") {
-					excluding.resolve();
-					await release.promise;
+					exclusions++;
+					assert.equal(session.disposed, true, "worker disposal precedes service exclusion");
+					assertCleanupMarker(original);
 				}
-				return originalFetch(input, init);
+				return fetch(input, init);
 			};
+			consent = true;
 			cleaning = api.command("herder-cleanup").handler("herder-plans --force", ctx);
-			void cleaning.catch(() => {});
-			await withDeadline(excluding.promise, "confirmed cleanup awaits service shutdown");
-			assert.equal(confirmations, 1);
-			assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock);
-			if (failure === "durable marker") markAdapterOwnershipCleanupRequired(held!);
-			if (failure === "worker disposal" || failure === "marker persistence") {
-				let persistenceAttempted = false;
-				if (failure === "marker persistence") fs.ftruncateSync = (descriptor, length) => {
-					const stat = fs.fstatSync(descriptor);
-					if (stat.dev === original.stat.dev && stat.ino === original.stat.ino) {
-						persistenceAttempted = true;
-						throw Error("fixture marker persistence failed before truncation");
-					}
-					truncate(descriptor, length);
-				};
-				const session = factory.sessions[0]!;
-				session.dispose = () => { throw Error("fixture exclusion-window disposal failed"); };
-				session.finish();
-				await withDeadline(unsafe.promise, "worker cleanup exclusion");
-				if (failure === "marker persistence") {
-					assert.equal(persistenceAttempted, true);
-					assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock, "only the local latch is available");
-				}
-			}
-			const before = evidence(value);
-			const warningOffset = warnings.length;
-			release.resolve();
-			await withDeadline(cleaning, "cleanup after exclusion");
-			globalThis.fetch = originalFetch;
-			if (failure === "none") {
-				assert.equal(fs.existsSync(value.planDirectory), false);
-				assert.equal(fs.existsSync(worktree), false);
-				assert.ok(!git("for-each-ref", "refs/heads/herder/herder-plans", "refs/herder/herder-plans").trim());
-			} else {
-				assert.ok(warnings.slice(warningOffset).some(warning => warning.level === "error" && /manual.*cleanup/i.test(warning.message)), JSON.stringify(warnings));
-				assert.ok(fs.existsSync(value.planDirectory));
-				assert.equal(fs.statSync(database).ino, databaseStat.ino);
-				assert.equal(fs.statSync(database).dev, databaseStat.dev);
+			if (failure !== "marker persistence" && failure !== "quarantine replacement") {
+				await withDeadline(abortEntered.promise, "force abort");
+				assert.equal(exclusions, 0);
 				assert.deepEqual(evidence(value), before);
-				assert.equal(git("show-ref"), refs);
-				assert.equal(git("worktree", "list", "--porcelain"), worktrees);
-				assert.ok(fs.existsSync(worktree));
+				releaseAbort.resolve();
+			}
+			await withDeadline(cleaning, "force completion");
+			if (failure === "none") {
+				assert.equal(exclusions, 1);
+				assert.equal(fs.existsSync(value.planDirectory), false);
+				assert.equal(fs.existsSync(before.plan!.worktree), false);
+				assert.equal(fs.existsSync(`${original.lockPath}.cleanup-required`), false);
+				assert.equal(fs.existsSync(`${value.planDirectory}.cleanup-required`), false);
+				assert.ok(warnings.some(w => /Force cleanup executed/.test(w.message)), JSON.stringify(warnings));
+				await api.invoke("session_shutdown", ctx);
+				assert.equal(fs.existsSync(value.planDirectory), false);
+			} else {
+				assert.equal(exclusions, 0);
+				assert.deepEqual(evidence(value), before);
+				assert.ok(!warnings.some(w => /Force cleanup executed/.test(w.message)));
+				assert.equal(fs.existsSync(original.lockPath), true);
 				if (failure === "marker persistence") {
 					assert.equal(fs.readFileSync(original.lockPath, "utf8"), lock);
-					assert.equal(fs.statSync(original.lockPath).ino, original.stat.ino);
+					assert.equal(session.aborted, false);
+					assert.equal(session.disposed, false);
+					assert.equal(fs.statSync(original.lockPath).nlink, 2);
+					assert.throws(() => acquireAdapterOwnership(value.planDirectory, "replacement", "replacement", {
+						isProcessAlive: () => false,
+					}), /manual child-process cleanup/);
+				}
+				else if (failure === "quarantine replacement") {
+					assert.equal(fs.readFileSync(`${original.lockPath}.cleanup-required`, "utf8"), "replacement evidence");
+					assert.equal(session.aborted, false);
+					assert.equal(session.disposed, false);
+					assert.ok(warnings.some(w => /quarantine was replaced/.test(w.message)), JSON.stringify(warnings));
+					assertCleanupMarker(original);
+				}
+				else if (failure === "claim mutation") {
+					assert.deepEqual(JSON.parse(fs.readFileSync(original.lockPath, "utf8")), { ...original.record, resetCleanupRequired: true, piSessionId: "replacement-session" });
+					assert.ok(warnings.some(w => /evidence changed during settlement/.test(w.message)));
 				} else assertCleanupMarker(original);
-				const offset = warnings.length;
 				await api.command("herder-cleanup").handler("herder-plans --force", ctx);
-				assert.equal(confirmations, 1, "affected directory remains excluded before preview");
-				assert.ok(warnings.slice(offset).some(warning => /manual.*cleanup/i.test(warning.message)));
-				assert.equal(factory.requests.length, failure === "durable marker" ? 0 : 1, "no successor worker");
+				assert.equal(exclusions, 0, "failed attempts never authorize a retry");
 			}
-			const unrelated = path.join(value.repo, "unrelated-plans");
-			initPlanDir(unrelated);
-			await api.command("herder-cleanup").handler("unrelated-plans --force", ctx);
-			assert.equal(fs.existsSync(unrelated), false, "unrelated cleanup is not quarantined");
 		} finally {
-			release.resolve();
+			releaseAbort.resolve();
 			await cleaning?.catch(() => {});
-			globalThis.fetch = originalFetch;
+			globalThis.fetch = fetch;
 			fs.ftruncateSync = truncate;
 			await api.invoke("session_shutdown", ctx).catch(() => {});
-			if (held) releaseAdapterOwnership(held);
 			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const timing of ["before deletion", "after deletion", "during exclusion", "post deletion", "valid restoration"] as const) {
+	test(`distinct adapter terminal recovery ${timing}`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-terminal-recovery-"));
+		const value = writeFixture(root);
+		const owner = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(owner as unknown as ExtensionAPI, new PendingWorkerFactory());
+		const observer = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		registerHerderPiWithWorkerFactory(observer as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const ctx = cleanupContext(value, warnings);
+		const fetch = globalThis.fetch;
+		const statusEntered = new Deferred<void>();
+		const allowStatus = new Deferred<void>();
+		const shutdownEntered = new Deferred<void>();
+		const allowShutdown = new Deferred<void>();
+		let recovery: Promise<unknown> | undefined;
+		let cleaning: Promise<unknown> | undefined;
+		try {
+			const started = await pauseFixture(value);
+			const recovered = restoredContext(value, started.before.run!.runId, warnings);
+			const statuses: unknown[] = [];
+			const recoveryCtx = { ...recovered, hasUI: true, ui: { ...ctx.ui,
+				setStatus: (_key: string, text: unknown) => statuses.push(text),
+			} } as ExtensionContext;
+			let statusReads = ["during exclusion", "post deletion"].includes(timing) ? 1 : 0;
+			globalThis.fetch = async (input, init) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/shutdown") {
+					shutdownEntered.resolve(); await allowShutdown.promise;
+				}
+				const response = await fetch(input, init);
+				if (url.pathname === "/v1/status" && statusReads++ === 0) {
+					const body = object(await response.json());
+					const reply = { ...object(body.reply), status: "complete", actions: [], active: [] };
+					statusEntered.resolve(); await allowStatus.promise;
+					return Response.json({ ...body, reply });
+				}
+				return response;
+			};
+			if (["before deletion", "after deletion", "valid restoration"].includes(timing)) {
+				recovery = observer.invoke("session_start", recoveryCtx);
+				await withDeadline(statusEntered.promise, "terminal recovery status admitted");
+			}
+			if (timing !== "valid restoration") {
+				cleaning = owner.command("herder-cleanup").handler("herder-plans --force", ctx);
+				await withDeadline(shutdownEntered.promise, "force held after final manager drain");
+				assert.equal(JSON.parse(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8")).resetCleanupRequired, true);
+				if (timing === "during exclusion") recovery = observer.invoke("session_start", recoveryCtx);
+				if (timing === "before deletion" || timing === "during exclusion") {
+					allowStatus.resolve(); await withDeadline(recovery!, "terminal reply before deletion");
+					assert.equal(observer.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY).length, 0);
+					assert.ok(statuses.every(s => s === undefined));
+				}
+				allowShutdown.resolve();
+				await withDeadline(cleaning, "force deletion");
+				assert.equal(fs.existsSync(value.planDirectory), false, JSON.stringify(warnings));
+				if (timing === "post deletion") recovery = observer.invoke("session_start", recoveryCtx);
+			}
+			allowStatus.resolve();
+			await withDeadline(recovery!, "terminal recovery settles");
+			assert.equal(observer.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY).length, timing === "valid restoration" ? 1 : 0);
+			assert.equal(factory.requests.length, 0);
+			if (timing !== "valid restoration") {
+				assert.ok(statuses.every(s => s === undefined));
+				assert.equal(fs.existsSync(value.planDirectory), false, "late callback must not recreate runtime");
+			}
+		} finally {
+			allowStatus.resolve(); allowShutdown.resolve();
+			await Promise.all([recovery, cleaning].map(p => p?.catch(() => {})));
+			globalThis.fetch = fetch;
+			await observer.invoke("session_shutdown", ctx).catch(() => {});
+			await owner.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const target of ["distinct", "same"] as const) {
+	test(`pre-ownership Fire and ${target}-target force cleanup keep target-specific admission`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-fire-isolation-"));
+		const value = writeFixture(root);
+		const other = path.join(value.repo, "other-plans");
+		initPlanDir(other);
+		const preflightEntered = new Deferred<void>();
+		const allowPreflight = new Deferred<void>();
+		const factory = new class extends PendingWorkerFactory {
+			bindings = 0;
+			bindModelRegistry() { this.bindings++; }
+			override async availableModels() {
+				preflightEntered.resolve(); await allowPreflight.promise;
+				return super.availableModels();
+			}
+		}();
+		const api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const ctx = cleanupContext(value, warnings);
+		let firing: Promise<unknown> | undefined;
+		try {
+			await api.invoke("session_start", ctx);
+			firing = api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			await withDeadline(preflightEntered.promise, "pre-ownership Fire preflight");
+			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
+			const bindings = factory.bindings;
+			await api.command("herder-cleanup").handler(`${target === "same" ? "herder-plans" : "other-plans"} --force`, ctx);
+			assert.equal(factory.bindings, bindings, "cleanup must not rebind another Fire's factory");
+			allowPreflight.resolve();
+			await withDeadline(firing, "Fire after target cleanup");
+			if (target === "same") {
+				assert.equal(factory.requests.length, 0);
+				assert.equal(fs.existsSync(value.planDirectory), false);
+				assert.ok(!warnings.some(w => /fire started/.test(w.message)));
+			} else {
+				await withDeadline(factory.sessions[0]!.started, "unrelated Fire worker starts");
+				assert.equal(fs.existsSync(other), false);
+				const durable = evidence(value);
+				assert.equal(durable.run!.status, "running");
+				assert.equal(durable.actions.filter(a => a.state === "dispatched").length, 1);
+				assert.equal(durable.actions[0]!.hostHandle, `pi-worker:${factory.sessions[0]!.sessionId}`);
+				assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
+			}
+		} finally {
+			allowPreflight.resolve(); await firing?.catch(() => {});
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			await stopService(other).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+test("owned Fire A terminal advances its real database while force B awaits shutdown", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-owned-isolation-"));
+	const value = writeFixture(root);
+	const other = path.join(value.repo, "other-plans");
+	initPlanDir(other);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const warnings: Warning[] = [];
+	const ctx = cleanupContext(value, warnings);
+	const fetch = globalThis.fetch;
+	const excluding = new Deferred<void>();
+	const allowExclusion = new Deferred<void>();
+	const terminalAccepted = new Deferred<string>();
+	let cleaning: Promise<unknown> | undefined;
+	try {
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await ensureService(other);
+		const serviceA = await ensureService(value.planDirectory);
+		const before = evidence(value);
+		const owner = ownershipEvidence(value);
+		globalThis.fetch = async (input, init) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/shutdown") { excluding.resolve(); await allowExclusion.promise; }
+			const response = await fetch(input, init);
+			if (url.pathname === "/v1/operation" && init?.method === "POST") {
+				const body = object(JSON.parse(String(init.body)));
+				if (body.kind === "event" && object(body.input).kind === "terminals") terminalAccepted.resolve(String(body.operationId));
+			}
+			return response;
+		};
+		cleaning = api.command("herder-cleanup").handler("other-plans --force", ctx);
+		await withDeadline(excluding.promise, "B exclusion after manager drain");
+		assert.equal(factory.sessions[0]!.aborted, false);
+		factory.sessions[0]!.finish();
+		const terminalId = await withDeadline(terminalAccepted.promise, "A terminal accepted during B exclusion");
+		await withDeadline(waitManagerOperation(serviceA, terminalId), "A terminal durably applied");
+		assert.notEqual(evidence(value).actions.find(action => action.actionId === before.actions[0]!.actionId)!.state, "dispatched");
+		assert.equal(evidence(value).run!.runId, before.run!.runId);
+		assert.equal(fs.statSync(owner.lockPath).ino, owner.stat.ino);
+		assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
+		allowExclusion.resolve();
+		await withDeadline(cleaning, "B cleanup");
+		assert.equal(fs.existsSync(other), false);
+		assert.equal(evidence(value).run!.runId, before.run!.runId);
+		assert.ok(!warnings.some(w => /completion handling failed/.test(w.message)), JSON.stringify(warnings));
+	} finally {
+		allowExclusion.resolve(); await cleaning?.catch(() => {});
+		globalThis.fetch = fetch;
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(value.planDirectory).catch(() => {});
+		await stopService(other).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+for (const disposalFails of [false, true]) {
+	test(`force drains out-of-queue integration-repair FINAL_AUDIT preparation and disposal (${disposalFails ? "failure" : "success"})`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-final-prepare-"));
+		const value = writeFixture(root);
+		const createEntered = new Deferred<void>();
+		const allowCreate = new Deferred<void>();
+		const shutdownEntered = new Deferred<void>();
+		const allowShutdown = new Deferred<void>();
+		const disposalEntered = new Deferred<void>();
+		const allowDisposal = new Deferred<void>();
+		const marked = new Deferred<void>();
+		let original: ReturnType<typeof ownershipEvidence>;
+		const factory = new class extends PendingWorkerFactory {
+			override async create(request: PiWorkerRequest) {
+				if (request.action.workerMode !== "FINAL_AUDIT") return super.create(request);
+				createEntered.resolve(); await allowCreate.promise;
+				const created = this.createSession(request);
+				Object.assign(created.session, { extensionRunner: { emit: async () => {
+					assertCleanupMarker(original);
+					shutdownEntered.resolve(); await allowShutdown.promise;
+				} } });
+				const dispose = created.session.dispose.bind(created.session);
+				created.session.dispose = async () => {
+					assertCleanupMarker(original);
+					disposalEntered.resolve(); await allowDisposal.promise;
+					if (disposalFails) throw Error("fixture final-audit disposal failed");
+					dispose();
+				};
+				return created;
+			}
+		}();
+		const api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const warnings: Warning[] = [];
+		const base = cleanupContext(value, warnings);
+		const ctx = { ...base, sessionManager: { ...base.sessionManager, getSessionId: () => "repair-owner" } } as ExtensionContext;
+		const fetch = globalThis.fetch;
+		const fsync = fs.fsyncSync;
+		let repair: Promise<unknown> | undefined;
+		let cleaning: Promise<unknown> | undefined;
+		let exclusions = 0;
+		try {
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			original = ownershipEvidence(value);
+			const before = evidence(value);
+			const service = await ensureService(value.planDirectory);
+			const body = await requestService(service, "/v1/status");
+			const reply = object(body.reply);
+			const run = before.run!;
+			const worktree = String(run.integrationWorktree);
+			const git = (...args: string[]) => runCommand("git", ["-C", worktree, ...args]).stdout.trim();
+			const head = git("rev-parse", "HEAD");
+			const request = { requestId: "repair-fixture", requestSha256: "a".repeat(64), capabilityToken: "b".repeat(64),
+				runId: run.runId, generation: run.currentGeneration, ownerSessionId: "repair-owner", state: "passed",
+				classification: "code_defect", round: 1, maxRounds: 3, currentCommit: head, currentTree: git("rev-parse", "HEAD^{tree}"),
+				integrationWorktree: worktree, integrationBranch: git("symbolic-ref", "--short", "HEAD"),
+			};
+			const finalReply = { ...reply, integrationRepair: request, actions: [{ ...factory.requests[0]!.action,
+				actionId: "held-final-audit", planId: "RUN", role: "plan-reviewer", workerMode: "FINAL_AUDIT",
+			}] };
+			globalThis.fetch = async (input, init) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/shutdown") {
+					exclusions++;
+					assert.equal(factory.sessions[1]!.disposed, true);
+				}
+				if (url.pathname === "/v1/status") return Response.json({ ...body, reply: { ...reply, integrationRepair: request, actions: [] } });
+				if (url.pathname === "/v1/operation") {
+					const posted = init?.method === "POST" ? object(JSON.parse(String(init.body))) : undefined;
+					if (posted?.kind === "integration_repair" || url.searchParams.get("id") === "repair-final-fixture") {
+						return Response.json({ ok: true, operation: { operationId: "repair-final-fixture", kind: "integration_repair", state: "succeeded", result: finalReply } });
+					}
+				}
+				return fetch(input, init);
+			};
+			repair = api.tool("herder_integration_repair").execute("repair", {
+				planDirectory: "herder-plans", operation: "finish", operationId: "repair-final-fixture",
+				requestId: request.requestId, requestSha256: request.requestSha256, capabilityToken: request.capabilityToken,
+				ownerSessionId: "repair-owner", observedCommit: head,
+			}, undefined, undefined, ctx);
+			const repairRejected = assert.rejects(repair, /cleanup|retired/);
+			await withDeadline(createEntered.promise, "out-of-queue final-audit preparation");
+			fs.fsyncSync = descriptor => {
+				fsync(descriptor);
+				if (fs.fstatSync(descriptor).ino === original.stat.ino && fs.fstatSync(descriptor).size > 0
+					&& JSON.parse(fs.readFileSync(original.lockPath, "utf8")).resetCleanupRequired) marked.resolve();
+			};
+			let settled = false;
+			cleaning = api.command("herder-cleanup").handler("herder-plans --force", ctx).finally(() => { settled = true; });
+			await withDeadline(marked.promise, "force marker before final preparation drain");
+			assert.equal(settled, false);
+			assert.equal(exclusions, 0);
+			allowCreate.resolve();
+			await withDeadline(shutdownEntered.promise, "late final-audit extension shutdown");
+			assert.equal(settled, false);
+			assert.deepEqual(evidence(value), before);
+			allowShutdown.resolve();
+			await withDeadline(disposalEntered.promise, "held final-audit disposal");
+			assert.equal(settled, false);
+			assert.equal(exclusions, 0);
+			assertCleanupMarker(original);
+			allowDisposal.resolve();
+			await withDeadline(Promise.all([repairRejected, cleaning]), "final-audit settlement before force");
+			assert.equal(factory.sessions[1]!.prompted, false);
+			assert.equal(exclusions, disposalFails ? 0 : 1);
+			assert.equal(fs.existsSync(value.planDirectory), disposalFails);
+			if (disposalFails) {
+				assertCleanupMarker(original);
+				assert.deepEqual(evidence(value), before);
+				assert.ok(!warnings.some(w => /Force cleanup executed/.test(w.message)));
+			} else assert.ok(warnings.some(w => /Force cleanup executed/.test(w.message)), JSON.stringify(warnings));
+		} finally {
+			allowCreate.resolve(); allowShutdown.resolve(); allowDisposal.resolve();
+			await Promise.all([repair, cleaning].map(p => p?.catch(() => {})));
+			globalThis.fetch = fetch; fs.fsyncSync = fsync;
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const operation of ["dashboard", "status"] as const) {
+	test(`${operation} refuses marked evidence before starting a service`, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-quarantined-dashboard-"));
+		const value = writeFixture(root);
+		const held = acquireAdapterOwnership(value.planDirectory, "fixture-run", "departed-session");
+		const api = new CapturedExtensionAPI();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, new PendingWorkerFactory());
+		const warnings: Warning[] = [];
+		const ctx = cleanupContext(value, warnings);
+		try {
+			markAdapterOwnershipCleanupRequired(held);
+			const before = fs.readdirSync(path.dirname(held.lockPath)).sort();
+			await api.command(`herder-${operation}`).handler("herder-plans", ctx);
+			assert.ok(warnings.some(w => /manual child-process cleanup/.test(w.message)), JSON.stringify(warnings));
+			assert.deepEqual(fs.readdirSync(path.dirname(held.lockPath)).sort(), before, "no service or dashboard evidence created");
+		} finally {
+			releaseAdapterOwnership(held);
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const scenario of ["preexisting collision", "confirmation collision", "marker persistence", "ordinary dead owner"] as const) {
+	test(`fresh context after force owner process exits: ${scenario}`, { timeout: 45_000 }, async (t) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-owner-exit-"));
+		const value = writeFixture(root);
+		const resultFile = path.join(root, "owner.json");
+		const lockPath = adapterOwnershipLockPath(value.planDirectory);
+		const quarantine = `${lockPath}.cleanup-required`;
+		const script = `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { CapturedExtensionAPI, CapturedUI, BaseSession, availableModels, agentRoot } from ${JSON.stringify(new URL("./helpers/harness.ts", import.meta.url).href)};
+import { registerHerderPiWithWorkerFactory } from ${JSON.stringify(new URL("../../../adapters/index.ts", import.meta.url).href)};
+import { HerderNestedAgentScope } from ${JSON.stringify(new URL("../../../adapters/nested-agent-executor.ts", import.meta.url).href)};
+import { RunStore } from ${JSON.stringify(new URL("../../../src/daemon/run-store.ts", import.meta.url).href)};
+const value = ${JSON.stringify(value)};
+const scenario = ${JSON.stringify(scenario)};
+const lockPath = ${JSON.stringify(lockPath)};
+const quarantine = lockPath + ".cleanup-required";
+const api = new CapturedExtensionAPI();
+const ui = new CapturedUI();
+const session = new class extends BaseSession {
+	async prompt() { await new Promise(() => {}); }
+	async abort() { throw Error("Failed marking must not abort workers"); }
+}("force-owner-worker");
+registerHerderPiWithWorkerFactory(api, {
+	availableModels: async () => [...availableModels],
+	create: async request => ({ session, nested: new HerderNestedAgentScope({
+		action: request.action, agentRoot, createSession: async () => { throw Error("unused"); },
+	}) }),
+});
+const ctx = { cwd: value.repo, hasUI: true, ui,
+	sessionManager: { getEntries: () => [], getSessionId: () => "force-owner" },
+	modelRegistry: { getAvailable: () => [...availableModels] }, model: availableModels[0], thinkingLevel: "xhigh",
+	isProjectTrusted: () => true, isIdle: () => true,
+};
+await api.invoke("session_start", ctx);
+await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+const store = new RunStore(value.planDirectory);
+const run = store.getRun();
+const plan = store.getPlan(run.runId, "001");
+const actions = store.getActions(run.runId);
+store.close();
+const dashboardUrl = api.appendedEntries.findLast(e => e.data?.dashboardUrl)?.data.dashboardUrl;
+assert.ok(dashboardUrl);
+const before = { bytes: fs.readFileSync(lockPath, "utf8"), stat: fs.lstatSync(lockPath), runtime: fs.lstatSync(path.dirname(lockPath)), run, plan, actions, dashboardUrl };
+fs.writeFileSync(path.join(plan.worktree, "retained-dirty-evidence"), "preserve me");
+const refs = await api.exec("git", ["-C", value.repo, "show-ref"]);
+let conflictingStat;
+const conflict = () => {
+	fs.writeFileSync(quarantine, "conflicting evidence", { flag: "wx" });
+	conflictingStat = fs.lstatSync(quarantine);
+};
+if (scenario === "preexisting collision") conflict();
+let confirmations = 0;
+ui.confirm = async () => { confirmations++; if (scenario === "confirmation collision") conflict(); return true; };
+const truncate = fs.ftruncateSync;
+if (scenario === "marker persistence") fs.ftruncateSync = (fd, length) => {
+	if (fs.fstatSync(fd).ino === before.stat.ino) throw Error("fixture marker persistence failed");
+	return truncate(fd, length);
+};
+if (scenario !== "ordinary dead owner") await api.command("herder-cleanup").handler("herder-plans --force", ctx);
+assert.equal(session.disposed, false);
+assert.equal(fs.readFileSync(lockPath, "utf8"), before.bytes);
+assert.deepEqual(await api.exec("git", ["-C", value.repo, "show-ref"]), refs);
+fs.writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ before, conflictingStat, confirmations, warnings: ui.notifications }));
+// Deliberately exit without session_shutdown or ownership release: the OS closes descriptors only.
+process.exit(0);
+`;
+		const fetch = globalThis.fetch;
+		try {
+			const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], {
+				encoding: "utf8", timeout: 30_000,
+			});
+			assert.equal(child.status, 0, child.stderr);
+			const { before, conflictingStat, confirmations, warnings } = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+			assert.equal(confirmations, scenario === "confirmation collision" || scenario === "marker persistence" ? 1 : 0);
+			assert.equal(before.stat.nlink, 1);
+			assert.equal(JSON.parse(before.bytes).resetCleanupRequired, undefined);
+			assert.equal(fs.readFileSync(lockPath, "utf8"), before.bytes);
+			assert.equal(fs.lstatSync(lockPath).ino, before.stat.ino);
+			assert.equal(fs.lstatSync(lockPath).dev, before.stat.dev);
+			const runtime = fs.lstatSync(path.dirname(lockPath));
+			assert.equal(runtime.ino, before.runtime.ino);
+			assert.equal(runtime.dev, before.runtime.dev);
+			assert.equal(fs.readFileSync(path.join(before.plan.worktree, "retained-dirty-evidence"), "utf8"), "preserve me");
+			const durable = evidence(value);
+			assert.deepEqual(durable.run, before.run);
+			assert.deepEqual(durable.plan, before.plan);
+			assert.deepEqual(durable.actions, before.actions);
+			if (scenario === "ordinary dead owner") {
+				assertAdapterRecoveryEvidence(value.planDirectory, readAdapterRuntimeIdentity(value.planDirectory));
+				const replacement = acquireAdapterOwnership(value.planDirectory, "replacement", "replacement");
+				try { assert.equal(replacement.record.runId, "replacement"); }
+				finally { releaseAdapterOwnership(replacement); }
+				assert.equal(fs.existsSync(quarantine), false);
+				return;
+			}
+			assert.ok(warnings.some((w: Warning) => /manual child-process cleanup|fixture marker persistence failed/.test(w.message)), JSON.stringify(warnings));
+			assert.ok(!warnings.some((w: Warning) => /Force cleanup executed/.test(w.message)));
+			const retained = fs.lstatSync(quarantine);
+			if (conflictingStat) {
+				assert.equal(retained.ino, conflictingStat.ino);
+				assert.equal(retained.dev, conflictingStat.dev);
+				assert.equal(fs.readFileSync(quarantine, "utf8"), "conflicting evidence");
+			}
+			assert.equal(retained.ino === before.stat.ino, scenario === "marker persistence");
+			assert.equal(fs.lstatSync(lockPath).nlink, scenario === "marker persistence" ? 2 : 1);
+			const retainedBytes = fs.readFileSync(quarantine, "utf8");
+			const files = fs.readdirSync(path.dirname(lockPath), { recursive: true }).sort();
+			assert.throws(() => readAdapterRuntimeIdentity(value.planDirectory), /manual child-process cleanup/);
+			assert.throws(() => assertAdapterRecoveryEvidence(value.planDirectory, runtime), /manual child-process cleanup/);
+			assert.throws(() => acquireAdapterOwnership(value.planDirectory, "replacement", "replacement"), /manual child-process cleanup/);
+			const api = new CapturedExtensionAPI();
+			const factory = new PendingWorkerFactory();
+			registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+			const recoveryWarnings: Warning[] = [];
+			const restored = restoredContext(value, before.run.runId, recoveryWarnings);
+			const statuses: unknown[] = [];
+			const widgets: unknown[] = [];
+			const ctx = { ...restored, hasUI: true, ui: { ...cleanupContext(value, recoveryWarnings).ui,
+				setStatus: (_key: string, text: unknown) => statuses.push(text),
+				setWidget: (_key: string, text: unknown) => widgets.push(text),
+			} } as ExtensionContext;
+			let serviceCalls = 0;
+			globalThis.fetch = async (input, init) => {
+				if (new URL(String(input)).origin === new URL(before.dashboardUrl).origin) {
+					serviceCalls++;
+					throw Error("quarantined recovery reached service");
+				}
+				return fetch(input, init);
+			};
+			await api.invoke("session_start", ctx);
+			await api.invoke("session_shutdown", ctx);
+			assert.equal(serviceCalls, 0);
+			assert.ok(recoveryWarnings.some(w => /manual child-process cleanup/.test(w.message)), JSON.stringify(recoveryWarnings));
+			assert.equal(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY).length, 0);
+			assert.ok(statuses.every(s => s === undefined));
+			assert.ok(widgets.every(w => w === undefined));
+			assert.equal(factory.requests.length, 0);
+			assert.deepEqual(fs.readdirSync(path.dirname(lockPath), { recursive: true }).sort(), files);
+			assert.equal(fs.lstatSync(quarantine).ino, retained.ino);
+			assert.equal(fs.lstatSync(quarantine).dev, retained.dev);
+			assert.equal(fs.readFileSync(quarantine, "utf8"), retainedBytes);
+			assert.equal(fs.lstatSync(lockPath).ino, before.stat.ino);
+			assert.equal(fs.readFileSync(lockPath, "utf8"), before.bytes);
+			t.diagnostic(JSON.stringify({ scenario,
+				owner: { dev: before.stat.dev, ino: before.stat.ino, nlink: fs.lstatSync(lockPath).nlink },
+				quarantine: { dev: retained.dev, ino: retained.ino },
+				evidencePreserved: true, replacementRefused: true, recoveryRefused: true, serviceCalls,
+			}));
+		} finally {
+			globalThis.fetch = fetch;
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const scenario of ["confirmation collision", "marker persistence", "cancelled confirmation", "unrelated target"] as const) {
+	test(`A8 active Fire terminal after force: ${scenario}`, { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-force-late-terminal-"));
+		const value = writeFixture(root);
+		const other = path.join(value.repo, "other-plans");
+		const api = new CapturedExtensionAPI();
+		const factory = new PendingWorkerFactory();
+		const terminalHandled = new Deferred<void>();
+		const onTerminal = PiWorkerEngine.prototype.onTerminal;
+		const fetch = globalThis.fetch;
+		const truncate = fs.ftruncateSync;
+		const lockPath = adapterOwnershipLockPath(value.planDirectory);
+		const quarantine = `${lockPath}.cleanup-required`;
+		const warnings: Warning[] = [];
+		let confirmations = 0;
+		let terminalSubmissions = 0;
+		let exclusions = 0;
+		let markerAttempts = 0;
+		const refused = scenario === "confirmation collision" || scenario === "marker persistence";
+		const ctx = cleanupContext(value, warnings, async () => {
+			confirmations++;
+			if (scenario === "confirmation collision") {
+				fs.writeFileSync(quarantine, "independent cleanup evidence\n", { flag: "wx" });
+				assert.notEqual(fs.statSync(quarantine).ino, fs.statSync(lockPath).ino);
+			}
+			return scenario !== "cancelled confirmation";
+		});
+		const fileEvidence = (file: string) => {
+			if (!fs.existsSync(file)) return null;
+			const stat = fs.lstatSync(file);
+			return { bytes: fs.readFileSync(file), dev: stat.dev, ino: stat.ino, nlink: stat.nlink };
+		};
+		const states = () => structuredClone(api.appendedEntries.filter(e => e.customType === HERDER_STATE_ENTRY));
+		const refs = () => runCommand("git", ["-C", value.repo, "show-ref"]).stdout;
+		try {
+			// Disposal precedes onTerminal. Wrap the actual adapter listener so even a
+			// refused callback must finish (including its manager queue) before assertions.
+			PiWorkerEngine.prototype.onTerminal = function (listener) {
+				return onTerminal.call(this, async terminal => {
+					await listener(terminal);
+					if (terminal.actionId === factory.requests[0]?.action.actionId) terminalHandled.resolve();
+				});
+			};
+			registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+			PiWorkerEngine.prototype.onTerminal = onTerminal;
+			await api.invoke("session_start", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			const session = factory.sessions[0]!;
+			await withDeadline(session.started, "A8 active worker");
+			const original = ownershipEvidence(value);
+			const before = evidence(value);
+			const beforeStates = states();
+			const beforeRefs = refs();
+			const beforeLock = fileEvidence(lockPath)!;
+			const index = fileEvidence(path.join(value.planDirectory, "README.md"));
+			const plan = fileEvidence(path.join(value.planDirectory, "001-recover-worker.md"));
+			if (scenario === "unrelated target") {
+				initPlanDir(other);
+				await ensureService(other);
+			}
+			if (scenario === "marker persistence") fs.ftruncateSync = (fd, length) => {
+				if (fs.fstatSync(fd).ino === original.stat.ino) {
+					markerAttempts++;
+					throw Error("A8 marker persistence failed");
+				}
+				truncate(fd, length);
+			};
+			globalThis.fetch = async (input, init) => {
+				const url = new URL(String(input));
+				if (url.pathname === "/shutdown") exclusions++;
+				if (url.pathname === "/v1/operation" && init?.method === "POST") {
+					const body = object(JSON.parse(String(init.body)));
+					if (body.kind === "event" && object(body.input).kind === "terminals") terminalSubmissions++;
+				}
+				return fetch(input, init);
+			};
+			await withDeadline(api.command("herder-cleanup").handler(`${scenario === "unrelated target" ? "other-plans" : "herder-plans"} --force`, ctx), "A8 force decision");
+			assert.equal(confirmations, 1, JSON.stringify(warnings));
+			assert.equal(session.aborted, false);
+			assert.equal(session.disposed, false);
+			assert.deepEqual(evidence(value), before);
+			assert.equal(exclusions, scenario === "unrelated target" ? 1 : 0);
+			if (refused) {
+				assert.ok(warnings.some(w => w.level === "error"), JSON.stringify(warnings));
+				assert.ok(!warnings.some(w => /Force cleanup executed/.test(w.message)));
+			}
+			if (scenario === "marker persistence") assert.ok(markerAttempts > 0);
+			const retainedLock = fileEvidence(lockPath);
+			const retainedQuarantine = fileEvidence(quarantine);
+			assert.equal(retainedLock!.ino, original.stat.ino);
+			assert.deepEqual(retainedLock!.bytes, beforeLock.bytes);
+			if (refused) assert.ok(retainedQuarantine);
+			if (scenario === "confirmation collision") {
+				assert.equal(retainedQuarantine!.bytes.toString(), "independent cleanup evidence\n");
+				assert.notEqual(retainedQuarantine!.ino, retainedLock!.ino);
+			}
+			if (scenario === "marker persistence") {
+				assert.equal(retainedQuarantine!.ino, retainedLock!.ino);
+				assert.equal(retainedLock!.nlink, 2);
+			}
+			session.finish();
+			await withDeadline(terminalHandled.promise, "A8 actual terminal callback completion");
+			assert.equal(session.disposed, true);
+			if (refused) {
+				assert.equal(terminalSubmissions, 0, "no late terminal submission");
+				assert.deepEqual(evidence(value), before, "no run, action, plan or lease mutation");
+				assert.equal(factory.requests.length, 1, "no successor");
+				assert.deepEqual(states(), beforeStates, "no state publication");
+				assert.equal(refs(), beforeRefs, "no ref publication");
+				assert.deepEqual(fileEvidence(path.join(value.planDirectory, "README.md")), index);
+				assert.deepEqual(fileEvidence(path.join(value.planDirectory, "001-recover-worker.md")), plan);
+				assert.deepEqual(fileEvidence(lockPath), retainedLock, "ownership must remain held");
+				assert.deepEqual(fileEvidence(quarantine), retainedQuarantine, "cleanup evidence must remain intact");
+			} else {
+				assert.equal(terminalSubmissions, 1, "control terminal reaches the manager");
+				assert.equal(evidence(value).actions.find(a => a.actionId === before.actions[0]!.actionId)!.state, "terminal");
+				assert.ok(factory.requests.length > 1, "control dispatches its retry");
+				assert.equal(fs.statSync(lockPath).ino, original.stat.ino);
+				assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
+			}
+		} finally {
+			PiWorkerEngine.prototype.onTerminal = onTerminal;
+			globalThis.fetch = fetch;
+			fs.ftruncateSync = truncate;
+			await api.invoke("session_shutdown", ctx).catch(() => {});
+			await stopService(value.planDirectory).catch(() => {});
+			await stopService(other).catch(() => {});
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});

@@ -2,7 +2,7 @@ import { beginWholeRunAttention, finishWholeRunEdit, cancelWholeRunEdit, wholeRu
 import { readRunRevision, revisionPending, type RunRevision } from "../src/core/run-revision.ts";
 import { RunStore } from "../src/daemon/run-store.ts";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, realpathSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -44,7 +44,6 @@ import {
 import { assertActiveFireGrillTarget, noDeterministicRunMessage } from "./run-guidance.ts";
 import { runCleanupCommand } from "./cleanup-command.ts";
 import { cleanupRun } from "../src/daemon/git/cleanup-run.ts";
-import { forceCleanupRun } from "../src/daemon/git/force-cleanup-run.ts";
 import { runResetCommand } from "./reset-command.ts";
 import { HERDER_CLEANUP_ENTRY, registerCleanupTranscriptRenderer } from "./cleanup-transcript.ts";
 import {
@@ -66,6 +65,10 @@ import { interruptedPiWorkers } from "./recovery.ts";
 import { MainSessionRequests, type IntegrationRepairBinding } from "./main-session-requests.ts";
 import { prepareReworkFinish, reworkBindingAfterReply, type ReworkEditBinding, type ReworkEditOperation } from "./rework.ts";
 import {
+	assertAdapterOwnership,
+	assertAdapterRecoveryEvidence,
+	readAdapterOwnershipEvidence,
+	readAdapterRuntimeIdentity,
 	withAdapterResetOwnership,
 	acquireAdapterOwnership,
 	adapterOwnershipLockPath,
@@ -197,6 +200,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	let ownershipEpoch = 0;
 	const fallbackPiSessionId = `fallback-${randomUUID()}`;
 	const verificationMonitors = new Map<string, number>();
+	const pendingOperations = new Map<Promise<unknown>, string>();
+	const cleanupClosed = new Set<string>();
 	const unsafeDirectories = new Map<string, Error>();
 	const unsafeCleanup = (planDir: string): Error | undefined => {
 		for (const [directory, error] of unsafeDirectories) if (sameResolvedDirectory(directory, planDir)) return error;
@@ -205,6 +210,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const assertSafe = (planDir: string): void => {
 		const error = unsafeCleanup(planDir);
 		if (error) throw error;
+		if (cleanupClosed.has(path.resolve(planDir))) throw new Error("Herder force cleanup closed this target; manual cleanup required after failure.");
 		engine.assertSafe(planDir);
 	};
 	engine.onUnsafeCleanup((planDir, cause) => {
@@ -226,6 +232,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	});
 
 	const persist = (state: HerderRunState) => {
+		assertSafe(state.planDir);
 		currentState = state;
 		if (lastPersistedState && sameHerderRunState(lastPersistedState, state)) return;
 		try {
@@ -243,6 +250,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const render = (ctx = lastContext) => {
 		if (!ctx?.hasUI) return;
+		if (currentState && cleanupClosed.has(path.resolve(currentState.planDir))) return;
 		if (!currentState) {
 			ctx.ui.setStatus("herder", undefined);
 			widget.update(ctx, undefined);
@@ -314,7 +322,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			context: lastContext,
 			state: currentState,
 			epoch: sessionEpoch,
-			active: !shuttingDown && !(currentState && unsafeCleanup(currentState.planDir)),
+			active: !shuttingDown && !(currentState && (unsafeCleanup(currentState.planDir) || cleanupClosed.has(path.resolve(currentState.planDir)))),
 			sessionId: lastContext ? piSessionId(lastContext) : fallbackPiSessionId,
 		}),
 		ownsRun,
@@ -343,6 +351,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		await waitForAdapterOwnershipRetirement(planDir);
 		assertSessionActive(epoch);
 		assertSafe(planDir);
+		if (readAdapterOwnershipEvidence(planDir)?.record.resetCleanupRequired) throw new Error("Herder ownership requires manual child-process cleanup.");
 		ownership = acquireAdapterOwnership(planDir, runId, piSessionId(ctx));
 		ownershipEpoch = epoch;
 		releaseOwnershipAfterManagerDrain = false;
@@ -359,7 +368,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	const releaseOwnership = (drained?: AdapterOwnership): void => {
 		if (drained && ownership !== drained) return;
 		if (resetting || ((shuttingDown || ownership?.record.resetCleanupRequired) && ownership !== drained)) return;
-		if (!ownership || unsafeCleanup(path.dirname(path.dirname(ownership.lockPath)))) return;
+		if (!ownership || unsafeCleanup(path.dirname(path.dirname(ownership.lockPath)))
+			|| cleanupClosed.has(path.dirname(path.dirname(ownership.lockPath)))) return;
 		const held = ownership;
 		ownership = undefined;
 		ownershipEpoch = 0;
@@ -429,11 +439,13 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		verificationRetryDetail?: string,
 		repoRoot?: string,
 	) => {
+		if (cleanupClosed.has(path.resolve(reply.planDirectory))) return;
 		if (unsafeCleanup(reply.planDirectory)) {
 			lastManagerMessage = unsafeCleanup(reply.planDirectory)!.message;
 			render();
 			return;
 		}
+		if (readAdapterOwnershipEvidence(reply.planDirectory)?.record.resetCleanupRequired) return;
 		if (reply.status === "idle") {
 			currentState = undefined;
 			mainSessionRequests.reset("idle");
@@ -490,10 +502,15 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		mainSessionRequests.deliverReply(reply, verificationRetryDetail);
 	};
 
+	const trackOperation = <T>(planDir: string, operation: Promise<T>): Promise<T> => {
+		pendingOperations.set(operation, planDir);
+		return operation.finally(() => { pendingOperations.delete(operation); });
+	};
+
 	const postEvent = async (planDir: string, input: unknown): Promise<ManagerReply> => {
 		assertSafe(planDir);
 		const event = input as Record<string, unknown>;
-		return unwrapReply(await submitHerderEvent({ planDirectory: planDir, ...event }) as Record<string, unknown>);
+		return unwrapReply(await trackOperation(planDir, submitHerderEvent({ planDirectory: planDir, ...event })) as Record<string, unknown>);
 	};
 
 	const releaseOwnershipIfManagerIdle = (): void => {
@@ -528,6 +545,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			const results = [];
 			const prepared: string[] = [];
 			for (const action of reply.actions) {
+				assertOwnership(reply.planDirectory, reply.runId);
 				try {
 					const handle = await engine.prepare({ action, planDirectory: reply.planDirectory });
 					prepared.push(handle);
@@ -542,7 +560,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					});
 					results.push({ actionId: action.actionId, accepted: true, hostHandle: handle });
 				} catch (error) {
-					if (unsafeCleanup(reply.planDirectory)) {
+					if (unsafeCleanup(reply.planDirectory) || cleanupClosed.has(path.resolve(reply.planDirectory))) {
 						await discardPrepared(prepared);
 						assertSafe(reply.planDirectory);
 					}
@@ -608,6 +626,11 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		return dispatchReply(reply, epoch);
 	};
 
+	const waitForOperation = (pending: Parameters<typeof waitHerderOperation>[0]): Promise<unknown> => {
+		assertSafe(pending.planDirectory);
+		return trackOperation(pending.planDirectory, waitHerderOperation(pending));
+	};
+
 	function monitorVerification(
 		operationId: string,
 		pending: Awaited<ReturnType<typeof submitHerderVerification>>,
@@ -616,7 +639,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const epoch = sessionEpoch;
 		if (verificationMonitors.get(operationId) === epoch) return;
 		verificationMonitors.set(operationId, epoch);
-		void waitHerderOperation(pending).then((value) => {
+		void waitForOperation(pending).then((value) => {
 			if (!sessionActive(epoch)) return;
 			return enqueueManager(async () => {
 				assertSessionActive(epoch);
@@ -627,7 +650,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				await dispatchReply(reply, epoch);
 			});
 		}).catch(async (error) => {
-			if (!sessionActive(epoch)) return;
+			if (!sessionActive(epoch) || cleanupClosed.has(path.resolve(pending.planDirectory))) return;
 			const detail = message(error);
 			lastContext?.ui.notify(`Herder verification handling failed: ${detail}`, "error");
 			if (!requestId) return;
@@ -668,6 +691,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			// is not authority and must not suppress the manager's next request.
 			mainSessionRequests.reset("resume");
 		}
+		const runtime = readAdapterRuntimeIdentity(planDir);
+		const assertLaunch = () => { assertSafe(planDir); if (runtime) assertAdapterRecoveryEvidence(planDir, runtime); };
 		let acquired: AdapterOwnership | undefined;
 		let before: ManagerReply | undefined;
 		try {
@@ -690,6 +715,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			renderLaunching(ctx, planDir, profile.profile, options.maxParallel ?? before?.maxParallel ?? currentState?.maxParallel ?? 5);
 			await preflight(ctx, profile);
 			assertSessionActive(epoch);
+			assertLaunch();
 			if (!before) acquired = await claimOwnership(planDir, `pending-fire:${randomUUID()}`, ctx, epoch);
 			const reply = await enqueueManager(async () => {
 				assertSessionActive(epoch);
@@ -762,12 +788,18 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const planDir = resolvePlanDirectory(repoRoot, options.planDir);
 		assertSafe(planDir);
 		if (!existsSync(path.join(planDir, "README.md"))) throw new Error(`Herder plan index is missing: ${path.join(planDir, "README.md")}`);
+		const runtime = readAdapterRuntimeIdentity(planDir);
+		const assertAttach = () => { assertSafe(planDir); if (runtime) assertAdapterRecoveryEvidence(planDir, runtime); };
+		await waitForAdapterOwnershipRetirement(planDir);
+		assertSessionActive(epoch);
+		assertAttach();
 		const snapshot = unwrapReply(await invokeHerderTool("herder_run", {
 			operation: "status",
 			planDirectory: planDir,
 			dashboardPort: options.dashboardPort,
 		}) as Record<string, unknown>);
 		assertSessionActive(epoch);
+		assertAttach();
 		if (snapshot.status === "idle") {
 			throw new Error(`No Herder run is recorded in ${planDir}. Use /herder-fire ${options.planDir} to start one.`);
 		}
@@ -788,6 +820,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		try {
 			const fresh = await enqueueManager(async () => {
 				assertSessionActive(epoch);
+				assertAttach();
 				acquired = await claimOwnership(planDir, snapshot.runId, ctx, epoch);
 				const reply = unwrapReply(await invokeHerderTool("herder_run", {
 					operation: "status",
@@ -816,7 +849,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const planDir = planDirInput
 			? resolvePlanDirectory(repoRoot, planDirInput)
 			: currentState?.planDir ?? resolvePlanDirectory(repoRoot, "herder-plans");
+		assertSafe(planDir);
+		const runtime = readAdapterRuntimeIdentity(planDir);
+		if (runtime) assertAdapterRecoveryEvidence(planDir, runtime);
 		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
+		assertSafe(planDir);
+		if (runtime) assertAdapterRecoveryEvidence(planDir, runtime);
 		const statusAttentionId = reply.attention?.requestId;
 		const reexposeAttention = Boolean(statusAttentionId
 			&& !unsafeCleanup(reply.planDirectory)
@@ -837,7 +875,12 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const planDir = planDirInput
 			? resolvePlanDirectory(repoRoot, planDirInput)
 			: currentState?.planDir ?? resolvePlanDirectory(repoRoot, "herder-plans");
+		assertSafe(planDir);
+		const runtime = readAdapterRuntimeIdentity(planDir);
+		if (runtime) assertAdapterRecoveryEvidence(planDir, runtime);
 		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "dashboard", planDirectory: planDir }) as Record<string, unknown>);
+		assertSafe(planDir);
+		if (runtime) assertAdapterRecoveryEvidence(planDir, runtime);
 		return `Herder dashboard: ${reply.dashboardUrl || "unavailable"}`;
 	};
 
@@ -849,39 +892,93 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const planDir = parsed.force && !existsSync(requested)
 			? resolvePlanDirectoryTarget(repoRoot, parsed.planDir)
 			: resolvePlanDirectory(repoRoot, parsed.planDir);
-		const assertCleanupSafe = () => {
-			assertSafe(planDir);
-			// Replacement adapters have no volatile exclusion; inspect the durable claim
-			// again after confirmation, without acquiring or acknowledging ownership.
-			const lockPath = adapterOwnershipLockPath(planDir);
-			let descriptor: number;
-			try { descriptor = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-			try {
-				const stat = fstatSync(descriptor);
-				if (!stat.isFile() || stat.size < 1 || stat.size > 4_096) throw new Error("Invalid ownership lock");
-				const record = JSON.parse(readFileSync(descriptor, "utf8"));
-				if (!record || record.version !== 1 || record.resetCleanupRequired !== undefined) throw new Error("Unsafe ownership lock");
-			} catch {
-				throw new Error(`Herder ownership evidence requires manual child-process cleanup and explicit ownership lock removal before cleanup: ${lockPath}`);
-			} finally { closeSync(descriptor); }
+		const assertCleanupEvidence = () => {
+			if (readAdapterOwnershipEvidence(planDir)?.record.resetCleanupRequired) {
+				throw new Error(`Herder ownership evidence requires manual child-process cleanup and explicit ownership lock removal before cleanup: ${adapterOwnershipLockPath(planDir)}`);
+			}
 		};
+		const assertCleanupSafe = () => { assertSafe(planDir); assertCleanupEvidence(); };
 		assertCleanupSafe();
 		const result = await runCleanupCommand(parsed, {
 			repositoryRoot: repoRoot,
 			planDirectory: planDir,
-			apply: (request, preview) => {
-				assertCleanupSafe();
-				return applyHerderCleanup(request, preview, {
-					// Exclusion and revalidation await: recheck at each synchronous runner boundary.
-					cleanupRunner: (input) => { assertCleanupSafe(); return cleanupRun(input); },
-					forceRunner: (input) => { assertCleanupSafe(); return forceCleanupRun(input); },
-				});
+			apply: async (request, preview) => {
+				if (!request.force) {
+					assertCleanupSafe();
+					return applyHerderCleanup(request, preview, {
+						cleanupRunner: input => { assertCleanupSafe(); return cleanupRun(input); },
+					});
+				}
+				// Confirmation closes publication before any fallible inspection, even
+				// when a quarantine collision prevents marking or worker retirement.
+				cleanupClosed.add(path.resolve(planDir));
+				const unsafe = unsafeCleanup(planDir);
+				if (unsafe) throw unsafe;
+				engine.assertSafe(planDir);
+				assertCleanupEvidence();
+				if (!existsSync(planDir)) return applyHerderCleanup(request, preview);
+				const held = ownership?.lockPath === adapterOwnershipLockPath(planDir)
+					? ownership : acquireAdapterOwnership(planDir, "pending-force", piSessionId(ctx));
+				assertAdapterOwnership(held, planDir);
+				const existing = readAdapterOwnershipEvidence(planDir);
+				if (held.record.resetCleanupRequired || !existing
+					|| (["pid", "piSessionId", "processIdentity"] as const).some(key => held.record[key] !== existing.record[key])) {
+					throw new Error("Herder ownership changed or requires manual child-process cleanup; refusing force");
+				}
+				try {
+					// Retain a second link before marker IO: even a pre-truncation failure
+					// leaves an unmarked dead owner distinguishable from an ordinary claim.
+					const quarantine = `${held.lockPath}.cleanup-required`;
+					linkSync(held.lockPath, quarantine);
+					const runtimeDescriptor = openSync(path.dirname(held.lockPath), "r");
+					try { fsyncSync(runtimeDescriptor); } finally { closeSync(runtimeDescriptor); }
+					markAdapterOwnershipCleanupRequired(held);
+					const named = lstatSync(quarantine);
+					const opened = fstatSync(held.descriptor);
+					if (!named.isFile() || named.isSymbolicLink() || named.dev !== opened.dev || named.ino !== opened.ino) {
+						throw new Error("Herder force cleanup quarantine was replaced; manual child-process cleanup required");
+					}
+					unlinkSync(quarantine);
+					const markedRecord = JSON.stringify(readAdapterOwnershipEvidence(planDir)?.record);
+					const oldManagerQueue = managerQueue;
+					const localDrain = engine.drain(planDir);
+					const retirement = (async () => {
+						await localDrain;
+						await oldManagerQueue;
+						await Promise.allSettled([...pendingOperations].filter(([, directory]) => sameResolvedDirectory(directory, planDir)).map(([operation]) => operation));
+						await engine.drain(planDir);
+					})();
+					registerAdapterOwnershipRetirement(held, retirement);
+					await retirement;
+					assertAdapterOwnership(held, planDir);
+					if (JSON.stringify(readAdapterOwnershipEvidence(planDir)?.record) !== markedRecord) {
+						throw new Error("Herder marked ownership evidence changed during settlement; refusing force cleanup");
+					}
+					const applied = await applyHerderCleanup(request, preview, { ownership: held });
+					if (ownership === held) { ownership = undefined; ownershipEpoch = 0; }
+					for (const [handle, worker] of workers) if (sameResolvedDirectory(worker.planDir, planDir)) workers.delete(handle);
+					if (sameResolvedDirectory(planDir, currentState?.planDir ?? currentRunRevision?.run.planDirectory)) {
+						currentState = undefined;
+						lastPersistedState = undefined;
+						currentRunRevision = undefined;
+						currentPlanEdit = undefined;
+						currentReworkEdit = undefined;
+						mainSessionRequests.reset("cleanup");
+						lastSummary = undefined;
+						lastManagerMessage = undefined;
+						verificationMonitors.clear();
+						render(ctx);
+					}
+					return applied;
+				} finally {
+					// Never unlink on failure or recreate runtime after successful deletion.
+					if (ownership !== held) closeSync(held.descriptor);
+				}
 			},
 			confirm: async (title, body) => ctx.hasUI && await ctx.ui.confirm(title, body),
 			appendEntry: (entry) => pi.appendEntry(HERDER_CLEANUP_ENTRY, entry),
 		});
-		if (result.applied && !result.cancelled) await clearCurrentStateForPlanDirectory(planDir, ctx);
+		if (result.applied && !result.cancelled && !parsed.force) await clearCurrentStateForPlanDirectory(planDir, ctx);
 		return result.message;
 	};
 
@@ -1623,7 +1720,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					observedCommit: params.operation === "finish" ? params.observedCommit : checkout.head,
 				});
 			});
-			const value = await waitHerderOperation(pending);
+			const value = await waitForOperation(pending);
 			assertSessionActive(epoch);
 			if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Integration repair operation returned no manager reply");
 			const reply = value as ManagerReply;
@@ -1799,7 +1896,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				return submitted;
 			});
-			const value = await waitHerderOperation(pending);
+			const value = await waitForOperation(pending);
 			assertSessionActive(epoch);
 			if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Reignite operation returned no manager reply");
 			const reply = value as ManagerReply;
@@ -1835,7 +1932,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				: completed),
 		);
 		workers.delete(completed.handle);
-		if (unsafe) return;
+		if (unsafe || cleanupClosed.has(path.resolve(binding.planDir))) return;
 		const epoch = binding.sessionEpoch;
 		if (!sessionActive(epoch)) return;
 		await enqueueManager(async () => {
@@ -1903,10 +2000,16 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastPersistedState = currentState;
 		if (currentState) {
 			const restored = currentState;
+			currentState = undefined;
 			let acquired: AdapterOwnership | undefined;
 			try {
+				const runtime = readAdapterRuntimeIdentity(restored.planDir);
+				await waitForAdapterOwnershipRetirement(realpathSync(restored.planDir));
+				const assertRecovery = () => { assertSafe(restored.planDir); assertAdapterRecoveryEvidence(restored.planDir, runtime); };
+				assertRecovery();
 				await enqueueManager(async () => {
 					assertSessionActive(epoch);
+					assertRecovery();
 					const revision = readRunRevision(restored.planDir);
 					if (revision && ((revision.state === "complete" && restored.runId === revision.run.runId && !revision.selective?.resumed) || revisionPending(revision))) {
 						if (![revision.run.runId, revision.successorRunId].includes(restored.runId)) throw new Error("Persisted Herder run does not match the whole-run revision");
@@ -1916,6 +2019,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					}
 					const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: restored.planDir }) as Record<string, unknown>);
 					assertSessionActive(epoch);
+					assertRecovery();
 					if (reply.runId !== restored.runId) {
 						throw new Error(`Persisted Herder run ${restored.runId} does not match manager run ${reply.runId || "idle"}; refusing recovery.`);
 					}

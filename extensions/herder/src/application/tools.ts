@@ -1,4 +1,4 @@
-import { acquireAdapterOwnership, assertAdapterOwnership, releaseAdapterOwnership, type AdapterOwnership } from "../../adapters/ownership.ts";
+import { acquireAdapterOwnership, assertAdapterOwnership, readAdapterRuntimeIdentity, releaseAdapterOwnership, type AdapterOwnership } from "../../adapters/ownership.ts";
 import { readRunRevision, revisionPending } from "../core/run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -295,6 +295,8 @@ export interface CleanupApplyResult extends CleanupPreview {
 }
 
 export interface CleanupApplicationDependencies {
+	/** Exact marked claim, supplied only after its owner successfully drained children. */
+	ownership?: AdapterOwnership;
 	cleanupRunner?: (input: CleanupInput) => CleanupResult | Promise<CleanupResult>;
 	forceRunner?: (input: ForceCleanupInput) => CleanupResult | Promise<CleanupResult>;
 	readStatus?: (planDirectory: string) => CleanupDurableStatus | Promise<CleanupDurableStatus>;
@@ -562,11 +564,14 @@ async function applyForceCleanup(
 	expectedPreview: CleanupPreview,
 	dependencies: CleanupApplicationDependencies,
 ): Promise<CleanupApplyResult> {
-	const apply = async (): Promise<CleanupApplyResult> => {
+	const apply = async (validateBeforeMutation: () => void, removePlanDirectory?: ForceCleanupInput["removePlanDirectory"]): Promise<CleanupApplyResult> => {
+		validateBeforeMutation();
 		const result = await (dependencies.forceRunner ?? forceCleanupRun)({
 			repo: request.repositoryRoot,
 			planDir: request.planDirectory,
 			dryRun: false,
+			validateBeforeMutation,
+			removePlanDirectory,
 		});
 		if (!result.destruction.eligible) {
 			throw new Error(`Force cleanup refused: ${result.destruction.blockers.map((item) => String(item.reason ?? "blocked")).join(", ")}`);
@@ -582,8 +587,56 @@ async function applyForceCleanup(
 		};
 	};
 	const runExclusion = dependencies.withExclusion ?? ((planDirectory, callback) => withServiceExclusion(planDirectory, callback, { purpose: "force" }));
-	if (!fs.existsSync(request.planDirectory)) return apply();
-	return runExclusion(request.planDirectory, apply);
+	readAdapterRuntimeIdentity(request.planDirectory); // Refuse retained final-removal evidence even if the target is absent.
+	if (!fs.existsSync(request.planDirectory)) {
+		const validateAbsent = () => {
+			try { fs.lstatSync(request.planDirectory); }
+			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+			throw new Error("Force cleanup plan directory appeared; refusing changed runtime evidence");
+		};
+		const result = await apply(validateAbsent);
+		validateAbsent();
+		return result;
+	}
+	const claim = dependencies.ownership;
+	if (!claim) throw new Error("Force cleanup requires the exact marked, successfully drained ownership claim");
+	assertAdapterOwnership(claim, request.planDirectory);
+	const evidence = fs.readFileSync(claim.lockPath, "utf8");
+	if (!claim.record.resetCleanupRequired || JSON.parse(evidence).resetCleanupRequired !== true) {
+		throw new Error("Force cleanup requires the exact marked, successfully drained ownership claim");
+	}
+	const validate = () => {
+		assertAdapterOwnership(claim, request.planDirectory);
+		if (fs.readFileSync(claim.lockPath, "utf8") !== evidence) {
+			throw new Error("Force cleanup ownership evidence changed; refusing mutation");
+		}
+	};
+	const removePlanDirectory: NonNullable<ForceCleanupInput["removePlanDirectory"]> = (directory) => {
+		validate();
+		// Keep the exact marked inode outside the recursive deletion. A failed final
+		// removal (including its directory tail) must never reopen Pi ownership.
+		const retained = `${directory}.cleanup-required`;
+		fs.linkSync(claim.lockPath, retained);
+		const parent = fs.openSync(path.dirname(directory), "r");
+		try {
+			fs.fsyncSync(parent);
+			validate();
+			fs.rmSync(directory, { recursive: true, force: true });
+			fs.fsyncSync(parent);
+			try {
+				fs.lstatSync(directory);
+				throw new Error("Force cleanup plan directory appeared; refusing changed runtime evidence");
+			} catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+			const named = fs.lstatSync(retained);
+			const opened = fs.fstatSync(claim.descriptor);
+			if (!named.isFile() || named.isSymbolicLink() || named.dev !== opened.dev || named.ino !== opened.ino
+				|| fs.readFileSync(retained, "utf8") !== evidence) {
+				throw new Error("Force cleanup retained ownership evidence changed; refusing removal");
+			}
+			fs.unlinkSync(retained);
+		} finally { fs.closeSync(parent); }
+	};
+	return runExclusion(request.planDirectory, () => apply(validate, removePlanDirectory));
 }
 
 export async function applyHerderCleanup(
