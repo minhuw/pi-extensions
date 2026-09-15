@@ -297,18 +297,16 @@ test("run-tool execution is cancelled after the captured session shuts down", as
 	);
 });
 
-test("planning tool returns its trust error before repository or manager work", async () => {
+test("planning tool rejects with its trust error before repository or manager work", async () => {
 	const api = captureAdapter();
-	const result = record(await api.tool("herder_plan").execute(
-		"planning-trust-gate",
-		{ operation: "status", planDirectory: "herder-plans" },
-		undefined,
-		undefined,
-		context(false),
-	));
-
-	assert.equal(result.isError, true);
-	const content = result.content;
-	assert.ok(Array.isArray(content));
-	assert.equal(record(content[0]).text, "Trust this project before using Herder plan operations.");
+	await rejectsMessage(
+		() => api.tool("herder_plan").execute(
+			"planning-trust-gate",
+			{ operation: "status", planDirectory: "herder-plans" },
+			undefined,
+			undefined,
+			context(false),
+		),
+		"Trust this project before using Herder plan operations.",
+	);
 });

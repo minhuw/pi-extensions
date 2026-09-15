@@ -261,7 +261,7 @@ export function registerPiPlanningWorkflows(
 		prepareArguments: preparePlanningWorkflowArguments,
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!ctx.isProjectTrusted()) {
-				return { content: [{ type: "text" as const, text: "Trust this project before using Herder plan operations." }], isError: true, details: {} };
+				throw new Error("Trust this project before using Herder plan operations.");
 			}
 			try {
 				assertPlanResponseOptions(params.operation, params);
@@ -307,7 +307,7 @@ export function registerPiPlanningWorkflows(
 				}
 				return { content: [{ type: "text" as const, text: formatPlanToolResponse(params.operation, result, params) }], details: { result } };
 			} catch (error) {
-				return { content: [{ type: "text" as const, text: message(error) }], isError: true, details: {} };
+				throw new Error(message(error));
 			}
 		},
 	});

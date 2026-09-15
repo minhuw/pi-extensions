@@ -193,11 +193,9 @@ test("native tool uses compact content but retains raw details and rejects prese
 		assert.equal(pageNext.isError, undefined);
 		assert.deepEqual(pageNext.details.result, pageStart.details.result);
 		fs.appendFileSync(contextFile, " changed");
-		const drift = await tool.execute("page-drift", continuation, undefined, undefined, ctx);
-		assert.match(drift.content[0].text, /response changed; restart inspection/);
+		await assert.rejects(tool.execute("page-drift", continuation, undefined, undefined, ctx), /response changed; restart inspection/);
 		const before = rootResolutions;
-		const refused = await tool.execute("mutation", { operation: "init", planDirectory: path.join(root, "new-plans"), view: "full" }, undefined, undefined, ctx);
-		assert.match(refused.content[0].text, /supported only/);
+		await assert.rejects(tool.execute("mutation", { operation: "init", planDirectory: path.join(root, "new-plans"), view: "full" }, undefined, undefined, ctx), /supported only/);
 		assert.equal(rootResolutions, before);
 		assert.equal(mutationChecks, 0);
 		assert.equal(fs.existsSync(path.join(root, "new-plans")), false);

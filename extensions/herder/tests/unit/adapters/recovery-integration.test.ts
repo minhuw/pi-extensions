@@ -380,7 +380,7 @@ test("main-session attention re-exposes the current request and refuses obsolete
 		assert.equal(api.customMessages[1]!.content, api.customMessages[0]!.content);
 		assert.equal(warnings.some((warning) => warning.level === "error"), false);
 
-		const resolved = object(await api.tool("herder_plan").execute(
+		await assert.rejects(api.tool("herder_plan").execute(
 			"attention",
 			{
 				operation: "attention",
@@ -393,9 +393,7 @@ test("main-session attention re-exposes the current request and refuses obsolete
 			undefined,
 			undefined,
 			ctx,
-		));
-		assert.equal(resolved.isError, true);
-		assert.match(String((resolved.content as Array<{ text: string }>)[0]!.text), /requires revise_run or explicit abandon_run/);
+		), /requires revise_run or explicit abandon_run/);
 		const unchanged = object((await requestService(service, "/v1/status")).reply);
 		assert.equal(object(unchanged.attention).requestId, attention.requestId);
 		assert.equal(api.customMessages.length, 2, "no selective action consumes the current request");
@@ -482,9 +480,7 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 			rationale: "The user accepts the current implementation with this specific gap.",
 			confirmed: true, // Untrusted model input must not bypass a declined host confirmation.
 		};
-		const declined = object(await api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx));
-		assert.equal(declined.isError, true);
-		assert.match(String((declined.content as Array<{ text: string }>)[0]!.text), /requires revise_run or explicit abandon_run/);
+		await assert.rejects(api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx), /requires revise_run or explicit abandon_run/);
 		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
 		assert.equal(confirmations.length, 0, "obsolete acceptance never opens a host confirmation");
 		const store = new RunStore(fixture.planDirectory);
@@ -532,7 +528,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 		assert.equal(api.customMessages.length, 0);
 
 		const before = object((await requestService(service, "/v1/status")).reply);
-		const result = object(await api.tool("herder_plan").execute(
+		await assert.rejects(api.tool("herder_plan").execute(
 			"attention",
 			{
 				operation: "attention",
@@ -543,9 +539,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 			undefined,
 			undefined,
 			ctx,
-		));
-		assert.equal(result.isError, true);
-		assert.match(String((result.content as Array<{ text?: string }>)[0]?.text), /No unresolved Herder attention request|does not own/);
+		), /No unresolved Herder attention request|does not own/);
 		const after = object((await requestService(service, "/v1/status")).reply);
 		assert.equal(object(after.attention).requestId, object(before.attention).requestId);
 		assert.equal(object(after.attention).state, object(before.attention).state);
@@ -1143,9 +1137,7 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
 		fs.writeFileSync(path.join(value.planDirectory, "001-recover-worker.md"), fixturePlan({ title: "Recover a lost worker", acceptance: "Entire execution uses the revised assignment." }));
 		const params = { operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken, confirmed: true };
-		const dismissed = object(await api.tool("herder_plan").execute("dismiss", params, undefined, undefined, ctx));
-		assert.equal(dismissed.isError, true);
-		assert.match(String((dismissed.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+		await assert.rejects(api.tool("herder_plan").execute("dismiss", params, undefined, undefined, ctx), /Confirmation dismissed/);
 		assert.ok(fs.existsSync(sentinel));
 		assert.equal(factory.requests.length, 1);
 		assert.equal(readRunRevision(value.planDirectory)?.state, "prepared");
@@ -1208,11 +1200,12 @@ for (const operation of ["finish_edit", "cancel_edit"]) {
 		try {
 			const record = await reserveWholeRunFixture(value);
 			await api.invoke("session_start", ctx);
-			const result = object(await api.tool("herder_plan").execute("recover", { operation, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx));
-			if (operation === "finish_edit") {
-				assert.equal(result.isError, true);
-				assert.match(String((result.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
-			} else assert.equal(result.isError, undefined, JSON.stringify(result));
+			const recovering = api.tool("herder_plan").execute("recover", { operation, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx);
+			if (operation === "finish_edit") await assert.rejects(recovering, /Confirmation dismissed/);
+			else {
+				const result = object(await recovering);
+				assert.equal(result.isError, undefined, JSON.stringify(result));
+			}
 			assert.equal(readRunRevision(value.planDirectory)?.state, operation === "finish_edit" ? "prepared" : "draft");
 			await assertWholeRunHook(api, ctx, value);
 			assert.equal(await api.handlers.get("tool_call")!({ toolName: "write", input: { path: "herder-plans/001-recover-worker.md" } }, ctx), undefined);
@@ -1262,9 +1255,12 @@ for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "se
 			} } as unknown as ExtensionContext;
 			await api.invoke("session_start", ctx);
 			if (recovery === "finish_edit" || recovery === "cancel_edit") {
-				const recovered = object(await api.tool("herder_plan").execute("recover", { operation: recovery, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx));
-				assert.equal(recovered.isError, recovery === "finish_edit" ? true : undefined, JSON.stringify(recovered));
-				if (recovery === "finish_edit") assert.match(String((recovered.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+				const recovering = api.tool("herder_plan").execute("recover", { operation: recovery, planDirectory: value.planDirectory, editToken: record.editToken }, undefined, undefined, ctx);
+				if (recovery === "finish_edit") await assert.rejects(recovering, /Confirmation dismissed/);
+				else {
+					const recovered = object(await recovering);
+					assert.equal(recovered.isError, undefined, JSON.stringify(recovered));
+				}
 			}
 			await api.invoke("agent_settled", ctx);
 			const delivered = await withDeadline(api.waitForAttentionMessage(), "recovered revision attention");
@@ -1272,12 +1268,9 @@ for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "se
 			assert.ok(api.customMessages.every(message => object(message.details).requestId === record.request.requestId));
 			const params = { operation: "attention", planDirectory: value.planDirectory, requestId: record.request.requestId, action: "abandon_run" };
 			const count = confirmations.length;
-			const wrong = object(await api.tool("herder_plan").execute("wrong-request", { ...params, requestId: queued[1]!.requestId }, undefined, undefined, ctx));
-			assert.equal(wrong.isError, true);
+			await assert.rejects(api.tool("herder_plan").execute("wrong-request", { ...params, requestId: queued[1]!.requestId }, undefined, undefined, ctx), /is not bound to this Pi session/);
 			assert.equal(confirmations.length, count);
-			const dismissed = object(await api.tool("herder_plan").execute("dismiss-abandon", params, undefined, undefined, ctx));
-			assert.equal(dismissed.isError, true);
-			assert.match(String((dismissed.content as Array<{ text: string }>)[0]!.text), /Confirmation dismissed/);
+			await assert.rejects(api.tool("herder_plan").execute("dismiss-abandon", params, undefined, undefined, ctx), /Confirmation dismissed/);
 			assert.equal(confirmations.length, count + 1);
 			assert.match(confirmations.at(-1)!, /^Abandon this entire Herder execution\?/);
 			assert.ok(confirmations.at(-1)!.includes(record.request.requestId));
@@ -1326,9 +1319,7 @@ for (const stale of ["resolved request", "request hash", "current generation"] a
 			await api.invoke("agent_settled", ctx);
 			assert.equal(api.customMessages.length, 0);
 			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
-			const rejected = object(await api.tool("herder_plan").execute("stale-abandon", { operation: "attention", planDirectory: value.planDirectory, requestId: record.request.requestId, action: "abandon_run" }, undefined, undefined, ctx));
-			assert.equal(rejected.isError, true);
-			assert.match(String((rejected.content as Array<{ text: string }>)[0]!.text), /No unresolved Herder attention request/);
+			await assert.rejects(api.tool("herder_plan").execute("stale-abandon", { operation: "attention", planDirectory: value.planDirectory, requestId: record.request.requestId, action: "abandon_run" }, undefined, undefined, ctx), /No unresolved Herder attention request/);
 			assert.equal(factory.requests.length, 0);
 		} finally {
 			if (ctx) await api.invoke("session_shutdown", ctx);
@@ -1800,8 +1791,7 @@ for (const duringPreparation of [false, true]) {
 				await api.command(name).handler(args, ctx);
 				assert.ok(notifications.slice(offset).some(entry => /manual.*cleanup/i.test(entry.message)), name);
 			}
-			const result = await api.tool("herder_plan").execute("unsafe-edit", { operation: "finish_edit", planDirectory: value.planDirectory, editToken: "unsafe" }, undefined, undefined, ctx);
-			assert.equal(object(result).isError, true);
+			await assert.rejects(api.tool("herder_plan").execute("unsafe-edit", { operation: "finish_edit", planDirectory: value.planDirectory, editToken: "unsafe" }, undefined, undefined, ctx), /manual.*cleanup/i);
 			const toolCall = api.handlers.get("tool_call")!;
 			assert.equal(object(await toolCall({ toolName: "herder_plan", input: { operation: "begin_edit", planDirectory: value.planDirectory } }, ctx)).block, true);
 			assert.equal(await toolCall({ toolName: "herder_plan", input: { operation: "snapshot", planDirectory: value.planDirectory } }, ctx), undefined);
@@ -1994,11 +1984,11 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 			await withDeadline(queueHeld.promise, "attach holds manager queue");
 			let actionReads = 0;
 			let attentionSettled = false;
-			attention = api.tool("herder_plan").execute("queued-attention", {
+			attention = assert.rejects(api.tool("herder_plan").execute("queued-attention", {
 				operation: "attention", planDirectory: value.planDirectory, requestId: object(message.details).requestId,
 				// The second read builds applicationParams only after bindAttention returned safely.
 				get action() { if (++actionReads === 2) bound.resolve(); return action; },
-			}, undefined, undefined, ctx).finally(() => { attentionSettled = true; });
+			}, undefined, undefined, ctx).finally(() => { attentionSettled = true; }), /manual.*cleanup/i);
 			await withDeadline(bound.promise, "attention bound before exclusion");
 			assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
 			assert.equal(attentionSettled, false, "attention is waiting behind attach");
@@ -2010,9 +2000,7 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 			assert.deepEqual(snapshot(), before, "failed root cleanup must not advance a terminal");
 			releaseQueue.resolve();
 			await withDeadline(attaching, "attach releases manager queue");
-			const result = object(await withDeadline(attention, "queued attention rejected"));
-			assert.equal(result.isError, true);
-			assert.match(String((result.content as Array<{ text: string }>)[0]!.text), /manual.*cleanup/i);
+			await withDeadline(attention, "queued attention rejected");
 			assert.equal(readRunRevision(value.planDirectory), null, "queued attention must not reserve a draft before checking exclusion");
 			assert.deepEqual(snapshot(), before, "run, plans, actions and attention must remain unchanged");
 			assert.equal(fs.readFileSync(index, "utf8"), markdown);

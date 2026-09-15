@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { initTheme, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { createSyntheticSourceInfo, wrapRegisteredTool, initTheme, type ExtensionRunner, type ToolDefinition, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { runAgentLoop, type AgentEvent } from "@earendil-works/pi-agent-core";
+import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Check } from "typebox/value";
 import { parseGrillPlanTarget } from "../../../adapters/arguments.ts";
@@ -544,7 +546,7 @@ test("attention authorization runs before the deterministic manager mutation", a
 		});
 		const tool = tools.find((candidate) => candidate.name === "herder_plan");
 		assert.ok(tool?.execute);
-		const result = await tool.execute(
+		await assert.rejects(() => tool.execute!(
 			"attention",
 			{
 				operation: "attention",
@@ -556,12 +558,97 @@ test("attention authorization runs before the deterministic manager mutation", a
 			undefined,
 			undefined,
 			{ isProjectTrusted: () => true } as ExtensionCommandContext,
-		);
+		), /does not own/);
 		assert.equal(authorizationChecks, 1);
-		assert.equal((result as { isError?: boolean }).isError, true);
-		assert.match(String((result as { content?: Array<{ text?: string }> }).content?.[0]?.text), /does not own/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("registered herder_plan failures and handled success cross the real SDK boundary", async (t) => {
+	const root = await fixture();
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const planDirectory = await realpath(root);
+	const rawResult = { edit: { planId: "001", state: "barrier" }, reply: { status: "running" } };
+	for (const scenario of [
+		{ name: "trust rejection", trusted: false, operation: "init", diagnostic: "Trust this project before using Herder plan operations.", reachesHook: false },
+		{ name: "invalid presentation", trusted: true, operation: "init", view: "full", diagnostic: "view, offset, and responseSha256 are supported only for validate, shape, and snapshot.", reachesHook: false },
+		{ name: "runtime Error", trusted: true, operation: "finish_edit", rejection: new Error("ownership hook failed"), diagnostic: "ownership hook failed", reachesHook: true },
+		{ name: "runtime non-Error", trusted: true, operation: "finish_edit", rejection: { reason: "ownership hook failed" }, diagnostic: "[object Object]", reachesHook: true },
+		{ name: "handled finish", trusted: true, operation: "finish_edit", reachesHook: true },
+	]) {
+		await t.test(scenario.name, async () => {
+			let definition: ToolDefinition | undefined;
+			let repositoryReads = 0;
+			let hookCalls = 0;
+			let managerReplies = 0;
+			const ctx = { isProjectTrusted: () => scenario.trusted } as ExtensionContext;
+			registerPiPlanningWorkflows({
+				registerCommand: () => {},
+				registerTool: (tool: ToolDefinition) => { definition = tool; },
+			} as unknown as ExtensionAPI, "/repo/herder", async () => {
+				repositoryReads += 1;
+				assert.equal(scenario.reachesHook, true, "rejection must precede repository access");
+				return path.dirname(planDirectory);
+			}, {
+				assertMutationAllowed: () => { assert.fail("rejection must precede mutation"); },
+				beforePlanOperation: async (operation, params, context) => {
+					hookCalls += 1;
+					assert.equal(operation, "finish_edit");
+					assert.equal(params.planDirectory, planDirectory);
+					assert.equal(context, ctx);
+					if (scenario.rejection !== undefined) throw scenario.rejection;
+					return { handled: true, result: rawResult };
+				},
+				handleManagerReply: async () => { managerReplies += 1; },
+			});
+			assert.ok(definition);
+			assert.equal(definition.name, "herder_plan");
+			const tool = wrapRegisteredTool({
+				definition,
+				sourceInfo: createSyntheticSourceInfo(import.meta.filename, { source: "test" }),
+			}, {
+				createContext: () => ctx,
+				getActiveTools: () => ["herder_plan"],
+			} as unknown as ExtensionRunner);
+			const faux = createFauxCore({});
+			faux.setResponses([fauxAssistantMessage(fauxToolCall("herder_plan", {
+				operation: scenario.operation,
+				planDirectory,
+				...(scenario.view ? { view: scenario.view } : {}),
+				...(scenario.operation === "finish_edit" ? { editToken: "00000000-0000-0000-0000-000000000001" } : {}),
+			}, { id: "plan-call" }), { stopReason: "toolUse" })]);
+			const events: AgentEvent[] = [];
+			const messages = await runAgentLoop(
+				[{ role: "user", content: "Run the plan operation", timestamp: 0 }],
+				{ systemPrompt: "Test", messages: [], tools: [tool] },
+				{
+					model: faux.getModel(),
+					convertToLlm: (messages) => messages.filter((message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult"),
+					shouldStopAfterTurn: () => true,
+				},
+				(event) => { events.push(event); }, undefined, faux.streamSimple,
+			);
+			const results = messages.filter((message) => message.role === "toolResult");
+			assert.equal(results.length, 1);
+			const result = results[0]!;
+			assert.equal(result.toolCallId, "plan-call");
+			assert.equal(result.isError, scenario.diagnostic !== undefined);
+			assert.deepEqual(result.content, [{ type: "text", text: scenario.diagnostic ?? JSON.stringify(rawResult, null, 2) }]);
+			if (!scenario.diagnostic) assert.deepEqual(result.details, { result: rawResult });
+			const ends = events.filter((event) => event.type === "tool_execution_end");
+			assert.equal(ends.length, 1);
+			assert.equal(ends[0]!.isError, result.isError);
+			assert.equal(repositoryReads, Number(scenario.reachesHook));
+			assert.equal(hookCalls, Number(scenario.reachesHook));
+			assert.equal(managerReplies, 0, "handled finish must not submit the manager reply twice");
+			assert.equal(faux.state.callCount, 1);
+			if (scenario.rejection !== undefined) {
+				await assert.rejects(() => definition!.execute("direct", {
+					operation: "finish_edit", planDirectory,
+				}, undefined, undefined, ctx), { name: "Error", message: scenario.diagnostic });
+			}
+		});
 	}
 });
 
