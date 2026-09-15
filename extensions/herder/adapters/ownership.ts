@@ -1,8 +1,10 @@
+import { nativeProcessAlive as adapterProcessAlive, nativeProcessIdentity as adapterProcessIdentity } from "../src/shared/process-identity.ts";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { openExecutionDatabase, withExecutionTransaction } from "../src/daemon/execution-store.ts";
+
+export { adapterProcessAlive, adapterProcessIdentity };
 
 const LOCK_NAME = "pi-session-owner.lock";
 const MAX_LOCK_BYTES = 4_096;
@@ -39,17 +41,6 @@ export interface AdapterOwnershipOptions {
 	isProcessAlive?: (pid: number) => boolean;
 	pid?: number;
 	processIdentity?: (pid: number) => string;
-}
-
-export function adapterProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
-		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-		throw error;
-	}
 }
 
 export function adapterOwnershipLockPath(planDirectory: string): string {
@@ -335,24 +326,6 @@ export function releaseAdapterOwnership(ownership: AdapterOwnership, strict = fa
 		}
 	} catch {}
 	try { fs.closeSync(ownership.descriptor); } catch {}
-}
-
-/** Native birth identity, never a command-name heuristic. Failure is deliberately fatal. */
-export function adapterProcessIdentity(pid: number): string {
-	if (process.platform === "linux") {
-		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-		const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-		if (!ticks || !/^\d+$/.test(ticks)) throw new Error("Cannot read Pi process start ticks");
-		return `linux:${fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()}:${ticks}`;
-	}
-	if (process.platform === "darwin") {
-		const birth = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
-			encoding: "utf8", timeout: 2_000, maxBuffer: 4096, env: { ...process.env, LC_ALL: "C" },
-		}).trim();
-		if (!birth) throw new Error("Cannot read Pi process birth identity");
-		return `darwin:${birth}`;
-	}
-	throw new Error("Safe Pi process identity is unsupported on this platform; exit the owning Pi once.");
 }
 
 export function assertAdapterOwnership(ownership: AdapterOwnership, planDirectory: string): void {

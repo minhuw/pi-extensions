@@ -131,7 +131,7 @@ process.stdin.destroy();
 			let service: Awaited<ReturnType<typeof startHerderService>> | undefined;
 			try {
 				assert.equal((await lines.next()).value, "held", stderr);
-				assert.equal(serviceProcessAlive(child.pid!), false);
+				assert.equal(serviceProcessAlive(child.pid!), true);
 				const lockPath = serviceOwnershipLockPath(planDir);
 				const payload = readFileSync(lockPath, "utf8");
 				await assert.rejects(async () => { service = await startHerderService({ planDirectory: planDir }); }, /already held by pid/);
@@ -151,4 +151,31 @@ process.stdin.destroy();
 			}
 		});
 	}
+}
+
+for (const legacy of [true, false]) {
+	test(`force exclusion refuses ${legacy ? "legacy" : "wrong birth"} live ownership without destructive callback`, async (t) => {
+		const { acquireServiceOwnership, releaseServiceOwnership } = await import("../../../src/daemon/service-ownership.ts");
+		const { RunStore } = await import("../../../src/daemon/run-store.ts");
+		const planDir = planDirectory();
+		const ownership = acquireServiceOwnership(planDir, "unsafe");
+		const lock = serviceOwnershipLockPath(planDir);
+		let called = false;
+		const signals: string[] = [];
+		try {
+			const store = new RunStore(planDir);
+			try { store.putService({ instanceId: "unsafe", pid: process.pid, port: 1, authToken: "test", dashboardUrl: "http://127.0.0.1:1/", startedAt: new Date().toISOString() }); }
+			finally { store.close(); }
+			writeFileSync(lock, legacy ? `${process.pid} unsafe\n` : readFileSync(lock, "utf8").replace(/linux:|darwin:/, "wrong:"));
+			t.mock.method(process, "kill", (_pid: number, signal: string | number = 0) => { if (signal !== 0) signals.push(String(signal)); return true; });
+			await assert.rejects(withServiceExclusion(planDir, () => { called = true; }, { purpose: "force" }), /refus|identity|ownership|shut down/i);
+			assert.equal(called, false);
+			assert.deepEqual(signals, []);
+			assert.equal(existsSync(lock), true);
+		} finally {
+			t.mock.restoreAll();
+			releaseServiceOwnership(ownership);
+			rmSync(path.dirname(planDir), { recursive: true, force: true });
+		}
+	});
 }

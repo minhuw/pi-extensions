@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import childProcess, { spawn, type ChildProcess } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import {
+	captureServiceTermination,
 	acquireServiceOwnership,
 	acquireStartExclusion,
 	releaseServiceOwnership,
@@ -15,9 +17,7 @@ import {
 } from "../../../src/daemon/service-ownership.ts";
 
 async function spawnNodeHelper(marker?: string): Promise<{ child: ChildProcess; pid: number }> {
-	// Keep the ordinary helper command line independent of this checkout path:
-	// the service identity guard intentionally rejects command lines containing
-	// "herder".
+	// Liveness must not depend on the helper command line.
 	const args = ["-e", "setInterval(() => {}, 1000)"];
 	if (marker) args.push(marker);
 	const child = spawn(process.execPath, args, { stdio: "ignore" });
@@ -72,22 +72,17 @@ function writeServiceLock(planDirectory: string, pid: number): string {
 	return lockPath;
 }
 
-test("reclaims service ownership when a live unrelated process reuses the recorded PID", { timeout: 10_000 }, async () => {
+test("preserves service ownership held by a live unrelated process", { timeout: 10_000 }, async () => {
 	const paths = fixture();
 	let helper: ChildProcess | undefined;
 	try {
 		const spawned = await spawnNodeHelper();
 		helper = spawned.child;
-		assert.equal(
-			serviceProcessAlive(spawned.pid),
-			false,
-			"plain node helper was classified as a Herder process; the environment cannot exercise PID-reuse reclaim",
-		);
-
-		const serviceLockPath = writeServiceLock(paths.planDirectory, spawned.pid);
-		const ownership = acquireServiceOwnership(paths.planDirectory, "replacement-instance");
-		assert.equal(ownership.lockPath, serviceLockPath);
-		releaseServiceOwnership(ownership);
+		assert.equal(serviceProcessAlive(spawned.pid), true);
+		const lockPath = writeServiceLock(paths.planDirectory, spawned.pid);
+		const payload = fs.readFileSync(lockPath, "utf8");
+		assert.throws(() => acquireServiceOwnership(paths.planDirectory, "replacement-instance"), /already held/);
+		assert.equal(fs.readFileSync(lockPath, "utf8"), payload);
 	} finally {
 		await stopProcess(helper);
 		fs.rmSync(paths.root, { recursive: true, force: true });
@@ -253,8 +248,12 @@ for (const kind of ["start", "service"] as const) {
 				await publisher.expect("paused");
 				const identity = fs.statSync(lock.lockPath);
 				const payload = fs.readFileSync(lock.lockPath, "utf8");
-				assert.equal(payload, phase === "empty" ? "" : kind === "start"
-					? `${publisher.child.pid}` : `${publisher.child.pid} child-instance`);
+				if (phase === "empty") assert.equal(payload, "");
+				else if (kind === "start") assert.equal(payload, `${publisher.child.pid}`);
+				else {
+					assert.ok(payload.startsWith(`${publisher.child.pid} child-instance\n`));
+					assert.ok(!payload.endsWith("\n"));
+				}
 				refuses(lock);
 				assert.equal(fs.statSync(lock.lockPath).ino, identity.ino);
 				assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
@@ -538,6 +537,86 @@ for (const kind of ["start", "service"] as const) {
 				if (missing) assert.equal(fs.existsSync(lock.lockPath), false);
 				else assert.equal(fs.readFileSync(lock.lockPath, "utf8"), payload);
 			} finally { fs.rmSync(paths.root, { recursive: true, force: true }); }
+		});
+	}
+}
+
+for (const code of ["EPERM", "EACCES", "ESRCH"]) {
+	test(`service liveness only treats ESRCH as death: ${code}`, (t) => {
+		t.mock.method(process, "kill", () => { throw Object.assign(new Error(code), { code }); });
+		assert.equal(serviceProcessAlive(process.pid), code !== "ESRCH");
+	});
+}
+
+test("native service termination evidence captures and rechecks synchronously", () => {
+	const paths = fixture();
+	const held = acquireServiceOwnership(paths.planDirectory, "native-instance");
+	try {
+		const text = fs.readFileSync(held.lockPath, "utf8");
+		assert.equal(text.split("\n")[0], `${process.pid} native-instance`);
+		const metadata = JSON.parse(text.split("\n")[1]);
+		assert.equal(metadata.version, 1);
+		assert.equal(metadata.planDirectory, fs.realpathSync(paths.planDirectory));
+		assert.match(metadata.processIdentity, /^(linux|darwin):/);
+		const verify = captureServiceTermination(paths.planDirectory, { pid: process.pid, instanceId: "native-instance" });
+		verify();
+		verify();
+	} finally { releaseServiceOwnership(held); fs.rmSync(paths.root, { recursive: true, force: true }); }
+});
+
+for (const when of ["capture", "invocation"]) {
+	for (const failure of ["birth", "plan", "legacy", "pid", "instance", "missing", "lock swap", "runtime swap", "runtime symlink", "lock symlink", "probe", "inspection"]) {
+		test(`termination refuses ${failure} at ${when}`, (t) => {
+			const paths = fixture();
+			const held = acquireServiceOwnership(paths.planDirectory, "native-instance");
+			try {
+				const service = { pid: process.pid, instanceId: "native-instance" };
+				const capture = () => captureServiceTermination(paths.planDirectory, service);
+				const verify = when === "invocation" ? capture() : capture;
+				const text = fs.readFileSync(held.lockPath, "utf8");
+				const [first, second] = text.split("\n");
+				const metadata = JSON.parse(second);
+				if (failure === "birth" || failure === "plan") {
+					metadata[failure === "birth" ? "processIdentity" : "planDirectory"] = failure === "birth" ? "wrong-birth" : paths.root;
+					fs.writeFileSync(held.lockPath, `${first}\n${JSON.stringify(metadata)}\n`);
+				} else if (failure === "legacy") fs.writeFileSync(held.lockPath, `${first}\n`);
+				else if (failure === "pid" || failure === "instance") {
+					fs.writeFileSync(held.lockPath, `${failure === "pid" ? process.pid + 1 : process.pid} ${failure === "instance" ? "other" : service.instanceId}\n${second}\n`);
+				} else if (failure === "missing") fs.unlinkSync(held.lockPath);
+				else if (["lock swap", "lock symlink", "runtime swap", "runtime symlink"].includes(failure)) {
+					const replace = () => {
+						if (failure.startsWith("lock")) {
+							fs.renameSync(held.lockPath, `${held.lockPath}.old`);
+							if (failure === "lock symlink") fs.symlinkSync(`${held.lockPath}.old`, held.lockPath);
+							else fs.writeFileSync(held.lockPath, text);
+						} else {
+							const runtime = path.dirname(held.lockPath);
+							fs.renameSync(runtime, `${runtime}.old`);
+							if (failure === "runtime symlink") fs.symlinkSync(`${runtime}.old`, runtime);
+							else { fs.mkdirSync(runtime); fs.writeFileSync(held.lockPath, text); }
+						}
+					};
+					if (when === "capture" && failure.endsWith("swap")) {
+						const read = fs.readSync;
+						t.mock.method(fs, "readSync", ((fd, buffer, offset, length, position) => {
+							const result = read(fd, buffer, offset, length, position);
+							replace();
+							return result;
+						}) as typeof fs.readSync);
+					} else replace();
+				} else if (failure === "probe") {
+					t.mock.method(fs, "readFileSync", () => { throw new Error("probe failed"); });
+					t.mock.method(childProcess, "execFileSync", () => { throw new Error("probe failed"); });
+					syncBuiltinESMExports();
+				} else if (failure === "inspection") {
+					t.mock.method(fs, "readSync", () => { throw new Error("inspection failed"); });
+				}
+				assert.throws(verify);
+			} finally {
+				t.mock.restoreAll(); syncBuiltinESMExports();
+				releaseServiceOwnership(held);
+				fs.rmSync(paths.root, { recursive: true, force: true });
+			}
 		});
 	}
 }

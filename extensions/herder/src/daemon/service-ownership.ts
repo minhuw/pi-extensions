@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { nativeProcessAlive, nativeProcessIdentity } from "../shared/process-identity.ts";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -18,24 +18,10 @@ export interface StartExclusion {
 	lockPath: string;
 }
 
-function processAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/** Pid liveness plus a best-effort guard against pid reuse by an unrelated process. */
+/** Only ESRCH establishes death; uncertain probes never authorize reclamation. */
 export function serviceProcessAlive(pid: number): boolean {
-	if (!processAlive(pid)) return false;
-	try {
-		const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-		return command.includes("service.ts") || command.includes("herder");
-	} catch {
-		return true;
-	}
+	try { return nativeProcessAlive(pid); }
+	catch { return true; }
 }
 
 function ownerLockPath(planDirectory: string): string {
@@ -46,13 +32,19 @@ function sameFile(left: FileIdentity, right: FileIdentity): boolean {
 	return left.dev === right.dev && left.ino === right.ino;
 }
 
+interface ServiceMetadata {
+	version: 1;
+	processIdentity: string;
+	planDirectory: string;
+}
+
 // Ambiguous evidence is never permission to unlink. O_NONBLOCK also prevents a
 // replaced FIFO from blocking between lstat and open; O_NOFOLLOW rejects links.
-function lockOwner(lockPath: string, service: boolean): { pid: number; instanceId?: string; identity: FileIdentity } | null {
+function lockOwner(lockPath: string, service: boolean): { pid: number; instanceId?: string; identity: fs.Stats; metadata?: ServiceMetadata } | null {
 	let descriptor: number | undefined;
 	try {
 		const named = fs.lstatSync(lockPath);
-		if (!named.isFile()) return null;
+		if (!fs.constants.O_NOFOLLOW || !named.isFile()) return null;
 		descriptor = fs.openSync(lockPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 		const opened = fs.fstatSync(descriptor);
 		if (!opened.isFile() || !sameFile(named, opened) || opened.size < 1 || opened.size > 4096) return null;
@@ -64,10 +56,17 @@ function lockOwner(lockPath: string, service: boolean): { pid: number; instanceI
 		if (size !== opened.size || after.size !== opened.size
 			|| after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) return null;
 		const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
-		const match = (service ? /^([1-9]\d*) ([^\s]+)\n$/ : /^([1-9]\d*)\n$/).exec(text);
+		const match = (service ? /^([1-9]\d*) ([^\s]+)\n(?:([^\n]+)\n)?$/ : /^([1-9]\d*)\n$/).exec(text);
 		if (!match || match[0] !== text) return null;
+		let metadata: ServiceMetadata | undefined;
+		if (match[3] !== undefined) {
+			metadata = JSON.parse(match[3]);
+			if (!metadata || metadata.version !== 1
+				|| typeof metadata.processIdentity !== "string" || !metadata.processIdentity.length || metadata.processIdentity.length > 512
+				|| typeof metadata.planDirectory !== "string" || !path.isAbsolute(metadata.planDirectory)) return null;
+		}
 		const pid = Number(match[1]);
-		return Number.isSafeInteger(pid) && pid <= 2147483647 ? { pid, instanceId: match[2], identity: opened } : null;
+		return Number.isSafeInteger(pid) && pid <= 2147483647 ? { pid, instanceId: match[2], identity: opened, metadata } : null;
 	} catch {
 		return null;
 	} finally {
@@ -102,10 +101,7 @@ function acquireLock(lockPath: string, payload: string, service: boolean): Servi
 			: `Cannot safely read service lock ${lockPath}; verify quiescence and inspect the exact lock before manual recovery.`);
 		return null;
 	};
-	// Operation owners run in Pi/CLI hosts, whose argv need not identify a daemon.
-	const alive = (owner: NonNullable<ReturnType<typeof lockOwner>>) =>
-		service && !/^(cleanup|reset|force|revision)-/.test(owner.instanceId ?? "")
-			? serviceProcessAlive(owner.pid) : processAlive(owner.pid);
+	const alive = (owner: NonNullable<ReturnType<typeof lockOwner>>) => serviceProcessAlive(owner.pid);
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try { fs.lstatSync(guardPath); throw guardError(); }
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw guardError(); }
@@ -162,7 +158,14 @@ export function releaseStartExclusion(lock: StartExclusion): void {
 export function acquireServiceOwnership(planDirectory: string, instanceId: string): ServiceOwnership {
 	const lockPath = ownerLockPath(planDirectory);
 	fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-	return acquireLock(lockPath, `${process.pid} ${instanceId}\n`, true)!;
+	readRuntimeIdentity(planDirectory);
+	if (!instanceId || /\s/.test(instanceId) || instanceId.length > 512) throw new Error("Invalid service ownership instance ID");
+	const metadata: ServiceMetadata = {
+		version: 1, processIdentity: nativeProcessIdentity(process.pid), planDirectory: fs.realpathSync(planDirectory),
+	};
+	const payload = `${process.pid} ${instanceId}\n${JSON.stringify(metadata)}\n`;
+	if (Buffer.byteLength(payload) > 4096) throw new Error("Service ownership evidence exceeds size limit");
+	return acquireLock(lockPath, payload, true)!;
 }
 
 export function serviceOwnershipIsCurrent(ownership: ServiceOwnership): boolean {
@@ -184,4 +187,44 @@ export function releaseServiceOwnership(ownership: ServiceOwnership): void {
 
 export function serviceOwnershipLockPath(planDirectory: string): string {
 	return ownerLockPath(planDirectory);
+}
+
+function readRuntimeIdentity(planDirectory: string): fs.Stats {
+	const runtime = fs.lstatSync(path.dirname(ownerLockPath(planDirectory)));
+	if (!runtime.isDirectory() || runtime.isSymbolicLink()) throw new Error("Unsafe service runtime; refusing signals");
+	return runtime;
+}
+
+/** Capture lock evidence for a registered service. Caller must recheck SQLite before each signal.
+ * Best effort: Node cannot make native birth inspection and the subsequent signal atomic.
+ */
+export function captureServiceTermination(planDirectory: string, service: { pid: number; instanceId: string }): () => void {
+	const resolved = path.resolve(planDirectory);
+	const canonical = fs.realpathSync(resolved);
+	const runtime = readRuntimeIdentity(resolved);
+	const lockPath = ownerLockPath(resolved);
+	const expected = { pid: service.pid, instanceId: service.instanceId };
+	let captured: fs.Stats | undefined;
+	const refuse = () => { throw new Error("Service termination identity evidence changed or unavailable; refusing signals. Safely shut down the owning service externally before retrying"); };
+	const assertRuntime = () => {
+		if (fs.realpathSync(resolved) !== canonical || !sameFile(runtime, readRuntimeIdentity(resolved))) refuse();
+	};
+	const verify = () => {
+		assertRuntime();
+		const owner = lockOwner(lockPath, true);
+		if (!owner || owner.pid !== expected.pid || owner.instanceId !== expected.instanceId
+			|| !owner.metadata || owner.metadata.planDirectory !== canonical || owner.identity.nlink !== 1) return refuse();
+		if (captured && !sameEvidence(captured, owner.identity)) refuse();
+		if (nativeProcessIdentity(expected.pid) !== owner.metadata.processIdentity) refuse();
+		assertRuntime();
+		const named = fs.lstatSync(lockPath);
+		if (!named.isFile() || !sameEvidence(owner.identity, named)) refuse();
+		captured ??= owner.identity;
+	};
+	verify();
+	return verify;
+}
+
+function sameEvidence(left: fs.Stats, right: fs.Stats): boolean {
+	return sameFile(left, right) && (["size", "mtimeMs", "ctimeMs", "nlink"] as const).every(key => left[key] === right[key]);
 }

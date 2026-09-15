@@ -197,6 +197,13 @@ test("a health failure after replacement exposure requires another healthy insta
 	const { root, planDirectory: directory } = planFixture({ prefix: "herder-runtime-safety-", planDirectoryMode: 0o700 });
 	const initial = await ensureService(directory);
 	await stopService(directory);
+	// Shutdown acknowledgement precedes OS exit and may already release ownership.
+	// Start this rotation scenario from proven exit, not missing live-owner evidence.
+	const exitDeadline = Date.now() + 5_000;
+	while (serviceProcessAlive(initial.pid) && Date.now() < exitDeadline) {
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	assert.equal(serviceProcessAlive(initial.pid), false);
 	const originalFetch = globalThis.fetch;
 	let exposedInstanceId: string | null = null;
 	globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {

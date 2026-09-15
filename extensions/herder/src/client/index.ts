@@ -16,6 +16,7 @@ import {
 import { RunStore, type StoredService } from "../daemon/run-store.ts";
 import {
 	acquireStartExclusion,
+	captureServiceTermination,
 	acquireServiceOwnership,
 	releaseServiceOwnership,
 	releaseStartExclusion,
@@ -192,14 +193,31 @@ async function healthyUnmarkedService(planDirectory: string): Promise<StoredServ
 	return service && !hasExecutionRotationMarker(planDirectory) ? service : null;
 }
 
-async function terminateServiceProcess(pid: number): Promise<void> {
-	try { process.kill(pid, "SIGTERM"); } catch { return; }
+async function terminateServiceProcess(planDirectory: string, service: StoredService): Promise<void> {
+	if (!serviceProcessAlive(service.pid)) return;
+	const verify = captureServiceTermination(planDirectory, service);
+	const signal = (signal: "SIGTERM" | "SIGKILL"): void => {
+		const registered = registeredService(planDirectory);
+		if (!registered || registered.pid !== service.pid || registered.instanceId !== service.instanceId) {
+			throw new Error("Herder service registration changed; refusing termination. Shut down the owning service safely before retrying.");
+		}
+		verify();
+		try { process.kill(service.pid, signal); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+	};
+	signal("SIGTERM");
 	const deadline = Date.now() + 2_000;
 	while (Date.now() < deadline) {
-		if (!serviceProcessAlive(pid)) return;
+		if (!serviceProcessAlive(service.pid)) return;
 		await delay(100);
 	}
-	try { process.kill(pid, "SIGKILL"); } catch {}
+	if (!serviceProcessAlive(service.pid)) return;
+	signal("SIGKILL");
+	const killDeadline = Date.now() + 2_000;
+	while (serviceProcessAlive(service.pid)) {
+		if (Date.now() >= killDeadline) throw new Error("Cannot prove Herder service exit after termination; refusing continuation.");
+		await delay(50);
+	}
 }
 
 function ensureRuntimeDirectory(directoryPath: string): fs.Stats {
@@ -359,16 +377,16 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 				catch { return false; }
 			})() : false;
 			if (rotationRequired && registered && serviceProcessAlive(registered.pid)) {
-				await terminateServiceProcess(registered.pid);
+				await terminateServiceProcess(planDirectory, registered);
 			} else if (registered && serviceProcessAlive(registered.pid)) {
 				if (!registeredLogSafe && registeredLogPresent) {
 					// Never reuse a daemon whose append target cannot be proven to be a
 					// private regular file. The startup helper will refuse symlinks too.
-					await terminateServiceProcess(registered.pid);
+					await terminateServiceProcess(planDirectory, registered);
 				} else if (await incompatibleService(registered)) {
 					// An authenticated daemon that explicitly reports an obsolete protocol is
 					// replaced immediately. An unresponsive owner still receives the grace period.
-					await terminateServiceProcess(registered.pid);
+					await terminateServiceProcess(planDirectory, registered);
 				} else {
 					// A live daemon already owns this plan directory. Never spawn a duplicate:
 					// give a busy daemon time to answer, and replace it only if it stays wedged.
@@ -393,7 +411,7 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 						}
 						if (!serviceProcessAlive(registered.pid)) break;
 					}
-					if (rotationRequired || serviceProcessAlive(registered.pid)) await terminateServiceProcess(registered.pid);
+					if (rotationRequired || serviceProcessAlive(registered.pid)) await terminateServiceProcess(planDirectory, registered);
 				}
 			}
 			markerIdentity = executionRotationMarkerIdentity(planDirectory);
@@ -426,13 +444,13 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 							rotationRequired = true;
 							previousInstanceId = service.instanceId;
 							replacementBaselinePending = false;
-							await terminateServiceProcess(service.pid);
+							await terminateServiceProcess(planDirectory, service);
 							return "restart";
 						}
 						if (replacementBaselinePending || previousInstanceId === undefined || service.instanceId === previousInstanceId) {
 							previousInstanceId = service.instanceId;
 							replacementBaselinePending = false;
-							await terminateServiceProcess(service.pid);
+							await terminateServiceProcess(planDirectory, service);
 							return "restart";
 						}
 						const expectedMarker = markerIdentity;
@@ -454,10 +472,10 @@ export async function ensureService(planDirectoryInput: string, options: { dashb
 							rotationRequired = true;
 							previousInstanceId = service.instanceId;
 							replacementBaselinePending = false;
-							await terminateServiceProcess(service.pid);
+							await terminateServiceProcess(planDirectory, service);
 							return "restart";
 						}
-						await terminateServiceProcess(service.pid);
+						await terminateServiceProcess(planDirectory, service);
 						if (remainingMarker === null) {
 							throw new Error("Execution rotation marker disappeared while authority rotation was being completed");
 						}
@@ -553,15 +571,6 @@ function mayStopLiveRun(purpose: ServiceExclusionPurpose): boolean {
 	return purpose === "reset" || purpose === "force" || purpose === "revision";
 }
 
-async function killOwnedService(pid: number): Promise<void> {
-	if (!serviceProcessAlive(pid)) return;
-	try { process.kill(pid, "SIGTERM"); } catch {}
-	const deadline = Date.now() + 2_000;
-	while (serviceProcessAlive(pid) && Date.now() < deadline) await delay(50);
-	if (!serviceProcessAlive(pid)) return;
-	try { process.kill(pid, "SIGKILL"); } catch {}
-}
-
 /**
  * Exclude daemon startup and hold the daemon-owner lock while a cleanup or reset
  * callback performs its Git mutation. Reset and force may stop a live run first;
@@ -585,13 +594,13 @@ export async function withServiceExclusion<T>(
 			const service = await healthyService(planDirectory);
 			if (!service) {
 				if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
-				await killOwnedService(registered.pid);
+				await terminateServiceProcess(planDirectory, registered);
 			} else {
 				let status: Record<string, unknown>;
 				try { status = managerReplyFromStatus(await requestService(service, "/v1/status", undefined, HEALTH_TIMEOUT_MS)); }
 				catch {
 					if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
-					await killOwnedService(registered.pid);
+					await terminateServiceProcess(planDirectory, registered);
 					status = { status: "stopped" };
 				}
 				const serviceStatus = String(status.status || "");
@@ -600,14 +609,14 @@ export async function withServiceExclusion<T>(
 					try { if (purpose !== "revision") await requestManagerOperation(service, "stop", {}); }
 					catch {
 						if (purpose !== "force") throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
-						await killOwnedService(registered.pid);
+						await terminateServiceProcess(planDirectory, registered);
 					}
 				}
 				if (serviceProcessAlive(registered.pid)) {
 					try { await requestService(service, "/shutdown", {}); }
 					catch {
 						if (purpose !== "force") throw new Error(`A Herder service could not be stopped; ${purpose} was not applied.`);
-						await killOwnedService(registered.pid);
+						await terminateServiceProcess(planDirectory, registered);
 					}
 				}
 			}

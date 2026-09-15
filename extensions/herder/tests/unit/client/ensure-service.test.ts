@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import childProcess, { spawn } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -20,8 +21,9 @@ import { planFixture } from "../../support/plan-fixture.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
 import { MANAGER_PROTOCOL_VERSION } from "../../../src/shared/protocol.ts";
 
-function fakeServiceProcess(script: string): { pid: number; kill: () => void } {
-	const child = spawn(process.execPath, [script], { detached: true, stdio: "ignore" });
+async function fakeServiceProcess(script: string): Promise<{ pid: number; kill: () => void }> {
+	const child = spawn(process.execPath, [script], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+	await new Promise<void>((resolve, reject) => { child.stdout!.once("data", () => resolve()); child.once("error", reject); });
 	child.unref();
 	if (!child.pid) throw new Error("failed to spawn fake service");
 	return { pid: child.pid, kill: () => { try { process.kill(child.pid!, "SIGKILL"); } catch {} } };
@@ -45,9 +47,9 @@ function alive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function oldProtocolServiceProcess(): Promise<{ pid: number; port: number; authToken: string; kill: () => void }> {
+async function oldProtocolServiceProcess(planDirectory: string): Promise<{ pid: number; port: number; authToken: string; kill: () => void }> {
 	const authToken = "stale";
-	const child = spawn(process.execPath, ["-e", `const http = require("node:http"); const server = http.createServer((req, res) => { if (req.url !== "/health" || req.headers.authorization !== "Bearer ${authToken}") { res.writeHead(401); return res.end(); } res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, instanceId: "stale-instance", pid: process.pid, runtimeExecutable: process.execPath, managerProtocolVersion: ${MANAGER_PROTOCOL_VERSION - 1}, executionSchemaVersion: 17, capabilities: ["durable-operations"] })); }); server.listen(0, "127.0.0.1", () => console.log(server.address().port)); setInterval(() => {}, 1000);`], { stdio: ["ignore", "pipe", "ignore"] });
+	const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `import { acquireServiceOwnership } from ${JSON.stringify(new URL("../../../src/daemon/service-ownership.ts", import.meta.url).href)}; acquireServiceOwnership(${JSON.stringify(planDirectory)}, "stale-instance"); const http = await import("node:http"); const server = http.createServer((req, res) => { if (req.url !== "/health" || req.headers.authorization !== "Bearer ${authToken}") { res.writeHead(401); return res.end(); } res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ ok: true, instanceId: "stale-instance", pid: process.pid, runtimeExecutable: process.execPath, managerProtocolVersion: ${MANAGER_PROTOCOL_VERSION - 1}, executionSchemaVersion: 17, capabilities: ["durable-operations"] })); }); server.listen(0, "127.0.0.1", () => console.log(server.address().port)); setInterval(() => {}, 1000);`], { stdio: ["ignore", "pipe", "ignore"] });
 	if (!child.pid || !child.stdout) throw new Error("failed to spawn old protocol service");
 	const port = await new Promise<number>((resolve, reject) => {
 		let output = "";
@@ -420,7 +422,7 @@ test("legacy blocking control paths remain authenticated HTTP tombstones", async
 });
 test("ensureService replaces a prior-protocol daemon", async () => {
 	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
-	const old = await oldProtocolServiceProcess();
+	const old = await oldProtocolServiceProcess(planDirectory);
 	try {
 		registerService(planDirectory, old.pid, old.port, old.authToken);
 		const service = await ensureService(planDirectory, { unresponsiveGraceMs: 1_000 });
@@ -450,8 +452,8 @@ test("ensureService replaces a stale registration whose pid is dead", async () =
 test("ensureService waits for a live owner and replaces it only after the grace period", async () => {
 	const { root, planDirectory } = planFixture({ prefix: "herder-ensure-service-" });
 	const script = path.join(root, "herder-stub-service.js");
-	writeFileSync(script, "setInterval(() => {}, 1000);\n");
-	const stub = fakeServiceProcess(script);
+	writeFileSync(script, `import(${JSON.stringify(new URL("../../../src/daemon/service-ownership.ts", import.meta.url).href)}).then(({ acquireServiceOwnership }) => { acquireServiceOwnership(${JSON.stringify(planDirectory)}, "stale-instance"); process.on("SIGTERM", () => {}); console.log("ready"); setInterval(() => {}, 1000); });`);
+	const stub = await fakeServiceProcess(script);
 	try {
 		registerService(planDirectory, stub.pid);
 		const started = Date.now();
@@ -465,6 +467,77 @@ test("ensureService waits for a live owner and replaces it only after the grace 
 		assert.ok(!alive(stub.pid), "wedged owner was not terminated");
 	} finally {
 		stub.kill();
+		await stopService(planDirectory).catch(() => {});
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+for (const mutation of ["legacy", "birth", "instance", "removed-after-term", "replaced-after-term", "registration-after-term", "reused-after-term", "probe-after-term"] as const) {
+	test(`ensureService refuses unsafe ownership: ${mutation}`, async (t) => {
+		const { acquireServiceOwnership, releaseServiceOwnership, serviceOwnershipLockPath } = await import("../../../src/daemon/service-ownership.ts");
+		const { root, planDirectory } = planFixture({ prefix: "herder-identity-refusal-" });
+		const ownership = acquireServiceOwnership(planDirectory, "stale-instance");
+		const lock = serviceOwnershipLockPath(planDirectory);
+		const signals: string[] = [];
+		try {
+			registerService(planDirectory, process.pid);
+			if (mutation === "legacy") writeFileSync(lock, `${process.pid} stale-instance\n`);
+			if (mutation === "birth") writeFileSync(lock, fs.readFileSync(lock, "utf8").replace(/linux:|darwin:/, "wrong:"));
+			if (mutation === "instance") writeFileSync(lock, fs.readFileSync(lock, "utf8").replace("stale-instance", "another-instance"));
+			t.mock.method(process, "kill", (_pid: number, signal: string | number = 0) => {
+				if (signal !== 0) {
+					signals.push(String(signal));
+					if (mutation === "removed-after-term") fs.unlinkSync(lock);
+					if (mutation === "replaced-after-term") {
+						fs.renameSync(lock, `${lock}.old`);
+						writeFileSync(lock, fs.readFileSync(`${lock}.old`));
+					}
+					if (mutation === "registration-after-term") registerService(planDirectory, 999_999_999);
+					if (mutation === "reused-after-term" || mutation === "probe-after-term") {
+						if (process.platform === "darwin") {
+							t.mock.method(childProcess, "execFileSync", () => {
+								if (mutation === "probe-after-term") throw new Error("native identity inspection failed");
+								return "different process birth";
+							});
+							syncBuiltinESMExports();
+						} else {
+							const read = fs.readFileSync;
+							t.mock.method(fs, "readFileSync", ((file, ...args) => {
+								if (String(file) === `/proc/${process.pid}/stat`) {
+									if (mutation === "probe-after-term") throw new Error("native identity inspection failed");
+									return `0 (reused) ${Array(19).fill("0").join(" ")} 999999999`;
+								}
+								return read(file, ...args);
+							}) as typeof fs.readFileSync);
+						}
+					}
+				}
+				return true;
+			});
+			await assert.rejects(ensureService(planDirectory, { unresponsiveGraceMs: 0 }), /refus|identity|ownership|shut down/i);
+			assert.deepEqual(signals, mutation.endsWith("after-term") ? ["SIGTERM"] : []);
+		} finally {
+			t.mock.restoreAll();
+			syncBuiltinESMExports();
+			releaseServiceOwnership(ownership);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+}
+
+test("healthy legacy service remains reusable without upgrading birth evidence", async () => {
+	const { serviceOwnershipLockPath } = await import("../../../src/daemon/service-ownership.ts");
+	const { root, planDirectory } = planFixture({ prefix: "herder-legacy-reuse-" });
+	try {
+		const initial = await ensureService(planDirectory);
+		const lock = serviceOwnershipLockPath(planDirectory);
+		const legacy = `${initial.pid} ${initial.instanceId}\n`;
+		writeFileSync(lock, legacy);
+		const reused = await ensureService(planDirectory);
+		assert.equal(reused.instanceId, initial.instanceId);
+		assert.equal(reused.pid, initial.pid);
+		assert.equal(fs.readFileSync(lock, "utf8"), legacy);
+	} finally {
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });
 	}
