@@ -62,6 +62,27 @@ test("fire defaults to a five-worker pool and an ephemeral dashboard port", () =
 	});
 });
 
+test("YOLO is a standalone fire-only flag and cannot change an existing run", () => {
+	assert.deepEqual(parseFireArguments("--yolo", "fire"), {
+		mode: "fire", planDir: "herder-plans", maxParallel: 5, dashboardPort: 0, yolo: true,
+	});
+	assert.deepEqual(parseFireArguments('"plans with spaces" --profile poorman --yolo --max-parallel 2 --dashboard-port 4312', "fire"), {
+		mode: "fire", planDir: "plans with spaces", profile: "poorman", maxParallel: 2, dashboardPort: 4312, yolo: true,
+	});
+	for (const mode of ["resume", "revise"] as const) {
+		assert.throws(() => parseFireArguments("--yolo", mode), /only supported by \/herder-fire/);
+		assert.equal(parseFireArguments("", mode).yolo, undefined);
+	}
+	assert.throws(() => parseAttachArguments("--yolo"), /Unknown option: --yolo/);
+	assert.throws(() => parsePlanDirArguments("--yolo"), /Unknown option: --yolo/); // /herder-revise command
+	assert.throws(() => parseFireArguments("--yolo --yolo", "fire"), /more than once/);
+	for (const value of ["true", "false", "1"]) {
+		assert.throws(() => parseFireArguments(`--yolo=${value}`, "fire"), /Unknown option/);
+		assert.throws(() => parseFireArguments(`plans --yolo ${value}`, "fire"), /Unexpected argument/);
+	}
+	assert.equal(parseFireArguments("", "fire").yolo, undefined);
+});
+
 test("attach accepts only a plan directory and dashboard port", () => {
 	assert.deepEqual(parseAttachArguments(""), { planDir: "herder-plans", dashboardPort: 0 });
 	assert.deepEqual(parseAttachArguments('"plans with spaces" --dashboard-port 4312'), { planDir: "plans with spaces", dashboardPort: 4312 });

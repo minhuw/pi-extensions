@@ -243,6 +243,7 @@ test("manager projection preserves populated manager domains", () => {
 
 		assert.deepEqual(readManagerState(planDirectory), {
 			run: {
+			yolo: false,
 			runId: RUN_ID,
 			planName: "herder-plans",
 			host: "pi",

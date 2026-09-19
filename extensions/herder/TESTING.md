@@ -41,6 +41,18 @@ Worker STOPPED/FAILED, Reviewer BLOCK, and Judge NEEDS_INPUT/BLOCKED can optiona
 
 Gate outcomes `passed`, `command_failed`, `unavailable`, `timed_out`, and `runner_error`, plus error/timedOut/signal metadata, are process evidence only. A launched uv/Nix wrapper missing a nested tool may be `command_failed`; exit 127 or log text alone is not a source-defect diagnosis. Inspect the declared invocation and prerequisites, report exact manager/command/cwd/error, and never rewrite missing setup as a passed check.
 
+## YOLO adapter regression coverage
+
+Run the focused, provider-free argument and display-state checks:
+
+```sh
+npm run test:herder -- extensions/herder/tests/unit/adapters/arguments.test.ts extensions/herder/tests/unit/adapters/state.test.ts
+```
+
+They cover fire-only standalone `--yolo`, rejection on resume/revise/attach and of duplicate/value-form flags, unchanged normal defaults, and restoration of boolean display hints with legacy entries remaining normal. Backend lifecycle coverage must additionally establish zero Reviewer/Judge dispatches (including final audit), Implementer COMPLETE plus mechanical integrity/scope checks, mandatory passed exact-tree final gates, immutable mode recovery, and unchanged budgets. Adapter checks alone do not prove those backend guarantees or semantic review quality.
+
+Schema 21 additively persists `yolo`, defaulting existing runs to `false`, without losing schema-20 budget accounting. Schema-19 migration must still preserve the applied contract/history/worktrees, reconstruct conservative consumption, and pause ambiguous recovery for explicit authorization. Test migrations only on isolated synthetic records, never real user executions. Normal review calibration below remains normal-mode coverage, not a YOLO approval claim.
+
 ## Bounded execution regression coverage
 
 `tests/unit/core/budgets.test.ts` exercises transactional admission and stop persistence, replay, task limits across generations/reset, unallocated renamed tasks, explicit grants, final verification, and conservative schema-19 migration. `review-findings.test.ts` validates approved obligation references, concrete causal evidence, advisory findings, and Judge bindings. `run-manager-environment.test.ts` covers quiet stops, safe host recovery, preserved mutations, stale dispatches, late terminals, and unknown verification results. `run-manager.test.ts` requires actual final approval instead of completion-plus-successor. All use isolated synthetic records/repositories; do not migrate or inspect real user executions for these checks.

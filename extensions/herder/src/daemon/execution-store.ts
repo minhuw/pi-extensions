@@ -50,7 +50,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 20
+export const EXECUTION_SCHEMA_VERSION = 21
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -582,7 +582,7 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const version = databaseSchemaVersion(database)
   if (version === EXECUTION_SCHEMA_VERSION) return
-  if (version !== 0 && version !== 19) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
+  if (version !== 0 && version !== 19 && version !== 20) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
   if (!allowInitialize) fail("Execution database has no initialized schema")
   database.exec("BEGIN IMMEDIATE")
   try {
@@ -592,8 +592,37 @@ function initializeSchema(database: Database, { allowInitialize = true }: { allo
       database.exec("COMMIT")
       return
     }
-    if (currentVersion === 19) {
-      migrateBudgets(database)
+    if (currentVersion === 19 || currentVersion === 20) {
+      if (currentVersion === 19) migrateBudgets(database)
+      // Synthetic legacy fixtures may already have additive columns.
+      if (!database.prepare("PRAGMA table_info(manager_runs)").all().some((column) => column.name === "yolo")) {
+        database.exec("ALTER TABLE manager_runs ADD COLUMN yolo INTEGER NOT NULL DEFAULT 0 CHECK (yolo IN (0, 1))")
+      }
+      database.exec(`
+CREATE TABLE manager_approvals_v21 (
+        run_id TEXT NOT NULL REFERENCES manager_runs(run_id) ON DELETE CASCADE,
+        plan_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
+        reviewer_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
+        decision_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
+        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge', 'user', 'plan-implementer')),
+        user_acceptance_json TEXT CHECK ((decision_role = 'user') = (user_acceptance_json IS NOT NULL)),
+        assignment_sha256 TEXT NOT NULL,
+        approved_base TEXT NOT NULL,
+        approved_head TEXT NOT NULL,
+        approved_tree TEXT NOT NULL,
+        review_result_sha256 TEXT NOT NULL,
+        decision_result_sha256 TEXT NOT NULL,
+        proof_sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, plan_id, generation)
+      );
+INSERT INTO manager_approvals_v21 SELECT * FROM manager_approvals;
+DROP TABLE manager_approvals;
+ALTER TABLE manager_approvals_v21 RENAME TO manager_approvals;
+CREATE UNIQUE INDEX manager_approvals_proof ON manager_approvals(proof_sha256);
+`)
       database.exec(`PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION}`)
       database.exec("COMMIT")
       return
@@ -631,6 +660,7 @@ CREATE TABLE run_configuration (
         recorded_at TEXT NOT NULL
       );
 CREATE TABLE manager_runs (
+        yolo INTEGER NOT NULL DEFAULT 0 CHECK (yolo IN (0, 1)),
         run_id TEXT PRIMARY KEY NOT NULL,
         repository_root TEXT NOT NULL,
         plan_directory TEXT NOT NULL,
@@ -761,7 +791,7 @@ CREATE TABLE manager_approvals (
         round_number INTEGER NOT NULL CHECK (round_number BETWEEN 1 AND ${MAX_PLAN_ROUNDS}),
         reviewer_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
         decision_action_id TEXT NOT NULL REFERENCES manager_actions(action_id),
-        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge', 'user')),
+        decision_role TEXT NOT NULL CHECK (decision_role IN ('plan-reviewer', 'plan-judge', 'user', 'plan-implementer')),
         user_acceptance_json TEXT CHECK ((decision_role = 'user') = (user_acceptance_json IS NOT NULL)),
         assignment_sha256 TEXT NOT NULL,
         approved_base TEXT NOT NULL,

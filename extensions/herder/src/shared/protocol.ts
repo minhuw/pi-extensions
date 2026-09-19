@@ -857,6 +857,7 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 }
 
 export interface ManagerReply {
+	yolo?: boolean;
 	executionBudget?: { limit: number; used: number; remaining: number; stopReason: string | null };
 	runRevision?: { editToken: string; requestId: string; state: string };
 	protocolVersion: number;

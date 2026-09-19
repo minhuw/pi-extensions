@@ -47,6 +47,7 @@ async function finishSelectiveRevision(initial: RunRevision): Promise<{ reply: M
 		const current = store.getRun();
 		const selective = record.selective!;
 		if (!current || current.runId !== record.run.runId
+			|| Boolean(current.yolo) !== Boolean(record.run.yolo)
 			|| (["repositoryRoot", "planDirectory", "planName", "host", "profileName", "profileSha256", "maxParallel", "integrationBranch", "integrationWorktree", "baseCommit", "checkoutStateToken"] as const).some(key => current[key] !== record.run[key])
 			|| !((current.currentGeneration === selective.sourceGeneration && current.graphSha256 === record.run.graphSha256)
 				|| (current.currentGeneration === selective.nextGeneration && current.graphSha256 === record.graphSha256))) throw new Error("Selective revision execution identity changed");
@@ -115,7 +116,7 @@ async function finishSelectiveRevision(initial: RunRevision): Promise<{ reply: M
 			crashRevisionForTest("after_complete");
 		}
 		if (record.selective!.resumed) return { reply: manager.reply() };
-		const reply = await manager.start({ mode: "resume", repositoryRoot: record.run.repositoryRoot, planDirectory: directory, profile: record.run.profileName, maxParallel: record.run.maxParallel });
+		const reply = await manager.start({ mode: "resume", repositoryRoot: record.run.repositoryRoot, planDirectory: directory, profile: record.run.profileName, maxParallel: record.run.maxParallel, yolo: Boolean(record.run.yolo) });
 		crashRevisionForTest("after_schedule");
 		save({ ...record, selective: { ...record.selective!, resumed: true } });
 		return { reply };

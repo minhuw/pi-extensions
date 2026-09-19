@@ -47,6 +47,8 @@ type Database = DatabaseSync;
 type SqlRow = Record<string, any>;
 
 export interface StoredRun {
+	/** Immutable; legacy fixtures and runs default to normal review. */
+	yolo?: boolean;
 	runId: string;
 	repositoryRoot: string;
 	planDirectory: string;
@@ -156,9 +158,10 @@ export interface StoredApproval {
 	planId: string;
 	generation: number;
 	round: number;
+	/** With decisionRole=plan-implementer, these legacy review columns bind Implementer evidence, not a review. */
 	reviewerActionId: string;
 	decisionActionId: string;
-	decisionRole: "plan-reviewer" | "plan-judge" | "user";
+	decisionRole: "plan-reviewer" | "plan-judge" | "user" | "plan-implementer";
 	userAcceptance?: AttentionResolutionInput;
 	assignmentSha256: string;
 	approvedBase: string;
@@ -356,7 +359,7 @@ export function readManagerState(planDir: string) {
     const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_runs'").get()
     if (!table) return { run: null, specs: [], plans: [], actions: [], generations: [], approvals: [], edit: null, verification: null, integrationRepair: null, attention: null, service: null }
     const run = (database.prepare(`
-      SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel,
+      SELECT run_id, plan_name, host, profile_name, profile_sha256, max_parallel, yolo,
         current_generation, graph_sha256, status, integration_branch,
         integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
       FROM manager_runs ORDER BY created_at DESC LIMIT 1
@@ -467,6 +470,7 @@ export function readManagerState(planDir: string) {
     `).get() as SqlRow | undefined ?? null
     return {
       run: run ? {
+        yolo: run.yolo === 1,
         runId: run.run_id,
         planName: run.plan_name,
         host: run.host,
@@ -675,6 +679,7 @@ function exposedManagerReply(value: unknown): unknown {
 function rowToRun(row: Record<string, unknown> | undefined): StoredRun | null {
 	if (!row) return null;
 	return {
+		yolo: row.yolo === 1,
 		runId: String(row.run_id),
 		repositoryRoot: String(row.repository_root),
 		planDirectory: String(row.plan_directory),
@@ -2215,14 +2220,14 @@ export class RunStore {
 					profile_name, profile_sha256, max_parallel, current_generation, graph_sha256,
 					status, checkout_state_token,
 					base_commit, integration_branch, integration_worktree, dashboard_url,
-					terminal_detail, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+					terminal_detail, created_at, updated_at, yolo
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
 			`).run(
 				input.runId, input.repositoryRoot, input.planDirectory, input.planName, input.host,
 			input.profileName, input.profileSha256, input.maxParallel, input.currentGeneration, input.graphSha256,
 			input.status, input.checkoutStateToken,
 			input.baseCommit, input.integrationBranch, input.integrationWorktree, input.dashboardUrl ?? null,
-			now, now,
+			now, now, input.yolo === true ? 1 : 0,
 		);
 		return this.getRun()!;
 	}

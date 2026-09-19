@@ -207,7 +207,7 @@ test("serialized fresh opener rechecks the schema after another opener initializ
 			const version = Number(database.prepare("PRAGMA user_version").get()!.user_version);
 			const objects = database.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
 			assert.equal(createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex"),
-				"cdb19a6f8e33241cfb39ebba23424b891a51ee840e7124366cba376b3512fa36");
+				"3bc8133837891fbec8793e5b5dbee854dc0ba3b0eb082e299b476b97223ee627");
 		} finally { database.close(); }
 	} finally {
 		DatabaseSync.prototype.exec = originalExec;
@@ -244,7 +244,7 @@ test("read-only empty and initialized opens and writable reopen never begin tran
 	}
 });
 
-test("fresh execution schema retains the canonical schema-20 fingerprint", () => {
+test("fresh execution schema retains the canonical schema-21 fingerprint", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-fingerprint-"));
 	try {
 		const database = openExecutionDatabase(planDirectory, { create: true });
@@ -267,7 +267,7 @@ test("fresh execution schema retains the canonical schema-20 fingerprint", () =>
 
 		assert.equal(version, EXECUTION_SCHEMA_VERSION);
 		assert.equal(objects.length, 40);
-		assert.equal(fingerprint, "cdb19a6f8e33241cfb39ebba23424b891a51ee840e7124366cba376b3512fa36");
+		assert.equal(fingerprint, "3bc8133837891fbec8793e5b5dbee854dc0ba3b0eb082e299b476b97223ee627");
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}

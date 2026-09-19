@@ -72,3 +72,17 @@ test("state persistence ignores heartbeat-only timestamp changes", () => {
 	assert.equal(sameHerderRunState(state, { ...state, updatedAt: 3 }), true);
 	assert.equal(sameHerderRunState(state, { ...state, status: "complete", updatedAt: 3 }), false);
 });
+
+test("YOLO display hints restore without changing legacy normal-mode state", () => {
+	const state: HerderRunState = {
+		version: 1, mode: "attach", status: "paused", runId: "yolo-run",
+		repoRoot: "/tmp/repo", planDir: "/tmp/repo/herder-plans", profile: "eclipse",
+		maxParallel: 5, startedAt: 1, updatedAt: 2,
+	};
+	const entry = (data: unknown) => ({ type: "custom", customType: HERDER_STATE_ENTRY, data });
+	assert.deepEqual(restoreLastRun([entry({ ...state, yolo: true })]), { ...state, yolo: true });
+	assert.deepEqual(restoreLastRun([entry(state), entry({ ...state, yolo: "true" })]), state);
+	assert.equal(sameHerderRunState(state, { ...state, yolo: false }), true);
+	assert.equal(sameHerderRunState(state, { ...state, yolo: true }), false);
+	assert.equal(sameHerderRunState({ ...state, yolo: true }, { ...state, yolo: true, updatedAt: 3 }), true);
+});

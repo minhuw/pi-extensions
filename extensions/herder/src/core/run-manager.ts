@@ -24,6 +24,7 @@ import {
 import { recordRunConfiguration } from "../daemon/execution-store.ts";
 import {
 	GitDriver,
+	git,
 	gitValue,
 	runCommand,
 	type CompletionApprovalProof,
@@ -97,6 +98,7 @@ const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
 const HELPER_ROOT = path.join(PLUGIN_ROOT, "src/daemon/git");
 
 interface StartInput {
+	yolo?: boolean;
 	mode: "fire" | "resume" | "revise";
 	repositoryRoot: string;
 	planDirectory: string;
@@ -169,6 +171,7 @@ interface PlanEditReply {
 }
 
 function validateStartInput(input: StartInput): void {
+	if (input?.yolo !== undefined && typeof input.yolo !== "boolean") throw new Error("yolo must be a boolean");
 	if (!input || !["fire", "resume", "revise"].includes(input.mode)) throw new Error("Start mode must be fire, resume, or revise");
 	if (!input.repositoryRoot || !input.planDirectory) throw new Error("Start requires repositoryRoot and planDirectory");
 	if (input.maxParallel !== undefined && (!Number.isSafeInteger(input.maxParallel) || input.maxParallel < 1 || input.maxParallel > 32)) {
@@ -1072,8 +1075,10 @@ export class HerderRunManager {
 		const revision = readRunRevision(this.planDirectory);
 		if (revisionPending(revision) && (revision.state !== "restarting" || revision.selective)) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
 		if (revisionPending(revision) && (input.repositoryRoot !== revision.run.repositoryRoot || input.profile !== revision.run.profileName || input.maxParallel !== revision.run.maxParallel)) throw new Error("Replacement Fire must preserve the original run configuration");
+		if (revisionPending(revision) && input.yolo !== undefined && input.yolo !== Boolean(revision.run.yolo)) throw new Error("Replacement Fire must preserve YOLO mode");
 		const existing = this.store.getRun();
 		if (existing) {
+			if (input.yolo !== undefined && input.yolo !== Boolean(existing.yolo)) throw new Error("Run must preserve YOLO mode");
 			if (input.mode === "fire") throw new Error(`Run ${existing.runId} already exists; use resume`);
 			return input.mode === "revise" ? this.revise(input) : this.resume(input);
 		}
@@ -1121,6 +1126,7 @@ export class HerderRunManager {
 		if (revisionPending(revision)) assertApprovedRevisionGraph(revision, graph);
 		this.store.transaction(() => {
 			this.store.createRun({
+				yolo: revisionPending(revision) ? Boolean(revision.run.yolo) : input.yolo ?? false,
 				runId,
 				repositoryRoot: driver.repoRoot,
 				planDirectory: this.planDirectory,
@@ -1163,7 +1169,9 @@ export class HerderRunManager {
 	}
 
 	async resume(input: StartInput): Promise<ManagerReply> {
+		validateStartInput(input);
 		let run = this.store.getRun();
+		if (run && input.yolo !== undefined && input.yolo !== Boolean(run.yolo)) throw new Error("Resume must preserve YOLO mode");
 		const revision = readRunRevision(this.planDirectory);
 		if (revisionPending(revision) && (revision.state !== "restarting" || run?.runId !== (revision.selective ? revision.run.runId : revision.successorRunId) || (revision.selective && run?.currentGeneration !== revision.selective.nextGeneration))) throw new Error("Finish the whole-run revision; unchanged resume/retry is disabled");
 		if (!run) throw new Error("No deterministic Herder run exists");
@@ -1894,6 +1902,7 @@ export class HerderRunManager {
 		for (const result of results) {
 			const action = this.store.getAction(result.actionId);
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown dispatch action ${result.actionId}`);
+			if (run.yolo && action.role !== "plan-implementer" && result.accepted) throw new Error("YOLO runs cannot dispatch Reviewer or Judge actions");
 			// Multiple durable callers can observe the same proposed action before
 			// either dispatch result is applied. Once one host wins, a stale rejection
 			// must not cancel that dispatched worker; an exact accepted replay is also
@@ -1993,6 +2002,7 @@ export class HerderRunManager {
 		for (const terminal of [...terminals].sort((left, right) => left.actionId.localeCompare(right.actionId))) {
 			const action = this.store.getAction(terminal.actionId);
 			if (!action || action.runId !== run.runId) throw new Error(`Unknown terminal action ${terminal.actionId}`);
+			if (run.yolo && action.role !== "plan-implementer") throw new Error("YOLO runs cannot accept Reviewer or Judge terminals");
 			if (terminal.failureKind && action.role !== "plan-reviewer") throw new Error("review_budget_exhausted is only valid for plan-reviewer terminals");
 			if (terminal.hostHandle && action.hostHandle && terminal.hostHandle !== action.hostHandle) {
 				throw new Error(`Terminal handle mismatch for ${terminal.actionId}`);
@@ -2056,7 +2066,7 @@ export class HerderRunManager {
 						recommendedAction: "Explicitly retry the same Reviewer mode/round with a fresh action budget, cancel, or defer. No automatic retry, code repair, plan rewrite, acceptance, or Reignite is authorized.",
 					}),
 				};
-			} else if (terminal.interrupted) {
+			} else if (terminal.interrupted || (run.yolo && terminal.error)) {
 				const detail = terminal.error || "Worker transport was interrupted";
 				transition = action.role === "plan-implementer"
 					? this.retryImplementerTransport(run, plan, action, detail)
@@ -2236,6 +2246,13 @@ export class HerderRunManager {
 		};
 	}
 
+	private yoloOutOfScopePaths(run: StoredRun, plan: StoredPlan, base: string, head: string): string[] {
+		const allowed = new Set(this.spec(run, plan.planId).assignment.plan.inScopePaths);
+		// Exact files only. Disabling rename detection includes both deleted and added names.
+		return git(plan.worktree, ["diff", "--no-renames", "--name-only", "-z", `${base}..${head}`, "--"])
+			.stdout.split("\0").filter((candidate) => candidate && !allowed.has(candidate));
+	}
+
 	private finishImplementer(run: StoredRun, plan: StoredPlan, action: StoredAction, result: Extract<WorkerResult, { kind: "implementer" }>): TerminalTransition {
 		const environment = this.finishEnvironmentBlock(run, plan, action, result);
 		if (environment) return environment;
@@ -2269,6 +2286,10 @@ export class HerderRunManager {
 		if (!failure && head === reviewBase) failure = "Implementer produced no commit";
 		const changedPaths = failure ? [] : driver.changedPaths(plan.worktree, reviewBase);
 		if (!failure && changedPaths.length === 0) failure = "Implementer produced no changed paths";
+		if (!failure && run.yolo) {
+			const outside = this.yoloOutOfScopePaths(run, plan, reviewBase, head);
+			if (outside.length) failure = `YOLO scope violation: changed paths outside the immutable assignment: ${outside.join(", ")}`;
+		}
 		const gates: GateResult[] = [];
 		if (failure) {
 			if (plan.round >= MAX_PLAN_ROUNDS) {
@@ -2290,6 +2311,20 @@ export class HerderRunManager {
 				};
 			}
 			return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [failure], gates } };
+		}
+		if (run.yolo) {
+			const tree = driver.worktreeTree(plan.worktree);
+			const resultSha256 = sha256(stableJson(result));
+			return {
+				plan: { ...plan, phase: "READY_TO_INTEGRATE", gates, generationBase: reviewBase,
+					approvedBase: reviewBase, approvedHead: head, approvedTree: tree, repair: [], rebase: null },
+				approval: createApproval({
+					runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
+					reviewerActionId: action.actionId, decisionActionId: action.actionId, decisionRole: "plan-implementer",
+					assignmentSha256: plan.assignmentSha256, approvedBase: reviewBase, approvedHead: head, approvedTree: tree,
+					reviewResultSha256: resultSha256, decisionResultSha256: resultSha256,
+				}),
+			};
 		}
 		return { plan: {
 			...plan, phase: "READY_REVIEWER", gates, generationBase: reviewBase,
@@ -2395,6 +2430,7 @@ export class HerderRunManager {
 	}
 
 	private recoverReigniteDossier(run: StoredRun): ReigniteRequest | null {
+		if (run.yolo) return null;
 		const existing = this.store.getReigniteRequest(run.runId, run.currentGeneration);
 		if (existing || run.status !== "complete") return existing;
 		const plan = this.store.getPlan(run.runId, "RUN");
@@ -2749,6 +2785,27 @@ export class HerderRunManager {
 			throw new Error(`Approval patch binding does not match plan ${plan.planId}`);
 		}
 		if (sha256(stableJson(approvalCore(approval))) !== approval.proofSha256) throw new Error(`Approval proof hash changed for ${plan.planId}`);
+		if (approval.decisionRole === "plan-implementer") {
+			const action = this.store.getAction(approval.decisionActionId);
+			const record = action ? storedTerminalRecord(action) : null;
+			const result = record?.workerResult;
+			if (this.store.getRun()?.yolo !== true || !run.yolo || approval.userAcceptance !== undefined
+				|| !action || action.role !== "plan-implementer" || action.state !== "terminal"
+				|| action.runId !== run.runId || action.planId !== plan.planId
+				|| action.generation !== plan.generation || action.round !== plan.round
+				|| approval.reviewerActionId !== action.actionId || record?.outcome !== "COMPLETE"
+				|| record.terminal.interrupted || record.terminal.error || record.terminal.failureKind
+				|| result?.kind !== "implementer" || result.status !== "COMPLETE" || result.blockerKind
+				|| sha256(stableJson(result)) !== approval.decisionResultSha256
+				|| approval.reviewResultSha256 !== approval.decisionResultSha256) {
+				throw new Error(`YOLO approval lacks its exact successful terminal Implementer evidence for ${plan.planId}`);
+			}
+			if (this.yoloOutOfScopePaths(run, plan, approval.approvedBase, approval.approvedHead).length) {
+				throw new Error(`YOLO approval exceeds immutable assignment scope for ${plan.planId}`);
+			}
+			return completionApproval(approval);
+		}
+		if (run.yolo) throw new Error(`YOLO approval must bind Implementer evidence for ${plan.planId}`);
 		const reviewer = this.store.getAction(approval.reviewerActionId);
 		const decision = this.store.getAction(approval.decisionActionId);
 		if (!reviewer || reviewer.runId !== run.runId || reviewer.planId !== plan.planId
@@ -2944,7 +3001,10 @@ export class HerderRunManager {
 				const verification = this.store.getVerification(run.runId, finalPlan.generation);
 				if (verification?.state !== "passed"
 					|| verification.request.integrationHead !== finalPlan.approvedHead
-					|| verification.request.integrationTree !== finalPlan.approvedTree) {
+					|| verification.request.integrationTree !== finalPlan.approvedTree
+					|| (run.yolo && (driver.branchHead(run.integrationBranch) !== finalPlan.approvedHead
+						|| driver.worktreeHead(run.integrationWorktree) !== finalPlan.approvedHead
+						|| driver.worktreeTree(run.integrationWorktree) !== finalPlan.approvedTree || Boolean(driver.worktreeStatus(run.integrationWorktree))))) {
 					const detail = "Final completion is blocked; exact-tree verification is required.";
 					this.store.transaction(() => {
 						this.updatePlan(finalPlan, { phase: "BLOCKED", repair: [detail] });
@@ -2953,7 +3013,7 @@ export class HerderRunManager {
 					this.projectLifecycleBestEffort();
 					return { run, reply: this.reply() };
 				}
-				this.store.updateRun({ status: "complete", terminalDetail: "All plans integrated and final audit approved." });
+				this.store.updateRun({ status: "complete", terminalDetail: run.yolo ? "YOLO accepted all plans after exact-tree verification; no independent review." : "All plans integrated and final audit approved." });
 				this.projectLifecycleBestEffort();
 				return { run, reply: this.refreshReply() };
 			}
@@ -2991,7 +3051,8 @@ export class HerderRunManager {
 					if (run.status !== "paused") this.store.updateRun({ status: "paused", terminalDetail: verification.terminalDetail || "Waiting for final verification." });
 					return { run, reply: this.reply() };
 				}
-				if (verification.request.integrationHead !== integrationHead || verification.request.integrationTree !== integrationTree) {
+				if (verification.request.integrationHead !== integrationHead || verification.request.integrationTree !== integrationTree
+					|| (run.yolo && (driver.worktreeHead(run.integrationWorktree) !== integrationHead || Boolean(driver.worktreeStatus(run.integrationWorktree))))) {
 					throw new Error("Passed verification no longer matches the integration branch");
 				}
 				this.store.putPlan({
@@ -2999,7 +3060,7 @@ export class HerderRunManager {
 					planId: "RUN",
 					generation: run.currentGeneration,
 					round: 1,
-					phase: "READY_REVIEWER",
+					phase: run.yolo ? "FINAL_APPROVED" : "READY_REVIEWER",
 					branch: run.integrationBranch,
 					worktree: run.integrationWorktree,
 					assignmentPath,
@@ -3015,6 +3076,7 @@ export class HerderRunManager {
 					approvedTree: integrationTree,
 					rebase: null,
 				});
+				if (run.yolo) return this.prepareFinalAuditHandoff(run, driver);
 			}
 		}
 		return { run };
@@ -3071,6 +3133,10 @@ export class HerderRunManager {
 		const driver = this.driver(run);
 		const reservedPlanId = this.store.getPlanEdit(run.runId)?.planId;
 		const active = activeActions(this.store, run.runId);
+		if (run.yolo && active.some((action) => action.role !== "plan-implementer")) {
+			this.store.updateRun({ status: "paused", terminalDetail: "YOLO run has stale independent review actions; dispatch is forbidden." });
+			return;
+		}
 		let occupied = active.length;
 		const owned = new Set(active.map((action) => action.planId));
 		const plans = this.store.getPlans(run.runId);
@@ -3080,6 +3146,10 @@ export class HerderRunManager {
 			if (owned.has(plan.planId)) continue;
 			const role = roleForPhase(plan.phase);
 			if (!role) continue;
+			if (run.yolo && role !== "plan-implementer") {
+				this.store.updateRun({ status: "paused", terminalDetail: `YOLO run has stale ${plan.phase} state for ${plan.planId}; independent review dispatch is forbidden.` });
+				return;
+			}
 			try { this.createAction(run, plan, role, profile, driver); } catch (error) { if (error instanceof BudgetExhaustedError) return; throw error; }
 			occupied += 1;
 			owned.add(plan.planId);
@@ -3099,6 +3169,7 @@ export class HerderRunManager {
 	}
 
 	private createAction(run: StoredRun, plan: StoredPlan, role: WorkerRole, profile: ResolvedProfile, driver: GitDriver): StoredAction {
+		if (run.yolo && role !== "plan-implementer") throw new Error("YOLO runs cannot create Reviewer or Judge actions");
 		// Only the immediately preceding blocked Implementer continuation can restore
 		// its mode. Old resolved attention must not override substantive review history.
 		const prior = role === "plan-implementer" ? this.store.getLatestAction(run.runId, {
@@ -3317,7 +3388,7 @@ export class HerderRunManager {
 		const plans = this.store.getPlans(run.runId);
 		const overview = summarizeRun(this.specs(run), plans);
 		const active = this.store.getActions(run.runId, ["proposed", "dispatched"]);
-		const proposed = active.filter((action) => action.state === "proposed");
+		const proposed = active.filter((action) => action.state === "proposed" && (!run.yolo || action.role === "plan-implementer"));
 		const planEdit = this.store.getPlanEdit(run.runId);
 		const runRevision = readRunRevision(this.planDirectory);
 		const nextAttention = planEdit ? null : this.store.getNextAttention(run.runId);
@@ -3336,6 +3407,7 @@ export class HerderRunManager {
 			runId: run.runId,
 			status: run.status,
 			profileName: run.profileName,
+			yolo: Boolean(run.yolo),
 			maxParallel: run.maxParallel,
 			planDirectory: run.planDirectory,
 			...(run.dashboardUrl ? { dashboardUrl: run.dashboardUrl } : {}),
@@ -3365,7 +3437,7 @@ export class HerderRunManager {
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
 			...(!stopped && verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
 			...(!stopped && exposedIntegrationRepair ? { integrationRepair: exposedIntegrationRepair } : {}),
-			...(run.status === "complete" && reignite?.state === "pending" ? { reigniteRequest: reignite } : {}),
+			...(!run.yolo && run.status === "complete" && reignite?.state === "pending" ? { reigniteRequest: reignite } : {}),
 		};
 	}
 

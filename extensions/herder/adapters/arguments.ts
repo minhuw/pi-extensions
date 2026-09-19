@@ -1,4 +1,5 @@
 export interface FireOptions {
+	yolo?: boolean;
 	mode: "fire" | "resume" | "revise";
 	planDir: string;
 	profile?: string;
@@ -132,12 +133,17 @@ export function parseFireArguments(input: string, mode: "fire" | "resume" | "rev
 	let planDir = "herder-plans";
 	let profile: string | undefined;
 	let maxParallel: number | undefined;
+	let yolo = false;
 	let dashboardPort = 0;
 	let positional = false;
 
 	for (let index = 0; index < tokens.length; index += 1) {
 		const argument = tokens[index]!;
-		if (["--profile", "--max-parallel", "--dashboard-port"].includes(argument)) {
+		if (argument === "--yolo") {
+			if (mode !== "fire") throw new Error("--yolo is only supported by /herder-fire; existing runs preserve their recorded review mode.");
+			if (yolo) throw new Error("--yolo was provided more than once.");
+			yolo = true;
+		} else if (["--profile", "--max-parallel", "--dashboard-port"].includes(argument)) {
 			if (argument === "--max-parallel" && mode === "revise") {
 				throw new Error("--max-parallel is only supported by /herder-fire and /herder-resume; /herder-revise preserves recorded parallelism.");
 			}
@@ -156,7 +162,7 @@ export function parseFireArguments(input: string, mode: "fire" | "resume" | "rev
 		}
 	}
 
-	return { mode, planDir, ...(profile ? { profile } : {}), ...(maxParallel === undefined && mode !== "fire" ? {} : { maxParallel: maxParallel ?? 5 }), dashboardPort };
+	return { mode, planDir, ...(yolo ? { yolo: true } : {}), ...(profile ? { profile } : {}), ...(maxParallel === undefined && mode !== "fire" ? {} : { maxParallel: maxParallel ?? 5 }), dashboardPort };
 }
 
 export function parseAttachArguments(input: string): AttachOptions {

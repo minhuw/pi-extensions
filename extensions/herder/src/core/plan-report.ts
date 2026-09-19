@@ -41,6 +41,7 @@ export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN
     // Authored DONE rows are not proof of final exact-tree verification or approval.
     execution: managerState?.run ? {
       status: managerState.run.status, detail: managerState.run.terminalDetail,
+      reviewMode: managerState.run.yolo ? "yolo" : "reviewed",
     } : null,
     lifecycle: plan === "RUN"
       ? { complete: managerState?.run ? managerState.run.status === "complete" : false, counts: graph.counts }

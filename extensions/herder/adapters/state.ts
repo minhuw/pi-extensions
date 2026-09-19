@@ -4,6 +4,8 @@ export const HERDER_STATE_ENTRY = "herder-pi-run-v1";
 
 export interface HerderRunState {
 	version: 1;
+	/** Display hint only; the manager owns the immutable review mode. */
+	yolo?: boolean;
 	mode: "fire" | "resume" | "revise" | "attach";
 	status: RunStatus;
 	runId: string;
@@ -20,6 +22,7 @@ export interface HerderRunState {
 
 export function sameHerderRunState(left: HerderRunState, right: HerderRunState): boolean {
 	return left.version === right.version
+		&& (left.yolo ?? false) === (right.yolo ?? false)
 		&& left.mode === right.mode
 		&& left.status === right.status
 		&& left.runId === right.runId
@@ -36,6 +39,7 @@ function isRunState(value: unknown): value is HerderRunState {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const state = value as Partial<HerderRunState>;
 	return state.version === 1
+		&& (state.yolo === undefined || typeof state.yolo === "boolean")
 		&& (state.attentionRequestId === undefined || (typeof state.attentionRequestId === "string" && state.attentionRequestId.length > 0 && state.attentionRequestId.length <= 200 && !/[\0\r\n]/.test(state.attentionRequestId)))
 		&& typeof state.runId === "string"
 		&& typeof state.repoRoot === "string"

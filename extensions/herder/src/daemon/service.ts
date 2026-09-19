@@ -311,7 +311,9 @@ export async function startHerderService(input: { planDirectory: string; dashboa
 			const recoveredPayload = operation.kind === "start" && operation.attemptCount > 1 && store.getRun()
 				&& operation.payload && typeof operation.payload === "object" && !Array.isArray(operation.payload)
 				&& (operation.payload as { mode?: unknown }).mode === "fire"
-				? { ...(operation.payload as Record<string, unknown>), mode: "resume" }
+				? { ...(operation.payload as Record<string, unknown>), mode: "resume",
+					// Preserve omitted mode on crash replay; explicit mismatches still reach manager validation.
+					yolo: (operation.payload as { yolo?: unknown }).yolo === undefined ? Boolean(store.getRun()!.yolo) : (operation.payload as { yolo?: unknown }).yolo }
 				: operation.payload;
 			let payload = operation.kind === "start" && recoveredPayload && typeof recoveredPayload === "object" && !Array.isArray(recoveredPayload)
 				? { ...(recoveredPayload as Record<string, unknown>), dashboardUrl }

@@ -22,9 +22,10 @@ export interface ApprovalCore {
   planId: string
   generation: number
   round: number
+  /** plan-implementer explicitly marks YOLO; legacy review fields then bind implementation evidence. */
   reviewerActionId: string
   decisionActionId: string
-  decisionRole: "plan-reviewer" | "plan-judge" | "user"
+  decisionRole: "plan-reviewer" | "plan-judge" | "user" | "plan-implementer"
   userAcceptance?: AttentionResolutionInput
   assignmentSha256: string
   approvedBase: string
@@ -68,7 +69,7 @@ function validatePayload(payload: CompletionProofPayload, object: string): void 
   if (!payload || payload.schemaVersion !== 1 || payload.integratedHead !== object) throw new Error("completion proof identity does not match its commit")
   if (!/^\d{3,}$/.test(payload.planId || "") || !Number.isSafeInteger(payload.generation) || payload.generation < 1
     || !Number.isSafeInteger(payload.round) || payload.round < 1 || payload.round > MAX_PLAN_ROUNDS
-    || !["plan-reviewer", "plan-judge", "user"].includes(payload.decisionRole)
+    || !["plan-reviewer", "plan-judge", "user", "plan-implementer"].includes(payload.decisionRole)
     || !payload.runId || !payload.reviewerActionId || !payload.decisionActionId) {
     throw new Error("completion proof has invalid approval identity")
   }
@@ -77,6 +78,10 @@ function validatePayload(payload: CompletionProofPayload, object: string): void 
   }
   for (const field of ["approvedBase", "approvedHead", "approvedTree", "integratedHead"]) {
     if (!/^[0-9a-f]{40,64}$/.test(payload[field as keyof CompletionProofPayload] as string || "")) throw new Error(`completion proof has invalid ${field}`)
+  }
+  if (payload.decisionRole === "plan-implementer" && (payload.decisionActionId !== payload.reviewerActionId
+    || payload.decisionResultSha256 !== payload.reviewResultSha256)) {
+    throw new Error("YOLO completion must bind one exact Implementer result")
   }
   if (payload.decisionRole === "user") {
     const acceptance = payload.userAcceptance

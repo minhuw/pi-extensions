@@ -268,7 +268,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				: ["needs_input", "paused"].includes(currentState.status)
 					? "warning"
 					: "accent";
-		ctx.ui.setStatus("herder", ctx.ui.theme.fg(statusColor, `Herder ${currentState.status}`));
+		ctx.ui.setStatus("herder", ctx.ui.theme.fg(statusColor, `Herder ${currentState.status}${currentState.yolo ? " · YOLO/no independent review" : ""}`));
 		const summary = summaryLine(lastSummary);
 		widget.update(ctx, {
 			status: currentState.status,
@@ -431,9 +431,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 
 	const displayedReply = (reply: ManagerReply): { status: Exclude<ManagerReply["status"], "idle">; message: string } => {
 		if (activeVerificationOperation(reply)) {
-			return { status: "running", message: "Executing final verification gates in the background." };
+			return { status: "running", message: `Executing final verification gates in the background.${reply.yolo ? " YOLO/no independent review." : ""}` };
 		}
-		return { status: reply.status as Exclude<ManagerReply["status"], "idle">, message: reply.message };
+		return { status: reply.status as Exclude<ManagerReply["status"], "idle">, message: `${reply.message}${reply.yolo ? " YOLO/no independent review." : ""}` };
 	};
 
 	const updateFromReply = (
@@ -474,6 +474,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planDir: reply.planDirectory,
 			profile: profile ?? reply.profileName ?? previous?.profile ?? "unknown",
 			maxParallel: reply.maxParallel,
+			yolo: reply.yolo ?? false,
 			startedAt: previous?.startedAt ?? now,
 			updatedAt: now,
 			...(mainSessionRequests.attentionRequestId ? { attentionRequestId: mainSessionRequests.attentionRequestId } : {}),
@@ -742,6 +743,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					planDirectory: planDir,
 					profile: profile.profile,
 					...(options.maxParallel === undefined ? {} : { maxParallel: options.maxParallel }),
+					...(options.mode === "fire" && options.yolo ? { yolo: true } : {}),
 					dashboardPort: options.dashboardPort,
 				}) as Record<string, unknown>);
 				assertSessionActive(epoch);
@@ -762,6 +764,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					planDir,
 					profile: profile.profile,
 					maxParallel: started.maxParallel,
+					yolo: started.yolo ?? false,
 					startedAt: now,
 					updatedAt: now,
 					...(started.dashboardUrl ? { dashboardUrl: started.dashboardUrl } : {}),
@@ -777,7 +780,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				return started;
 			});
-			return `Herder ${options.mode} started with deterministic manager ${reply.runId}, profile ${profile.profile}, and max parallel ${reply.maxParallel}. Dashboard: ${reply.dashboardUrl || "unavailable"}`;
+			return `Herder ${options.mode} started with deterministic manager ${reply.runId}, profile ${profile.profile}, and max parallel ${reply.maxParallel}.${reply.yolo ? " YOLO/no independent review." : ""} Dashboard: ${reply.dashboardUrl || "unavailable"}`;
 		} catch (error) {
 			releaseNewOwnership(acquired, epoch);
 			render(ctx);
@@ -843,7 +846,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				assertSessionActive(epoch);
 				return reply;
 			});
-			return `Attached to Herder run ${fresh.runId} without changing its ${fresh.status} lifecycle state, profile ${profile.profile}, and max parallel ${fresh.maxParallel}. Dashboard: ${fresh.dashboardUrl || "unavailable"}`;
+			return `Attached to Herder run ${fresh.runId} without changing its ${fresh.status} lifecycle state, profile ${profile.profile}, and max parallel ${fresh.maxParallel}.${fresh.yolo ? " YOLO/no independent review." : ""} Dashboard: ${fresh.dashboardUrl || "unavailable"}`;
 		} catch (error) {
 			releaseNewOwnership(acquired, epoch);
 			throw error;
@@ -1193,7 +1196,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		catch (error) { ctx.ui.notify(message(error), "error"); }
 	};
 
-	pi.registerCommand("herder-fire", { description: "Start a deterministic background Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "fire"), ctx)) });
+	pi.registerCommand("herder-fire", { description: "Start a deterministic background Herder run; --yolo skips independent review.", handler: command((args, ctx) => launch(parseFireArguments(args, "fire"), ctx)) });
 	pi.registerCommand("herder-attach", { description: "Attach this Pi session to an active Herder run after its former session died.", handler: command((args, ctx) => attach(parseAttachArguments(args), ctx)) });
 	pi.registerCommand("herder-resume", { description: "Resume a deterministic Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "resume"), ctx)) });
 	pi.registerCommand("herder-revise", { description: "Request a host-confirmed scope amendment; effort budgets remain unchanged.", handler: command(async (args, ctx) => {
@@ -1294,7 +1297,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		currentRunRevision = record;
 		persist({ version: 1, mode: "resume", status: run?.status ?? "paused", runId,
 			repoRoot: record.run.repositoryRoot, planDir: directory, profile: record.run.profileName,
-			maxParallel: record.run.maxParallel, startedAt: currentState?.startedAt ?? Date.now(), updatedAt: Date.now() });
+			maxParallel: record.run.maxParallel, yolo: run?.yolo ?? false, startedAt: currentState?.startedAt ?? Date.now(), updatedAt: Date.now() });
 		if (attention) mainSessionRequests.restoreAttention(directory, attention);
 		return acquired;
 	};

@@ -220,6 +220,7 @@ test("execution reports never confuse authored DONE or a paused final audit with
 		const incomplete = getExecutionReport(planDir);
 		assert.equal(incomplete.lifecycle.complete, false);
 		assert.equal(incomplete.execution?.status, "paused");
+		assert.equal(incomplete.execution?.reviewMode, "reviewed");
 		assert.match(incomplete.execution?.detail ?? "", /A1 remains unverified/);
 		store.updateRun({ status: "complete" });
 		assert.equal(getExecutionReport(planDir).lifecycle.complete, true);

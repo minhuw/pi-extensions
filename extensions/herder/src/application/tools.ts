@@ -137,6 +137,7 @@ async function runTool(args: JsonObject): Promise<unknown> {
 		...(args.planName ? { planName: String(args.planName) } : {}),
 		...(args.profile ? { profile: String(args.profile) } : {}),
 		...(args.maxParallel === undefined ? {} : { maxParallel: Number(args.maxParallel) }),
+		...(args.yolo === undefined ? {} : { yolo: args.yolo }),
 	});
 	const currentService = await ensureService(directory);
 	await openDashboard(currentService);
