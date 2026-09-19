@@ -11,7 +11,6 @@ import {
 	type ReigniteRequest,
 	type VerificationRequest,
 } from "../src/shared/protocol.ts";
-import { readLiveRunFreshness } from "../src/application/tools.ts";
 import { classifyVerificationRecovery, verificationRunnerEvidence, ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "./verification-recovery.ts";
 import type { HerderRunState } from "./state.ts";
 
@@ -84,7 +83,7 @@ export class MainSessionRequests {
 
 	reset(mode: "idle" | "cleanup" | "resume" | "session-start" | "shutdown"): void {
 		this.currentAttention = undefined;
-		this.attentionHint = undefined;
+		if (mode !== "resume") this.attentionHint = undefined;
 		this.deferredAttention.clear();
 		if (mode === "resume") {
 			this.promptedReignites.clear();
@@ -105,6 +104,8 @@ export class MainSessionRequests {
 		if (mode === "cleanup") this.deliveredVerificationFailureFollowUps.clear();
 		if (mode === "shutdown") this.sendingVerificationFailure = false;
 	}
+
+	restoreAttentionHint(requestId: string | undefined): void { this.attentionHint = requestId; }
 
 	clearVerificationPrompt(requestId: string): void { this.promptedVerifications.delete(requestId); }
 	acknowledgeReignite(requestId: string): void { this.reigniteRequestStore.delete(requestId); }
@@ -127,11 +128,17 @@ export class MainSessionRequests {
 	}
 
 	observeReply(reply: ManagerReply, displayed?: { status: string; message: string }): void {
+		if (reply.status === "stopped" || reply.executionBudget?.stopReason) { this.pendingVerificationFailure = undefined; }
 		const owned = this.host.ownsRun(reply.planDirectory, reply.runId);
 		this.currentAttention = owned ? reply.attention : undefined;
-		if (!this.currentAttention || this.attentionHint !== this.currentAttention.requestId) this.attentionHint = undefined;
+		if (!this.currentAttention || this.attentionHint !== this.currentAttention.requestId) {
+			const displayed = this.host.current().state?.attentionRequestId;
+			this.attentionHint = displayed === this.currentAttention?.requestId ? displayed : undefined;
+		}
 		const repair = this.bindIntegrationRepair(reply)?.request;
+		if (reply.status === "stopped" || reply.executionBudget?.stopReason) return;
 		if (!displayed) return;
+		if (["paused", "stopped"].includes(displayed.status) && reply.attention) { this.pendingVerificationFailure = undefined; return; }
 		const recovery = classifyVerificationRecovery(repair, repair?.ownerSessionId && this.host.current().context ? this.host.current().sessionId : "");
 		const verificationFailure = (/verification/i.test(displayed.message) && (displayed.status === "failed" || recovery.actionable)) || Boolean(repair && recovery.actionable) || recovery.ownerMismatch || recovery.ambiguity;
 		if (!verificationFailure) { this.pendingVerificationFailure = undefined; return; }
@@ -144,8 +151,8 @@ export class MainSessionRequests {
 	}
 
 	deliverReply(reply: ManagerReply, retryDetail?: string): void {
+		if (reply.status === "stopped" || reply.executionBudget?.stopReason) { this.pendingVerificationFailure = undefined; void this.drainAttentionNow(); return; }
 		this.delegateVerification(reply, retryDetail);
-		this.delegateReignite(reply);
 		this.drainVerificationFailure();
 		void this.drainAttentionNow();
 	}
@@ -209,6 +216,7 @@ export class MainSessionRequests {
 	}
 
 	private delegateVerification = (reply: ManagerReply, retryDetail?: string) => {
+		if (reply.status === "stopped" || reply.executionBudget?.stopReason) return;
 		if (!this.host.current().active || !this.host.ownsRun(reply.planDirectory, reply.runId)) return;
 		const request = reply.verificationRequest;
 		if (!request) return;
@@ -225,7 +233,7 @@ export class MainSessionRequests {
 				: "Herder has finished integrating the ordinary plans and needs this main Pi session to select final verification semantically.",
 			"Inspect the exact frozen integration worktree and assignment below. You may use read-only inspection commands, but do not edit files, move Git refs, update Herder state, or execute the verification commands yourself.",
 			...(repairVerification ? [
-				"Retain the inherited ordered gate prefix exactly. Add a gate only when it directly covers a newly touched path, and explain every addition. This selection is still authoritative Herder verification, not a local diagnostic.",
+				"Retain the inherited ordered gate prefix exactly. Add a gate only when it directly verifies an existing approved obligation on a newly touched path; never introduce new requirements. Explain every addition. This selection is still authoritative Herder verification, not a local diagnostic.",
 			] : []),
 			...FINAL_VERIFICATION_SELECTION_GUIDANCE,
 			"Choose the smallest non-redundant set of commands that adequately verifies the integrated change. Distinguish setup/examples from actual checks; prefer one comprehensive check over duplicated focused checks when it subsumes them.",
@@ -257,61 +265,6 @@ export class MainSessionRequests {
 		}
 	};
 
-	private pendingStatusChangingOperations = (reply: ManagerReply, requestId: string): boolean =>
-		(reply.operations ?? []).some((operation) => {
-			if (!["accepted", "running"].includes(operation.state)) return false;
-			if (operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${requestId}:`)) return false;
-			return true;
-		});
-
-	private delegateReignite = (reply: ManagerReply) => {
-		if (!this.host.current().active || !this.host.ownsRun(reply.planDirectory, reply.runId) || reply.status !== "complete") return;
-		const request = reply.reigniteRequest;
-		if (!request || request.state !== "pending") return;
-		if (this.pendingStatusChangingOperations(reply, request.requestId)) return;
-		const live = readLiveRunFreshness(reply.planDirectory);
-		if (!live || live.runId !== reply.runId || live.status !== "complete") return;
-		if (live.pendingOperations > 0) return;
-		this.reigniteRequestStore.set(request.requestId, request);
-		if ((reply.operations ?? []).some((operation) => operation.kind === "reignite" && operation.operationId.startsWith(`reignite:${request.requestId}:`))) return;
-		if (this.promptedReignites.has(request.requestId) || !this.host.current().context) return;
-		this.promptedReignites.add(request.requestId);
-		const findings = request.findings.length > 0 ? request.findings.map((finding) => `- ${finding}`).join("\n") : "none";
-		const guidance = request.fixGuidance.length > 0 ? request.fixGuidance.map((item) => `- ${item}`).join("\n") : "none";
-		const prompt = [
-			"HERDER_MAIN_SESSION_REIGNITE_V1",
-			"The original Herder run is complete. Turn residual PLAN_REQUIREMENT and PATCH_REGRESSION findings into a new fireable sibling plan directory only when their remediation fits Herder's repository execution boundary.",
-			`Before authoring, read ${this.host.packageRoot}/skills/plans/references/plan-format.md and ${this.host.packageRoot}/skills/plans/references/plan-template.md completely, including the execution boundary and Producer self-review.`,
-			"Cloud provisioning, deployment/publishing, live migrations, and live restore/undo (including disposable targets) are external operator work, not Herder starting conditions, dependencies, setup, or acceptance/final gates. Local tests, emulators, non-mutating dry-runs, and implementing configuration/scripts/runbooks are allowed. Code completion is not release acceptance.",
-			"If a finding requires external operations or changing an existing live acceptance requirement, report the needed operator handoff or confirmed replan and acknowledge failed with that detail. Do not invent a TODO/BLOCKED operational node, silently drop/rephase a criterion, or claim unrun live evidence. The original run remains complete; release approval is separate.",
-			"Write only in the allocated directory. Do not edit the source plan tree, the frozen integration worktree, or manager SQLite. Do not call /herder-fire.",
-			"For findings within that boundary, use herder_plan init with local tracking, write the plan files, cold-read their compiled snapshots using the Producer self-review, then shape and validate. Each PLAN_REQUIREMENT or PATCH_REGRESSION finding becomes TODO or BLOCKED. FOLLOWUP and INVALID findings may go in leak/ only.",
-			"As your final action, call herder_reignite exactly once with written or failed. Pass SOURCE_PLAN_DIRECTORY as planDirectory; the allocated sibling is also accepted. Acknowledgement always targets the source run. For written, pass the graphSha256 returned by herder_plan validate of the allocated directory; do not reuse GRAPH_SHA256 from this prompt.",
-			`REQUEST_ID: ${request.requestId}`,
-			`REQUEST_SHA256: ${request.requestSha256}`,
-			`RUN_ID: ${request.runId}`,
-			`SOURCE_PLAN_DIRECTORY: ${request.sourcePlanDirectory}`,
-			`ALLOCATED_PLAN_DIRECTORY: ${request.allocatedPlanDirectory ?? "unallocated"}`,
-			`GENERATION: ${request.generation}`,
-			`GRAPH_SHA256: ${request.graphSha256}`,
-			`INTEGRATION_BRANCH: ${request.integrationBranch}`,
-			`INTEGRATION_HEAD: ${request.integrationHead}`,
-			`INTEGRATION_TREE: ${request.integrationTree}`,
-			`VERDICT: ${request.verdict}`,
-			`SCOPE: ${request.scope}`,
-			"FINDINGS:",
-			findings,
-			"FIX_GUIDANCE:",
-			guidance,
-			...(request.detail ? [`PREVIOUS_WRITE_ERROR: ${request.detail.replace(/\s+/g, " ").slice(0, 1_000)}`] : []),
-		].join("\n");
-		try {
-			this.host.pi.sendUserMessage(prompt, { deliverAs: "followUp" });
-		} catch (error) {
-			this.promptedReignites.delete(request.requestId);
-			this.host.current().context?.ui.notify(`Herder could not delegate the reignite write: ${message(error)}`, "warning");
-		}
-	};
 
 	private drainAttention = async (): Promise<void> => {
 		if (!this.host.current().active || !this.host.current().context || !this.currentAttention || !this.host.current().state) return;
@@ -328,7 +281,7 @@ export class MainSessionRequests {
 				content: prompt,
 				display: true,
 				details: attentionMessageDetails(request),
-			}, { deliverAs: "followUp", triggerTurn: true });
+			}, { deliverAs: "followUp", triggerTurn: false });
 			// A successful injection is the only acknowledgement held by the adapter.
 			// SQLite remains authoritative, so a replacement session can re-expose the
 			// request when this hint was not persisted before shutdown.
@@ -447,7 +400,7 @@ export class MainSessionRequests {
 					...(repair.transientRetryUsed ? ["TRANSIENT_BUDGET: The unchanged transient retry for this exact head/tree/gate program is already consumed; select a different evidence-supported path."] : []),
 					"Gate outcomes (passed, command_failed, unavailable, timed_out, runner_error), errors, signals, and timeout flags are runner observations, not defect classifications. Even command_failed from uv/nix/package-manager wrappers may mean missing prerequisites. Inspect the recorded evidence; never infer code_defect from an exit code or log regex alone.",
 					"Separate setup from validation. Use repository-declared canonical uv run, nix develop --command, or package-script invocations when specified, not bare tools, global installs, uvx/npx downloads, or ambient HOME substitution. Record exact manager/argv/cwd/error and the required prerequisite.",
-					"For manifest_error (wrong argv, cwd, or manager invocation), call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree. Proven missing environment prerequisites are environment, not source defects or automatic transient retries.",
+					"Manifest corrections remain bounded by the existing run budget and approved obligations; they never authorize new requirements or budget refill. For manifest_error (wrong argv, cwd, or manager invocation), call herder_integration_repair begin once, then finish with a corrected complete gate array; do not edit the integration worktree. Proven missing environment prerequisites are environment, not source defects or automatic transient retries.",
 					"For transient, call begin once, then finish once with the inherited gates unchanged; this is the one unchanged retry and must not edit the integration worktree.",
 					"For code_defect, call begin once before editing. Only after begin may you edit failure-related paths in INTEGRATION_WORKTREE and run optional local diagnostics. Then stage the allowed changes, create the next bounded code-repair commit or amend the existing repair commit while retaining the fixed parent, confirm git status is clean, and pass allowedPaths plus observedCommit from git rev-parse HEAD. The owning session authors the commit; Herder only validates it and reruns the authoritative gates. Local tests are optional and non-authoritative; do not run the final Herder gates directly.",
 					"For design_ambiguity, scope_ambiguity, credential, environment, or product_ambiguity, call herder_integration_repair exactly once with operation begin, the selected classification, and a concrete rationale or detail. This records a non-mutating user-decision outcome; it does not open edit authority. For environment, the operator may prepare the verified declared prerequisites externally, then explicitly use /herder-resume to replay the exact canonical gates without edits or a budget charge. Other decision classifications may use a corrective plan followed by /herder-revise when the user chooses it.",
@@ -471,7 +424,9 @@ export class MainSessionRequests {
 				].join("\n");
 		this.sendingVerificationFailure = true;
 		try {
-			this.host.pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+			if (["paused", "stopped"].includes(this.host.current().state?.status ?? "") || recovery.kind === "decision_required" || recovery.kind === "owner_mismatch") {
+				this.host.pi.sendMessage({ customType: HERDER_ATTENTION_MESSAGE, content: prompt, display: true }, { triggerTurn: false });
+			} else this.host.pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 			this.deliveredVerificationFailureFollowUps.add(deliveryKey);
 			this.pendingVerificationFailure = undefined;
 		} catch (error) {

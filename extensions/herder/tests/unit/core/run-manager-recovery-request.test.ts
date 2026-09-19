@@ -350,7 +350,7 @@ test("unbound answers with different text cannot advance either attention reques
 	}
 });
 
-test("record-only plan answers remain rejected across manager restart without consuming any request", async () => {
+test("record-only answers persist a quiet pause across restart and preserve other requests", async () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-attention-policy-"));
 	const store = new RunStore(planDirectory);
 	try {
@@ -362,9 +362,10 @@ test("record-only plan answers remain rejected across manager restart without co
 			const manager = new HerderRunManager(planDirectory);
 			try {
 				const resolve = manager as unknown as { applyAttentionResolution: (input: AttentionResolutionInput) => Promise<void> };
-				await assert.rejects(resolve.applyAttentionResolution({ ...attentionResolutionFromRequest(first), action: "answer", answer: "Answer request one" }), /requires revise_run or explicit abandon_run/);
-				assert.equal(manager.store.getPlan("run-1", "001")?.phase, "NEEDS_INPUT");
-				assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, []);
+				await resolve.applyAttentionResolution({ ...attentionResolutionFromRequest(first), action: "answer", answer: "Answer request one" });
+				assert.equal(manager.store.getPlan("run-1", "001")?.phase, "BLOCKED");
+				assert.equal(manager.store.getRun()?.status, "paused");
+				assert.deepEqual(manager.store.getPlan("run-1", "001")?.repair, ["ATTENTION_ANSWER [attention-first]: Answer request one"]);
 				assert.equal(manager.store.getAttention(first.requestId)?.state, "awaiting_input");
 				assert.equal(manager.store.getAttention(second.requestId)?.state, "awaiting_input");
 			} finally { manager.close(); }

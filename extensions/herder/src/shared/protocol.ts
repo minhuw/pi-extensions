@@ -134,6 +134,7 @@ export const ATTENTION_CAUSES = [
 	"judge_needs_input",
 	"final_reviewer_needs_input",
 	"transport_exhausted",
+	"worker_protocol_error",
 	"verification_environment",
 ] as const;
 
@@ -856,6 +857,7 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 }
 
 export interface ManagerReply {
+	executionBudget?: { limit: number; used: number; remaining: number; stopReason: string | null };
 	runRevision?: { editToken: string; requestId: string; state: string };
 	protocolVersion: number;
 	runId: string;
@@ -961,7 +963,7 @@ function lines(value: string | undefined): string[] {
 	return value.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
-export const WORKER_BLOCKER_KINDS = ["ENVIRONMENT", "INVOCATION", "REQUIREMENT"] as const;
+export const WORKER_BLOCKER_KINDS = ["ENVIRONMENT", "INVOCATION", "REQUIREMENT", "SAFETY"] as const;
 export type WorkerBlockerKind = typeof WORKER_BLOCKER_KINDS[number];
 
 export interface ImplementerResult {
@@ -979,6 +981,8 @@ export interface ImplementerResult {
 	usage: UsageEvidence;
 }
 
+/** Finding strings retain their wire format; manager must validate them against
+ * frozen contracts via core/review-findings.ts before granting repair authority. */
 export interface ReviewerResult {
 	kind: "reviewer";
 	/** Worker-reported evidence only; never approval or mutation authority. */
@@ -1000,6 +1004,7 @@ export interface JudgeResult {
 	blockerKind?: WorkerBlockerKind;
 	decision: "DONE" | "REPAIR" | "NEEDS_INPUT" | "BLOCKED";
 	findings: string[];
+	/** Stable IDs bound to validated reviewer evidence, never new obligations. */
 	authorizedBlockers: string[];
 	repairContracts: string[];
 	passDocument?: string;
@@ -1028,7 +1033,7 @@ function parseBlockerKind(role: WorkerRole, fields: Map<string, string>): Worker
 	if (!concrete(detail) || !operationalEvidence.some(concrete)) {
 		throw new Error("BLOCKER_KIND requires concrete detail and SETUP or CHECKS evidence (manager, command, cwd, error, and prerequisite or decision)");
 	}
-	if (kind !== "REQUIREMENT" && (fields.get("SCOPE") === "FAIL"
+	if (["ENVIRONMENT", "INVOCATION"].includes(kind) && (fields.get("SCOPE") === "FAIL"
 		|| ["FINDINGS", "FIX_GUIDANCE", "AUTHORIZED_BLOCKERS", "REPAIR_CONTRACTS", "PASS_DOCUMENT"].some((name) => lines(fields.get(name)).length > 0))) {
 		throw new Error("ENVIRONMENT/INVOCATION cannot report defect findings, repair authority, or failed scope");
 	}

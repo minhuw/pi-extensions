@@ -74,7 +74,7 @@ const planningWorkflowSchema = Type.Object({
 	editToken: Type.Optional(Type.String()),
 	track: Type.Optional(Type.Boolean()),
 	requestId: Type.Optional(Type.String()),
-	action: Type.Optional(Type.String({ description: "Plan attention: revise_run opens a whole-run Markdown revision; abandon_run requires explicit host confirmation. No defer, answer, unchanged retry, or target-local revision. Final RUN attention retains its existing actions." })),
+	action: Type.Optional(Type.String({ description: "Stopped attention: answer records only; defer or stop preserves evidence. Safe operator retry requires host confirmation. Scope amendments must be user-invoked through /herder-revise, never initiated by this tool." })),
 	answer: Type.Optional(Type.String()),
 	rationale: Type.Optional(Type.String()),
 }, { additionalProperties: false });
@@ -305,7 +305,7 @@ export function registerPiPlanningWorkflows(
 						});
 					}
 				}
-				return { content: [{ type: "text" as const, text: formatPlanToolResponse(params.operation, result, params) }], details: { result } };
+				return { content: [{ type: "text" as const, text: formatPlanToolResponse(params.operation, result, params) }], details: { result }, ...(params.operation === "attention" && ["answer", "defer", "stop", "cancel"].includes(params.action ?? "") ? { terminate: true } : {}) };
 			} catch (error) {
 				throw new Error(message(error));
 			}

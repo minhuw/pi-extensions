@@ -1,8 +1,5 @@
 import { confirmRunRevision, prepareRunRevision, readRunRevision, writeRunRevision } from "../../../src/core/run-revision.ts";
 import { applyHerderReset } from "../../../src/application/tools.ts";
-import { HerderRunManager } from "../../../src/core/run-manager.ts";
-import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
-import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -324,7 +321,7 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-test("main-session attention re-exposes the current request and refuses obsolete selective rejection", { timeout: 30_000 }, async () => {
+test("main-session attention stays quiet on status and refuses obsolete selective rejection", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
@@ -360,7 +357,7 @@ test("main-session attention re-exposes the current request and refuses obsolete
 		})(), "attention delivery");
 		assert.equal(api.customMessages.length, 1);
 		assert.equal(api.customMessages[0]!.customType, "herder-attention-v1");
-		assert.match(api.customMessages[0]!.content, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
+		assert.match(api.customMessages[0]!.content, /^HERDER_STOPPED_ATTENTION_V1/m);
 		assert.match(api.customMessages[0]!.content, /REQUEST_ID:/);
 		assert.doesNotMatch(api.customMessages[0]!.content, /REQUEST_SHA256|CAPABILITY_TOKEN|RECOVERY_GIT_IDENTITY|schemaVersion|exact request binding/);
 		const messageDetails = object(api.customMessages[0]!.details);
@@ -368,16 +365,15 @@ test("main-session attention re-exposes the current request and refuses obsolete
 		assert.equal(messageDetails.cause, "initial_decision_blocked");
 		assert.equal(messageDetails.role, "plan-implementer");
 		assert.equal(messageDetails.round, 1);
-		assert.equal(messageDetails.nextAction, "Propose/review a whole-run revision; abandon is available.");
+		assert.equal(messageDetails.nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
 		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
-		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: false });
 
 		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		assert.equal(api.customMessages.length, 1, "passive settled events duplicated the attention request");
 		await api.command("herder-status").handler("herder-plans", ctx);
-		assert.equal(api.customMessages.length, 2);
-		assert.equal(api.customMessages[1]!.content, api.customMessages[0]!.content);
+		assert.equal(api.customMessages.length, 1, "status does not prompt another model turn");
 		assert.equal(warnings.some((warning) => warning.level === "error"), false);
 
 		await assert.rejects(api.tool("herder_plan").execute(
@@ -393,10 +389,10 @@ test("main-session attention re-exposes the current request and refuses obsolete
 			undefined,
 			undefined,
 			ctx,
-		), /requires revise_run or explicit abandon_run/);
+		), /Stopped attention permits answer, defer, stop, or host-authorized safe operator retry/);
 		const unchanged = object((await requestService(service, "/v1/status")).reply);
 		assert.equal(object(unchanged.attention).requestId, attention.requestId);
-		assert.equal(api.customMessages.length, 2, "no selective action consumes the current request");
+		assert.equal(api.customMessages.length, 1, "no selective action consumes the current request");
 		assert.equal(factory.requests.length, 0);
 
 		await withDeadline(api.invoke("session_shutdown", ctx), "attention session_shutdown");
@@ -445,11 +441,11 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 			runCommand("git", ["-C", worktree, "commit", "-m", `fix(value): advance fixture to ${round + 1}`]);
 			reply = await complete(implementer, "STATUS: COMPLETE\nCHECKS: fixture source updated\nFILES CHANGED: src/value.mjs\nNOTES: regression check remains unresolved");
 			const reviewer = object((reply.actions as unknown[])[0]);
-			reply = await complete(reviewer, "VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: [F1][P1][BLOCKING][PLAN_REQUIREMENT] src/value.mjs:1 — required regression check fails\nFIX_GUIDANCE: [F1] make the regression check pass\nCHECKS: required regression check — FAILED\nRATIONALE: Original acceptance remains unmet");
+			reply = await complete(reviewer, "VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: [F1][P1][BLOCKING][PLAN_REQUIREMENT] src/value.mjs:1 — required regression check fails; obligation=A1; evidence=src/value.mjs:1 regression check fails; violation=approved acceptance remains unmet\nFIX_GUIDANCE: [F1] make the regression check pass\nCHECKS: required regression check — FAILED\nRATIONALE: Original acceptance remains unmet");
 			if (round === 2) {
 				const judge = object((reply.actions as unknown[])[0]);
 				assert.equal(judge.role, "plan-judge");
-				reply = await complete(judge, "DECISION: REPAIR\nFINDINGS: [F1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] required check fails\nAUTHORIZED_BLOCKERS: F1\nREPAIR_CONTRACTS: [F1] expected=required regression check passes; constraints=original scope\nPASS_DOCUMENT: Resolve F1, run the required regression check, and preserve original scope. No rejected findings or unresolved decisions.\nCHECKS: required regression check — FAILED\nRATIONALE: One bounded rescue remains");
+				reply = await complete(judge, "DECISION: REPAIR\nFINDINGS: [F1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] required check fails; obligation=A1; evidence=src/value.mjs:1 regression check fails; violation=approved acceptance remains unmet\nAUTHORIZED_BLOCKERS: F1\nREPAIR_CONTRACTS: [F1] expected=required regression check passes; constraints=original scope\nPASS_DOCUMENT: Resolve F1, run the required regression check, and preserve original scope. No rejected findings or unresolved decisions.\nCHECKS: required regression check — FAILED\nRATIONALE: One bounded rescue remains");
 			}
 		}
 		const attention = object(reply.attention);
@@ -473,14 +469,14 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
 		const delivered = await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
-		assert.equal(object(delivered.details).nextAction, "Propose/review a whole-run revision; abandon is available.");
+		assert.equal(object(delivered.details).nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
 		const params = {
 			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
 			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",
 			rationale: "The user accepts the current implementation with this specific gap.",
 			confirmed: true, // Untrusted model input must not bypass a declined host confirmation.
 		};
-		await assert.rejects(api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx), /requires revise_run or explicit abandon_run/);
+		await assert.rejects(api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx), /Stopped attention permits answer, defer, stop, or host-authorized safe operator retry/);
 		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
 		assert.equal(confirmations.length, 0, "obsolete acceptance never opens a host confirmation");
 		const store = new RunStore(fixture.planDirectory);
@@ -1115,20 +1111,22 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		await api.invoke("session_start", ctx);
 		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
 		const message = await withDeadline(api.waitForAttentionMessage(), "whole-run attention delivery");
-		assert.match(message.content, /PROPOSE a concrete whole-run graph revision directly/);
-		assert.match(message.content, /skills\/plans\/references\/plan-format\.md.*skills\/plans\/references\/plan-template\.md completely/);
-		assert.match(message.content, /product\/execution boundary/);
-		assert.match(message.content, /cold-read the complete affected plan snapshots/);
-		assert.match(message.content, /draft Markdown writes are allowed without execution approval/);
-		assert.match(message.content, /Do not run source setup, dependency installation, tests, builds/);
+		assert.match(message.content, /Only the user may invoke \/herder-revise/);
+		assert.deepEqual(message.options, { deliverAs: "followUp", triggerTurn: false });
 		assert.equal(factory.sessions.length, 1);
 		await withDeadline(factory.sessions[0]!.started, "initial sibling started");
 		const oldWorktree = factory.requests[0]!.action.worktree;
 		const sentinel = path.join(oldWorktree, "old-execution-evidence.txt");
 		fs.writeFileSync(sentinel, "keep until final approval");
 		const requestId = object(message.details).requestId;
-		const opened = object(await api.tool("herder_plan").execute("revise", { operation: "attention", planDirectory: value.planDirectory, requestId, action: "revise_run" }, undefined, undefined, ctx));
-		assert.equal(opened.isError, undefined, JSON.stringify(opened));
+		await assert.rejects(api.tool("herder_plan").execute("revise", { operation: "attention", planDirectory: value.planDirectory, requestId, action: "revise_run", confirmed: true }, undefined, undefined, ctx), /Only a user-invoked/);
+		await api.command("herder-revise").handler("herder-plans", ctx);
+		assert.equal(readRunRevision(value.planDirectory), null, "declined drafting leaves execution intact");
+		assert.equal(factory.sessions[0]!.aborted, false);
+		consent = true;
+		await api.command("herder-revise").handler("herder-plans", ctx);
+		assert.match(api.userMessages.at(-1)!.content, /HERDER_USER_AUTHORIZED_SCOPE_DRAFT_V1/);
+		consent = false;
 		const record = readRunRevision(value.planDirectory)!;
 		assert.equal(factory.sessions[0]!.aborted, true, "begin returns graph authority only after all old workers settle");
 		assert.ok(fs.existsSync(sentinel));
@@ -1137,20 +1135,26 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
 		fs.writeFileSync(path.join(value.planDirectory, "001-recover-worker.md"), fixturePlan({ title: "Recover a lost worker", acceptance: "Entire execution uses the revised assignment." }));
 		const params = { operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken, confirmed: true };
+		await assert.rejects(api.tool("herder_plan").execute("dirty", params, undefined, undefined, ctx), /dirty or unreviewed committed work/);
+		assert.equal(fs.readFileSync(sentinel, "utf8"), "keep until final approval");
+		assert.equal(confirmations.length, 2, "unreconciled work cannot reach adoption confirmation");
+		// Explicitly reconcile the test-created untracked file; production must never discard it.
+		fs.unlinkSync(sentinel);
 		await assert.rejects(api.tool("herder_plan").execute("dismiss", params, undefined, undefined, ctx), /Confirmation dismissed/);
-		assert.ok(fs.existsSync(sentinel));
+		assert.ok(fs.existsSync(oldWorktree), "dismissal preserves the old execution worktree");
 		assert.equal(factory.requests.length, 1);
 		assert.equal(readRunRevision(value.planDirectory)?.state, "prepared");
 		consent = true;
 		const finished = object(await api.tool("herder_plan").execute("approve", params, undefined, undefined, ctx));
 		assert.equal(finished.isError, undefined, JSON.stringify(finished));
-		assert.equal(confirmations.length, 2);
-		assert.ok(confirmations.every(body => body.includes(record.run.runId) && body.includes(record.run.baseCommit) && body.includes(String(requestId))));
+		assert.equal(confirmations.length, 4);
+		const adoptionConfirmations = confirmations.slice(2);
+		assert.ok(adoptionConfirmations.every(body => body.includes(record.run.runId) && body.includes(record.run.baseCommit) && body.includes(String(requestId))));
 		assert.equal(fs.existsSync(sentinel), false);
 		assert.equal(factory.requests.length, 3);
 		assert.ok(factory.requests.slice(1).every(request => request.action.runId === record.run.runId && request.action.generation === record.run.currentGeneration + 1));
-		assert.ok(confirmations.every(body => /Retain completed plans: none/.test(body) && /Rerun plans: 001, 002/.test(body)));
-		assert.ok(confirmations.every(body => !/deleting every old execution|no selective reuse/.test(body)));
+		assert.ok(adoptionConfirmations.every(body => /Retain completed plans: none/.test(body) && /Rerun plans: 001, 002/.test(body)));
+		assert.ok(adoptionConfirmations.every(body => !/deleting every old execution|no selective reuse/.test(body)));
 		assert.ok(factory.requests.slice(1).some(request => fs.readFileSync(request.action.assignmentPath, "utf8").includes("Entire execution uses the revised assignment")));
 		assert.equal(readRunRevision(value.planDirectory)?.state, "complete");
 	} finally {
@@ -1161,11 +1165,20 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 });
 
 async function reserveWholeRunFixture(value: Fixture) {
-	const manager = new HerderRunManager(value.planDirectory);
+	const api = new CapturedExtensionAPI();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, new PendingWorkerFactory());
+	const notifications: Warning[] = [];
+	const base = freshContext(value, notifications);
+	const ctx = { ...base, hasUI: true, ui: { ...base.ui, theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text }, confirm: async () => true } } as unknown as ExtensionContext;
 	try {
-		const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 1 });
-		await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(reply.attention!), action: "revise_run" } });
-	} finally { manager.close(); }
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-revise").handler("herder-plans", ctx);
+		assert.ok(readRunRevision(value.planDirectory), JSON.stringify(notifications));
+	} finally {
+		await api.invoke("session_shutdown", ctx);
+		await stopService(value.planDirectory);
+	}
 	const record = readRunRevision(value.planDirectory)!;
 	const index = path.join(value.planDirectory, "README.md");
 	fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
@@ -1224,7 +1237,7 @@ for (const operation of ["finish_edit", "cancel_edit"]) {
 }
 
 for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "session_start prepared"] as const) {
-	test(`${recovery} restores exact whole-run attention for confirmed abandonment without status`, { timeout: 40_000 }, async () => {
+	test(`${recovery} restores exact whole-run attention and preserves evidence on user stop without status`, { timeout: 40_000 }, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-revision-abandon-"));
 		const value = writeBlockedAttentionFixture(root);
 		const api = new CapturedExtensionAPI();
@@ -1270,10 +1283,11 @@ for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "se
 			const count = confirmations.length;
 			await assert.rejects(api.tool("herder_plan").execute("wrong-request", { ...params, requestId: queued[1]!.requestId }, undefined, undefined, ctx), /is not bound to this Pi session/);
 			assert.equal(confirmations.length, count);
-			await assert.rejects(api.tool("herder_plan").execute("dismiss-abandon", params, undefined, undefined, ctx), /Confirmation dismissed/);
+			await assert.rejects(api.tool("herder_plan").execute("model-abandon", params, undefined, undefined, ctx), /Only a user-invoked/);
+			assert.equal(confirmations.length, count, "model abandonment cannot open confirmation");
+			await api.command("herder-stop").handler("", ctx);
 			assert.equal(confirmations.length, count + 1);
-			assert.match(confirmations.at(-1)!, /^Abandon this entire Herder execution\?/);
-			assert.ok(confirmations.at(-1)!.includes(record.request.requestId));
+			assert.match(confirmations.at(-1)!, /^Stop Herder\?/);
 			const pending = new RunStore(value.planDirectory, { readOnly: true });
 			try {
 				assert.equal(pending.getRun()!.runId, record.run.runId);
@@ -1282,12 +1296,15 @@ for (const recovery of ["finish_edit", "cancel_edit", "session_start draft", "se
 			} finally { pending.close(); }
 			assert.equal(factory.requests.length, 0);
 			consent = true;
-			const abandoned = object(await api.tool("herder_plan").execute("confirm-abandon", params, undefined, undefined, ctx));
-			assert.equal(abandoned.isError, undefined, JSON.stringify(abandoned));
-			assert.equal(readRunRevision(value.planDirectory)?.state, "abandoned");
+			await api.command("herder-stop").handler("", ctx);
+			assert.equal(readRunRevision(value.planDirectory)?.state, recovery === "finish_edit" || recovery === "session_start prepared" ? "prepared" : "draft");
 			const after = new RunStore(value.planDirectory, { readOnly: true });
-			try { assert.equal(after.getRun(), null); } finally { after.close(); }
-			assert.equal(factory.requests.length, 0, "recovery and abandonment must never resume or dispatch workers");
+			try {
+				assert.equal(after.getRun()!.status, "stopped");
+				assert.equal(after.getRun()!.runId, record.run.runId);
+				assert.deepEqual(after.getAttentionRequests(record.run.runId, { unresolvedOnly: true }), queued);
+			} finally { after.close(); }
+			assert.equal(factory.requests.length, 0, "recovery and stop must never resume or dispatch workers");
 		} finally {
 			if (ctx) await api.invoke("session_shutdown", ctx);
 			await stopService(value.planDirectory).catch(() => {});
@@ -1674,10 +1691,12 @@ test("shutdown drains locally while old admitted remote reconciliation retains o
 		allowReceipt.resolve();
 		await withDeadline(Promise.all([attaching, recovery]), "remote retirement and queued recovery");
 		assert.equal(warnings.length, 0, JSON.stringify(warnings));
-		assert.equal(factory.sessions.length, 2);
-		await withDeadline(factory.sessions[1]!.started, "remote retirement replacement");
+		assert.equal(factory.sessions.length, 1, "second automatic transport recovery must not bypass its persisted limit");
 		assert.equal(factory.sessions[0]!.prompted, false, "old epoch never starts its accepted worker");
-		assert.equal(evidence(value).actions.filter(action => action.state === "dispatched").length, 1);
+		const stopped = evidence(value);
+		assert.equal(stopped.actions.filter(action => action.state === "dispatched").length, 0);
+		assert.equal(stopped.run!.status, "needs_input");
+		assert.match(stopped.run!.terminalDetail!, /exhausted the cumulative safe transport recovery/i);
 		assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
 	} finally {
 		allowReceipt.resolve();
@@ -1789,7 +1808,7 @@ for (const duringPreparation of [false, true]) {
 			] as const) {
 				const offset = notifications.length;
 				await api.command(name).handler(args, ctx);
-				assert.ok(notifications.slice(offset).some(entry => /manual.*cleanup/i.test(entry.message)), name);
+				assert.ok(notifications.slice(offset).some(entry => (name === "herder-rework" ? /Active rework has moved to/ : /manual.*cleanup/i).test(entry.message)), name);
 			}
 			await assert.rejects(api.tool("herder_plan").execute("unsafe-edit", { operation: "finish_edit", planDirectory: value.planDirectory, editToken: "unsafe" }, undefined, undefined, ctx), /manual.*cleanup/i);
 			const toolCall = api.handlers.get("tool_call")!;
@@ -1926,8 +1945,8 @@ for (const markDuringConfirmation of [false, true]) {
 	});
 }
 
-for (const action of ["revise_run", "abandon_run"] as const) {
-	test(`queued ${action} attention cannot mutate after root disposal latches exclusion`, { timeout: 30_000 }, async () => {
+for (const action of ["herder-revise", "herder-stop"] as const) {
+	test(`queued ${action} user command cannot mutate after root disposal latches exclusion`, { timeout: 30_000 }, async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-queued-attention-"));
 		const value = writeBlockedAttentionFixture(root);
 		const api = new CapturedExtensionAPI();
@@ -1936,11 +1955,12 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 		const unsafe = new Deferred<void>();
 		const queueHeld = new Deferred<void>();
 		const releaseQueue = new Deferred<void>();
-		const bound = new Deferred<void>();
+		const notifications: string[] = [];
 		const base = freshContext(value, []);
-		const ctx = { ...base, ui: { ...base.ui, notify(text: string) {
+		const ctx = { ...base, hasUI: true, ui: { ...base.ui, theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text }, confirm: async () => true, notify(text: string) {
+			notifications.push(text);
 			if (/manual.*cleanup/i.test(text)) unsafe.resolve();
-		} } } as ExtensionContext;
+		} } } as unknown as ExtensionContext;
 		const originalFetch = globalThis.fetch;
 		let attaching: Promise<unknown> | undefined;
 		let attention: Promise<unknown> | undefined;
@@ -1982,14 +2002,9 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 			};
 			attaching = api.command("herder-attach").handler("herder-plans", ctx);
 			await withDeadline(queueHeld.promise, "attach holds manager queue");
-			let actionReads = 0;
 			let attentionSettled = false;
-			attention = assert.rejects(api.tool("herder_plan").execute("queued-attention", {
-				operation: "attention", planDirectory: value.planDirectory, requestId: object(message.details).requestId,
-				// The second read builds applicationParams only after bindAttention returned safely.
-				get action() { if (++actionReads === 2) bound.resolve(); return action; },
-			}, undefined, undefined, ctx).finally(() => { attentionSettled = true; }), /manual.*cleanup/i);
-			await withDeadline(bound.promise, "attention bound before exclusion");
+			attention = api.command(action).handler("herder-plans", ctx).finally(() => { attentionSettled = true; });
+			await new Promise(resolve => setTimeout(resolve, 50));
 			assert.equal(ownershipEvidence(value).record.resetCleanupRequired, undefined);
 			assert.equal(attentionSettled, false, "attention is waiting behind attach");
 			session.dispose = () => { throw Error("fixture queued attention root disposal failed"); };
@@ -2001,6 +2016,7 @@ for (const action of ["revise_run", "abandon_run"] as const) {
 			releaseQueue.resolve();
 			await withDeadline(attaching, "attach releases manager queue");
 			await withDeadline(attention, "queued attention rejected");
+			assert.ok(notifications.some(text => /manual.*cleanup/i.test(text)));
 			assert.equal(readRunRevision(value.planDirectory), null, "queued attention must not reserve a draft before checking exclusion");
 			assert.deepEqual(snapshot(), before, "run, plans, actions and attention must remain unchanged");
 			assert.equal(fs.readFileSync(index, "utf8"), markdown);

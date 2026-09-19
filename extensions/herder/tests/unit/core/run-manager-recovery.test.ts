@@ -1,3 +1,4 @@
+import { grantHostAttention } from "../../../src/core/run-revision.ts";
 import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -207,10 +208,17 @@ test("plan recovery freezes the entire execution and rejects old selective actio
 		assert.equal(attention.planId, "001");
 		const original = (started.actions as unknown[]).map(object);
 		assert.deepEqual(original.map(action => action.planId), ["002"]);
-		for (const action of ["unchanged_retry", "revise", "reject", "defer", "retry", "answer", "answer_and_resume", "accept", "stop", "cancel"]) {
-			await assert.rejects(managerReply(service, "event", { eventId: `retired-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Explicit choice"), answer: "Explicit answer", confirmed: true } }), /requires revise_run or explicit abandon_run/);
+		for (const action of ["unchanged_retry", "revise", "reject", "retry", "answer_and_resume", "accept"]) {
+			await assert.rejects(managerReply(service, "event", { eventId: `retired-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Explicit choice"), answer: "Explicit answer", confirmed: true } }), /Stopped attention permits/);
 		}
 		const resolution = attentionResolution(attention, String(started.runId), "revise_run", "Propose a replacement for the whole graph.");
+		await assert.rejects(managerReply(service, "event", { eventId: "unapproved-scope", kind: "attention", attention: { ...resolution, confirmed: true } }), /private host grant/);
+		for (const action of ["answer", "defer", "stop", "cancel"]) {
+			const paused = await managerReply(service, "event", { eventId: `quiet-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Remain stopped"), answer: "Recorded only" } });
+			assert.equal(paused.status, "paused"); assert.deepEqual(paused.actions, []);
+		}
+		const granting = new RunStore(value.planDirectory);
+		try { grantHostAttention(granting.getRun()!, resolution); } finally { granting.close(); }
 		const opened = await managerReply(service, "event", { eventId: "open-whole-run", kind: "attention", attention: resolution });
 		assert.deepEqual(opened.actions, []);
 		assert.equal(object(opened.scheduler).reason, "revision-barrier");

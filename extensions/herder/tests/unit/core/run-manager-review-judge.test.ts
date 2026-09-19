@@ -23,6 +23,7 @@ type Fixture = { repo: string; planDirectory: string; originalHead: string };
 
 type ReviewerEnvelope = {
 	verdict: "APPROVE" | "REVISE" | "BLOCK";
+	blockerKind?: "SAFETY" | "REQUIREMENT";
 	findings?: string[];
 	fixGuidance?: string[];
 	scope?: "PASS" | "FAIL";
@@ -197,6 +198,7 @@ function failedImplementerResponse(reason: string): string {
 function reviewerResponse(result: ReviewerEnvelope): string {
 	return [
 		`VERDICT: ${result.verdict}`,
+		...(result.blockerKind ? [`BLOCKER_KIND: ${result.blockerKind}`] : []),
 		`FINDINGS: ${result.findings?.length ? result.findings.join("\n") : "none"}`,
 		`FIX_GUIDANCE: ${result.fixGuidance?.length ? result.fixGuidance.join("\n") : "none"}`,
 		"DISCOVERED_PATHS: none",
@@ -233,10 +235,14 @@ async function finishJudge(service: Service, candidate: JsonRecord, prefix: stri
 	return terminal(service, candidate, prefix, judgeResponse(result));
 }
 
+const FAILURE_FIELDS = "obligation=A1; evidence=src/value.mjs:1 exports an incorrect fixture value; violation=the incorrect value fails the approved fixture transition acceptance";
+const REMAINING_FINDING = `[F001][P1][BLOCKING][PLAN_REQUIREMENT] remaining impact: incorrect value; ${FAILURE_FIELDS}`;
+const JUDGE_FINDING = `[F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; ${FAILURE_FIELDS}`;
+
 function blocker(round: number): ReviewerEnvelope {
 	return {
 		verdict: "REVISE",
-		findings: [`[BLOCKING][P1] reviewer-blocker-round-${round}`],
+		findings: [`[F001][P1][BLOCKING][PLAN_REQUIREMENT] reviewer-blocker-round-${round}; ${FAILURE_FIELDS}`],
 		fixGuidance: [`Fix reviewer blocker in round ${round}`],
 	};
 }
@@ -329,17 +335,19 @@ test("Reviewer APPROVE integrates; nonapproval never silently normalizes to appr
 			fixGuidance: [],
 			scope: "PASS",
 		});
-		assert.equal(reply.status, "running");
-		assert.equal(action(reply, "plan-implementer").round, 2);
+		assert.equal(reply.status, "needs_input");
+		assert.deepEqual(reply.actions, []);
+		assert.equal(payload(reply.attention).cause, "worker_protocol_error");
 
 		const { store, run, plan } = inspectPlan(fixture);
 		try {
-			assert.equal(plan.phase, "IMPLEMENTING");
+			assert.equal(plan.phase, "NEEDS_INPUT");
+			assert.equal(plan.round, 1, "invalid findings must not consume a repair round");
 			const approval = store.getApproval(run!.runId, "001", 1);
 			assert.equal(approval, null, "REVISE must retain its nonapproval meaning");
 			const storedReviewer = store.getAction(String(reviewer.actionId));
-			assert.equal(payload(payload(storedReviewer!.result).workerResult).verdict, "REVISE", "raw Reviewer evidence remains REVISE");
-			assert.equal(store.getActions(run!.runId, ["proposed", "dispatched"]).length, 1);
+			assert.match(String(payload(payload(storedReviewer!.result).terminal).response), /VERDICT: REVISE/, "raw Reviewer evidence remains available");
+			assert.equal(store.getActions(run!.runId, ["proposed", "dispatched"]).length, 0);
 		} finally {
 			store.close();
 		}
@@ -586,9 +594,9 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 					hostHandle: `judge-repair-${state.judge.attemptId}-host`,
 					response: judgeResponse({
 						decision: "REPAIR",
-						findings: ["[BLOCKING][P1] adjudicated blocker"],
-						authorizedBlockers: ["reviewer-blocker-round-3"],
-						repairContracts: ["Implement the adjudicated repair contract exactly"],
+						findings: [JUDGE_FINDING],
+						authorizedBlockers: ["F001"],
+						repairContracts: ["[F001] Implement the adjudicated repair contract exactly"],
 					}),
 				}],
 			}));
@@ -619,7 +627,7 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 		try {
 			assert.equal(inspected.plan.phase, "IMPLEMENTING");
 			assert.equal(inspected.plan.round, 3);
-			assert.deepEqual(inspected.plan.repair, ["Implement the adjudicated repair contract exactly"]);
+			assert.deepEqual(inspected.plan.repair, ["[F001] Implement the adjudicated repair contract exactly"]);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 			assert.equal(implementer.model, inspected.store.getActions(inspected.run!.runId).find((a) => a.role === "plan-implementer")!.model);
 		} finally {
@@ -641,13 +649,13 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 	});
 });
 
-test("Judge NEEDS_INPUT delegates a whole-run revision rather than rescheduling the same Judge", { timeout: 45_000 }, async () => {
+test("Judge NEEDS_INPUT preserves a quiet decision without revision or automatic Judge replay", { timeout: 45_000 }, async () => {
 	await withFixture("judge-input", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-input");
 		const question = "Which approved repair boundary | should the Judge apply?";
 		const paused = await finishJudge(service, state.judge, "judge-input", {
 			decision: "NEEDS_INPUT",
-			findings: ["[BLOCKING][P1] adjudication needs a product decision"],
+			findings: ["[F001][NONBLOCKING_IN_SCOPE][NEEDS_INPUT] adjudication needs a product decision"],
 			authorizedBlockers: [],
 			repairContracts: [],
 			question,
@@ -677,11 +685,8 @@ test("Judge NEEDS_INPUT delegates a whole-run revision rather than rescheduling 
 			attention: { ...attentionResolutionFromRequest(attention as unknown as ManagerAttentionRequest),
 				action: "answer_and_resume", answer: "Use only the declared repair contract." },
 		};
-		await assert.rejects(submitHerderEvent(submission), /requires revise_run or explicit abandon_run/);
-		const opened = payload(payload(await submitHerderEvent({ ...submission, attention: { ...submission.attention, action: "revise_run" } })).reply);
-		assert.deepEqual(opened.actions, []);
-		assert.equal(payload(opened.scheduler).reason, "revision-barrier");
-		assert.ok(payload(opened.runRevision).editToken);
+		await assert.rejects(submitHerderEvent(submission), /host grant/);
+		await assert.rejects(submitHerderEvent({ ...submission, attention: { ...submission.attention, action: "revise_run" } }), /host grant/);
 		const after = inspectPlan(fixture);
 		try {
 			assert.equal(after.plan.phase, "NEEDS_INPUT");
@@ -697,7 +702,7 @@ test("Judge BLOCKED ends the run without approval", { timeout: 45_000 }, async (
 		const state = await reachJudge(service, fixture, "judge-block");
 		const reply = await finishJudge(service, state.judge, "judge-block", {
 			decision: "BLOCKED",
-			findings: ["[BLOCKING][P1] Judge explicitly blocked the plan"],
+			findings: [JUDGE_FINDING],
 			authorizedBlockers: [],
 			repairContracts: [],
 		});
@@ -725,8 +730,8 @@ test("Judge BLOCKED ends the run without approval", { timeout: 45_000 }, async (
 async function exhaustReview(service: Service, fixture: Fixture, prefix: string): Promise<{ reply: JsonRecord; reviewer: JsonRecord; judge: JsonRecord }> {
 	const state = await reachJudge(service, fixture, prefix);
 	let reply = await finishJudge(service, state.judge, prefix, {
-		decision: "REPAIR", findings: ["[BLOCKING][P1] remaining impact: incorrect value"],
-		repairContracts: ["Fix the incorrect value"], authorizedBlockers: ["incorrect value"],
+		decision: "REPAIR", findings: [JUDGE_FINDING],
+		repairContracts: ["[F001] Fix the incorrect value"], authorizedBlockers: ["F001"],
 		passDocument: "Required: retain integer API, fix incorrect value, run node --test. No waived checks.",
 	});
 	const implementer = action(reply, "plan-implementer");
@@ -736,7 +741,7 @@ async function exhaustReview(service: Service, fixture: Fixture, prefix: string)
 	const reviewer = action(reply, "plan-reviewer");
 	await dispatch(service, reviewer, prefix);
 	reply = await terminal(service, reviewer, prefix, reviewerResponse({
-		verdict: "REVISE", findings: ["[BLOCKING][P1] remaining impact: incorrect value"],
+		verdict: "REVISE", findings: [REMAINING_FINDING],
 		fixGuidance: ["Fix the incorrect value"], rationale: "The rescue did not satisfy the recorded requirement",
 	}).replace("CHECKS: fixture test — passed", "CHECKS: node --test — failed: incorrect value"));
 	return { reply, reviewer, judge: state.judge };
@@ -777,74 +782,69 @@ test("round-3 Reviewer nonapproval exhausts without Judge or round 4 and include
 			assert.ok(inspected.store.getActions(inspected.run!.runId).every((a) => a.round <= 3));
 			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally { inspected.store.close(); }
-		await assert.rejects(resolve(service, resolutionFor(state.reply, "unchanged_retry"), "no-retry"), /requires revise_run or explicit abandon_run/);
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "unchanged_retry"), "no-retry"), /Stopped attention/);
 	});
 });
 
-test("exhausted plan acceptance and stop are rejected without altering failed-review evidence", { timeout: 60_000 }, async () => {
+test("exhausted plan cannot be accepted or revised by a model, but can stop preserving evidence", { timeout: 60_000 }, async () => {
 	await withFixture("retired-acceptance", async (service, fixture) => {
 		const state = await exhaustReview(service, fixture, "retired-acceptance");
 		const resolution = resolutionFor(state.reply, "accept");
 		await assert.rejects(resolve(service, { ...resolution, requestSha256: "0".repeat(64) }, "stale"), /hash/);
 		await assert.rejects(resolve(service, { ...resolution, capabilityToken: "0".repeat(64) }, "foreign"), /capability/);
-		for (const action of ["accept", "stop", "revise", "unchanged_retry"] as const) {
-			await assert.rejects(resolve(service, resolutionFor(state.reply, action), `retired-${action}`), /requires revise_run or explicit abandon_run/);
+		for (const action of ["accept", "revise", "unchanged_retry"] as const) {
+			await assert.rejects(resolve(service, resolutionFor(state.reply, action), `retired-${action}`), /Stopped attention/);
 		}
 		const worktree = String(state.reviewer.worktree);
 		const head = git(worktree, ["rev-parse", "HEAD"]).stdout;
-		const opened = await resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-proposal");
-		assert.deepEqual(opened.actions, []);
-		assert.ok(payload(opened.runRevision).editToken);
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-proposal"), /host grant/);
+		const stopped = await resolve(service, resolutionFor(state.reply, "stop"), "preserve-work");
+		assert.deepEqual(stopped.actions, []);
+		assert.equal(stopped.status, "paused");
+		assert.equal(stopped.runRevision, undefined);
 		assert.equal(git(worktree, ["rev-parse", "HEAD"]).stdout, head);
 		const inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.plan.phase, "BLOCKED");
 			assert.equal(inspected.plan.round, 3);
-			assert.deepEqual(inspected.plan.findings, ["[BLOCKING][P1] remaining impact: incorrect value"]);
+			assert.deepEqual(inspected.plan.findings, [REMAINING_FINDING]);
 			assertNoApproval(inspected.store, inspected.run!.runId);
 			assert.notEqual(inspected.store.getAttention(resolution.requestId)?.state, "resolved");
 		} finally { inspected.store.close(); }
 	});
 });
 
-test("mutated transport uses the three-round budget and rescue without a Judge document retains operational evidence", { timeout: 30_000 }, async () => {
+test("mutated transport pauses immediately without consuming a new product round or invoking Judge", { timeout: 30_000 }, async () => {
 	await withFixture("transport-rescue", async (service, fixture) => {
 		let reply = await startRun(service, fixture, "transport-rescue");
 		let implementer = action(reply, "plan-implementer");
 		await dispatch(service, implementer, "transport-rescue");
 		reply = await terminal(service, implementer, "transport-rescue", failedImplementerResponse("round-one operational failure"));
-		for (const round of [2, 3]) {
-			implementer = action(reply, "plan-implementer");
-			assert.equal(implementer.round, round);
-			if (round === 3) {
-				assert.equal(implementer.workerMode, "RESCUE");
-				assert.match(String(implementer.prompt), /no recorded round-2 Judge REPAIR document/);
-				assert.match(String(implementer.prompt), /round-one operational failure/);
-				assert.match(String(implementer.prompt), /interrupted operational round 2/);
-			}
-			await dispatch(service, implementer, "transport-rescue");
-			fs.writeFileSync(path.join(String(implementer.worktree), "src/value.mjs"), `export const value = ${round}\n`);
-			reply = payload(payload(await requestManagerOperation(service, "event", {
-				eventId: `transport-failure-${round}`, kind: "terminals", terminals: [{
-					actionId: implementer.actionId, interrupted: true, error: `interrupted operational round ${round}`,
-				}],
-			})).reply);
-		}
+		implementer = action(reply, "plan-implementer");
+		assert.equal(implementer.round, 2);
+		await dispatch(service, implementer, "transport-rescue");
+		const file = path.join(String(implementer.worktree), "src/value.mjs");
+		fs.writeFileSync(file, "export const value = 2; // unfinished\n");
+		reply = payload(payload(await requestManagerOperation(service, "event", {
+			eventId: "transport-failure-2", kind: "terminals", terminals: [{ actionId: implementer.actionId, interrupted: true, error: "WebSocket interrupted operational round 2" }],
+		})).reply);
 		assert.equal(reply.status, "needs_input");
+		assert.deepEqual(reply.actions, []);
 		const request = payload(reply.attention);
 		assert.equal(request.kind, "operator_attention");
 		assert.equal(request.cause, "transport_exhausted");
-		assert.match(String(request.detail), /EXHAUSTION_DECISION_DOSSIER/);
-		assert.match(String(request.detail), /interrupted operational round 3/);
+		assert.match(String(request.detail), /WebSocket interrupted operational round 2/);
+		assert.match(fs.readFileSync(file, "utf8"), /unfinished/);
 		const inspected = inspectPlan(fixture);
 		try {
-			assert.equal(inspected.plan.round, 3);
-			assert.ok(inspected.store.getActions(inspected.run!.runId).every((a) => a.round <= 3 && a.role !== "plan-judge"));
+			assert.equal(inspected.plan.round, 2);
+			assert.equal(inspected.store.countActions(inspected.run!.runId), 2);
+			assert.ok(inspected.store.getActions(inspected.run!.runId).every((a) => a.role !== "plan-judge"));
 		} finally { inspected.store.close(); }
 	});
 });
 
-test("exhaustion permits sibling evidence before the whole-run barrier but never selectively unlocks dependencies", { timeout: 60_000 }, async () => {
+test("exhaustion preserves independent sibling evidence and never unlocks blocked dependencies", { timeout: 60_000 }, async () => {
 	await withFixture("accept-scheduling", async (service, fixture) => {
 		const readme = path.join(fixture.planDirectory, "README.md");
 		fs.writeFileSync(readme, fs.readFileSync(readme, "utf8").replace("\n\n## Dependency notes", ["",
@@ -864,16 +864,85 @@ test("exhaustion permits sibling evidence before the whole-run barrier but never
 		git(siblingWorktree, ["commit", "-qm", "test: independent patch"]);
 		let reply = await terminal(service, sibling, "sibling", implementerResponse(git(siblingWorktree, ["rev-parse", "HEAD"]).stdout.trim()).replaceAll("src/value.mjs", "src/independent.mjs"));
 		reply = await finishReviewer(service, action(reply, "plan-reviewer"), "sibling", { verdict: "BLOCK", rationale: "Independent operator decision" });
-		await assert.rejects(resolve(service, resolutionFor(state.reply, "accept"), "retired-unlock"), /requires revise_run or explicit abandon_run/);
-		reply = await resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-barrier");
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "accept"), "retired-unlock"), /Stopped attention/);
+		await assert.rejects(resolve(service, resolutionFor(state.reply, "revise_run"), "whole-run-barrier"), /host grant/);
 		assert.deepEqual(reply.actions, []);
-		assert.equal(payload(reply.scheduler).reason, "revision-barrier");
+		assert.equal(reply.runRevision, undefined);
 		assert.equal(fs.readFileSync(path.join(siblingWorktree, "src/independent.mjs"), "utf8"), "export const independent = 1\n");
 		const inspected = inspectPlan(fixture);
 		try {
 			assert.equal(inspected.store.getPlan(inspected.run!.runId, "002")?.phase, "BLOCKED");
 			assert.equal(inspected.store.getPlan(inspected.run!.runId, "003"), null);
 			assert.equal(inspected.store.getAttentionRequests(inspected.run!.runId, { unresolvedOnly: true }).length, 2);
+		} finally { inspected.store.close(); }
+	});
+});
+
+test("malformed obligations and incidental FOLLOWUP cannot authorize repair", { timeout: 60_000 }, async () => {
+	const scenarios: Array<{ name: string; result: ReviewerEnvelope; approved?: boolean }> = [
+		{ name: "unknown-id", result: { ...blocker(1), findings: [REMAINING_FINDING.replace("obligation=A1", "obligation=A99")] } },
+		{ name: "missing-evidence", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; evidence=[^;]+/, "")] } },
+		{ name: "missing-cause", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; violation=[^;]+/, "")] } },
+		{ name: "followup-revise", result: { verdict: "REVISE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] } },
+		{ name: "approve-scope-fail", result: { verdict: "APPROVE", scope: "FAIL" } },
+		{ name: "approve-with-blocker", result: { ...blocker(1), verdict: "APPROVE" } },
+		{ name: "followup-approve", result: { verdict: "APPROVE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] }, approved: true },
+	];
+	for (const scenario of scenarios) await withFixture(scenario.name, async (service, fixture) => {
+		let reply = await startRun(service, fixture, scenario.name);
+		reply = await finishImplementer(service, action(reply, "plan-implementer"), scenario.name);
+		reply = await finishReviewer(service, action(reply, "plan-reviewer"), scenario.name, scenario.result);
+		assert.deepEqual(reply.actions, []);
+		const inspected = inspectPlan(fixture);
+		try {
+			assert.equal(inspected.plan.round, 1);
+			if (scenario.approved) {
+				assert.equal(reply.status, "paused");
+				assert.equal(inspected.plan.phase, "DONE");
+				assert.ok(inspected.store.getApproval(inspected.run!.runId, "001", 1));
+			} else {
+				assert.equal(reply.status, "needs_input");
+				assert.equal(payload(reply.attention).cause, "worker_protocol_error");
+				assertNoApproval(inspected.store, inspected.run!.runId);
+			}
+		} finally { inspected.store.close(); }
+	});
+});
+
+test("Judge cannot authorize an invented obligation over validated reviewer evidence", { timeout: 30_000 }, async () => {
+	await withFixture("judge-invented", async (service, fixture) => {
+		const state = await reachJudge(service, fixture, "judge-invented");
+		const reply = await finishJudge(service, state.judge, "judge-invented", {
+			decision: "REPAIR",
+			findings: [JUDGE_FINDING.replace("obligation=A1", "obligation=A99")],
+			authorizedBlockers: ["F001"], repairContracts: ["[F001] invented scope"],
+		});
+		assert.equal(reply.status, "needs_input");
+		assert.deepEqual(reply.actions, []);
+		assert.equal(payload(reply.attention).cause, "worker_protocol_error");
+		const inspected = inspectPlan(fixture);
+		try {
+			assert.equal(inspected.plan.round, 2);
+			assertNoApproval(inspected.store, inspected.run!.runId);
+		} finally { inspected.store.close(); }
+	});
+});
+
+test("safety discovery pauses for a decision rather than code repair", { timeout: 30_000 }, async () => {
+	await withFixture("safety", async (service, fixture) => {
+		let reply = await startRun(service, fixture, "safety");
+		reply = await finishImplementer(service, action(reply, "plan-implementer"), "safety");
+		reply = await finishReviewer(service, action(reply, "plan-reviewer"), "safety", {
+			verdict: "BLOCK", blockerKind: "SAFETY",
+			rationale: "The required reproduction would delete customer data; operator must select a safe isolated environment.",
+		});
+		assert.equal(reply.status, "paused");
+		assert.deepEqual(reply.actions, []);
+		assert.equal(payload(reply.attention).kind, "user_decision");
+		const inspected = inspectPlan(fixture);
+		try {
+			assert.equal(inspected.plan.round, 1);
+			assertNoApproval(inspected.store, inspected.run!.runId);
 		} finally { inspected.store.close(); }
 	});
 });

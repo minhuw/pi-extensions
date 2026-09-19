@@ -160,7 +160,7 @@ test("failed fresh initialization rolls back schema and version and can be retri
 					injected = true;
 					originalExec.call(this, stage === "version-publication" ? sql : sql.slice(0, sql.indexOf(";") + 1));
 					assert.ok(this.prepare("SELECT name FROM sqlite_master WHERE name = 'attempts'").get());
-					assert.equal(this.prepare("PRAGMA user_version").get()!.user_version, stage === "version-publication" ? 19 : 0);
+					assert.equal(this.prepare("PRAGMA user_version").get()!.user_version, stage === "version-publication" ? EXECUTION_SCHEMA_VERSION : 0);
 					try {
 						originalExec.call(this, stage === "automatic-rollback"
 							? "CREATE TABLE fault (value INTEGER CHECK (value > 0)); INSERT OR ROLLBACK INTO fault VALUES (0)"
@@ -180,7 +180,7 @@ test("failed fresh initialization rolls back schema and version and can be retri
 				assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 0);
 				assert.deepEqual(database.prepare("SELECT name FROM sqlite_master").all(), []);
 			} finally { database.close(); }
-			assert.equal(initializeExecutionStore(planDirectory).schemaVersion, 19);
+			assert.equal(initializeExecutionStore(planDirectory).schemaVersion, EXECUTION_SCHEMA_VERSION);
 			openExecutionDatabase(planDirectory, { readOnly: true })!.close();
 		} finally {
 			DatabaseSync.prototype.exec = originalExec;
@@ -197,7 +197,7 @@ test("serialized fresh opener rechecks the schema after another opener initializ
 		DatabaseSync.prototype.exec = function(sql: string) {
 			if (!interleaved && sql === "BEGIN IMMEDIATE") {
 				interleaved = true;
-				assert.equal(initializeExecutionStore(planDirectory).schemaVersion, 19);
+				assert.equal(initializeExecutionStore(planDirectory).schemaVersion, EXECUTION_SCHEMA_VERSION);
 			}
 			return originalExec.call(this, sql);
 		};
@@ -207,7 +207,7 @@ test("serialized fresh opener rechecks the schema after another opener initializ
 			const version = Number(database.prepare("PRAGMA user_version").get()!.user_version);
 			const objects = database.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
 			assert.equal(createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex"),
-				"ed70c843910bddf379984f9082395caa0d6f3977113567612779dd1269935c48");
+				"cdb19a6f8e33241cfb39ebba23424b891a51ee840e7124366cba376b3512fa36");
 		} finally { database.close(); }
 	} finally {
 		DatabaseSync.prototype.exec = originalExec;
@@ -244,7 +244,7 @@ test("read-only empty and initialized opens and writable reopen never begin tran
 	}
 });
 
-test("fresh execution schema retains the canonical schema-19 fingerprint", () => {
+test("fresh execution schema retains the canonical schema-20 fingerprint", () => {
 	const planDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "herder-execution-schema-fingerprint-"));
 	try {
 		const database = openExecutionDatabase(planDirectory, { create: true });
@@ -265,9 +265,9 @@ test("fresh execution schema retains the canonical schema-19 fingerprint", () =>
 		const fingerprint = createHash("sha256").update(JSON.stringify({ version, objects }), "utf8").digest("hex");
 		database.close();
 
-		assert.equal(version, 19);
-		assert.equal(objects.length, 36);
-		assert.equal(fingerprint, "ed70c843910bddf379984f9082395caa0d6f3977113567612779dd1269935c48");
+		assert.equal(version, EXECUTION_SCHEMA_VERSION);
+		assert.equal(objects.length, 40);
+		assert.equal(fingerprint, "cdb19a6f8e33241cfb39ebba23424b891a51ee840e7124366cba376b3512fa36");
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });
 	}
@@ -693,6 +693,8 @@ test("ordinary SQL rounds stop at three and user approval evidence survives repl
 	const store = new RunStore(planDirectory);
 	try {
 		seedManagerRun(store.database, "run-approval");
+		store.database.prepare(`INSERT INTO manager_plan_specs VALUES ('run-approval', 1, '001', ?, 2, 0, 'Plan', 'P1', 'S', 'code', '[]', 'TODO', '', '[]', '001.md', '{}')`).run("f".repeat(64));
+		store.putPlanSpecs(store.getPlanSpecs("run-approval"));
 		const action: ManagerAction = {
 			actionId: "reviewer-3", attemptId: "attempt-3", runId: "run-approval", planId: "001", generation: 1, round: 3,
 			role: "plan-reviewer", agentType: "reviewer", model: "model", effort: "high", workerMode: "VERIFICATION",

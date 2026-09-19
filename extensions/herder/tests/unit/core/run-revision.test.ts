@@ -12,12 +12,12 @@ import { HerderRunManager } from "../../../src/core/run-manager.ts";
 import { RunStore, type StoredPlanSpec } from "../../../src/daemon/run-store.ts";
 import { git, GitDriver } from "../../../src/daemon/git-driver.ts";
 import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
-import { assertApprovedRevisionGraph, confirmRunRevision, prepareRunRevision, readRunRevision, revisionDriver, writeRunRevision } from "../../../src/core/run-revision.ts";
+import { grantHostAttention, assertApprovedRevisionGraph, confirmRunRevision, prepareRunRevision, readRunRevision, revisionDriver, writeRunRevision } from "../../../src/core/run-revision.ts";
 import { finishRunRevision } from "../../../src/application/run-revision.ts";
 import { graphInputSha256 } from "../../../src/core/plan-edit.ts";
 import { selectivePlanSets, stageSelectiveReversal, SelectiveReversalConflict } from "../../../src/daemon/git/selective-revision.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
-import { finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "../../../adapters/run-revision.ts";
+import { beginUserScopeAmendment, scopeChangePreview, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "../../../adapters/run-revision.ts";
 import { resetHerderPlanSet } from "../../../src/daemon/git/reset-plan-set.ts";
 import { buildCompletionProofPayload } from "../../../src/daemon/git/completion-proof.ts";
 import { parseWorkerResult, normalizeUsage, sha256, stableJson, attentionRequestSha256, attentionCapabilityToken } from "../../../src/shared/protocol.ts";
@@ -86,6 +86,7 @@ async function begin(value: ReturnType<typeof fixture>, conflict = false, restac
 		} finally { store.close(); }
 		const request = reply.attention!;
 		assert.equal(request.planId, "002");
+		grantHostAttention(manager.store.getRun()!, { ...attentionResolutionFromRequest(request), action: "revise_run" });
 		const opened = await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "revise_run" } });
 		assert.deepEqual(opened.actions, []);
 		assert.equal(opened.scheduler.reason, "revision-barrier");
@@ -183,18 +184,18 @@ test("invalid, inherited, unchanged, and changed-after-confirmation graphs canno
 	} finally { value.dispose(); }
 });
 
-test("explicit abandonment deletes entire unmerged execution and preserves exact Markdown", { timeout: 30_000 }, async () => {
+test("legacy abandonment replay is refused without deleting execution or Markdown", { timeout: 30_000 }, async () => {
 	const value = fixture();
 	try {
 		const { record, worktree } = await begin(value);
 		const index = fs.readFileSync(path.join(value.directory, "README.md"));
-		await finishWholeRunEdit(value.directory, record.editToken, { hasUI: true, ui: { confirm: async () => true } as never }, host, "abandon_run");
-		assert.equal(readRunRevision(value.directory)?.state, "abandoned");
+		await assert.rejects(finishWholeRunEdit(value.directory, record.editToken, { hasUI: true, ui: { confirm: async () => true } as never }, host, "abandon_run"), /Legacy destructive/);
+		assert.equal(readRunRevision(value.directory)?.state, "confirmed");
 		assert.deepEqual(fs.readFileSync(path.join(value.directory, "README.md")), index);
-		assert.equal(fs.existsSync(worktree), false);
-		assert.equal(git(value.repo, ["for-each-ref", "--format=%(refname)", "refs/heads/herder/"]).stdout.trim(), "");
+		assert.equal(fs.existsSync(worktree), true);
+		assert.notEqual(git(value.repo, ["for-each-ref", "--format=%(refname)", "refs/heads/herder/"]).stdout.trim(), "");
 		assert.equal(git(value.repo, ["rev-parse", "HEAD"]).stdout.trim(), value.originalHead);
-		assert.equal((await finishRunRevision(value.directory, record.editToken)).abandoned, true);
+		await assert.rejects(finishRunRevision(value.directory, record.editToken), /Legacy destructive/);
 	} finally { value.dispose(); }
 });
 
@@ -204,8 +205,8 @@ test("plan attention rejects every retired action at the manager boundary", { ti
 		const { request } = await begin(value);
 		const manager = new HerderRunManager(value.directory);
 		try {
-			for (const action of ["defer", "answer", "answer_and_resume", "retry", "unchanged_retry", "revise", "reject", "accept", "stop", "cancel"]) {
-				await assert.rejects(manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer: "do it", rationale: "do it", confirmed: true } }), /requires revise_run or explicit abandon_run/);
+			for (const action of ["answer_and_resume", "retry", "unchanged_retry", "revise", "reject", "accept"]) {
+				await assert.rejects(manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer: "do it", rationale: "do it", confirmed: true } }), /Stopped attention permits/);
 			}
 		} finally { manager.close(); }
 	} finally { value.dispose(); }
@@ -270,7 +271,8 @@ test("whole-run revision can replace the entire ID set and dependency graph", { 
 		fs.writeFileSync(path.join(value.directory, "003-replacement.md"), fixturePlan({ id: "003", title: "Replacement", acceptance: "The replacement subsumes both former plans." }));
 		await confirmRunRevision(await prepareRunRevision(value.directory, record.editToken));
 		const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
-		assert.deepEqual(reply.actions.map(action => action.planId), ["003"]);
+		assert.deepEqual(reply.actions, [], "new task requires a separate explicit effort grant");
+		assert.equal(reply.status, "paused");
 		assert.equal(fs.existsSync(worktree), false);
 		assert.equal(git(value.repo, ["show-ref", "--verify", "--quiet", "refs/heads/herder/herder-plans/001"], true).status, 1);
 		assert.equal(fs.readFileSync(path.join(value.repo, "src/value.mjs"), "utf8"), "export const value = 1;\n");
@@ -381,6 +383,7 @@ test("ordinary reset requeues TODO-origin completion retained from an earlier se
 			} finally { store.close(); }
 			const request = reply.attention!;
 			assert.equal(request.planId, "002");
+			grantHostAttention(manager.store.getRun()!, { ...attentionResolutionFromRequest(request), action: "revise_run" });
 			await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "revise_run" } });
 			record = readRunRevision(value.directory)!;
 		} finally { manager.close(); }
@@ -520,6 +523,7 @@ test("two selective revisions preserve attribution and restart non-DONE surfaces
 			const next = { ...request, requestId, capabilityToken: attentionCapabilityToken(requestId), generation: 2, state: "pending" as const };
 			next.requestSha256 = attentionRequestSha256(next);
 			manager.store.putAttention(next);
+			grantHostAttention(manager.store.getRun()!, { ...attentionResolutionFromRequest(next), action: "revise_run" });
 			await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(next), action: "revise_run" } });
 			second = readRunRevision(value.directory)!;
 		} finally { manager.close(); }
@@ -540,7 +544,7 @@ test("two selective revisions preserve attribution and restart non-DONE surfaces
 	} finally { value.dispose(); }
 });
 
-test("confirmed legacy records without selective evidence still use their original all-reset successor scope", { timeout: 30_000 }, async () => {
+test("confirmed legacy records without selective evidence cannot reset budgets or create a successor", { timeout: 30_000 }, async () => {
 	const value = fixture();
 	try {
 		const { record } = await begin(value);
@@ -549,17 +553,16 @@ test("confirmed legacy records without selective evidence still use their origin
 		const { selective: _, ...legacy } = prepared;
 		writeRunRevision(value.directory, legacy, prepared);
 		await confirmRunRevision(legacy);
-		const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
-		assert.equal(reply.runId, record.successorRunId);
+		await assert.rejects(finishRunRevision(value.directory, record.editToken), /Legacy destructive/);
 		const store = new RunStore(value.directory);
-		try { assert.equal(store.getRun()?.currentGeneration, 1); assert.equal(store.getAttention(record.request.requestId), null); }
+		try { assert.equal(store.getRun()?.currentGeneration, 1); assert.equal(store.getRun()?.runId, record.run.runId); assert.ok(store.getAttention(record.request.requestId)); }
 		finally { store.close(); }
 	} finally { value.dispose(); }
 });
 
 
 test("selective closure includes removed plans and old/new rewiring, but not independent DONE plans", () => {
-	const spec = (planId: string, dependencies: string[] = [], planFingerprint = planId) => ({ planId, dependencies, planFingerprint }) as StoredPlanSpec;
+	const spec = (planId: string, dependencies: string[] = [], planFingerprint = planId) => ({ planId, dependencies, planFingerprint }) as unknown as StoredPlanSpec;
 	const previous = [spec("001"), spec("002", ["001"]), spec("003", ["002"]), spec("004")];
 	const next = [spec("002", [], "rewired"), spec("003", ["002"]), spec("004"), spec("005", ["003"])];
 	assert.deepEqual(selectivePlanSets(previous, next, new Set(["001", "002", "003", "004"])), { retainedPlanIds: ["004"], rerunPlanIds: ["002", "003", "005"], removedPlanIds: ["001"] });
@@ -640,7 +643,7 @@ for (const continuation of ["refine", "abandon"] as const) {
 				const abandoned = await prepareRunRevision(value.directory, record.editToken, "abandon_run");
 				assert.equal(abandoned.selective, undefined);
 				await confirmRunRevision(abandoned);
-				assert.equal((await finishRunRevision(value.directory, record.editToken)).abandoned, true);
+				await assert.rejects(finishRunRevision(value.directory, record.editToken), /Legacy destructive/);
 			}
 		} finally { value.dispose(); }
 	});
@@ -669,3 +672,74 @@ test("a staging conflict does not reopen authority when the approved graph chang
 		assert.equal(readRunRevision(value.directory)?.state, "confirmed");
 	} finally { GitDriver.prototype.worktreeStatus = originalStatus; value.dispose(); }
 });
+
+
+test("user scope command can open a draft after a run-level stop without worker attention", { timeout: 30_000 }, async () => {
+	const value = fixture();
+	try {
+		const manager = new HerderRunManager(value.directory);
+		try {
+			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			for (const request of manager.store.getAttentionRequests(manager.store.getRun()!.runId)) manager.store.resolveAttention(request.requestId);
+			manager.store.updateRun({ status: "paused", terminalDetail: "Final audit stopped" });
+		} finally { manager.close(); }
+		await assert.rejects(beginUserScopeAmendment(value.directory, { hasUI: false, ui: {} as never }, host), /interactive/);
+		assert.equal(readRunRevision(value.directory), null);
+		await assert.rejects(beginUserScopeAmendment(value.directory, { hasUI: true, ui: { confirm: async () => false } as never }, host), /dismissed/);
+		assert.equal(readRunRevision(value.directory), null);
+		await beginUserScopeAmendment(value.directory, { hasUI: true, ui: { confirm: async (_title: string, body: string) => { assert.match(body, /Generation: 1/); assert.match(body, /budgets are unchanged/); return true; } } as never }, host);
+		assert.equal(readRunRevision(value.directory)?.state, "draft");
+		assert.equal(readRunRevision(value.directory)?.request.planId, "RUN");
+	} finally { value.dispose(); }
+});
+
+test("scope preview displays exact acceptance and permission changes, additions and removals", () => {
+	const spec = (id: string, text: string, paths: string[]): StoredPlanSpec => ({ planId: id, planFingerprint: sha256(text), dependencies: [], assignment: { planText: text, plan: { inScopePaths: paths } } }) as unknown as StoredPlanSpec;
+	const preview = scopeChangePreview([spec("001", "Acceptance: old\nPermission: src/old", ["src/old"]), spec("002", "Removed acceptance", [])], [spec("001", "Acceptance: new\nPermission: src/new", ["src/new"]), spec("003", "Added acceptance", [])]);
+	assert.match(preview, /CHANGED plan 001/); assert.match(preview, /- Acceptance: old/); assert.match(preview, /\+ Acceptance: new/);
+	assert.match(preview, /Permissions before: \["src\/old"\]/); assert.match(preview, /Permissions after: \["src\/new"\]/);
+	assert.match(preview, /REMOVED plan 002/); assert.match(preview, /ADDED plan 003/);
+});
+
+for (const stage of ["prepare", "confirm", "cleanup"] as const) {
+	for (const mutation of ["unstaged", "staged", "untracked", "committed"] as const) {
+		test(`selective revision ${stage} preserves non-DONE ${mutation} work`, { timeout: 30_000 }, async () => {
+			const value = fixture();
+			try {
+				const { record } = await begin(value);
+				const driver = revisionDriver(record.run);
+				const store = new RunStore(value.directory);
+				let worktree: string;
+				try {
+					const spec = store.getPlanSpecs(record.run.runId).find(spec => spec.planId === "002")!;
+					const base = driver.branchHead(record.run.integrationBranch);
+					const execution = driver.ensurePlanWorktree("002", spec.assignment, base);
+					worktree = execution.worktree;
+					store.putPlan({ runId: record.run.runId, planId: "002", generation: 1, round: 1, phase: "IMPLEMENTING",
+						branch: execution.branch, worktree, generationBase: base,
+						assignmentPath: execution.assignment.bundlePath, assignmentSha256: execution.assignment.bundleSha256,
+						snapshotSha256: execution.assignment.snapshotSha256, reviewPass: 0, findings: [], repair: [], gates: [],
+						approvedBase: null, approvedHead: null, approvedTree: null, rebase: null });
+				} finally { store.close(); }
+				revise(value);
+				const prepared = stage === "prepare" ? null : await prepareRunRevision(value.directory, record.editToken);
+				if (stage === "cleanup") await confirmRunRevision(prepared!);
+				const file = mutation === "untracked" ? "unfinished.txt" : "src/other.mjs";
+				const contents = "// unfinished work must survive amendment\n";
+				fs.writeFileSync(path.join(worktree, file), contents);
+				if (mutation === "staged" || mutation === "committed") git(worktree, ["add", file]);
+				if (mutation === "committed") git(worktree, ["commit", "-qm", "unreviewed work"]);
+				const refs = driver.readIntegrationRepairNamespace().refs;
+				const status = driver.worktreeStatus(worktree);
+				const revision = readRunRevision(value.directory);
+				const operation = stage === "prepare" ? () => prepareRunRevision(value.directory, record.editToken)
+					: stage === "confirm" ? () => confirmRunRevision(prepared!) : () => finishRunRevision(value.directory, record.editToken);
+				await assert.rejects(operation, /non-DONE plan 002.*Preserve\/reconcile this work before amendment/);
+				assert.equal(fs.readFileSync(path.join(worktree, file), "utf8"), contents);
+				assert.equal(driver.worktreeStatus(worktree), status);
+				assert.deepEqual(driver.readIntegrationRepairNamespace().refs, refs);
+				assert.deepEqual(readRunRevision(value.directory), revision);
+			} finally { value.dispose(); }
+		});
+	}
+}

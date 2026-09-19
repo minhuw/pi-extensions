@@ -90,6 +90,7 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(herderReadme, /^## Planning and execution commands$/m);
 	const expectedCommandNames = [
 		"/herder-attach",
+		"/herder-budget",
 		"/herder-cleanup",
 		"/herder-dashboard",
 		"/herder-fire",
@@ -106,7 +107,7 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 		"/herder-validate",
 	].sort();
 	assert.deepEqual([...new Set(herderReadme.match(/\/herder-[a-z-]+/g))].sort(), expectedCommandNames);
-	const commandSection = herderReadme.split("## Planning and execution commands")[1].split("Fire, resume")[0];
+	const commandSection = herderReadme.split("## Planning and execution commands")[1].split("\n## ")[0];
 	const actualCommandForms = [...commandSection.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1].replaceAll("\\|", "|"));
 	assert.deepEqual(actualCommandForms, [
 		"/herder-grill <change>",
@@ -123,7 +124,8 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 		"/herder-fire [plan-dir] [options]",
 		"/herder-attach [plan-dir] [--dashboard-port n]",
 		"/herder-resume [plan-dir] [options]",
-		"/herder-revise [plan-dir] [options]",
+		"/herder-revise [plan-dir]",
+		"/herder-budget <amount> [plan-dir] [--plan ID --rounds N --recoveries N]",
 		"/herder-rework <plan-id> [plan-dir]",
 		"/herder-status [plan-dir]",
 		"/herder-dashboard [plan-dir]",
@@ -296,10 +298,10 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		/HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/,
 		/HERDER_MAIN_SESSION_VERIFICATION_RECOVERY_V1/,
 		/HERDER_MAIN_SESSION_VERIFICATION_REPAIR_DECISION_V1/,
-		/HERDER_MAIN_SESSION_REIGNITE_V1/,
 		/PATH_POLICY: INTEGRATION_WORKTREE is an absolute LocationRoot/,
 		/EXAMPLE_GATE: \{"gateId":"unit"/,
 	]) assert.match(mainSessionRequests, marker);
+	assert.doesNotMatch(mainSessionRequests, /HERDER_MAIN_SESSION_REIGNITE_V1/, "follow-up findings never initiate automatic planning");
 	assert.match(extension, /Tree-relative path inside the integration worktree/);
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
 	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
@@ -422,7 +424,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.match(contract, /repository-declared locked|repository-prescribed,? locked/);
 		assert.match(contract, /tracked manifest\/lock changes.*only when this assignment explicitly authorizes|Never modify tracked manifests, locks, source/);
 		assert.match(contract, /[Nn]ever[^.]*unpinned `uvx`\/`npx`/);
-		assert.match(contract, /BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/);
+		assert.match(contract, /BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT \| SAFETY; optional/);
 		assert.match(contract, /(?:omit|omitting|omitted).*BLOCKER_KIND|BLOCKER_KIND omitted/);
 		if (role === "plan-reviewer") {
 			assert.match(contents, /REVIEW_PROTOCOL_PATH/);
@@ -472,7 +474,7 @@ test("bounded review policy is owned by the protocol and assembled with the revi
 		/Verify frozen branch\/HEAD\/tree integrity before every terminal report/,
 		/[Ff]inal-phase V rows[^.]*cannot be the only prerequisite acceptance proof/,
 		/SETUP: </,
-		/BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT; optional/,
+		/BLOCKER_KIND: <ENVIRONMENT \| INVOCATION \| REQUIREMENT \| SAFETY; optional/,
 		/Only `ENVIRONMENT` and `INVOCATION` reject defect findings or `SCOPE: FAIL`/,
 		/`REQUIREMENT` blocker and retains confirmed `plan_recovery`\/`user_decision` authority/,
 		/Return exactly the envelope below/,
@@ -521,7 +523,7 @@ test("bounded review policy is owned by the protocol and assembled with the revi
 	]) assert.match(child, pattern);
 });
 
-test("review docs separate policy counts, opt-in deadlines, material-only Reignite, and unmeasured calibration", async () => {
+test("review docs separate policy counts, opt-in deadlines, nonexecuting followups, and unmeasured calibration", async () => {
 	const [readme, adapter, testing] = await Promise.all([
 		"README.md", "adapters/README.md", "TESTING.md",
 	].map((file) => readFile(path.join(extensionRoot, file), "utf8")));
@@ -534,13 +536,13 @@ test("review docs separate policy counts, opt-in deadlines, material-only Reigni
 		assert.match(text, /[Ee]xhaustion[^\n]*same-round[^\n]*operator[_ ]attention/);
 		assert.match(text, /no automatic retry or approval|never automatic retry or approval/);
 		assert.match(text, /settlement may exceed the deadline/);
-		assert.match(text, /P0\/P1 `BLOCKING`[^\n]*`PLAN_REQUIREMENT`[^\n]*`PATCH_REGRESSION`/);
-		assert.match(text, /[Aa]dvisories remain[^\n]*reports, not executable scope/);
+		assert.match(text, /(?:[Aa]dvisories|Advisory findings) remain[^\n]*(?:reports, not executable scope|result as optional backlog)/);
+		assert.match(text, /[Rr]eignite[^\n]*(?:not automatic|does not automatically|disabled)|does not automatically[^\n]*Reignite/);
 	}
 	for (const text of [readme, adapter, testing]) {
 		assert.match(text, /defect-candidate|candidate scouting/);
 	}
-	assert.match(adapter, /advisory-only reports do not trigger automatic Reignite drafting/);
+	assert.match(adapter, /Residual blockers or an incomplete audit pause the original run/);
 	assert.match(testing, /approximately 30 representative historical changes[^\n]*model bindings held constant/);
 	assert.match(testing, /Human-audit material defects and misses/);
 	assert.match(testing, /latency, total tokens including descendants, and human triage effort/);

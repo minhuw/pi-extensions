@@ -90,6 +90,13 @@ function linear(repo: string, base: string, head: string): string[] {
 	});
 }
 
+function validateUnfinishedWork(plan: StoredPlan, driver: GitDriver): void {
+	if (plan.phase !== "DONE" && (driver.worktreeStatus(plan.worktree)
+		|| driver.branchHead(plan.branch) !== plan.generationBase || driver.worktreeHead(plan.worktree) !== plan.generationBase)) {
+		throw new Error(`Selective revision refuses cleanup of non-DONE plan ${plan.planId}: dirty or unreviewed committed work exists. Preserve/reconcile this work before amendment; files and refs have not been cleaned up.`);
+	}
+}
+
 export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[], driver: GitDriver, priorKnown: string[] = []): SelectiveRevision {
 	const store = new RunStore(run.planDirectory, { readOnly: true });
 	try {
@@ -115,6 +122,7 @@ export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[]
 				|| owned.length !== 1 || owned[0]!.path !== plan.worktree || owned[0]!.locked) throw new Error(`Selective revision refuses moved/leased plan ${plan.planId}`);
 			const ref = `refs/plan-herder/${run.planName}/completed/${plan.planId}`;
 			if (plan.phase !== "DONE") {
+				validateUnfinishedWork(plan, driver);
 				if (namespace.some(item => item.ref === ref)) throw new Error(`Non-DONE plan ${plan.planId} has integrated completion evidence`);
 				continue;
 			}
@@ -202,6 +210,7 @@ export function validateSelectiveArtifacts(run: StoredRun, revision: SelectiveRe
 		try { fs.lstatSync(artifact.plan.worktree); exists = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 		if (exists) {
 			if (cleanup?.step === "branch_deleted" || cleanup?.state === "completed" || identity(artifact.plan.worktree) !== artifact.identity || attachment(artifact.plan.worktree) !== artifact.attachment) throw new Error(`Selective revision found replaced worktree ${artifact.plan.worktree}`);
+			validateUnfinishedWork(artifact.plan, driver);
 		} else if (!cleanup) throw new Error(`Selective revision worktree disappeared: ${artifact.plan.worktree}`);
 		if (!exists) {
 			const index = expectedWorktrees.findIndex(item => item.path === artifact.plan.worktree);

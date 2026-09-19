@@ -14,8 +14,6 @@ import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { fixturePlan } from "../../support/plan-v2.ts";
-import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
-import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService } from "../../../src/client/index.ts";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
@@ -316,33 +314,6 @@ function fieldValue(prompt: string, name: string): string {
 	const match = prompt.match(new RegExp(`^${name}: (.+)$`, "m"));
 	if (!match) throw new Error(`Prompt did not contain ${name}`);
 	return match[1]!;
-}
-
-function writeAdapterFollowUpPlan(directory: string, fixture: Fixture): string {
-	initPlanDir(directory);
-	fs.writeFileSync(path.join(directory, "README.md"), `# Herder Plans
-
-## Execution order & status
-
-| Plan | Title | Priority | Effort | Depends on | Status |
-|---|---|---|---|---|---|
-| [001](001-follow-up.md) | Follow up residual work | P1 | S | — | TODO |
-
-## Dependency notes
-
-None.
-
-## Considered and rejected
-
-None.
-`);
-	fs.writeFileSync(
-		path.join(directory, "001-follow-up.md"),
-		fs.readFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "utf8")
-			.replaceAll("Plan 001: Update the fixture value", "Plan 001: Follow up residual work")
-			.replaceAll("Update the fixture value", "Follow up residual work"),
-	);
-	return compileGraphIdentity(buildGraph(directory));
 }
 
 function readVerification(fixture: Fixture): { runId: string; state: string; manifest: Record<string, unknown> | null } {
@@ -844,7 +815,25 @@ async function fireThroughPassingVerification(
 	);
 }
 
-test("complete pending reignite injects one write prompt and ack does not dispatch workers", { timeout: 60_000 }, async () => {
+async function waitForReignite(fixture: Fixture) {
+	return withDeadline((async () => {
+		for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
+			const store = new RunStore(fixture.planDirectory);
+			try {
+				const run = store.getRun();
+				if (run?.status === "complete") {
+					const request = store.getReigniteRequest(run.runId, run.currentGeneration);
+					assert.ok(request);
+					return request;
+				}
+			} finally { store.close(); }
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		throw new Error("Final audit did not complete with a record-only reignite dossier");
+	})(), "record-only reignite completion");
+}
+
+test("blocking final audit preserves failed evidence without drafting successor work", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-reignite-"));
 	let fixture: Fixture | undefined;
 	let api: CapturedExtensionAPI | undefined;
@@ -860,7 +849,7 @@ test("complete pending reignite injects one write prompt and ack does not dispat
 		await withDeadline(api.invoke("session_start", context), "captured session_start");
 		const finalAudit = await fireThroughPassingVerification(api, factory, context);
 		finalAudit.finalReviewResponse = `VERDICT: REVISE
-FINDINGS: [fr-1][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding
+FINDINGS: [fr-1][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding; obligation=001:A1; evidence=src/value.mjs:1 residual fixture mismatch; violation=approved value transition remains unmet
 FIX_GUIDANCE: Write a sibling follow-up plan set.
 DISCOVERED_PATHS: none
 SCOPE: PASS
@@ -869,85 +858,22 @@ RATIONALE: Residual requirement belongs in a follow-up plan set.
 USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
 		const beforeReignite = api.userMessages.length;
 		finalAudit.release();
-		const reignitePrompt = (await withDeadline(
-			api.waitForUserMessage(beforeReignite, "HERDER_MAIN_SESSION_REIGNITE_V1"),
-			"reignite delegation",
-		)).content;
-		assert.match(reignitePrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
-		assert.match(reignitePrompt, /SOURCE_PLAN_DIRECTORY: /);
-		assert.match(reignitePrompt, /ALLOCATED_PLAN_DIRECTORY: /);
-		assert.match(reignitePrompt, /Pass SOURCE_PLAN_DIRECTORY as planDirectory/);
-		assert.match(reignitePrompt, /allocated sibling is also accepted/);
-		assert.match(reignitePrompt, /Do not call \/herder-fire/);
-		assert.match(reignitePrompt, /skills\/plans\/references\/plan-format\.md/);
-		assert.match(reignitePrompt, /skills\/plans\/references\/plan-template\.md/);
-		assert.match(reignitePrompt, /Cloud provisioning, deployment\/publishing, live migrations, and live restore\/undo/);
-		assert.match(reignitePrompt, /not Herder starting conditions, dependencies, setup, or acceptance\/final gates/);
-		assert.match(reignitePrompt, /Local tests, emulators, non-mutating dry-runs/);
-		assert.match(reignitePrompt, /acknowledge failed with that detail/);
-		assert.match(reignitePrompt, /Do not invent a TODO\/BLOCKED operational node, silently drop\/rephase a criterion/);
-		assert.match(reignitePrompt, /Code completion is not release acceptance/);
-		assert.equal(factory.sessions.some((session) => session.action.role === "plan-implementer" && session.action.planId !== "001"), false);
-		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
-		assert.equal(firstCount, 1);
-		await withDeadline(api.command("herder-status").handler("herder-plans", context), "reignite status refresh");
-		await new Promise((resolve) => setTimeout(resolve, 25));
-		assert.equal(
-			api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length,
-			firstCount,
-			"status refresh injected a duplicate reignite prompt",
-		);
-		const messageCountBeforeResume = api.userMessages.length;
-		await withDeadline(api.command("herder-resume").handler("herder-plans", context), "/herder-resume pending reignite");
-		const resumedPrompt = (await withDeadline(
-			api.waitForUserMessage(messageCountBeforeResume, "HERDER_MAIN_SESSION_REIGNITE_V1"),
-			"reignite re-injection",
-		)).content;
-		assert.match(resumedPrompt, /^HERDER_MAIN_SESSION_REIGNITE_V1/m);
-		assert.equal(fieldValue(resumedPrompt, "REQUEST_ID"), fieldValue(reignitePrompt, "REQUEST_ID"));
-		const allocated = fieldValue(resumedPrompt, "ALLOCATED_PLAN_DIRECTORY");
-		writeAdapterFollowUpPlan(allocated, fixture);
-		const validated = object(await invokeHerderTool("herder_plan", {
-			operation: "validate",
-			planDirectory: allocated,
-		}));
-		const graphSha256 = String(validated.graphSha256);
-		const workersBeforeAck = factory.sessions.length;
-		const ackArgs = {
-			requestId: fieldValue(resumedPrompt, "REQUEST_ID"),
-			requestSha256: fieldValue(resumedPrompt, "REQUEST_SHA256"),
-			state: "written" as const,
-			graphSha256,
-		};
-		await assert.rejects(
-			() => api!.tool("herder_reignite").execute(
-				"reignite-wrong-dir",
-				{ ...ackArgs, planDirectory: "src" },
-				undefined,
-				undefined,
-				context,
-			),
-			/must be the source run/,
-		);
-		const ack = await withDeadline(
-			api.tool("herder_reignite").execute(
-				"reignite",
-				{ ...ackArgs, planDirectory: allocated },
-				undefined,
-				undefined,
-				context,
-			),
-			"herder_reignite written ack against allocated directory",
-		);
-		assert.equal(object(ack).terminate, true);
-		assert.match(toolText(ack), /original run remains complete/i);
-		assert.equal(factory.sessions.length, workersBeforeAck, "reignite ack dispatched workers");
+		await withDeadline(api.waitForAttentionMessage(), "blocking final audit attention");
+		const workersBeforeRefresh = factory.sessions.length;
+		await withDeadline(api.command("herder-status").handler("herder-plans", context), "blocked audit status");
+		assert.equal(api.userMessages.length, beforeReignite, "blocking audit must not draft successor work");
+		assert.equal(factory.sessions.length, workersBeforeRefresh);
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(run.status, "complete");
-			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "written");
+			assert.equal(run.status, "paused");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+			assert.match(store.getPlan(run.runId, "RUN")!.findings.join("\n"), /obligation=001:A1/);
+			assert.equal(store.getNextAttention(run.runId)?.cause, "final_reviewer_needs_input");
 		} finally { store.close(); }
+		await assert.rejects(api.tool("herder_reignite").execute("no-successor", {
+			planDirectory: fixture.planDirectory, requestId: "not-authorized", requestSha256: "0".repeat(64), state: "failed", detail: "No successor authorized",
+		}, undefined, undefined, context), /not bound to this main session/);
 		await withDeadline(api.invoke("session_shutdown", context), "reignite session_shutdown");
 		shutdown = true;
 	} finally {
@@ -977,27 +903,23 @@ test("stale complete snapshots do not inject a reignite prompt after the source 
 		context = contextFor(fixture, ui);
 		await withDeadline(api.invoke("session_start", context), "captured session_start");
 		const finalAudit = await fireThroughPassingVerification(api, factory, context);
-		finalAudit.finalReviewResponse = `VERDICT: REVISE
-FINDINGS: [fr-stale][P1][BLOCKING][PLAN_REQUIREMENT] residual audit finding
+		finalAudit.finalReviewResponse = `VERDICT: APPROVE
+FINDINGS: [fr-stale][P2][NON_BLOCKING][FOLLOWUP] optional fixture enhancement
 FIX_GUIDANCE: Write a sibling follow-up plan set.
 DISCOVERED_PATHS: none
 SCOPE: PASS
 CHECKS: npm test — passed
 RATIONALE: Residual requirement belongs in a follow-up plan set.
 USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
-		const beforeReignite = api.userMessages.length;
 		finalAudit.release();
-		await withDeadline(
-			api.waitForUserMessage(beforeReignite, "HERDER_MAIN_SESSION_REIGNITE_V1"),
-			"reignite delegation",
-		);
+		await waitForReignite(fixture);
 		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
-		assert.equal(firstCount, 1);
+		assert.equal(firstCount, 0);
 		const service = await ensureService(fixture.planDirectory);
 		const completeStatus = object(await requestService(service, "/v1/status"));
 		const completeReply = object(completeStatus.reply) as unknown as ManagerReply;
 		assert.equal(completeReply.status, "complete");
-		assert.equal(completeReply.reigniteRequest?.state, "pending");
+		assert.equal(completeReply.reigniteRequest, undefined);
 		appendIndependentPlan(fixture);
 		await requestManagerOperation(service, "event", {
 			eventId: "adapter-reignite-stale-drift",

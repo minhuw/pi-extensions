@@ -1,4 +1,5 @@
-import { assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
+import { BudgetExhaustedError } from "../daemon/budgets.ts";
+import { assertHostAttentionGrant, assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { decideJudge, decideReview } from "../daemon/git/round-policy.ts";
 import { buildGraph, projectStatuses } from "./plans.ts";
 import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
+import { reviewFindingContractsFromSpecs, validateReviewerResult, validateJudgeFindings } from "./review-findings.ts";
 import {
 	captureReworkSnapshot,
 	crashReworkForTest,
@@ -641,10 +643,8 @@ function terminalRecord(result: WorkerResult | null, terminal: TerminalEvent, us
 			interrupted: Boolean(terminal.interrupted),
 			error: terminal.error ?? null,
 			hostHandle: terminal.hostHandle ?? null,
-			...(terminal.failureKind ? {
-				failureKind: terminal.failureKind,
-				response: terminal.response ?? "",
-			} : {}),
+			...(terminal.failureKind ? { failureKind: terminal.failureKind } : {}),
+			...(!result || terminal.interrupted || terminal.failureKind ? { response: terminal.response ?? "" } : {}),
 		},
 	};
 }
@@ -889,7 +889,7 @@ export class HerderRunManager {
 			`REMAINING_FINDINGS_AND_IMPACT: ${boundedEvidence(stableJson(finishing?.result && "findings" in finishing.result ? finishing.result.findings : plan.findings), 1_000)}`,
 			`RECORDED_GATES: ${boundedEvidence(stableJson(plan.gates), 600)}`,
 			plan.planId === "RUN" ? "RECOMMENDATION: Stop unless the exact clean reviewed patch is acceptable with explicitly acknowledged gaps. OPTIONS: accept (confirmed, accepted gaps and rationale; only a clean terminal round-3 reviewed tree), stop (preserve artifacts), or explicitly revise the target in a new generation. Pure transport exhaustion remains operator attention, not authorization to rewrite or waive requirements."
-				: "RECOMMENDATION: Inspect this failure and propose a concrete whole-run graph revision directly for user refinement and approval. OPTIONS: revise_run or explicit abandon_run. Approval reruns changed plans, their downstream dependents, and unfinished execution while preserving validated unrelated DONE work; conflicts require another proposal. Dismissal never abandons or retries unchanged.",
+				: "RECOMMENDATION: Stop this task and report the blocked obligation, concrete evidence, missing authority or operator action, preserved work, and remaining budget. Do not draft a revision, add prerequisites, or restart work. Scope amendment and additional budget require separate explicit host authorization.",
 			boundedEvidence(this.passDocumentEvidence(run, plan), 3_000),
 			this.terminalEvidence(run, plan, finishing ? { ...finishing, detail } : undefined),
 		].join("\n"), 16_384);
@@ -1351,31 +1351,8 @@ export class HerderRunManager {
 			`Adopted selective revision generation ${selective.nextGeneration}.`, undefined, [...selective.rerunPlanIds, ...selective.removedPlanIds]);
 	}
 
-	async revise(input: StartInput): Promise<ManagerReply> {
-		if (revisionPending(readRunRevision(this.planDirectory))) throw new Error("Finish the whole-run revision first");
-		const run = this.store.getRun();
-		if (!run) throw new Error("No deterministic Herder run exists");
-		if (fs.realpathSync(input.repositoryRoot) !== run.repositoryRoot) throw new Error("Revision repository does not match the recorded run");
-		if (input.planName && input.planName !== run.planName) throw new Error(`Revision plan name must remain ${run.planName}`);
-		if (input.maxParallel !== undefined && input.maxParallel !== run.maxParallel) {
-			throw new Error(`Revision must preserve max parallel ${run.maxParallel}; received ${input.maxParallel}`);
-		}
-		if (activeActionCount(this.store, run.runId) > 0) {
-			throw new Error("Plan graph revision requires zero proposed or dispatched workers; wait for terminal events or stop them first");
-		}
-		if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the active Grill plan edit before running Herder revise");
-		const profile = resolvePiProfile(input.profile || run.profileName);
-		if (profile.profile_sha256 !== run.profileSha256 || profile.profile !== run.profileName) {
-			throw new Error(`Recorded profile ${run.profileName} no longer matches its immutable binding`);
-		}
-		const driver = this.driver(run);
-		await driver.verifyCheckout(run.checkoutStateToken);
-		const nextGeneration = run.currentGeneration + 1;
-		const compiled = this.compileCurrentGraph(run, nextGeneration);
-		if (compiled.graphSha256 === run.graphSha256) throw new Error(`Plan graph still matches generation ${run.currentGeneration}; use resume`);
-		this.validateRevisionChanges(run, compiled);
-		this.adoptCompiledRevision(run, compiled, `Adopted plan graph generation ${nextGeneration} from generation ${run.currentGeneration}.`);
-		return this.reconcile(profile);
+	async revise(_input: StartInput): Promise<ManagerReply> {
+		throw new Error("Raw graph adoption is not authorized. Use the user-invoked /herder-revise scope amendment and exact host confirmation.");
 	}
 
 	private compiledReservedEdit(run: StoredRun, edit: StoredPlanEdit) {
@@ -1389,19 +1366,8 @@ export class HerderRunManager {
 		return { compiled, target };
 	}
 
-	private adoptReservedEdit(run: StoredRun, edit: StoredPlanEdit): void {
-		if (activeActionCount(this.store, run.runId) > 0) throw new Error("Reserved plan revision is still waiting for active workers to settle");
-		const { compiled, target } = this.compiledReservedEdit(run, edit);
-		if (edit.proposedGraphSha256 !== compiled.graphSha256 || edit.proposedPlanFingerprint !== target.planFingerprint) {
-			throw new Error(`Reserved plan ${edit.planId} changed after its revision barrier was requested`);
-		}
-		const nextGeneration = run.currentGeneration + 1;
-		this.adoptCompiledRevision(
-			run,
-			compiled,
-			`Adopted Grill revision for plan ${edit.planId} as graph generation ${nextGeneration}.`,
-			edit,
-		);
+	private adoptReservedEdit(_run: StoredRun, _edit: StoredPlanEdit): void {
+		throw new Error("Legacy plan edits cannot adopt semantic changes without an exact host scope grant; cancel and use /herder-revise");
 	}
 
 	private reservedEditIsRework(run: StoredRun, planId: string): boolean {
@@ -1626,216 +1592,39 @@ export class HerderRunManager {
 		return this.ensureFreshPlanRuntime(run, this.spec(run, planId), expectedHead);
 	}
 
-	private async applyRework(run: StoredRun, edit: StoredPlanEdit): Promise<ManagerReply> {
-		if (edit.state !== "barrier" || !edit.proposedGraphSha256 || !edit.proposedPlanFingerprint) throw new Error(`Plan ${edit.planId} rework must be prepared before finish`);
-		if (!this.store.hasPlanEditConfirmation(edit)) throw new Error(`Plan ${edit.planId} rework must be confirmed before finish`);
-		const { plan, driver, snapshot, validation, cleanupIdentity } = await this.validatePreparedRework(run, edit);
-		try {
-			const lease = driver.leaseReason(plan.worktree);
-			if (lease) throw new Error(`Plan ${plan.planId} worktree is still leased after worker settlement: ${lease}`);
-		} catch (error) {
-			if (!/not registered/i.test(error instanceof Error ? error.message : String(error))) throw error;
-		}
-		const nextGeneration = run.currentGeneration + 1;
-		const integrationHead = driver.branchHead(run.integrationBranch);
-		const assignment = driver.materializeRunAssignment(integrationHead, validation.nextSpecs.map((spec) => spec.assignment), nextGeneration);
-		const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
-		driver.resetPlanExecution({
-			branch: plan.branch,
-			worktree: plan.worktree,
-			expectedHead: snapshot.expectedHead,
-			expectedTree: snapshot.expectedTree,
-			additionalRefs: snapshot.transientRefs,
-			cleanupIdentity,
-			recordedCleanup: recordedCleanup ?? undefined,
-			onPrepare: (step) => this.store.recordAttentionCleanupStep(cleanupIdentity, step),
-			onProgress: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
-			onComplete: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
-		});
-		if (driver.planTransientRefs(edit.planId).length > 0) throw new Error(`Plan ${edit.planId} transient refs remain after rework cleanup`);
-		crashReworkForTest("after_git_cleanup");
-		this.store.transaction(() => {
-			this.store.putPlanSpecs(validation.nextSpecs);
-			this.store.putGeneration({
-				runId: run.runId,
-				generation: nextGeneration,
-				graphSha256: validation.compiled.graphSha256,
-				parentGeneration: run.currentGeneration,
-				runAssignmentPath: assignment.bundlePath,
-				runAssignmentSha256: assignment.bundleSha256,
-				runSnapshotSha256: assignment.snapshotSha256,
-			});
-			this.store.deletePlan(run.runId, edit.planId);
-			for (const request of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) {
-				if (request.planId === edit.planId) this.store.resolveAttention(request.requestId);
-			}
-			this.store.recordPlanEditOutcome(edit, "finish");
-			this.store.deletePlanEdit(run.runId);
-			this.store.updateRun({
-				currentGeneration: nextGeneration,
-				graphSha256: validation.compiled.graphSha256,
-				status: this.store.getNextInputAttention(run.runId) ? "needs_input" : "running",
-				terminalDetail: `Reworked plan ${edit.planId} as graph generation ${nextGeneration}.`,
-			});
-		});
-		this.cacheSpecs(validation.nextSpecs);
-		crashReworkForTest("after_adoption");
-		const adoptedRun = this.store.getRun()!;
-		this.ensureReworkedPlanRuntime(adoptedRun, edit.planId, integrationHead);
-		deleteReworkSnapshotBestEffort(run.planDirectory, edit.editToken);
-		const reply = await this.reconcile(boundProfile(adoptedRun, this.store));
-		this.projectLifecycle(this.store.getRun()!);
-		return reply;
+	private async applyRework(_run: StoredRun, _edit: StoredPlanEdit): Promise<ManagerReply> {
+		throw new Error("Legacy rework cannot reset execution without an exact host scope grant; cancel and use /herder-revise");
 	}
 
 	async edit(input: PlanEditInput): Promise<PlanEditReply> {
+		if (input.operation !== "cancel") throw new Error("Active edits require the user-invoked /herder-revise scope amendment; public edit operations cannot authorize semantic changes or reset budgets");
 		if (revisionPending(readRunRevision(this.planDirectory))) throw new Error("Whole-run revision owns graph editing; use its bound finish_edit flow");
 		validatePlanEditInput(input);
-		let run = this.store.getRun();
+		const run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
-		if (input.operation !== "begin") {
-			const editToken = input.editToken!;
-			if (input.operation === "finish" || input.operation === "cancel") {
-				const outcome = this.store.getPlanEditOutcome(run.runId, editToken, input.operation);
-				if (outcome) {
-					if (input.operation === "finish" && outcome.rework && !this.store.getPlan(run.runId, outcome.planId) && !this.store.getPlanEdit(run.runId)) {
-						this.cacheSpecs(this.store.getPlanSpecs(run.runId));
-						this.ensureReworkedPlanRuntime(run, outcome.planId);
-					}
-					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
-					const reply = input.operation === "finish" && (run.status === "running" || run.status === "needs_input")
-						? await this.reconcile(boundProfile(run, this.store))
-						: this.reply();
-					if (input.operation === "finish" && outcome.rework) this.projectLifecycle(this.store.getRun()!);
-					return { edit: { planId: outcome.planId, state: input.operation === "finish" ? "barrier" : "reserved" }, reply };
-				}
-				const opposite = this.store.getPlanEditOutcome(run.runId, editToken, input.operation === "finish" ? "cancel" : "finish");
-				if (opposite) throw new Error(`Plan edit ${editToken} was already ${opposite.operation === "finish" ? "finished" : "cancelled"}`);
-			}
+		const editToken = input.editToken!;
+		const outcome = this.store.getPlanEditOutcome(run.runId, editToken, "cancel");
+		if (outcome) {
+			deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
+			return { edit: { planId: outcome.planId, state: "reserved" }, reply: this.reply() };
 		}
-		if (input.operation === "begin") {
-			const planId = normalizePlanId(input.planId);
-			const rework = input.intent === "rework";
-			if (!rework && run.status !== "running") throw new Error(`Active Grill requires a running Herder Fire run; current status is ${run.status}`);
-			const existing = this.store.getPlanEdit(run.runId);
-			if (existing) {
-				if (existing.planId !== planId) throw new Error(`Plan ${existing.planId} already has the active Grill reservation`);
-				const hadExecution = this.reservedEditIsRework(run, planId);
-				if (rework && !hadExecution) throw new Error(`Plan ${planId} is reserved for Grill; cancel that edit before reworking`);
-				if (!rework && hadExecution) throw new Error(`Plan ${planId} is reserved for rework; continue with /herder-rework or cancel the reservation`);
-				if (rework) readReworkSnapshot(run, existing, this.store);
-				return { edit: { planId, state: existing.state, editToken: existing.editToken }, reply: this.reply() };
-			}
-			const drift = this.graphDrift(run);
-			if (drift.changed) throw new Error(`${drift.detail} Resolve graph drift before starting Grill.`);
-			const spec = this.spec(run, planId);
-			if (rework) {
-				const plan = this.assertReworkEligible(run, planId);
-				const driver = this.driver(run);
-				await driver.verifyCheckout(run.checkoutStateToken);
-				const editToken = input.editToken ?? randomUUID();
-				pruneReworkSnapshots(run.planDirectory, editToken);
-				const pendingEdit: StoredPlanEdit = {
-					runId: run.runId,
-					planId,
-					editToken,
-					state: "reserved",
-					baseGraphSha256: run.graphSha256,
-					basePlanFingerprint: spec.planFingerprint,
-					proposedGraphSha256: null,
-					proposedPlanFingerprint: null,
-					createdAt: "",
-					updatedAt: "",
-				};
-				let snapshotSha256: string;
-				try {
-					const snapshotPath = reworkSnapshotPath(run.planDirectory, editToken);
-					if (fs.existsSync(snapshotPath)) snapshotSha256 = readReworkSnapshotFile(run, pendingEdit).sha256;
-					else {
-						const heads = this.reworkGitHeads(driver, plan);
-						const graphPlan = buildGraph(run.planDirectory).plans.find((candidate) => candidate.id === planId);
-						if (!graphPlan) throw new Error(`Rework target ${planId} is missing from the current graph`);
-						const targetPlanFile = path.relative(run.planDirectory, graphPlan.file);
-						snapshotSha256 = captureReworkSnapshot(run, planId, editToken, heads.expectedHead, heads.expectedTree, targetPlanFile, driver.planTransientRefs(planId)).sha256;
-					}
-				} catch (error) {
-					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
-					throw error;
-				}
-				crashReworkForTest("after_snapshot");
-				let edit: StoredPlanEdit;
-				try {
-					edit = this.store.transaction(() => {
-						const reserved = this.store.putPlanEdit(pendingEdit);
-						this.store.recordPlanEditSnapshot(run!.runId, editToken, planId, snapshotSha256);
-						return reserved;
-					});
-				} catch (error) {
-					deleteReworkSnapshotBestEffort(run.planDirectory, editToken);
-					throw error;
-				}
-				return { edit: { planId, state: edit.state, editToken: edit.editToken }, reply: this.reply() };
-			}
-			if (!["TODO", "BLOCKED"].includes(spec.initialStatus)) throw new Error(`Plan ${planId} is ${spec.initialStatus}, not an unstarted editable plan`);
-			if (this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) > 0) {
-				throw new Error(`Plan ${planId} cannot be grilled because execution already started`);
-			}
-			const edit = this.store.putPlanEdit({
-				runId: run.runId,
-				planId,
-				editToken: randomUUID(),
-				state: "reserved",
-				baseGraphSha256: run.graphSha256,
-				basePlanFingerprint: spec.planFingerprint,
-			});
-			return { edit: { planId, state: edit.state, editToken: edit.editToken }, reply: this.reply() };
-		}
-
+		if (this.store.getPlanEditOutcome(run.runId, editToken, "finish")) throw new Error(`Plan edit ${editToken} was already finished`);
 		const edit = this.store.getPlanEdit(run.runId);
-		if (!edit || edit.editToken !== input.editToken) throw new Error("Plan edit token does not match the active Grill reservation");
+		if (!edit || edit.editToken !== editToken) throw new Error("Plan edit token does not match the active Grill reservation");
 		const rework = this.reservedEditIsRework(run, edit.planId);
-		if (input.operation === "prepare") {
-			if (!rework) throw new Error("Explicit prepare is only valid for plan rework");
-			const barrier = await this.prepareRework(run, edit);
-			return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
-		}
-		if (input.operation === "confirm") {
-			if (!rework || edit.state !== "barrier") throw new Error("Only a prepared plan rework can be confirmed");
-			await this.validatePreparedRework(run, edit);
-			this.store.recordPlanEditConfirmation(edit);
-			return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply("revision-barrier") };
-		}
-		if (input.operation === "cancel") {
-			if (rework) {
-				if (this.store.hasPlanEditConfirmation(edit)) throw new Error(`Confirmed plan ${edit.planId} rework must finish or replay; it can no longer be cancelled`);
-				restoreReworkSnapshot(run, edit, this.store);
-				this.projectLifecycle(run, edit.createdAt);
-			} else {
-				const compiled = this.compileCurrentGraph(run);
-				if (compiled.graphSha256 !== edit.baseGraphSha256) throw new Error(`Plan ${edit.planId} changed; restore the reserved graph or finish the edit before cancelling`);
-			}
-			this.store.transaction(() => {
-				this.store.recordPlanEditOutcome(edit, "cancel");
-				this.store.deletePlanEdit(run!.runId);
-			});
-			if (rework) deleteReworkSnapshotBestEffort(run.planDirectory, edit.editToken);
-			return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply() };
-		}
 		if (rework) {
-			const reply = await this.applyRework(run, edit);
-			return { edit: { planId: edit.planId, state: "barrier" }, reply };
+			if (this.store.hasPlanEditConfirmation(edit)) throw new Error(`Confirmed legacy plan ${edit.planId} rework requires explicit operator recovery; automatic reset is not authorized`);
+			restoreReworkSnapshot(run, edit, this.store);
+			this.projectLifecycle(run, edit.createdAt);
+		} else if (this.compileCurrentGraph(run).graphSha256 !== edit.baseGraphSha256) {
+			throw new Error(`Plan ${edit.planId} changed; restore the reserved graph before cancelling`);
 		}
-		if (run.status !== "running") throw new Error(`Cannot finish a Grill revision while Herder is ${run.status}`);
-
-		const { compiled, target } = this.compiledReservedEdit(run, edit);
-		const barrier = this.store.putPlanEditBarrier(run.runId, edit.editToken, compiled.graphSha256, target.planFingerprint);
-		if (activeActionCount(this.store, run.runId) === 0) {
-			await this.driver(run).verifyCheckout(run.checkoutStateToken);
-			this.adoptReservedEdit(run, barrier);
-			run = this.store.getRun()!;
-			return { edit: { planId: edit.planId, state: "barrier" }, reply: await this.reconcile(boundProfile(run, this.store)) };
-		}
-		return { edit: { planId: edit.planId, state: barrier.state }, reply: this.reply("revision-barrier") };
+		this.store.transaction(() => {
+			this.store.recordPlanEditOutcome(edit, "cancel");
+			this.store.deletePlanEdit(run.runId);
+		});
+		if (rework) deleteReworkSnapshotBestEffort(run.planDirectory, edit.editToken);
+		return { edit: { planId: edit.planId, state: edit.state }, reply: this.reply() };
 	}
 
 	async integrationRepair(input: IntegrationRepairInput): Promise<ManagerReply> {
@@ -1907,6 +1696,10 @@ export class HerderRunManager {
 			}
 			return this.reply();
 		}
+		if (stored.state === "running") {
+			this.store.updateRun({ status: "paused", terminalDetail: "Verification execution reservation is ambiguous; explicit host recovery is required." });
+			return this.reply();
+		}
 		await driver.verifyCheckout(run.checkoutStateToken);
 		if (driver.branchHead(run.integrationBranch) !== stored.request.integrationHead
 			|| driver.worktreeTree(run.integrationWorktree) !== stored.request.integrationTree
@@ -1915,10 +1708,19 @@ export class HerderRunManager {
 		}
 		const assignment = fs.readFileSync(stored.request.runAssignmentPath);
 		if (sha256(assignment) !== stored.request.runAssignmentSha256) throw new Error("Verification run assignment changed after the request was created");
-		this.store.transaction(() => {
-			this.store.startVerification(stored.request.requestId, manifest, manifestSha256);
-			this.store.updateRun({ status: "running", terminalDetail: "Executing the main-session verification manifest." });
-		});
+		let reserved: boolean;
+		try {
+			reserved = this.store.transaction(() => {
+				if (this.store.getVerificationByRequestId(stored.request.requestId)?.state !== "awaiting_manifest") return false;
+				this.store.startVerification(stored.request.requestId, manifest, manifestSha256);
+				this.store.updateRun({ status: "running", terminalDetail: "Executing the main-session verification manifest." });
+				return true;
+			});
+		} catch (error) {
+			if (error instanceof BudgetExhaustedError) return this.reply();
+			throw error;
+		}
+		if (!reserved) return this.reply();
 		const gates: GateResult[] = [];
 		try {
 			const frozenStateError = async (): Promise<string | null> => {
@@ -2114,6 +1916,9 @@ export class HerderRunManager {
 				continue;
 			}
 			if (action.state !== "proposed") throw new Error(`Action ${result.actionId} cannot dispatch from ${action.state}`);
+			if (result.accepted && (!["running", "needs_input"].includes(run.status) || this.store.getBudget(run.runId)?.stopReason)) {
+				throw new Error("Execution is stopped or paused; a stale dispatch cannot start a worker");
+			}
 			if (result.accepted && revisionPending(readRunRevision(this.planDirectory))) throw new Error("Whole-run revision barrier forbids new worker dispatch");
 			if (!result.accepted && result.hostHandle) throw new Error(`Rejected action ${result.actionId} cannot have a host handle`);
 			if (result.accepted && !result.hostHandle) throw new Error(`Accepted action ${result.actionId} has no host handle`);
@@ -2207,8 +2012,18 @@ export class HerderRunManager {
 			let parsed: WorkerResult | null = null;
 			let parseError: string | null = null;
 			if (!terminal.interrupted && terminal.response) {
-				try { parsed = parseWorkerResult(action.role as WorkerRole, terminal.response); }
-				catch (error) { parseError = (error as Error).message; }
+				try {
+					parsed = parseWorkerResult(action.role as WorkerRole, terminal.response);
+					if (parsed.kind !== "implementer") {
+						const contracts = reviewFindingContractsFromSpecs(plan.planId === "RUN" ? this.specs(run) : [this.spec(run, plan.planId)]);
+						if (parsed.kind === "reviewer") validateReviewerResult(parsed, contracts, plan.planId === "RUN");
+						else {
+							const reviewer = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation, round: plan.round, role: "plan-reviewer", state: "terminal" });
+							const result = reviewer ? storedWorkerResult(reviewer) : null;
+							validateJudgeFindings(parsed, result?.kind === "reviewer" ? result.findings : [], contracts);
+						}
+					}
+				} catch (error) { parsed = null; parseError = (error as Error).message; }
 			}
 			if ((!parsed || terminal.interrupted) && action.role !== "plan-implementer") {
 				driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
@@ -2247,10 +2062,17 @@ export class HerderRunManager {
 					? this.retryImplementerTransport(run, plan, action, detail)
 					: this.retryTransportOrPause(run, plan, action, detail);
 			} else if (!parsed) {
-				const detail = `Worker result was malformed: ${parseError || terminal.error || "missing response"}`;
-				transition = action.role === "plan-implementer"
-					? this.retryImplementerTransport(run, plan, action, detail)
-					: this.retryTransportOrPause(run, plan, action, detail);
+				const detail = `Worker protocol error; execution incomplete: ${parseError || terminal.error || "missing response"}. Raw response and worktree are preserved; no product repair is authorized.`;
+				transition = {
+					plan: { ...plan, phase: "NEEDS_INPUT", repair: [...plan.repair, detail] },
+					runUpdate: { status: "needs_input", terminalDetail: detail },
+					attention: this.attention({
+						run, plan, kind: "operator_attention", cause: "worker_protocol_error",
+						actionId: action.actionId, state: "awaiting_input",
+						continuation: { role: action.role as WorkerRole, phase: readyPhaseForRole(action.role) },
+						detail, recommendedAction: "Correct the reporting protocol before explicitly authorizing another attempt. Do not revise product scope.",
+					}),
+				};
 			} else if (parsed.kind === "implementer") transition = this.finishImplementer(run, plan, action, parsed);
 			else if (parsed.kind === "reviewer") transition = this.finishReviewer(run, plan, action, parsed);
 			else transition = this.finishJudge(run, plan, action, parsed);
@@ -2270,7 +2092,8 @@ export class HerderRunManager {
 				if (entry.transition.approval) this.store.putApproval(entry.transition.approval);
 				if (entry.transition.attention) this.store.putAttention(entry.transition.attention);
 				this.store.putPlan(entry.transition.plan);
-				if (entry.transition.runUpdate) this.store.updateRun(entry.transition.runUpdate);
+				// A late terminal may preserve evidence, never reopen a user/safety/budget stop.
+				if (entry.transition.runUpdate && ["running", "needs_input"].includes(this.store.getRun()!.status)) this.store.updateRun(entry.transition.runUpdate);
 				if (entry.transition.reigniteRequest) {
 					try {
 						if (process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE === eventId) throw new Error("injected dossier failure");
@@ -2333,39 +2156,30 @@ export class HerderRunManager {
 		const driver = this.driver(run);
 		const mutationMayHaveOccurred = driver.worktreeHead(plan.worktree) !== plan.generationBase || Boolean(driver.worktreeStatus(plan.worktree));
 		if (!mutationMayHaveOccurred) return this.retryTransportOrPause(run, plan, action, detail);
-		if (plan.round >= MAX_PLAN_ROUNDS) {
-			const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
-			return {
-				plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
-				runUpdate: { status: "needs_input", terminalDetail },
-				attention: this.attention({
-					run,
-					plan,
-					spec: this.spec(run, plan.planId),
-					kind: "operator_attention",
-					cause: "transport_exhausted",
-					actionId: action.actionId,
-					state: "awaiting_input",
-					continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
-					detail: terminalDetail,
-					recommendedAction: "Choose whether to retry the recorded Implementer role; transport exhaustion never authorizes plan rewriting.",
-				}),
-			};
-		}
-		return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: plan.round + 1, repair: [detail] } };
+		const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
+		return {
+			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
+			runUpdate: { status: "needs_input", terminalDetail },
+			attention: this.attention({
+				run,
+				plan,
+				spec: this.spec(run, plan.planId),
+				kind: "operator_attention",
+				cause: "transport_exhausted",
+				actionId: action.actionId,
+				state: "awaiting_input",
+				continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
+				detail: terminalDetail,
+				recommendedAction: "Choose whether to retry the recorded Implementer role; transport exhaustion never authorizes plan rewriting.",
+			}),
+		};
 	}
 
 	private retryTransportOrPause(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
-		const equivalentAttempts = this.store.countActions(run.runId, {
-			planId: action.planId,
-			generation: action.generation,
-			round: action.round,
-			role: action.role,
-		});
-		if (equivalentAttempts < 3) {
+		if (this.store.reserveTransportRecovery(run.runId, action.planId, action.actionId)) {
 			return { plan: { ...plan, phase: readyPhaseForRole(action.role), repair: [detail] } };
 		}
-		const terminalDetail = `${action.role} transport failed ${equivalentAttempts} times for ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
+		const terminalDetail = `${action.role} exhausted the cumulative safe transport recovery for ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
 		return {
 			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
 			runUpdate: { status: "needs_input", terminalDetail },
@@ -2385,6 +2199,20 @@ export class HerderRunManager {
 
 	/** Classification preserves evidence; it never grants approval, edits, or another code round. */
 	private finishEnvironmentBlock(run: StoredRun, plan: StoredPlan, action: StoredAction, result: WorkerResult): TerminalTransition | null {
+		if (result.blockerKind === "SAFETY") {
+			const detail = boundedEvidence(`Safety decision required; no remediation project is authorized. Work and evidence preserved at ${plan.worktree}.\n${result.kind === "implementer" ? result.stoppedBecause || result.notes : result.rationale}\n${[...result.setup, ...result.checks].join("\n")}`, 16_384);
+			return {
+				plan: { ...plan, phase: "NEEDS_INPUT", repair: [...plan.repair, detail] },
+				runUpdate: { status: "paused", terminalDetail: detail },
+				attention: this.attention({
+					run, plan, kind: "user_decision", cause: "initial_decision_blocked",
+					actionId: action.actionId, state: "awaiting_input",
+					continuation: { role: action.role as WorkerRole, phase: readyPhaseForRole(action.role) },
+					detail, question: "What specific safety decision or separately authorized remediation is required?",
+					recommendedAction: "Keep execution paused. A safety discovery grants no new write authority or acceptance waiver.",
+				}),
+			};
+		}
 		if (result.blockerKind !== "ENVIRONMENT" && result.blockerKind !== "INVOCATION") return null;
 		const detail = boundedEvidence([
 			`WORKER_SELF_REPORT: ${result.blockerKind}; role=${action.role}; mode=${action.workerMode}; round=${plan.round}`,
@@ -2457,7 +2285,7 @@ export class HerderRunManager {
 						state: "pending",
 						continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
 						detail: failure,
-						recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Implementer continuation.",
+						recommendedAction: "Implementation budget exhausted. Preserve this worktree and report unmet approved obligations; further execution requires explicit additional budget, not a plan rewrite.",
 					}),
 				};
 			}
@@ -2508,6 +2336,20 @@ export class HerderRunManager {
 					}),
 				};
 			}
+			if (verdict !== "APPROVE" || result.scope !== "PASS" || blockers > 0) {
+				const detail = `Final audit incomplete under the approved contract: ${result.rationale || result.findings.join("; ") || verdict}. No successor work is authorized.`;
+				return {
+					plan: { ...plan, phase: "BLOCKED", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [detail] },
+					runUpdate: { status: "paused", terminalDetail: detail },
+					attention: this.attention({
+						run, plan, kind: "user_decision", cause: "final_reviewer_needs_input",
+						actionId: action.actionId, state: "awaiting_input",
+						continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
+						detail, question: "Which explicit decision or authorized repair addresses the remaining approved obligations?",
+						recommendedAction: "Preserve integrated work and failed audit evidence. Do not mark complete, create a successor, or amend scope without user authorization.",
+					}),
+				};
+			}
 			return {
 				plan: { ...plan, phase: "FINAL_APPROVED", reviewPass: plan.reviewPass + 1, findings: result.findings },
 				reigniteRequest: this.buildReigniteDossier(run, plan, result, verification),
@@ -2547,7 +2389,7 @@ export class HerderRunManager {
 				state: "pending",
 				continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
 				detail,
-				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Reviewer continuation.",
+				recommendedAction: "Report the blocked approved obligation and preserved evidence. Do not revise or expand the graph; ask only for the specific missing decision or separately authorized effort.",
 			}),
 		};
 	}
@@ -2599,7 +2441,8 @@ export class HerderRunManager {
 		// Ambiguous IDs (including repeated NEW) cannot bind guidance to a specific finding.
 		const guidanceIds = new Set(findings.map(findingId).filter((id) => id && idCounts.get(id) === 1));
 		const fixGuidance = result.fixGuidance.filter((guidance) => /^\[[^\[\]\s]+\]\s+[^\s[]/.test(guidance) && guidanceIds.has(findingId(guidance)));
-		const state = findings.length > 0 ? "pending" : "skipped";
+		// Follow-up evidence is a backlog, never automatic planning or execution authority.
+		const state = "skipped";
 		return createReigniteRequest({
 			requestId: existing?.requestId ?? randomUUID(),
 			runId: run.runId,
@@ -2683,7 +2526,7 @@ export class HerderRunManager {
 				state: "pending",
 				continuation: { role: "plan-judge", phase: "READY_JUDGE" },
 				detail: terminalDetail,
-				recommendedAction: "Repair or explicitly revise only the target plan, then resume the recorded Judge continuation.",
+				recommendedAction: "Stop this task with the Judge's evidence and the precise missing decision. No new prerequisite, generation, or automatic Judge retry is authorized.",
 			}),
 		};
 	}
@@ -2850,166 +2693,48 @@ export class HerderRunManager {
 		const run = this.store.getRun();
 		if (!run) throw new Error("No deterministic Herder run exists");
 		const attention = this.attentionResolutionRequest(run, resolution);
-		if (attention.planId !== "RUN") {
-			if (!["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Plan attention requires revise_run or explicit abandon_run; unchanged retry, defer, answer, and target-local recovery are not allowed");
-			if (attention.state === "resolved") throw new Error("Whole-run request is already resolved");
-			if (attention.kind === "plan_recovery" && resolution.git) {
-				for (const key of ["assignmentPath", "assignmentSha256", "snapshotSha256", "generationBase", "branch", "worktree", "worktreeHead", "worktreeTree"] as const) {
-					if (resolution.git[key] !== attention.recovery[key]) throw new Error("Whole-run attention Git identity does not match immutable request evidence");
-				}
-			}
+		if (attention.state === "resolved") {
+			if (["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Whole-run request is already resolved");
+			return;
+		}
+		const requestedAction = ["revise_run", "abandon_run"].includes(resolution.action) ? resolution.action : normalizeAttentionAction(String(resolution.action));
+		if (["answer", "defer", "stop", "cancel"].includes(requestedAction)) {
+			if (requestedAction === "answer" && !resolution.answer?.trim()) throw new Error("Record-only answer requires nonempty text");
+			const plan = this.store.getPlan(run.runId, attention.planId);
+			const marker = `ATTENTION_${["stop", "cancel"].includes(requestedAction) ? "CANCEL" : requestedAction === "answer" ? "ANSWER" : "DEFER"} [${attention.requestId}]: ${resolution.answer || resolution.rationale || attention.detail}`;
+			this.store.transaction(() => {
+				if (plan) this.updatePlan(plan, { phase: "BLOCKED", repair: plan.repair.includes(marker) ? plan.repair : [...plan.repair, marker] });
+				// Acknowledgement is not resolution: a later explicit operator retry retains
+				// the original immutable request instead of requiring a scope amendment.
+				this.store.recordEvent(run.runId, `manager-attention-note:${attention.requestId}:${sha256(stableJson(resolution))}`, "attention_note", resolution);
+				this.store.updateRun({ status: "paused", terminalDetail: marker });
+			});
+			return;
+		}
+		if (["revise_run", "abandon_run"].includes(requestedAction)) {
 			if (this.store.getPlanEdit(run.runId)) throw new Error("Finish or cancel the target edit before whole-run revision");
 			await beginRunRevision(run, resolution);
-			if (run.status !== "needs_input") this.store.updateRun({ status: "needs_input", terminalDetail: "Review the whole-run revision; abandonment requires explicit confirmation." });
+			this.store.updateRun({ status: "needs_input", terminalDetail: "User-authorized scope draft; exact adoption requires separate host confirmation. Budgets unchanged." });
 			return;
 		}
-		if (attention.state === "resolved") return;
-		const action = normalizeAttentionAction(String(resolution.action));
-		if (action === "defer") return;
-		if (attention.kind === "plan_recovery") {
-			if (action === "accept" || action === "stop") {
-				const driver = this.driver(run);
-				await driver.verifyCheckout(run.checkoutStateToken);
-				const { plan } = this.validateRecoveryTarget(run, attention, action, resolution);
-				let approval: Omit<StoredApproval, "createdAt"> | undefined;
-				if (action === "accept") {
-					if (resolution.confirmed !== true || !resolution.answer?.trim() || !resolution.rationale?.trim()) {
-						throw new Error("Acceptance requires explicit confirmation, accepted gaps and rationale");
-					}
-					if (!plan || plan.round !== MAX_PLAN_ROUNDS) throw new Error("Acceptance requires a terminal round-3 reviewed tree");
-					if (plan.rebase || ["rebase-merge", "rebase-apply"].some((name) => fs.existsSync(gitValue(plan.worktree, "rev-parse", "--path-format=absolute", "--git-path", name)))
-						|| driver.worktreeStatus(plan.worktree)) throw new Error("Acceptance requires a clean worktree without an active rebase");
-					if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree
-						|| plan.approvedBase !== attention.recovery.generationBase
-						|| plan.approvedHead !== attention.recovery.worktreeHead || plan.approvedTree !== attention.recovery.worktreeTree
-						|| driver.changedPaths(plan.worktree, plan.approvedBase).length === 0) {
-						throw new Error("Acceptance requires the exact nonempty frozen reviewed patch");
-					}
-					const reviewer = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation,
-						round: plan.round, role: "plan-reviewer", state: "terminal" });
-					const result = reviewer ? storedWorkerResult(reviewer) : null;
-					if (!reviewer || reviewer.actionId !== attention.actionId || result?.kind !== "reviewer") {
-						throw new Error("Acceptance requires the recovery request's terminal round-3 Reviewer evidence");
-					}
-					approval = createApproval({
-						runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
-						reviewerActionId: reviewer.actionId, decisionActionId: reviewer.actionId, decisionRole: "user",
-						assignmentSha256: plan.assignmentSha256, approvedBase: plan.approvedBase,
-						approvedHead: plan.approvedHead, approvedTree: plan.approvedTree,
-						reviewResultSha256: sha256(stableJson(result)), decisionResultSha256: sha256(stableJson(resolution)),
-						userAcceptance: resolution,
-					});
-				}
-				this.store.transaction(() => {
-					if (approval) this.store.putApproval(approval);
-					if (plan) this.updatePlan(plan, { phase: action === "accept" ? "READY_TO_INTEGRATE" : "BLOCKED" });
-					this.store.recordEvent(run.runId, `manager-attention-resolution:${attention.requestId}`, "attention_resolution", resolution);
-					this.store.resolveAttention(attention.requestId);
-					this.attentionStatusAfterResolution(run.runId);
-				});
-				return;
-			}
-			if (!["unchanged_retry", "revise", "reject", "retry", "cancel"].includes(action)) {
-				throw new Error(`Action ${action} cannot resolve plan-recovery attention`);
-			}
-			const recoveryAction = action === "retry" ? "unchanged_retry" : action === "cancel" ? "reject" : action;
-			if (recoveryAction === "unchanged_retry" && attention.round >= MAX_PLAN_ROUNDS) {
-				throw new Error("Exhausted round-3 recovery requires accept, stop, or an explicit target revision");
-			}
-			if (recoveryAction === "revise" && !(resolution.rationale || "").trim()) {
-				throw new Error("Target revision requires a non-empty rationale");
-			}
-			const driver = this.driver(run);
-			await driver.verifyCheckout(run.checkoutStateToken);
-			const validation = this.validateRecoveryTarget(run, attention, recoveryAction, resolution);
-			const cleanupIdentity = {
-				runId: run.runId,
-				requestId: attention.requestId,
-				requestSha256: attention.requestSha256,
-				planId: attention.planId,
-				generation: attention.generation,
-				round: attention.round,
-				assignmentPath: attention.recovery.assignmentPath,
-				assignmentSha256: attention.recovery.assignmentSha256,
-				snapshotSha256: attention.recovery.snapshotSha256,
-				generationBase: attention.recovery.generationBase,
-				branch: attention.recovery.branch,
-				worktree: attention.recovery.worktree,
-				expectedHead: attention.recovery.worktreeHead,
-				expectedTree: attention.recovery.worktreeTree,
-			};
-			const recordedCleanup = this.store.getAttentionCleanupEvidence(cleanupIdentity);
-			this.store.beginRecoveryEdit(attention.requestId);
-			driver.resetPlanExecution({
-				branch: attention.recovery.branch,
-				worktree: attention.recovery.worktree,
-				expectedHead: attention.recovery.worktreeHead,
-				expectedTree: attention.recovery.worktreeTree,
-				cleanupIdentity,
-				recordedCleanup: recordedCleanup ?? undefined,
-				onPrepare: (step) => this.store.recordAttentionCleanupStep(cleanupIdentity, step),
-				onProgress: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
-				onComplete: (step) => this.store.recordAttentionCleanupCompletion(cleanupIdentity, step),
-			});
-			const nextGeneration = run.currentGeneration + 1;
-			const integrationHead = driver.branchHead(run.integrationBranch);
-			const assignment = driver.materializeRunAssignment(integrationHead, validation.nextSpecs.map((spec) => spec.assignment), nextGeneration);
-			this.store.transaction(() => {
-				this.store.putPlanSpecs(validation.nextSpecs);
-				this.store.putGeneration({
-					runId: run.runId,
-					generation: nextGeneration,
-					graphSha256: validation.compiled.graphSha256,
-					parentGeneration: run.currentGeneration,
-					runAssignmentPath: assignment.bundlePath,
-					runAssignmentSha256: assignment.bundleSha256,
-					runSnapshotSha256: assignment.snapshotSha256,
-				});
-				this.store.deletePlan(run.runId, attention.planId);
-				this.store.resolveAttention(attention.requestId);
-				this.store.updateRun({
-					currentGeneration: nextGeneration,
-					graphSha256: validation.compiled.graphSha256,
-					status: this.store.getNextInputAttention(run.runId) ? "needs_input" : "running",
-					terminalDetail: resolution.rationale?.trim() || `Recovery applied for plan ${attention.planId}.`,
-				});
-			});
-			this.cacheSpecs(validation.nextSpecs);
-			return;
-		}
-		if ((attention.cause === "verification_environment" || attention.cause === "review_budget_exhausted") && !["retry", "cancel"].includes(action)) {
-			throw new Error("Environment or review-budget attention requires explicit retry or cancel; it cannot approve or waive checks");
-		}
-		if (attention.kind === "user_decision" && action === "retry") {
-			throw new Error('User-decision retry is not allowed; use answer_and_resume with an exact nonempty clarification, or answer to record only.');
-		}
-		if (action === "answer_and_resume" && attention.kind !== "user_decision") {
-			throw new Error("answer_and_resume is only valid for user_decision attention");
-		}
-		if (!["answer", "answer_and_resume", "retry", "cancel"].includes(action)) throw new Error(`Action ${action} cannot resolve ${attention.kind} attention`);
-		if (attention.kind === "user_decision" && ["answer", "answer_and_resume"].includes(action) && !(resolution.answer || "").trim()) {
-			throw new Error(`Attention request ${attention.requestId} requires an answer`);
-		}
+		const clarification = requestedAction === "answer_and_resume" && attention.kind === "user_decision" && Boolean(resolution.answer?.trim());
+		const operatorRetry = requestedAction === "retry" && attention.kind === "operator_attention"
+			&& ["transport_exhausted", "verification_environment", "review_budget_exhausted"].includes(attention.cause);
+		const implementationRetry = requestedAction === "retry" && attention.kind === "plan_recovery"
+			&& ["round_limit", "implementer_exhausted", "reviewer_blocked", "judge_blocked", "integration_conflict_exhausted"].includes(attention.cause);
+		if (!clarification && !operatorRetry && !implementationRetry) throw new Error("Stopped attention permits record-only answer, defer, stop, or host-authorized implementation/operator retry/within-scope clarification. Scope changes require /herder-revise.");
+		assertHostAttentionGrant(run, resolution);
+		if (implementationRetry && attention.kind === "plan_recovery") this.validateRecoveryTarget(run, attention, "unchanged_retry", resolution);
+
 		const plan = this.store.getPlan(run.runId, attention.planId);
-		if (!plan || plan.generation !== attention.generation || plan.round !== attention.round || plan.phase !== "NEEDS_INPUT") {
+		if (!plan || plan.generation !== attention.generation || plan.round !== attention.round || !["NEEDS_INPUT", "BLOCKED"].includes(plan.phase)) {
 			throw new Error(`Attention request ${attention.requestId} has no matching input-waiting continuation`);
 		}
-		const continuationPhase = attention.continuation.phase;
-		const recordOnly = attention.kind === "user_decision" && action === "answer";
-		const marker = action === "cancel"
-			? `ATTENTION_CANCEL [${attention.requestId}]: ${(resolution.rationale || resolution.answer || "operator cancelled").trim()}`
-			: `ATTENTION_ANSWER [${attention.requestId}]: ${(resolution.answer || resolution.rationale || "retry").trim()}`;
 		this.store.transaction(() => {
-			this.updatePlan(plan, {
-				phase: action === "cancel" || recordOnly ? "BLOCKED" : continuationPhase,
-				repair: [...plan.repair, marker],
-			});
+			this.updatePlan(plan, { phase: implementationRetry ? "READY_IMPLEMENTER" : attention.continuation.phase, repair: [...plan.repair, `ATTENTION_${clarification ? "ANSWER" : "RETRY"} [${attention.requestId}]: ${resolution.answer || resolution.rationale || "host-authorized operator retry"}`] });
 			this.store.recordEvent(run.runId, `manager-attention-resolution:${attention.requestId}`, "attention_resolution", resolution);
 			this.store.resolveAttention(attention.requestId);
 			this.attentionStatusAfterResolution(run.runId);
-			if ((action === "cancel" || recordOnly) && attention.planId === "RUN") {
-				this.store.updateRun({ status: "paused", terminalDetail: marker });
-			}
 		});
 	}
 
@@ -3159,7 +2884,7 @@ export class HerderRunManager {
 							state: "pending",
 							continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" },
 							detail,
-							recommendedAction: "Repair or explicitly revise only the target plan, then resume its recorded Implementer continuation.",
+							recommendedAction: "Conflict repair budget exhausted. Preserve the conflict and approvals; additional effort requires explicit authorization, not a graph rewrite.",
 						}));
 					});
 				} else {
@@ -3355,7 +3080,7 @@ export class HerderRunManager {
 			if (owned.has(plan.planId)) continue;
 			const role = roleForPhase(plan.phase);
 			if (!role) continue;
-			this.createAction(run, plan, role, profile, driver);
+			try { this.createAction(run, plan, role, profile, driver); } catch (error) { if (error instanceof BudgetExhaustedError) return; throw error; }
 			occupied += 1;
 			owned.add(plan.planId);
 		}
@@ -3368,7 +3093,7 @@ export class HerderRunManager {
 			if (planId === reservedPlanId) continue;
 			if (this.store.getPlan(run.runId, planId)) continue;
 			const plan = this.ensureFreshPlanRuntime(run, spec);
-			this.createAction(run, plan, "plan-implementer", profile, driver);
+			try { this.createAction(run, plan, "plan-implementer", profile, driver); } catch (error) { if (error instanceof BudgetExhaustedError) return; throw error; }
 			occupied += 1;
 		}
 	}
@@ -3433,10 +3158,15 @@ export class HerderRunManager {
 			prompt: "",
 		};
 		let stored!: StoredAction;
-		this.store.transaction(() => {
-			stored = this.store.putAction(action);
-			this.updatePlan(plan, { phase: phaseForRole(role) });
-		});
+		try {
+			this.store.transaction(() => {
+				stored = this.store.putAction(action);
+				this.updatePlan(plan, { phase: phaseForRole(role) });
+			});
+		} catch (error) {
+			driver.release(plan.worktree, leaseReason);
+			throw error;
+		}
 		return stored;
 	}
 
@@ -3599,6 +3329,8 @@ export class HerderRunManager {
 			: undefined;
 		const reignite = this.store.getReigniteRequest(run.runId, run.currentGeneration);
 		const scheduler = this.schedulerState(run, suppression, { active, plans });
+		const budget = this.store.getBudget(run.runId);
+		const stopped = run.status === "stopped" || Boolean(budget?.stopReason);
 		return {
 			protocolVersion: MANAGER_PROTOCOL_VERSION,
 			runId: run.runId,
@@ -3607,7 +3339,8 @@ export class HerderRunManager {
 			maxParallel: run.maxParallel,
 			planDirectory: run.planDirectory,
 			...(run.dashboardUrl ? { dashboardUrl: run.dashboardUrl } : {}),
-			actions: revisionPending(runRevision) ? [] : proposed.map((action) => this.managerAction(run, action)),
+			actions: revisionPending(runRevision) || stopped || !["running", "needs_input"].includes(run.status) ? [] : proposed.map((action) => this.managerAction(run, action)),
+			...(budget ? { executionBudget: { limit: budget.limit, used: budget.used, remaining: Math.max(0, budget.limit - budget.used), stopReason: budget.stopReason } } : {}),
 			...(revisionPending(runRevision) ? { runRevision: { editToken: runRevision.editToken, requestId: runRevision.request.requestId, state: runRevision.state } } : {}),
 			active: active.map((action) => ({
 				actionId: action.actionId,
@@ -3626,11 +3359,12 @@ export class HerderRunManager {
 			message: (plans.some((plan) => plan.phase === "BLOCKED")
 				? "BLOCKED work requires manual intervention; recorded answers do not resume it. Use explicit user-invoked recovery. " : "") + (planEdit
 				? `Plan ${planEdit.planId} is ${planEdit.state === "reserved" ? "reserved for Grill" : "waiting at the revision barrier"}; ${active.length} worker actions active.`
-				: nextAttention?.detail || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`),
+				: (run.status === "paused" || stopped ? run.terminalDetail : nextAttention?.detail) || run.terminalDetail || `${overview.done}/${overview.total} plans done; ${active.length} worker actions active.`)
+				+ (budget ? ` Budget: ${budget.used}/${budget.limit} dispatch units used; ${Math.max(0, budget.limit - budget.used)} remaining.` : ""),
 			...(exposedAttention ? { attention: exposedAttention } : {}),
 			...(planEdit ? { planEdit: { planId: planEdit.planId, state: planEdit.state } } : {}),
-			...(verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
-			...(exposedIntegrationRepair ? { integrationRepair: exposedIntegrationRepair } : {}),
+			...(!stopped && verification?.state === "awaiting_manifest" ? { verificationRequest: verification.request } : {}),
+			...(!stopped && exposedIntegrationRepair ? { integrationRepair: exposedIntegrationRepair } : {}),
 			...(run.status === "complete" && reignite?.state === "pending" ? { reigniteRequest: reignite } : {}),
 		};
 	}

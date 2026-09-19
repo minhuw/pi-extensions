@@ -194,6 +194,30 @@ test("failure-related paths are required before accepting a session commit", () 
 	}
 });
 
+test("repair rejects replacing an allowed file with unauthorized descendants", () => {
+	const { root, driver } = fixture();
+	try {
+		const parent = driver.branchHead(driver.integrationBranch);
+		const evidence = namespaceEvidence(driver);
+		const file = path.join(driver.integrationWorktree, "value.txt");
+		fs.unlinkSync(file);
+		fs.mkdirSync(file);
+		fs.writeFileSync(path.join(file, "evil"), "unauthorized descendant\n");
+		git(driver.integrationWorktree, ["add", "--all"]);
+		git(driver.integrationWorktree, ["commit", "-q", "-m", "test: replace file with directory"]);
+		const observedCommit = driver.worktreeHead(driver.integrationWorktree);
+		assert.deepEqual(driver.changedPaths(driver.integrationWorktree, parent), ["value.txt", "value.txt/evil"]);
+		assert.throws(() => validate(driver, { parent, round: 1, observedCommit, ...evidence, allowedPaths: ["value.txt"] }), /path value\.txt\/evil is not recorded as failure-related/);
+		assert.equal(driver.branchHead(driver.integrationBranch), observedCommit);
+		assert.equal(driver.worktreeHead(driver.integrationWorktree), observedCommit);
+		assert.equal(driver.worktreeStatus(driver.integrationWorktree), "");
+		const accepted = validate(driver, { parent, round: 1, observedCommit, ...evidence, allowedPaths: ["value.txt", "value.txt/evil"] });
+		assert.deepEqual(accepted.changedPaths, ["value.txt", "value.txt/evil"]);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("clean commit identity replays without a marker or another commit", () => {
 	const { root, driver } = fixture();
 	try {

@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import { BUDGET_SCHEMA, migrateBudgets } from "./budgets.ts"
 import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
 import path from "node:path"
@@ -49,7 +50,7 @@ export interface RunConfiguration {
 
 export const EXECUTION_DATABASE_RELATIVE = ".herder/execution.sqlite3"
 export const EXECUTION_ROTATION_MARKER_RELATIVE = ".herder/rotation-required"
-export const EXECUTION_SCHEMA_VERSION = 19
+export const EXECUTION_SCHEMA_VERSION = 20
 
 const PRIVATE_RUNTIME_DIRECTORY_MODE = 0o700
 const PRIVATE_RUNTIME_FILE_MODE = 0o600
@@ -581,13 +582,19 @@ function configureDatabase(database: Database, { readOnly = false }: { readOnly?
 function initializeSchema(database: Database, { allowInitialize = true }: { allowInitialize?: boolean } = {}): void {
   const version = databaseSchemaVersion(database)
   if (version === EXECUTION_SCHEMA_VERSION) return
-  if (version !== 0) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
+  if (version !== 0 && version !== 19) fail(`Execution database schema ${version} is unsupported; Herder ${EXECUTION_SCHEMA_VERSION} requires a fresh run database`)
   if (!allowInitialize) fail("Execution database has no initialized schema")
   database.exec("BEGIN IMMEDIATE")
   try {
     // Another opener may have initialized while we waited for the write lock.
     const currentVersion = databaseSchemaVersion(database)
     if (currentVersion === EXECUTION_SCHEMA_VERSION) {
+      database.exec("COMMIT")
+      return
+    }
+    if (currentVersion === 19) {
+      migrateBudgets(database)
+      database.exec(`PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION}`)
       database.exec("COMMIT")
       return
     }
@@ -935,6 +942,7 @@ CREATE INDEX manager_attention_requests_run_state
 CREATE UNIQUE INDEX manager_attention_requests_unresolved_identity
       ON manager_attention_requests(run_id, plan_id, generation, cause)
       WHERE state <> 'resolved';
+${BUDGET_SCHEMA}
 PRAGMA user_version = ${EXECUTION_SCHEMA_VERSION};
     `)
     database.exec("COMMIT")

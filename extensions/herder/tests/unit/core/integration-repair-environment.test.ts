@@ -82,6 +82,40 @@ test("environment final repair is a durable nonmutating decision, with no succes
 	} finally { f.close(); }
 });
 
+test("integration repair cannot grant itself unapproved write authority", { timeout: 20_000 }, async () => {
+	const f = await fixture();
+	try {
+		const before = treeIdentity(f);
+		await assert.rejects(f.invoke({ ...f.begin, classification: "code_defect", allowedPaths: ["upstream/package"] }), /exceeds approved write authority/);
+		assert.equal(f.store.getIntegrationRepairForRequest(f.request.requestId)?.classification, null);
+		assert.equal(f.verificationCalls, 0);
+		assert.deepEqual(treeIdentity(f), before);
+	} finally { f.close(); }
+});
+
+test("approved repair files do not authorize descendant paths at begin or finish", { timeout: 20_000 }, async () => {
+	const f = await fixture();
+	try {
+		f.store.putPlanSpecs([{
+			runId: f.request.runId, graphGeneration: f.request.generation, planId: "001", planFingerprint: "f".repeat(64),
+			fingerprintVersion: 2, ordinal: 0, title: "Repair value", priority: "P1", effort: "S", kind: "code",
+			dependencies: [], initialStatus: "TODO", initialStatusDetail: "", planFile: "001.md",
+			assignment: { snapshotSha256: "s", snapshotInputs: [], planText: "Repair value.txt only",
+				plan: { id: "001", title: "Repair value", kind: "code", parentObjective: null, dependencies: [], inScopePaths: ["value.txt"] } },
+		}]);
+		const before = treeIdentity(f);
+		await assert.rejects(f.invoke({ ...f.begin, classification: "code_defect", allowedPaths: ["value.txt/evil"] }), /path value\.txt\/evil exceeds approved write authority/);
+		assert.equal(f.store.getIntegrationRepairForRequest(f.request.requestId)?.classification, null);
+		const reply = await f.invoke({ ...f.begin, classification: "code_defect", allowedPaths: ["value.txt"] });
+		assert.equal(reply.integrationRepair?.state, "active");
+		const repair = f.store.getIntegrationRepairForRequest(f.request.requestId);
+		await assert.rejects(f.invoke({ ...f.begin, classification: undefined, operation: "finish", operationId: "finish-code", observedCommit: before.head, allowedPaths: ["value.txt/evil"] }), /path value\.txt\/evil exceeds approved write authority/);
+		assert.deepEqual(f.store.getIntegrationRepairForRequest(f.request.requestId), repair);
+		assert.equal(f.verificationCalls, 0);
+		assert.deepEqual(treeIdentity(f), before);
+	} finally { f.close(); }
+});
+
 test("wrong invocation remains manifest_error, not environment or edit authority", { timeout: 20_000 }, async () => {
 	const f = await fixture();
 	try {
@@ -220,4 +254,36 @@ for (const missing of ["manifest", "audit", "operation"] as const) test(`environ
 		assert.equal(f.store.getIntegrationRepair(sealed.repairId)?.successorRequestId, sealed.successorRequestId);
 		assert.equal(f.verificationCalls, 1, "missing replay evidence does not rebuild or execute a successor");
 	} finally { f.close(); }
+});
+
+for (const classification of ["manifest_error", "transient", "code_defect"]) {
+ test(`automatic ${classification} begin shares the finite run budget and preserves failed evidence on denial`, async () => {
+  const f = await fixture();
+  try {
+   const budget = f.store.getBudget("run-env")!;
+   for (let i = budget.used; i < budget.limit; i++) f.store.reserveBudget({ runId: "run-env", generation: 1, reservationId: `spent:${i}`, kind: "verification", payloadSha256: String(i) });
+   const before = treeIdentity(f);
+   await assert.rejects(f.invoke({ ...f.begin, classification }), /Run execution budget exhausted/);
+   assert.equal(f.store.getRun()!.status, "paused");
+   assert.equal(f.store.getBudget("run-env")!.used, budget.limit);
+   assert.equal(f.store.getIntegrationRepairForRequest(f.request.requestId)?.classification, null);
+   assert.deepEqual(treeIdentity(f), before);
+   f.restart();
+   f.store.updateRun({ status: "running" });
+   assert.equal(f.store.getRun()!.status, "paused");
+  } finally { f.close(); }
+ });
+}
+
+test("automatic repair begin charges once across replay and restart", async () => {
+ const f = await fixture();
+ try {
+  const before = f.store.getBudget("run-env")!.used;
+  const input = { ...f.begin, classification: "manifest_error" };
+  await f.invoke(input);
+  assert.equal(f.store.getBudget("run-env")!.used, before + 1);
+  f.restart();
+  await f.invoke(input);
+  assert.equal(f.store.getBudget("run-env")!.used, before + 1);
+ } finally { f.close(); }
 });

@@ -549,6 +549,16 @@ export async function runIntegrationRepair(
 		if (input.repairId && !repair && repairForRequest) throw new Error("Integration repair ID does not match durable evidence");
 		if (repair && input.repairId && repair.repairId !== input.repairId) throw new Error("Integration repair ID does not match durable evidence");
 		const run = deps.store.getRun()!;
+		// A coordinator's failure-related path list can narrow, never enlarge, approved write authority.
+		if (input.allowedPaths && (input.classification === "code_defect" || repair?.classification === "code_defect")) {
+			const approvedPaths = deps.store.getPlanSpecs(run.runId, run.currentGeneration)
+				.flatMap(spec => spec.assignment.plan.inScopePaths);
+			for (const candidate of input.allowedPaths) {
+				if (!approvedPaths.includes(candidate)) {
+					throw new Error(`Integration repair path ${candidate} exceeds approved write authority; an explicit scope amendment is required`);
+				}
+			}
+		}
 		const historicalFinishReplay = Boolean(repair && input.operation === "finish" && ["failed", "paused", "passed"].includes(repair.state)
 			&& deps.store.getIntegrationRepairAudits(repair.repairId).some((audit) =>
 				audit.operationId === operationId && audit.payloadSha256 === inputHash && ["finish-intent", "successor", "commit"].includes(audit.action)));
@@ -563,6 +573,8 @@ export async function runIntegrationRepair(
 			return { snapshot: evidence.snapshot, sha256: evidence.sha256 };
 		};
 		if (input.operation === "begin") {
+			const budgetStop = deps.store.getBudget(run.runId)?.stopReason;
+			if (budgetStop) throw new Error(budgetStop);
 			const classification = normalizeIntegrationRepairClassification(input.classification);
 			const decisionOnly = ["design_ambiguity", "scope_ambiguity", "credential", "environment", "product_ambiguity"].includes(classification);
 			if (!decisionOnly && !["code_defect", "transient", "manifest_error"].includes(classification)) throw new Error("Integration repair classification is not an automatic recovery path");
@@ -615,6 +627,8 @@ export async function runIntegrationRepair(
 				: beginNamespaceEvidence(verification.request.integrationHead);
 			const round = classification === "code_defect" ? Math.max(1, (repair?.acceptedCodeRounds ?? 0) + 1) : (repair?.round ?? 1);
 			deps.store.transaction(() => {
+				if (!decisionOnly) deps.store.reserveBudget({ runId: run.runId, generation: run.currentGeneration,
+					reservationId: `repair:${operationId}`, kind: "repair", payloadSha256: inputHash });
 				if (!repair) {
 					repair = deps.store.putIntegrationRepair({
 						repairId: input.repairId || randomUUID(),

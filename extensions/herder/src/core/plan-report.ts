@@ -38,8 +38,12 @@ export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN
     storage: state.storage,
     schemaVersion: state.schemaVersion,
     runConfiguration: state.runConfiguration,
+    // Authored DONE rows are not proof of final exact-tree verification or approval.
+    execution: managerState?.run ? {
+      status: managerState.run.status, detail: managerState.run.terminalDetail,
+    } : null,
     lifecycle: plan === "RUN"
-      ? { complete: graph.complete, counts: graph.counts }
+      ? { complete: managerState?.run ? managerState.run.status === "complete" : false, counts: graph.counts }
       : { title: planRecord!.title, status: planRecord!.status, statusDetail: planRecord!.statusDetail },
     ...report,
     supersededAttempts,

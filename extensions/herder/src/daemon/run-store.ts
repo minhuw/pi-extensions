@@ -1,3 +1,4 @@
+import { BudgetExhaustedError } from "./budgets.ts";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { ResetPlanCleanupEvidence } from "./git/reset-plan.ts";
@@ -1095,9 +1096,130 @@ export class RunStore {
 		this.database.close();
 	}
 
+	private transactionDepth = 0;
 	transaction<T>(operation: () => T): T {
-		return withExecutionTransaction(this.database, operation);
+		if (this.transactionDepth) return operation();
+		let exhausted: BudgetExhaustedError | undefined;
+		const result = withExecutionTransaction(this.database, () => {
+			this.database.exec("SAVEPOINT budget_admission");
+			this.transactionDepth++;
+			try {
+				const value = operation();
+				this.database.exec("RELEASE budget_admission");
+				return value;
+			} catch (error) {
+				if (!(error instanceof BudgetExhaustedError)) throw error;
+				// Roll back attempted admission and persist its stop in ONE outer commit.
+				this.database.exec("ROLLBACK TO budget_admission");
+				this.database.exec("RELEASE budget_admission");
+				this.database.prepare("UPDATE manager_budgets SET stop_reason = ? WHERE current_run_id = ?").run(error.message, error.runId);
+				this.database.prepare("UPDATE manager_runs SET status = 'paused', terminal_detail = ? WHERE run_id = ?").run(error.message, error.runId);
+				exhausted = error;
+				return undefined;
+			} finally { this.transactionDepth--; }
+		});
+		if (exhausted) throw exhausted;
+		return result as T;
 	}
+	/** Baseline is sealed once; graph edits and reset/restart never mint authority. */
+	private initializeBudget(): void {
+		const run = this.getRun();
+		if (!run || this.getBudget(run.runId)) return;
+		const previous = this.database.prepare("SELECT run_id FROM manager_budgets LIMIT 1").get() as { run_id: string } | undefined;
+		if (previous) {
+			this.database.prepare("UPDATE manager_budgets SET current_run_id = ?, current_generation = ?, current_graph_sha256 = ? WHERE run_id = ?").run(run.runId, run.currentGeneration, run.graphSha256, previous.run_id);
+			return;
+		}
+		const specs = this.getPlanSpecs(run.runId);
+		this.database.prepare("INSERT INTO manager_budgets VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)").run(run.runId, run.runId, run.currentGeneration, run.graphSha256, stableJson(specs), run.currentGeneration, run.graphSha256, 8 * specs.length + 12);
+		for (const spec of specs) this.database.prepare("INSERT INTO manager_task_budgets VALUES (?, ?, 3, 1)").run(run.runId, spec.planId);
+	}
+
+	getBudget(runId: string): { runId: string; baselineGeneration: number; baselineGraphSha256: string; baselineSpecsJson: string; generation: number; graphSha256: string; limit: number; used: number; stopReason: string | null } | null {
+		const row = this.database.prepare(`SELECT b.*, (SELECT COUNT(*) FROM manager_budget_ledger l WHERE l.run_id = b.run_id AND l.kind <> 'transport') AS used FROM manager_budgets b WHERE current_run_id = ?`).get(runId) as SqlRow | undefined;
+		return row ? { runId, baselineGeneration: row.baseline_generation, baselineGraphSha256: row.baseline_graph_sha256, baselineSpecsJson: row.baseline_specs_json, generation: row.current_generation, graphSha256: row.current_graph_sha256, limit: row.execution_limit, used: row.used, stopReason: row.stop_reason } : null;
+	}
+
+	private budgetRoot(runId: string): string {
+		this.initializeBudget();
+		const row = this.database.prepare("SELECT run_id FROM manager_budgets WHERE current_run_id = ?").get(runId) as { run_id: string } | undefined;
+		if (!row) throw new Error("Budget run identity is stale");
+		return row.run_id;
+	}
+
+	/** Caller must first verify private, request-bound host approval. Never expose as a model approval tool. */
+	grantBudget(input: { requestId: string; runId: string; generation: number; graphSha256: string; amount: number; planId?: string; implementationRounds?: number; infrastructureRecoveries?: number }): void {
+		this.transaction(() => {
+			if (!input.requestId.trim() || !Number.isSafeInteger(input.amount) || input.amount <= 0) throw new Error("Budget grant requires a positive safe integer amount and request ID");
+			for (const value of [input.implementationRounds, input.infrastructureRecoveries]) if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new Error("Task grants must be nonnegative safe integers");
+			if (!input.planId && (input.implementationRounds || input.infrastructureRecoveries)) throw new Error("Task grant requires a plan ID");
+			const run = this.getRun();
+			if (!run || run.runId !== input.runId || run.currentGeneration !== input.generation || run.graphSha256 !== input.graphSha256) throw new Error("Budget grant identity is stale");
+			const payload = stableJson(input);
+			const previous = this.database.prepare("SELECT payload_json FROM manager_budget_grants WHERE request_id = ?").get(input.requestId) as { payload_json: string } | undefined;
+			if (previous) {
+				if (previous.payload_json !== payload) throw new Error("Budget grant replay has different evidence");
+				return;
+			}
+			const root = this.budgetRoot(run.runId);
+			if (input.planId !== undefined) {
+				if (!this.getPlanSpecs(run.runId).some((spec) => spec.planId === input.planId)) throw new Error("Budget grant task is absent from the current graph");
+				this.database.prepare("INSERT INTO manager_task_budgets VALUES (?, ?, ?, ?) ON CONFLICT(run_id, plan_id) DO UPDATE SET round_limit = round_limit + excluded.round_limit, recovery_limit = recovery_limit + excluded.recovery_limit").run(root, input.planId, input.implementationRounds ?? 0, input.infrastructureRecoveries ?? 0);
+			}
+			this.database.prepare("UPDATE manager_budgets SET execution_limit = execution_limit + ? WHERE run_id = ?").run(input.amount, root);
+			this.database.prepare("INSERT INTO manager_budget_grants VALUES (?, ?)").run(input.requestId, payload);
+			this.database.prepare("UPDATE manager_budgets SET stop_reason = NULL WHERE run_id = ?").run(root);
+		});
+	}
+
+	/** Atomic ledger reservation. Replays never refund or double-charge authority. */
+	reserveBudget(input: { runId: string; generation: number; reservationId: string; kind: string; payloadSha256: string; planId?: string; round?: number }): void {
+		this.transaction(() => {
+			const root = this.budgetRoot(input.runId);
+			const existing = this.database.prepare("SELECT * FROM manager_budget_ledger WHERE run_id = ? AND reservation_id = ?").get(root, input.reservationId) as SqlRow | undefined;
+			if (existing) {
+				if (existing.payload_sha256 !== input.payloadSha256 || (existing.kind !== input.kind && !(input.kind === "action:plan-implementer" && existing.kind === "action:plan-implementer:transport")) || existing.source_run_id !== input.runId || existing.generation !== input.generation || existing.plan_id !== (input.planId ?? null) || existing.round_number !== (input.round ?? null)) throw new Error("Budget reservation replay has different evidence");
+				return;
+			}
+			const run = this.getRun();
+			if (!run || run.runId !== input.runId || run.currentGeneration !== input.generation) throw new Error("Budget reservation generation is stale");
+			const budget = this.getBudget(input.runId)!;
+			let reason = budget.stopReason;
+			if (!reason && budget.used >= budget.limit) reason = "Run execution budget exhausted";
+			if (!reason && input.kind.startsWith("action:") && input.planId !== "RUN" && !this.database.prepare("SELECT 1 FROM manager_task_budgets WHERE run_id = ? AND plan_id = ? AND round_limit > 0").get(root, input.planId!)) reason = `Task ${input.planId} has no implementation allocation`;
+			let kind = input.kind;
+			if (!reason && input.kind === "action:plan-implementer" && input.planId !== "RUN") {
+				const allocation = this.database.prepare("SELECT round_limit FROM manager_task_budgets WHERE run_id = ? AND plan_id = ?").get(root, input.planId!) as { round_limit: number } | undefined;
+				// Only the immediately preceding implementation can sponsor a safe retry.
+				// Recording that retry advances the predecessor, so its token cannot be reused.
+				const previous = this.database.prepare("SELECT * FROM manager_budget_ledger WHERE run_id = ? AND plan_id = ? AND kind IN ('action:plan-implementer', 'action:plan-implementer:transport') ORDER BY rowid DESC LIMIT 1").get(root, input.planId!) as SqlRow | undefined;
+				const transport = previous && previous.source_run_id === input.runId && previous.generation === input.generation && previous.round_number === input.round
+					&& this.database.prepare("SELECT 1 FROM manager_budget_ledger WHERE run_id = ? AND reservation_id = ? AND kind = 'transport' AND source_run_id = ? AND plan_id = ?").get(root, `transport:${previous.reservation_id.slice("action:".length)}`, input.runId, input.planId!);
+				if (transport) kind = "action:plan-implementer:transport";
+				else {
+					const attempts = this.database.prepare("SELECT COUNT(*) AS used FROM manager_budget_ledger WHERE run_id = ? AND plan_id = ? AND kind = 'action:plan-implementer'").get(root, input.planId!) as { used: number };
+					if (!allocation || attempts.used >= allocation.round_limit) reason = `Task ${input.planId} implementation budget exhausted`;
+				}
+			}
+			if (reason) throw new BudgetExhaustedError(input.runId, reason);
+			this.database.prepare("INSERT INTO manager_budget_ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(root, input.reservationId, kind, input.runId, input.planId ?? null, input.generation, input.round ?? null, input.payloadSha256);
+		});
+	}
+
+	/** One automatic, proven-safe recovery per task, across roles and generations. */
+	reserveTransportRecovery(runId: string, planId: string, actionId: string): boolean {
+		return this.transaction(() => {
+			const root = this.budgetRoot(runId);
+			const existing = this.database.prepare("SELECT reservation_id FROM manager_budget_ledger WHERE run_id = ? AND kind = 'transport' AND plan_id = ?").all(root, planId) as { reservation_id: string }[];
+			if (existing.some((row) => row.reservation_id === `transport:${actionId}`)) return true;
+			const allocation = this.database.prepare("SELECT recovery_limit FROM manager_task_budgets WHERE run_id = ? AND plan_id = ?").get(root, planId) as { recovery_limit: number } | undefined;
+			if (existing.length >= (allocation?.recovery_limit ?? (planId === "RUN" ? 1 : 0))) return false;
+			this.database.prepare("INSERT INTO manager_budget_ledger VALUES (?, ?, 'transport', ?, ?, NULL, NULL, ?)").run(root, `transport:${actionId}`, runId, planId, actionId);
+			return true;
+		});
+	}
+
+
 
 	/** Insert usage into an open caller-owned transaction. */
 	insertUsageInTransaction(input: UsageRecordInput): void {
@@ -1889,14 +2011,17 @@ export class RunStore {
 	}
 
 	startVerification(requestId: string, manifest: VerificationManifest, manifestSha256: string): StoredVerification {
+		return this.transaction(() => {
 		const row = this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown> | undefined;
 		if (!row) throw new Error(`Unknown verification request ${requestId}`);
 		const existing = rowToVerification(row);
 		if (existing.manifestSha256 && existing.manifestSha256 !== manifestSha256) throw new Error(`Verification request ${requestId} was submitted with a different manifest`);
 		if (existing.state === "passed" || existing.state === "failed" || existing.state === "running") return existing;
+		this.reserveBudget({ runId: existing.request.runId, generation: existing.request.generation, reservationId: `verification:${requestId}`, kind: "verification", payloadSha256: manifestSha256 });
 		this.database.prepare("UPDATE manager_verifications SET state = 'running', manifest_json = ?, manifest_sha256 = ?, terminal_detail = NULL, updated_at = ? WHERE request_id = ? AND state = 'awaiting_manifest'")
 			.run(JSON.stringify(manifest), manifestSha256, new Date().toISOString(), requestId);
 		return rowToVerification(this.database.prepare("SELECT * FROM manager_verifications WHERE request_id = ?").get(requestId) as Record<string, unknown>);
+		});
 	}
 
 	finishVerification(requestId: string, state: "passed" | "failed", result: unknown, terminalDetail: string | null): StoredVerification {
@@ -2003,6 +2128,7 @@ export class RunStore {
 				"[]", input.planFile, JSON.stringify(input.assignment),
 			);
 		}
+		this.initializeBudget();
 	}
 
 	getGeneration(runId: string, generation: number): StoredGeneration | null {
@@ -2110,13 +2236,15 @@ export class RunStore {
 	}): StoredRun {
 		const run = this.getRun();
 		if (!run) throw new Error("No Herder manager run exists");
-		const status = input.status ?? run.status;
+		const stopReason = this.getBudget(run.runId)?.stopReason;
+		const status = stopReason ? "paused" : input.status ?? run.status;
 		const dashboardUrl = input.dashboardUrl === undefined ? run.dashboardUrl : input.dashboardUrl;
-		const terminalDetail = input.terminalDetail === undefined ? run.terminalDetail : input.terminalDetail;
+		const terminalDetail = stopReason ?? (input.terminalDetail === undefined ? run.terminalDetail : input.terminalDetail);
 		const currentGeneration = input.currentGeneration ?? run.currentGeneration;
 		const graphSha256 = input.graphSha256 ?? run.graphSha256;
 		this.database.prepare("UPDATE manager_runs SET status = ?, dashboard_url = ?, terminal_detail = ?, current_generation = ?, graph_sha256 = ?, updated_at = ? WHERE run_id = ?")
 			.run(status, dashboardUrl, terminalDetail, currentGeneration, graphSha256, new Date().toISOString(), run.runId);
+		this.database.prepare("UPDATE manager_budgets SET current_generation = ?, current_graph_sha256 = ? WHERE current_run_id = ?").run(currentGeneration, graphSha256, run.runId);
 		return this.getRun()!;
 	}
 
@@ -2257,8 +2385,13 @@ export class RunStore {
 	}
 
 	putAction(action: ManagerAction): StoredAction {
+		return this.transaction(() => {
 		const existing = this.getAction(action.actionId);
-		if (existing) return existing;
+		if (existing) {
+			if (existing.runId !== action.runId || existing.planId !== action.planId || existing.generation !== action.generation || existing.round !== action.round || existing.role !== action.role || existing.attemptId !== action.attemptId) throw new Error("Action reservation replay has different evidence");
+			return existing;
+		}
+		this.reserveBudget({ runId: action.runId, generation: action.generation, reservationId: `action:${action.actionId}`, kind: `action:${action.role}`, planId: action.planId, round: action.round, payloadSha256: sha256(stableJson(action)) });
 		const now = new Date().toISOString();
 		this.database.prepare(`
 			INSERT INTO manager_actions (
@@ -2272,6 +2405,7 @@ export class RunStore {
 			action.taskName, action.leaseReason, now, now,
 		);
 		return this.getAction(action.actionId)!;
+		});
 	}
 
 	markDispatched(actionId: string, hostHandle: string): StoredAction {
@@ -2279,6 +2413,8 @@ export class RunStore {
 		if (!action) throw new Error(`Unknown Herder action ${actionId}`);
 		if (action.state === "dispatched" && action.hostHandle === hostHandle) return action;
 		if (action.state !== "proposed") throw new Error(`Action ${actionId} cannot dispatch from ${action.state}`);
+		const stopReason = this.getBudget(action.runId)?.stopReason;
+		if (stopReason) throw new BudgetExhaustedError(action.runId, stopReason);
 		this.database.prepare("UPDATE manager_actions SET state = 'dispatched', host_handle = ?, updated_at = ? WHERE action_id = ?")
 			.run(hostHandle, new Date().toISOString(), actionId);
 		return this.getAction(actionId)!;

@@ -1,4 +1,5 @@
-import { beginWholeRunAttention, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "./run-revision.ts";
+import { grantUserBudget, parseBudgetArguments } from "./budget.ts";
+import { confirmHostAttention, beginUserScopeAmendment, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "./run-revision.ts";
 import { readRunRevision, revisionPending, type RunRevision } from "../src/core/run-revision.ts";
 import { RunStore } from "../src/daemon/run-store.ts";
 import { randomUUID } from "node:crypto";
@@ -54,7 +55,6 @@ import {
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import {
 	attentionResolutionFromRequest,
-	confirmPlanAcceptance,
 	registerAttentionMessageRenderer,
 } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
@@ -861,16 +861,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		const reply = unwrapReply(await invokeHerderTool("herder_run", { operation: "status", planDirectory: planDir }) as Record<string, unknown>);
 		assertSafe(planDir);
 		if (runtime) assertAdapterRecoveryEvidence(planDir, runtime);
-		const statusAttentionId = reply.attention?.requestId;
-		const reexposeAttention = Boolean(statusAttentionId
-			&& !unsafeCleanup(reply.planDirectory)
-			&& ownsRun(reply.planDirectory, reply.runId)
-			&& statusAttentionId === mainSessionRequests.attentionRequestId);
 		updateFromReply(reply);
-		if (reexposeAttention && statusAttentionId) {
-			mainSessionRequests.reexposeAttention(statusAttentionId);
-			await mainSessionRequests.drainAttentionNow();
-		}
 		render(ctx);
 		const displayed = displayedReply(reply);
 		return `${unsafeCleanup(planDir)?.message ?? `${displayed.status.toUpperCase()} · ${displayed.message}`}${reply.dashboardUrl ? `\nDashboard: ${reply.dashboardUrl}` : ""}`;
@@ -1151,88 +1142,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		}
 	};
 
-	const rework = async (args: string, ctx: ExtensionContext): Promise<string> => {
-		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before using Herder rework.");
-		const parsed = parseReworkArguments(args);
-		const epoch = sessionEpoch;
-		assertSessionActive(epoch);
-		const repoRoot = await repositoryRoot(ctx);
-		assertSessionActive(epoch);
-		const planDir = resolvePlanDirectory(repoRoot, parsed.planDir ?? currentState?.planDir ?? "herder-plans");
-		assertSafe(planDir);
-		let acquiredForRework: AdapterOwnership | undefined;
-		let binding: ReworkEditBinding | undefined;
-		const cancelReservation = async (): Promise<void> => {
-			if (!binding || !sessionActive(epoch) || !currentState || !ownsRun(planDir, currentState.runId)) return;
-			await enqueueManager(planDir, async () => {
-				assertSessionActive(epoch);
-				assertOwnership(planDir, currentState!.runId);
-				const activeBinding = binding!;
-				const cancelled = await invokeHerderTool("herder_plan", {
-					operation: "cancel_edit",
-					planDirectory: planDir,
-					editToken: activeBinding.editToken,
-				}) as Record<string, unknown>;
-				await processReworkCancellation(unwrapReply(cancelled), activeBinding, epoch, ctx);
-			});
-		};
-		try {
-			await launchPlanningWorkflow(pi, ctx as ExtensionCommandContext, PACKAGE_ROOT, "grill", `--plan ${parsed.planId}`, async () => {
-				acquiredForRework = await acquireReworkOwnership(planDir, repoRoot, ctx, epoch);
-				assertSessionActive(epoch);
-				assertOwnership(planDir, currentState!.runId);
-				let reserved: Record<string, unknown>;
-				try {
-					reserved = await enqueueManager(planDir, async () => {
-						assertSessionActive(epoch);
-						assertOwnership(planDir, currentState!.runId);
-						return await invokeHerderTool("herder_plan", {
-							operation: "begin_edit",
-							planDirectory: planDir,
-							planId: parsed.planId,
-							intent: "rework",
-						}) as Record<string, unknown>;
-					});
-				} catch (error) {
-					if (acquiredForRework) await clearCurrentStateForPlanDirectory(planDir, ctx);
-					throw error;
-				}
-				const edit = reserved.edit as Record<string, unknown> | undefined;
-				const editToken = typeof edit?.editToken === "string" ? edit.editToken : "";
-				const planId = typeof edit?.planId === "string" ? edit.planId : parsed.planId;
-				if (!editToken) throw new Error("Herder manager did not return a plan edit token.");
-				const priorRecovery = currentReworkEdit?.planDirectory === planDir && currentReworkEdit.editToken === editToken
-					? currentReworkEdit.recoverOnFinish
-					: false;
-				binding = { planDirectory: planDir, planId, editToken, recoverOnFinish: Boolean(acquiredForRework || priorRecovery) };
-				currentReworkEdit = binding;
-				if (reserved.reply && typeof reserved.reply === "object") {
-					const reply = reserved.reply as ManagerReply;
-					assertOwnership(reply.planDirectory, reply.runId);
-					updateFromReply(reply);
-				}
-				return {
-					runtimeContext: [
-						"HERDER_ACTIVE_PLAN_REWORK_V1",
-						`PLAN_ID: ${planId}`,
-						`PLAN_DIRECTORY: ${planDir}`,
-						`EDIT_TOKEN: ${editToken}`,
-						"The manager has reserved this blocked or exhausted plan. Existing execution is untouched until finish_edit.",
-						"Edit only the reserved plan and necessary index fields. Preserve its ID, filename, and dependencies.",
-						"Do not add, remove, or change another plan.",
-						"After the rewrite passes shape and validation, call herder_plan with operation finish_edit, this planDirectory, and editToken when the operator directs completion. The host presents the destructive confirmation.",
-						"If Grill is cancelled or no files were changed, call herder_plan with operation cancel_edit instead. Cancellation restores the pre-interview graph and leaves existing execution untouched.",
-						"Never call /herder-revise, /herder-reset, Git, or SQLite for this path.",
-					].join("\n"),
-					rollback: cancelReservation,
-				};
-			});
-		} catch (error) {
-			await cancelReservation().catch(() => {});
-			if (acquiredForRework || binding?.recoverOnFinish) await clearCurrentStateForPlanDirectory(planDir, ctx);
-			throw error;
-		}
-		return `Reserved plan ${binding!.planId} for rework. Grill will rewrite it; finish_edit discards the current execution after confirmation.`;
+	const rework = async (_args: string, _ctx: ExtensionContext): Promise<string> => {
+		throw new Error("Active rework has moved to /herder-revise: request a scope amendment with separate drafting and exact-change confirmations; budgets are unchanged");
 	};
 
 	const stop = async (): Promise<string> => {
@@ -1285,13 +1196,43 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.registerCommand("herder-fire", { description: "Start a deterministic background Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "fire"), ctx)) });
 	pi.registerCommand("herder-attach", { description: "Attach this Pi session to an active Herder run after its former session died.", handler: command((args, ctx) => attach(parseAttachArguments(args), ctx)) });
 	pi.registerCommand("herder-resume", { description: "Resume a deterministic Herder run.", handler: command((args, ctx) => launch(parseFireArguments(args, "resume"), ctx)) });
-	pi.registerCommand("herder-revise", { description: "Adopt a validated new plan-graph generation.", handler: command((args, ctx) => launch(parseFireArguments(args, "revise"), ctx)) });
+	pi.registerCommand("herder-revise", { description: "Request a host-confirmed scope amendment; effort budgets remain unchanged.", handler: command(async (args, ctx) => {
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before requesting a scope amendment");
+		const epoch = sessionEpoch;
+		const repoRoot = await repositoryRoot(ctx);
+		const directory = resolvePlanDirectory(repoRoot, parsePlanDirArguments(args).planDir ?? currentState?.planDir ?? "herder-plans");
+		if (!currentState || !sameResolvedDirectory(directory, currentState.planDir)) throw new Error("Attach to this run before requesting its scope amendment");
+		assertOwnership(directory, currentState.runId);
+		const result = await enqueueManager(directory, async () => {
+			assertSessionActive(epoch);
+			return beginUserScopeAmendment(directory, ctx, wholeRunHost(ctx, epoch));
+		});
+		pi.sendUserMessage([
+			"HERDER_USER_AUTHORIZED_SCOPE_DRAFT_V1",
+			`The user invoked /herder-revise and confirmed proposal drafting for ${directory}.`,
+			JSON.stringify(result),
+			`Read ${PACKAGE_ROOT}/skills/plans/references/plan-format.md and plan-template.md completely before editing.`,
+			"Draft only plan-graph Markdown for the requested amendment. Preserve baseline intent unless the user explicitly proposes changing it. Show acceptance and permission changes. Shape and validate, then call finish_edit for exact host confirmation. No source edits, new effort budget, automatic cleanup or successor run is authorized.",
+		].join("\n\n"));
+		return "Scope draft opened by user authorization. Exact adoption needs separate confirmation; budgets are unchanged.";
+	}) });
+	pi.registerCommand("herder-budget", { description: "Grant explicit additional effort without changing scope: <amount> [plan-dir] [--plan ID --rounds N --recoveries N].", handler: command(async (args, ctx) => {
+		if (!ctx.isProjectTrusted()) throw new Error("Trust this project before granting effort");
+		const epoch = sessionEpoch;
+		const { planDirectory, ...increments } = parseBudgetArguments(args);
+		const directory = resolvePlanDirectory(await repositoryRoot(ctx), planDirectory ?? currentState?.planDir ?? "herder-plans");
+		if (!currentState || !sameResolvedDirectory(directory, currentState.planDir)) throw new Error("Attach to this run before granting additional effort");
+		const runId = currentState.runId;
+		await enqueueManager(directory, () => grantUserBudget(directory, increments, ctx, () => { assertSessionActive(epoch); assertOwnership(directory, runId); }));
+		return "Exact budget grant recorded. Scope and patches are unchanged; resume or confirm the stopped continuation separately.";
+	}) });
+
 	pi.registerCommand("herder-status", { description: "Show Herder manager and plan status.", handler: command((args, ctx) => status(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-dashboard", { description: "Open the manager-hosted Herder dashboard.", handler: command((args, ctx) => dashboard(parsePlanDirArguments(args).planDir, ctx)) });
 	pi.registerCommand("herder-cleanup", { description: "Preview and confirm Herder cleanup. Use --force to destroy a plan set unconditionally.", handler: command(cleanup) });
 	pi.registerCommand("herder-reset", { description: "Reset a Herder plan set to its pre-initialized execution state.", handler: command(reset) });
 	pi.registerCommand("herder-rework", {
-		description: "Rewrite a blocked or exhausted non-integrated plan and rerun it from the current integration HEAD.",
+		description: "Retired active rework; use /herder-revise for an explicitly confirmed scope amendment.",
 		handler: async (args, ctx) => {
 			lastContext = ctx;
 			try {
@@ -1359,6 +1300,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	};
 
 	const wholeRunHost = (ctx: ExtensionContext, epoch: number): RunRevisionHost => ({
+		assertRun: run => { assertSessionActive(epoch); assertOwnership(run.planDirectory, run.runId); },
 		assert: (record) => {
 			assertSafe(record.run.planDirectory);
 			assertSessionActive(epoch);
@@ -1425,15 +1367,9 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (resetPending) throw new Error("Herder reset is in progress");
 			if (activeFire()) throw new Error("Finish or stop the active Herder Fire run before changing plan configuration.");
 		},
-		handleAttention: async ({ planDirectory, resolution }, ctx) => {
-			if (resolution.planId === "RUN") return;
-			if (!["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Plan attention requires revise_run or explicit abandon_run");
-			const epoch = sessionEpoch;
-			return enqueueManager(planDirectory, async () => {
-				assertSessionActive(epoch);
-				assertOwnership(planDirectory, resolution.runId);
-				return { handled: true as const, result: await beginWholeRunAttention(planDirectory, resolution, ctx, wholeRunHost(ctx, epoch)) };
-			});
+		handleAttention: async ({ resolution }) => {
+			if (["revise_run", "abandon_run"].includes(resolution.action)) throw new Error("Model tools cannot initiate a scope proposal or abandonment. The user must invoke /herder-revise or /herder-stop.");
+			return undefined;
 		},
 		bindAttention: async (input, ctx) => {
 			const epoch = sessionEpoch;
@@ -1443,18 +1379,23 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			if (input.requestId !== request.requestId) {
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
-			if (request.planId !== "RUN" && !["revise_run", "abandon_run"].includes(input.action ?? "")) throw new Error("Plan attention requires revise_run or explicit abandon_run");
+			if (["revise_run", "abandon_run"].includes(input.action ?? "")) throw new Error("Only a user-invoked /herder-revise command may open a scope amendment");
+			if (request.planId !== "RUN" && !["answer", "answer_and_resume", "defer", "stop", "cancel", "retry"].includes(input.action ?? "")) throw new Error("Stopped attention permits answer, defer, stop, or host-authorized safe operator retry");
 			const binding = attentionResolutionFromRequest(request);
-			if (input.action?.trim().toLowerCase() === "accept") {
-				await confirmPlanAcceptance(request, input, ctx);
+			if (input.action === "retry" || input.action === "answer_and_resume") {
+				if (input.action === "answer_and_resume" && (request.kind !== "user_decision" || !input.answer?.trim())) throw new Error("Clarification requires an exact nonempty answer to a user decision");
+				const implementationRetry = input.action === "retry" && request.kind === "plan_recovery"
+					&& ["round_limit", "implementer_exhausted", "reviewer_blocked", "judge_blocked", "integration_conflict_exhausted"].includes(request.cause);
+				const operatorRetry = input.action === "retry" && request.kind === "operator_attention"
+					&& ["transport_exhausted", "verification_environment", "review_budget_exhausted"].includes(request.cause);
+				if (input.action === "retry" && !implementationRetry && !operatorRetry) throw new Error("Retry is only available for ordinary implementation or safe operator failures, not safety or protocol failures");
+				if (implementationRetry && !input.rationale?.trim()) throw new Error("Implementation retry requires a non-empty rationale");
+				const confirmation = implementationRetry ? { hasUI: ctx.hasUI, ui: { ...ctx.ui, confirm: (_title: string, message: string) => ctx.ui.confirm("Retry implementation under the unchanged approved contract?", `${message}\n\nThis retries the Implementer in the same assignment, worktree, generation and round, not the stopped review role. It spends one remaining task attempt and one run execution; no scope change or budget refill is authorized.`) } } : ctx;
+				await confirmHostAttention(input.planDirectory, { ...binding, action: input.action, ...(input.answer === undefined ? {} : { answer: input.answer }), ...(input.rationale === undefined ? {} : { rationale: input.rationale }) }, confirmation, undefined, () => { assertSessionActive(epoch); assertOwnership(input.planDirectory, request.runId); });
 				assertSessionActive(epoch);
 				assertOwnership(input.planDirectory, request.runId);
-				if (mainSessionRequests.attention?.requestId !== request.requestId
-					|| mainSessionRequests.attention.requestSha256 !== request.requestSha256 || mainSessionRequests.attention.state === "resolved") {
-					throw new Error("The attention request changed during confirmation; review its current evidence before accepting.");
-				}
-				return { ...binding, confirmed: true };
 			}
+			if (input.action?.trim().toLowerCase() === "accept") throw new Error("Acceptance waivers require an exact user-authorized scope amendment, not an attention confirmed flag");
 			return binding;
 		},
 		beforePlanOperation: async (operation, params, ctx) => {
@@ -2014,6 +1955,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		lastPersistedState = currentState;
 		if (currentState) {
 			const restored = currentState;
+			mainSessionRequests.restoreAttentionHint(restored.attentionRequestId);
 			currentState = undefined;
 			let acquired: AdapterOwnership | undefined;
 			try {

@@ -787,7 +787,7 @@ export class GitDriver {
 					throw new Error(`Integration repair cannot modify protected plan path ${candidate}`);
 				}
 				if (!allowedPaths || allowedPaths.length === 0) throw new Error("Integration repair requires recorded failure-related paths before accepting a commit");
-				if (!allowedPaths.some((allowed) => candidate === allowed || candidate.startsWith(`${allowed}/`))) {
+				if (!allowedPaths.includes(candidate)) {
 					throw new Error(`Integration repair path ${candidate} is not recorded as failure-related`);
 				}
 			}

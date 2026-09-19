@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { buildGraph, projectLifecycle } from "../../../src/core/plans.ts";
+import { getExecutionReport } from "../../../src/core/plan-report.ts";
 import { readPlanLifecycle, readPlanLifecycleGraph, summarizeRun } from "../../../src/core/workflow.ts";
 import { RunStore, type StoredPlan, type StoredPlanSpec } from "../../../src/daemon/run-store.ts";
 
@@ -206,6 +207,24 @@ function runtime(runId: string, phase: StoredPlan["phase"], planId = "001"): Omi
 		rebase: null,
 	};
 }
+
+test("execution reports never confuse authored DONE or a paused final audit with completion", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-report-completion-"));
+	let store: RunStore | undefined;
+	try {
+		const planDir = writePlanDir(root, "DONE");
+		assert.equal(getExecutionReport(planDir).lifecycle.complete, false);
+		store = new RunStore(planDir);
+		createRun(store, planDir);
+		store.updateRun({ status: "paused", terminalDetail: "Final audit incomplete; A1 remains unverified" });
+		const incomplete = getExecutionReport(planDir);
+		assert.equal(incomplete.lifecycle.complete, false);
+		assert.equal(incomplete.execution?.status, "paused");
+		assert.match(incomplete.execution?.detail ?? "", /A1 remains unverified/);
+		store.updateRun({ status: "complete" });
+		assert.equal(getExecutionReport(planDir).lifecycle.complete, true);
+	} finally { store?.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
 
 test("projectLifecycle keeps normalized status projections in parity", () => {
 	const cases = [

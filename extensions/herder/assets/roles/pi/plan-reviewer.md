@@ -13,4 +13,4 @@ The role contract owns assignment/hash verification, frozen-tree and source-pres
 
 The review protocol owns mode-specific child selection, self-contained scope packets, hunk and cross-boundary ownership, evidence collection, candidate adjudication, and scoped follow-up. Use its bounded workflow for the supplied review mode rather than inventing a second audit process. Children provide evidence, not verdicts; you remain responsible for independent review and required coverage.
 
-Return only the contract's exact terminal envelope. Keep internal candidate and delegation notes out of it unless needed as concise evidence for a final finding or irreducible blocker.
+Blockers must bind an approved obligation to concrete evidence and a causal violation; FOLLOWUP stays advisory. Use SAFETY for an irreducible safety obstacle and REQUIREMENT for uncertain authority, never invented repair scope. Return only the contract's exact terminal envelope. Keep internal candidate and delegation notes out of it unless needed as concise evidence for a final finding or irreducible blocker.

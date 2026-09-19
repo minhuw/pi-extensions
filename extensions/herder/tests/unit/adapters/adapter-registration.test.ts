@@ -113,6 +113,7 @@ test("adapter registration exposes the complete live surface", () => {
 
 	assert.deepEqual([...api.commands.keys()].sort(), [
 		"herder-attach",
+		"herder-budget",
 		"herder-cleanup",
 		"herder-dashboard",
 		"herder-fire",

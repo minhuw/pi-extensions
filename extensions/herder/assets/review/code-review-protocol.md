@@ -9,6 +9,14 @@ Use this protocol only as the root `plan-reviewer` for the frozen assignment sup
 - Never use `worker` for review, edit source or plans, commit, or integrate. Children provide evidence, never a verdict; the contract governs source preservation and frozen authority. Stops cascade through the tree.
 - Review only introduced behavior against the compiled assignment, explicit repository rules, changed-code contracts, required checks, and demonstrated regressions. Suppress style, speculation, pre-existing defects, and unrelated improvement ideas. Plan V2 A rows and explicitly binding decisions govern requirements within Boundaries; the route is suggested. A routine fix satisfying acceptance and scope does not violate the plan merely by using another approach.
 
+## Bounded finding authority
+
+Every `[BLOCKING]` finding must be P0/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION` and include `obligation=...; evidence=...; violation=...`. `obligation` names an approved acceptance or verification ID (`A1`/`V1` for one plan; `planId:A1`/`planId:V1` for aggregate final audit), or `constraint:<exact frozen Boundaries line>` including that line's Markdown, with outer whitespace removed. Quote the actual boundary, not a synthetic constraint label, suggested route, or newly invented requirement. Keep each field on the same finding line; semicolon followed by `key=` starts another field.
+
+`evidence` supplies a concrete location/trace, observed reproduction, or failing check. `violation` explains causally why that evidence fails the named obligation; proximity to changed code is insufficient. Missing/unknown obligations, missing fields, and placeholder evidence are protocol errors, not repair authority. Structural validation binds references and requires evidence fields; it cannot mechanically prove their truth, semantic relevance, or causal sufficiency. Independently verify those claims.
+
+Incidental churn, pre-existing defects, and unrelated improvements remain advisory `FOLLOWUP`, even if adjacent to the patch. `FOLLOWUP`/`INVALID` never authorize repair. Preserve compatible nonblocking finding prose. Report an irreducible safety obstacle as `BLOCKER_KIND: SAFETY` with concrete CHECKS/SETUP evidence and rationale; pause for a user decision, never automatic repair. Use `REQUIREMENT` when intent, obligation, or evidence remains uncertain. Neither classification permits inventing a code blocker or obligation. Do not run an unsafe reproduction merely to obtain proof.
+
 ## Inputs the parent must establish first
 
 The contract establishes assignment/hash verification, frozen authority, source-preserving setup, and the manager-facing evidence boundary. Apply it before delegation. Read applicable repository instruction files from the frozen worktree only. Prepare a self-contained relevant scope packet for every child containing:
@@ -74,6 +82,8 @@ SCENARIO: <concrete triggering input, state, or environment>
 EVIDENCE: <observed code path, targeted reproduction, supplied check evidence, or exact rule>
 INTRODUCED_BY: <changed hunk, repair delta, or commit>
 RELATIONSHIP: PLAN_REQUIREMENT | PATCH_REGRESSION | FOLLOWUP | INVALID
+OBLIGATION: <approved A/V ID or exact frozen boundary line>
+VIOLATION: <causal explanation connecting evidence to obligation>
 ```
 
 Every subreviewer also returns `UNRESOLVED` (separately labeled `COVERAGE_GAP` and `MATERIAL_CONCERN`, or none) and `COVERAGE` (owned hunks, cross-boundary questions checked, unreviewed areas, and concise rejection reasons), even when it proposes no findings. Apply the materiality dispositions above.

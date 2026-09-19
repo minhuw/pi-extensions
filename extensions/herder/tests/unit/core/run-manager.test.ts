@@ -7,13 +7,13 @@ import { invokeHerderTool } from "../../../src/application/tools.ts";
 import { ensureService, requestManagerOperation,
 	requestService, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
-import { openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
+import { EXECUTION_SCHEMA_VERSION, openExecutionDatabase } from "../../../src/daemon/execution-store.ts";
 import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
 import { readManagerState, RunStore } from "../../../src/daemon/run-store.ts";
 import { allocateUnusedReigniteDirectory, HerderRunManager } from "../../../src/core/run-manager.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
-import { createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
-import { MANAGER_PROTOCOL_VERSION, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type IntegrationRepairClassification, type ManagerAction, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
+import { createReigniteRequest, createVerificationRequest, normalizeVerificationManifest } from "../../../src/core/verification.ts";
+import { MANAGER_PROTOCOL_VERSION, parseWorkerResult, integrationRepairCapabilityDigest, integrationRepairCapabilityToken, sha256, stableJson, type IntegrationRepairClassification, type ManagerAction, type ManagerReply, type ResolvedProfile, type VerificationGate } from "../../../src/shared/protocol.ts";
 import { appendIndependentPlan } from "../../support/independent-plan.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { planFixture } from "../../support/plan-fixture.ts";
@@ -227,6 +227,37 @@ async function finishFinalReview(
 	})).reply);
 }
 
+// Seed an already-persisted legacy report: new final reviews cannot create pending dossiers.
+async function seedLegacyFinalReview(
+	service: Awaited<ReturnType<typeof ensureService>>,
+	fixture: { repo: string; planDirectory: string },
+	prefix: string,
+	response: string,
+	recover = false,
+): Promise<Record<string, unknown>> {
+	await completeSinglePlan(service, fixture, prefix);
+	const manager = new HerderRunManager(fixture.planDirectory);
+	try {
+		const store = manager.store;
+		const run = store.getRun()!;
+		const report = parseWorkerResult("plan-reviewer", response);
+		if (report.kind !== "reviewer") throw new Error("Expected reviewer fixture");
+		const audit = store.getLatestAction(run.runId, { planId: "RUN", generation: run.currentGeneration, round: 1, role: "plan-reviewer", state: "terminal" })!;
+		const record = payload(audit.result);
+		store.database.prepare("UPDATE manager_actions SET result_json = ? WHERE action_id = ?")
+			.run(JSON.stringify({ ...record, workerResult: report }), audit.actionId);
+		store.database.prepare("UPDATE manager_plans SET findings_json = ? WHERE run_id = ? AND plan_id = 'RUN'")
+			.run(JSON.stringify(report.findings), run.runId);
+		const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
+		store.database.exec("DELETE FROM manager_reignite_requests");
+		if (!recover) store.putReigniteRequest(createReigniteRequest({
+			...dossier, verdict: report.verdict, scope: report.scope, findings: report.findings,
+			fixGuidance: report.fixGuidance, rationale: report.rationale, state: "pending",
+		}));
+		return manager.refreshReply() as unknown as Record<string, unknown>;
+	} finally { manager.close(); }
+}
+
 function resolvedRepoPath(repo: string, ...parts: string[]): string {
 	return path.join(fs.realpathSync(repo), ...parts);
 }
@@ -244,7 +275,7 @@ function implementerEnvelope(commit: string, changedPath = "src/value.mjs"): str
 }
 
 function reviewerBlockEnvelope(round: number): string {
-	const finding = `[atomic-blocker-${round}][P1][BLOCKING][PLAN_REQUIREMENT] round ${round} blocker`;
+	const finding = `[atomic-blocker-${round}][P1][BLOCKING][PLAN_REQUIREMENT] round ${round} blocker; obligation=A1; evidence=synthetic round ${round} assertion fails; violation=required fixture value is missing`;
 	return `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: resolve round ${round} blocker\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: continue the bounded review round\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
 }
 
@@ -470,7 +501,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 	}
 });
 
-test("malformed clean worker envelopes pause after three bounded transport retries", { timeout: 20_000 }, async () => {
+test("malformed clean worker envelopes require protocol correction without retry", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-malformed-test-"));
 	const fixture = writeFixture(root);
 	try {
@@ -483,32 +514,31 @@ test("malformed clean worker envelopes pause after three bounded transport retri
 			maxParallel: 1,
 			dashboardUrl: service.dashboardUrl,
 		})).reply);
-		for (let attempt = 1; attempt <= 3; attempt += 1) {
-			const action = payload((reply.actions as unknown[])[0]);
-			assert.equal(action.role, "plan-implementer");
-			assert.equal(action.round, 1, "clean transport retry consumed a substantive round");
-			await requestManagerOperation(service, "event", {
-				eventId: `malformed-dispatch-${attempt}`,
-				kind: "dispatch_results",
-				dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: `malformed-worker-${attempt}` }],
-			});
-			reply = payload(payload(await requestManagerOperation(service, "event", {
-				eventId: `malformed-terminal-${attempt}`,
-				kind: "terminals",
-				terminals: [{ actionId: action.actionId, hostHandle: `malformed-worker-${attempt}`, response: "not a role envelope" }],
-			})).reply);
-		}
+		const action = payload((reply.actions as unknown[])[0]);
+		assert.equal(action.role, "plan-implementer");
+		assert.equal(action.round, 1, "protocol failure consumed a substantive round");
+		await requestManagerOperation(service, "event", {
+			eventId: `malformed-dispatch-1`,
+			kind: "dispatch_results",
+			dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: `malformed-worker-1` }],
+		});
+		reply = payload(payload(await requestManagerOperation(service, "event", {
+			eventId: `malformed-terminal-1`,
+			kind: "terminals",
+			terminals: [{ actionId: action.actionId, hostHandle: `malformed-worker-1`, response: "not a role envelope" }],
+		})).reply);
 		assert.equal(reply.status, "needs_input");
 		assert.equal((reply.actions as unknown[]).length, 0);
-		assert.match(String(reply.message), /transport failed 3 times/);
+		assert.match(String(reply.message), /Worker protocol error/);
 		const attention = payload(reply.attention);
 		assert.equal(attention.kind, "operator_attention");
-		assert.equal(attention.cause, "transport_exhausted");
+		assert.equal(attention.cause, "worker_protocol_error");
 		assert.deepEqual(payload(attention.continuation), { role: "plan-implementer", phase: "READY_IMPLEMENTER" });
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "transport_exhausted").length, 1);
+			assert.equal(store.getActions(run.runId).length, 1, "malformed output must not dispatch a retry");
+			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "worker_protocol_error").length, 1);
 		} finally { store.close(); }
 		const resumed = payload(payload(await requestManagerOperation(service, "start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
@@ -902,7 +932,7 @@ test("exact dispatch replay preserves capacity suppression and rejects changed p
 });
 
 for (const recovery of ["refresh", "replay", "resume"] as const) {
-test(`Reignite persistence failure recovers through ${recovery} after restart`, { timeout: 30_000 }, async () => {
+test(`Reignite persistence failure recovers as skipped through ${recovery} after restart`, { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-atomic-reignite-test-"));
 	const fixture = writeFixture(root);
 	process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE = "atomic-reignite-terminal";
@@ -922,7 +952,7 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 			terminals: [{
 				actionId: String(finalReviewer.actionId),
 				hostHandle: "atomic-reignite-worker",
-				response: "VERDICT: REVISE\nFINDINGS: [recover-1][P1][BLOCKING][PLAN_REQUIREMENT] retain residual work\nFIX_GUIDANCE: [recover-1] implement the residual requirement\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
+				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
 			}],
 		};
 		const before = new RunStore(fixture.planDirectory);
@@ -955,7 +985,6 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 		finally { afterReplay.close(); }
 		await stopService(fixture.planDirectory);
 		delete process.env.HERDER_TEST_REIGNITE_PERSIST_FAILURE;
-		appendIndependentPlan(fixture);
 		const manager = new HerderRunManager(fixture.planDirectory);
 		try {
 			const run = manager.store.getRun()!;
@@ -1015,10 +1044,11 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 			assert.equal(recovered.status, "complete");
 			assert.equal(recovered.actions.length, 0);
 			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
-			assert.equal(dossier.state, "pending");
-			assert.deepEqual(dossier.findings, ["[recover-1][P1][BLOCKING][PLAN_REQUIREMENT] retain residual work"]);
-			assert.deepEqual(dossier.fixGuidance, ["[recover-1] implement the residual requirement"]);
-			assert.ok(dossier.allocatedPlanDirectory);
+			assert.equal(dossier.state, "skipped");
+			assert.deepEqual(dossier.findings, []);
+			assert.deepEqual(dossier.fixGuidance, []);
+			assert.equal(dossier.allocatedPlanDirectory, undefined);
+			assert.equal(recovered.reigniteRequest, undefined);
 			manager.refreshReply();
 			await manager.event(event);
 			await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse" });
@@ -1027,6 +1057,7 @@ test(`Reignite persistence failure recovers through ${recovery} after restart`, 
 			assert.ok(store.readEvent(event.eventId));
 			for (const state of ["pending", "written", "skipped"] as const) {
 				store.updateReigniteRequest(dossier.requestId, { state, detail: "existing acknowledgement detail" });
+				manager.refreshReply();
 				const acknowledged = store.getReigniteRequest(run.runId, run.currentGeneration);
 				manager.refreshReply();
 				await manager.event(event);
@@ -1608,55 +1639,84 @@ test("persisted FINAL_APPROVED completion fails closed without matching exact-tr
 	}
 });
 
-test("final Reviewer residual findings complete the run with a pending reignite dossier", { timeout: 30_000 }, async () => {
+test("final Reviewer blockers pause across resume and restart without successor dispatch", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-input-test-"));
 	const fixture = writeFixture(root);
 	try {
+		let service = await ensureService(fixture.planDirectory);
+		const finding = "[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] aggregate requirement missing; obligation=001:A1; evidence=synthetic aggregate assertion fails; violation=required fixture value is missing";
+		const findings = [finding];
+		const response = `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The aggregate audit is incomplete.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`;
+		const paused = await finishFinalReview(service, fixture, "final-reviewer-input", response);
+		const assertPaused = (reply: Record<string, unknown>) => {
+			assert.equal(reply.status, "paused");
+			assert.equal(reply.reigniteRequest, undefined);
+			assert.deepEqual(reply.actions, []);
+		};
+		assertPaused(paused);
+		const before = new RunStore(fixture.planDirectory);
+		const run = before.getRun()!;
+		const actions = before.getActions(run.runId);
+		const verification = before.getVerification(run.runId, run.currentGeneration);
+		try {
+			assert.equal(before.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
+			assert.deepEqual(before.getPlan(run.runId, "RUN")?.findings, findings);
+			assert.equal(before.getReigniteRequest(run.runId, run.currentGeneration), null);
+			const audit = actions.find((action) => action.planId === "RUN" && action.state === "terminal")!;
+			assert.deepEqual(payload(payload(audit.result).workerResult).findings, findings);
+			assert.deepEqual(payload(audit.result).workerResult, parseWorkerResult("plan-reviewer", response));
+			assert.equal(verification?.state, "passed");
+		} finally { before.close(); }
+		for (const restart of [false, true]) {
+			if (restart) {
+				await stopService(fixture.planDirectory);
+				service = await ensureService(fixture.planDirectory);
+				assertPaused(payload(payload(await requestService(service, "/v1/status")).reply));
+			}
+			assertPaused(payload(payload(await requestManagerOperation(service, "start", {
+				mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse",
+			})).reply));
+			const store = new RunStore(fixture.planDirectory);
+			try {
+				assert.equal(store.getRun()?.status, "paused");
+				assert.equal(store.getRun()?.currentGeneration, run.currentGeneration);
+				assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
+				assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, findings);
+				assert.deepEqual(store.getActions(run.runId), actions, "no successor or replacement reviewer dispatch");
+				assert.deepEqual(store.getVerification(run.runId, run.currentGeneration), verification);
+				assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+			} finally { store.close(); }
+		}
+		assert.equal(fs.readdirSync(fixture.repo).some((entry) => entry.startsWith("herder-reignite")), false);
+	} finally {
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+	}
+});
+
+for (const scenario of [
+	{ name: "approval with blockers", verdict: "APPROVE", scope: "PASS", blockers: true },
+	{ name: "revision without blockers", verdict: "REVISE", scope: "PASS", blockers: false },
+	{ name: "approval with failed scope", verdict: "APPROVE", scope: "FAIL", blockers: false },
+]) test(`final Reviewer ${scenario.name} requires protocol correction, not completion`, { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-protocol-test-"));
+	const fixture = writeFixture(root);
+	try {
 		const service = await ensureService(fixture.planDirectory);
-		const awaiting = await prepareSinglePlan(service, fixture, "final-reviewer-input");
-		const submitted = await submitFinalVerification(service, fixture.planDirectory, awaiting, "final-reviewer-input");
-		const finalReviewer = payload((submitted.reply.actions as unknown[])[0]);
-		await requestManagerOperation(service, "event", {
-			eventId: "final-reviewer-input-dispatch",
-			kind: "dispatch_results",
-			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "final-reviewer-input-host" }],
-		});
-		const finding = "[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] aggregate review needs input";
-		const completed = payload(payload(await requestManagerOperation(service, "event", {
-			eventId: "final-reviewer-input-terminal",
-			kind: "terminals",
-			terminals: [{
-				actionId: finalReviewer.actionId,
-				hostHandle: "final-reviewer-input-host",
-				response: `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The final Reviewer needs a main-session decision.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
-			}],
-		})).reply);
-		assert.equal(completed.status, "complete");
-		assert.equal(completed.attention, undefined);
-		assert.equal((completed.actions as unknown[]).length, 0);
-		const reignite = payload(completed.reigniteRequest);
-		assert.equal(reignite.state, "pending");
-		assert.equal(reignite.verdict, "REVISE");
-		assert.deepEqual(reignite.findings, [finding]);
+		const finding = "[fr-invalid][P1][BLOCKING][PLAN_REQUIREMENT] obligation=001:A1; evidence=synthetic aggregate assertion fails; violation=required fixture value is missing";
+		const reply = await finishFinalReview(service, fixture, "final-protocol",
+			`VERDICT: ${scenario.verdict}\nFINDINGS: ${scenario.blockers ? finding : "none"}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: ${scenario.scope}\nCHECKS: fixture test — passed\nRATIONALE: Inconsistent synthetic verdict.`);
+		assert.equal(reply.status, "needs_input");
+		assert.deepEqual(reply.actions, []);
+		assert.equal(reply.reigniteRequest, undefined);
+		assert.equal(payload(reply.attention).cause, "worker_protocol_error");
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "FINAL_APPROVED");
-			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "final_reviewer_needs_input").length, 0);
-			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration);
-			assert.equal(dossier?.state, "pending");
-			assert.deepEqual(dossier?.findings, [finding]);
-			assert.equal(dossier?.requestId, reignite.requestId);
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
 		} finally { store.close(); }
-		const resumed = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "resume",
-			repositoryRoot: fixture.repo,
-			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
-		})).reply);
-		assert.equal(resumed.status, "complete");
-		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
-		assert.equal(payload(resumed.reigniteRequest).state, "pending");
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -1670,7 +1730,7 @@ test("complete pending reignite resume re-exposes the dossier after plan-graph d
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const finding = "[fr-drift][P1][BLOCKING][PLAN_REQUIREMENT] residual work after graph drift";
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"complete-pending-resume-drift",
@@ -1705,7 +1765,7 @@ test("complete pending reignite resume re-exposes the dossier after plan-graph d
 	}
 });
 
-test("final-review graph drift keeps a pending dossier unexposed until the source is complete", { timeout: 30_000 }, async () => {
+test("final-review graph drift with blockers stays paused without a dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-reignite-incomplete-"));
 	const fixture = writeFixture(root);
 	try {
@@ -1720,7 +1780,7 @@ test("final-review graph drift keeps a pending dossier unexposed until the sourc
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
 		});
 		appendIndependentPlan(fixture);
-		const finding = "[fr-incomplete][P1][BLOCKING][PLAN_REQUIREMENT] residual work while drifted";
+		const finding = "[fr-incomplete][P1][BLOCKING][PLAN_REQUIREMENT] residual work while drifted; obligation=001:A1; evidence=synthetic aggregate assertion fails; violation=required fixture value is missing";
 		const drifted = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-terminal-final`,
 			kind: "terminals",
@@ -1736,17 +1796,10 @@ test("final-review graph drift keeps a pending dossier unexposed until the sourc
 		try {
 			const run = store.getRun()!;
 			assert.equal(run.status, "paused");
-			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration);
-			assert.equal(dossier?.state, "pending");
-			assert.deepEqual(dossier?.findings, [finding]);
-			await assert.rejects(() => requestManagerOperation(service, "reignite", {
-				requestId: dossier!.requestId,
-				requestSha256: dossier!.requestSha256,
-				state: "written",
-				graphSha256: "a".repeat(64),
-			}), /complete source run/);
-			assert.equal(store.getRun()?.status, "paused");
-			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration)?.state, "pending");
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
+			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding]);
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+			assert.deepEqual(drifted.actions, []);
 		} finally { store.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
@@ -1785,22 +1838,28 @@ test("final Reviewer approve with no findings persists a skipped reignite dossie
 	}
 });
 
-test("final Reviewer block with a patch regression completes with a pending dossier", { timeout: 30_000 }, async () => {
+test("final Reviewer block with a patch regression pauses without a dossier", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-block-test-"));
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const finding = "[fr-2][P1][BLOCKING][PATCH_REGRESSION] integrated patch lost a required check";
+		const finding = "[fr-2][P1][BLOCKING][PATCH_REGRESSION] integrated patch lost a required check; obligation=001:V1; evidence=synthetic required assertion absent; violation=required verification no longer exercises the export";
 		const completed = await finishFinalReview(
 			service,
 			fixture,
 			"final-reviewer-block",
 			`VERDICT: BLOCK\nFINDINGS: ${finding}\nFIX_GUIDANCE: Restore the missing check.\nDISCOVERED_PATHS: none\nSCOPE: FAIL\nCHECKS: fixture test — passed\nRATIONALE: Residual regression belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
 		);
-		assert.equal(completed.status, "complete");
-		assert.equal(payload(completed.reigniteRequest).state, "pending");
-		assert.equal(payload(completed.reigniteRequest).verdict, "BLOCK");
-		assert.deepEqual(payload(completed.reigniteRequest).findings, [finding]);
+		assert.equal(completed.status, "paused");
+		assert.equal(completed.reigniteRequest, undefined);
+		assert.deepEqual(completed.actions, []);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
+			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding]);
+			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
+		} finally { store.close(); }
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -1833,7 +1892,7 @@ test("final Reviewer follow-up findings persist a skipped reignite dossier", { t
 	}
 });
 
-for (const scenario of ["advisory", "mixed", "material", "duplicate-ids", "invalid-labels"] as const) test(`Reignite ${scenario} filtering preserves the full immutable report and binds only unambiguous material guidance`, { timeout: 30_000 }, async () => {
+for (const scenario of ["advisory", "mixed", "material", "duplicate-ids", "invalid-labels"] as const) test(`Legacy Reignite ${scenario} recovery filtering preserves the full immutable report and binds only unambiguous material guidance`, { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-reignite-${scenario}-`));
 	const fixture = writeFixture(root);
 	const material = Array.from({ length: scenario === "material" ? 20 : 2 }, (_, index) =>
@@ -1877,17 +1936,18 @@ for (const scenario of ["advisory", "mixed", "material", "duplicate-ids", "inval
 	const eligibleGuidance = scenario === "mixed" || scenario === "material" ? guidance : [];
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(service, fixture, `filter-${scenario}`,
-			`VERDICT: REVISE\nFINDINGS: ${findings.join("\n")}\nFIX_GUIDANCE: ${fixGuidance.join("\n")}\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: original full review remains evidence`);
+		const completed = await seedLegacyFinalReview(service, fixture, `filter-${scenario}`,
+			`VERDICT: REVISE\nFINDINGS: ${findings.join("\n")}\nFIX_GUIDANCE: ${fixGuidance.join("\n")}\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: original full review remains evidence`, true);
 		assert.equal(completed.status, "complete");
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
 			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
-			assert.equal(dossier.state, eligible.length ? "pending" : "skipped");
+			assert.equal(dossier.state, "skipped");
+			assert.equal(dossier.allocatedPlanDirectory, undefined);
 			assert.deepEqual(dossier.findings, eligible);
 			assert.deepEqual(dossier.fixGuidance, eligibleGuidance);
-			assert.equal(Boolean(completed.reigniteRequest), eligible.length > 0);
+			assert.equal(completed.reigniteRequest, undefined);
 			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, findings);
 			const audit = store.getLatestAction(run.runId, { planId: "RUN", generation: run.currentGeneration, round: 1, role: "plan-reviewer", state: "terminal" })!;
 			const report = payload(payload(audit.result).workerResult);
@@ -1908,7 +1968,7 @@ test("pending reignite allocation is stable and skips an existing README", { tim
 	fs.writeFileSync(path.join(occupied.repo, "herder-reignite", "README.md"), "# foreign\n");
 	try {
 		const service = await ensureService(occupied.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			occupied,
 			"reignite-occupied",
@@ -1934,7 +1994,7 @@ test("pending reignite allocation is stable and skips an existing README", { tim
 	const empty = writeFixture(emptyRoot);
 	try {
 		const service = await ensureService(empty.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			empty,
 			"reignite-empty",
@@ -1998,7 +2058,7 @@ test("reignite written ack validates the allocated graph and keeps the source co
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"reignite-written",
@@ -2062,7 +2122,7 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"reignite-failed",
@@ -2124,7 +2184,7 @@ test("status snapshots revalidate live complete state before exposing a reignite
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"reignite-stale-status",
@@ -2205,7 +2265,8 @@ test("reconcile refreshes graph drift after scheduling before publication", { ti
 		assert.equal(started.status, "paused");
 		assert.equal(manager.store.getRun()?.status, "paused");
 		assert.match(started.message, /Plan graph changed after generation \d+;/);
-		assert.equal(started.actions.length, 1, "paused replies retain proposed actions as evidence");
+		assert.equal(started.actions.length, 0, "paused replies must not expose dispatchable work");
+		assert.equal(manager.store.getActions(started.runId, ["proposed"]).length, 1, "reservation evidence is retained without starting workers");
 	} finally {
 		manager.close();
 		fs.rmSync(root, { recursive: true, force: true });
@@ -2247,7 +2308,7 @@ test("complete pending reignite allocation refreshes at startup and resume bound
 	const fixture = writeFixture(root);
 	try {
 		let service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"refresh-allocation",
@@ -2309,7 +2370,7 @@ test("complete verification replay preserves a pending reignite dossier after pl
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
-		const completed = await finishFinalReview(
+		const completed = await seedLegacyFinalReview(
 			service,
 			fixture,
 			"verification-replay-complete",
@@ -2772,7 +2833,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 	}
 });
 
-test("active Grill rejects started plans and releases unchanged reservations", { timeout: 10_000 }, async () => {
+test("active Grill public begin rejects started and unstarted plans without a host scope grant", { timeout: 10_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-guard-test-"));
 	const fixture = writeFixture(root);
 	appendIndependentPlan(fixture);
@@ -2781,11 +2842,7 @@ test("active Grill rejects started plans and releases unchanged reservations", {
 		await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		});
-		await assert.rejects(() => requestManagerOperation(service, "edit", { operation: "begin", planId: "001" }), /execution already started/);
-		const begun = payload(await requestManagerOperation(service, "edit", { operation: "begin", planId: "2" }));
-		const edit = payload(begun.edit);
-		const cancelled = payload(await requestManagerOperation(service, "edit", { operation: "cancel", editToken: edit.editToken }));
-		assert.equal(payload(cancelled.reply).planEdit, undefined);
+		for (const planId of ["001", "002"]) await assert.rejects(() => requestManagerOperation(service, "edit", { operation: "begin", planId }), /user-invoked.*herder-revise/);
 		const store = new RunStore(fixture.planDirectory);
 		assert.equal(store.getPlanEdit(store.getRun()!.runId), null);
 		store.close();
@@ -2796,7 +2853,7 @@ test("active Grill rejects started plans and releases unchanged reservations", {
 	}
 });
 
-test("active Grill reserves an unstarted plan and adopts it after current workers settle", { timeout: 20_000 }, async () => {
+test("active Grill confirm and finish cannot adopt or disturb an active worker without private scope authority", { timeout: 20_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-plan-edit-test-"));
 	const fixture = writeFixture(root);
 	appendIndependentPlan(fixture);
@@ -2812,47 +2869,21 @@ test("active Grill reserves an unstarted plan and adopts it after current worker
 			dispatchResults: [{ actionId: implementer.actionId, accepted: true, hostHandle: "plan-edit-implementer" }],
 		});
 
-		const begun = payload(await requestManagerOperation(service, "edit", { operation: "begin", planId: "002-update-other.md" }));
-		const edit = payload(begun.edit);
-		assert.equal(edit.planId, "002");
-		assert.equal(edit.state, "reserved");
-		assert.match(String(edit.editToken), /^[0-9a-f-]{36}$/i);
-		assert.deepEqual(payload(begun.reply).planEdit, { planId: "002", state: "reserved" });
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const before = store.getRun()!;
+			const specs = store.getPlanSpecs(before.runId);
+			const actions = store.getActions(before.runId);
+			for (const operation of ["begin", "prepare", "confirm", "finish"]) {
+				await assert.rejects(requestManagerOperation(service, "edit", { operation, planId: "002", editToken: "forged", confirmed: true }), /user-invoked.*herder-revise/);
+			}
+			assert.equal(store.getRun()?.currentGeneration, 1);
+			assert.deepEqual(store.getPlanSpecs(before.runId), specs);
+			assert.deepEqual(store.getActions(before.runId), actions);
+			assert.equal(store.getPlanEdit(before.runId), null);
+			assert.ok(fs.existsSync(String(implementer.worktree)));
+		} finally { store.close(); }
 
-		fs.appendFileSync(path.join(fixture.planDirectory, "002-update-other.md"), "\nGrill refinement: keep the other export stable and focused.\n");
-		const finished = payload(await requestManagerOperation(service, "edit", { operation: "finish", editToken: edit.editToken }));
-		assert.deepEqual(payload(finished.reply).planEdit, { planId: "002", state: "barrier" });
-		assert.equal(payload(payload(finished.reply).scheduler).reason, "revision-barrier");
-		const beforeAdoption = new RunStore(fixture.planDirectory);
-		assert.equal(beforeAdoption.getRun()!.currentGeneration, 1);
-		assert.equal(beforeAdoption.getPlanEdit(beforeAdoption.getRun()!.runId)!.state, "barrier");
-		beforeAdoption.close();
-
-		const worktree = String(implementer.worktree);
-		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
-		git(worktree, ["add", "src/value.mjs"]);
-		git(worktree, ["commit", "-q", "-m", "fix: complete work during grill"]);
-		const advanced = payload(payload(await requestManagerOperation(service, "event", {
-			eventId: "plan-edit-terminal-implementer", kind: "terminals",
-			terminals: [{
-				actionId: implementer.actionId,
-				hostHandle: "plan-edit-implementer",
-				response: `STATUS: COMPLETE\nCOMMITS: ${git(worktree, ["rev-parse", "HEAD"]).stdout.trim()}\nCHECKS: npm test — passed\nFILES CHANGED: src/value.mjs\nDISCOVERED_PATHS: none\nNOTES: value updated\nUSAGE: input_tokens=10; cached_input_tokens=0; output_tokens=5; reasoning_tokens=0; source=test-host`,
-			}],
-		})).reply);
-		assert.equal(advanced.planEdit, undefined);
-		assert.deepEqual((advanced.actions as unknown[]).map((action) => [payload(action).planId, payload(action).role]), [["001", "plan-reviewer"]]);
-
-		const adopted = new RunStore(fixture.planDirectory);
-		const run = adopted.getRun()!;
-		assert.equal(run.currentGeneration, 2);
-		assert.equal(adopted.getPlanEdit(run.runId), null);
-		assert.notEqual(
-			adopted.getPlanSpecs(run.runId, 1).find((spec) => spec.planId === "002")!.planFingerprint,
-			adopted.getPlanSpecs(run.runId, 2).find((spec) => spec.planId === "002")!.planFingerprint,
-		);
-		assert.equal(adopted.getPlan(run.runId, "001")!.generation, 1);
-		adopted.close();
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -2860,7 +2891,7 @@ test("active Grill reserves an unstarted plan and adopts it after current worker
 	}
 });
 
-test("plan graph revision adopts additions while preserving exact completed evidence", { timeout: 30_000 }, async () => {
+test("raw plan graph adoption refuses additions while preserving exact completed evidence", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-revision-test-"));
 	const fixture = writeFixture(root);
 	try {
@@ -2881,29 +2912,18 @@ test("plan graph revision adopts additions while preserving exact completed evid
 		await assert.rejects(() => requestManagerOperation(service, "start", {
 			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 		}), /Use revise instead of resume/);
-		const revised = payload(payload(await requestManagerOperation(service, "start", {
+		await assert.rejects(requestManagerOperation(service, "start", {
 			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
-		})).reply);
-		assert.equal(payload(revised.summary).total, 2);
-		assert.equal(payload(revised.summary).done, 1);
-		assert.equal(payload((revised.actions as unknown[])[0]).planId, "002");
-		const revisedStore = new RunStore(fixture.planDirectory);
-		const revisedRun = revisedStore.getRun()!;
-		assert.equal(revisedRun.currentGeneration, 2);
-		assert.equal(revisedStore.getGenerations(revisedRun.runId).length, 2);
-		assert.match(revisedStore.getGeneration(revisedRun.runId, 2)!.runAssignmentPath, /run-assignment-generation-2\.json$/);
-		assert.equal(revisedStore.getPlan(revisedRun.runId, "001")!.generation, 1);
-		revisedStore.close();
+		}), /Raw graph adoption is not authorized/);
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			assert.equal(store.getRun()?.currentGeneration, 1);
+			assert.equal(store.getGenerations(firstRun.runId).length, 1);
+			assert.deepEqual(store.getApproval(firstRun.runId, "001", 1), approval);
+			assert.equal(store.getPlan(firstRun.runId, "002"), null);
+		} finally { store.close(); }
+		assert.equal(git(fixture.repo, ["cat-file", "-t", completionRef]).stdout.trim(), "tag");
 
-		const newAction = payload((revised.actions as unknown[])[0]);
-		await requestManagerOperation(service, "event", {
-			eventId: "revision-cancel-new-plan", kind: "dispatch_results",
-			dispatchResults: [{ actionId: newAction.actionId, accepted: false, error: "test host unavailable" }],
-		});
-		fs.appendFileSync(path.join(fixture.planDirectory, "001-update-value.md"), "\nChanged after approval.\n");
-		await assert.rejects(() => requestManagerOperation(service, "start", {
-			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
-		}), /changed 001 after execution started/);
 	} finally {
 		await stopService(fixture.planDirectory).catch(() => {});
 		fs.rmSync(root, { recursive: true, force: true });
@@ -3788,7 +3808,7 @@ test("awaiting repair successor resumes the persisted manifest", { timeout: 60_0
 		service = await ensureService(fixture.planDirectory);
 		const migrated = new RunStore(fixture.planDirectory);
 		try {
-			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), 19);
+			assert.equal(Number((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version), EXECUTION_SCHEMA_VERSION);
 			const verification = migrated.getVerificationByRequestId("migrated-awaiting-successor-request")!;
 			assert.equal(verification.state, "awaiting_manifest");
 			assert.equal(verification.manifest, null);

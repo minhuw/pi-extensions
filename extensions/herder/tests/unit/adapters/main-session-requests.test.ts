@@ -8,6 +8,7 @@ function harness() {
 	let state = { version: 1 as const, mode: "resume" as const, status: "running" as const, runId: "run", repoRoot: "/repo", planDir: "/repo/herder-plans", profile: "default", maxParallel: 1, startedAt: 1, updatedAt: 1 };
 	const userMessages: string[] = [];
 	const customMessages: unknown[] = [];
+	const messageOptions: unknown[] = [];
 	const hints: (string | undefined)[] = [];
 	let failUserMessage = false;
 	const host: MainSessionRequestsHost = {
@@ -17,13 +18,13 @@ function harness() {
 				if (failUserMessage) { failUserMessage = false; throw new Error("temporary delivery failure"); }
 				userMessages.push(message);
 			},
-			sendMessage(message) { customMessages.push(message); },
+			sendMessage(message, options) { customMessages.push(message); messageOptions.push(options); },
 		},
 		current: () => ({ epoch, state, active: true, sessionId: "session", context: { hasUI: false, ui: { notify() {} } as never } }),
 		ownsRun: (planDirectory, runId) => planDirectory === state.planDir && runId === state.runId,
 		onAttentionHint: (hint) => hints.push(hint),
 	};
-	return { host, requests: new MainSessionRequests(host), userMessages, customMessages, hints, setEpoch: (value: number) => { epoch = value; }, setState: (value: typeof state) => { state = value; }, fail: () => { failUserMessage = true; } };
+	return { host, requests: new MainSessionRequests(host), userMessages, customMessages, messageOptions, hints, setEpoch: (value: number) => { epoch = value; }, setState: (value: typeof state) => { state = value; }, fail: () => { failUserMessage = true; } };
 }
 
 function reply(overrides: Partial<ManagerReply> = {}): ManagerReply {
@@ -93,4 +94,55 @@ test("shutdown reset removes request capabilities", () => {
 	assert.equal(h.requests.getIntegrationRepairRequest("repair-request"), undefined);
 	assert.equal(h.requests.getReigniteRequest("reignite-request"), undefined);
 	assert.equal(h.requests.attention, undefined);
+});
+
+
+test("stopped attention is displayed once without triggering a model turn; old Reignite stays backlog", async () => {
+	const h = harness();
+	const value = reply({ status: "paused", attention, reigniteRequest: { state: "pending", requestId: "old-reignite" } as never });
+	for (let index = 0; index < 3; index++) {
+		h.requests.observeReply(value);
+		h.requests.deliverReply(value);
+		await h.requests.settled();
+	}
+	assert.equal(h.customMessages.length, 1);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
+	assert.deepEqual(h.userMessages, []);
+	const complete = reply({ status: "complete", reigniteRequest: value.reigniteRequest });
+	h.requests.deliverReply(complete);
+	await h.requests.settled();
+	assert.deepEqual(h.userMessages, []);
+});
+
+
+test("durable displayed hint suppresses the same report on session restoration", async () => {
+	const h = harness();
+	h.requests.observeReply(reply({ attention }));
+	await h.requests.settled();
+	h.requests.reset("session-start");
+	h.requests.restoreAttentionHint(attention.requestId);
+	h.requests.observeReply(reply({ status: "paused", attention }));
+	await h.requests.settled();
+	assert.equal(h.customMessages.length, 1);
+});
+
+test("stopped verification requests never trigger a selector model turn", async () => {
+	const h = harness();
+	const paused = reply({ status: "stopped", verificationRequest: verification });
+	h.requests.observeReply(paused);
+	h.requests.deliverReply(paused);
+	await h.requests.settled();
+	assert.deepEqual(h.userMessages, []);
+});
+
+
+test("budget stop clears cached verification failure even without displayed status", async () => {
+	const h = harness();
+	const failed = reply({ status: "failed", message: "verification failed" });
+	h.requests.observeReply(failed, { status: "failed", message: failed.message });
+	const stopped = reply({ status: "paused", verificationRequest: verification, executionBudget: { stopReason: "Spent" } as never });
+	h.requests.observeReply(stopped);
+	h.requests.deliverReply(stopped);
+	await h.requests.settled();
+	assert.deepEqual(h.userMessages, []);
 });

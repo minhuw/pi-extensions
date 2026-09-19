@@ -95,16 +95,12 @@ test("final RUN attention prompts retain their separate request bindings and act
 		kind: "user_decision",
 		question: "Which recorded decision should the Judge use?",
 	} as ManagerAttentionRequest);
-	assert.match(userPrompt, /^HERDER_MAIN_SESSION_USER_DECISION_V1/m);
-	assert.match(userPrompt, /Default to action "answer"/);
-	assert.match(userPrompt, /BLOCKED \(final RUN paused\), never scheduling/);
-	assert.match(userPrompt, /Manual intervention is still needed/);
-	assert.match(userPrompt, /"answer_and_resume" only.*immutable assignment runnable/);
-	assert.match(userPrompt, /Upstream, scope, acceptance, or dependency revisions are not clarifications/);
-	assert.match(userPrompt, /never use "retry" for user_decision/);
-	assert.match(userPrompt, /cannot change already-started plans/);
-	assert.match(userPrompt, /Neither permits editing integrated upstream plans/);
-	assert.match(userPrompt, /stop, replan standalone, and start a fresh run/);
+	assert.match(userPrompt, /^HERDER_STOPPED_ATTENTION_V1/m);
+	assert.match(userPrompt, /answer \(record only\), defer, stop/);
+	assert.match(userPrompt, /answer_and_resume requires exact host confirmation/);
+	assert.match(userPrompt, /without scope, acceptance, permission or dependency changes/);
+	assert.match(userPrompt, /Scope changes never refill budgets/);
+
 	assert.match(userPrompt, /QUESTION: Which recorded decision should the Judge use\?/);
 	assert.match(userPrompt, /PLAN_DIRECTORY: \/repo\/herder-plans/);
 	assert.match(userPrompt, /REQUEST_ID: request-001/);
@@ -123,12 +119,12 @@ test("final RUN attention prompts retain their separate request bindings and act
 		cause: "transport_exhausted",
 		question: "Retry the recorded role or stop it?",
 	} as ManagerAttentionRequest);
-	assert.match(operatorPrompt, /^HERDER_MAIN_SESSION_OPERATOR_ATTENTION_V1/m);
+	assert.match(operatorPrompt, /^HERDER_STOPPED_ATTENTION_V1/m);
 	assert.match(operatorPrompt, /REQUEST_ID: request-002/);
 	assert.match(operatorPrompt, /PLAN_ID: RUN/);
 	assert.match(operatorPrompt, /GENERATION: 1/);
 	assert.match(operatorPrompt, /ROUND: 2/);
-	assert.match(operatorPrompt, /action "retry"/);
+	assert.match(operatorPrompt, /Safe operator retry requires exact host confirmation/);
 	assert.doesNotMatch(operatorPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256/);
 	assert.doesNotMatch(operatorPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
@@ -158,17 +154,17 @@ test("final RUN attention prompts retain their separate request bindings and act
 			changedPathsSha256: "5".repeat(64),
 		},
 	} as ManagerAttentionRequest);
-	assert.match(recoveryPrompt, /^HERDER_MAIN_SESSION_ATTENTION_V1/m);
-	assert.match(recoveryPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
+	assert.match(recoveryPrompt, /^HERDER_STOPPED_ATTENTION_V1/m);
+	assert.doesNotMatch(recoveryPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 	assert.match(recoveryPrompt, /REQUEST_ID: request-003/);
 	assert.match(recoveryPrompt, /PLAN_ID: RUN/);
 	assert.match(recoveryPrompt, /GENERATION: 1/);
 	assert.match(recoveryPrompt, /ROUND: 2/);
 	assert.match(recoveryPrompt, /CONTINUATION_ROLE: plan-judge/);
 	assert.match(recoveryPrompt, /CAUSE: reviewer_blocked/);
-	assert.match(recoveryPrompt, /ALLOWED_OPERATIONS: defer, unchanged_retry, revise, reject/);
+	assert.match(recoveryPrompt, /ALLOWED_ACTIONS: answer \(record only\), defer, stop/);
 	assert.match(recoveryPrompt, /001-plan\.md/);
-	assert.match(recoveryPrompt, /CHANGED_PATHS:/);
+	assert.match(recoveryPrompt, /"changedPaths":/);
 	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
 });
 
@@ -207,7 +203,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		role: "plan-judge",
 		phase: "READY_JUDGE",
 		reason: "Should the optional compatibility alias remain in scope?",
-		nextAction: "Propose/review a whole-run revision; abandon is available.",
+		nextAction: "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.",
 	});
 	assert.doesNotMatch(JSON.stringify(details), /secret-capability-token/);
 	const operatorDetails = attentionMessageDetails({
@@ -217,7 +213,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		question: undefined,
 	});
 	assert.equal(operatorDetails.reason, "Transport exhausted");
-	assert.equal(operatorDetails.nextAction, "Propose/review a whole-run revision; abandon is available.");
+	assert.equal(operatorDetails.nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
 	for (const blocker of ["ENVIRONMENT", "INVOCATION"]) {
 		const explanation = "Chromium executable unavailable; prepare the pinned browser before retrying.";
 		const environmentRequest = {
@@ -247,7 +243,7 @@ test("attention messages render a compact card while preserving the full prompt"
 	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
 	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
 	assert.match(collapsed, /Reason: Should the optional compatibility alias remain in scope\?/);
-	assert.match(collapsed, /Next: Propose\/review a whole-run revision; abandon is available\./);
+	assert.match(collapsed, /Next: Record an answer, defer, or stop/);
 	assert.match(collapsed, /ctrl\+o for full dossier/);
 	assert.doesNotMatch(collapsed, /HERDER_MAIN_SESSION|REQUEST_ID|secret-capability-token/);
 
@@ -400,17 +396,12 @@ test("adapter binds complete attention evidence, including recovery Git identity
 
 	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
 	const prompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", exhausted);
-	assert.match(prompt, /ALLOWED_ACTIONS: revise_run, abandon_run/);
-	assert.match(prompt, /PROPOSE a concrete whole-run graph revision directly/);
+	assert.match(prompt, /ALLOWED_ACTIONS: answer \(record only\), defer, stop/);
 	assert.ok(prompt.includes(recovery.worktreeHead));
 	assert.ok(prompt.includes(recovery.worktreeTree));
-	assert.match(prompt, /A dismissed confirmation leaves the proposal recoverable/);
-	assert.match(prompt, /previously integrated plans may change/);
-	assert.match(prompt, /Whole-graph editing does not mean whole-graph recomputation/);
-	assert.match(prompt, /unchanged completed work outside the affected dependency closure is retained/);
-	assert.doesNotMatch(prompt, /Set every replacement plan TODO|No selective reuse|discards ALL old/);
-	assert.match(prompt, /Final RUN attention and exact-tree final integration repair/);
-	assert.doesNotMatch(prompt, /ALLOWED_OPERATIONS: defer|For acceptance|submit action "unchanged_retry"/);
+	assert.match(prompt, /Only the user may invoke \/herder-revise/);
+	assert.match(prompt, /No automatic retry, plan rewrite, cleanup or successor work/);
+	assert.doesNotMatch(prompt, /PROPOSE|ALLOWED_ACTIONS: revise_run|Beginning a proposal does not require/);
 });
 
 test("attention tool inputs round-trip with the fixed resolution schema", () => {
@@ -448,9 +439,9 @@ test("attention schema is minimal and normalizes legacy stored calls", () => {
 	const tool = tools.find((candidate) => candidate.name === "herder_plan");
 	assert.ok(tool?.parameters);
 	const actionDescription = (tool.parameters as { properties: { action: { description: string } } }).properties.action.description;
-	assert.match(actionDescription, /revise_run opens a whole-run Markdown revision/);
-	assert.match(actionDescription, /abandon_run requires explicit host confirmation/);
-	assert.match(actionDescription, /No defer, answer, unchanged retry/);
+	assert.match(actionDescription, /answer records only; defer or stop preserves evidence/);
+	assert.match(actionDescription, /Safe operator retry requires host confirmation/);
+	assert.match(actionDescription, /never initiated by this tool/);
 	assert.ok(tool.prepareArguments);
 	const minimal = {
 		operation: "attention",

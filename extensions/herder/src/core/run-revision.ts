@@ -79,6 +79,7 @@ export async function verifyRevisionCheckout(record: RunRevision): Promise<void>
 }
 
 export async function beginRunRevision(run: StoredRun, request: AttentionResolutionInput): Promise<RunRevision> {
+	assertHostAttentionGrant(run, request);
 	const previous = readRunRevision(run.planDirectory);
 	const priorSelective = previous?.run.runId === run.runId ? previous.selective : undefined;
 	if (revisionPending(previous)) {
@@ -148,4 +149,29 @@ export async function confirmRunRevision(prepared: RunRevision): Promise<RunRevi
 	const confirmed: RunRevision = { ...prepared, state: "confirmed" };
 	writeRunRevision(directory, confirmed, prepared);
 	return confirmed;
+}
+
+/** Host-only grant for one exact attention decision, not a public confirmed flag. */
+export function grantHostAttention(run: StoredRun, resolution: AttentionResolutionInput): void {
+	if (!["revise_run", "abandon_run", "retry", "answer_and_resume"].includes(resolution.action)) throw new Error("Unsupported host attention grant");
+	const runtime = path.join(run.planDirectory, ".herder");
+	ensurePrivateDirectory(runtime);
+	const record = { runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256,
+		inputSha256: graphInputSha256(run.planDirectory), resolutionSha256: sha256(stableJson(resolution)) };
+	const temporary = path.join(runtime, `.attention-host-grant-${randomUUID()}.tmp`);
+	const fd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+	try { fs.writeFileSync(fd, stableJson(record)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+	try { fs.renameSync(temporary, path.join(runtime, "attention-host-grant.json")); fsyncDirectory(runtime); }
+	finally { try { fs.unlinkSync(temporary); } catch {} }
+}
+
+export function assertHostAttentionGrant(run: StoredRun, resolution: AttentionResolutionInput): void {
+	if (compileGraphIdentity(buildGraph(run.planDirectory)) !== run.graphSha256) throw new Error("Host attention grant cannot authorize graph drift; use an exact scope amendment");
+	let file;
+	try { file = readRegularBytes(path.join(run.planDirectory, ".herder", "attention-host-grant.json"), "host attention grant"); }
+	catch { throw new Error("This decision requires an exact private host grant; confirmed flags are not authorization"); }
+	ensurePrivateDirectory(path.join(run.planDirectory, ".herder"));
+	const expected = { runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256,
+		inputSha256: graphInputSha256(run.planDirectory), resolutionSha256: sha256(stableJson(resolution)) };
+	if (file.mode !== 0o600 || file.bytes.length > 4096 || file.bytes.toString("utf8") !== stableJson(expected)) throw new Error("Host attention grant is stale or does not match this exact decision");
 }
