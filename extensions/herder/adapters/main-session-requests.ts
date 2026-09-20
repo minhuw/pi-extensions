@@ -12,6 +12,7 @@ import {
 	type VerificationRequest,
 } from "../src/shared/protocol.ts";
 import { classifyVerificationRecovery, verificationRunnerEvidence, ENVIRONMENT_VERIFICATION_RESUME_GUIDANCE, FINAL_VERIFICATION_SELECTION_GUIDANCE } from "./verification-recovery.ts";
+import { HERDER_ROUND_PROGRESS_MESSAGE, renderRoundProgress, roundProgressKey } from "./round-progress.ts";
 import type { HerderRunState } from "./state.ts";
 
 export interface MainSessionPi {
@@ -54,6 +55,7 @@ interface PendingVerificationFailure {
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 export class MainSessionRequests {
+	private readonly deliveredRounds = new Set<string>();
 	private readonly verificationRequestStore = new Map<string, VerificationRequest>();
 	private readonly promptedVerifications = new Set<string>();
 	private readonly integrationRepairRequestStore = new Map<string, IntegrationRepairBinding>();
@@ -105,6 +107,14 @@ export class MainSessionRequests {
 		if (mode === "shutdown") this.sendingVerificationFailure = false;
 	}
 
+	restoreRoundProgress(entries: readonly unknown[]): void {
+		this.deliveredRounds.clear();
+		for (const entry of entries) {
+			const message = entry as { type?: string; customType?: string; details?: { reportKey?: string } };
+			if (message?.type === "custom_message" && message.customType === HERDER_ROUND_PROGRESS_MESSAGE && typeof message.details?.reportKey === "string") this.deliveredRounds.add(message.details.reportKey);
+		}
+	}
+
 	restoreAttentionHint(requestId: string | undefined): void { this.attentionHint = requestId; }
 
 	clearVerificationPrompt(requestId: string): void { this.promptedVerifications.delete(requestId); }
@@ -151,10 +161,24 @@ export class MainSessionRequests {
 	}
 
 	deliverReply(reply: ManagerReply, retryDetail?: string): void {
+		this.deliverRoundProgress(reply);
 		if (reply.status === "stopped" || reply.executionBudget?.stopReason) { this.pendingVerificationFailure = undefined; void this.drainAttentionNow(); return; }
 		this.delegateVerification(reply, retryDetail);
 		this.drainVerificationFailure();
 		void this.drainAttentionNow();
+	}
+
+	private deliverRoundProgress(reply: ManagerReply): void {
+		if (!this.host.current().active || !this.host.current().context || !this.host.ownsRun(reply.planDirectory, reply.runId)) return;
+		for (const progress of reply.roundProgress ?? []) {
+			if (progress.runId !== reply.runId) continue;
+			const reportKey = roundProgressKey(progress);
+			if (this.deliveredRounds.has(reportKey)) continue;
+			try {
+				this.host.pi.sendMessage({ customType: HERDER_ROUND_PROGRESS_MESSAGE, content: renderRoundProgress(progress), display: true, details: { reportKey } }, { deliverAs: "followUp", triggerTurn: false });
+				this.deliveredRounds.add(reportKey);
+			} catch (error) { this.notify(`Herder could not deliver round progress: ${message(error)}`, "warning"); }
+		}
 	}
 
 	async settled(): Promise<void> {

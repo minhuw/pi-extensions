@@ -146,3 +146,39 @@ test("budget stop clears cached verification failure even without displayed stat
 	await h.requests.settled();
 	assert.deepEqual(h.userMessages, []);
 });
+
+test("round progress is concise, durable-id deduplicated across resume and session restoration, and never triggers a turn", () => {
+	const h = harness();
+	const progress = { runId: "run", planId: "PLAN", generation: 1, round: 1, reportId: "judge-action", implementer: { actionId: "implementation", summary: "Updated\nfixture", outcome: "complete", interrupted: false, setup: [], checks: ["unit: passed"] }, fixNext: ["F1: exact repair"], notIntendedToFix: ["F2: excluded"], outcome: "needs input" };
+	const value = reply({ status: "stopped", roundProgress: [progress] });
+	h.requests.deliverReply(value);
+	h.requests.reset("resume");
+	h.requests.deliverReply(value);
+	assert.equal(h.customMessages.length, 1);
+	assert.equal(h.userMessages.length, 0);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
+	const sent = h.customMessages[0] as { content: string };
+	assert.equal(sent.content, "Herder · PLAN · generation 1 · round 1\ndone: implementer: Updated fixture (complete)\nchecks: unit: passed\nfixNext: F1: exact repair\nnotIntendedToFix: F2: excluded\noutcome: needs input");
+	const resumed = new MainSessionRequests(h.host);
+	resumed.restoreRoundProgress([{ type: "custom_message", ...h.customMessages[0] as object }]);
+	resumed.deliverReply(value);
+	assert.equal(h.customMessages.length, 1);
+	resumed.deliverReply(reply({ roundProgress: [{ ...progress, reportId: "next-terminal-action" }] }));
+	assert.equal(h.customMessages.length, 2);
+	resumed.deliverReply(reply({ runId: "foreign", roundProgress: [{ ...progress, reportId: "foreign" }] }));
+	assert.equal(h.customMessages.length, 2);
+});
+
+test("round delivery failure does not acknowledge evidence or create a model turn", () => {
+	const h = harness();
+	const send = h.host.pi.sendMessage;
+	h.host.pi.sendMessage = () => { throw new Error("delivery unavailable"); };
+	const value = reply({ roundProgress: [{ runId: "run", planId: "PLAN", generation: 1, round: 1, reportId: "terminal", fixNext: [], notIntendedToFix: [], outcome: "recorded" }] });
+	h.requests.deliverReply(value);
+	assert.equal(h.customMessages.length, 0);
+	h.host.pi.sendMessage = send;
+	h.requests.deliverReply(value);
+	assert.equal(h.customMessages.length, 1);
+	assert.equal(h.userMessages.length, 0);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
+});

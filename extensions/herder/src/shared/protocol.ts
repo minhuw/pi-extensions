@@ -856,7 +856,35 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 	if (input.observedCommit !== undefined && (typeof input.observedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(input.observedCommit))) throw new Error("Integration repair observed commit is invalid");
 }
 
+/** Compact presentation of persisted evidence, not approval or final gate proof. */
+export interface RoundRoleProgress {
+	actionId: string;
+	summary: string;
+	outcome: string;
+	interrupted: boolean;
+	setup: string[];
+	checks: string[];
+}
+
+export interface RoundProgress {
+	runId: string;
+	planId: string;
+	generation: number;
+	round: number;
+	/** Latest terminal action identity in stored chronological order; delivery dedup key. */
+	reportId: string;
+	implementer?: RoundRoleProgress;
+	reviewer?: RoundRoleProgress;
+	judge?: RoundRoleProgress;
+	/** Persisted Judge-authorized repair contracts, never reviewer suggestions. */
+	fixNext: string[];
+	/** Cumulative generation-scoped Judge exclusions, retaining IDs and evidence. */
+	notIntendedToFix: string[];
+	outcome: string;
+}
+
 export interface ManagerReply {
+	roundProgress?: RoundProgress[];
 	yolo?: boolean;
 	executionBudget?: { limit: number; used: number; remaining: number; stopReason: string | null };
 	runRevision?: { editToken: string; requestId: string; state: string };

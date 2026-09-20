@@ -1947,6 +1947,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		releaseOwnershipAfterManagerDrain = false;
 		lastContext = ctx;
 		mainSessionRequests.reset("session-start");
+		mainSessionRequests.restoreRoundProgress(ctx.sessionManager.getEntries());
 		currentRunRevision = undefined;
 		currentPlanEdit = undefined;
 		currentReworkEdit = undefined;

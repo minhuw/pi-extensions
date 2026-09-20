@@ -1,6 +1,7 @@
 import { buildGraph, canonicalId } from "./plans.ts"
 import { executionReport, readUsageState } from "../daemon/execution-store.ts"
-import { readManagerState } from "../daemon/run-store.ts"
+import { readManagerState, RunStore } from "../daemon/run-store.ts"
+import { buildRoundProgress } from "./round-progress.ts"
 
 const DEFAULT_PLAN_DIR = "herder-plans"
 
@@ -31,6 +32,14 @@ export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN
   })
   const report = executionReport(records, plan)
   const supersededAttempts = report.records.filter((record) => record.superseded).length
+  let roundProgress: ReturnType<typeof buildRoundProgress> = []
+  if (managerState?.run) {
+    const store = new RunStore(graph.planDir, { readOnly: true })
+    try {
+      roundProgress = buildRoundProgress(store.getActions(managerState.run.runId))
+        .filter((round) => plan === "RUN" || round.planId === plan)
+    } finally { store.close() }
+  }
   return {
     planDir: graph.planDir,
     readme: graph.readme,
@@ -47,6 +56,7 @@ export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN
       ? { complete: managerState?.run ? managerState.run.status === "complete" : false, counts: graph.counts }
       : { title: planRecord!.title, status: planRecord!.status, statusDetail: planRecord!.statusDetail },
     ...report,
+    roundProgress,
     supersededAttempts,
   }
 }

@@ -1,3 +1,4 @@
+import { buildRoundProgress } from "./round-progress.ts";
 import { BudgetExhaustedError } from "../daemon/budgets.ts";
 import { assertHostAttentionGrant, assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
 import { randomUUID } from "node:crypto";
@@ -3407,6 +3408,7 @@ export class HerderRunManager {
 			runId: run.runId,
 			status: run.status,
 			profileName: run.profileName,
+			roundProgress: buildRoundProgress(this.store.getActions(run.runId)),
 			yolo: Boolean(run.yolo),
 			maxParallel: run.maxParallel,
 			planDirectory: run.planDirectory,

@@ -127,7 +127,7 @@ export class CapturedExtensionAPI {
 	sendMessage(message: { customType: string; content: string; display: boolean; details?: unknown }, options?: unknown): void {
 		const captured = { ...message, ...(options === undefined ? {} : { options }) };
 		this.customMessages.push(captured);
-		while (this.customMessageWaiters.length) this.customMessageWaiters.shift()!.resolve(captured);
+		if (message.customType === "herder-attention-v1") while (this.customMessageWaiters.length) this.customMessageWaiters.shift()!.resolve(captured);
 	}
 
 	async exec(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {

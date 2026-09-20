@@ -221,6 +221,7 @@ test("execution reports never confuse authored DONE or a paused final audit with
 		assert.equal(incomplete.lifecycle.complete, false);
 		assert.equal(incomplete.execution?.status, "paused");
 		assert.equal(incomplete.execution?.reviewMode, "reviewed");
+		assert.deepEqual(incomplete.roundProgress, [], "reports must not invent rounds without terminal evidence");
 		assert.match(incomplete.execution?.detail ?? "", /A1 remains unverified/);
 		store.updateRun({ status: "complete" });
 		assert.equal(getExecutionReport(planDir).lifecycle.complete, true);
