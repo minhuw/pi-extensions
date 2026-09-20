@@ -11,7 +11,7 @@ import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { fixturePlan } from "../../support/plan-v2.ts";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 
-test("host-granted product retry spends exactly one added attempt without changing the round-three contract", async () => {
+test("host grant and additional budget cannot invent a repair list after unreviewed implementation failures", async () => {
  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-budget-retry-"));
  const { repo, originalHead } = initFixtureRepo(root, { name: "Budget retry", email: "test@example.invalid", files: { "src/value.mjs": "export const value = 1;\n" } });
  const directory = path.join(repo, "herder-plans");
@@ -41,23 +41,11 @@ test("host-granted product retry spends exactly one added attempt without changi
   await assert.rejects(manager.event({ eventId: "unapproved", kind: "attention", attention: resolution }), /host grant/);
   store.grantBudget({ requestId: "one-extra-attempt", runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256, amount: 1, planId: "001", implementationRounds: 1 });
   grantHostAttention(run, resolution);
-  reply = await manager.event({ eventId: "approved", kind: "attention", attention: resolution });
-  assert.equal(reply.actions.length, 1);
-  assert.equal(reply.actions[0].role, "plan-implementer");
-  const after = store.getPlan(run.runId, "001")!;
-  for (const key of ["generation", "round", "assignmentPath", "assignmentSha256", "snapshotSha256", "branch", "worktree", "generationBase"] as const) assert.equal(after[key], before[key]);
+  await assert.rejects(manager.event({ eventId: "approved", kind: "attention", attention: resolution }), /bounded Judge REPAIR list/);
+  assert.equal(store.getPlan(run.runId, "001")!.phase, "BLOCKED");
   assert.deepEqual(store.getPlanSpecs(run.runId), specs);
   assert.equal(store.getRun()!.graphSha256, run.graphSha256);
-  assert.equal(store.getBudget(run.runId)!.used, 4);
-  reply = await fail(reply.actions[0]);
-  assert.equal(store.getPlan(run.runId, "001")!.phase, "BLOCKED");
-  const next = store.getNextAttention(run.runId)!;
-  const extraRetry = { ...attentionResolutionFromRequest(next), action: "retry", rationale: "Try again without any additional allocation." };
-  grantHostAttention(store.getRun()!, extraRetry);
-  reply = await manager.event({ eventId: "no-allocation", kind: "attention", attention: extraRetry });
-  assert.equal(reply.actions.length, 0);
-  assert.equal(store.getRun()!.status, "paused");
-  assert.match(store.getBudget(run.runId)!.stopReason!, /implementation budget exhausted/);
-  assert.equal(store.getBudget(run.runId)!.used, 4);
+  assert.equal(store.getBudget(run.runId)!.used, 3);
+  assert.equal(store.getNextAttention(run.runId)!.requestId, request.requestId);
  } finally { manager.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

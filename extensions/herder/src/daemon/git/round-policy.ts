@@ -29,22 +29,12 @@ export function decideReview({ round, verdict, scope, openBlockers }: { round: n
     if (scope !== "PASS" || normalizedBlockers !== 0) {
       fail("APPROVE requires scope PASS and zero open blockers")
     }
-    return { action: "READY_TO_INTEGRATE", judgeRequired: false, nextRound: null }
   }
-
-  if (normalizedRound === 1) {
-    if (verdict === "BLOCK") {
-      return { action: "BLOCKED", judgeRequired: false, nextRound: null }
-    }
-    return { action: "REPAIR_DIRECT", judgeRequired: false, nextRound: normalizedRound + 1 }
-  }
-
-  if (normalizedRound === MAX_PLAN_ROUNDS) return { action: "BLOCKED_ROUND_LIMIT", judgeRequired: false, nextRound: null }
   return { action: "JUDGE", judgeRequired: true, nextRound: null }
 }
 
 export function decideJudge({ round, decision }: { round: number | string; decision: JudgeDecision }): { action: PolicyAction; nextRound: number | null } {
-  const normalizedRound = parseInteger(String(round), "round", { min: 2, max: 2 })
+  const normalizedRound = parseInteger(String(round), "round", { min: 1, max: MAX_PLAN_ROUNDS })
   if (!JUDGE_DECISIONS.has(decision)) {
     fail("decision must be DONE, REPAIR, NEEDS_INPUT, or BLOCKED")
   }
@@ -52,6 +42,7 @@ export function decideJudge({ round, decision }: { round: number | string; decis
     return { action: "READY_TO_INTEGRATE", nextRound: null }
   }
   if (decision === "REPAIR") {
+    if (normalizedRound === MAX_PLAN_ROUNDS) return { action: "BLOCKED_ROUND_LIMIT", nextRound: null }
     return { action: "REPAIR_GUIDED", nextRound: normalizedRound + 1 }
   }
   return { action: decision, nextRound: null }

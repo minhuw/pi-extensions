@@ -1032,7 +1032,7 @@ function attentionIdentity(request: AttentionRequest): string {
 		continuation: request.continuation,
 		question: request.question ?? null,
 		recommendedAction: request.recommendedAction ?? null,
-		recovery: request.kind === "plan_recovery" ? request.recovery : null,
+		recovery: "recovery" in request ? request.recovery ?? null : null,
 	});
 }
 
@@ -1136,7 +1136,7 @@ export class RunStore {
 			return;
 		}
 		const specs = this.getPlanSpecs(run.runId);
-		this.database.prepare("INSERT INTO manager_budgets VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)").run(run.runId, run.runId, run.currentGeneration, run.graphSha256, stableJson(specs), run.currentGeneration, run.graphSha256, 8 * specs.length + 12);
+		this.database.prepare("INSERT INTO manager_budgets VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)").run(run.runId, run.runId, run.currentGeneration, run.graphSha256, stableJson(specs), run.currentGeneration, run.graphSha256, 9 * specs.length + 12);
 		for (const spec of specs) this.database.prepare("INSERT INTO manager_task_budgets VALUES (?, ?, 3, 1)").run(run.runId, spec.planId);
 	}
 
@@ -1558,7 +1558,7 @@ export class RunStore {
 			input.requestId, input.runId, input.planId, input.generation, input.round, input.actionId, input.requestSha256,
 			input.kind, input.state, input.cause, input.detail, input.detailSha256,
 			input.continuation.role, input.continuation.phase, input.question ?? null,
-			input.recommendedAction ?? null, input.kind === "plan_recovery" ? JSON.stringify(input.recovery) : null,
+			input.recommendedAction ?? null, "recovery" in input && input.recovery ? JSON.stringify(input.recovery) : null,
 			input.createdAt, input.updatedAt, input.resolvedAt ?? null,
 		);
 		return this.getAttention(input.requestId)!;

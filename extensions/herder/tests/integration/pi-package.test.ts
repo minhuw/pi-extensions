@@ -458,7 +458,7 @@ test("bounded review policy is owned by the protocol and assembled with the revi
 		/[Rr]eject unsupported speculation[^.]*concise reason/,
 		/[Ss]erious unresolved concerns[^.]*missing required checks\/coverage[^.]*incomplete[^.]*never approval/,
 		/[Mm]issing finding from a partial report is not resolution/,
-		/[Dd]o not reopen[^.]*resolved\/rejected findings without new evidence/,
+		/[Dd]o not reopen excluded findings without different explicit Reviewer evidence and Judge confirmation of an introduced\/worsened regression/,
 	]) assert.match(protocol, pattern);
 	for (const text of [protocol, child]) {
 		assert.match(text, /bounded static (?:defect[- ])?candidate scouting/);
@@ -508,7 +508,8 @@ test("bounded review policy is owned by the protocol and assembled with the revi
 	assert.match(protocol, /Verify all accepted open IDs and concrete P0\/P1 repair-delta regressions/);
 	assert.match(protocol, /For later review passes, do not reopen broad discovery/);
 	assert.match(protocol, /evidence-complete P0\/P1 `PLAN_REQUIREMENT` or `PATCH_REGRESSION`/);
-	assert.match(protocol, /No round-3 Judge or fourth automatic mutation is allowed/);
+	assert.match(protocol, /Judge classifies all findings after every completed review, including approval and final audit/);
+	assert.match(protocol, /no reviewer or Judge may invent a fourth automatic mutation/);
 	for (const pattern of [
 		/source preservation is a behavioral contract, not a sandbox/,
 		/hunk\/subsystem ownership, cross-boundary questions/,

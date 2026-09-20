@@ -89,12 +89,27 @@ function runtime(f: Fixture, id = "001") { return f.manager.store.getPlan(f.mana
 const finding = "[value][P1][BLOCKING][PLAN_REQUIREMENT] incorrect value; obligation=A1; evidence=value assertion failed; violation=export is not the required two";
 const revise = `VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: ${finding}\nFIX_GUIDANCE: [value] fix the value\nRATIONALE: bounded code defect\nCHECKS: value assertion failed`;
 const approve = "VERDICT: APPROVE\nSCOPE: PASS\nFINDINGS: none\nCHECKS: inspected value\nRATIONALE: accepted";
+const judgeDone = "DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nCHECKS: inspected value\nRATIONALE: approved contract satisfied";
+const judgeRepair = "DECISION: REPAIR\nFINDINGS: [value][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] incorrect value; obligation=A1; evidence=value assertion failed; violation=export is not the required two\nAUTHORIZED_BLOCKERS: value\nREPAIR_CONTRACTS: [value] fix the value\nPASS_DOCUMENT: Preserve the export and verify its value\nRATIONALE: bounded repair";
+async function judged(f: Fixture, reply: ManagerReply, response = judgeDone) {
+	const j = action(reply, "plan-judge");
+	await dispatch(f, j);
+	return terminal(f, j, response);
+}
+
+async function requirementDecision(f: Fixture, a: ManagerAction, decision = "NEEDS_INPUT") {
+	const reply = await terminal(f, a, blocked(a.role, "REQUIREMENT"));
+	if (a.role !== "plan-reviewer") return reply;
+	assert.equal(reply.attention, undefined, "a review first goes to Judge, not directly to recovery");
+	assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
+	return judged(f, reply, `DECISION: ${decision}\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nQUESTION: Which existing requirement applies?\nRATIONALE: an approved requirement is contradictory\nCHECKS: inspected the frozen contract`);
+}
 
 async function reviewer(f: Fixture) { return action(await implemented(f, action(f.reply)), "plan-reviewer"); }
 async function judge(f: Fixture) {
 	let review = await reviewer(f);
 	await dispatch(f, review);
-	const implementation = action(await terminal(f, review, revise), "plan-implementer");
+	const implementation = action(await judged(f, await terminal(f, review, revise), judgeRepair), "plan-implementer");
 	review = action(await implemented(f, implementation), "plan-reviewer");
 	await dispatch(f, review);
 	return action(await terminal(f, review, revise), "plan-judge");
@@ -102,7 +117,7 @@ async function judge(f: Fixture) {
 async function finalRequest(f: Fixture) {
 	const review = await reviewer(f);
 	await dispatch(f, review);
-	const ready = await terminal(f, review, approve);
+	const ready = await judged(f, await terminal(f, review, approve));
 	const request = ready.verificationRequest!;
 	assert.ok(request);
 	return request;
@@ -139,7 +154,7 @@ async function budgetReviewer(f: Fixture, stage: "discovery" | "verification" | 
 	const a = await reviewer(f);
 	if (stage === "discovery") return a;
 	await dispatch(f, a);
-	return action(await implemented(f, action(await terminal(f, a, revise))), "plan-reviewer");
+	return action(await implemented(f, action(await judged(f, await terminal(f, a, revise), judgeRepair))), "plan-reviewer");
 }
 
 async function assertWholeRunRecovery(f: Awaited<ReturnType<typeof fixture>>, request: ManagerAttentionRequest): Promise<void> {
@@ -230,7 +245,7 @@ for (const stage of ["discovery", "verification", "rescue", "final"] as const) t
 		if (stage === "final") {
 			assert.equal(next.workerMode, "FINAL_AUDIT");
 			await dispatch(f, next);
-			assert.equal((await terminal(f, next, approve)).status, "complete");
+			assert.equal((await judged(f, await terminal(f, next, approve))).status, "complete");
 		}
 	} finally { f.close(); }
 });
@@ -465,7 +480,7 @@ test("final RUN environment block neither completes nor reignites; explicit retr
 		assert.equal(next.workerMode, "FINAL_AUDIT");
 		assert.equal(next.round, 1);
 		await dispatch(f, next);
-		assert.equal((await terminal(f, next, approve)).status, "complete");
+		assert.equal((await judged(f, await terminal(f, next, approve))).status, "complete");
 	} finally { f.close(); }
 });
 
@@ -474,8 +489,8 @@ for (const stage of ["implementer", "reviewer", "judge", "final"] as const) test
 	try {
 		const a = stage === "implementer" ? action(f.reply) : stage === "reviewer" ? await reviewer(f) : stage === "judge" ? await judge(f) : await finalReviewer(f);
 		await dispatch(f, a);
-		const reply = await terminal(f, a, blocked(a.role, "REQUIREMENT"));
-		assert.equal(reply.attention?.kind, stage === "implementer" || stage === "final" ? "user_decision" : "plan_recovery");
+		const reply = await requirementDecision(f, a);
+		assert.equal(reply.attention?.kind, stage === "judge" ? "plan_recovery" : "user_decision");
 		assert.equal(runtime(f, a.planId).round, a.round);
 		assert.notEqual(reply.status, "complete");
 		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
@@ -509,7 +524,7 @@ for (const kind of ["ENVIRONMENT", "REQUIREMENT"]) test(`final ${kind} cancellat
 		const a = await finalReviewer(f);
 		await dispatch(f, a);
 		const before = runtime(f, "RUN").approvedTree;
-		const request = (await terminal(f, a, blocked(a.role, kind))).attention!;
+		const request = (kind === "REQUIREMENT" ? await requirementDecision(f, a) : await terminal(f, a, blocked(a.role, kind))).attention!;
 		const reply = await f.manager.event({ eventId: "cancel-final", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "cancel", rationale: "Operator stopped the audit" } });
 		assert.equal(reply.status, "paused");
 		assert.equal(reply.actions.length, 0);
@@ -529,19 +544,19 @@ for (const kind of ["ENVIRONMENT", "REQUIREMENT"]) test(`final ${kind} cancellat
 });
 
 
-test("round-two requirement review requests recovery instead of adjudication or inferred repair", { timeout: 30_000 }, async () => {
+test("round-two requirement review goes through Judge without inferred repair", { timeout: 30_000 }, async () => {
 	const f = await fixture();
 	try {
 		let a = await reviewer(f);
 		await dispatch(f, a);
-		const implementer = action(await terminal(f, a, revise));
+		const implementer = action(await judged(f, await terminal(f, a, revise), judgeRepair));
 		a = action(await implemented(f, implementer), "plan-reviewer");
 		await dispatch(f, a);
-		const reply = await terminal(f, a, blocked(a.role, "REQUIREMENT"));
-		assert.equal(reply.attention?.kind, "plan_recovery");
-		assert.equal(reply.attention?.cause, "reviewer_blocked");
+		const reply = await requirementDecision(f, a);
+		assert.equal(reply.attention?.kind, "user_decision");
+		assert.equal(reply.attention?.cause, "judge_needs_input");
 		assert.equal(reply.attention?.round, 2);
-		assert.equal(runtime(f).reviewPass, 1, "requirement non-review does not increment the completed review count");
+		assert.equal(runtime(f).reviewPass, 2, "both completed Reviewer reports reached Judge");
 		assert.equal(reply.actions.length, 0);
 	} finally { f.close(); }
 });
@@ -552,15 +567,15 @@ for (const final of [false, true]) test(`explicit requirement clarification resu
 	try {
 		const a = final ? await finalReviewer(f) : action(f.reply);
 		await dispatch(f, a);
-		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
+		const request = (await requirementDecision(f, a)).attention!;
 		f.restart();
 		if (!final) { await assertWholeRunRecovery(f, request); return; }
 		const attention = { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Keep the original value export requirement; do not expand scope." };
 		grantHostAttention(f.manager.store.getRun()!, attention);
 		const next = action(await f.manager.event({ eventId: "requirement-answer", kind: "attention", attention }));
 		assert.equal(next.round, 1);
+		assert.equal(next.role, request.continuation.role);
 		assert.equal(next.workerMode, final ? "FINAL_AUDIT" : "INITIAL");
-		assert.equal(next.role, a.role);
 		assert.equal(next.planId, a.planId);
 		assert.equal(next.assignmentSha256, a.assignmentSha256);
 		assert.equal(f.manager.store.getApproval(a.runId, a.planId, a.generation), null);
@@ -726,7 +741,7 @@ for (const final of [false, true]) test(`record-only requirement answer stays bl
 	try {
 		const a = final ? await finalReviewer(f) : action(f.reply);
 		await dispatch(f, a);
-		const request = (await terminal(f, a, blocked(a.role, "REQUIREMENT"))).attention!;
+		const request = (await requirementDecision(f, a)).attention!;
 		assert.equal(request.kind, "user_decision");
 		if (!final) { await assertWholeRunRecovery(f, request); return; }
 		const answer = "  Fix the upstream requirement first; revise dependencies before continuing.\nDo not expand this worker's scope.  ";
@@ -744,7 +759,7 @@ for (const final of [false, true]) test(`record-only requirement answer stays bl
 			assert.equal(sibling.planId, "002");
 			const review = action(await implemented(f, sibling), "plan-reviewer");
 			await dispatch(f, review);
-			await terminal(f, review, approve);
+			await judged(f, await terminal(f, review, approve));
 			assert.equal(runtime(f, "002").phase, "DONE", "unrelated work integrates despite the recorded blocker");
 		}
 		f.restart();
@@ -774,7 +789,7 @@ test("user decisions reject legacy prose, retry, and missing answers without con
 				await assert.rejects(f.manager.event({ eventId: `bad:${action}:${answer}`, kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer } as never }));
 			}
 		}
-		await assert.rejects(retry(f, request), /Stopped attention/);
+		await assert.rejects(retry(f, request), /bounded Judge REPAIR list/);
 		assert.equal(runtime(f).phase, "NEEDS_INPUT");
 		assert.equal(f.manager.store.getAttention(request.requestId)?.state, "awaiting_input");
 		assert.equal(f.manager.store.countActions(a.runId, { planId: a.planId }), 1);
@@ -786,7 +801,7 @@ for (const recovery of [false, true]) test(`answer_and_resume rejects wrong atte
 	try {
 		const a = recovery ? await reviewer(f) : action(f.reply);
 		await dispatch(f, a);
-		const request = (await terminal(f, a, blocked(a.role, recovery ? "REQUIREMENT" : "ENVIRONMENT"))).attention!;
+		const request = (recovery ? await requirementDecision(f, a, "BLOCKED") : await terminal(f, a, blocked(a.role))).attention!;
 		assert.equal(request.kind, recovery ? "plan_recovery" : "operator_attention");
 		await assert.rejects(f.manager.event({ eventId: "wrong-kind", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Within scope clarification" } }), /Stopped attention/);
 		assert.notEqual(f.manager.store.getAttention(request.requestId)?.state, "resolved");

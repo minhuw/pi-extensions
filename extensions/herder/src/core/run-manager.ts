@@ -1,14 +1,14 @@
-import { buildRoundProgress } from "./round-progress.ts";
+import { buildRoundProgress, excludedFindings } from "./round-progress.ts";
 import { BudgetExhaustedError } from "../daemon/budgets.ts";
 import { assertHostAttentionGrant, assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideJudge, decideReview } from "../daemon/git/round-policy.ts";
+import { decideJudge } from "../daemon/git/round-policy.ts";
 import { buildGraph, projectStatuses } from "./plans.ts";
 import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
-import { reviewFindingContractsFromSpecs, validateReviewerResult, validateJudgeFindings } from "./review-findings.ts";
+import { normalizeReviewerFindings, reviewFindingContractsFromSpecs, validateReviewerResult, validateJudgeFindings } from "./review-findings.ts";
 import {
 	captureReworkSnapshot,
 	crashReworkForTest,
@@ -336,7 +336,7 @@ function validateTargetOnlyGraph(
 }
 
 function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
-	if (request.kind !== "plan_recovery") return null;
+	if (!("recovery" in request) || !request.recovery) return null;
 	return {
 		assignmentPath: request.recovery.assignmentPath,
 		assignmentSha256: request.recovery.assignmentSha256,
@@ -483,9 +483,6 @@ function resultOutcome(result: WorkerResult | null, terminal: TerminalEvent): st
 	return result.decision;
 }
 
-function countBlocking(findings: string[]): number {
-	return findings.filter((finding) => /\[BLOCKING\]/.test(finding) && /\[(?:P0|P1)\]/.test(finding)).length;
-}
 
 function findingId(entry: string): string | undefined {
 	return entry.match(/^\[([^\[\]\s]+)\]/)?.[1];
@@ -774,7 +771,9 @@ export class HerderRunManager {
 			try { worktreeTree = driver.worktreeTree(plan.worktree); } catch { worktreeTree = null; }
 			try { changedPaths = driver.changedPaths(plan.worktree, plan.generationBase).sort(); } catch { changedPaths = []; }
 		}
-		const inScopePaths = [...spec.assignment.plan.inScopePaths].sort();
+		const inScopePaths = [...new Set(plan?.planId === "RUN"
+			? this.specs(run).flatMap(entry => entry.assignment.plan.inScopePaths)
+			: spec.assignment.plan.inScopePaths)].sort();
 		const changedPathCount = changedPaths.length;
 		const changedPathsSha256 = sha256(stableJson(changedPaths));
 		let generationBase = plan?.generationBase ?? run.baseCommit;
@@ -782,9 +781,9 @@ export class HerderRunManager {
 			try { generationBase = this.driver(run).branchHead(run.integrationBranch); } catch { /* preserve the recorded base commit */ }
 		}
 		return {
-			planFingerprint: spec.planFingerprint,
+			planFingerprint: plan?.planId === "RUN" ? run.graphSha256 : spec.planFingerprint,
 			fingerprintVersion: spec.fingerprintVersion,
-			planFile: spec.planFile,
+			planFile: plan?.planId === "RUN" ? "RUN" : spec.planFile,
 			inScopePaths: inScopePaths.slice(0, ATTENTION_PATH_LIMIT),
 			inScopePathCount: inScopePaths.length,
 			inScopePathsSha256: sha256(stableJson(inScopePaths)),
@@ -832,12 +831,12 @@ export class HerderRunManager {
 
 	private passDocumentEvidence(run: StoredRun, plan: StoredPlan): string {
 		const judge = this.store.getActions(run.runId).filter((action) => action.planId === plan.planId
-			&& action.generation === plan.generation && action.round === 2 && action.role === "plan-judge"
+			&& action.generation === plan.generation && action.role === "plan-judge"
 			&& action.state === "terminal" && storedWorkerResult(action)?.kind === "judge")
 			.reverse().find((action) => (storedWorkerResult(action) as Extract<WorkerResult, { kind: "judge" }>).decision === "REPAIR");
 		const result = judge ? storedWorkerResult(judge) : null;
 		if (!judge || result?.kind !== "judge" || !result.passDocument) {
-			return "PASS_DOCUMENT: none — no recorded round-2 Judge REPAIR document. Rescue may follow a proven operational failure; use the original assignment and recorded failure evidence, never invent a waiver.";
+			return "PASS_DOCUMENT: none — no recorded prior Judge REPAIR document. Rescue may follow a proven operational failure; use the original assignment and recorded failure evidence, never invent a waiver.";
 		}
 		return `PASS_DOCUMENT_ACTION_ID: ${judge.actionId}\nPASS_DOCUMENT_SHA256: ${sha256(result.passDocument)}\nPASS_DOCUMENT_RESULT_SHA256: ${sha256(stableJson(result))}\nPASS_DOCUMENT:\n${result.passDocument}`;
 	}
@@ -848,8 +847,10 @@ export class HerderRunManager {
 		return [
 			this.terminalEvidence(run, plan),
 			this.acceptedDependencyEvidence(run, plan),
-			...(plan.round === MAX_PLAN_ROUNDS ? [this.passDocumentEvidence(run, plan),
-				"FINAL_ROUND: Rescue uses the existing Implementer role, model and tools in a fresh session. Reviewer nonapproval ends autonomous work; no Judge and no round 4."] : []),
+			this.passDocumentEvidence(run, plan),
+			`PREVIOUS_ROUND_SUMMARY: ${stableJson(buildRoundProgress(this.store.getActions(run.runId)).filter(entry => entry.planId === plan.planId && entry.generation === plan.generation && entry.round <= plan.round && entry.judge).slice(-1))}`,
+			`CUMULATIVE_EXCLUDED_FINDINGS: ${stableJson(excludedFindings(this.store.getActions(run.runId), plan.planId, plan.generation))}`,
+			...(plan.round === MAX_PLAN_ROUNDS ? ["FINAL_ROUND: Independent Reviewer then Judge; REPAIR stops without a fourth automatic implementation."] : []),
 			...(prior ? [`PREVIOUS_GENERATION_RECOVERY_EVIDENCE_ONLY: request=${prior.requestId}; sha256=${prior.detailSha256}. This is historical evidence, NOT a contract; the current revised assignment supersedes all old requirements.\n${boundedEvidence(prior.detail, 6_000)}`] : []),
 		].join("\n");
 	}
@@ -936,7 +937,9 @@ export class HerderRunManager {
 			continuation: input.continuation,
 			...(input.question ? { question: input.question.slice(0, 4_096) } : {}),
 			...(input.recommendedAction ? { recommendedAction: input.recommendedAction.slice(0, 4_096) } : {}),
-			...(input.kind === "plan_recovery"
+			...(input.kind === "user_decision" && input.plan
+				? { recovery: this.recoveryEvidence(input.run, input.plan, input.spec ?? this.specs(input.run)[0]!) }
+				: input.kind === "plan_recovery"
 				? input.spec
 					? { recovery: this.recoveryEvidence(input.run, input.plan, input.spec) }
 					: (() => { throw new Error("Plan-recovery attention requires a compiled plan specification"); })()
@@ -1211,6 +1214,11 @@ export class HerderRunManager {
 		} else {
 			const namespace = driver.inspectNamespace("resume");
 			if (!namespace.ok) throw new Error(`Cannot resume ambiguous Herder namespace: ${namespace.reason}`);
+		}
+		const dropped = this.store.getPlans(run.runId).find(plan => plan.repair.some(detail => detail.startsWith("DROPPED_BY_USER [")));
+		if (dropped) {
+			this.store.updateRun({ status: "paused", terminalDetail: dropped.repair.find(detail => detail.startsWith("DROPPED_BY_USER ["))! });
+			return this.reply();
 		}
 		const finalPlan = this.store.getPlan(run.runId, "RUN");
 		const finalCancellation = finalPlan?.phase === "BLOCKED" ? finalPlan.repair.findLast((detail) => detail.startsWith("ATTENTION_CANCEL [")) : undefined;
@@ -2027,11 +2035,23 @@ export class HerderRunManager {
 					parsed = parseWorkerResult(action.role as WorkerRole, terminal.response);
 					if (parsed.kind !== "implementer") {
 						const contracts = reviewFindingContractsFromSpecs(plan.planId === "RUN" ? this.specs(run) : [this.spec(run, plan.planId)]);
-						if (parsed.kind === "reviewer") validateReviewerResult(parsed, contracts, plan.planId === "RUN");
+						if (parsed.kind === "reviewer") {
+							const previousFindings = this.store.getActions(run.runId).filter(entry => entry.planId === plan.planId && entry.generation === plan.generation && entry.state === "terminal")
+								.flatMap(entry => { const prior = storedWorkerResult(entry); return prior?.kind === "reviewer" ? prior.findings : []; });
+							parsed = normalizeReviewerFindings(parsed, action.actionId, previousFindings);
+							validateReviewerResult(parsed, contracts, plan.planId === "RUN");
+						}
 						else {
 							const reviewer = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation, round: plan.round, role: "plan-reviewer", state: "terminal" });
 							const result = reviewer ? storedWorkerResult(reviewer) : null;
-							validateJudgeFindings(parsed, result?.kind === "reviewer" ? result.findings : [], contracts);
+							const history = this.store.getActions(run.runId).filter(entry => entry.planId === plan.planId && entry.generation === plan.generation && entry.state === "terminal");
+							const exclusions = excludedFindings(history, plan.planId, plan.generation);
+							const excluded = new Set(exclusions.map(entry => findingId(entry) ?? entry));
+							const priorEvidence = history.flatMap(entry => {
+								const prior = storedWorkerResult(entry);
+								return prior?.kind === "reviewer" && entry.actionId !== reviewer?.actionId ? prior.findings.filter(finding => excluded.has(findingId(finding) ?? "")) : [];
+							});
+							validateJudgeFindings(parsed, result?.kind === "reviewer" ? result.findings : [], contracts, [...priorEvidence, ...exclusions.filter(entry => !priorEvidence.some(prior => findingId(prior) === findingId(entry)))], plan.planId === "RUN");
 						}
 					}
 				} catch (error) { parsed = null; parseError = (error as Error).message; }
@@ -2067,7 +2087,7 @@ export class HerderRunManager {
 						recommendedAction: "Explicitly retry the same Reviewer mode/round with a fresh action budget, cancel, or defer. No automatic retry, code repair, plan rewrite, acceptance, or Reignite is authorized.",
 					}),
 				};
-			} else if (terminal.interrupted || (run.yolo && terminal.error)) {
+			} else if (terminal.interrupted || terminal.error) {
 				const detail = terminal.error || "Worker transport was interrupted";
 				transition = action.role === "plan-implementer"
 					? this.retryImplementerTransport(run, plan, action, detail)
@@ -2210,7 +2230,7 @@ export class HerderRunManager {
 
 	/** Classification preserves evidence; it never grants approval, edits, or another code round. */
 	private finishEnvironmentBlock(run: StoredRun, plan: StoredPlan, action: StoredAction, result: WorkerResult): TerminalTransition | null {
-		if (result.blockerKind === "SAFETY") {
+		if (result.blockerKind === "SAFETY" && result.kind !== "reviewer") {
 			const detail = boundedEvidence(`Safety decision required; no remediation project is authorized. Work and evidence preserved at ${plan.worktree}.\n${result.kind === "implementer" ? result.stoppedBecause || result.notes : result.rationale}\n${[...result.setup, ...result.checks].join("\n")}`, 16_384);
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", repair: [...plan.repair, detail] },
@@ -2342,92 +2362,14 @@ export class HerderRunManager {
 		}
 		const environment = this.finishEnvironmentBlock(run, plan, action, result);
 		if (environment) return environment;
-		const blockers = countBlocking(result.findings);
-		const verdict = result.verdict;
 		if (plan.planId === "RUN") {
 			const verification = this.store.getVerification(run.runId, plan.generation);
-			if (!verification) {
-				const detail = "Legacy final Reviewer evidence was discarded; exact-tree verification is required.";
-				return {
-					plan: { ...plan, phase: "BLOCKED", reviewPass: plan.reviewPass + 1, repair: [detail] },
-					runUpdate: { status: "paused", terminalDetail: detail },
-				};
-			}
-			if (verification.state !== "passed"
-				|| verification.request.integrationHead !== plan.approvedHead
+			if (verification?.state !== "passed" || verification.request.integrationHead !== plan.approvedHead
 				|| verification.request.integrationTree !== plan.approvedTree) {
 				throw new Error("Final Reviewer is not bound to passed verification evidence for its frozen tree");
 			}
-			if (result.blockerKind === "REQUIREMENT") {
-				const detail = result.rationale;
-				return {
-					plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: [...plan.repair, detail] },
-					runUpdate: { status: "needs_input", terminalDetail: detail },
-					attention: this.attention({
-						run, plan, kind: "user_decision", cause: "final_reviewer_needs_input",
-						actionId: action.actionId, state: "awaiting_input",
-						continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
-						detail, question: detail,
-						recommendedAction: "Answer the final Reviewer requirement decision; this does not complete the audit or waive verification.",
-					}),
-				};
-			}
-			if (verdict !== "APPROVE" || result.scope !== "PASS" || blockers > 0) {
-				const detail = `Final audit incomplete under the approved contract: ${result.rationale || result.findings.join("; ") || verdict}. No successor work is authorized.`;
-				return {
-					plan: { ...plan, phase: "BLOCKED", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [detail] },
-					runUpdate: { status: "paused", terminalDetail: detail },
-					attention: this.attention({
-						run, plan, kind: "user_decision", cause: "final_reviewer_needs_input",
-						actionId: action.actionId, state: "awaiting_input",
-						continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
-						detail, question: "Which explicit decision or authorized repair addresses the remaining approved obligations?",
-						recommendedAction: "Preserve integrated work and failed audit evidence. Do not mark complete, create a successor, or amend scope without user authorization.",
-					}),
-				};
-			}
-			return {
-				plan: { ...plan, phase: "FINAL_APPROVED", reviewPass: plan.reviewPass + 1, findings: result.findings },
-				reigniteRequest: this.buildReigniteDossier(run, plan, result, verification),
-			};
 		}
-		const decision = result.blockerKind === "REQUIREMENT"
-			? { action: "BLOCKED" as const, nextRound: null }
-			: decideReview({ round: plan.round, verdict, scope: result.scope, openBlockers: blockers });
-		const reviewed = { ...plan, reviewPass: plan.reviewPass + (result.blockerKind === "REQUIREMENT" ? 0 : 1), findings: result.findings };
-		if (decision.action === "READY_TO_INTEGRATE") {
-			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree) throw new Error(`Reviewer approval has no frozen patch for ${plan.planId}`);
-			const resultSha256 = sha256(stableJson(result));
-			const approval = createApproval({
-				runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
-				reviewerActionId: action.actionId, decisionActionId: action.actionId, decisionRole: "plan-reviewer",
-				assignmentSha256: plan.assignmentSha256, approvedBase: plan.approvedBase,
-				approvedHead: plan.approvedHead, approvedTree: plan.approvedTree,
-				reviewResultSha256: resultSha256, decisionResultSha256: resultSha256,
-			});
-			return { plan: { ...reviewed, phase: "READY_TO_INTEGRATE", repair: [] }, approval };
-		} else if (decision.action === "REPAIR_DIRECT") {
-			return { plan: { ...reviewed, phase: "READY_IMPLEMENTER", round: decision.nextRound!, repair: result.fixGuidance } };
-		} else if (decision.action === "JUDGE") {
-			return { plan: { ...reviewed, phase: "READY_JUDGE", repair: result.fixGuidance } };
-		}
-		const detail = result.rationale || result.findings[0] || "Reviewer blocked the plan";
-		return {
-			plan: { ...reviewed, phase: "BLOCKED", repair: [detail] },
-			attention: this.attention({
-				run,
-				plan,
-				spec: this.spec(run, plan.planId),
-				kind: "plan_recovery",
-				cause: decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "reviewer_blocked",
-				result,
-				actionId: action.actionId,
-				state: "pending",
-				continuation: { role: "plan-reviewer", phase: "READY_REVIEWER" },
-				detail,
-				recommendedAction: "Report the blocked approved obligation and preserved evidence. Do not revise or expand the graph; ask only for the specific missing decision or separately authorized effort.",
-			}),
-		};
+		return { plan: { ...plan, phase: "READY_JUDGE", reviewPass: plan.reviewPass + 1, findings: result.findings, repair: [] } };
 	}
 
 	private recoverReigniteDossier(run: StoredRun): ReigniteRequest | null {
@@ -2519,6 +2461,13 @@ export class HerderRunManager {
 			});
 			const reviewResult = reviewer ? storedWorkerResult(reviewer) : null;
 			if (!reviewer || !reviewResult || reviewResult.kind !== "reviewer") throw new Error(`Judge cannot approve ${plan.planId} without a terminal Reviewer result`);
+			if (plan.planId === "RUN") {
+				const verification = this.store.getVerification(run.runId, plan.generation);
+				if (verification?.state !== "passed" || verification.request.integrationHead !== plan.approvedHead
+					|| verification.request.integrationTree !== plan.approvedTree) throw new Error("Final Judge requires passed exact-tree verification");
+				return { plan: { ...plan, phase: "FINAL_APPROVED", findings: result.findings, repair: [] },
+					reigniteRequest: this.buildReigniteDossier(run, plan, reviewResult, verification), leaks: result.leaks };
+			}
 			const approval = createApproval({
 				runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
 				reviewerActionId: reviewer.actionId, decisionActionId: action.actionId, decisionRole: "plan-judge",
@@ -2527,9 +2476,9 @@ export class HerderRunManager {
 				reviewResultSha256: sha256(stableJson(reviewResult)), decisionResultSha256: sha256(stableJson(result)),
 			});
 			return { plan: { ...plan, phase: "READY_TO_INTEGRATE", findings: result.findings, repair: [] }, approval, leaks: result.leaks };
-		} else if (decision.action === "REPAIR_GUIDED") {
+		} else if (decision.action === "REPAIR_GUIDED" && plan.planId !== "RUN") {
 			return { plan: { ...plan, phase: "READY_IMPLEMENTER", round: decision.nextRound!, findings: result.findings, repair: result.repairContracts } };
-		} else if (decision.action === "NEEDS_INPUT") {
+		} else if (decision.action === "NEEDS_INPUT" || plan.planId === "RUN") {
 			const terminalDetail = result.question || result.rationale;
 			return {
 				plan: { ...plan, phase: "NEEDS_INPUT", findings: result.findings, repair: [terminalDetail] },
@@ -2537,7 +2486,7 @@ export class HerderRunManager {
 				attention: this.attention({
 					run,
 					plan,
-					spec: this.spec(run, plan.planId),
+					...(plan.planId !== "RUN" ? { spec: this.spec(run, plan.planId) } : {}),
 					kind: "user_decision",
 					cause: "judge_needs_input",
 					actionId: action.actionId,
@@ -2553,10 +2502,11 @@ export class HerderRunManager {
 		const cause: AttentionCause = decision.action === "BLOCKED_ROUND_LIMIT" ? "round_limit" : "judge_blocked";
 		return {
 			plan: { ...plan, phase: "BLOCKED", findings: result.findings, repair: [terminalDetail] },
+			...(decision.action === "BLOCKED_ROUND_LIMIT" ? { runUpdate: { status: "paused" as const, terminalDetail: "Judge repair requires another implementation attempt; autonomous round budget exhausted." } } : {}),
 			attention: this.attention({
 				run,
 				plan,
-				spec: this.spec(run, plan.planId),
+				...(plan.planId !== "RUN" ? { spec: this.spec(run, plan.planId) } : {}),
 				kind: "plan_recovery",
 				cause,
 				actionId: action.actionId,
@@ -2754,24 +2704,68 @@ export class HerderRunManager {
 			this.store.updateRun({ status: "needs_input", terminalDetail: "User-authorized scope draft; exact adoption requires separate host confirmation. Budgets unchanged." });
 			return;
 		}
+		const disposition = ["accept", "reject"].includes(requestedAction)
+			&& ["user_decision", "plan_recovery"].includes(attention.kind);
 		const clarification = requestedAction === "answer_and_resume" && attention.kind === "user_decision" && Boolean(resolution.answer?.trim());
 		const operatorRetry = requestedAction === "retry" && attention.kind === "operator_attention"
-			&& ["transport_exhausted", "verification_environment", "review_budget_exhausted"].includes(attention.cause);
-		const implementationRetry = requestedAction === "retry" && attention.kind === "plan_recovery"
-			&& ["round_limit", "implementer_exhausted", "reviewer_blocked", "judge_blocked", "integration_conflict_exhausted"].includes(attention.cause);
-		if (!clarification && !operatorRetry && !implementationRetry) throw new Error("Stopped attention permits record-only answer, defer, stop, or host-authorized implementation/operator retry/within-scope clarification. Scope changes require /herder-revise.");
+			&& ["transport_exhausted", "verification_environment", "review_budget_exhausted", "worker_protocol_error"].includes(attention.cause);
+		const implementationRetry = requestedAction === "retry" && ["plan_recovery", "user_decision"].includes(attention.kind) && attention.planId !== "RUN";
+		if (!disposition && !clarification && !operatorRetry && !implementationRetry) throw new Error("Stopped attention permits record-only answer, defer, stop, or host-authorized bounded retry/accept/reject. Final RUN cannot start another implementation; scope changes require /herder-revise.");
 		assertHostAttentionGrant(run, resolution);
-		if (implementationRetry && attention.kind === "plan_recovery") this.validateRecoveryTarget(run, attention, "unchanged_retry", resolution);
-
 		const plan = this.store.getPlan(run.runId, attention.planId);
 		if (!plan || plan.generation !== attention.generation || plan.round !== attention.round || !["NEEDS_INPUT", "BLOCKED"].includes(plan.phase)) {
 			throw new Error(`Attention request ${attention.requestId} has no matching input-waiting continuation`);
 		}
+		const driver = this.driver(run);
+		if (this.store.getActions(run.runId, ["proposed", "dispatched"]).some(action => action.planId === plan.planId)
+			|| driver.leaseReason(plan.worktree)) throw new Error("Attention target still owns an active action or lease");
+		if (disposition || implementationRetry || (clarification && recoveryIdentityFromRequest(attention))) {
+			const expected = recoveryIdentityFromRequest(attention);
+			const current: AttentionGitIdentity = { assignmentPath: plan.assignmentPath, assignmentSha256: plan.assignmentSha256,
+				snapshotSha256: plan.snapshotSha256, generationBase: plan.generationBase, branch: plan.branch, worktree: plan.worktree,
+				worktreeHead: driver.worktreeHead(plan.worktree), worktreeTree: driver.worktreeTree(plan.worktree) };
+			if (!expected || !resolution.git || !sameRecoveryIdentity(expected, resolution.git) || !sameRecoveryIdentity(expected, current)) throw new Error("Attention frozen Git identity changed");
+			driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
+			if (requestedAction !== "reject" && driver.worktreeStatus(plan.worktree)) throw new Error("Attention decision requires a clean frozen worktree");
+			if (driver.branchHead(plan.branch) !== current.worktreeHead || gitValue(plan.worktree, "symbolic-ref", "--short", "HEAD") !== plan.branch) throw new Error("Attention branch identity changed");
+			if (!clarification && !resolution.rationale?.trim()) throw new Error("Attention decision requires a rationale");
+		}
+		let repair = plan.repair;
+		if (implementationRetry) {
+			const judge = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation, round: plan.round, role: "plan-judge", state: "terminal" });
+			const result = judge ? storedWorkerResult(judge) : null;
+			if (result?.kind !== "judge" || result.decision !== "REPAIR" || !result.authorizedBlockers.length || !result.repairContracts.length) throw new Error("Next implementation requires a bounded Judge REPAIR list; no raw Reviewer guidance or original-plan expansion is authorized");
+			repair = result.repairContracts;
+		}
+		let approval: Omit<StoredApproval, "createdAt"> | undefined;
+		if (requestedAction === "accept") {
+			if (!plan.approvedBase || !plan.approvedHead || !plan.approvedTree || resolution.git?.worktreeHead !== plan.approvedHead
+				|| resolution.git.worktreeTree !== plan.approvedTree) throw new Error("Acceptance requires the exact frozen reviewed patch");
+			if (plan.planId !== "RUN" && this.yoloOutOfScopePaths(run, plan, plan.approvedBase, plan.approvedHead).length) throw new Error("Acceptance cannot grant out-of-scope write authority");
+			const reviewer = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation, round: plan.round, role: "plan-reviewer", state: "terminal" });
+			const result = reviewer ? storedWorkerResult(reviewer) : null;
+			if (!reviewer || result?.kind !== "reviewer" || storedTerminalRecord(reviewer)?.terminal.interrupted) throw new Error("Acceptance requires actual terminal Reviewer evidence");
+			if (plan.planId === "RUN") {
+				const verification = this.store.getVerification(run.runId, plan.generation);
+				if (verification?.state !== "passed" || verification.request.integrationHead !== plan.approvedHead
+					|| verification.request.integrationTree !== plan.approvedTree) throw new Error("Final acceptance requires passed exact-tree verification");
+			}
+			approval = createApproval({ runId: run.runId, planId: plan.planId, generation: plan.generation, round: plan.round,
+				reviewerActionId: reviewer.actionId, decisionActionId: reviewer.actionId, decisionRole: "user", userAcceptance: resolution,
+				assignmentSha256: plan.assignmentSha256, approvedBase: plan.approvedBase, approvedHead: plan.approvedHead, approvedTree: plan.approvedTree,
+				reviewResultSha256: sha256(stableJson(result)), decisionResultSha256: sha256(stableJson(resolution)) });
+		}
 		this.store.transaction(() => {
-			this.updatePlan(plan, { phase: implementationRetry ? "READY_IMPLEMENTER" : attention.continuation.phase, repair: [...plan.repair, `ATTENTION_${clarification ? "ANSWER" : "RETRY"} [${attention.requestId}]: ${resolution.answer || resolution.rationale || "host-authorized operator retry"}`] });
+			const marker = `${requestedAction === "reject" ? "DROPPED_BY_USER" : requestedAction === "accept" ? "ACCEPTED_AS_IS" : "ATTENTION_RETRY"} [${attention.requestId}]: ${resolution.answer || resolution.rationale || "host-authorized retry"}`;
+			this.updatePlan(plan, { phase: requestedAction === "reject" ? "BLOCKED" : requestedAction === "accept" ? (plan.planId === "RUN" ? "FINAL_APPROVED" : "READY_TO_INTEGRATE") : implementationRetry ? "READY_IMPLEMENTER" : attention.continuation.phase,
+				round: implementationRetry ? Math.min(MAX_PLAN_ROUNDS, plan.round + 1) : plan.round,
+				repair: implementationRetry ? repair : [...repair, marker] });
+			if (approval) this.store.putApproval(approval);
 			this.store.recordEvent(run.runId, `manager-attention-resolution:${attention.requestId}`, "attention_resolution", resolution);
 			this.store.resolveAttention(attention.requestId);
 			this.attentionStatusAfterResolution(run.runId);
+			const budget = this.store.getBudget(run.runId);
+			if (requestedAction === "reject" || budget?.stopReason || (budget && budget.used >= budget.limit)) this.store.updateRun({ status: "paused", terminalDetail: `${marker}. ${budget?.stopReason || "Further execution requires remaining budget; no allocation was changed."}` });
 		});
 	}
 
@@ -2827,13 +2821,13 @@ export class HerderRunManager {
 			const request = this.store.getAttention(resolution.requestId);
 			const latest = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation,
 				round: plan.round, role: "plan-reviewer", state: "terminal" });
-			if (!request || request.kind !== "plan_recovery" || request.state !== "resolved"
+			if (!request || !("recovery" in request) || !request.recovery || request.state !== "resolved"
 				|| request.requestSha256 !== attentionRequestSha256(request) || resolution.requestSha256 !== request.requestSha256
 				|| resolution.capabilityToken !== (request.capabilityToken || attentionCapabilityToken(request.requestId))
 				|| normalizeAttentionAction(resolution.action) !== "accept" || resolution.confirmed !== true || !resolution.answer?.trim() || !resolution.rationale?.trim()
-				|| request.runId !== run.runId || request.planId !== plan.planId || request.generation !== plan.generation || request.round !== MAX_PLAN_ROUNDS
+				|| request.runId !== run.runId || request.planId !== plan.planId || request.generation !== plan.generation || request.round !== plan.round
 				|| resolution.runId !== request.runId || resolution.planId !== request.planId || resolution.generation !== request.generation || resolution.round !== request.round
-				|| plan.round !== MAX_PLAN_ROUNDS || approval.decisionActionId !== reviewer.actionId || request.actionId !== reviewer.actionId || latest?.actionId !== reviewer.actionId
+				|| approval.decisionActionId !== reviewer.actionId || latest?.actionId !== reviewer.actionId
 				|| !resolution.git || !sameRecoveryIdentity(resolution.git, recoveryIdentityFromRequest(request)!)
 				|| request.recovery.assignmentPath !== plan.assignmentPath || request.recovery.assignmentSha256 !== plan.assignmentSha256
 				|| request.recovery.snapshotSha256 !== plan.snapshotSha256 || request.recovery.branch !== plan.branch || request.recovery.worktree !== plan.worktree
@@ -3003,9 +2997,9 @@ export class HerderRunManager {
 				if (verification?.state !== "passed"
 					|| verification.request.integrationHead !== finalPlan.approvedHead
 					|| verification.request.integrationTree !== finalPlan.approvedTree
-					|| (run.yolo && (driver.branchHead(run.integrationBranch) !== finalPlan.approvedHead
+					|| (driver.branchHead(run.integrationBranch) !== finalPlan.approvedHead
 						|| driver.worktreeHead(run.integrationWorktree) !== finalPlan.approvedHead
-						|| driver.worktreeTree(run.integrationWorktree) !== finalPlan.approvedTree || Boolean(driver.worktreeStatus(run.integrationWorktree))))) {
+						|| driver.worktreeTree(run.integrationWorktree) !== finalPlan.approvedTree || Boolean(driver.worktreeStatus(run.integrationWorktree)))) {
 					const detail = "Final completion is blocked; exact-tree verification is required.";
 					this.store.transaction(() => {
 						this.updatePlan(finalPlan, { phase: "BLOCKED", repair: [detail] });
@@ -3014,7 +3008,7 @@ export class HerderRunManager {
 					this.projectLifecycleBestEffort();
 					return { run, reply: this.reply() };
 				}
-				this.store.updateRun({ status: "complete", terminalDetail: run.yolo ? "YOLO accepted all plans after exact-tree verification; no independent review." : "All plans integrated and final audit approved." });
+				this.store.updateRun({ status: "complete", terminalDetail: run.yolo ? "YOLO accepted all plans after exact-tree verification; no independent review." : finalPlan.repair.some(detail => detail.startsWith("ACCEPTED_AS_IS [")) ? "All plans integrated; final audit accepted as-is by user after exact-tree verification." : "All plans integrated and final audit approved." });
 				this.projectLifecycleBestEffort();
 				return { run, reply: this.refreshReply() };
 			}
@@ -3053,7 +3047,7 @@ export class HerderRunManager {
 					return { run, reply: this.reply() };
 				}
 				if (verification.request.integrationHead !== integrationHead || verification.request.integrationTree !== integrationTree
-					|| (run.yolo && (driver.worktreeHead(run.integrationWorktree) !== integrationHead || Boolean(driver.worktreeStatus(run.integrationWorktree))))) {
+					|| driver.worktreeHead(run.integrationWorktree) !== integrationHead || Boolean(driver.worktreeStatus(run.integrationWorktree))) {
 					throw new Error("Passed verification no longer matches the integration branch");
 				}
 				this.store.putPlan({

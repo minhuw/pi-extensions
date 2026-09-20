@@ -74,7 +74,7 @@ const planningWorkflowSchema = Type.Object({
 	editToken: Type.Optional(Type.String()),
 	track: Type.Optional(Type.Boolean()),
 	requestId: Type.Optional(Type.String()),
-	action: Type.Optional(Type.String({ description: "Stopped attention: answer records only; defer or stop preserves evidence. Safe operator retry requires host confirmation. Scope amendments must be user-invoked through /herder-revise, never initiated by this tool." })),
+	action: Type.Optional(Type.String({ description: "Judge/plan-recovery attention: retry = next round (exact bounded repairs only); accept = accept unresolved findings as-is, not passed checks; reject = drop plan, preserve work and block dependents. These require interactive exact host confirmation and grant no scope or budget. RUN accept additionally requires passed exact gates. Other stopped attention: answer records only; defer or stop preserves evidence; Safe operator retry requires host confirmation and remains separate. /herder-budget grants effort separately. Scope amendments must be user-invoked through /herder-revise, never initiated by this tool." })),
 	answer: Type.Optional(Type.String()),
 	rationale: Type.Optional(Type.String()),
 }, { additionalProperties: false });

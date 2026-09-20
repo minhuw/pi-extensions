@@ -199,14 +199,14 @@ test("legacy abandonment replay is refused without deleting execution or Markdow
 	} finally { value.dispose(); }
 });
 
-test("plan attention rejects every retired action at the manager boundary", { timeout: 30_000 }, async () => {
+test("plan attention rejects retired actions and cannot reuse a revision grant for other decisions", { timeout: 30_000 }, async () => {
 	const value = fixture();
 	try {
 		const { request } = await begin(value);
 		const manager = new HerderRunManager(value.directory);
 		try {
 			for (const action of ["answer_and_resume", "retry", "unchanged_retry", "revise", "reject", "accept"]) {
-				await assert.rejects(manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer: "do it", rationale: "do it", confirmed: true } }), /Stopped attention permits/);
+				await assert.rejects(manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(request), action, answer: "do it", rationale: "do it", confirmed: true } }), ["retry", "accept", "reject"].includes(action) ? /Host attention grant is stale or does not match this exact decision/ : /Stopped attention permits/);
 			}
 		} finally { manager.close(); }
 	} finally { value.dispose(); }

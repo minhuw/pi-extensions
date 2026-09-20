@@ -4,13 +4,13 @@ import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { invokeHerderTool } from "../src/application/tools.ts";
 import { beginRequestedRunRevision, finishRunRevision } from "../src/application/run-revision.ts";
-import { grantHostAttention, confirmRunRevision, prepareRunRevision, readRunRevision, restoreRevisionGraph, verifyRevisionCheckout, writeRunRevision, type RunRevision } from "../src/core/run-revision.ts";
+import { grantHostAttention, revisionDriver, confirmRunRevision, prepareRunRevision, readRunRevision, restoreRevisionGraph, verifyRevisionCheckout, writeRunRevision, type RunRevision } from "../src/core/run-revision.ts";
 import { attentionRequestSha256, sha256, stableJson, type AttentionResolutionInput, type ManagerAttentionRequest, type ManagerReply } from "../src/shared/protocol.ts";
 
 import { graphInputSha256 } from "../src/core/plan-edit.ts";
 import { RunStore, type StoredPlanSpec, type StoredRun } from "../src/daemon/run-store.ts";
 
-import { attentionResolutionFromRequest } from "./attention.ts";
+import { attentionResolutionFromRequest, isRoundDecision } from "./attention.ts";
 
 export interface RunRevisionHost {
 	assertRun?(run: StoredRun): void;
@@ -95,14 +95,26 @@ export async function confirmHostAttention(directory: string, resolution: Attent
 		if (!run || !request || request.state === "resolved" || request.requestSha256 !== resolution.requestSha256 || run.runId !== resolution.runId) throw new Error("Attention identity changed before confirmation");
 		assertCurrent?.(run);
 		const inputSha256 = graphInputSha256(directory);
-		const approved = await ctx.ui.confirm(resolution.action === "retry" ? "Retry this exact stopped role?" : resolution.action === "answer_and_resume" ? "Confirm this exact within-scope clarification?" : "Open a scope amendment?", [
+		const driver = revisionDriver(run);
+		const worktree = request.planId === "RUN" ? run.integrationWorktree : store.getPlan(run.runId, request.planId)?.worktree;
+		const treeBinding = () => worktree ? { worktree, head: driver.worktreeHead(worktree), tree: driver.worktreeTree(worktree), status: driver.worktreeStatus(worktree) } : null;
+		const currentTree = treeBinding();
+		const title = resolution.action === "accept" ? "Accept unresolved findings as-is, not passed checks?"
+			: resolution.action === "reject" ? "Drop plan, preserving work and blocking dependents?"
+			: resolution.action === "retry" ? (isRoundDecision(request) ? "Next round: exact bounded repairs only?" : "Retry this exact stopped role?")
+			: resolution.action === "answer_and_resume" ? "Confirm this exact within-scope clarification?" : "Open a scope amendment?";
+		const approved = await ctx.ui.confirm(title, [
 			`Run: ${run.runId}`, `Generation: ${run.currentGeneration}`, `Graph: ${run.graphSha256}`,
 			`Request: ${request.requestId}`, `Action: ${resolution.action}`, `Role: ${request.continuation.role}; round ${request.round}`,
+			`Request SHA256: ${request.requestSha256}`, `Resolution SHA256: ${sha256(stableJson(resolution))}`,
+			`Current worktree: ${currentTree?.worktree ?? "none"}`, `HEAD: ${currentTree?.head ?? "none"}`, `Tree: ${currentTree?.tree ?? "none"}`,
 			`Answer: ${resolution.answer ?? "none"}`, `Rationale: ${resolution.rationale ?? "none"}`,
-			["retry", "answer_and_resume"].includes(resolution.action) ? "Confirm this makes only the recorded continuation runnable within the already approved scope and remaining budget. No acceptance waiver, permission expansion, dependency change, or budget refill is authorized." : "Authorize Markdown proposal drafting only. Preserve patches and history. Exact changes require a separate final confirmation; effort budgets are unchanged.",
+			resolution.action === "accept" ? "Accept unresolved findings as-is, not passed checks. Failed checks remain failed; backend exact gates and integration requirements remain authoritative. This grants no scope expansion or budget."
+				: resolution.action === "reject" ? "Preserve existing patches, branches, worktrees and evidence. Drop this plan and block dependents; this is not destructive cleanup or abandonment of the whole run."
+				: ["retry", "answer_and_resume"].includes(resolution.action) ? "Confirm this makes only the recorded continuation runnable within the already approved scope and remaining budget. No acceptance waiver, permission expansion, dependency change, or budget refill is authorized." : "Authorize Markdown proposal drafting only. Preserve patches and history. Exact changes require a separate final confirmation; effort budgets are unchanged.",
 		].join("\n\n"));
 		if (!approved) throw new Error("Host confirmation dismissed; execution and evidence are unchanged");
-		if (graphInputSha256(directory) !== inputSha256 || stableJson(store.getRun()) !== stableJson(run) || (newRequest ? Boolean(store.getNextAttention(run.runId)) : stableJson(store.getAttention(request.requestId)) !== stableJson(request))) throw new Error("Attention changed during host confirmation");
+		if (stableJson(treeBinding()) !== stableJson(currentTree) || graphInputSha256(directory) !== inputSha256 || stableJson(store.getRun()) !== stableJson(run) || (newRequest ? Boolean(store.getNextAttention(run.runId)) : stableJson(store.getAttention(request.requestId)) !== stableJson(request))) throw new Error("Attention changed during host confirmation");
 		assertCurrent?.(run);
 		grantHostAttention(run, resolution);
 		return run;

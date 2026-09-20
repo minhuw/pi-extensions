@@ -49,16 +49,17 @@ test("three implementation rounds survive generations, cancellation, reset and t
 test("all roles, verification and repair share finite ledger; grant identity and replay are atomic", () => {
  const f = fixture();
  try {
-  for (let i = 0; i < 18; i++) f.store.putAction(f.action(`review${i}`, 1, 1, i % 2 ? "plan-reviewer" : "plan-judge"));
+  const limit = f.store.getBudget("run")!.limit;
+  for (let i = 0; i < limit - 2; i++) f.store.putAction(f.action(`review${i}`, 1, 1, i % 2 ? "plan-reviewer" : "plan-judge"));
   const verification = { runId: "run", generation: 1, reservationId: "verification:v", kind: "verification", payloadSha256: "v" };
   f.store.reserveBudget(verification); f.store.reserveBudget(verification);
   f.store.reserveBudget({ ...verification, reservationId: "repair:r", kind: "repair", payloadSha256: "r" });
-  assert.equal(f.store.getBudget("run")!.used, 20);
+  assert.equal(f.store.getBudget("run")!.used, limit);
   assert.throws(() => f.store.putAction(f.action("final", 1, 1, "plan-reviewer", "RUN")), /Run execution budget exhausted/);
   const grant = { requestId: "grant", runId: "run", generation: 1, graphSha256: f.run.graphSha256, amount: 2 };
   assert.throws(() => f.store.grantBudget({ ...grant, generation: 2 }), /stale/);
   f.store.grantBudget(grant); f.store.grantBudget(grant);
-  assert.equal(f.store.getBudget("run")!.limit, 22);
+  assert.equal(f.store.getBudget("run")!.limit, limit + 2);
   assert.throws(() => f.store.grantBudget({ ...grant, amount: 3 }), /different evidence/);
   f.store.putAction(f.action("final", 1, 1, "plan-reviewer", "RUN"));
  } finally { f.cleanup(); }
@@ -67,7 +68,8 @@ test("all roles, verification and repair share finite ledger; grant identity and
 test("failed admission and durable stop share one outer commit, including caller rollback", () => {
  const f = fixture();
  try {
-  for (let i = 0; i < 20; i++) f.store.putAction(f.action(`reserved${i}`, 1, 1, "plan-reviewer"));
+  const limit = f.store.getBudget("run")!.limit;
+  for (let i = 0; i < limit; i++) f.store.putAction(f.action(`reserved${i}`, 1, 1, "plan-reviewer"));
   const commands: string[] = [];
   const exec = f.store.database.exec.bind(f.store.database);
   f.store.database.exec = (sql: string) => { commands.push(sql); exec(sql); };
@@ -91,7 +93,7 @@ test("graph additions and renamed tasks get zero allocation, explicit task grant
  try {
   f.store.updateRun({ currentGeneration: 2, graphSha256: "d".repeat(64) });
   f.store.putPlanSpecs([{ ...f.spec, graphGeneration: 2, planId: "renamed" }]);
-  assert.equal(f.store.getBudget("run")!.limit, 20);
+  assert.equal(f.store.getBudget("run")!.limit, 9 * 1 + 12);
   assert.equal(f.store.getBudget("run")!.baselineGraphSha256, f.run.graphSha256);
   assert.throws(() => f.store.putAction(f.action("renamed", 2, 1, "plan-implementer", "renamed")), /no implementation allocation/);
   f.store.grantBudget({ requestId: "task-grant", runId: "run", generation: 2, graphSha256: "d".repeat(64), amount: 1, planId: "renamed", implementationRounds: 1 });
@@ -112,14 +114,15 @@ test("verification admission is atomic, charged once and fails closed before gat
  const f = fixture();
  try {
   const { request, manifest, manifestSha256 } = verification(f);
-  for (let i = 0; i < 20; i++) f.store.putAction(f.action(`review${i}`, 1, 1, "plan-reviewer"));
+  const limit = f.store.getBudget("run")!.limit;
+  for (let i = 0; i < limit; i++) f.store.putAction(f.action(`review${i}`, 1, 1, "plan-reviewer"));
   assert.throws(() => f.store.transaction(() => f.store.startVerification(request.requestId, manifest, manifestSha256)), /Run execution budget exhausted/);
   assert.equal(f.store.getVerificationByRequestId(request.requestId)!.state, "awaiting_manifest");
   assert.equal(f.store.getRun()!.status, "paused");
   f.store.grantBudget({ requestId: "verify-grant", runId: "run", generation: 1, graphSha256: f.run.graphSha256, amount: 1 });
   f.store.startVerification(request.requestId, manifest, manifestSha256);
   f.store.startVerification(request.requestId, manifest, manifestSha256);
-  assert.equal(f.store.getBudget("run")!.used, 21);
+  assert.equal(f.store.getBudget("run")!.used, limit + 1);
  } finally { f.cleanup(); }
 });
 
@@ -141,6 +144,7 @@ test("schema19 additive migration preserves current graph and reservations and p
    assert.equal((migrated.database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, EXECUTION_SCHEMA_VERSION);
    assert.equal(migrated.getRun()!.status, "paused");
    assert.equal(migrated.getBudget("run")!.used, 3);
+   assert.equal(migrated.getBudget("run")!.limit, 8 * 1 + 12);
    assert.equal(migrated.getBudget("run")!.baselineGeneration, 2);
    assert.match(migrated.getBudget("run")!.baselineSpecsJson, /current/);
    assert.equal(migrated.getAction("old")!.actionId, "old");
@@ -196,12 +200,13 @@ test("transport exemption requires the immediately prior implementation with mat
 test("safe transport still consumes run allocation and cannot bypass a run stop", () => {
  const f = fixture();
  try {
-  for (let i = 0; i < 17; i++) f.store.putAction(f.action(`review${i}`, 1, 1, "plan-reviewer"));
+  const limit = f.store.getBudget("run")!.limit;
+  for (let i = 0; i < limit - 3; i++) f.store.putAction(f.action(`review${i}`, 1, 1, "plan-reviewer"));
   for (let i = 0; i < 3; i++) f.store.putAction(f.action(`implement${i}`, 1, 3));
   assert.equal(f.store.reserveTransportRecovery("run", "001", "implement2"), true);
   assert.throws(() => f.store.putAction(f.action("transport-retry", 1, 3)), /Run execution budget exhausted/);
   f.store.grantBudget({ requestId: "run-only", runId: "run", generation: 1, graphSha256: f.run.graphSha256, amount: 1 });
   f.store.putAction(f.action("transport-retry", 1, 3));
-  assert.equal(f.store.getBudget("run")!.used, 21);
+  assert.equal(f.store.getBudget("run")!.used, limit + 1);
  } finally { f.cleanup(); }
 });

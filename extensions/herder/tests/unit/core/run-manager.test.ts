@@ -151,6 +151,24 @@ async function submitFinalVerification(
 	return { reply: payload(response.reply), manifest };
 }
 
+async function finishJudgeTerminal(
+	service: Awaited<ReturnType<typeof ensureService>>,
+	reply: Record<string, unknown>,
+	prefix: string,
+	response = judgeDoneEnvelope("none"),
+): Promise<Record<string, unknown>> {
+	const judge = (reply.actions as Record<string, unknown>[]).find(action => action.role === "plan-judge");
+	assert.ok(judge, "expected an actual Judge action");
+	await requestManagerOperation(service, "event", {
+		eventId: `${prefix}-dispatch-judge`, kind: "dispatch_results",
+		dispatchResults: [{ actionId: judge.actionId, accepted: true, hostHandle: `${prefix}-judge` }],
+	});
+	return payload(payload(await requestManagerOperation(service, "event", {
+		eventId: `${prefix}-terminal-judge`, kind: "terminals",
+		terminals: [{ actionId: judge.actionId, hostHandle: `${prefix}-judge`, response }],
+	})).reply);
+}
+
 async function prepareSinglePlan(
 	service: Awaited<ReturnType<typeof ensureService>>,
 	fixture: { repo: string; planDirectory: string },
@@ -186,7 +204,7 @@ async function prepareSinglePlan(
 		eventId: `${prefix}-dispatch-reviewer`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: reviewer.actionId, accepted: true, hostHandle: `${prefix}-reviewer` }],
 	});
-	return payload(payload(await requestManagerOperation(service, "event", {
+	const afterReviewer = payload(payload(await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-terminal-reviewer`, kind: "terminals",
 		terminals: [{
 			actionId: reviewer.actionId,
@@ -194,6 +212,7 @@ async function prepareSinglePlan(
 			response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 		}],
 	})).reply);
+	return finishJudgeTerminal(service, afterReviewer, prefix);
 }
 
 async function completeSinglePlan(
@@ -209,6 +228,7 @@ async function finishFinalReview(
 	fixture: { repo: string; planDirectory: string },
 	prefix: string,
 	response: string,
+	judgeResponse = judgeDoneEnvelope("none"),
 ): Promise<Record<string, unknown>> {
 	const afterReviewer = await prepareSinglePlan(service, fixture, prefix);
 	const verified = await submitFinalVerification(service, fixture.planDirectory, afterReviewer, prefix);
@@ -217,7 +237,7 @@ async function finishFinalReview(
 		eventId: `${prefix}-dispatch-final`, kind: "dispatch_results",
 		dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: `${prefix}-final` }],
 	});
-	return payload(payload(await requestManagerOperation(service, "event", {
+	const afterFinalReviewer = payload(payload(await requestManagerOperation(service, "event", {
 		eventId: `${prefix}-terminal-final`, kind: "terminals",
 		terminals: [{
 			actionId: finalReviewer.actionId,
@@ -225,6 +245,8 @@ async function finishFinalReview(
 			response,
 		}],
 	})).reply);
+	if (!(afterFinalReviewer.actions as Record<string, unknown>[]).some(action => action.role === "plan-judge")) return afterFinalReviewer;
+	return finishJudgeTerminal(service, afterFinalReviewer, `${prefix}-final`, judgeResponse);
 }
 
 // Seed an already-persisted legacy report: new final reviews cannot create pending dossiers.
@@ -288,7 +310,7 @@ async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService
 		mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
 	})).reply);
 	let implementer = payload((started.actions as unknown[])[0]);
-	for (let round = 1; round <= 2; round += 1) {
+	for (let round = 1; round <= 1; round += 1) {
 		const hostHandle = `${prefix}-implementer-${round}`;
 		await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-dispatch-implementer-${round}`,
@@ -315,9 +337,9 @@ async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService
 		const afterReviewer = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: `${prefix}-terminal-reviewer-${round}`,
 			kind: "terminals",
-			terminals: [{ actionId: reviewer.actionId, hostHandle: reviewerHost, response: reviewerBlockEnvelope(round) }],
+			terminals: [{ actionId: reviewer.actionId, hostHandle: reviewerHost, response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: exact patch reviewed" }],
 		})).reply);
-		if (round === 2) return payload((afterReviewer.actions as unknown[])[0]);
+		if (round === 1) return payload((afterReviewer.actions as unknown[])[0]);
 		implementer = payload((afterReviewer.actions as unknown[])[0]);
 	}
 	throw new Error("Atomic Judge was not scheduled");
@@ -946,14 +968,26 @@ test(`Reignite persistence failure recovers as skipped through ${recovery} after
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "atomic-reignite-worker" }],
 		});
-		const event = {
-			eventId: "atomic-reignite-terminal",
+		const reviewerEvent = {
+			eventId: "atomic-reignite-reviewer-terminal",
 			kind: "terminals" as const,
 			terminals: [{
 				actionId: String(finalReviewer.actionId),
 				hostHandle: "atomic-reignite-worker",
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: final audit approved\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host",
 			}],
+		};
+		const reviewed = payload(payload(await requestManagerOperation(service, "event", reviewerEvent)).reply);
+		assert.equal(reviewed.status, "running");
+		const finalJudge = (reviewed.actions as Record<string, unknown>[]).find(action => action.role === "plan-judge")!;
+		assert.ok(finalJudge);
+		await requestManagerOperation(service, "event", {
+			eventId: "atomic-reignite-judge-dispatch", kind: "dispatch_results",
+			dispatchResults: [{ actionId: finalJudge.actionId, accepted: true, hostHandle: "atomic-reignite-judge" }],
+		});
+		const event = {
+			eventId: "atomic-reignite-terminal", kind: "terminals" as const,
+			terminals: [{ actionId: String(finalJudge.actionId), hostHandle: "atomic-reignite-judge", response: judgeDoneEnvelope("none") }],
 		};
 		const before = new RunStore(fixture.planDirectory);
 		const usageBefore = usageCount(before);
@@ -1248,7 +1282,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: focused outcome and gates pass\nUSAGE: input_tokens=80; cached_input_tokens=10; output_tokens=20; reasoning_tokens=5; source=test-host",
 			}],
 		}));
-		const verified = await submitFinalVerification(service, fixture.planDirectory, payload(reviewerTerminal.reply), "persistent");
+		const verified = await submitFinalVerification(service, fixture.planDirectory, await finishJudgeTerminal(service, payload(reviewerTerminal.reply), "persistent-plan"), "persistent");
 		const finalReviewer = payload((verified.reply.actions as unknown[])[0]);
 		assert.equal(finalReviewer.planId, "RUN");
 		assert.equal(finalReviewer.workerMode, "FINAL_AUDIT");
@@ -1268,7 +1302,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: aggregate plan set is coherent\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host",
 			}],
 		}));
-		const finalReply = payload(complete.reply);
+		const finalReply = await finishJudgeTerminal(service, payload(complete.reply), "persistent-final");
 		assert.equal(finalReply.status, "complete");
 		assert.equal(payload(finalReply.summary).done, 1);
 		assert.match(fs.readFileSync(path.join(fixture.planDirectory, "README.md"), "utf8"), /\| DONE \|/);
@@ -1285,7 +1319,9 @@ test("persistent service drives a complete deterministic run and reuses its proc
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: aggregate plan set is coherent\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host",
 			}],
 		}));
-		assert.equal(payload(replay.reply).status, "complete");
+		assert.equal(payload(replay.reply).status, "running", "Reviewer replay preserves its intervening Judge proposal, not later completion");
+		assert.equal(payload((payload(replay.reply).actions as unknown[])[0]).role, "plan-judge");
+		assert.equal(payload(payload(await requestService(service, "/v1/status")).reply).status, "complete");
 		await assert.rejects(() => requestManagerOperation(service, "event", {
 			eventId: "terminal-final",
 			kind: "terminals",
@@ -1516,7 +1552,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 			kind: "dispatch_results",
 			dispatchResults: [{ actionId: finalReviewer.actionId, accepted: true, hostHandle: "verification-replacement-final" }],
 		});
-		const complete = payload(payload(await requestManagerOperation(service, "event", {
+		const reviewed = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "verification-replacement-terminal-final",
 			kind: "terminals",
 			terminals: [{
@@ -1525,6 +1561,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: replacement verification is bound to the unchanged tree\nUSAGE: input_tokens=60; cached_input_tokens=10; output_tokens=15; reasoning_tokens=5; source=test-host",
 			}],
 		})).reply);
+		const complete = await finishJudgeTerminal(service, reviewed, "replacement-final");
 		assert.equal(complete.status, "complete");
 		assert.equal(payload(complete.summary).done, 1);
 		const finalState = readManagerState(fixture.planDirectory);
@@ -1639,7 +1676,7 @@ test("persisted FINAL_APPROVED completion fails closed without matching exact-tr
 	}
 });
 
-test("final Reviewer blockers pause across resume and restart without successor dispatch", { timeout: 30_000 }, async () => {
+test("final Judge retains Reviewer blockers across resume and restart without successor dispatch", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-reviewer-input-test-"));
 	const fixture = writeFixture(root);
 	try {
@@ -1647,9 +1684,11 @@ test("final Reviewer blockers pause across resume and restart without successor 
 		const finding = "[fr-1][P1][BLOCKING][PLAN_REQUIREMENT] aggregate requirement missing; obligation=001:A1; evidence=synthetic aggregate assertion fails; violation=required fixture value is missing";
 		const findings = [finding];
 		const response = `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: The aggregate audit is incomplete.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`;
-		const paused = await finishFinalReview(service, fixture, "final-reviewer-input", response);
+		const judgeResponse = judgeDoneEnvelope("none").replace("DECISION: DONE", "DECISION: NEEDS_INPUT").replace("QUESTION: none", "QUESTION: Which required coverage remains incomplete?")
+			.replace("FINDINGS: none", `FINDINGS: ${finding.replace("[P1][BLOCKING]", "[BLOCKING_IN_SCOPE]")}`);
+		const paused = await finishFinalReview(service, fixture, "final-reviewer-input", response, judgeResponse);
 		const assertPaused = (reply: Record<string, unknown>) => {
-			assert.equal(reply.status, "paused");
+			assert.equal(reply.status, "needs_input");
 			assert.equal(reply.reigniteRequest, undefined);
 			assert.deepEqual(reply.actions, []);
 		};
@@ -1659,8 +1698,8 @@ test("final Reviewer blockers pause across resume and restart without successor 
 		const actions = before.getActions(run.runId);
 		const verification = before.getVerification(run.runId, run.currentGeneration);
 		try {
-			assert.equal(before.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
-			assert.deepEqual(before.getPlan(run.runId, "RUN")?.findings, findings);
+			assert.equal(before.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
+			assert.deepEqual(before.getPlan(run.runId, "RUN")?.findings, [finding.replace("[P1][BLOCKING]", "[BLOCKING_IN_SCOPE]")]);
 			assert.equal(before.getReigniteRequest(run.runId, run.currentGeneration), null);
 			const audit = actions.find((action) => action.planId === "RUN" && action.state === "terminal")!;
 			assert.deepEqual(payload(payload(audit.result).workerResult).findings, findings);
@@ -1678,10 +1717,10 @@ test("final Reviewer blockers pause across resume and restart without successor 
 			})).reply));
 			const store = new RunStore(fixture.planDirectory);
 			try {
-				assert.equal(store.getRun()?.status, "paused");
+				assert.equal(store.getRun()?.status, "needs_input");
 				assert.equal(store.getRun()?.currentGeneration, run.currentGeneration);
-				assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
-				assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, findings);
+				assert.equal(store.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
+				assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding.replace("[P1][BLOCKING]", "[BLOCKING_IN_SCOPE]")]);
 				assert.deepEqual(store.getActions(run.runId), actions, "no successor or replacement reviewer dispatch");
 				assert.deepEqual(store.getVerification(run.runId, run.currentGeneration), verification);
 				assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
@@ -1699,18 +1738,19 @@ for (const scenario of [
 	{ name: "approval with blockers", verdict: "APPROVE", scope: "PASS", blockers: true },
 	{ name: "revision without blockers", verdict: "REVISE", scope: "PASS", blockers: false },
 	{ name: "approval with failed scope", verdict: "APPROVE", scope: "FAIL", blockers: false },
-]) test(`final Reviewer ${scenario.name} requires protocol correction, not completion`, { timeout: 30_000 }, async () => {
+]) test(`final Reviewer ${scenario.name} cannot complete without valid Judge approval`, { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-manager-final-protocol-test-"));
 	const fixture = writeFixture(root);
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const finding = "[fr-invalid][P1][BLOCKING][PLAN_REQUIREMENT] obligation=001:A1; evidence=synthetic aggregate assertion fails; violation=required fixture value is missing";
 		const reply = await finishFinalReview(service, fixture, "final-protocol",
-			`VERDICT: ${scenario.verdict}\nFINDINGS: ${scenario.blockers ? finding : "none"}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: ${scenario.scope}\nCHECKS: fixture test — passed\nRATIONALE: Inconsistent synthetic verdict.`);
+			`VERDICT: ${scenario.verdict}\nFINDINGS: ${scenario.blockers ? finding : "none"}\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: ${scenario.scope}\nCHECKS: fixture test — passed\nRATIONALE: Inconsistent synthetic verdict.`,
+			judgeDoneEnvelope("none").replace("DECISION: DONE", "DECISION: NEEDS_INPUT").replace("QUESTION: none", "QUESTION: Which required coverage remains incomplete?"));
 		assert.equal(reply.status, "needs_input");
 		assert.deepEqual(reply.actions, []);
 		assert.equal(reply.reigniteRequest, undefined);
-		assert.equal(payload(reply.attention).cause, "worker_protocol_error");
+		assert.equal(payload(reply.attention).cause, scenario.verdict === "REVISE" ? "judge_needs_input" : "worker_protocol_error");
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
@@ -1796,7 +1836,7 @@ test("final-review graph drift with blockers stays paused without a dossier", { 
 		try {
 			const run = store.getRun()!;
 			assert.equal(run.status, "paused");
-			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "READY_JUDGE");
 			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding]);
 			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
 			assert.deepEqual(drifted.actions, []);
@@ -1849,15 +1889,17 @@ test("final Reviewer block with a patch regression pauses without a dossier", { 
 			fixture,
 			"final-reviewer-block",
 			`VERDICT: BLOCK\nFINDINGS: ${finding}\nFIX_GUIDANCE: Restore the missing check.\nDISCOVERED_PATHS: none\nSCOPE: FAIL\nCHECKS: fixture test — passed\nRATIONALE: Residual regression belongs in a follow-up plan set.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test`,
+			judgeDoneEnvelope("none").replace("DECISION: DONE", "DECISION: BLOCKED")
+				.replace("FINDINGS: none", `FINDINGS: ${finding.replace("[P1][BLOCKING]", "[BLOCKING_IN_SCOPE]")}`),
 		);
-		assert.equal(completed.status, "paused");
+		assert.equal(completed.status, "needs_input");
 		assert.equal(completed.reigniteRequest, undefined);
 		assert.deepEqual(completed.actions, []);
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "BLOCKED");
-			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding]);
+			assert.equal(store.getPlan(run.runId, "RUN")?.phase, "NEEDS_INPUT");
+			assert.deepEqual(store.getPlan(run.runId, "RUN")?.findings, [finding.replace("[P1][BLOCKING]", "[BLOCKING_IN_SCOPE]")]);
 			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
 		} finally { store.close(); }
 	} finally {
@@ -1877,6 +1919,7 @@ test("final Reviewer follow-up findings persist a skipped reignite dossier", { t
 			fixture,
 			"final-reviewer-followup",
 			"VERDICT: APPROVE\nFINDINGS: [fu-1][P2][ADVISORY][FOLLOWUP] later cleanup\n[inv-1][P3][ADVISORY][INVALID] out of scope\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: Only follow-up and invalid findings remain.\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
+			judgeDoneEnvelope("none").replace("FINDINGS: none", "FINDINGS: [fu-1][DEFERRED_OUT_OF_SCOPE][FOLLOWUP] later cleanup is advisory\n[inv-1][REJECTED][INVALID] outside the assignment"),
 		);
 		assert.equal(completed.status, "complete");
 		assert.equal(completed.reigniteRequest, undefined);
@@ -2640,7 +2683,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 				{ actionId: mixedImplementer.actionId, accepted: true, hostHandle: "mixed-implementer" },
 			],
 		});
-		const reviewed = payload(payload(await requestManagerOperation(service, "event", {
+		const afterMixedReviewer = payload(payload(await requestManagerOperation(service, "event", {
 			eventId: "mixed-terminal-reviewer",
 			kind: "terminals",
 			terminals: [{
@@ -2649,6 +2692,8 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 				response: "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: npm test — passed\nRATIONALE: exact patch approved\nUSAGE: input_tokens=1; cached_input_tokens=0; output_tokens=1; reasoning_tokens=0; source=test",
 			}],
 		})).reply);
+		assert.equal(payload(afterMixedReviewer.summary).done, 0);
+		const reviewed = await finishJudgeTerminal(service, afterMixedReviewer, "mixed");
 		assert.equal(payload(reviewed.summary).done, 1);
 		assert.deepEqual((reviewed.active as unknown[]).map((item) => payload(item).planId), ["002"]);
 		const store = new RunStore(fixture.planDirectory);

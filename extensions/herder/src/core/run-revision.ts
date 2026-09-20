@@ -153,7 +153,7 @@ export async function confirmRunRevision(prepared: RunRevision): Promise<RunRevi
 
 /** Host-only grant for one exact attention decision, not a public confirmed flag. */
 export function grantHostAttention(run: StoredRun, resolution: AttentionResolutionInput): void {
-	if (!["revise_run", "abandon_run", "retry", "answer_and_resume"].includes(resolution.action)) throw new Error("Unsupported host attention grant");
+	if (!["revise_run", "abandon_run", "retry", "answer_and_resume", "accept", "reject"].includes(resolution.action)) throw new Error("Unsupported host attention grant");
 	const runtime = path.join(run.planDirectory, ".herder");
 	ensurePrivateDirectory(runtime);
 	const record = { runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256,

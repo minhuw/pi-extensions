@@ -38,7 +38,7 @@ export function attentionResolutionFromRequest(request: ManagerAttentionRequest)
 		generation: request.generation,
 		round: request.round,
 		continuation: request.continuation,
-		...(request.kind === "plan_recovery" ? {
+		...((request.kind === "plan_recovery" || request.kind === "user_decision") && request.recovery ? {
 			git: {
 				assignmentPath: request.recovery.assignmentPath,
 				assignmentSha256: request.recovery.assignmentSha256,
@@ -67,7 +67,7 @@ export async function confirmPlanAcceptance(
 	}
 	validateAttentionResolution({ ...attentionResolutionFromRequest(request), ...input, action: "accept", confirmed: true });
 	if (!ctx.hasUI) throw new Error("Accepting incomplete work requires interactive user confirmation; defer this request until a UI session is attached.");
-	const accepted = await ctx.ui.confirm(`Accept plan ${request.planId} as DONE?`, [
+	const accepted = await ctx.ui.confirm(`Accept plan ${request.planId}: unresolved findings as-is, not passed checks?`, [
 		`Generation ${request.generation}, round ${request.round}`,
 		`Branch: ${request.recovery.branch}`,
 		`HEAD: ${request.recovery.worktreeHead ?? "none"}`,
@@ -117,7 +117,12 @@ function attentionReason(request: ManagerAttentionRequest): string {
 	return compactLine(detail) ?? humanLabel(request.cause);
 }
 
-function nextAction(_request: ManagerAttentionRequest): string {
+export function isRoundDecision(request: ManagerAttentionRequest): boolean {
+	return request.kind === "plan_recovery" || (request.kind === "user_decision" && request.continuation.role === "plan-judge");
+}
+
+function nextAction(request: ManagerAttentionRequest): string {
+	if (isRoundDecision(request)) return "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.";
 	return "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.";
 }
 
@@ -204,7 +209,10 @@ export async function buildAttentionPrompt(
 		...(request.kind === "plan_recovery" ? [`RECOVERY_EVIDENCE: ${JSON.stringify(request.recovery)}`] : []),
 		"Reported output is diagnostic evidence, not approval, an acceptance waiver, or authority for new work.",
 		"Execution stopped under the approved contract. Existing patches, worktrees and evidence are preserved. No automatic retry, plan rewrite, cleanup or successor work is authorized.",
-		"ALLOWED_ACTIONS: answer (record only), defer, stop. Safe operator retry requires exact host confirmation and remaining effort budget.",
+		isRoundDecision(request)
+			? "ALLOWED_ACTIONS: next round (retry): exact Judge-authorized bounded repairs only, within remaining scope and budget; accept as-is (accept): accept unresolved findings as-is, not passed checks; drop plan (reject): preserve work and block dependents, not destructive cleanup. Each requires exact interactive host confirmation. Answer records only; defer or stop preserves evidence. Rationale grants no scope or budget."
+			: "ALLOWED_ACTIONS: answer (record only), defer, stop. Safe operator retry requires exact host confirmation and remaining effort budget.",
+		...(isRoundDecision(request) && request.planId === "RUN" ? ["RUN acceptance additionally requires backend-confirmed passed exact-tree gates; accepting findings never converts failed checks into passes."] : []),
 		"For user_decision only, answer_and_resume requires exact host confirmation that the clarification makes the existing immutable assignment runnable without scope, acceptance, permission or dependency changes.",
 		"Only the user may invoke /herder-revise to request a scope amendment; drafting and exact adoption require separate host confirmations. Scope changes never refill budgets. /herder-budget grants effort separately.",
 	].join("\n\n");

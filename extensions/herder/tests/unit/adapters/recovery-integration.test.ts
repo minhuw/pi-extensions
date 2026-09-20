@@ -321,7 +321,7 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-test("main-session attention stays quiet on status and refuses obsolete selective rejection", { timeout: 30_000 }, async () => {
+test("main-session attention stays quiet on status and refuses rejection without interactive host confirmation", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
@@ -365,7 +365,7 @@ test("main-session attention stays quiet on status and refuses obsolete selectiv
 		assert.equal(messageDetails.cause, "initial_decision_blocked");
 		assert.equal(messageDetails.role, "plan-implementer");
 		assert.equal(messageDetails.round, 1);
-		assert.equal(messageDetails.nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
+		assert.equal(messageDetails.nextAction, "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.");
 		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
 		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: false });
 
@@ -389,7 +389,7 @@ test("main-session attention stays quiet on status and refuses obsolete selectiv
 			undefined,
 			undefined,
 			ctx,
-		), /Stopped attention permits answer, defer, stop, or host-authorized safe operator retry/);
+		), /requires interactive host confirmation/);
 		const unchanged = object((await requestService(service, "/v1/status")).reply);
 		assert.equal(object(unchanged.attention).requestId, attention.requestId);
 		assert.equal(api.customMessages.length, 1, "no selective action consumes the current request");
@@ -433,6 +433,7 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 		};
 		for (let round = 1; round <= 3; round += 1) {
 			const implementer = object((reply.actions as unknown[])[0]);
+			assert.equal(implementer.role, "plan-implementer");
 			assert.equal(implementer.round, round);
 			assert.equal(implementer.workerMode, round === 1 ? "INITIAL" : round === 2 ? "GUIDED_REPAIR" : "RESCUE");
 			const worktree = String(implementer.worktree);
@@ -441,12 +442,11 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 			runCommand("git", ["-C", worktree, "commit", "-m", `fix(value): advance fixture to ${round + 1}`]);
 			reply = await complete(implementer, "STATUS: COMPLETE\nCHECKS: fixture source updated\nFILES CHANGED: src/value.mjs\nNOTES: regression check remains unresolved");
 			const reviewer = object((reply.actions as unknown[])[0]);
+			assert.equal(reviewer.role, "plan-reviewer");
 			reply = await complete(reviewer, "VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: [F1][P1][BLOCKING][PLAN_REQUIREMENT] src/value.mjs:1 — required regression check fails; obligation=A1; evidence=src/value.mjs:1 regression check fails; violation=approved acceptance remains unmet\nFIX_GUIDANCE: [F1] make the regression check pass\nCHECKS: required regression check — FAILED\nRATIONALE: Original acceptance remains unmet");
-			if (round === 2) {
-				const judge = object((reply.actions as unknown[])[0]);
-				assert.equal(judge.role, "plan-judge");
-				reply = await complete(judge, "DECISION: REPAIR\nFINDINGS: [F1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] required check fails; obligation=A1; evidence=src/value.mjs:1 regression check fails; violation=approved acceptance remains unmet\nAUTHORIZED_BLOCKERS: F1\nREPAIR_CONTRACTS: [F1] expected=required regression check passes; constraints=original scope\nPASS_DOCUMENT: Resolve F1, run the required regression check, and preserve original scope. No rejected findings or unresolved decisions.\nCHECKS: required regression check — FAILED\nRATIONALE: One bounded rescue remains");
-			}
+			const judge = object((reply.actions as unknown[])[0]);
+			assert.equal(judge.role, "plan-judge");
+			reply = await complete(judge, "DECISION: REPAIR\nFINDINGS: [F1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] required regression check fails; obligation=A1; evidence=src/value.mjs:1 regression check fails; violation=approved acceptance remains unmet\nAUTHORIZED_BLOCKERS: F1\nREPAIR_CONTRACTS: [F1] expected=required regression check passes; constraints=original scope\nPASS_DOCUMENT: Resolve F1, run the required regression check, and preserve original scope. No rejected findings or unresolved decisions.\nCHECKS: required regression check — FAILED\nRATIONALE: The original regression-check obligation remains unmet");
 		}
 		const attention = object(reply.attention);
 		assert.equal(attention.round, 3);
@@ -469,21 +469,30 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
 		const delivered = await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
-		assert.equal(object(delivered.details).nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
+		assert.equal(object(delivered.details).nextAction, "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.");
 		const params = {
 			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
 			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",
 			rationale: "The user accepts the current implementation with this specific gap.",
 			confirmed: true, // Untrusted model input must not bypass a declined host confirmation.
 		};
-		await assert.rejects(api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx), /Stopped attention permits answer, defer, stop, or host-authorized safe operator retry/);
+		await assert.rejects(api.tool("herder_plan").execute("decline", params, undefined, undefined, ctx), /Host confirmation dismissed; execution and evidence are unchanged/);
 		assert.equal(object(object((await requestService(service, "/v1/status")).reply).attention).requestId, attention.requestId);
-		assert.equal(confirmations.length, 0, "obsolete acceptance never opens a host confirmation");
+		assert.equal(confirmations.length, 1, "a forged confirmed flag cannot bypass actual host consent");
+		assert.match(confirmations[0]!, /Failed checks remain failed/);
+		assert.equal(fs.existsSync(path.join(fixture.planDirectory, ".herder", "attention-host-grant.json")), false);
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			assert.equal(store.getApproval(String(reply.runId), "001", 1), null);
 			assert.equal(store.getAttention(String(attention.requestId))?.state === "resolved", false);
 			assert.match(store.getPlan(String(reply.runId), "001")!.findings.join("\n"), /required regression check fails/);
+			assert.equal(store.getActions(String(reply.runId)).filter(action => action.role === "plan-judge").length, 3);
+			const reviewers = store.getActions(String(reply.runId)).filter(action => action.role === "plan-reviewer");
+			assert.equal(reviewers.length, 3);
+			for (const reviewer of reviewers) {
+				assert.equal(reviewer.state, "terminal");
+				assert.match(JSON.stringify(reviewer.result), /required regression check — FAILED/);
+			}
 		} finally { store.close(); }
 		assert.equal(factory.requests.length, 0);
 

@@ -319,6 +319,7 @@ export interface PlanRecoveryAttentionRequest extends AttentionRequestCore {
 }
 
 export interface UserDecisionAttentionRequest extends AttentionRequestCore {
+	recovery?: AttentionRecoveryEvidence;
 	kind: "user_decision";
 	question: string;
 	recommendedAction?: string;
@@ -428,7 +429,7 @@ export function validateAttentionRequest(value: unknown): asserts value is Manag
 		throw new Error("Attention capability token is invalid");
 	}
 	if (request.kind === "user_decision" && !request.question) throw new Error("User-decision attention requires a question");
-	if (request.kind === "plan_recovery") {
+	if (request.kind === "plan_recovery" || (request.kind === "user_decision" && request.recovery !== undefined)) {
 		const recovery = request.recovery as AttentionRecoveryEvidence | undefined;
 		if (!recovery || typeof recovery !== "object" || Array.isArray(recovery)) throw new Error("Plan-recovery attention requires recovery evidence");
 		for (const [name, candidate, limit] of [

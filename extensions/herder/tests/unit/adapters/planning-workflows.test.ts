@@ -96,7 +96,8 @@ test("final RUN attention prompts retain their separate request bindings and act
 		question: "Which recorded decision should the Judge use?",
 	} as ManagerAttentionRequest);
 	assert.match(userPrompt, /^HERDER_STOPPED_ATTENTION_V1/m);
-	assert.match(userPrompt, /answer \(record only\), defer, stop/);
+	assert.match(userPrompt, /next round \(retry\)/);
+	assert.match(userPrompt, /accept as-is \(accept\)/);
 	assert.match(userPrompt, /answer_and_resume requires exact host confirmation/);
 	assert.match(userPrompt, /without scope, acceptance, permission or dependency changes/);
 	assert.match(userPrompt, /Scope changes never refill budgets/);
@@ -162,7 +163,7 @@ test("final RUN attention prompts retain their separate request bindings and act
 	assert.match(recoveryPrompt, /ROUND: 2/);
 	assert.match(recoveryPrompt, /CONTINUATION_ROLE: plan-judge/);
 	assert.match(recoveryPrompt, /CAUSE: reviewer_blocked/);
-	assert.match(recoveryPrompt, /ALLOWED_ACTIONS: answer \(record only\), defer, stop/);
+	assert.match(recoveryPrompt, /ALLOWED_ACTIONS: next round \(retry\)/);
 	assert.match(recoveryPrompt, /001-plan\.md/);
 	assert.match(recoveryPrompt, /"changedPaths":/);
 	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
@@ -203,7 +204,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		role: "plan-judge",
 		phase: "READY_JUDGE",
 		reason: "Should the optional compatibility alias remain in scope?",
-		nextAction: "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.",
+		nextAction: "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.",
 	});
 	assert.doesNotMatch(JSON.stringify(details), /secret-capability-token/);
 	const operatorDetails = attentionMessageDetails({
@@ -243,7 +244,7 @@ test("attention messages render a compact card while preserving the full prompt"
 	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
 	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
 	assert.match(collapsed, /Reason: Should the optional compatibility alias remain in scope\?/);
-	assert.match(collapsed, /Next: Record an answer, defer, or stop/);
+	assert.match(collapsed, /Next: Next round \(retry\), accept as-is \(accept\), or drop plan \(reject\)/);
 	assert.match(collapsed, /ctrl\+o for full dossier/);
 	assert.doesNotMatch(collapsed, /HERDER_MAIN_SESSION|REQUEST_ID|secret-capability-token/);
 
@@ -396,7 +397,9 @@ test("adapter binds complete attention evidence, including recovery Git identity
 
 	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
 	const prompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", exhausted);
-	assert.match(prompt, /ALLOWED_ACTIONS: answer \(record only\), defer, stop/);
+	assert.match(prompt, /ALLOWED_ACTIONS: next round \(retry\)/);
+	assert.match(prompt, /accept as-is \(accept\).*not passed checks/);
+	assert.match(prompt, /drop plan \(reject\).*not destructive cleanup/);
 	assert.ok(prompt.includes(recovery.worktreeHead));
 	assert.ok(prompt.includes(recovery.worktreeTree));
 	assert.match(prompt, /Only the user may invoke \/herder-revise/);

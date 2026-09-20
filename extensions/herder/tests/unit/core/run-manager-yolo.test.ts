@@ -25,6 +25,7 @@ function fixture(writePaths = ["src/value.mjs"]) {
 }
 const complete = "STATUS: COMPLETE\nCOMMITS: fixture commit\nCHECKS: passed\nFILES CHANGED: src/value.mjs\nDISCOVERED_PATHS: none\nNOTES: implemented";
 const approve = "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: passed\nRATIONALE: focused outcome passes";
+const done = "DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nLEAKS: none\nCHECKS: passed\nRATIONALE: reviewed outcome passes";
 async function terminal(manager: HerderRunManager, action: ManagerAction, response = complete, extra = {}) {
 	await manager.event({ eventId: `dispatch:${action.actionId}`, kind: "dispatch_results", dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: action.actionId }] });
 	return manager.event({ eventId: `terminal:${action.actionId}`, kind: "terminals", terminals: [{ actionId: action.actionId, hostHandle: action.actionId, response, ...extra }] });
@@ -55,11 +56,16 @@ for (const yolo of [false, true]) test(`${yolo ? "YOLO" : "normal"} implementati
 		if (!yolo) {
 			assert.equal(reply.actions[0].role, "plan-reviewer");
 			reply = await terminal(manager, reply.actions[0], approve);
+			assert.equal(reply.actions[0].role, "plan-judge");
+			assert.equal(reply.actions[0].planId, "001");
+			assert.equal(manager.store.getApproval(reply.runId, "001", 1), null);
+			assert.notEqual(reply.status, "complete");
+			reply = await terminal(manager, reply.actions[0], done);
 		}
 		assert.equal(reply.status, "paused");
 		assert.equal(reply.actions.length, 0);
 		const proof = manager.store.getApproval(reply.runId, "001", 1)!;
-		assert.equal(proof.decisionRole, yolo ? "plan-implementer" : "plan-reviewer");
+		assert.equal(proof.decisionRole, yolo ? "plan-implementer" : "plan-judge");
 		assert.equal(manager.store.getPlan(reply.runId, "001")!.phase, "DONE");
 		if (yolo) {
 			assert.equal(proof.decisionActionId, implementer.actionId);
@@ -83,11 +89,15 @@ for (const yolo of [false, true]) test(`${yolo ? "YOLO" : "normal"} implementati
 			assert.equal(reply.actions[0].planId, "RUN");
 			assert.equal(reply.actions[0].role, "plan-reviewer");
 			reply = await terminal(manager, reply.actions[0], approve);
+			assert.equal(reply.actions[0].role, "plan-judge");
+			assert.equal(reply.actions[0].planId, "RUN");
+			assert.notEqual(reply.status, "complete");
+			reply = await terminal(manager, reply.actions[0], done);
 		}
 		assert.equal(reply.status, "complete");
 		assert.equal(manager.store.getPlan(reply.runId, "RUN")!.phase, "FINAL_APPROVED");
 		assert.equal(manager.store.getVerification(reply.runId, 1)!.state, "passed");
-		assert.equal(manager.store.getActions(reply.runId).filter(a => a.role !== "plan-implementer").length, yolo ? 0 : 2);
+		assert.equal(manager.store.getActions(reply.runId).filter(a => a.role !== "plan-implementer").length, yolo ? 0 : 4);
 		assert.equal(reply.reigniteRequest, undefined);
 		if (yolo) assert.match(reply.message, /YOLO accepted.*no independent review/);
 		assert.equal(git(f.repo, ["rev-parse", "HEAD"]).stdout.trim(), f.originalHead);
@@ -190,6 +200,8 @@ test("schema20 to schema21 defaults to normal without pausing and preserves appr
 		commit(started.actions[0]);
 		let reply = await terminal(manager, started.actions[0]);
 		reply = await terminal(manager, reply.actions[0], approve);
+		assert.equal(reply.actions[0].role, "plan-judge");
+		reply = await terminal(manager, reply.actions[0], done);
 		manager.store.updateRun({ status: "running", terminalDetail: "preserve me" });
 		const before = manager.store.getRun()!;
 		const approval = manager.store.getApproval(reply.runId, "001", 1)!;

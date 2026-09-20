@@ -18,16 +18,18 @@ const root = await mkdtemp(path.join(tmpdir(), "herder-fire-test-"));
 
 test("Fire policy and gate execution remain isolated and fail-closed", async () => {
 try {
-  assert.equal(decideReview({ round: 1, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }).action, "READY_TO_INTEGRATE");
-  assert.equal(decideReview({ round: 1, verdict: "REVISE", scope: "PASS", openBlockers: 0 }).nextRound, 2);
-  assert.equal(decideReview({ round: 2, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }).action, "READY_TO_INTEGRATE");
-  for (const verdict of ["REVISE", "BLOCK"] as const) {
-    assert.equal(decideReview({ round: 2, verdict, scope: "PASS", openBlockers: 1 }).action, "JUDGE");
-    assert.equal(decideReview({ round: 3, verdict, scope: "PASS", openBlockers: 1 }).action, "BLOCKED_ROUND_LIMIT");
+  for (const round of [1, 2, 3]) {
+    for (const verdict of ["APPROVE", "REVISE", "BLOCK"] as const) {
+      const result = decideReview({ round, verdict, scope: "PASS", openBlockers: verdict === "APPROVE" ? 0 : 1 });
+      assert.equal(result.action, "JUDGE");
+      assert.equal(result.judgeRequired, true);
+      assert.equal(result.nextRound, null, "a Reviewer cannot authorize the next repair");
+    }
+    assert.equal(decideJudge({ round, decision: "DONE" }).action, "READY_TO_INTEGRATE");
   }
+  assert.equal(decideJudge({ round: 1, decision: "REPAIR" }).nextRound, 2);
   assert.equal(decideJudge({ round: 2, decision: "REPAIR" }).nextRound, 3);
-  assert.equal(decideJudge({ round: 2, decision: "DONE" }).action, "READY_TO_INTEGRATE");
-  assert.throws(() => decideJudge({ round: 3, decision: "DONE" }), /between 2 and 2/);
+  assert.equal(decideJudge({ round: 3, decision: "REPAIR" }).action, "BLOCKED_ROUND_LIMIT");
   assert.throws(() => decideReview({ round: 4, verdict: "APPROVE", scope: "PASS", openBlockers: 0 }), /between 1 and 3/);
 
   const reviewProtocol = await readFile(path.join(pluginRoot, "assets", "review", "code-review-protocol.md"), "utf8");
@@ -45,7 +47,8 @@ try {
   assert.match(reviewProtocol, /Supply relevant evidence directly rather than asking children to rediscover assignment authority/);
   assert.match(reviewProtocol, /Every subreviewer also returns `UNRESOLVED`[\s\S]*`COVERAGE`/);
   assert.match(reviewProtocol, /Evidence completeness and the parent's independent verification determine the final finding set/);
-  assert.match(reviewProtocol, /exact changed location, concrete triggering scenario, reproducible evidence or a failing check, and the introducing hunk\/commit/);
+  assert.match(reviewProtocol, /exact location, concrete triggering scenario, and reproducible evidence or a failing check/);
+  assert.match(reviewProtocol, /PATCH_REGRESSION additionally requires the introducing\/worsening hunk or commit/);
   assert.match(reviewProtocol, /Confirmed P2\/P3 findings remain advisory/);
   assert.match(reviewProtocol, /`FOLLOWUP` and `INVALID` never block/);
   assert.match(reviewProtocol, /three-round authority rules/);

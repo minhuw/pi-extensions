@@ -181,6 +181,14 @@ const reviewerEnvelope = "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\n
 const companionReviewerEnvelope = reviewerEnvelope.replace("DISCOVERED_PATHS: none", "DISCOVERED_PATHS: src/value.mjs — JUSTIFIED — A1 requires consistency with the newly discovered shared fixture export; no public interface change");
 
 
+async function approveWithJudge(service: ConflictRun["service"], reply: JsonRecord, planId: string): Promise<JsonRecord> {
+	const judge = findAction(reply, planId, "plan-judge");
+	await managerRequest(service, "event", { eventId: `dispatch:${judge.actionId}`, kind: "dispatch_results", dispatchResults: [{ actionId: judge.actionId, accepted: true, hostHandle: judge.actionId }] });
+	return managerRequest(service, "event", { eventId: `terminal:${judge.actionId}`, kind: "terminals", terminals: [{ actionId: judge.actionId, hostHandle: judge.actionId,
+		response: "DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nDISCOVERED_PATHS: src/value.mjs — ACCEPTED — directly necessary for the original A1 export\nCHECKS: fixture checks passed\nRATIONALE: frozen approved contract satisfied",
+	}] });
+}
+
 async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise<ConflictRun> {
 	const service = await ensureService(fixture.planDirectory);
 	const started = await managerRequest(service, "start", {
@@ -235,6 +243,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 			response: reviewerEnvelope,
 		}],
 	});
+	reply = await approveWithJudge(service, reply, "001");
 	assert.equal(git(fixture.repo, ["rev-parse", "refs/heads/herder/herder-plans/integration"]).stdout.trim(), firstHead);
 	assert.equal(actions(reply).some((action) => action.planId === "002"), false, "the second Implementer remains active until its terminal event");
 
@@ -262,6 +271,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 			response: companionReviewerEnvelope,
 		}],
 	});
+	reply = await approveWithJudge(service, reply, "002");
 	const recoveryAction = findAction(reply, "002", "plan-implementer");
 	const state = readPlanState(fixture, "002");
 	assert.equal(state.plan.phase, "IMPLEMENTING");
@@ -546,6 +556,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 				response: companionReviewerEnvelope,
 			}],
 		});
+		reply = await approveWithJudge(service, reply, "002");
 		const finalState = readPlanState(fixture, "002");
 		assert.equal(finalState.plan.phase, "DONE");
 		assert.equal(finalState.plan.rebase, null, "successful integration clears active rebase evidence");

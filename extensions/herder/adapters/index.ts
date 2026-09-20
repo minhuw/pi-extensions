@@ -55,6 +55,7 @@ import {
 import { resolvePiProfile } from "../src/core/profile-registry.ts";
 import {
 	attentionResolutionFromRequest,
+	isRoundDecision,
 	registerAttentionMessageRenderer,
 } from "./attention.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
@@ -1383,22 +1384,19 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				throw new Error(`Herder attention request ${input.requestId || "missing"} is not bound to this Pi session.`);
 			}
 			if (["revise_run", "abandon_run"].includes(input.action ?? "")) throw new Error("Only a user-invoked /herder-revise command may open a scope amendment");
-			if (request.planId !== "RUN" && !["answer", "answer_and_resume", "defer", "stop", "cancel", "retry"].includes(input.action ?? "")) throw new Error("Stopped attention permits answer, defer, stop, or host-authorized safe operator retry");
-			const binding = attentionResolutionFromRequest(request);
-			if (input.action === "retry" || input.action === "answer_and_resume") {
+			if (request.planId !== "RUN" && !["answer", "answer_and_resume", "defer", "stop", "cancel", "retry", "accept", "reject"].includes(input.action ?? "")) throw new Error("Stopped attention permits answer, defer, stop, or host-confirmed retry/accept/reject for a bound round decision");
+			const binding = { ...attentionResolutionFromRequest(request), ...(input.action === "accept" ? { confirmed: true } : {}) };
+			if (["retry", "answer_and_resume", "accept", "reject"].includes(input.action ?? "")) {
 				if (input.action === "answer_and_resume" && (request.kind !== "user_decision" || !input.answer?.trim())) throw new Error("Clarification requires an exact nonempty answer to a user decision");
-				const implementationRetry = input.action === "retry" && request.kind === "plan_recovery"
-					&& ["round_limit", "implementer_exhausted", "reviewer_blocked", "judge_blocked", "integration_conflict_exhausted"].includes(request.cause);
-				const operatorRetry = input.action === "retry" && request.kind === "operator_attention"
-					&& ["transport_exhausted", "verification_environment", "review_budget_exhausted"].includes(request.cause);
-				if (input.action === "retry" && !implementationRetry && !operatorRetry) throw new Error("Retry is only available for ordinary implementation or safe operator failures, not safety or protocol failures");
-				if (implementationRetry && !input.rationale?.trim()) throw new Error("Implementation retry requires a non-empty rationale");
-				const confirmation = implementationRetry ? { hasUI: ctx.hasUI, ui: { ...ctx.ui, confirm: (_title: string, message: string) => ctx.ui.confirm("Retry implementation under the unchanged approved contract?", `${message}\n\nThis retries the Implementer in the same assignment, worktree, generation and round, not the stopped review role. It spends one remaining task attempt and one run execution; no scope change or budget refill is authorized.`) } } : ctx;
-				await confirmHostAttention(input.planDirectory, { ...binding, action: input.action, ...(input.answer === undefined ? {} : { answer: input.answer }), ...(input.rationale === undefined ? {} : { rationale: input.rationale }) }, confirmation, undefined, () => { assertSessionActive(epoch); assertOwnership(input.planDirectory, request.runId); });
+				const roundDecision = isRoundDecision(request);
+				const operatorRetry = request.kind === "operator_attention" && ["transport_exhausted", "verification_environment", "review_budget_exhausted"].includes(request.cause);
+				if (input.action === "retry" && !roundDecision && !operatorRetry) throw new Error("Retry is only available for bounded round decisions or safe operator failures");
+				if (["accept", "reject"].includes(input.action!) && !roundDecision && request.planId !== "RUN") throw new Error("Accept or drop requires a round decision");
+				if (roundDecision && input.action === "retry" && !input.rationale?.trim()) throw new Error("Next round requires a non-empty rationale");
+				await confirmHostAttention(input.planDirectory, { ...binding, action: input.action!, ...(input.answer === undefined ? {} : { answer: input.answer }), ...(input.rationale === undefined ? {} : { rationale: input.rationale }) }, ctx, undefined, () => { assertSessionActive(epoch); assertOwnership(input.planDirectory, request.runId); });
 				assertSessionActive(epoch);
 				assertOwnership(input.planDirectory, request.runId);
 			}
-			if (input.action?.trim().toLowerCase() === "accept") throw new Error("Acceptance waivers require an exact user-authorized scope amendment, not an attention confirmed flag");
 			return binding;
 		},
 		beforePlanOperation: async (operation, params, ctx) => {

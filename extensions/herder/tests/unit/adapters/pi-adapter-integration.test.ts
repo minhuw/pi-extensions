@@ -157,12 +157,13 @@ class ControlledSession extends BaseSession {
 	prompted = false;
 	aborted = false;
 	finalReviewResponse?: string;
+	finalJudgeResponse?: string;
 	private readonly gate?: Deferred<void>;
 
 	constructor(sessionId: string, action: ManagerAction) {
 		super(sessionId);
 		this.action = action;
-		if (action.role === "plan-implementer" || action.workerMode === "FINAL_AUDIT") this.gate = new Deferred<void>();
+		if (action.role === "plan-implementer" || (action.role === "plan-reviewer" && action.workerMode === "FINAL_AUDIT")) this.gate = new Deferred<void>();
 	}
 
 	async prompt(text: string): Promise<void> {
@@ -177,6 +178,7 @@ class ControlledSession extends BaseSession {
 		}
 		if (this.action.role === "plan-implementer") this.completeImplementation();
 		else if (this.action.role === "plan-reviewer" && this.action.workerMode !== "FINAL_AUDIT") this.completeReview();
+		else if (this.action.role === "plan-judge") this.addAssistantMessage(this.finalJudgeResponse ?? "DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nCHECKS: inherited recorded checks\nRATIONALE: The controlled Judge confirms no authorized repairs remain.");
 		else if (this.action.workerMode === "FINAL_AUDIT" && this.finalReviewResponse) this.addAssistantMessage(this.finalReviewResponse);
 		this.finishLifecycle();
 	}
@@ -229,7 +231,7 @@ USAGE: input_tokens=20; cached_input_tokens=3; output_tokens=10; reasoning_token
 
 	private completeReview(): void {
 		runCommand("npm", ["test"], { cwd: this.action.worktree });
-		this.addAssistantMessage(`VERDICT: APPROVE
+		this.addAssistantMessage(this.finalReviewResponse ?? `VERDICT: APPROVE
 FINDINGS: none
 FIX_GUIDANCE: none
 DISCOVERED_PATHS: none
@@ -273,6 +275,7 @@ class CapturedWorkerFactory implements PiWorkerSessionFactory {
 
 	async create(request: PiWorkerRequest) {
 		const session = new ControlledSession(`pi-test-session-${this.sessions.length + 1}`, request.action);
+		if (request.action.role === "plan-judge") session.finalJudgeResponse = this.sessions.findLast(previous => previous.action.planId === request.action.planId && previous.action.role === "plan-reviewer")?.finalJudgeResponse;
 		const nested = new HerderNestedAgentScope({
 			action: request.action,
 			agentRoot,
@@ -540,12 +543,12 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const inputEntries = api.appendedEntries
 			.filter((entry) => entry.customType === HERDER_WORKER_INPUT_ENTRY)
 			.map((entry) => object(entry.data));
-		assert.deepEqual(inputEntries.map((entry) => entry.workerMode), ["INITIAL", "DISCOVERY", "FINAL_AUDIT"]);
+		assert.deepEqual(inputEntries.map((entry) => entry.workerMode), ["INITIAL", "DISCOVERY", "ADJUDICATE", "FINAL_AUDIT"]);
 		assert.ok(inputEntries.every((entry) => typeof entry.prompt === "string" && String(entry.prompt).includes("HERDER_MANAGER_WORKER_V1")));
 		const returnedOutputs = api.appendedEntries
 			.filter((entry) => entry.customType === HERDER_WORKER_OUTPUT_ENTRY)
 			.map((entry) => object(entry.data));
-		assert.equal(returnedOutputs.length, 2);
+		assert.equal(returnedOutputs.length, 3);
 		assert.ok(returnedOutputs.every((entry) => entry.status === "returned"));
 
 		const entriesBeforeShutdown = api.appendedEntries.length;
@@ -558,8 +561,8 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const interruptedOutputs = api.appendedEntries
 			.filter((entry) => entry.customType === HERDER_WORKER_OUTPUT_ENTRY)
 			.map((entry) => object(entry.data));
-		assert.equal(interruptedOutputs.length, 3);
-		assert.equal(interruptedOutputs[2]!.status, "interrupted");
+		assert.equal(interruptedOutputs.length, 4);
+		assert.equal(interruptedOutputs[3]!.status, "interrupted");
 		assert.equal(api.appendedEntries.length > entriesBeforeShutdown, true);
 		assert.equal(ui.widgets.at(-1)?.value, undefined, "shutdown did not dispose the Herder widget");
 		assert.equal(durableFinalAction(fixture, durableVerification.runId).state, "dispatched", "shutdown reported a terminal to the manager");
@@ -822,6 +825,7 @@ async function waitForReignite(fixture: Fixture) {
 			try {
 				const run = store.getRun();
 				if (run?.status === "complete") {
+					assert.ok(store.getLatestAction(run.runId, { planId: "RUN", generation: run.currentGeneration, round: store.getPlan(run.runId, "RUN")!.round, role: "plan-judge", state: "terminal" }), "Reviewer alone must never complete the run");
 					const request = store.getReigniteRequest(run.runId, run.currentGeneration);
 					assert.ok(request);
 					return request;
@@ -856,6 +860,7 @@ SCOPE: PASS
 CHECKS: npm test — passed
 RATIONALE: Residual requirement belongs in a follow-up plan set.
 USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
+		finalAudit.finalJudgeResponse = "DECISION: NEEDS_INPUT\nFINDINGS: [fr-1][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] residual audit finding; obligation=001:A1; evidence=src/value.mjs:1 residual fixture mismatch; violation=approved value transition remains unmet\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nQUESTION: Choose the unresolved final finding.\nRATIONALE: Exact user decision required.";
 		const beforeReignite = api.userMessages.length;
 		finalAudit.release();
 		await withDeadline(api.waitForAttentionMessage(), "blocking final audit attention");
@@ -866,10 +871,10 @@ USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens
 		const store = new RunStore(fixture.planDirectory);
 		try {
 			const run = store.getRun()!;
-			assert.equal(run.status, "paused");
+			assert.equal(run.status, "needs_input");
 			assert.equal(store.getReigniteRequest(run.runId, run.currentGeneration), null);
 			assert.match(store.getPlan(run.runId, "RUN")!.findings.join("\n"), /obligation=001:A1/);
-			assert.equal(store.getNextAttention(run.runId)?.cause, "final_reviewer_needs_input");
+			assert.equal(store.getNextAttention(run.runId)?.cause, "judge_needs_input");
 		} finally { store.close(); }
 		await assert.rejects(api.tool("herder_reignite").execute("no-successor", {
 			planDirectory: fixture.planDirectory, requestId: "not-authorized", requestSha256: "0".repeat(64), state: "failed", detail: "No successor authorized",
@@ -911,6 +916,7 @@ SCOPE: PASS
 CHECKS: npm test — passed
 RATIONALE: Residual requirement belongs in a follow-up plan set.
 USAGE: input_tokens=12; cached_input_tokens=2; output_tokens=6; reasoning_tokens=2; source=provider-free-test`;
+		finalAudit.finalJudgeResponse = "DECISION: DONE\nFINDINGS: [fr-stale][DEFERRED_OUT_OF_SCOPE][FOLLOWUP] optional fixture enhancement is outside the approved contract\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nRATIONALE: No approved obligations remain.";
 		finalAudit.release();
 		await waitForReignite(fixture);
 		const firstCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_REIGNITE_V1")).length;
@@ -1082,6 +1088,102 @@ test("adapter forwards host review budget exhaustion unchanged instead of accept
 		if (api && context) await withDeadline(api.invoke("session_shutdown", context), "budget shutdown", 5_000).catch(() => {});
 		if (previousTimeout === undefined) delete process.env.HERDER_REVIEW_TIMEOUT_MS;
 		else process.env.HERDER_REVIEW_TIMEOUT_MS = previousTimeout;
+		if (fixture) {
+			await stopService(fixture.planDirectory).catch(() => {});
+			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("registered herder_plan acceptance requires UI confirmation and preserves unresolved evidence", { timeout: 60_000 }, async (t) => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-accept-"));
+	let fixture: Fixture | undefined;
+	let api: CapturedExtensionAPI | undefined;
+	let context: ExtensionContext | undefined;
+	try {
+		fixture = writeFixture(root);
+		api = new CapturedExtensionAPI();
+		class DecisionFactory extends CapturedWorkerFactory {
+			override async create(request: PiWorkerRequest) {
+				const prepared = await super.create(request);
+				if (request.action.role === "plan-reviewer") prepared.session.finalReviewResponse = `VERDICT: REVISE
+FINDINGS: [accept-gap][P1][BLOCKING][PLAN_REQUIREMENT] unresolved fixture requirement; obligation=001:A1; evidence=src/value.mjs:1 fixture value needs a user decision; violation=the required value remains disputed
+FIX_GUIDANCE: Obtain a user decision about the unresolved requirement.
+DISCOVERED_PATHS: none
+SCOPE: PASS
+CHECKS: unresolved fixture requirement — failed
+RATIONALE: Preserve the failed check until the user decides.`;
+				if (request.action.role === "plan-judge") prepared.session.finalJudgeResponse = `DECISION: NEEDS_INPUT
+FINDINGS: [accept-gap][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] unresolved fixture requirement; obligation=001:A1; evidence=src/value.mjs:1 fixture value needs a user decision; violation=the required value remains disputed
+AUTHORIZED_BLOCKERS: none
+REPAIR_CONTRACTS: none
+CHECKS: unresolved fixture requirement — failed
+QUESTION: Accept the recorded fixture gap as-is?
+RATIONALE: The unresolved requirement needs an explicit user decision.`;
+				return prepared;
+			}
+		}
+		const factory = new DecisionFactory();
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		const ui = new CapturedUI();
+		context = contextFor(fixture, ui);
+		await withDeadline(api.invoke("session_start", context), "accept session start");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "accept fire");
+		const implementer = await withDeadline(factory.waitForSession(session => session.action.role === "plan-implementer"), "accept implementer");
+		await withDeadline(implementer.started.promise, "accept implementer start");
+		implementer.release();
+		await withDeadline(api.waitForAttentionMessage(), "accept attention");
+		const store = new RunStore(fixture.planDirectory);
+		try {
+			const run = store.getRun()!;
+			const attention = store.getNextAttention(run.runId)!;
+			assert.equal(attention.kind, "user_decision", attention.detail);
+			assert.equal(attention.planId, "001");
+			assert.ok(attention.recovery);
+			const plan = store.getPlan(run.runId, "001")!;
+			const actions = store.getActions(run.runId);
+			const budget = store.getBudget(run.runId);
+			assert.equal(plan.phase, "NEEDS_INPUT");
+			assert.match(plan.findings.join("\n"), /accept-gap/);
+			const params = {
+				operation: "attention", planDirectory: "herder-plans", requestId: attention.requestId,
+				action: "accept", answer: "Accept accept-gap as-is; the unresolved fixture check remains failed.",
+				rationale: "The user explicitly accepts this gap without claiming it passed.",
+			};
+			const confirmation = t.mock.method(ui, "confirm", async () => false);
+			await assert.rejects(
+				api.tool("herder_plan").execute("accept-cancelled", params, undefined, undefined, context),
+				/Host confirmation dismissed/,
+			);
+			assert.equal(confirmation.mock.callCount(), 1);
+			assert.deepEqual(store.getAttention(attention.requestId), attention);
+			assert.deepEqual(store.getPlan(run.runId, "001"), plan);
+			assert.deepEqual(store.getActions(run.runId), actions);
+			assert.deepEqual(store.getBudget(run.runId), budget);
+			assert.equal(store.getApproval(run.runId, "001", plan.generation), null);
+
+			confirmation.mock.mockImplementation(async () => true);
+			await withDeadline(api.tool("herder_plan").execute("accept-confirmed", params, undefined, undefined, context), "confirmed registered acceptance");
+			assert.equal(confirmation.mock.callCount(), 2);
+			assert.match(String((confirmation.mock.calls[1]!.arguments as unknown[])[0]), /not passed checks/);
+			assert.equal(store.getAttention(attention.requestId)?.state, "resolved");
+			const approval = store.getApproval(run.runId, "001", plan.generation)!;
+			assert.equal(approval.decisionRole, "user");
+			assert.equal(approval.userAcceptance?.confirmed, true);
+			assert.equal(approval.userAcceptance?.requestId, attention.requestId);
+			assert.equal(approval.userAcceptance?.answer, params.answer);
+			assert.equal(approval.userAcceptance?.rationale, params.rationale);
+			assert.equal(approval.userAcceptance?.git?.worktreeHead, attention.recovery.worktreeHead);
+			assert.equal(approval.userAcceptance?.git?.worktreeTree, attention.recovery.worktreeTree);
+			assert.deepEqual(store.getPlan(run.runId, "001")!.findings, plan.findings);
+			assert.match(store.getPlan(run.runId, "001")!.repair.join("\n"), /ACCEPTED_AS_IS/);
+			for (const action of actions) assert.deepEqual(store.getAction(action.actionId), action, "acceptance rewrote worker evidence");
+			assert.notEqual(store.getRun()!.status, "complete", "acceptance bypassed final verification");
+			assert.equal(factory.providerCalls, 0);
+		} finally { store.close(); }
+	} finally {
+		if (api && context) await withDeadline(api.invoke("session_shutdown", context), "accept shutdown", 5_000).catch(() => {});
 		if (fixture) {
 			await stopService(fixture.planDirectory).catch(() => {});
 			fs.rmSync(`${fixture.repo}-herder-worktrees`, { recursive: true, force: true });

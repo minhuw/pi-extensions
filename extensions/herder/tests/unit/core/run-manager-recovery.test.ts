@@ -197,7 +197,7 @@ test("restart backfills terminal usage without duplicating the attempt", { timeo
 	}
 });
 
-test("plan recovery freezes the entire execution and rejects old selective actions across service restart", { timeout: 45_000 }, async () => {
+test("plan recovery freezes the entire execution and rejects ungranted decisions and retired actions across service restart", { timeout: 45_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-whole-recovery-"));
 	const value = fixture(root);
 	let service: Service | undefined;
@@ -209,7 +209,7 @@ test("plan recovery freezes the entire execution and rejects old selective actio
 		const original = (started.actions as unknown[]).map(object);
 		assert.deepEqual(original.map(action => action.planId), ["002"]);
 		for (const action of ["unchanged_retry", "revise", "reject", "retry", "answer_and_resume", "accept"]) {
-			await assert.rejects(managerReply(service, "event", { eventId: `retired-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Explicit choice"), answer: "Explicit answer", confirmed: true } }), /Stopped attention permits/);
+			await assert.rejects(managerReply(service, "event", { eventId: `retired-${action}`, kind: "attention", attention: { ...attentionResolution(attention, String(started.runId), action, "Explicit choice"), answer: "Explicit answer", confirmed: true } }), ["retry", "accept", "reject"].includes(action) ? /exact private host grant; confirmed flags are not authorization/ : /Stopped attention permits/);
 		}
 		const resolution = attentionResolution(attention, String(started.runId), "revise_run", "Propose a replacement for the whole graph.");
 		await assert.rejects(managerReply(service, "event", { eventId: "unapproved-scope", kind: "attention", attention: { ...resolution, confirmed: true } }), /private host grant/);
