@@ -182,7 +182,7 @@ type UsageInput = UsageRecordInput
 
 function usage(planDir: string, input: Partial<UsageInput>): void {
   recordUsageRecord(planDir, {
-    model: "gpt-5.6-sol",
+    model: "gpt-6-sol",
     effort: "xhigh",
     source: "codex-exec",
     generation: "generation-1",
@@ -645,7 +645,7 @@ async function runTests(): Promise<void> {
       attempt: "attempt-2",
       plan: "002",
       role: "plan-reviewer",
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       effort: "max",
       outcome: "REVISE",
       inputTokens: null,
@@ -785,7 +785,7 @@ async function runTests(): Promise<void> {
       { key: "REVISE", attempts: 1, tokenAttempts: 1, knownTokens: 1200 },
     ])
     assert.deepEqual(state.accounting.byModel, [
-      { key: "gpt-5.6-sol / xhigh", attempts: 7, tokenAttempts: 7, knownTokens: 8400 },
+      { key: "gpt-6-sol / xhigh", attempts: 7, tokenAttempts: 7, knownTokens: 8400 },
     ])
     assert.deepEqual(state.accounting.byHarness, [
       { key: "codex", attempts: 7, tokenAttempts: 7, knownTokens: 8400 },

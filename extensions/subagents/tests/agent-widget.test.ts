@@ -19,38 +19,38 @@ it("keeps the default fleet on Pi's built-in search tools", () => {
 
 describe("foreground agent metadata", () => {
   it("always formats the exact effective model name", () => {
-    expect(formatModelName({ provider: "openai", id: "gpt-5.6-luna", name: "GPT-5.6 Luna" })).toBe("openai/gpt-5.6-luna");
+    expect(formatModelName({ provider: "openai", id: "gpt-6-luna", name: "GPT-6 Luna" })).toBe("openai/gpt-6-luna");
     expect(formatModelName({ provider: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" })).toBe("anthropic/claude-sonnet-4-6");
     expect(formatModelName({ id: "custom-model" })).toBe("custom-model");
   });
 
   it("formats compact model · thinking · tier identity", () => {
     expect(formatAgentIdentity({
-      modelName: "openai/gpt-5.6-luna",
+      modelName: "openai/gpt-6-luna",
       thinking: "xhigh",
       serviceTier: "fast",
-    })).toBe("openai/gpt-5.6-luna · xhigh · fast");
+    })).toBe("openai/gpt-6-luna · xhigh · fast");
     expect(formatAgentIdentity({
-      modelName: "openai/gpt-5.6-luna",
+      modelName: "openai/gpt-6-luna",
       thinking: "max",
-    })).toBe("openai/gpt-5.6-luna · max");
+    })).toBe("openai/gpt-6-luna · max");
     expect(formatAgentIdentity({
-      modelName: "openai/gpt-5.6-luna",
-    })).toBe("openai/gpt-5.6-luna");
+      modelName: "openai/gpt-6-luna",
+    })).toBe("openai/gpt-6-luna");
     expect(formatAgentIdentity({})).toBeUndefined();
   });
 
   it("uses the resumed session metadata when no invocation snapshot exists", () => {
     expect(buildResumedInvocation({
       session: {
-        model: { provider: "openai", id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+        model: { provider: "openai", id: "gpt-6-luna", name: "GPT-6 Luna" },
         thinkingLevel: "xhigh",
       },
       serviceTier: "fast",
       maxTurns: 30,
       isBackground: true,
     })).toEqual({
-      modelName: "openai/gpt-5.6-luna",
+      modelName: "openai/gpt-6-luna",
       thinking: "xhigh",
       serviceTier: "fast",
       maxTurns: 30,
@@ -61,7 +61,7 @@ describe("foreground agent metadata", () => {
   it("recovers exact invocation metadata from any agent record", () => {
     expect(buildRecordInvocation({
       invocation: undefined,
-      session: { model: { provider: "openai", id: "gpt-5.6-luna" }, thinkingLevel: "max" },
+      session: { model: { provider: "openai", id: "gpt-6-luna" }, thinkingLevel: "max" },
       model: "openai/stale-model",
       thinking: "high",
       serviceTier: "fast",
@@ -69,7 +69,7 @@ describe("foreground agent metadata", () => {
       isBackground: true,
       worktree: undefined,
     } as any)).toEqual({
-      modelName: "openai/gpt-5.6-luna",
+      modelName: "openai/gpt-6-luna",
       thinking: "max",
       serviceTier: "fast",
       maxTurns: 12,
@@ -79,7 +79,7 @@ describe("foreground agent metadata", () => {
   });
 
   it("keeps an inherited model visible next to the name, leaves flags as tags, and avoids duplicating max turns", () => {
-    const parentModel = { provider: "openai", id: "gpt-5.6-luna", name: "GPT-5.6 Luna" };
+    const parentModel = { provider: "openai", id: "gpt-6-luna", name: "GPT-6 Luna" };
     const invocation = buildInvocationTags({
       modelName: formatModelName(parentModel),
       serviceTier: "fast",
@@ -89,8 +89,8 @@ describe("foreground agent metadata", () => {
     });
 
     expect(invocation).toEqual({
-      modelName: "openai/gpt-5.6-luna",
-      identity: "openai/gpt-5.6-luna · xhigh · fast",
+      modelName: "openai/gpt-6-luna",
+      identity: "openai/gpt-6-luna · xhigh · fast",
       tags: ["worktree"],
     });
 
@@ -110,7 +110,7 @@ describe("foreground agent metadata", () => {
       turnCount: 13,
       maxTurns: 30,
     })).toEqual([
-      "openai/gpt-5.6-luna · xhigh · fast",
+      "openai/gpt-6-luna · xhigh · fast",
       "worktree",
       "↻13≤30",
       " 54",

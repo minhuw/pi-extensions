@@ -153,7 +153,7 @@ test -x "$pi_bin"
 test -f "$provider_extension"
 models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models cliproxyapi)
 for required_model_id in \
-  'gpt-5.6-luna' \
+  'gpt-6-luna' \
   'deepseek-v4-flash'
 do
   if ! printf '%s\n' "$models" | grep -Fq -- "$required_model_id"; then
@@ -209,6 +209,6 @@ CI sets `HERDER_E2E_TIMEOUT_MS` to 2,400,000 ms (40 minutes) while the job has a
 
 - **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun `npm ci` and verify the vendored provider exists in this checkout, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
 - **Endpoint authorization or normalization:** check that the runtime variables are set without printing them, apply the trailing-slash/`/backend-api`/`/v1` normalization, and rerun the body-free `curl` probe. Do not substitute the CI/artifact variable names for the provider runtime names.
-- **Missing model or effort:** rerun the explicit `--list-models` check and compare both exact IDs (gpt-5.6-luna and deepseek-v4-flash). A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
+- **Missing model or effort:** rerun the explicit `--list-models` check and compare both exact IDs (gpt-6-luna and deepseek-v4-flash). A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
 - **Early RPC exit:** inspect `pi.log` and verify the provider install, `--no-extensions`, the explicit provider extension, and the checkout's `extensions/herder/adapters/index.ts`. Treat logs as potentially sensitive before copying or uploading them.
 - **Stalls:** inspect the printed progress, `pi.log`, and the retained `.herder` diagnostics. Increase `HERDER_E2E_STALL_TIMEOUT_MS` or `HERDER_E2E_TIMEOUT_MS` only for a diagnosed slow provider, remembering that a longer overall limit can increase model spend.

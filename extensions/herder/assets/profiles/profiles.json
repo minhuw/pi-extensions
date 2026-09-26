@@ -5,21 +5,21 @@
     {
       "name": "eclipse",
       "description": "Sol orchestrates and reviews while Luna implements.",
-      "orchestrator": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+      "orchestrator": { "model": "gpt-6-sol", "effort": "xhigh" },
       "roles": {
-        "plan-implementer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
-        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
-        "plan-judge": { "model": "gpt-5.6-sol", "effort": "xhigh" }
+        "plan-implementer": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
+        "plan-reviewer": { "model": "gpt-6-sol", "effort": "xhigh" },
+        "plan-judge": { "model": "gpt-6-sol", "effort": "xhigh" }
       }
     },
     {
       "name": "poorman",
       "description": "Luna orchestrates, reviews, and judges while DeepSeek implements.",
-      "orchestrator": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
+      "orchestrator": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
       "roles": {
         "plan-implementer": { "model": "deepseek-v4-flash", "effort": "high" },
-        "plan-reviewer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
-        "plan-judge": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" }
+        "plan-reviewer": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
+        "plan-judge": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" }
       }
     },
     {
@@ -28,7 +28,7 @@
       "orchestrator": { "model": "claude-fable-5", "effort": "high" },
       "roles": {
         "plan-implementer": { "model": "claude-opus-5", "effort": "high" },
-        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+        "plan-reviewer": { "model": "gpt-6-sol", "effort": "xhigh" },
         "plan-judge": { "model": "claude-fable-5", "effort": "high" }
       }
     },
@@ -38,8 +38,8 @@
       "orchestrator": { "model": "grok-4.6", "effort": "xhigh" },
       "roles": {
         "plan-implementer": { "model": "grok-4.6", "effort": "xhigh" },
-        "plan-reviewer": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" },
-        "plan-judge": { "model": "gpt-5.6-luna", "effort": "max", "service_tier": "fast" }
+        "plan-reviewer": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
+        "plan-judge": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" }
       }
     },
     {
@@ -48,11 +48,11 @@
       "orchestrator": { "model": "gpt-6-astra", "effort": "high" },
       "roles": {
         "plan-implementer": { "model": "gpt-6-astra", "effort": "medium" },
-        "plan-reviewer": { "model": "gpt-5.6-sol", "effort": "xhigh" },
+        "plan-reviewer": { "model": "gpt-6-sol", "effort": "xhigh" },
         "plan-judge": { "model": "gpt-6-astra", "effort": "xhigh" }
       },
       "rescue": { "model": "gpt-6-astra", "effort": "xhigh" },
-      "searcher": { "model": "gpt-5.6-sol", "effort": "xhigh" }
+      "searcher": { "model": "gpt-6-sol", "effort": "xhigh" }
     }
   ]
 }

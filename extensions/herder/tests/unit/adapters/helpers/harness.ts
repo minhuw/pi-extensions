@@ -35,14 +35,14 @@ export async function withDeadline<T>(operation: Promise<T>, label: string, time
 export const availableModels = [
 	{
 		provider: "fake",
-		id: "gpt-5.6-sol",
+		id: "gpt-6-sol",
 		api: "openai-responses",
 		reasoning: true,
 		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 	},
 	{
 		provider: "fake",
-		id: "gpt-5.6-luna",
+		id: "gpt-6-luna",
 		api: "openai-responses",
 		reasoning: true,
 		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },

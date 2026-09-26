@@ -62,7 +62,7 @@ Peers: `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-wo
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only codebase recon; compressed handoff | read-only | `openai/gpt-5.6-luna`, thinking `max`, `service_tier: fast` |
+| `recon` | Read-only codebase recon; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, `service_tier: fast` |
 | `worker` | Bounded implementation + verify | all coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review; no edits | read-only | inherit parent |
 
@@ -91,7 +91,7 @@ Upstream package docs (pre-fork): [README v0.14.3](https://github.com/tintinweb/
 Frontmatter (authoritative when set):
 
 ```yaml
-model: openai/gpt-5.6-luna
+model: openai/gpt-6-luna
 thinking: max
 service_tier: fast   # fast|standard, or priority|default|flex|auto
 ```

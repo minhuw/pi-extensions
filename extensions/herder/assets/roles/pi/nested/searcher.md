@@ -4,7 +4,7 @@ package: herder
 kind: nested
 readOnly: true
 binding: own
-model: gpt-5.6-luna
+model: gpt-6-luna
 effort: max
 service_tier: fast
 description: Bounded external research with optional explicitly delegated local evidence.

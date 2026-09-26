@@ -64,7 +64,7 @@ test("normalizeUsage preserves nested model slices from the terminal event", () 
 			source: "herder pi worker session",
 			nested: [{
 				type: "recon",
-				model: "gpt-5.6-luna",
+				model: "gpt-6-luna",
 				effort: "max",
 				serviceTier: "fast",
 				count: 1,
@@ -76,7 +76,7 @@ test("normalizeUsage preserves nested model slices from the terminal event", () 
 		},
 	});
 	assert.equal(usage.inputTokens, 10);
-	assert.equal(usage.nested?.[0]?.model, "gpt-5.6-luna");
+	assert.equal(usage.nested?.[0]?.model, "gpt-6-luna");
 	assert.equal(usage.nested?.[0]?.count, 1);
 });
 

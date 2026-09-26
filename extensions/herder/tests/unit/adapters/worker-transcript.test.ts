@@ -35,7 +35,7 @@ function action(prompt = [
 		round: 1,
 		role: "plan-implementer",
 		agentType: "herder.plan-implementer",
-		model: "gpt-5.6-luna",
+		model: "gpt-6-luna",
 		effort: "max",
 		serviceTier: "fast",
 		workerMode: "INITIAL",
@@ -60,7 +60,7 @@ test("worker input entries preserve exact bounded assignment context", () => {
 
 	const collapsed = workerInputDisplay(entry, false, theme);
 	assert.match(collapsed, /Herder Implementer/);
-	assert.match(collapsed, /Plan 001 · GPT-5\.6-luna · MAX · Fast/);
+	assert.match(collapsed, /Plan 001 · GPT-6-luna · MAX · Fast/);
 	assert.match(collapsed, /round 1 · INITIAL · herder-001-implementer-r1-1/);
 	assert.match(collapsed, /HERDER_MANAGER_WORKER_V1/);
 	assert.match(collapsed, /more lines/);
@@ -84,7 +84,7 @@ test("worker output entries render returned and interrupted child evidence", () 
 	assert.equal(returned.durationMs, 3_000);
 	const collapsed = workerOutputDisplay(returned, false, theme);
 	assert.match(collapsed, /Herder Implementer/);
-	assert.match(collapsed, /Plan 001 · GPT-5\.6-luna · MAX · Fast/);
+	assert.match(collapsed, /Plan 001 · GPT-6-luna · MAX · Fast/);
 	assert.match(collapsed, /round 1 · returned · 2\.0k tokens · 3s/);
 	assert.match(collapsed, /STATUS: COMPLETE/);
 	assert.doesNotMatch(collapsed, /NOTES: done/);
@@ -108,7 +108,7 @@ test("worker UI labels an unpinned service tier as standard", () => {
 	const standardAction = action();
 	delete standardAction.serviceTier;
 	const entry = createWorkerInputEntry(standardAction, "pi-worker:session-standard", 1_000);
-	assert.match(workerInputDisplay(entry, false, theme), /Plan 001 · GPT-5\.6-luna · MAX · Standard/);
+	assert.match(workerInputDisplay(entry, false, theme), /Plan 001 · GPT-6-luna · MAX · Standard/);
 });
 
 test("worker transcript entries cap oversized child payloads", () => {

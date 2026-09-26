@@ -163,16 +163,16 @@ test("applyServiceTier pins every stream request and final provider payload", as
 	const first = seen[0] as { reasoning: string; serviceTier: string; onPayload: (payload: unknown, model: unknown) => Promise<unknown> };
 	assert.equal(first.reasoning, "max");
 	assert.equal(first.serviceTier, "priority");
-	assert.deepEqual(await first.onPayload({ model: "gpt-5.6-luna" }, "model"), {
-		model: "gpt-5.6-luna",
+	assert.deepEqual(await first.onPayload({ model: "gpt-6-luna" }, "model"), {
+		model: "gpt-6-luna",
 		service_tier: "priority",
 		transformed: true,
 	});
 	session.agent.streamFunction("model", "context");
 	const second = seen[1] as { serviceTier: string; onPayload: (payload: unknown, model: unknown) => Promise<unknown> };
 	assert.equal(second.serviceTier, "priority");
-	assert.deepEqual(await second.onPayload({ model: "gpt-5.6-luna" }, "model"), {
-		model: "gpt-5.6-luna",
+	assert.deepEqual(await second.onPayload({ model: "gpt-6-luna" }, "model"), {
+		model: "gpt-6-luna",
 		service_tier: "priority",
 	});
 	await assert.rejects(() => second.onPayload("invalid", "model"), /non-object provider payload/);
@@ -363,9 +363,9 @@ export default function (pi) {
 		const faux = fauxProvider({
 			api: "openai-responses",
 			provider: "test",
-			models: [{ id: "test-model", reasoning: true }, { id: "gpt-5.6-luna", reasoning: true }],
+			models: [{ id: "test-model", reasoning: true }, { id: "gpt-6-luna", reasoning: true }],
 		});
-		Object.assign(faux.getModel("gpt-5.6-luna")!, {
+		Object.assign(faux.getModel("gpt-6-luna")!, {
 			thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 		});
 		runtime.registerNativeProvider(faux.provider);
@@ -476,7 +476,7 @@ export default function (pi) {
 				observedModels.push(model.id);
 				const tools = (context.tools ?? []).map((tool) => tool.name).sort();
 				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
-				if (model.id === "gpt-5.6-luna") {
+				if (model.id === "gpt-6-luna") {
 					assert.deepEqual(tools, ["read", "grep", "find", "ls"].sort());
 					assert.equal(options?.reasoning, "max");
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
@@ -524,7 +524,7 @@ export default function (pi) {
 			})));
 			for (const result of results) assert.equal(result.status, "completed", result.error ?? result.output);
 			assert.equal(observedModels.filter((model) => model === "test-model").length, 12);
-			assert.equal(observedModels.filter((model) => model === "gpt-5.6-luna").length, 8);
+			assert.equal(observedModels.filter((model) => model === "gpt-6-luna").length, 8);
 			const snapshots = review.nested.treeSnapshots();
 			assert.equal(snapshots.length, 8);
 			for (const result of results) {
@@ -853,7 +853,7 @@ test("worker terminal keeps parent usage separate from nested model slices", asy
 	assert.equal(result.usage.source, "herder pi worker session");
 	assert.deepEqual(result.usage.nested, [{
 		type: "recon",
-		model: "gpt-5.6-luna",
+		model: "gpt-6-luna",
 		effort: "max",
 		serviceTier: "fast",
 		count: 1,

@@ -17,7 +17,7 @@ function nested(overrides: Partial<PiNestedAgentSnapshot> = {}): PiNestedAgentSn
 		type: "recon",
 		description: "inspect code",
 		status: "running",
-		model: "gpt-5.6-sol",
+		model: "gpt-6-sol",
 		effort: "xhigh",
 		serviceTier: "fast",
 		startedAt: 6_000,
@@ -38,7 +38,7 @@ function worker(overrides: Partial<PiWorkerSnapshot> = {}): PiWorkerSnapshot {
 		planId: "018",
 		round: 2,
 		role: "plan-reviewer",
-		model: "gpt-5.6-sol",
+		model: "gpt-6-sol",
 		effort: "xhigh",
 		serviceTier: "fast",
 		status: "running",
@@ -82,16 +82,16 @@ test("Pi worker fleet flattens Plan and Role and renders direct child stats on o
 	]), theme, 160, 66_000, 0);
 
 	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
-	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer · gpt-5\.6-sol · xhigh · fast  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
-	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon · gpt-5\.6-sol · xhigh · fast  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
-	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer · gpt-5\.6-sol · xhigh · fast  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
+	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer · gpt-6-sol · xhigh · fast  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
+	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon · gpt-6-sol · xhigh · fast  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
+	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer · gpt-6-sol · xhigh · fast  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.ok(lines.every((line) => visibleWidth(line) <= 160));
 });
 
 test("agent identity is model · thinking · service tier and omits missing fields", () => {
-	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast" }), "gpt-5.6-sol · xhigh · fast");
-	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol", effort: "max" }), "gpt-5.6-sol · max");
-	assert.equal(formatAgentIdentity({ model: "gpt-5.6-sol" }), "gpt-5.6-sol");
+	assert.equal(formatAgentIdentity({ model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast" }), "gpt-6-sol · xhigh · fast");
+	assert.equal(formatAgentIdentity({ model: "gpt-6-sol", effort: "max" }), "gpt-6-sol · max");
+	assert.equal(formatAgentIdentity({ model: "gpt-6-sol" }), "gpt-6-sol");
 	assert.equal(formatAgentIdentity({}), undefined);
 });
 
@@ -109,7 +109,7 @@ test("aborted nested agents render as failures", () => {
 	const lines = workerFleetTreeLines(model([
 		worker({ children: [nested({ status: "aborted", activeTools: [], activity: "aborted" })] }),
 	]), theme, 120, 66_000, 0);
-	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  aborted\s+↻1/);
+	assert.match(lines[2]!, /✗ Recon · gpt-6-sol · xhigh · fast  aborted\s+↻1/);
 });
 
 test("reviewer scouts render beneath their owner and retain timeout evidence", () => {
@@ -137,7 +137,7 @@ test("second-level scouts use compact inline stats without repeated identity or 
 	];
 	const current = model([worker({ children })]);
 	const lines = workerFleetTreeLines(current, theme, 160, 66_000);
-	assert.match(lines[2]!, /Reviewer · gpt-5\.6-sol · xhigh · fast.*↻1 · 2 tools · 2\.5k \(34% · ⇊1\)/);
+	assert.match(lines[2]!, /Reviewer · gpt-6-sol · xhigh · fast.*↻1 · 2 tools · 2\.5k \(34% · ⇊1\)/);
 	assert.match(lines[3]!, /└─ ⠋ Recon  reading…  2 tools · 2\.5k · 1m 00s$/);
 	assert.doesNotMatch(lines[3]!, /gpt-|xhigh|fast|↻|%|⇊/);
 	assert.ok(visibleWidth(lines[3]!) < 85, "grandchildren avoid padding across the full terminal width");
@@ -184,7 +184,7 @@ test("completed nested agents collapse into one summary under the live children"
 	];
 	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 66_000, 0);
 	assert.equal(lines.length, 4);
-	assert.match(lines[2]!, /⠋ Recon · gpt-5\.6-sol · xhigh · fast  reading…/);
+	assert.match(lines[2]!, /⠋ Recon · gpt-6-sol · xhigh · fast  reading…/);
 	assert.match(lines[3]!, /✓ 6 Recon done$/);
 	assert.equal(lines.filter((line) => /✓ Recon ·/.test(line)).length, 0);
 });
@@ -198,7 +198,7 @@ test("completed nested summary groups mixed child types and keeps failures expan
 	];
 	const lines = workerFleetTreeLines(model([worker({ children })]), theme, 160, 66_000, 0);
 	assert.equal(lines.length, 4);
-	assert.match(lines[2]!, /✗ Recon · gpt-5\.6-sol · xhigh · fast  error/);
+	assert.match(lines[2]!, /✗ Recon · gpt-6-sol · xhigh · fast  error/);
 	assert.match(lines[3]!, /✓ 2 Recon · 1 Searcher done$/);
 });
 

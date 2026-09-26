@@ -21,17 +21,19 @@ The published extension table and installation details live in the root [README]
 
 Run commands from the repository root with Node `>=22.19.0`.
 
-| Command | Coverage |
-| --- | --- |
-| `npm ci` | Install the locked dependencies. |
-| `npm run typecheck` | Run strict, no-emit TypeScript checking for the configured `extensions` sources; `extensions/subagents` is excluded. |
-| `npm test` | Run the safe collection suite: CLIProxyAPI Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
-| `npm run test:cliproxyapi-provider` | Run 53 offline Node catalog regression scenarios and the mocked Vitest provider/TPS entrypoint checks. |
-| `npm run test:commit` | Run Commit's strict TypeScript `node --test` suite. |
-| `npm run test:writer` | Run Writer's strict TypeScript `node --test` suite. |
-| `npm run test:statusline` | Run Statusline Footer's Vitest suite. |
-| `npm run test:subagents` | Run the Subagents widget's Vitest suite. |
-| `npm run test:herder` | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`. |
+
+| Command                             | Coverage                                                                                                                                |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm ci`                            | Install the locked dependencies.                                                                                                        |
+| `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the configured `extensions` sources; `extensions/subagents` is excluded.                    |
+| `npm test`                          | Run the safe collection suite: CLIProxyAPI Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
+| `npm run test:cliproxyapi-provider` | Run 53 offline Node catalog regression scenarios and the mocked Vitest provider/TPS entrypoint checks.                                  |
+| `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
+| `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
+| `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
+| `npm run test:subagents`            | Run the Subagents widget's Vitest suite.                                                                                                |
+| `npm run test:herder`               | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`.                                               |
+
 
 ## Live E2E warning
 
@@ -49,10 +51,10 @@ Run commands from the repository root with Node `>=22.19.0`.
 - `node_modules/` — generated dependency state.
 - Any `*/.herder/` runtime directory — manager-owned SQLite state, locks, and worktrees.
 - `herder-plans/README.md` during a run — its lifecycle status rows are manager-owned.
-- `extensions/subagents` vendored source — change it only through upstream pin updates.
 
 ## Deeper docs
 
 - [Herder README](extensions/herder/README.md)
 - [Herder adapter/runtime docs](extensions/herder/adapters/README.md)
 - [Herder testing guide](extensions/herder/TESTING.md)
+

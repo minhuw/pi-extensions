@@ -21,7 +21,7 @@ const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 test("Pi resolves the poorman profile into three generic package agents", async () => {
 	const profile = resolvePiProfile("poorman", catalog);
 	assert.equal(profile.host, "pi");
-	assert.deepEqual(profile.orchestrator, { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" });
+	assert.deepEqual(profile.orchestrator, { model: "gpt-6-luna", effort: "max", service_tier: "fast" });
 	assert.deepEqual(profile.roles, {
 		"plan-implementer": {
 			agent_type: "herder.plan-implementer",
@@ -30,13 +30,13 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 		},
 		"plan-reviewer": {
 			agent_type: "herder.plan-reviewer",
-			model: "gpt-5.6-luna",
+			model: "gpt-6-luna",
 			effort: "max",
 			service_tier: "fast",
 		},
 		"plan-judge": {
 			agent_type: "herder.plan-judge",
-			model: "gpt-5.6-luna",
+			model: "gpt-6-luna",
 			effort: "max",
 			service_tier: "fast",
 		},
@@ -90,9 +90,9 @@ test("service tiers map to exact provider request values on capable APIs only", 
 	assert.equal(serviceTierRequestValue("fast"), "priority");
 	assert.equal(serviceTierRequestValue("standard"), "default");
 	assert.throws(() => serviceTierRequestValue("flex"), /Unknown Herder service tier/);
-	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-responses" }), true);
-	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-5.6-luna", api: "openai-codex-responses" }), true);
-	assert.equal(modelSupportsServiceTier({ provider: "cliproxyapi", id: "gpt-5.6-luna", api: "cliproxyapi-codex-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-6-luna", api: "openai-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "openai", id: "gpt-6-luna", api: "openai-codex-responses" }), true);
+	assert.equal(modelSupportsServiceTier({ provider: "cliproxyapi", id: "gpt-6-luna", api: "cliproxyapi-codex-responses" }), true);
 	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5", api: "openai-completions" }), false);
 	assert.equal(modelSupportsServiceTier({ provider: "proxy", id: "grok-4.5" }), false);
 });
@@ -102,17 +102,17 @@ test("model checks accept provider-qualified catalog entries without substitutio
 	const available = [
 		{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3" },
 		{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash" },
-		{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna" },
+		{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna" },
 	];
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[2]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna"]);
 });
 
 test("model availability includes optional rescue and Searcher bindings", () => {
 	const profile = resolvePiProfile("universe", catalog);
-	const available = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"].map((id) => ({ provider: "proxy", id }));
+	const available = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].map((id) => ({ provider: "proxy", id }));
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[0]), true);
 	const custom = {
@@ -121,7 +121,7 @@ test("model availability includes optional rescue and Searcher bindings", () => 
 		searcher: { ...profile.searcher!, model: "searcher-only" },
 	};
 	assert.deepEqual(unavailableProfileModels(custom, available), ["rescue-only", "searcher-only"]);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-5.6-luna"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna"]);
 });
 
 test("Pi profile catalogs require exactly the canonical worker roles", async () => {

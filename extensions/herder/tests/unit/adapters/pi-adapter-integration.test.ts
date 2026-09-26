@@ -526,7 +526,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const manifest = durableVerification.manifest;
 		assert.ok(manifest);
 		assert.deepEqual(manifest.selector, {
-			model: "fake/gpt-5.6-sol",
+			model: "fake/gpt-6-sol",
 			thinkingLevel: "xhigh",
 			sessionId: "main-session-011",
 		});

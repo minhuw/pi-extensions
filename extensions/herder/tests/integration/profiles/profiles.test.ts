@@ -14,31 +14,31 @@ test("profile registry exposes the supported Pi profiles", () => {
 
 	const expectedProfiles: Record<string, { orchestrator: ResolvedProfile["orchestrator"]; roles: ResolvedProfile["roles"] }> = {
 		eclipse: {
-			orchestrator: { model: "gpt-5.6-sol", effort: "xhigh" },
+			orchestrator: { model: "gpt-6-sol", effort: "xhigh" },
 			roles: {
 				"plan-implementer": {
 					agent_type: "herder.plan-implementer",
-					model: "gpt-5.6-luna",
+					model: "gpt-6-luna",
 					effort: "max",
 					service_tier: "fast",
 				},
-				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
-				"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-sol", effort: "xhigh" },
+				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
+				"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-sol", effort: "xhigh" },
 			},
 		},
 		poorman: {
-			orchestrator: { model: "gpt-5.6-luna", effort: "max", service_tier: "fast" },
+			orchestrator: { model: "gpt-6-luna", effort: "max", service_tier: "fast" },
 			roles: {
 				"plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek-v4-flash", effort: "high" },
 				"plan-reviewer": {
 					agent_type: "herder.plan-reviewer",
-					model: "gpt-5.6-luna",
+					model: "gpt-6-luna",
 					effort: "max",
 					service_tier: "fast",
 				},
 				"plan-judge": {
 					agent_type: "herder.plan-judge",
-					model: "gpt-5.6-luna",
+					model: "gpt-6-luna",
 					effort: "max",
 					service_tier: "fast",
 				},
@@ -48,7 +48,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 			orchestrator: { model: "claude-fable-5", effort: "high" },
 			roles: {
 				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5", effort: "high" },
-				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
 				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5", effort: "high" },
 			},
 		},
@@ -58,13 +58,13 @@ test("profile registry exposes the supported Pi profiles", () => {
 				"plan-implementer": { agent_type: "herder.plan-implementer", model: "grok-4.6", effort: "xhigh" },
 				"plan-reviewer": {
 					agent_type: "herder.plan-reviewer",
-					model: "gpt-5.6-luna",
+					model: "gpt-6-luna",
 					effort: "max",
 					service_tier: "fast",
 				},
 				"plan-judge": {
 					agent_type: "herder.plan-judge",
-					model: "gpt-5.6-luna",
+					model: "gpt-6-luna",
 					effort: "max",
 					service_tier: "fast",
 				},
@@ -73,10 +73,10 @@ test("profile registry exposes the supported Pi profiles", () => {
 	};
 
 	const existingHashes = {
-		eclipse: "e0fcf64d9186cd35dd436947003f7209eb8ed7f03d8ee2e63b37715955910a9d",
-		poorman: "c0b37ddfd1a9814cffab6aa3ac4ab66cfd4e5b0cb17dc2406081c1597ee1469c",
-		epic: "f6032a994b13055a7a0555ab5e9aa4c8832aa1a703fb1ef14807308108bcb149",
-		lightspeed: "7b47e77c0e8192bce4cbb09a51c565ff09168674c67fe4b85a2eeea523a9c714",
+		eclipse: "f0b97201eb7be74fb8fea936e95c516e028b22651736616bbb2b6bcfdaaeac49",
+		poorman: "816b0142bf97f50e563178de123acdc8d008b6c2bb2a5a880655fe430411c65b",
+		epic: "8ba10eace351b1c7938556d18c058412453538a27cb5a7545f00dda8ac2fc8af",
+		lightspeed: "cb67146ee26d31ed0e6aba3e5982bc3fb1f20a9eee648ae4bd69d72c06465c6e",
 	};
 	for (const [name, hash] of Object.entries(existingHashes)) {
 		const profile = resolvePiProfile(name);
@@ -89,11 +89,11 @@ test("profile registry exposes the supported Pi profiles", () => {
 	assert.deepEqual(universe.orchestrator, { model: "gpt-6-astra", effort: "high" });
 	assert.deepEqual(universe.roles, {
 		"plan-implementer": { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "medium" },
-		"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+		"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
 		"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-astra", effort: "xhigh" },
 	});
 	assert.deepEqual(universe.rescue, { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh" });
-	assert.deepEqual(universe.searcher, { model: "gpt-5.6-sol", effort: "xhigh" });
+	assert.deepEqual(universe.searcher, { model: "gpt-6-sol", effort: "xhigh" });
 	assert.deepEqual(Object.keys(universe.roles), WORKER_ROLES);
 
 	assert.deepEqual(resolvePiProfile(), universe);

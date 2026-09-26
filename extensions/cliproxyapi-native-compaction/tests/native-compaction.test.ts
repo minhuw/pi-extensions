@@ -17,8 +17,8 @@ import {
 } from "../native-compaction.ts";
 
 const model = {
-	id: "gpt-5.6-sol",
-	name: "GPT-5.6 Sol",
+	id: "gpt-6-luna",
+	name: "GPT-6 Luna",
 	api: "cliproxyapi-codex-responses",
 	provider: "cliproxyapi",
 	baseUrl: "https://proxy.example/backend-api/",
@@ -40,9 +40,8 @@ const config: NativeCompactionConfig = {
 describe("model capability gate", () => {
 	it("defaults to the supported OpenAI aliases", () => {
 		expect(DEFAULT_NATIVE_MODELS).toEqual([
-			"gpt-5.6-sol",
-			"gpt-5.6-terra",
-			"gpt-5.6-luna",
+			"gpt-6-sol",
+			"gpt-6-luna",
 			"gpt-6-astra",
 		]);
 	});
@@ -88,7 +87,7 @@ describe("compact endpoint transport", () => {
 	it("appends the documented compaction_trigger to canonical input", () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
 		expect(buildCompactRequestBody(model, input)).toEqual({
-			model: "gpt-5.6-sol",
+			model: "gpt-6-luna",
 			instructions: "",
 			input: [...input, { type: "compaction_trigger" }],
 		});
@@ -114,7 +113,7 @@ describe("compact endpoint transport", () => {
 		];
 
 		expect(buildCompactRequestBody(model, input)).toEqual({
-			model: "gpt-5.6-sol",
+			model: "gpt-6-luna",
 			instructions: "",
 			input: [
 				{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque" },
@@ -229,7 +228,7 @@ describe("canonical compacted output", () => {
 				details: {
 					kind: "cliproxyapi-openai-native-compaction",
 					version: 1,
-					modelKey: "cliproxyapi:cliproxyapi-codex-responses:gpt-5.6-sol",
+					modelKey: "cliproxyapi:cliproxyapi-codex-responses:gpt-6-luna",
 					endpoint: "responses/compact",
 					replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }],
 				},
@@ -274,7 +273,7 @@ describe("canonical compacted output", () => {
 			return new Response(
 				JSON.stringify({
 					error: {
-						message: "auth_unavailable: no auth available (providers=codex,openai-compatible-minimax router, model=gpt-5.6-sol)",
+						message: "auth_unavailable: no auth available (providers=codex,openai-compatible-minimax router, model=gpt-6-luna)",
 						type: "server_error",
 						code: "internal_server_error",
 					},
@@ -287,7 +286,7 @@ describe("canonical compacted output", () => {
 			callRemoteCompaction({
 				url: "https://proxy.example/backend-api/codex/responses",
 				headers: new Headers(),
-				body: { model: "gpt-5.6-sol", input: [] },
+				body: { model: "gpt-6-luna", input: [] },
 				model,
 				fetchImpl,
 			}),

@@ -85,7 +85,7 @@ function seedPopulatedRun(database: NonNullable<ReturnType<typeof openExecutionD
 			agent_type, model, effort, service_tier, worker_mode, task_name, lease_reason,
 			host_handle, result_json, created_at, updated_at
 		) VALUES ('action-1', ?, '001', 1, 2, 'plan-reviewer', 'attempt-1', 'terminal',
-			'worker', 'gpt-5.6-luna', 'max', 'fast', 'INITIAL', 'review plan', 'review requested',
+			'worker', 'gpt-6-luna', 'max', 'fast', 'INITIAL', 'review plan', 'review requested',
 			'host-1', ?, ?, ?)
 	`).run(RUN_ID, JSON.stringify({ status: "approved" }), NOW, LATER);
 	database.prepare(`
@@ -297,7 +297,7 @@ test("manager projection preserves populated manager domains", () => {
 				attemptId: "attempt-1",
 				state: "terminal",
 				agentType: "worker",
-				model: "gpt-5.6-luna",
+				model: "gpt-6-luna",
 				effort: "max",
 				serviceTier: "fast",
 				workerMode: "INITIAL",

@@ -335,7 +335,7 @@ test("usage records persist nested model slices and report them separately", () 
 			attempt: "attempt-nested",
 			plan: "001",
 			role: "plan-implementer",
-			model: "gpt-5.6-sol",
+			model: "gpt-6-sol",
 			effort: "xhigh",
 			outcome: "COMPLETE",
 			inputTokens: 100,
@@ -348,7 +348,7 @@ test("usage records persist nested model slices and report them separately", () 
 			harness: "pi",
 			nested: [{
 				type: "recon",
-				model: "gpt-5.6-luna",
+				model: "gpt-6-luna",
 				effort: "max",
 				serviceTier: "fast",
 				count: 2,
@@ -363,7 +363,7 @@ test("usage records persist nested model slices and report them separately", () 
 		assert.equal(stored.record.inputTokens, 100);
 		assert.deepEqual(stored.record.nestedUsage, [{
 			type: "recon",
-			model: "gpt-5.6-luna",
+			model: "gpt-6-luna",
 			effort: "max",
 			serviceTier: "fast",
 			count: 2,
@@ -378,8 +378,8 @@ test("usage records persist nested model slices and report them separately", () 
 		const report = executionReport(state.records);
 		assert.equal(report.tokens.reportedInputOutput, 168);
 		assert.deepEqual(report.byModel.map((row) => ({ key: row.key, knownTokens: row.knownTokens, attempts: row.attempts })), [
-			{ key: "gpt-5.6-luna / max", knownTokens: 48, attempts: 2 },
-			{ key: "gpt-5.6-sol / xhigh", knownTokens: 120, attempts: 1 },
+			{ key: "gpt-6-luna / max", knownTokens: 48, attempts: 2 },
+			{ key: "gpt-6-sol / xhigh", knownTokens: 120, attempts: 1 },
 		]);
 	} finally {
 		fs.rmSync(planDirectory, { recursive: true, force: true });

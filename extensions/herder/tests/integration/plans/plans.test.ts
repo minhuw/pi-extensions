@@ -190,8 +190,8 @@ try {
     host: "pi",
     roles: {
       "plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek-v4-flash", effort: "high" },
-      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-luna", effort: "max" },
-      "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-5.6-luna", effort: "max" },
+      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-luna", effort: "max" },
+      "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-luna", effort: "max" },
     },
   }
   assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, true)
@@ -242,7 +242,7 @@ try {
     plan: "002",
     role: "plan-reviewer",
     attempt: "run-1-002-reviewer-1",
-    model: "gpt-5.6-luna",
+    model: "gpt-6-luna",
     effort: "max",
     outcome: "APPROVE",
     source: "unknown",
@@ -265,7 +265,7 @@ try {
     knownTokens: 1200,
   }])
   assert.equal(required(usage.byRole.find((row) => row.key === "plan-implementer")).knownTokens, 1200)
-  assert.equal(required(usage.byModel.find((row) => row.key === "gpt-5.6-luna / max")).tokenAttempts, 0)
+  assert.equal(required(usage.byModel.find((row) => row.key === "gpt-6-luna / max")).tokenAttempts, 0)
   assert.equal(usage.storage, "sqlite")
   assert.equal(required(usage.runConfiguration).profile, "poorman")
   assert.equal(fs.readFileSync(valid.readme, "utf8"), readmeBeforeUsage)
@@ -775,7 +775,7 @@ test("optional run bindings round-trip immutably through roles_json", () => {
   try {
     const roles = {
       "plan-implementer": { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "medium" },
-      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-5.6-sol", effort: "xhigh" },
+      "plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
       "plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-astra", effort: "xhigh" },
       rescue: { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh", service_tier: "standard" },
       searcher: { agent_type: "herder.searcher", model: "gpt-6-astra", effort: "medium", service_tier: "fast" },
@@ -785,7 +785,7 @@ test("optional run bindings round-trip immutably through roles_json", () => {
     assert.deepEqual(required(readRunConfiguration(planDir).configuration).roles, roles)
     assert.equal(recordRunConfiguration(planDir, { ...configuration, roles: JSON.stringify(roles) }).recorded, false)
     for (const key of ["rescue", "searcher"] as const) {
-      for (const change of [{ model: "gpt-5.6-sol" }, { effort: "high" }, { service_tier: "standard" === roles[key].service_tier ? "fast" : "standard" }]) {
+      for (const change of [{ model: "gpt-6-sol" }, { effort: "high" }, { service_tier: "standard" === roles[key].service_tier ? "fast" : "standard" }]) {
         expectFailure(() => recordRunConfiguration(planDir, { ...configuration, roles: { ...roles, [key]: { ...roles[key], ...change } } }), /already bound/)
       }
       const without = { ...roles } as Record<string, unknown>

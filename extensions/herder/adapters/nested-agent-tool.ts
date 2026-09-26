@@ -85,7 +85,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			"Delegate one bounded task to a package-owned Herder nested agent.",
 			`Up to ${scope.maxConcurrency} children may run concurrently for this role and at most ${scope.maxCalls} may be launched in this scope.`,
 			"Set run_in_background to continue working while the child runs, then call get_subagent_result before returning the role's final answer.",
-			"recon uses gpt-5.6-luna at max on the fast tier. searcher uses this run's profile binding when supplied, otherwise the same package scout binding. worker and reviewer inherit this role's exact model, thinking level, and service tier.",
+			"recon uses gpt-6-luna at max on the fast tier. searcher uses this run's profile binding when supplied, otherwise the same package scout binding. worker and reviewer inherit this role's exact model, thinking level, and service tier.",
 			"Every child inherits this action's stable worktree and lifetime.",
 			`Allowed types in this scope: ${scope.allowedTypes.join(", ")}. recon is repository-read-only source navigation and bounded static defect candidate scouting; searcher is web research with delegated local read-only search; worker may mutate (Implementer only); reviewer independently reviews (root Reviewer only).`,
 			"Recon uses worktree-scoped read/grep/find/ls overrides; other children use Pi's built-in local tools. searcher loads only pi-web-access, worker loads only Ponytail's trusted pi-extension entry, and recon/reviewer load no extensions.",

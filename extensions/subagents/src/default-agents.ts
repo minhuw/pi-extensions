@@ -23,7 +23,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       excludeExtensions: DEFAULT_EXCLUDED_EXTENSIONS,
       skills: true,
       // Fast tier + high effort on Luna — cheap-ish latency path for search fan-out.
-      model: "openai/gpt-5.6-luna",
+      model: "openai/gpt-6-luna",
       thinking: "max",
       serviceTier: "fast",
       systemPrompt: `# READ-ONLY RECON

@@ -4,9 +4,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const CONFIG_FILE_NAME = "cliproxyapi-native-compaction.json";
 export const DEFAULT_NATIVE_MODELS = [
-	"gpt-5.6-sol",
-	"gpt-5.6-terra",
-	"gpt-5.6-luna",
+	"gpt-6-sol",
+	"gpt-6-luna",
 	"gpt-6-astra",
 ] as const;
 

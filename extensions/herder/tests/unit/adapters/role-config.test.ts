@@ -14,7 +14,7 @@ const agentRoot = path.join(packageRoot, "assets/roles/pi");
 const available = [
 	{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3", thinkingLevelMap: { max: "max" } },
 	{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash", thinkingLevelMap: { high: "high", max: null } },
-	{ provider: "proxy", id: "gpt-5.6-luna", fullId: "proxy/gpt-5.6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
+	{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 ];
 
 test("Herder loads exact scoped Pi role definitions", async () => {
@@ -41,10 +41,10 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
 	assert.equal(recon.binding, "own");
-	assert.deepEqual(recon.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(recon.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
 	assert.equal(searcher.readOnly, true);
 	assert.equal(searcher.binding, "own");
-	assert.deepEqual(searcher.modelBinding, { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(searcher.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
 	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
 	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content", "find", "grep"]);
 	assert.equal(worker.readOnly, false);
@@ -72,13 +72,13 @@ test("universe keeps Luna on Recon and validates rescue and Searcher overrides",
 	const models = [
 		...available,
 		{ provider: "proxy", id: "gpt-6-astra", api: "openai-completions", thinkingLevelMap: { medium: "medium", xhigh: "xhigh", max: null } },
-		{ provider: "proxy", id: "gpt-5.6-sol", thinkingLevelMap: { xhigh: "xhigh", max: null } },
+		{ provider: "proxy", id: "gpt-6-sol", thinkingLevelMap: { xhigh: "xhigh", max: null } },
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, models));
-	const parent = { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-5.6-sol", effort: "xhigh" });
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "gpt-5.6-luna", effort: "max", serviceTier: "fast" });
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "fast" });
+	const parent = { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6-sol", effort: "xhigh" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast" });
 	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
 		...profile, rescue: { ...profile.rescue!, model: "rescue-only" },
 	}, [...models, { provider: "proxy", id: "rescue-only", thinkingLevelMap: { medium: "medium", xhigh: null } }]), /rescue-only does not support thinking xhigh/);
@@ -186,9 +186,9 @@ test("nested reviewer rejects widened, incomplete, or dishonest permission metad
 		const original = await readFile(path.join(agentRoot, "nested/reviewer.md"), "utf8");
 		const tools = "read, bash, grep, find, ls, Agent, get_subagent_result";
 		const cases: [string, string, RegExp][] = [
-			["binding: inherit", "binding: own\nmodel: gpt-5.6-luna\neffort: max", /must inherit its parent binding/],
+			["binding: inherit", "binding: own\nmodel: gpt-6-luna\neffort: max", /must inherit its parent binding/],
 			["binding: inherit", "binding: other", /invalid binding/],
-			["binding: inherit", "binding: inherit\nmodel: gpt-5.6-luna\neffort: max\nservice_tier: fast", /cannot declare its own model/],
+			["binding: inherit", "binding: inherit\nmodel: gpt-6-luna\neffort: max\nservice_tier: fast", /cannot declare its own model/],
 			["readOnly: false", "readOnly: true", /mutating or unrestricted tool/],
 			["readOnly: false", 'readOnly: "false"', /missing readOnly/],
 			["package: herder", "package: other", /mismatched nested agent metadata/],
@@ -234,8 +234,8 @@ test("Herder validates package roles against the built-in engine model catalog",
 test("Herder refuses own-model nested agents when Luna cannot honor the scout tier", async () => {
 	const profile = resolvePiProfile("poorman", catalog);
 	await assert.rejects(
-		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "gpt-5.6-luna" ? { ...model, api: "openai-completions" } : model)),
-		/nested agent recon cannot start because gpt-5.6-luna .* does not support service tier fast/,
+		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "gpt-6-luna" ? { ...model, api: "openai-completions" } : model)),
+		/nested agent recon cannot start because gpt-6-luna .* does not support service tier fast/,
 	);
 });
 
@@ -243,12 +243,12 @@ test("Herder refuses tiered roles when the resolved model cannot honor the tier"
 	const profile = resolvePiProfile("eclipse", catalog);
 	assert.equal(profile.roles["plan-implementer"].service_tier, "fast");
 	const tiered = [
-		{ provider: "cliproxyapi", id: "gpt-5.6-sol", fullId: "cliproxyapi/gpt-5.6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
-		{ provider: "cliproxyapi", id: "gpt-5.6-luna", fullId: "cliproxyapi/gpt-5.6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
+		{ provider: "cliproxyapi", id: "gpt-6-sol", fullId: "cliproxyapi/gpt-6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+		{ provider: "cliproxyapi", id: "gpt-6-luna", fullId: "cliproxyapi/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, tiered));
 	await assert.rejects(
-		() => validateHerderRoleAgents(agentRoot, profile, tiered.map((model) => model.id === "gpt-5.6-luna" ? { ...model, api: "openai-completions" } : model)),
+		() => validateHerderRoleAgents(agentRoot, profile, tiered.map((model) => model.id === "gpt-6-luna" ? { ...model, api: "openai-completions" } : model)),
 		/does not support service tier fast/,
 	);
 });

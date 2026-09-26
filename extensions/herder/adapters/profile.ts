@@ -41,7 +41,7 @@ export function modelMatches(requested: string, candidate: AvailableModel): bool
 	return requested === id || requested === fullId || fullId.endsWith(`/${requested}`);
 }
 
-export const HERDER_OWN_NESTED_MODEL = "gpt-5.6-luna";
+export const HERDER_OWN_NESTED_MODEL = "gpt-6-luna";
 
 export function unavailableProfileModels(profile: ResolvedProfile, available: readonly AvailableModel[]): string[] {
 	const required = new Set([
