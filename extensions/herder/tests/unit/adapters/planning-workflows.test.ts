@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createSyntheticSourceInfo, wrapRegisteredTool, initTheme, type ExtensionRunner, type ToolDefinition, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { createSyntheticSourceInfo, wrapRegisteredTool, initTheme, type ExtensionRunner, type ToolDefinition, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ExtensionToolContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { runAgentLoop, type AgentEvent } from "@earendil-works/pi-agent-core";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -576,7 +576,11 @@ test("registered herder_plan failures and handled success cross the real SDK bou
 			let repositoryReads = 0;
 			let hookCalls = 0;
 			let managerReplies = 0;
-			const ctx = { isProjectTrusted: () => scenario.trusted } as ExtensionContext;
+			const ctx = {
+				isProjectTrusted: () => scenario.trusted,
+				tools: [],
+				executeTool: async () => { assert.fail("plan operations must not execute nested tools"); },
+			} as unknown as ExtensionToolContext;
 			registerPiPlanningWorkflows({
 				registerCommand: () => {},
 				registerTool: (tool: ToolDefinition) => { definition = tool; },
@@ -602,7 +606,7 @@ test("registered herder_plan failures and handled success cross the real SDK bou
 				definition,
 				sourceInfo: createSyntheticSourceInfo(import.meta.filename, { source: "test" }),
 			}, {
-				createContext: () => ctx,
+				createToolContext: () => ctx,
 				getActiveTools: () => ["herder_plan"],
 			} as unknown as ExtensionRunner);
 			const faux = createFauxCore({});
@@ -615,11 +619,11 @@ test("registered herder_plan failures and handled success cross the real SDK bou
 			const events: AgentEvent[] = [];
 			const messages = await runAgentLoop(
 				[{ role: "user", content: "Run the plan operation", timestamp: 0 }],
-				{ systemPrompt: "Test", messages: [], tools: [tool] },
+				{ messages: [], tools: [tool] },
 				{
 					model: faux.getModel(),
 					convertToLlm: (messages) => messages.filter((message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult"),
-					shouldStopAfterTurn: () => true,
+					finishTurn: () => ({ action: "end" }),
 				},
 				(event) => { events.push(event); }, undefined, faux.streamSimple,
 			);

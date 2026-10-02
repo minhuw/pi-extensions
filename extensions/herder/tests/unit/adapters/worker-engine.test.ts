@@ -6,6 +6,7 @@ import test from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderCleanupError, HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
@@ -395,8 +396,8 @@ export default function (pi) {
 					: ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]).sort(),
 			);
 			if (role === "plan-implementer") {
-				const injected = await session.extensionRunner.emitBeforeAgentStart("task", undefined, "BASE", {} as never);
-				assert.match(injected?.systemPrompt ?? "", /BASE\nPONYTAIL_TEST/);
+				const injected = await session.extensionRunner.emitBeforeAgentStart("task", undefined, { cwd: worktree, forceSystemPrompt: "BASE" });
+				assert.match(injected?.systemPromptOptions.forceSystemPrompt ?? "", /BASE\nPONYTAIL_TEST/);
 			}
 			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			session.dispose();
@@ -436,7 +437,7 @@ export default function (pi) {
 			const beforeNested = await eventLines();
 			let providerTools: string[] = [];
 			const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
-				providerTools = (context.tools ?? []).map((tool) => tool.name).sort();
+				providerTools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
 				if (nestedCase.type === "recon") {
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
@@ -474,14 +475,17 @@ export default function (pi) {
 			const observedModels: string[] = [];
 			const respond: Parameters<typeof faux.setResponses>[0][number] = (context, options, _state, model) => {
 				observedModels.push(model.id);
-				const tools = (context.tools ?? []).map((tool) => tool.name).sort();
+				const tools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
 				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
 				if (model.id === "gpt-6-luna") {
 					assert.deepEqual(tools, ["read", "grep", "find", "ls"].sort());
 					assert.equal(options?.reasoning, "max");
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) {
-						assert.equal(context.messages.length, 1, "scout starts with its own task only");
+						const conversation = context.messages.filter((entry) => entry.role !== "system");
+						assert.deepEqual(conversation.map((entry) => entry.role), ["user"], "scout inherits no reviewer conversation");
+						assert.match(JSON.stringify(conversation[0]!.content), /Trace the exported symbol/);
+						assert.doesNotMatch(JSON.stringify(conversation[0]!.content), /Review shard/);
 						return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
 					}
 					assert.equal(results.length, 3);
@@ -499,7 +503,9 @@ export default function (pi) {
 				assert.deepEqual(tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"].sort());
 				const results = context.messages.filter((entry) => entry.role === "toolResult");
 				if (results.length === 0) {
-					assert.equal(context.messages.length, 1, "reviewer starts with its own task only");
+					const conversation = context.messages.filter((entry) => entry.role !== "system");
+					assert.deepEqual(conversation.map((entry) => entry.role), ["user"], "reviewer starts with its own task only");
+					assert.match(JSON.stringify(conversation[0]!.content), /Review shard [0-3]/);
 					return fauxAssistantMessage(fauxToolCall("Agent", {
 						subagent_type: "recon", prompt: "Trace the exported symbol", description: "trace exported symbol",
 					}), { stopReason: "toolUse" });
@@ -1317,16 +1323,18 @@ for (const owner of ["root", "reviewer", "recon"] as const) {
 			const authStarted = new Deferred<void>();
 			const authResume = new Deferred<void>();
 			const providerRelease = new Deferred<void>();
+			let compactionAuthSignal: AbortSignal | undefined;
 			const authGate = async () => { authStarted.resolve(); await authResume.promise; };
 			if (phase === "compaction") {
-				// The SDK awaits this before emitting compaction_start/installing its controller.
+				// Pi installs the compaction controller before awaiting summarization auth.
 				const internals = session as unknown as {
-					_getSummarizationRequestAuth(model: NonNullable<AgentSession["model"]>): Promise<unknown>;
+					_getSummarizationRequestAuth(model: NonNullable<AgentSession["model"]>, signal?: AbortSignal): Promise<unknown>;
 				};
 				const getAuth = internals._getSummarizationRequestAuth.bind(session);
-				t.mock.method(internals, "_getSummarizationRequestAuth", async (model: NonNullable<AgentSession["model"]>) => {
+				t.mock.method(internals, "_getSummarizationRequestAuth", async (model: NonNullable<AgentSession["model"]>, signal?: AbortSignal) => {
+					compactionAuthSignal = signal;
 					await authGate();
-					return getAuth(model);
+					return getAuth(model, signal);
 				});
 			} else {
 				// Prompt preflight can finish auth after an idle session.abort() already resolved.
@@ -1394,7 +1402,8 @@ for (const owner of ["root", "reviewer", "recon"] as const) {
 				t.mock.timers.tick(100);
 				await nextTurn();
 				assert.equal(engine.snapshots()[0]!.status, "stopping");
-				assert.equal(session.isCompacting, false, "no compaction controller exists during auth");
+				assert.equal(session.isCompacting, phase === "compaction", "compaction retains its controller until pending auth settles");
+				if (phase === "compaction") assert.equal(compactionAuthSignal?.aborted, true, "deadline cancels pending compaction auth");
 				fixture?.session.promptDone.resolve();
 				fixture?.session.abortDone.resolve();
 				await nextTurn();

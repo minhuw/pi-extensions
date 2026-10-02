@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
 	buildSessionContext,
 	convertToLlm,
-	sessionEntryToContextMessages,
 	type SessionEntry,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
@@ -431,7 +430,8 @@ export function messagesToResponseItems(model: Model<any>, messages: Message[], 
 }
 
 function entriesToResponseItems(model: Model<any>, entries: SessionEntry[], tools: ToolInfo[]): ResponseItem[] {
-	const messages = entries.flatMap((entry) => sessionEntryToContextMessages(entry));
+	// Project only the tail: Pi stops at its missing checkpoint parent and applies context edits.
+	const { messages } = buildSessionContext(entries);
 	return messagesToResponseItems(model, convertToLlm(messages), tools);
 }
 
@@ -446,7 +446,12 @@ export function effectiveInputForBranch(params: {
 		const lastAssistantIndex = branch.findLastIndex(
 			(entry) => entry.type === "message" && entry.message.role === "assistant",
 		);
-		if (lastAssistantIndex >= 0) branch = branch.filter((_entry, index) => index !== lastAssistantIndex);
+		if (lastAssistantIndex >= 0) {
+			const excluded = branch[lastAssistantIndex]!;
+			branch = branch
+				.filter((_entry, index) => index !== lastAssistantIndex)
+				.map((entry) => entry.parentId === excluded.id ? { ...entry, parentId: excluded.parentId } : entry);
+		}
 	}
 
 	const checkpoint = findNativeCheckpoint(branch);

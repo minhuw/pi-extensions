@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Model } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_NATIVE_MODELS,
 	isEligibleModel,
@@ -10,7 +12,11 @@ import {
 	buildCompactRequestBody,
 	buildRemoteCompactionV2ReplacementHistory,
 	callRemoteCompaction,
+	effectiveInputForBranch,
 	findNativeCheckpoint,
+	modelKey,
+	NATIVE_COMPACTION_KIND,
+	NATIVE_COMPACTION_VERSION,
 	parseCompactResponse,
 	resolveCompactUrl,
 	shouldFallbackToBuiltinCompaction,
@@ -134,6 +140,83 @@ describe("compact endpoint transport", () => {
 			],
 		});
 		expect(input[0]).toHaveProperty("status", "completed");
+	});
+});
+
+describe.each(["compaction", "custom"] as const)("%s checkpoint context edits", (checkpointType) => {
+	function sessionWithCheckpoint() {
+		const session = SessionManager.inMemory();
+		const beforeId = session.appendMessage({ role: "user", content: "pre-checkpoint history", timestamp: 0 });
+		const replacementHistory = [
+			{ role: "user", content: [{ type: "input_text", text: "retained canonical input" }] },
+			{ type: "compaction", encrypted_content: "opaque" },
+		];
+		const details = {
+			kind: NATIVE_COMPACTION_KIND,
+			version: NATIVE_COMPACTION_VERSION,
+			endpoint: "responses",
+			modelKey: modelKey(model),
+			replacementHistory,
+		};
+		if (checkpointType === "compaction") {
+			// A full-branch projection would incorrectly restore this retained raw entry.
+			session.appendCompaction("native marker", beforeId, 100, details);
+		} else {
+			session.appendCustomEntry(NATIVE_COMPACTION_KIND, details);
+		}
+		return { session, beforeId, replacementHistory };
+	}
+
+	it("preserves the checkpoint with no tail", () => {
+		const { session, replacementHistory } = sessionWithCheckpoint();
+		expect(effectiveInputForBranch({ branch: session.getBranch(), model, tools: [] })).toEqual(replacementHistory);
+	});
+
+	it("appends an unchanged tail despite its missing checkpoint parent in the projection", () => {
+		const { session, replacementHistory } = sessionWithCheckpoint();
+		session.appendMessage({ role: "user", content: "tail", timestamp: 1 });
+		expect(effectiveInputForBranch({ branch: session.getBranch(), model, tools: [] })).toEqual([
+			...replacementHistory,
+			{ role: "user", content: [{ type: "input_text", text: "tail" }] },
+		]);
+	});
+
+	it.each(["metadata", "context edit"])("preserves tail connectivity when an excluded error precedes %s", (following) => {
+		const { session, replacementHistory } = sessionWithCheckpoint();
+		const targetId = session.appendMessage({ role: "user", content: "important tail", timestamp: 1 });
+		session.appendMessage(fauxAssistantMessage("failed response", { stopReason: "error" }));
+		if (following === "metadata") session.appendCustomEntry("metadata", {});
+		else session.appendContextEdit(targetId, { content: "edited tail" });
+		const branch = session.getBranch();
+		const original = structuredClone(branch);
+		expect(effectiveInputForBranch({ branch, model, tools: [], excludeLastAssistantError: true })).toEqual([
+			...replacementHistory,
+			{ role: "user", content: [{ type: "input_text", text: following === "metadata" ? "important tail" : "edited tail" }] },
+		]);
+		expect(branch).toEqual(original);
+	});
+
+	it("omits an edited tail message without changing the checkpoint or raw history", () => {
+		const { session, replacementHistory } = sessionWithCheckpoint();
+		const targetId = session.appendMessage({ role: "user", content: "omit me", timestamp: 1 });
+		session.appendContextEdit(targetId, null);
+		const branch = session.getBranch();
+		const original = structuredClone(branch);
+		expect(effectiveInputForBranch({ branch, model, tools: [] })).toEqual(replacementHistory);
+		expect(branch).toEqual(original);
+	});
+
+	it("uses the latest tail replacement without resurrecting edited pre-checkpoint entries", () => {
+		const { session, beforeId, replacementHistory } = sessionWithCheckpoint();
+		const targetId = session.appendMessage({ role: "user", content: "original tail", timestamp: 1 });
+		session.appendContextEdit(targetId, { content: "first replacement" });
+		session.appendContextEdit(targetId, null);
+		session.appendContextEdit(targetId, { content: "latest replacement" });
+		session.appendContextEdit(beforeId, { content: "must not reappear" });
+		expect(effectiveInputForBranch({ branch: session.getBranch(), model, tools: [] })).toEqual([
+			...replacementHistory,
+			{ role: "user", content: [{ type: "input_text", text: "latest replacement" }] },
+		]);
 	});
 });
 
