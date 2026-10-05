@@ -174,3 +174,75 @@ test("historical ADVISORY evidence can reopen only as a changed introduced PATCH
 	assert.throws(() => validateJudgeFindings({ ...reopened, findings: reopened.findings.map(f => f.replace("PATCH_REGRESSION", "PLAN_REQUIREMENT")) }, [changed.replace("PATCH_REGRESSION", "PLAN_REQUIREMENT")], contracts, [prior]), /excluded finding/);
 	assert.throws(() => validateJudgeFindings({ ...judge(), findings: [disposition.replace("F001", "NEW") + rationale], authorizedBlockers: ["NEW"], repairContracts: ["[NEW] fix"] }, [current.replace("F001", "NEW")], contracts, [prior]), /excluded finding/);
 });
+
+// Redacted incident shape: reviewer metadata follows an unpunctuated violation;
+// the Judge moved that violation to the end and added a period.
+const incidentFields = "obligation=A1; evidence=src/fence.ts:12 stale owner is not rejected; violation=the stale owner bypasses the required fencing response";
+const incidentReviewer = `[F-fence][P1][BLOCKING][PLAN_REQUIREMENT] stale owner; ${incidentFields}; introduced_by=repair`;
+const referenceJudge = () => ({
+	decision: "REPAIR" as const,
+	findings: ["[F-fence][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] confirmation=Independently traced src/fence.ts:12 and reproduced the stale-owner write"],
+	authorizedBlockers: ["F-fence"], repairContracts: ["[F-fence] reject stale-owner writes"],
+});
+
+test("incident punctuation mismatch names violation; references retain exact reviewer fields without mutating input", () => {
+	const result = referenceJudge();
+	assert.throws(() => validateJudgeFindings({ ...result, findings: [`[F-fence][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] retain; ${incidentFields}.`] }, [incidentReviewer], contracts), /F-fence.*mismatched: violation$/);
+	const before = structuredClone(result);
+	Object.freeze(result.findings);
+	const normalized = validateJudgeFindings(result, [incidentReviewer], contracts);
+	assert.deepEqual(normalized, [`[F-fence][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] ${incidentFields}; confirmation=Independently traced src/fence.ts:12 and reproduced the stale-owner write`]);
+	assert.deepEqual(result, before);
+	assert.deepEqual(validateJudgeFindings(judge(), [finding], contracts), judge().findings, "legacy fields remain unchanged");
+});
+
+test("legacy evidence containing confirmation= is not mistaken for a reference", () => {
+	const suffix = " with confirmation=false";
+	const review = finding.replace("input 0", `input 0${suffix}`);
+	const result = { ...judge(), findings: judge().findings.map(f => f.replace("input 0", `input 0${suffix}`)) };
+	assert.deepEqual(validateJudgeFindings(result, [review], contracts), result.findings);
+	assert.throws(() => validateJudgeFindings({ ...result, findings: result.findings.map(f => f.replace("confirmation=false", "confirmation=true")) }, [review], contracts), /mismatched: evidence/);
+});
+
+test("references require unique current IDs, concrete reviewer fields, known obligations and exact relationship", () => {
+	const result = referenceJudge();
+	for (const review of [[], [incidentReviewer.replace("F-fence", "F-other")], [incidentReviewer, incidentReviewer], [incidentReviewer, "[F-fence][P2][ADVISORY][FOLLOWUP] ambiguous ID"]]) {
+		assert.throws(() => validateJudgeFindings(result, review, contracts), /unambiguous|duplicate blocker/);
+	}
+	for (const name of ["evidence", "violation"]) {
+		for (const replacement of ["", `; ${name}=unknown`]) {
+			const review = incidentReviewer.replace(new RegExp(`; ${name}=[^;]+`), replacement);
+			assert.throws(() => validateJudgeFindings(result, [review], contracts), new RegExp(`F-fence: missing (?:concrete )?${name}`));
+		}
+	}
+	for (const obligation of ["A99", "unknown"]) assert.throws(() => validateJudgeFindings(result, [incidentReviewer.replace("obligation=A1", `obligation=${obligation}`)], contracts), /obligation/);
+	assert.throws(() => validateJudgeFindings(result, [incidentReviewer.replace("obligation=A1; ", "")], contracts), /obligation/);
+	assert.throws(() => validateJudgeFindings({ ...result, findings: result.findings.map(f => f.replace("PLAN_REQUIREMENT", "PATCH_REGRESSION")) }, [incidentReviewer], contracts), /mismatched: relationship/);
+	assert.throws(() => validateJudgeFindings(result, [incidentReviewer], contracts, [], true), /aggregate obligations/);
+});
+
+test("reference grammar rejects missing/placeholder confirmation, mixed fields and unbounded or ambiguous bodies", () => {
+	const result = referenceJudge();
+	const prefix = "[F-fence][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] ";
+	const confirmation = "confirmation=Reproduced stale-owner write in src/fence.ts:12";
+	for (const body of ["retain", "regression_rationale=repair introduced this", ...["", " ", "none", "unknown", "...", "<verification>", "confirmed", "verified"].map(v => `confirmation=${v}`),
+		`${confirmation}; confirmation=duplicate`, `${confirmation}; extra=value`, `regression_rationale=introduced; ${confirmation}`, `confirmation=${"x".repeat(4097)}`, `${confirmation}\ntrailing`, `${confirmation}\n`, `${confirmation}; regression_rationale=unknown`,
+		...["obligation=A1", "obligation=A99", "evidence=changed trace", "violation=changed cause", "relationship=PATCH_REGRESSION"].flatMap(field => [`${confirmation}; ${field}`, `${field}; ${confirmation}`, `${confirmation}, ${field}`]),
+	]) assert.throws(() => validateJudgeFindings({ ...result, findings: [prefix + body] }, [incidentReviewer], contracts), /Review finding protocol/, body);
+});
+
+test("references preserve exclusions, repair binding and DONE completeness", () => {
+	const result = referenceJudge();
+	assert.throws(() => validateJudgeFindings(result, [incidentReviewer], contracts, [incidentReviewer]), /excluded finding/);
+	const regression = incidentReviewer.replace("PLAN_REQUIREMENT", "PATCH_REGRESSION");
+	const reopened = { ...result, findings: result.findings.map(f => f.replace("PLAN_REQUIREMENT", "PATCH_REGRESSION") + "; regression_rationale=repair introduced a new stale-owner path") };
+	assert.throws(() => validateJudgeFindings(reopened, [regression], contracts, [incidentReviewer]), /excluded finding/);
+	const changed = regression.replace("src/fence.ts:12", "src/fence.ts:24");
+	assert.throws(() => validateJudgeFindings({ ...reopened, findings: reopened.findings.map(f => f.split("; regression_rationale=")[0]!) }, [changed], contracts, [incidentReviewer]), /regression_rationale/);
+	assert.match(validateJudgeFindings(reopened, [changed], contracts, [incidentReviewer])[0]!, /evidence=src\/fence.ts:24/);
+	for (const override of [{ findings: [] }, { authorizedBlockers: ["F-other"] }, { repairContracts: ["[F-other] wrong repair"] }, { repairContracts: [...result.repairContracts, "[F-other] extra repair"] }]) {
+		assert.throws(() => validateJudgeFindings({ ...result, ...override }, [incidentReviewer], contracts), /bound|repair contract/);
+	}
+	assert.throws(() => validateJudgeFindings({ ...result, decision: "DONE", authorizedBlockers: [], repairContracts: [] }, [incidentReviewer], contracts), /unbound/);
+	assert.throws(() => validateJudgeFindings({ ...result, decision: "DONE", findings: [], authorizedBlockers: [], repairContracts: [] }, [incidentReviewer], contracts), /exactly one disposition/);
+});

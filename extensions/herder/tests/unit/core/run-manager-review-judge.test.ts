@@ -1124,3 +1124,48 @@ test("excluded NEW advisory cannot authorize repeated repair but changed introdu
 		}
 	});
 });
+
+test("Judge references persist canonical current evidence while punctuation errors preserve raw diagnostics and retry authority", { timeout: 60_000 }, async () => {
+	for (const reference of [true, false]) await withFixture(`judge-reference-${reference}`, async (service, fixture) => {
+		const prefix = `judge-reference-${reference}`;
+		const fields = "obligation=A1; evidence=src/value.mjs:1 stale owner writes succeed; violation=the stale owner bypasses the required fencing response";
+		const reviewerFinding = `[F001][P1][BLOCKING][PLAN_REQUIREMENT] stale owner; ${fields}; introduced_by=repair`;
+		const confirmation = "confirmation=Independently reproduced the stale-owner write at src/value.mjs:1";
+		const judgeFinding = `[F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] ${reference ? confirmation : `retain; ${fields}.`}`;
+		let reply = await startRun(service, fixture, prefix);
+		reply = await finishImplementer(service, action(reply, "plan-implementer"), prefix);
+		reply = await finishReviewer(service, action(reply, "plan-reviewer"), prefix, { verdict: "REVISE", findings: [reviewerFinding] });
+		const judge = action(reply, "plan-judge");
+		assert.ok(String(judge.prompt).includes(reviewerFinding));
+		const raw = judgeResponse({ decision: "REPAIR", findings: [judgeFinding], authorizedBlockers: ["F001"], repairContracts: ["[F001] reject stale-owner writes"], rationale: "Independent trace recorded. ".repeat(1000) });
+		await dispatch(service, judge, prefix);
+		reply = await terminal(service, judge, prefix, raw);
+		const inspected = inspectPlan(fixture);
+		try {
+			const stored = payload(inspected.store.getAction(String(judge.actionId))!.result);
+			assertNoApproval(inspected.store, inspected.run!.runId);
+			if (reference) {
+				const canonical = [`[F001][BLOCKING_IN_SCOPE][PLAN_REQUIREMENT] ${fields}; ${confirmation}`];
+				assert.deepEqual(payload(stored.workerResult).findings, canonical);
+				assert.deepEqual(inspected.plan.findings, canonical);
+				assert.equal(action(reply, "plan-implementer").round, 2);
+				assert.ok(String(action(reply, "plan-implementer").prompt).includes(fields));
+			} else {
+				assert.equal(payload(stored.terminal).response, raw);
+				assert.equal(stored.workerResult, null);
+				assert.equal(reply.status, "needs_input");
+				assert.deepEqual(reply.actions, []);
+				assert.equal(inspected.plan.round, 1);
+				const attention = payload(reply.attention);
+				assert.equal(attention.cause, "worker_protocol_error");
+				const detail = String(attention.detail);
+				assert.match(detail, /F001.*mismatched: violation/);
+				for (const locator of [inspected.store.databasePath, "manager_actions", `action_id=${judge.actionId}`, "result_json.terminal.response", `${prefix}-${judge.attemptId}-host`]) assert.ok(detail.slice(0, 2048).includes(locator), locator);
+				assert.deepEqual(inspected.plan.findings, [reviewerFinding]);
+				assert.deepEqual(payload(attention.continuation), { role: "plan-judge", phase: "READY_JUDGE" });
+				await assert.rejects(submitHerderEvent({ planDirectory: fixture.planDirectory, kind: "attention", attention: { ...attentionResolutionFromRequest(attention as unknown as ManagerAttentionRequest), action: "retry" } }), /host grant/);
+				assert.equal(inspected.store.countActions(inspected.run!.runId), 3, "protocol errors never automatically retry");
+			}
+		} finally { inspected.store.close(); }
+	});
+});

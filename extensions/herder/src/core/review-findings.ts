@@ -46,20 +46,22 @@ function fail(message: string): never {
 	throw new Error(`Review finding protocol: ${message}`);
 }
 
-function blockerFields(body: string, requireObligation = true): Pick<ValidatedReviewBlocker, "obligation" | "evidence" | "violation"> {
+const PLACEHOLDER = /^(?:none|unknown|n\/a|pending|tbd|not run|\.\.\.|<[^>]*>)$/i;
+
+function blockerFields(body: string, id: string, requireObligation = true): Pick<ValidatedReviewBlocker, "obligation" | "evidence" | "violation"> {
 	const fields = new Map<string, string>();
 	const matches = [...body.matchAll(/(?:^|;\s*)([a-z_]+)=/g)];
 	for (let index = 0; index < matches.length; index++) {
 		const match = matches[index]!;
 		const name = match[1]!;
 		if (!["obligation", "evidence", "violation"].includes(name)) continue;
-		if (fields.has(name)) fail(`duplicate ${name}`);
+		if (fields.has(name)) fail(`finding ${id}: duplicate ${name}`);
 		const value = body.slice(match.index! + match[0].length, matches[index + 1]?.index ?? body.length).trim();
-		if ((!value || /^(?:none|unknown|n\/a|pending|tbd|not run|\.\.\.|<[^>]*>)$/i.test(value)) && (name !== "obligation" || requireObligation)) fail(`missing concrete ${name}`);
+		if ((!value || PLACEHOLDER.test(value)) && (name !== "obligation" || requireObligation)) fail(`finding ${id}: missing concrete ${name}`);
 		fields.set(name, value);
 	}
 	for (const name of ["obligation", "evidence", "violation"]) {
-		if (!fields.has(name) && (name !== "obligation" || requireObligation)) fail(`missing ${name}`);
+		if (!fields.has(name) && (name !== "obligation" || requireObligation)) fail(`finding ${id}: missing ${name}`);
 	}
 	return { obligation: fields.get("obligation") ?? "unknown", evidence: fields.get("evidence")!, violation: fields.get("violation")! };
 }
@@ -93,7 +95,7 @@ export function validateReviewFindings(findings: readonly string[], contracts: r
 		if (!finding.includes("[BLOCKING]")) continue;
 		const match = finding.match(/^\[([^\[\]\s]+)\]\[(P0|P1)\]\[BLOCKING\]\[(PLAN_REQUIREMENT|PATCH_REGRESSION)\]\s+(.+)$/);
 		if (!match) fail("blocker requires P0/P1 and PLAN_REQUIREMENT or PATCH_REGRESSION; FOLLOWUP/INVALID are advisory");
-		const fields = blockerFields(match[4]!, requireObligation);
+		const fields = blockerFields(match[4]!, match[1]!, requireObligation);
 		if (requireObligation) validateObligation(fields.obligation, contracts, finalAudit);
 		const id = match[1]!;
 		if (id !== "NEW" && blockers.some((entry) => entry.id === id)) fail(`duplicate blocker ${id}`);
@@ -144,6 +146,7 @@ export function validateReviewerResult(
 
 /** Supply the current reviewer evidence with the exact retained finding IDs.
  * Judge dispositions may reject evidence, but authorization cannot invent or replace it.
+ * Returns canonical findings for persistence without mutating either input.
  */
 export function validateJudgeFindings(
 	result: Pick<JudgeResult, "decision" | "findings" | "authorizedBlockers" | "repairContracts">,
@@ -151,14 +154,15 @@ export function validateJudgeFindings(
 	contracts: readonly ReviewFindingContract[],
 	previouslyExcluded: readonly string[] = [],
 	finalAudit = false,
-): void {
+): string[] {
+	const findings = [...result.findings];
 	const validated = validateReviewFindings(reviewerFindings, contracts, finalAudit, false);
 	const authorized = new Set(result.authorizedBlockers);
 	if (authorized.size !== result.authorizedBlockers.length) fail("duplicate authorized blocker");
 	if (result.decision !== "REPAIR" && authorized.size) fail("only REPAIR may authorize blockers");
 	if (result.decision === "REPAIR" && !authorized.size) fail("REPAIR requires validated blockers");
 	const dispositions = new Set<string>();
-	for (const finding of result.findings) {
+	for (const [index, finding] of result.findings.entries()) {
 		if (finding.includes("[BLOCKING]")) fail("judge findings require disposition tags, not reviewer blocker tags");
 		if (!finding.includes("[BLOCKING_IN_SCOPE]")) continue;
 		const match = finding.match(/^\[([^\[\]\s]+)\]\[BLOCKING_IN_SCOPE\]\[(PLAN_REQUIREMENT|PATCH_REGRESSION)\]\s+(.+)$/);
@@ -167,13 +171,26 @@ export function validateJudgeFindings(
 		if (result.decision === "DONE" || (result.decision === "REPAIR" && !authorized.has(id)) || dispositions.has(id)) fail(`unbound or duplicate judge blocker ${id}`);
 		const evidence = validated.filter((entry) => entry.id === id);
 		if (evidence.length !== 1) fail(`judge blocker ${id} requires unambiguous validated reviewer evidence`);
-		const fields = blockerFields(match[3]!);
 		const original = evidence[0]!;
 		validateObligation(original.obligation, contracts, finalAudit);
-		if (match[2] !== original.relationship || fields.obligation !== original.obligation
-			|| fields.evidence !== original.evidence || fields.violation !== original.violation) {
-			fail(`judge blocker ${id} must retain validated obligation, evidence, violation, and relationship`);
+		const body = match[3]!;
+		// Reference-only syntax cannot carry replacement evidence, even if it matches.
+		const reference = /(?:^|;\s*)confirmation\s*=/i.test(body);
+		if (reference) {
+			const confirmation = body.match(/^confirmation=([^;\r\n]{1,4096})(?:;[ \t]*regression_rationale=([^;\r\n]{1,4096}))?$/);
+			if (!confirmation || /[\r\n]/.test(finding) || /\b(?:obligation|evidence|violation|relationship)\s*=/i.test(body)) fail(`judge blocker ${id}: reference requires only confirmation and optional regression_rationale; no explicit evidence fields`);
+			const value = confirmation[1]!.trim();
+			if (!value || PLACEHOLDER.test(value) || /^(?:confirmed|verified|yes|agreed|same|see above)[.!]?$/i.test(value)) fail(`judge blocker ${id}: missing concrete confirmation`);
+			if (confirmation[2] !== undefined && (!confirmation[2].trim() || PLACEHOLDER.test(confirmation[2].trim()))) fail(`judge blocker ${id}: missing concrete regression_rationale`);
+			if (reviewerFindings.filter(entry => entry.startsWith(`[${id}]`)).length !== 1) fail(`judge blocker ${id} requires unambiguous validated reviewer evidence`);
 		}
+		const fields = reference ? original : blockerFields(body, id);
+		const mismatches = [
+			...(match[2] !== original.relationship ? ["relationship"] : []),
+			...(["obligation", "evidence", "violation"] as const).filter(field => fields[field] !== original[field]),
+		];
+		if (mismatches.length) fail(`judge blocker ${id} must retain validated fields; mismatched: ${mismatches.join(", ")}`);
+		if (reference) findings[index] = `[${id}][BLOCKING_IN_SCOPE][${original.relationship}] obligation=${original.obligation}; evidence=${original.evidence}; violation=${original.violation}; ${body}`;
 		for (const prior of previouslyExcluded.filter(entry => entry.startsWith(`[${id}]`) || findingEvidence(entry) === fields.evidence)) {
 			const rationale = finding.match(/;\s*regression_rationale=([^;]+)/i)?.[1]?.trim();
 			if (original.relationship !== "PATCH_REGRESSION" || fields.evidence === findingEvidence(prior)
@@ -202,4 +219,5 @@ export function validateJudgeFindings(
 		const id = entry.match(/^\[([^\[\]\s]+)\]\s+/)?.[1];
 		if (!id || !authorized.has(id)) fail("repair contract refers to an unauthorized blocker");
 	}
+	return findings;
 }

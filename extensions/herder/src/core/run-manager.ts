@@ -2051,7 +2051,7 @@ export class HerderRunManager {
 								const prior = storedWorkerResult(entry);
 								return prior?.kind === "reviewer" && entry.actionId !== reviewer?.actionId ? prior.findings.filter(finding => excluded.has(findingId(finding) ?? "")) : [];
 							});
-							validateJudgeFindings(parsed, result?.kind === "reviewer" ? result.findings : [], contracts, [...priorEvidence, ...exclusions.filter(entry => !priorEvidence.some(prior => findingId(prior) === findingId(entry)))], plan.planId === "RUN");
+							parsed = { ...parsed, findings: validateJudgeFindings(parsed, result?.kind === "reviewer" ? result.findings : [], contracts, [...priorEvidence, ...exclusions.filter(entry => !priorEvidence.some(prior => findingId(prior) === findingId(entry)))], plan.planId === "RUN") };
 						}
 					}
 				} catch (error) { parsed = null; parseError = (error as Error).message; }
@@ -2093,7 +2093,12 @@ export class HerderRunManager {
 					? this.retryImplementerTransport(run, plan, action, detail)
 					: this.retryTransportOrPause(run, plan, action, detail);
 			} else if (!parsed) {
-				const detail = `Worker protocol error; execution incomplete: ${parseError || terminal.error || "missing response"}. Raw response and worktree are preserved; no product repair is authorized.`;
+				const detail = [
+					"Worker protocol error; execution incomplete. Raw response and worktree are preserved; no product repair is authorized.",
+					`RAW_RESPONSE: database=${this.store.databasePath}; manager_actions action_id=${action.actionId}; result_json.terminal.response`,
+					...(action.hostHandle ? [`HOST_HANDLE: ${boundedEvidence(action.hostHandle, 256)}`] : []),
+					`ERROR: ${parseError || terminal.error || "missing response"}`,
+				].join("\n");
 				transition = {
 					plan: { ...plan, phase: "NEEDS_INPUT", repair: [...plan.repair, detail] },
 					runUpdate: { status: "needs_input", terminalDetail: detail },
