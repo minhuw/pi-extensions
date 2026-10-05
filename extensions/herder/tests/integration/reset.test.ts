@@ -621,6 +621,63 @@ real_git "$@"
 	}, () => resetHerderPlanSet(resetInput(value))), operation === "branch" || operation === "ref" ? /could not delete moved ref/ : /injected deletion boundary/);
 }
 
+test("completed reset replays read-only after caller commit, branch, and detached checkout changes but rejects recreated refs", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const result = resetHerderPlanSet(resetInput(value));
+		assert.equal(resetIntent(value).completed, true);
+		const store = new RunStore(value.planDir, { readOnly: true });
+		try { assert.equal(store.getRun(), null); } finally { store.close(); }
+		const file = path.join(value.planDir, ".herder", "reset-intent.json");
+		const receipt = fs.readFileSync(file, "utf8");
+		for (const args of [
+			["commit", "-q", "--allow-empty", "-m", "test: later user commit"],
+			["checkout", "-q", "-b", "later-user-branch"],
+			["checkout", "-q", "--detach"],
+		]) {
+			command(value.repo, args);
+			const before = namespaceSnapshot(value);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), result);
+			assert.equal(namespaceSnapshot(value), before);
+			assert.equal(fs.readFileSync(file, "utf8"), receipt);
+		}
+		command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/base`, value.base]);
+		const before = namespaceSnapshot(value);
+		assert.throws(() => resetHerderPlanSet(resetInput(value)), /new or unexpectedly missing artifact/);
+		assert.equal(namespaceSnapshot(value), before);
+		assert.equal(fs.readFileSync(file, "utf8"), receipt);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const boundary of ["deletion", "DB-cleared pending"] as const) {
+	test(`unfinished reset rejects caller HEAD drift without mutation at ${boundary}`, { timeout: 30_000 }, async (t) => {
+		const value = await initializedFixture();
+		try {
+			if (boundary === "deletion") interruptDeletion(value);
+			else {
+				const original = RunStore.prototype.resetExecutionState;
+				const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
+					original.call(this);
+					throw new Error("injected after DB clear");
+				});
+				assert.throws(() => resetHerderPlanSet(resetInput(value)), /injected after DB clear/);
+				mocked.mock.restore();
+				const store = new RunStore(value.planDir, { readOnly: true });
+				try { assert.equal(store.getRun(), null); } finally { store.close(); }
+			}
+			assert.equal(resetIntent(value).completed, false);
+			assert.equal(resetIntent(value).databasePending, boundary === "DB-cleared pending");
+			command(value.repo, ["commit", "-q", "--allow-empty", "-m", "test: unfinished reset checkout drift"]);
+			const before = namespaceSnapshot(value);
+			const file = path.join(value.planDir, ".herder", "reset-intent.json");
+			const receipt = fs.readFileSync(file, "utf8");
+			assert.throws(() => resetHerderPlanSet(resetInput(value)), /checkout or run identity changed/);
+			assert.equal(namespaceSnapshot(value), before);
+			assert.equal(fs.readFileSync(file, "utf8"), receipt);
+		} finally { t.mock.restoreAll(); await stopService(value.planDir).catch(() => {}); remove(value); }
+	});
+}
+
 for (const operation of ["worktree", "branch", "ref", "unlock"] as const) {
 	test(`durable reset resumes interrupted ${operation} deletion and replays its original result`, { timeout: 30_000 }, async () => {
 		const value = operation === "worktree" ? await retainedDoneFixture() : await initializedFixture();

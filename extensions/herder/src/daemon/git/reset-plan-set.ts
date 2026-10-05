@@ -182,7 +182,7 @@ function validateReplay(repo: string, planDir: string, name: string, intent: Res
   if (compileGraphIdentity(buildGraph(planDir)) !== m.graphSha256) fail("Herder reset graph changed after preflight.");
   if (m.input.repoRoot !== repo || m.input.planDirectory !== planDir || m.run.repositoryRoot !== repo
     || m.run.planName !== name || m.run.integrationBranch !== `herder/${name}/integration`
-    || JSON.stringify(currentCheckout(repo)) !== JSON.stringify(m.current)) fail("Herder reset checkout or run identity changed after preflight.");
+    || (!intent.completed && JSON.stringify(currentCheckout(repo)) !== JSON.stringify(m.current))) fail("Herder reset checkout or run identity changed after preflight.");
   const relatives = new Set(["integration", ...m.specs.map((s) => s.planId)]);
   const allowed = [...relatives].flatMap((relative) => allowedWorktreePaths(repo, planDir, name, relative));
   if (snapshot(m.slots.map((s) => s.path)) !== snapshot([...new Set(allowed)])) fail("Herder reset intent contains foreign worktree paths.");
@@ -212,7 +212,10 @@ function validateReplay(repo: string, planDir: string, name: string, intent: Res
     } else if (identity !== null) fail(`Herder reset found an unregistered worktree artifact: ${w.path}`);
   }
   const foreign = m.worktrees.filter((w) => !m.owned.some((owned) => owned.path === w.path));
-  if (snapshot(remaining) !== snapshot(foreign)) fail("Herder reset found new, moved, or foreign worktree attachments after preflight.");
+  // Completed receipts permit caller checkout changes, not changed attachments or locks.
+  const comparable = (w: typeof inventory[number]) => intent.completed && w.path && realpathIfPresent(w.path) === repo
+    ? { ...w, head: "", branch: "", detached: false } : w;
+  if (snapshot(remaining.map(comparable)) !== snapshot(foreign.map(comparable))) fail("Herder reset found new, moved, or foreign worktree attachments after preflight.");
   for (const slot of m.slots) {
     const ownedIndex = m.owned.findIndex((w) => w.path === slot.path || (slot.identity !== null && w.identity === slot.identity));
     const identity = slotIdentity(slot.path);
