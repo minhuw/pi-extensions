@@ -365,7 +365,8 @@ test("main-session attention stays quiet on status and refuses rejection without
 		assert.equal(messageDetails.cause, "initial_decision_blocked");
 		assert.equal(messageDetails.role, "plan-implementer");
 		assert.equal(messageDetails.round, 1);
-		assert.equal(messageDetails.nextAction, "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.");
+		assert.match(String(messageDetails.nextAction), /Record an answer \(record only\), defer, or stop/);
+		assert.match(String(messageDetails.recommendedOperation), /clarify the missing decision/);
 		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
 		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: false });
 
@@ -469,7 +470,8 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
 		const delivered = await withDeadline(api.waitForAttentionMessage(), "acceptance dossier delivery");
-		assert.equal(object(delivered.details).nextAction, "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.");
+		assert.match(String(object(delivered.details).nextAction), /grant no execution, scope, or budget authority/);
+		assert.match(String(object(delivered.details).recommendedOperation), /preserved failure and findings/);
 		const params = {
 			operation: "attention", planDirectory: fixture.planDirectory, requestId: attention.requestId,
 			action: "accept", answer: "Accept F1 and waive the unmet regression-check requirement for this exact plan tree.",

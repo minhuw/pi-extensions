@@ -7,7 +7,8 @@ import {
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
-import type { ManagerAction, TerminalEvent, UsageEvidence } from "../src/shared/protocol.ts";
+import { parseWorkerResult, type ManagerAction, type TerminalEvent, type UsageEvidence, type WorkerResult } from "../src/shared/protocol.ts";
+import { recommendedNextOperation } from "./round-progress.ts";
 
 export const HERDER_WORKER_INPUT_ENTRY = "herder-worker-input-v1";
 export const HERDER_WORKER_OUTPUT_ENTRY = "herder-worker-output-v1";
@@ -40,11 +41,22 @@ export interface HerderWorkerInputEntry extends HerderWorkerTranscriptContext {
 	prompt: string;
 }
 
+interface WorkerPresentation {
+	kind: WorkerResult["kind"];
+	outcome: string;
+	summary: string;
+	stopReason?: string;
+	question?: string;
+}
+
 export interface HerderWorkerOutputEntry extends HerderWorkerTranscriptContext {
 	completedAt: number;
 	durationMs: number;
 	status: "returned" | "interrupted";
+	failureKind?: TerminalEvent["failureKind"];
 	response?: string;
+	/** Parsed from the original response before transcript clipping; not manager acceptance. */
+	presentation?: WorkerPresentation;
 	error?: string;
 	usage: Partial<UsageEvidence>;
 }
@@ -59,6 +71,26 @@ function boundedTranscript(
 	if (!result.truncated) return value;
 	const marker = `[Herder transcript truncated to ${result.outputLines}/${result.totalLines} lines and ${formatSize(result.outputBytes)}/${formatSize(result.totalBytes)}. Full evidence remains in the Herder runtime.]`;
 	return result.content ? `${result.content}\n\n${marker}` : marker;
+}
+
+function workerPresentation(role: ManagerAction["role"], response: string): WorkerPresentation | undefined {
+	try {
+		const result = parseWorkerResult(role, response);
+		return {
+			kind: result.kind,
+			outcome: result.kind === "implementer" ? result.status : result.kind === "reviewer" ? result.verdict : result.decision,
+			summary: boundedTranscript(result.kind === "implementer" ? result.notes : result.kind === "judge" && result.rationale === result.question ? "" : result.rationale, 40, 4 * 1024),
+			// Keep the decision-bearing fields intact; only incidental summaries/raw previews are clipped.
+			...(result.kind === "implementer" && result.stoppedBecause ? { stopReason: result.stoppedBecause } : {}),
+			...(result.kind === "judge" && result.question ? { question: result.question } : {}),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+function isTruncated(value: string | undefined): boolean {
+	return Boolean(value?.includes("[Herder transcript truncated to "));
 }
 
 export function createWorkerTranscriptContext(
@@ -106,7 +138,8 @@ export function createWorkerOutputEntry(
 		completedAt,
 		durationMs: Math.max(0, completedAt - context.startedAt),
 		status: terminal.interrupted ? "interrupted" : "returned",
-		...(terminal.response ? { response: boundedTranscript(terminal.response) } : {}),
+		...(terminal.failureKind ? { failureKind: terminal.failureKind } : {}),
+		...(terminal.response ? { response: boundedTranscript(terminal.response), presentation: workerPresentation(context.role, terminal.response) } : {}),
 		...(terminal.error ? { error: boundedTranscript(terminal.error, ERROR_MAX_LINES, ERROR_MAX_BYTES) } : {}),
 		usage: terminal.usage ?? {},
 	};
@@ -204,14 +237,43 @@ export function workerOutputDisplay(
 	expandHint = "ctrl+o to expand",
 ): string {
 	const interrupted = entry.status === "interrupted";
-	const icon = interrupted ? theme.fg("error", "✗") : theme.fg("success", "✓");
-	const state = interrupted ? "interrupted" : "returned";
+	const transportFailed = interrupted || Boolean(entry.error || entry.failureKind);
+	const responseTruncated = isTruncated(entry.response);
+	// Legacy clipped prefixes cannot establish an outcome even if they still parse.
+	const report = transportFailed ? undefined : entry.presentation ?? (!responseTruncated && entry.response ? workerPresentation(entry.role, entry.response) : undefined);
+	const reportedOutcome = report?.outcome;
+	const incomplete = responseTruncated || [report?.summary, report?.stopReason, report?.question].some(isTruncated);
+	const warning = transportFailed || !report || ["FAILED", "STOPPED", "BLOCK", "BLOCKED", "NEEDS_INPUT"].includes(reportedOutcome ?? "UNKNOWN");
+	const icon = theme.fg(transportFailed ? "error" : warning ? "warning" : "muted", transportFailed ? "✗" : warning ? "!" : "•");
+	const state = interrupted ? "interrupted" : (entry.error || entry.failureKind) ? "returned with transport error" : "returned";
 	const stats = [formatTokens(entry.usage), formatDuration(entry.durationMs)].filter((value): value is string => Boolean(value)).join(" · ");
 	const header = `${icon} ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))}  ${theme.fg("muted", workerIdentity(entry))}`;
-	const body = entry.response || entry.error || "No worker response recorded.";
 	const outcome = [`round ${entry.round}`, state, ...(stats ? [stats] : [])].join(" · ");
-	const lines = [header, theme.fg("dim", `  ${outcome}`), ...themedLines(body, expanded, theme, expandHint)];
-	if (entry.error && entry.response) lines.push(...themedLines(`ERROR: ${entry.error}`, expanded, theme, expandHint, "error"));
+	const lines = [header, theme.fg("dim", `  ${outcome}`)];
+	if (entry.failureKind) lines.push(theme.fg("error", `  Failure: ${entry.failureKind}`));
+	if (entry.error) lines.push(...themedLines(`ERROR: ${entry.error}`, expanded, theme, expandHint, "error"));
+	if (report) {
+		const field = report.kind === "implementer" ? "STATUS" : report.kind === "reviewer" ? "VERDICT" : "DECISION";
+		lines.push(theme.fg(warning ? "warning" : "muted", `  Worker-reported ${field}: ${reportedOutcome} (report only; not manager acceptance)`));
+		if (report.stopReason) lines.push(theme.fg("warning", `  Reason: ${report.stopReason}`));
+		if (report.question) lines.push(theme.fg("warning", `  Question: ${report.question}`));
+		const notes = report.summary === report.question ? "" : report.summary;
+		if (notes) lines.push(theme.fg("dim", `  ${report.kind === "implementer" ? "Recorded work" : "Reason"}: ${notes}`));
+	} else {
+		lines.push(theme.fg("warning", `  Outcome: UNKNOWN — ${transportFailed ? "transport failed; any reported outcome is unconfirmed" : responseTruncated ? "incomplete legacy transcript; no full worker report retained" : "no parseable worker report"}.`));
+	}
+	if (incomplete) {
+		lines.push(theme.fg("warning", "  Evidence truncated: expansion is also bounded. Full evidence remains in the Herder runtime."));
+		lines.push(theme.fg("muted", `  action: ${entry.actionId} · handle: ${entry.handle}`));
+	}
+	lines.push(theme.fg("muted", `  Recommended next operation: ${recommendedNextOperation(report?.kind ?? "", transportFailed ? "STOPPED" : reportedOutcome ?? "UNKNOWN")}`));
+	if (expanded) {
+		lines.push(...themedLines(entry.response || "No worker response recorded.", true, theme, expandHint));
+	} else if (report || transportFailed || responseTruncated) {
+		if (entry.response) lines.push(theme.fg("muted", `  ${responseTruncated ? "Bounded" : "Original"} worker response (${expandHint})`));
+	} else {
+		lines.push(...themedLines(entry.response || "No worker response recorded.", false, theme, expandHint));
+	}
 	if (expanded) {
 		lines.push(theme.fg("muted", `  action: ${entry.actionId}`));
 		lines.push(theme.fg("muted", `  handle: ${entry.handle}`));
@@ -231,7 +293,7 @@ export function registerWorkerTranscriptRenderers(pi: ExtensionAPI): void {
 	pi.registerEntryRenderer<HerderWorkerOutputEntry>(HERDER_WORKER_OUTPUT_ENTRY, (entry, { expanded }, theme) => {
 		const data = entry.data;
 		if (!data) return new Text(theme.fg("warning", "Herder worker output unavailable"), 0, 0);
-		const background = data.status === "interrupted" ? "toolErrorBg" : "toolSuccessBg";
+		const background = data.status === "interrupted" || data.error || data.failureKind ? "toolErrorBg" : "customMessageBg";
 		const box = new Box(1, 1, (text) => theme.bg(background, text));
 		box.addChild(new Text(workerOutputDisplay(data, expanded, theme, keyHint("app.tools.expand", "to expand")), 0, 0));
 		return box;

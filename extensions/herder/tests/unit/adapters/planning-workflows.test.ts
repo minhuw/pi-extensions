@@ -203,8 +203,11 @@ test("attention messages render a compact card while preserving the full prompt"
 		cause: "judge_needs_input",
 		role: "plan-judge",
 		phase: "READY_JUDGE",
-		reason: "Should the optional compatibility alias remain in scope?",
-		nextAction: "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.",
+		reason: request.detail,
+		question: request.question,
+		reportedAdvice: request.recommendedAction,
+		recommendedOperation: "Ask the user to clarify the missing decision against the frozen contract. Only if scope changes are required should the user invoke /herder-revise; clarification alone does not authorize execution.",
+		nextAction: "Record an answer (record only), defer, or stop. These options grant no execution, scope, or budget authority.",
 	});
 	assert.doesNotMatch(JSON.stringify(details), /secret-capability-token/);
 	const operatorDetails = attentionMessageDetails({
@@ -213,8 +216,9 @@ test("attention messages render a compact card while preserving the full prompt"
 		cause: "transport_exhausted",
 		question: undefined,
 	});
-	assert.equal(operatorDetails.reason, "Transport exhausted");
-	assert.equal(operatorDetails.nextAction, "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.");
+	assert.equal(operatorDetails.reason, request.detail);
+	assert.match(operatorDetails.recommendedOperation!, /Inspect the preserved transport failure/);
+	assert.match(operatorDetails.nextAction!, /Record an answer \(record only\), defer, or stop/);
 	for (const blocker of ["ENVIRONMENT", "INVOCATION"]) {
 		const explanation = "Chromium executable unavailable; prepare the pinned browser before retrying.";
 		const environmentRequest = {
@@ -243,8 +247,10 @@ test("attention messages render a compact card while preserving the full prompt"
 	} as unknown as Theme;
 	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
 	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
-	assert.match(collapsed, /Reason: Should the optional compatibility alias remain in scope\?/);
-	assert.match(collapsed, /Next: Next round \(retry\), accept as-is \(accept\), or drop plan \(reject\)/);
+	assert.match(collapsed, /Reason: The Judge needs a bounded product decision\./);
+	assert.match(collapsed, /Question: Should the optional compatibility alias remain in scope\?/);
+	assert.match(collapsed, /Recommended next operation: Ask the user to clarify/);
+	assert.match(collapsed, /Options: Record an answer \(record only\)/);
 	assert.match(collapsed, /ctrl\+o for full dossier/);
 	assert.doesNotMatch(collapsed, /HERDER_MAIN_SESSION|REQUEST_ID|secret-capability-token/);
 
@@ -279,7 +285,10 @@ test("attention messages render a compact card while preserving the full prompt"
 	}
 	const compactComponent = renderer(message, { expanded: false, outputPad: 1 }, theme);
 	assert.ok(compactComponent);
-	assert.equal(compactComponent.render(80).length, 6, "collapsed card stays four content lines plus padding");
+	const wrappedCard = compactComponent.render(80).join("\n").replace(/\s+/g, " ");
+	assert.match(wrappedCard, /Recommended next operation:/);
+	assert.match(wrappedCard, /clarification alone does not authorize execution\./);
+	assert.match(wrappedCard, /for full dossier/);
 
 	const legacy = attentionMessageDisplay(prompt, {
 		requestId: details.requestId,

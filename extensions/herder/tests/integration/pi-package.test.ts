@@ -304,7 +304,8 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.doesNotMatch(mainSessionRequests, /HERDER_MAIN_SESSION_REIGNITE_V1/, "follow-up findings never initiate automatic planning");
 	assert.match(extension, /Tree-relative path inside the integration worktree/);
 	assert.match(transcript, /theme\.bg\("userMessageBg", text\)/);
-	assert.match(transcript, /"toolErrorBg" : "toolSuccessBg"/);
+	assert.match(transcript, /"toolErrorBg" : "customMessageBg"/);
+	assert.doesNotMatch(transcript, /"toolSuccessBg"/, "returned worker output is not manager-accepted success");
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
 	assert.doesNotMatch(extension + engine + nestedExecutor + nestedTool + roleConfig, /extensions\/subagents|subagents\/src|subagents:telemetry|registerSubagentHost|getSubagentHost/);
 	// worker-engine.test.ts exercises clean sessions, exact tool envelopes,

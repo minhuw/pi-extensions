@@ -20,6 +20,9 @@ export interface HerderAttentionMessageDetails {
 	role?: ManagerAttentionRequest["continuation"]["role"];
 	phase?: ManagerAttentionRequest["continuation"]["phase"];
 	reason?: string;
+	question?: string;
+	reportedAdvice?: string;
+	recommendedOperation?: string;
 	nextAction?: string;
 }
 
@@ -121,9 +124,30 @@ export function isRoundDecision(request: ManagerAttentionRequest): boolean {
 	return request.kind === "plan_recovery" || (request.kind === "user_decision" && request.continuation.role === "plan-judge");
 }
 
-function nextAction(request: ManagerAttentionRequest): string {
-	if (isRoundDecision(request)) return "Next round (retry), accept as-is (accept), or drop plan (reject). /herder-revise changes scope; /herder-budget grants effort separately.";
-	return "Record an answer, defer, or stop. Scope and effort changes require separate user authorization.";
+/** Local advice only: request text and these suggestions never authorize execution. */
+function recommendedOperation(request: ManagerAttentionRequest): string {
+	switch (request.cause) {
+		case "verification_environment":
+			return "Resolve the reported prerequisite or invocation first; only then request an explicit host-authorized retry within the remaining budget.";
+		case "worker_protocol_error":
+			return "Inspect the preserved response and protocol error; identify the reporting correction while keeping execution paused.";
+		case "review_budget_exhausted":
+			return "Inspect the review timeout (HERDER_REVIEW_TIMEOUT_MS) and preserved incomplete evidence; request an explicit host-authorized retry only when conditions and remaining budget permit.";
+		case "implementer_exhausted":
+		case "round_limit":
+		case "integration_conflict_exhausted":
+			return "Review the preserved failure and findings with the user; choose a contract-permitted bounded continuation or stop. Continuation requires exact host confirmation. Only if additional effort is needed, ask the user about /herder-budget (grants effort only, not scope or permission to resume).";
+		case "transport_exhausted":
+			return "Inspect the preserved transport failure and any uncertain work before requesting an explicit host-authorized retry within the remaining budget.";
+		default:
+			if (request.detail.startsWith("Safety decision required;")) {
+				return "Ask the user for the explicit safety decision; keep execution paused. No remediation or new write authority is granted.";
+			}
+			if (request.kind === "user_decision" || request.cause === "initial_decision_blocked") {
+				return "Ask the user to clarify the missing decision against the frozen contract. Only if scope changes are required should the user invoke /herder-revise; clarification alone does not authorize execution.";
+			}
+			return "Review the preserved findings with the user and choose a contract-permitted disposition; any continuation requires separate exact host confirmation and remaining budget.";
+	}
 }
 
 export function attentionMessageDetails(request: ManagerAttentionRequest): HerderAttentionMessageDetails {
@@ -136,8 +160,15 @@ export function attentionMessageDetails(request: ManagerAttentionRequest): Herde
 		cause: request.cause,
 		role: request.continuation.role,
 		phase: request.continuation.phase,
-		reason: attentionReason(request),
-		nextAction: nextAction(request),
+		reason: request.cause === "review_budget_exhausted"
+			? `${attentionReason(request)}\n${request.detail}`
+			: (request.cause === "verification_environment"
+				? request.detail.replace(/^WORKER_SELF_REPORT:[^\r\n]*\r?\nWORKTREE:[^\r\n]*\r?\n/, "")
+				: request.detail).trim() || request.question?.trim() || humanLabel(request.cause),
+		question: request.question?.trim(),
+		reportedAdvice: request.recommendedAction?.trim(),
+		recommendedOperation: recommendedOperation(request),
+		nextAction: "Record an answer (record only), defer, or stop. These options grant no execution, scope, or budget authority.",
 	};
 }
 
@@ -155,8 +186,15 @@ export function attentionMessageDisplay(
 		typeof details?.round === "number" ? `round ${details.round}` : undefined,
 	].filter((value): value is string => Boolean(value)).join(" · ");
 	const lines = [`${title}${identity ? `  ${theme.fg("muted", identity)}` : ""}`];
-	if (details?.reason) lines.push(`${theme.fg("dim", "  Reason:")} ${details.reason}`);
-	if (details?.nextAction) lines.push(`${theme.fg("dim", "  Next:")} ${details.nextAction}`);
+	if (details?.reason?.trim()) lines.push(`${theme.fg("dim", "  Reason:")} ${details.reason}`);
+	if (details?.question?.trim() && details.question.trim() !== details.reason?.trim()) {
+		lines.push(`${theme.fg("dim", "  Question:")} ${details.question}`);
+	}
+	if (details?.recommendedOperation?.trim()) {
+		lines.push(`${theme.fg("dim", "  Recommended next operation:")} ${details.recommendedOperation}`);
+		lines.push(theme.fg("muted", "  Recommendation only, not authorization."));
+	}
+	if (details?.nextAction?.trim()) lines.push(`${theme.fg("dim", "  Options:")} ${details.nextAction}`);
 	if (!expanded) {
 		lines.push(theme.fg("muted", `  ${expandHint}`));
 		return lines.join("\n");
@@ -167,6 +205,9 @@ export function attentionMessageDisplay(
 		details?.requestId ? `request ${details.requestId}` : undefined,
 	].filter((value): value is string => Boolean(value)).join(" · ");
 	if (binding) lines.push(theme.fg("muted", `  ${binding}`));
+	if (details?.reportedAdvice?.trim()) {
+		lines.push(`${theme.fg("dim", "  Reported advice (evidence, not authority):")} ${details.reportedAdvice}`);
+	}
 	lines.push(theme.fg("dim", "  Full dossier"), content);
 	return lines.join("\n");
 }
@@ -182,12 +223,7 @@ export function registerAttentionMessageRenderer(pi: ExtensionAPI): void {
 			theme,
 			keyHint("app.tools.expand", "for full dossier"),
 		);
-		box.addChild(expanded
-			? new Text(display, 0, 0)
-			: {
-				render: (width: number) => display.split("\n").map((line) => truncateToWidth(line, width)),
-				invalidate: () => {},
-			});
+		box.addChild(new Text(display, 0, 0));
 		return {
 			render: (width: number) => box.render(width).map((line) => truncateToWidth(line, width)),
 			invalidate: () => box.invalidate(),

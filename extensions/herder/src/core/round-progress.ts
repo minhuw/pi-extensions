@@ -49,7 +49,8 @@ export function buildRoundProgress(actions: readonly StoredAction[]): RoundProgr
 		const role = action.role.replace("plan-", "") as "implementer" | "reviewer" | "judge";
 		round[role] = {
 			actionId: action.actionId,
-			summary: summary ? summary.replace(/\s+/g, " ").trim().slice(0, 600) : "Unknown: no completed worker evidence.",
+			summary: summary ? summary.replace(/\s+/g, " ").trim() : result ? "No notes recorded." : "Unknown: no completed worker evidence.",
+			...(result?.kind === "implementer" ? { stoppedBecause: result.stoppedBecause, commits: [...result.commits] } : {}),
 			outcome,
 			interrupted,
 			setup: result ? [...result.setup] : [],

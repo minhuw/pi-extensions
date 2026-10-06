@@ -175,7 +175,7 @@ export class MainSessionRequests {
 			const reportKey = roundProgressKey(progress);
 			if (this.deliveredRounds.has(reportKey)) continue;
 			try {
-				this.host.pi.sendMessage({ customType: HERDER_ROUND_PROGRESS_MESSAGE, content: renderRoundProgress(progress), display: true, details: { reportKey } }, { deliverAs: "followUp", triggerTurn: false });
+				this.host.pi.sendMessage({ customType: HERDER_ROUND_PROGRESS_MESSAGE, content: renderRoundProgress(progress, reply), display: true, details: { reportKey } }, { deliverAs: "followUp", triggerTurn: false });
 				this.deliveredRounds.add(reportKey);
 			} catch (error) { this.notify(`Herder could not deliver round progress: ${message(error)}`, "warning"); }
 		}

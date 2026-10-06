@@ -158,7 +158,9 @@ test("round progress is concise, durable-id deduplicated across resume and sessi
 	assert.equal(h.userMessages.length, 0);
 	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
 	const sent = h.customMessages[0] as { content: string };
-	assert.equal(sent.content, "Herder · PLAN · generation 1 · round 1\ndone: implementer: Updated fixture (complete)\nchecks: unit: passed\nfixNext: F1: exact repair\nnotIntendedToFix: F2: excluded\noutcome: needs input");
+	for (const evidence of ["PLAN", "Updated fixture", "unit: passed", "F1: exact repair", "F2: excluded", "needs input", "stopped"]) assert.ok(sent.content.includes(evidence), evidence);
+	assert.match(sent.content, /Recommended next operation:/);
+	assert.doesNotMatch(sent.content, /(?:^|\n)done:|fixNext: none|notIntendedToFix: none/);
 	const resumed = new MainSessionRequests(h.host);
 	resumed.restoreRoundProgress([{ type: "custom_message", ...h.customMessages[0] as object }]);
 	resumed.deliverReply(value);
@@ -167,6 +169,24 @@ test("round progress is concise, durable-id deduplicated across resume and sessi
 	assert.equal(h.customMessages.length, 2);
 	resumed.deliverReply(reply({ runId: "foreign", roundProgress: [{ ...progress, reportId: "foreign" }] }));
 	assert.equal(h.customMessages.length, 2);
+});
+
+test("attempt notification carries the manager pause reason without authorizing a retry", () => {
+	const h = harness();
+	const stoppedBecause = "V3 browser verification remains incomplete for Scheduler tooltips and private Parquet flows.";
+	const pauseReason = "Host worker capacity is unavailable; resume when a child slot is free.";
+	const value = reply({ status: "paused", message: pauseReason, roundProgress: [{
+		runId: "run", planId: "003", generation: 1, round: 1, reportId: "implementation",
+		implementer: { actionId: "implementation", summary: "Implementation committed; worktree clean.", stoppedBecause, commits: ["af558d1"], outcome: "FAILED", interrupted: false, setup: [], checks: ["build passed"] },
+		fixNext: [], notIntendedToFix: [], outcome: "FAILED",
+	}] });
+	h.requests.deliverReply(value);
+	const sent = h.customMessages[0] as { content: string };
+	for (const fact of [stoppedBecause, pauseReason, "paused", "FAILED", "af558d1"]) assert.ok(sent.content.includes(fact), fact);
+	assert.match(sent.content, /Recommended next operation:/);
+	assert.doesNotMatch(sent.content, /fixNext: none/);
+	assert.deepEqual(h.userMessages, []);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
 });
 
 test("round delivery failure does not acknowledge evidence or create a model turn", () => {

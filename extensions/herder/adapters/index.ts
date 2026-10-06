@@ -58,6 +58,7 @@ import {
 	isRoundDecision,
 	registerAttentionMessageRenderer,
 } from "./attention.ts";
+import { registerRoundProgressRenderer } from "./round-progress.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
 import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-workflows.ts";
@@ -181,6 +182,7 @@ const cleanupClosed = new Set<string>();
 
 export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFactory: HerderPiWorkerFactory): void {
 	registerAttentionMessageRenderer(pi);
+	registerRoundProgressRenderer(pi);
 	registerWorkerTranscriptRenderers(pi);
 	registerCleanupTranscriptRenderer(pi);
 	const engine = new PiWorkerEngine(sessionFactory);

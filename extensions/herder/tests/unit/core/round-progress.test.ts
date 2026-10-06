@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { StoredAction } from "../../../src/daemon/run-store.ts";
 import { buildRoundProgress, excludedFindings } from "../../../src/core/round-progress.ts";
+import { renderRoundProgress, recommendedNextOperation } from "../../../adapters/round-progress.ts";
+import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { parseWorkerResult } from "../../../src/shared/protocol.ts";
 
 function action(id: string, role: "implementer" | "reviewer" | "judge", overrides: Partial<StoredAction> = {}): StoredAction {
@@ -107,4 +109,103 @@ test("validated Judge reopening removes only its authorized ID from current excl
 		Object.assign((unauthorized.result as { workerResult: object }).workerResult, change);
 		assert.deepEqual(excludedFindings([excluded, unauthorized], "001", 1), [deferred, retained]);
 	}
+});
+
+function stoppedAttempt(planId: string, status: "FAILED" | "STOPPED", commits: string, reason: string): StoredAction {
+	return action(planId, "implementer", { planId, result: {
+		workerResult: parseWorkerResult("plan-implementer", `STATUS: ${status}\nCOMMITS: ${commits}\nNOTES: Updated code.\nSTOPPED BECAUSE: ${reason}\nCHECKS: npm test — passed\ntypecheck — passed`),
+		terminal: { interrupted: false },
+	} });
+}
+
+test("003 FAILED retains committed work but prioritizes the full V3 reason over passing checks", () => {
+	const reason = `V3 not verified: ${"supporting evidence; ".repeat(40)}critical trailing prerequisite`;
+	const progress = buildRoundProgress([stoppedAttempt("003", "FAILED", "abcdef1", reason)])[0]!;
+	assert.equal(progress.implementer?.stoppedBecause, reason);
+	assert.deepEqual(progress.implementer?.commits, ["abcdef1"]);
+	const text = renderRoundProgress(progress);
+	assert.match(text, /Outcome: FAILED/);
+	assert.ok(text.includes(`Reason: ${reason}`));
+	assert.ok(text.indexOf(reason) < text.indexOf("npm test"));
+	assert.match(text, /Recorded work: Updated code/);
+	assert.match(text, /Retained commits \(worker-reported\): abcdef1/);
+	assert.match(text, /self-reported, not passed manager gates/);
+	assert.match(text, /Inspect the stopped reason and current manager status\/attention before any retry/);
+	assert.doesNotMatch(text, /done:|fixNext:|notIntendedToFix:|Authorized repair:|Excluded finding:/);
+	assert.equal(text.match(/Recommended next operation:/g)?.length, 1);
+	assert.ok(new Text(text, 0, 0).render(42).every(line => visibleWidth(line) <= 42));
+});
+
+test("004 STOPPED has no invented commits; legacy progress omits unknown commit evidence", () => {
+	const progress = buildRoundProgress([stoppedAttempt("004", "STOPPED", "none", "Required environment unavailable")])[0]!;
+	assert.deepEqual(progress.implementer?.commits, []);
+	assert.match(renderRoundProgress(progress), /Retained commits \(worker-reported\): none recorded/);
+	delete progress.implementer!.commits;
+	delete progress.implementer!.stoppedBecause;
+	const text = renderRoundProgress(progress);
+	assert.match(text, /Outcome: STOPPED/);
+	assert.doesNotMatch(text, /Retained commits|undefined|fixNext: none/);
+});
+
+test("stage advice preserves role boundaries and interrupted outcomes remain unknown", () => {
+	assert.match(renderRoundProgress(buildRoundProgress([action("i", "implementer")])[0]!), /Use \/herder-status.*does not establish plan completion or a next dispatch/);
+	assert.match(renderRoundProgress(buildRoundProgress([action("r", "reviewer")])[0]!), /Judge adjudication.*not plan approval/);
+	assert.match(renderRoundProgress(buildRoundProgress([action("j", "judge")])[0]!), /Use \/herder-status.*integration\/final verification/);
+	assert.match(recommendedNextOperation("judge", "REPAIR"), /manager-owned authorized repair/);
+	const interrupted = action("i", "implementer");
+	(interrupted.result as { terminal: unknown }).terminal = { interrupted: true };
+	const progress = buildRoundProgress([interrupted])[0]!;
+	assert.equal(progress.implementer?.commits, undefined);
+	const text = renderRoundProgress(progress);
+	assert.match(text, /Outcome: UNKNOWN/);
+	assert.match(text, /Inspect preserved evidence/);
+	assert.doesNotMatch(text, /Outcome: COMPLETE|Await manager review dispatch|Run at report/);
+});
+
+test("only same-run historical manager snapshots override stage advice for pause or attention", () => {
+	const progress = buildRoundProgress([action("i", "implementer")])[0]!;
+	const snapshot = {
+		runId: "run", status: "paused", message: "Host review required", active: [], actions: [],
+		scheduler: { active: 0, freeSlots: 1, runnable: 0, runnablePlanIds: [], expectedNewActions: 0, workConserving: true, reason: "inactive", checkedAt: "now" },
+	} satisfies NonNullable<Parameters<typeof renderRoundProgress>[1]>;
+	const text = renderRoundProgress(progress, snapshot);
+	assert.match(text, /Run at report \(historical manager snapshot\): paused — Host review required/);
+	assert.match(text, /Inspect current manager status\/attention and its request before any retry/);
+	assert.doesNotMatch(text, /next dispatch/);
+	const otherRun = renderRoundProgress(progress, { ...snapshot, runId: "other" });
+	assert.doesNotMatch(otherRun, /Run at report|Host review required/);
+	assert.match(otherRun, /Use \/herder-status.*does not establish plan completion or a next dispatch/);
+});
+
+
+test("round check previews stay bounded without hiding the stop reason or counting pass/fail", () => {
+	const progress = buildRoundProgress([stoppedAttempt("003", "FAILED", "abcdef1", "V3 not verified")])[0]!;
+	progress.implementer!.setup = ["install", "configure", "third setup item"];
+	progress.implementer!.checks = ["check one: " + "x".repeat(600), "second check", "third check", "fourth check"];
+	const text = renderRoundProgress(progress);
+	assert.match(text, /Reason: V3 not verified/);
+	assert.match(text, /1 additional items omitted; expand worker transcript/);
+	assert.match(text, /preview truncated; 2 additional items omitted; expand worker transcript/);
+	assert.doesNotMatch(text, /third setup item|third check|fourth check|\d+ passed|\d+ failed/);
+	assert.ok(text.split("\n").find(line => line.includes("Recorded checks ("))!.length < 700);
+});
+
+
+test("manager completion and stopped states outrank historical stage advice", () => {
+	const progress = buildRoundProgress([action("j", "judge")])[0]!;
+	const snapshot = { runId: "run", status: "complete", message: "Final verification passed", active: [], actions: [] } as unknown as NonNullable<Parameters<typeof renderRoundProgress>[1]>;
+	const complete = renderRoundProgress(progress, snapshot);
+	assert.match(complete, /Recommended next operation: Use \/herder-status to review the completed run status/);
+	assert.doesNotMatch(complete, /Await|before any retry/);
+	for (const status of ["stopped", "failed", "needs_input", "paused"] as const) {
+		assert.match(renderRoundProgress(progress, { ...snapshot, status }), /Inspect current manager status\/attention and its request before any retry or continuation/);
+	}
+});
+
+test("no-context COMPLETE is mode-neutral, including YOLO; Reviewer BLOCK asks for adjudication", () => {
+	const text = renderRoundProgress(buildRoundProgress([action("yolo", "implementer")])[0]!);
+	assert.match(text, /Recommended next operation: Use \/herder-status/);
+	assert.doesNotMatch(text, /Await|wait.*review|review dispatch/);
+	assert.match(recommendedNextOperation("reviewer", "BLOCK"), /Judge adjudication/);
+	assert.doesNotMatch(recommendedNextOperation("reviewer", "BLOCK"), /retry|stopped reason|repair/);
 });

@@ -859,6 +859,9 @@ export function validateIntegrationRepairInput(value: unknown): asserts value is
 
 /** Compact presentation of persisted evidence, not approval or final gate proof. */
 export interface RoundRoleProgress {
+	/** Retained worker evidence, not completion or final gate proof. */
+	stoppedBecause?: string;
+	commits?: string[];
 	actionId: string;
 	summary: string;
 	outcome: string;
