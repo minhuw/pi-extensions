@@ -1098,7 +1098,7 @@ test("foreign worker handles fail closed without changing manager evidence", { t
 	}
 });
 
-test("actual planning tool settles every worker, retains dismissed draft, and dispatches fresh whole-run assignments", { timeout: 60_000 }, async () => {
+test("actual planning tool preserves unrelated dirty unfinished work and attention without dispatch after adoption", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-whole-run-"));
 	let value: Fixture | undefined;
 	let api: CapturedExtensionAPI | undefined;
@@ -1146,11 +1146,6 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("BLOCKED — needs attention", "TODO"));
 		fs.writeFileSync(path.join(value.planDirectory, "001-recover-worker.md"), fixturePlan({ title: "Recover a lost worker", acceptance: "Entire execution uses the revised assignment." }));
 		const params = { operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken, confirmed: true };
-		await assert.rejects(api.tool("herder_plan").execute("dirty", params, undefined, undefined, ctx), /dirty or unreviewed committed work/);
-		assert.equal(fs.readFileSync(sentinel, "utf8"), "keep until final approval");
-		assert.equal(confirmations.length, 2, "unreconciled work cannot reach adoption confirmation");
-		// Explicitly reconcile the test-created untracked file; production must never discard it.
-		fs.unlinkSync(sentinel);
 		await assert.rejects(api.tool("herder_plan").execute("dismiss", params, undefined, undefined, ctx), /Confirmation dismissed/);
 		assert.ok(fs.existsSync(oldWorktree), "dismissal preserves the old execution worktree");
 		assert.equal(factory.requests.length, 1);
@@ -1161,12 +1156,13 @@ test("actual planning tool settles every worker, retains dismissed draft, and di
 		assert.equal(confirmations.length, 4);
 		const adoptionConfirmations = confirmations.slice(2);
 		assert.ok(adoptionConfirmations.every(body => body.includes(record.run.runId) && body.includes(record.run.baseCommit) && body.includes(String(requestId))));
-		assert.equal(fs.existsSync(sentinel), false);
-		assert.equal(factory.requests.length, 3);
+		assert.equal(fs.readFileSync(sentinel, "utf8"), "keep until final approval");
+		assert.equal(factory.requests.length, 1, "adoption cannot dispatch even through host.finished");
 		assert.ok(factory.requests.slice(1).every(request => request.action.runId === record.run.runId && request.action.generation === record.run.currentGeneration + 1));
-		assert.ok(adoptionConfirmations.every(body => /Retain completed plans: none/.test(body) && /Rerun plans: 001, 002/.test(body)));
+		assert.ok(adoptionConfirmations.every(body => /Retain completed plans: none/.test(body) && /Rerun plans: 001/.test(body) && /Preserve unfinished plans: 002/.test(body) && /does not resume execution/.test(body)));
 		assert.ok(adoptionConfirmations.every(body => !/deleting every old execution|no selective reuse/.test(body)));
-		assert.ok(factory.requests.slice(1).some(request => fs.readFileSync(request.action.assignmentPath, "utf8").includes("Entire execution uses the revised assignment")));
+		const adoptedStore = new RunStore(value.planDirectory, { readOnly: true });
+		try { assert.equal(adoptedStore.getRun()!.status, "paused"); assert.equal(adoptedStore.getPlan(record.run.runId, "002")!.generation, 1); assert.equal(adoptedStore.getNextAttention(record.run.runId)!.planId, "002"); } finally { adoptedStore.close(); }
 		assert.equal(readRunRevision(value.planDirectory)?.state, "complete");
 	} finally {
 		if (api && ctx) await withDeadline(api.invoke("session_shutdown", ctx), "whole-run fixture shutdown").catch(() => {});
@@ -1375,7 +1371,7 @@ for (const point of ["after_restarting", "after_restart", "after_complete"]) {
 			ctx = restoredContext(value, record.run.runId, notifications);
 			await api.invoke("session_start", ctx);
 			assert.equal(notifications.some(entry => /recovery failed|refusing recovery/.test(entry.message)), false, JSON.stringify(notifications));
-			assert.ok(notifications.some(entry => entry.message.includes(record.editToken)));
+			if (point !== "after_complete") assert.ok(notifications.some(entry => entry.message.includes(record.editToken)));
 			const owner = JSON.parse(fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8"));
 			assert.equal(owner.runId, record.run.runId);
 			if (point !== "after_complete") await assertWholeRunHook(api, ctx, value);
@@ -1386,7 +1382,8 @@ for (const point of ["after_restarting", "after_restart", "after_complete"]) {
 					operation: "finish_edit", planDirectory: value.planDirectory, editToken: record.editToken,
 				}, undefined, undefined, ctx));
 				assert.equal(finished.isError, undefined, JSON.stringify(finished));
-				assert.equal(readRunRevision(value.planDirectory)?.selective?.resumed, true);
+				assert.equal(readRunRevision(value.planDirectory)?.selective?.resumed, undefined);
+				assert.equal(factory.requests.length, 0, "completed replay never dispatches");
 				await api.invoke("session_shutdown", ctx);
 				const laterNotifications: Warning[] = [];
 				ctx = restoredContext(value, record.run.runId, laterNotifications);

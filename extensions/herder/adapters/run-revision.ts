@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { invokeHerderTool } from "../src/application/tools.ts";
 import { beginRequestedRunRevision, finishRunRevision } from "../src/application/run-revision.ts";
-import { grantHostAttention, revisionDriver, confirmRunRevision, prepareRunRevision, readRunRevision, restoreRevisionGraph, verifyRevisionCheckout, writeRunRevision, type RunRevision } from "../src/core/run-revision.ts";
+import { assertCurrentRunRevision, grantHostAttention, revisionDriver, confirmRunRevision, prepareRunRevision, readRunRevision, restoreRevisionGraph, verifyRevisionCheckout, writeRunRevision, type RunRevision } from "../src/core/run-revision.ts";
 import { attentionRequestSha256, sha256, stableJson, type AttentionResolutionInput, type ManagerAttentionRequest, type ManagerReply } from "../src/shared/protocol.ts";
 
 import { graphInputSha256 } from "../src/core/plan-edit.ts";
@@ -49,9 +49,11 @@ export async function finishWholeRunEdit(directory: string, editToken: string, c
 	let record = readRunRevision(directory);
 	if (!record || record.editToken !== editToken) throw new Error("Whole-run finish is not bound to this exact edit token");
 	host.assert(record);
+	assertCurrentRunRevision(record);
 	if (["draft", "prepared"].includes(record.state)) {
 		if (!ctx.hasUI) throw new Error("Whole-run revision requires interactive host confirmation");
 		record = await prepareRunRevision(directory, editToken, decision);
+		assertCurrentRunRevision(record);
 		host.assert(record);
 		const store = new RunStore(directory, { readOnly: true });
 		let scopePreview: string;
@@ -65,12 +67,14 @@ export async function finishWholeRunEdit(directory: string, editToken: string, c
 				"All workers will be settled before deleting every old execution worktree, branch, and proof. Preserve plan Markdown. Do not restart any workers.",
 			] : record.selective ? [
 				`Retain completed plans: ${record.selective.retainedPlanIds.join(", ") || "none"}`,
+				`Preserve unfinished plans: ${record.selective.preservedPlanIds.join(", ") || "none"}`,
 				`Rerun plans: ${record.selective.rerunPlanIds.join(", ") || "none"}`,
 				`Remove plans: ${record.selective.removedPlanIds.join(", ") || "none"}`,
+				...record.selective.artifacts.map(artifact => `Destructive artifact plan ${artifact.plan.planId}: branch ${artifact.plan.branch}; worktree ${artifact.plan.worktree}\nDirty tracked (unstaged): ${artifact.snapshot.tracked}; staged: ${artifact.snapshot.staged}; untracked: ${artifact.snapshot.untracked}; ignored: ${artifact.snapshot.ignored}\nDiscard unreviewed commits: ${artifact.unreviewedCommits.join(", ") || "none"}\nExact destructive snapshot: ${artifact.snapshot.sha256}`),
 				`Integration before revision: ${record.selective.integrationHead}`,
-				"Retain unrelated completed work and its original evidence. Reverse invalidated contributions and discard only affected execution surfaces; unfinished work restarts. Conflicts keep recovery blocked rather than discarding extra work. Final verification and approval run again.",
+				"Reset scope includes changed/added/removed plans and their dependents through BOTH old and new dependency graphs. Preserve unrelated completed and unfinished work, worktrees, and unresolved attention. Reverse invalidated contributions and discard only listed affected execution surfaces, including ignored files and unreviewed commits. Conflicts keep recovery blocked rather than discarding extra work. Final verification and approval run again.",
 			] : ["Legacy revision: discard every old execution worktree, branch, and proof and rerun every revised plan from TODO on the original base."]),
-			"Scope approval does not refill effort budgets. Original assignments and acceptance history remain recorded.",
+			"Scope approval grants no additional effort and does not resume execution. Finish paused; retained attention remains actionable; use /herder-resume separately or resolve retained attention. Original assignments and acceptance history remain recorded.",
 			"Your source checkout and branch will not be reset.",
 		].join("\n\n"));
 		host.assert(record);
@@ -130,7 +134,7 @@ export async function beginWholeRunAttention(directory: string, resolution: Atte
 	host.assert(record);
 	await host.settle(record);
 	if (resolution.action === "abandon_run") return finishWholeRunEdit(directory, record.editToken, ctx, host, "abandon_run");
-	return { ...result, editToken: record.editToken, scope: "whole-run plan-graph Markdown only", instructions: "Inspect the failure and propose concrete graph edits directly for user refinement. All IDs, dependencies, shared context, additions/removals, and previously integrated plans may change. Change only what is needed; unrelated completed plans need not be rewritten. Herder derives retained/rerun/removed plans from immutable assignments, dependency changes, and completion evidence, not authored statuses. Final confirmation previews that impact; conflicts remain blocked rather than discarding extra work. Source code and runtime files are not writable. Call finish_edit with this editToken for final host confirmation; dismissal never abandons or retries." };
+	return { ...result, editToken: record.editToken, scope: "whole-run plan-graph Markdown only", instructions: "Inspect the failure and propose concrete graph edits directly for user refinement. All IDs, dependencies, shared context, additions/removals, and previously integrated plans may change. Change only what is needed; unrelated completed or unfinished plans need not be rewritten. Herder derives retained/rerun/removed plans from immutable assignments, dependency changes, and completion evidence, not authored statuses. Unchanged unfinished runtimes and attention survive. Final confirmation previews dependent reset scope, dirty/ignored counts and discarded unreviewed commits; approval grants no execution resume or additional effort. Use /herder-resume separately or resolve retained attention after adoption; conflicts remain blocked rather than discarding extra work. Source code and runtime files are not writable. Call finish_edit with this editToken for final host confirmation; dismissal never abandons or retries." };
 }
 
 /** Only a slash-command handler calls this; model attention tools cannot initiate it. */

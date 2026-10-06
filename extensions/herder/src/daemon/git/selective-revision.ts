@@ -9,15 +9,17 @@ import { listCoordinationRefs } from "./coordination-ref.ts";
 import { listWorktreeInventory } from "./namespace-inventory.ts";
 import { runGit, isAncestor } from "./primitives.ts";
 import { sha256, stableJson } from "../../shared/protocol.ts";
+import { destructiveSnapshot } from "./destructive-snapshot.ts";
 import type { ResetPlanCleanupIdentity } from "./reset-plan.ts";
 
 export interface SelectiveRevision {
-	version: 1;
+	version: 2;
 	resumed?: boolean;
 	published?: boolean;
 	sourceGeneration: number;
 	nextGeneration: number;
 	retainedPlanIds: string[];
+	preservedPlanIds: string[];
 	rerunPlanIds: string[];
 	removedPlanIds: string[];
 	integrationHead: string;
@@ -29,12 +31,19 @@ export interface SelectiveRevision {
 	reverseCommits: string[];
 	namespace: Array<{ ref: string; target: string }>;
 	worktrees: ReturnType<typeof listWorktreeInventory>;
-	artifacts: Array<{ plan: StoredPlan; head: string; tree: string; identity: string; attachment: string; refs: Array<{ ref: string; target: string }> }>;
-	retainedWorktrees: Array<{ worktree: string; identity: string; attachment: string; assignmentPath: string; assignmentSha256: string }>;
+	artifacts: Array<{ plan: StoredPlan; head: string; tree: string; snapshot: ReturnType<typeof destructiveSnapshot>; unreviewedCommits: string[]; identity: string; attachment: string; refs: Array<{ ref: string; target: string }> }>;
+	retainedWorktrees: Array<{ completed: boolean; worktree: string; identity: string; attachment: string; assignmentPath: string; assignmentSha256: string }>;
 	integrationIdentity: string;
 	integrationAttachment: string;
 	publication?: { head: string; tree: string };
 }
+
+/** Historical preview only: never authorizes destructive v2 operations. */
+export type LegacySelectiveRevision = Omit<SelectiveRevision, "version" | "preservedPlanIds" | "artifacts" | "retainedWorktrees"> & {
+	version: 1;
+	artifacts: Array<Omit<SelectiveRevision["artifacts"][number], "snapshot" | "unreviewedCommits">>;
+	retainedWorktrees: Array<Omit<SelectiveRevision["retainedWorktrees"][number], "completed">>;
+};
 
 const git = (repo: string, args: string[]) => runGit(repo, args).stdout.trim();
 
@@ -44,7 +53,6 @@ export function selectivePlanSets(previous: StoredPlanSpec[], next: StoredPlanSp
 	const after = new Map(next.map(spec => [spec.planId, spec]));
 	const invalid = new Set([...before.keys(), ...after.keys()].filter(id => before.get(id)?.planFingerprint !== after.get(id)?.planFingerprint));
 	if (!invalid.size) throw new Error("Propose a concrete semantic graph revision; unchanged retry is not allowed");
-	for (const id of before.keys()) if (!done.has(id)) invalid.add(id);
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -54,7 +62,8 @@ export function selectivePlanSets(previous: StoredPlanSpec[], next: StoredPlanSp
 	}
 	return {
 		retainedPlanIds: next.filter(spec => !invalid.has(spec.planId) && done.has(spec.planId)).map(spec => spec.planId).sort(),
-		rerunPlanIds: next.filter(spec => invalid.has(spec.planId) || !done.has(spec.planId)).map(spec => spec.planId).sort(),
+		preservedPlanIds: next.filter(spec => !invalid.has(spec.planId) && !done.has(spec.planId)).map(spec => spec.planId).sort(),
+		rerunPlanIds: next.filter(spec => invalid.has(spec.planId)).map(spec => spec.planId).sort(),
 		removedPlanIds: previous.filter(spec => !after.has(spec.planId)).map(spec => spec.planId).sort(),
 	};
 }
@@ -70,7 +79,7 @@ function identity(file: string): string {
 	safePath(file);
 	const stat = fs.lstatSync(file, { bigint: true });
 	if (!stat.isDirectory()) throw new Error(`Selective revision requires a directory: ${file}`);
-	return `${stat.dev}:${stat.ino}`;
+	return `${stat.dev}:${stat.ino}:${stat.uid}:${stat.gid}:${stat.mode}`;
 }
 function attachment(file: string): string {
 	const candidate = path.join(file, ".git");
@@ -88,13 +97,6 @@ function linear(repo: string, base: string, head: string): string[] {
 		if (parts.length !== 2 || parts[1] !== parent) throw new Error("Selective revision refuses merges or nonlinear integration ranges");
 		parent = parts[0]!; return parent;
 	});
-}
-
-function validateUnfinishedWork(plan: StoredPlan, driver: GitDriver): void {
-	if (plan.phase !== "DONE" && (driver.worktreeStatus(plan.worktree)
-		|| driver.branchHead(plan.branch) !== plan.generationBase || driver.worktreeHead(plan.worktree) !== plan.generationBase)) {
-		throw new Error(`Selective revision refuses cleanup of non-DONE plan ${plan.planId}: dirty or unreviewed committed work exists. Preserve/reconcile this work before amendment; files and refs have not been cleaned up.`);
-	}
 }
 
 export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[], driver: GitDriver, priorKnown: string[] = []): SelectiveRevision {
@@ -122,7 +124,6 @@ export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[]
 				|| owned.length !== 1 || owned[0]!.path !== plan.worktree || owned[0]!.locked) throw new Error(`Selective revision refuses moved/leased plan ${plan.planId}`);
 			const ref = `refs/plan-herder/${run.planName}/completed/${plan.planId}`;
 			if (plan.phase !== "DONE") {
-				validateUnfinishedWork(plan, driver);
 				if (namespace.some(item => item.ref === ref)) throw new Error(`Non-DONE plan ${plan.planId} has integrated completion evidence`);
 				continue;
 			}
@@ -165,10 +166,10 @@ export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[]
 		}
 		const history = linear(run.repositoryRoot, run.baseCommit, integrationHead);
 		if (history.some(commit => !known.has(commit)) || [...known].some(commit => !history.includes(commit))) throw new Error("Selective revision refuses unknown integration contributions");
-		const artifacts = plans.filter(plan => !sets.retainedPlanIds.includes(plan.planId)).map(plan => {
+		const artifacts = plans.filter(plan => sets.rerunPlanIds.includes(plan.planId) || sets.removedPlanIds.includes(plan.planId)).map(plan => {
 			const head = driver.branchHead(plan.branch);
 			if (driver.worktreeHead(plan.worktree) !== head) throw new Error(`Selective revision plan ${plan.planId} worktree moved`);
-			return { plan, head, tree: driver.worktreeTree(plan.worktree), identity: identity(plan.worktree), attachment: attachment(plan.worktree), refs: refs.filter(ref => ref.identity && "plan" in ref.identity && ref.identity.plan === plan.planId).map(({ ref, target }) => ({ ref, target })) };
+			return { plan, head, snapshot: destructiveSnapshot(plan.worktree), unreviewedCommits: plan.phase === "DONE" ? [] : git(run.repositoryRoot, ["rev-list", "--reverse", `${plan.generationBase}..${head}`]).split("\n").filter(Boolean), tree: driver.worktreeTree(plan.worktree), identity: identity(plan.worktree), attachment: attachment(plan.worktree), refs: refs.filter(ref => ref.identity && "plan" in ref.identity && ref.identity.plan === plan.planId).map(({ ref, target }) => ({ ref, target })) };
 		});
 		const knownPlans = new Set(plans.map(plan => plan.planId));
 		if (refs.find(ref => ref.identity?.kind === "base")?.target !== run.baseCommit) throw new Error("Selective revision base coordination identity changed");
@@ -177,29 +178,30 @@ export function prepareSelectiveRevision(run: StoredRun, specs: StoredPlanSpec[]
 			const branchPrefix = `refs/heads/herder/${run.planName}/`;
 			if (entry.ref.startsWith(branchPrefix) && entry.ref !== `refs/heads/${run.integrationBranch}` && !knownPlans.has(entry.ref.slice(branchPrefix.length))) throw new Error("Selective revision refuses unowned plan branches");
 		}
-		const result: SelectiveRevision = { version: 1, sourceGeneration: run.currentGeneration, nextGeneration: run.currentGeneration + 1, ...sets,
-			integrationHead, integrationTree: driver.worktreeTree(run.integrationWorktree), previewSha256: "", specs: specs.map(spec => ({ ...spec, initialStatus: sets.retainedPlanIds.includes(spec.planId) ? "DONE" : "TODO", initialStatusDetail: "" })), knownCommits: history, reverseCommits: history.filter(commit => reverse.has(commit)).reverse(), namespace, worktrees: inventory, artifacts,
-			retainedWorktrees: plans.filter(plan => sets.retainedPlanIds.includes(plan.planId)).map(plan => ({ worktree: plan.worktree, identity: identity(plan.worktree), attachment: attachment(plan.worktree), assignmentPath: plan.assignmentPath, assignmentSha256: plan.assignmentSha256 })),
+		const result: SelectiveRevision = { version: 2, sourceGeneration: run.currentGeneration, nextGeneration: run.currentGeneration + 1, ...sets,
+			integrationHead, integrationTree: driver.worktreeTree(run.integrationWorktree), previewSha256: "", specs: specs.map(spec => ({ ...spec, initialStatus: sets.retainedPlanIds.includes(spec.planId) ? "DONE" : sets.preservedPlanIds.includes(spec.planId) ? previous.find(old => old.planId === spec.planId)!.initialStatus : "TODO", initialStatusDetail: sets.preservedPlanIds.includes(spec.planId) ? previous.find(old => old.planId === spec.planId)!.initialStatusDetail : "" })), knownCommits: history, reverseCommits: history.filter(commit => reverse.has(commit)).reverse(), namespace, worktrees: inventory, artifacts,
+			retainedWorktrees: plans.filter(plan => sets.retainedPlanIds.includes(plan.planId) || sets.preservedPlanIds.includes(plan.planId)).map(plan => ({ completed: plan.phase === "DONE", worktree: plan.worktree, identity: identity(plan.worktree), attachment: attachment(plan.worktree), assignmentPath: plan.assignmentPath, assignmentSha256: plan.assignmentSha256 })),
 			integrationIdentity: identity(run.integrationWorktree), integrationAttachment: attachment(run.integrationWorktree) };
 		result.previewSha256 = selectivePreviewSha256(result);
 		return result;
 	} finally { store.close(); }
 }
 
-export function selectivePreviewSha256(revision: SelectiveRevision): string {
+export function selectivePreviewSha256(revision: SelectiveRevision | LegacySelectiveRevision): string {
 	const { previewSha256: _, publication: __, resumed: ___, published: ____, ...preview } = revision;
 	return sha256(stableJson(preview));
 }
 
 /** Validate every owned artifact before publication or any deletion, including inode/attachment identity. */
 export function validateSelectiveArtifacts(run: StoredRun, revision: SelectiveRevision, driver: GitDriver, store?: RunStore, request?: { requestId: string; requestSha256: string }): void {
+	if (revision.version !== 2 || !Array.isArray(revision.preservedPlanIds) || revision.artifacts.some(artifact => !/^[a-f0-9]{64}$/.test(artifact.snapshot?.sha256))) throw new Error("Legacy selective revision lacks destructive snapshot authorization; stop and obtain explicit operator recovery before a fresh preview/confirmation");
 	if (selectivePreviewSha256(revision) !== revision.previewSha256) throw new Error("Selective revision preview changed");
 	if (identity(run.integrationWorktree) !== revision.integrationIdentity || attachment(run.integrationWorktree) !== revision.integrationAttachment || driver.worktreeStatus(run.integrationWorktree)) throw new Error("Selective revision integration worktree changed");
 	const head = driver.branchHead(run.integrationBranch);
 	if (!(revision.published ? head === revision.publication?.head : [revision.integrationHead, revision.publication?.head].includes(head)) || driver.worktreeHead(run.integrationWorktree) !== head) throw new Error("Selective revision integration HEAD changed");
 	for (const kept of revision.retainedWorktrees) {
 		driver.verifyAssignment(kept.worktree, kept.assignmentPath, kept.assignmentSha256);
-		if (identity(kept.worktree) !== kept.identity || attachment(kept.worktree) !== kept.attachment || driver.worktreeStatus(kept.worktree)) throw new Error(`Selective revision retained worktree changed: ${kept.worktree}`);
+		if (identity(kept.worktree) !== kept.identity || attachment(kept.worktree) !== kept.attachment || (kept.completed && driver.worktreeStatus(kept.worktree))) throw new Error(`Selective revision retained worktree changed: ${kept.worktree}`);
 	}
 	const expectedWorktrees = [...revision.worktrees];
 	const expected = new Map(revision.namespace.map(item => [item.ref, item.target]));
@@ -210,7 +212,7 @@ export function validateSelectiveArtifacts(run: StoredRun, revision: SelectiveRe
 		try { fs.lstatSync(artifact.plan.worktree); exists = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 		if (exists) {
 			if (cleanup?.step === "branch_deleted" || cleanup?.state === "completed" || identity(artifact.plan.worktree) !== artifact.identity || attachment(artifact.plan.worktree) !== artifact.attachment) throw new Error(`Selective revision found replaced worktree ${artifact.plan.worktree}`);
-			validateUnfinishedWork(artifact.plan, driver);
+			if (stableJson(destructiveSnapshot(artifact.plan.worktree)) !== stableJson(artifact.snapshot)) throw new Error(`Selective revision destructive snapshot changed: ${artifact.plan.planId}`);
 		} else if (!cleanup) throw new Error(`Selective revision worktree disappeared: ${artifact.plan.worktree}`);
 		if (!exists) {
 			const index = expectedWorktrees.findIndex(item => item.path === artifact.plan.worktree);

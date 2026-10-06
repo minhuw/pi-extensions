@@ -1,8 +1,8 @@
 import { HerderRunManager } from "../core/run-manager.ts";
-import { assertHostAttentionGrant, assertApprovedRevisionGraph, readRunRevision, verifyRevisionCheckout, writeRunRevision, revisionDriver, type RunRevision } from "../core/run-revision.ts";
+import { assertCurrentRunRevision, assertHostAttentionGrant, assertApprovedRevisionGraph, readRunRevision, verifyRevisionCheckout, writeRunRevision, revisionDriver, type RunRevision } from "../core/run-revision.ts";
 import { withServiceExclusion } from "../client/index.ts";
 import { RunStore, type StoredRun } from "../daemon/run-store.ts";
-import { cleanupIdentity, stageSelectiveReversal, validateSelectiveArtifacts, SelectiveReversalConflict } from "../daemon/git/selective-revision.ts";
+import { cleanupIdentity, stageSelectiveReversal, validateSelectiveArtifacts, SelectiveReversalConflict, type SelectiveRevision } from "../daemon/git/selective-revision.ts";
 import { runGit } from "../daemon/git/primitives.ts";
 import { stableJson, type AttentionResolutionInput, type ManagerAttentionRequest, type ManagerReply } from "../shared/protocol.ts";
 
@@ -30,16 +30,17 @@ export async function finishRunRevision(directory: string, editToken: string): P
 		const record = readRunRevision(directory);
 		if (!record || record.editToken !== editToken) throw new Error("Whole-run finish has no matching durable edit");
 		if (!record.selective || record.decision !== "revise_run") throw new Error("Legacy destructive revision/abandonment replay is paused: preserve execution and budgets; explicit operator recovery is required");
+		assertCurrentRunRevision(record);
 		return finishSelectiveRevision(record);
 	}, { purpose: "revision" });
 }
 
 /** Same run, new graph generation. Every mutation replays from immutable confirmed evidence. */
-async function finishSelectiveRevision(initial: RunRevision): Promise<{ reply: ManagerReply }> {
+async function finishSelectiveRevision(initial: RunRevision<SelectiveRevision>): Promise<{ reply: ManagerReply }> {
 	let record = initial;
 	const directory = record.run.planDirectory;
 	if (!["confirmed", "resetting", "restarting", "complete"].includes(record.state)) throw new Error("Selective finish requires host confirmation");
-	const save = (next: RunRevision) => { writeRunRevision(directory, next, record); record = next; };
+	const save = (next: RunRevision<SelectiveRevision>) => { writeRunRevision(directory, next, record); record = next; };
 	await verifyRevisionCheckout(record);
 	const driver = revisionDriver(record.run);
 	const store = new RunStore(directory);
@@ -93,6 +94,7 @@ async function finishSelectiveRevision(initial: RunRevision): Promise<{ reply: M
 				validateSelectiveArtifacts(record.run, selective, driver, store, record.request);
 				const identity = cleanupIdentity(record.run, artifact, { requestId: record.request.requestId, requestSha256: record.request.requestSha256 });
 				driver.resetPlanExecution({ branch: artifact.plan.branch, worktree: artifact.plan.worktree, expectedHead: artifact.head, expectedTree: artifact.tree, additionalRefs: artifact.refs,
+					validateBeforeRemoval: () => validateSelectiveArtifacts(record.run, selective, driver, store, record.request),
 					cleanupIdentity: identity, recordedCleanup: store.getAttentionCleanupEvidence(identity) ?? undefined,
 					onPrepare: step => { store.recordAttentionCleanupStep(identity, step); crashRevisionForTest(`before_cleanup_${step}`); },
 					onComplete: step => { crashRevisionForTest(`after_cleanup_${step}`); store.recordAttentionCleanupCompletion(identity, step); } });
@@ -115,10 +117,6 @@ async function finishSelectiveRevision(initial: RunRevision): Promise<{ reply: M
 			save({ ...record, state: "complete" });
 			crashRevisionForTest("after_complete");
 		}
-		if (record.selective!.resumed) return { reply: manager.reply() };
-		const reply = await manager.start({ mode: "resume", repositoryRoot: record.run.repositoryRoot, planDirectory: directory, profile: record.run.profileName, maxParallel: record.run.maxParallel, yolo: Boolean(record.run.yolo) });
-		crashRevisionForTest("after_schedule");
-		save({ ...record, selective: { ...record.selective!, resumed: true } });
-		return { reply };
+		return { reply: { ...manager.reply(), actions: [] } };
 	} finally { manager.close(); }
 }

@@ -42,6 +42,7 @@ export interface ResetPlanExecutionInput {
 	/** Typed manager-owned progress from an earlier interrupted apply. */
 	recordedCleanup?: ResetPlanCleanupEvidence;
 	/** Persist manager-owned step intent before the next Git mutation. */
+	validateBeforeRemoval?: () => void;
 	onPrepare?: (step: ResetPlanCleanupStep) => void;
 	/** Observe a successful Git mutation; replay never depends on this callback. */
 	onProgress?: (step: ResetPlanCleanupStep) => void;
@@ -224,6 +225,7 @@ export function resetPlanExecution(input: ResetPlanExecutionInput): ResetPlanExe
 			fail(`Recovery worktree reappeared after manager cleanup: ${worktree}`);
 		}
 		if (recordedStep !== "worktree_removed" && recordedStep !== "branch_deleted") input.onPrepare?.("worktree_removed");
+		input.validateBeforeRemoval?.();
 		removeWorktree(repoRoot, worktree);
 		const afterRemoval = listWorktreeInventory(repoRoot).find((candidate) => candidate.path && realpathIfPresent(candidate.path) === canonicalWorktree);
 		if (afterRemoval || fs.existsSync(worktree)) fail(`Recovery worktree was not removed: ${worktree}`);

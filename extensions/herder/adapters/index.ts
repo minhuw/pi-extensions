@@ -1358,7 +1358,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			currentRunRevision = undefined;
 			mainSessionRequests.reset("cleanup");
 			updateFromReply(result.reply, undefined, "fire", undefined, record.run.repositoryRoot);
-			await dispatchReply(result.reply, epoch);
+			// Adoption is not execution authority; expose retained attention without dispatch/reconciliation.
+			if (result.reply.attention) mainSessionRequests.restoreAttention(record.run.planDirectory, result.reply.attention);
 		},
 	});
 
@@ -1971,7 +1972,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					assertSessionActive(epoch);
 					assertRecovery();
 					const revision = readRunRevision(restored.planDir);
-					if (revision && ((revision.state === "complete" && restored.runId === revision.run.runId && !revision.selective?.resumed) || revisionPending(revision))) {
+					if (revision && revisionPending(revision)) {
 						if (![revision.run.runId, revision.successorRunId].includes(restored.runId)) throw new Error("Persisted Herder run does not match the whole-run revision");
 						acquired = await recoverWholeRunRevision(revision, ctx, epoch);
 						ctx.ui.notify(`Recovered whole-run revision ${revision.state}. Continue finish_edit with editToken ${revision.editToken}; no workers were resumed.`, "info");

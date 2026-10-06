@@ -1187,7 +1187,17 @@ export class RunStore {
 				return;
 			}
 			const run = this.getRun();
-			if (!run || run.runId !== input.runId || run.currentGeneration !== input.generation) throw new Error("Budget reservation generation is stale");
+			if (!run || run.runId !== input.runId) throw new Error("Budget reservation generation is stale");
+			if (run.currentGeneration !== input.generation) {
+				// Selective adoption preserves unchanged runtime assignments, not new effort authority.
+				const plan = input.planId && input.planId !== "RUN" ? this.getPlan(input.runId, input.planId) : null;
+				const original = this.getPlanSpecs(input.runId, input.generation).find(spec => spec.planId === input.planId);
+				const current = this.getPlanSpecs(input.runId, run.currentGeneration).find(spec => spec.planId === input.planId);
+				if (!input.kind.startsWith("action:") || input.generation >= run.currentGeneration
+					|| !plan || plan.generation !== input.generation || plan.round !== input.round
+					|| !original || !current || original.planFingerprint !== current.planFingerprint
+					|| original.fingerprintVersion !== current.fingerprintVersion) throw new Error("Budget reservation generation is stale");
+			}
 			const budget = this.getBudget(input.runId)!;
 			let reason = budget.stopReason;
 			if (!reason && budget.used >= budget.limit) reason = "Run execution budget exhausted";

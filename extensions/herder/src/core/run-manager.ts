@@ -1330,14 +1330,16 @@ export class HerderRunManager {
 			this.store.deletePlan(run.runId, "RUN");
 			if (invalidatedPlanIds) {
 				for (const planId of invalidatedPlanIds) this.store.deletePlan(run.runId, planId);
-				for (const request of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) this.store.resolveAttention(request.requestId);
+				for (const request of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) {
+					if (request.planId === "RUN" || invalidatedPlanIds.includes(request.planId)) this.store.resolveAttention(request.requestId);
+				}
 			}
 			if (completedEdit) {
 				this.store.recordPlanEditOutcome(completedEdit, "finish");
 				this.store.deletePlanEdit(run.runId);
 			}
 			this.store.updateRun({
-				status: "running",
+				status: invalidatedPlanIds ? "paused" : "running",
 				terminalDetail: detail,
 				currentGeneration: nextGeneration,
 				graphSha256: compiled.graphSha256,
@@ -1360,12 +1362,12 @@ export class HerderRunManager {
 		if (record.state !== "restarting" || stableJson(readRunRevision(this.planDirectory)) !== stableJson(record)) throw new Error("Selective adoption requires its durable confirmed cutover intent");
 		const selective = record.selective;
 		const run = this.store.getRun();
-		if (!selective || !run || run.runId !== record.run.runId) throw new Error("Selective adoption lost its original run");
+		if (!selective || selective.version !== 2 || !run || run.runId !== record.run.runId) throw new Error("Selective adoption lost its original run");
 		if (run.currentGeneration === selective.nextGeneration && run.graphSha256 === record.graphSha256) return;
 		if (run.currentGeneration !== selective.sourceGeneration || run.graphSha256 !== record.run.graphSha256) throw new Error("Selective adoption generation changed");
 		assertApprovedRevisionGraph(record);
 		this.adoptCompiledRevision(run, { specs: selective.specs, graphSha256: record.graphSha256! },
-			`Adopted selective revision generation ${selective.nextGeneration}.`, undefined, [...selective.rerunPlanIds, ...selective.removedPlanIds]);
+			`Adopted selective revision generation ${selective.nextGeneration}. No execution resumed or additional effort granted. Use /herder-resume separately or resolve retained attention.`, undefined, [...selective.rerunPlanIds, ...selective.removedPlanIds]);
 	}
 
 	async revise(_input: StartInput): Promise<ManagerReply> {

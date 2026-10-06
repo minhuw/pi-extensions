@@ -561,6 +561,7 @@ export class GitDriver {
 		additionalRefs?: PlanTransientRef[];
 		cleanupIdentity?: ResetPlanCleanupIdentity;
 		recordedCleanup?: ResetPlanCleanupEvidence;
+		validateBeforeRemoval?: () => void;
 		onPrepare?: (step: ResetPlanCleanupStep) => void;
 		onProgress?: (step: ResetPlanCleanupStep) => void;
 		onComplete?: (step: ResetPlanCleanupStep) => void;

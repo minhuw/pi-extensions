@@ -15,17 +15,18 @@ import { attentionResolutionFromRequest } from "../../../adapters/attention.ts";
 import { grantHostAttention, assertApprovedRevisionGraph, confirmRunRevision, prepareRunRevision, readRunRevision, revisionDriver, writeRunRevision } from "../../../src/core/run-revision.ts";
 import { finishRunRevision } from "../../../src/application/run-revision.ts";
 import { graphInputSha256 } from "../../../src/core/plan-edit.ts";
-import { selectivePlanSets, stageSelectiveReversal, SelectiveReversalConflict } from "../../../src/daemon/git/selective-revision.ts";
+import { destructiveSnapshot } from "../../../src/daemon/git/destructive-snapshot.ts";
+import { selectivePreviewSha256, selectivePlanSets, stageSelectiveReversal, SelectiveReversalConflict } from "../../../src/daemon/git/selective-revision.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { beginUserScopeAmendment, scopeChangePreview, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "../../../adapters/run-revision.ts";
 import { resetHerderPlanSet } from "../../../src/daemon/git/reset-plan-set.ts";
 import { buildCompletionProofPayload } from "../../../src/daemon/git/completion-proof.ts";
 import { parseWorkerResult, normalizeUsage, sha256, stableJson, attentionRequestSha256, attentionCapabilityToken } from "../../../src/shared/protocol.ts";
-import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
+import type { ManagerAttentionRequest, ManagerReply } from "../../../src/shared/protocol.ts";
 
 function fixture(upstreamStatus = "DONE") {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-run-revision-"));
-	const { repo, originalHead } = initFixtureRepo(root, { name: "Revision", email: "revision@example.invalid", files: { "src/value.mjs": "export const value = 1;\n", "src/other.mjs": "export const other = 1;\n" } });
+	const { repo, originalHead } = initFixtureRepo(root, { name: "Revision", email: "revision@example.invalid", files: { ".gitignore": ".herder/ignored.txt\n", "src/value.mjs": "export const value = 1;\n", "src/other.mjs": "export const other = 1;\n" } });
 	const directory = path.join(repo, "herder-plans");
 	initPlanDir(directory);
 	fs.writeFileSync(path.join(directory, "README.md"), `# Revision\n\n## Execution order & status\n\n| Plan | Title | Priority | Effort | Depends on | Status |\n|---|---|---|---|---|---|\n| [001](001-upstream.md) | Upstream | P1 | S | — | ${upstreamStatus} |\n| [002](002-downstream.md) | Downstream | P1 | S | 001 | BLOCKED — revise the upstream contract |\n\n## Dependency notes\n\n002 consumes 001.\n\n## Considered and rejected\n\nNone.\n`);
@@ -101,6 +102,21 @@ function revise(value: ReturnType<typeof fixture>) {
 	fs.writeFileSync(path.join(value.directory, "002-downstream.md"), fixturePlan({ id: "002", title: "Downstream", writePaths: ["src/other.mjs"], acceptance: "The revised consumer no longer depends on upstream execution." }));
 }
 
+function installLegacyHistory(directory: string, state: "complete" | "abandoned") {
+	const current = readRunRevision(directory)!;
+	assert.ok(current.selective?.version === 2);
+	const { preservedPlanIds: _, artifacts, retainedWorktrees, ...preview } = current.selective;
+	const selective = { ...preview, version: 1 as const,
+		artifacts: artifacts.map(({ snapshot: _, unreviewedCommits: __, ...artifact }) => artifact),
+		retainedWorktrees: retainedWorktrees.map(({ completed: _, ...worktree }) => worktree) };
+	selective.previewSha256 = selectivePreviewSha256(selective);
+	const legacy = { ...current, state, selective };
+	const file = path.join(directory, ".herder/run-revision.json");
+	const bytes = stableJson({ record: legacy, sha256: sha256(stableJson(legacy)) });
+	fs.writeFileSync(file, bytes, { mode: 0o600 });
+	return { legacy, file, bytes };
+}
+
 const host: RunRevisionHost = { assert: () => {}, settle: async () => {}, observe: () => {}, finished: async () => {} };
 
 // Real local Git only: no LLM workers and no live project runtime mutations.
@@ -114,8 +130,13 @@ test("whole-run revision replaces integrated upstream and blocked downstream on 
 		await confirmRunRevision(prepared);
 		const result = await finishRunRevision(value.directory, record.editToken);
 		assert.equal(result.reply?.runId, record.run.runId);
-		assert.equal(result.reply?.actions.length, 2);
-		assert.ok(result.reply?.actions.some(action => fs.readFileSync(action.assignmentPath, "utf8").includes("revised numeric API")));
+		assert.deepEqual(result.reply?.actions, []);
+		assert.equal(result.reply?.status, "paused");
+		const resumedManager = new HerderRunManager(value.directory);
+		let resumed;
+		try { resumed = await resumedManager.start({ mode: "resume", repositoryRoot: value.repo, planDirectory: value.directory }); } finally { resumedManager.close(); }
+		assert.equal(resumed.actions.length, 2);
+		assert.ok(resumed.actions.some(action => fs.readFileSync(action.assignmentPath, "utf8").includes("revised numeric API")));
 		const store = new RunStore(value.directory, { readOnly: true });
 		try {
 			assert.equal(store.getRun()?.baseCommit, value.originalHead);
@@ -224,11 +245,17 @@ test("revision tool authority permits only Markdown graph edits, including liter
 	} finally { value.dispose(); }
 });
 
-for (const point of ["before_publication", "after_publication", "before_cleanup_worktree_removed", "after_cleanup_worktree_removed", "before_cleanup_branch_deleted", "after_cleanup_branch_deleted", "after_reset", "after_restarting", "after_restart", "after_complete", "after_schedule"]) {
+for (const point of ["before_publication", "after_publication", "before_cleanup_worktree_removed", "after_cleanup_worktree_removed", "before_cleanup_branch_deleted", "after_cleanup_branch_deleted", "after_reset", "after_restarting", "after_restart", "after_complete"]) {
 	test(`whole-run finish safely replays after process interruption ${point}`, { timeout: 45_000 }, async () => {
 		const value = fixture();
 		try {
 			const { record } = await begin(value);
+			const unfinished = unfinishedPlan(value, record.run);
+			fs.writeFileSync(path.join(unfinished.worktree, "src/other.mjs"), "// committed unfinished work\n");
+			git(unfinished.worktree, ["add", "src/other.mjs"]); git(unfinished.worktree, ["commit", "-qm", "unreviewed before crash"]);
+			fs.mkdirSync(path.join(unfinished.worktree, ".herder"), { recursive: true });
+			fs.writeFileSync(path.join(unfinished.worktree, ".herder/ignored.txt"), "approved ignored discard");
+			fs.writeFileSync(path.join(unfinished.worktree, "untracked.txt"), "approved untracked discard");
 			revise(value);
 			await confirmRunRevision(await prepareRunRevision(value.directory, record.editToken));
 			const module = new URL("../../../src/application/run-revision.ts", import.meta.url).href;
@@ -236,7 +263,8 @@ for (const point of ["before_publication", "after_publication", "before_cleanup_
 			assert.equal(child.signal, "SIGKILL", child.stderr);
 			const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
 			assert.equal(reply.runId, record.run.runId);
-			assert.equal(reply.actions.length, 2);
+			assert.deepEqual(reply.actions, []);
+			assert.equal(reply.status, "paused");
 			assert.equal(git(value.repo, ["rev-parse", "HEAD"]).stdout.trim(), value.originalHead);
 			assert.equal(readRunRevision(value.directory)?.state, "complete");
 		} finally { value.dispose(); }
@@ -295,7 +323,7 @@ for (const point of ["after_restarting", "after_restart"]) {
 			const approved = fs.readFileSync(index, "utf8");
 			fs.writeFileSync(index, approved.replace("| TODO |", "| DONE |"));
 			assert.equal(compileGraphIdentity(buildGraph(value.directory)), restarting.graphSha256, "graph identity alone cannot detect skipped execution");
-			assert.throws(() => assertApprovedRevisionGraph({ ...restarting, inputSha256: graphInputSha256(value.directory) }), /every plan TODO/);
+			assert.throws(() => assertApprovedRevisionGraph({ ...restarting, inputSha256: graphInputSha256(value.directory) }), /approved lifecycle statuses/);
 			await assert.rejects(finishRunRevision(value.directory, record.editToken), /Markdown changed after host confirmation/);
 			const manager = new HerderRunManager(value.directory);
 			try {
@@ -308,7 +336,7 @@ for (const point of ["after_restarting", "after_restart"]) {
 			fs.writeFileSync(index, approved);
 			const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
 			assert.equal(reply.runId, record.run.runId);
-			assert.deepEqual(reply.actions.map(action => action.planId), ["001", "002"]);
+			assert.deepEqual(reply.actions, []);
 		} finally { value.dispose(); }
 	});
 }
@@ -336,7 +364,7 @@ for (const restack of [false, true]) test(`selective revision retains independen
 		assert.deepEqual(prepared.selective?.rerunPlanIds, ["001", "002"]);
 		await confirmRunRevision(prepared);
 		const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
-		assert.deepEqual(reply.actions.map(action => action.planId), ["001"]);
+		assert.deepEqual(reply.actions, []);
 		const current = new RunStore(value.directory);
 		try {
 			assert.equal(current.getPlan(record.run.runId, "RUN"), null, "prior final audit runtime never survives adoption");
@@ -392,7 +420,7 @@ test("ordinary reset requeues TODO-origin completion retained from an earlier se
 		assert.deepEqual(prepared.selective!.retainedPlanIds, ["001"]);
 		await confirmRunRevision(prepared);
 		const revised = (await finishRunRevision(value.directory, record.editToken)).reply!;
-		assert.deepEqual(revised.actions.map(action => action.planId), ["002"], "selective revision alone keeps the prerequisite complete");
+		assert.deepEqual(revised.actions, [], "selective adoption does not resume execution");
 		const store = new RunStore(value.directory);
 		try {
 			assert.equal(store.getRun()!.currentGeneration, 2);
@@ -506,13 +534,16 @@ for (const mutation of ["moved ref", "replaced worktree", "symlink worktree", "d
 	});
 }
 
-test("two selective revisions preserve attribution and restart non-DONE surfaces without stale attention or action leakage", { timeout: 60_000 }, async () => {
+for (const legacyHistory of [false, true]) test(`two selective revisions preserve attribution and unaffected unfinished plans and attention (legacy history: ${legacyHistory})`, { timeout: 60_000 }, async () => {
 	const value = independentFixture();
 	try {
 		const { record, request } = await begin(value);
 		fs.appendFileSync(path.join(value.directory, "001-upstream.md"), "\nFirst API revision.\n");
+		// The historical v1 flow reset all unfinished plans, unlike v2 preservation.
+		if (legacyHistory) fs.appendFileSync(path.join(value.directory, "002-downstream.md"), "\nHistorical consumer revision.\n");
 		await confirmRunRevision(await prepareRunRevision(value.directory, record.editToken));
 		await finishRunRevision(value.directory, record.editToken);
+		const history = legacyHistory ? installLegacyHistory(value.directory, "complete").legacy : readRunRevision(value.directory)!;
 		const manager = new HerderRunManager(value.directory);
 		let second;
 		try {
@@ -526,17 +557,20 @@ test("two selective revisions preserve attribution and restart non-DONE surfaces
 			grantHostAttention(manager.store.getRun()!, { ...attentionResolutionFromRequest(next), action: "revise_run" });
 			await manager.event({ eventId: randomUUID(), kind: "attention", attention: { ...attentionResolutionFromRequest(next), action: "revise_run" } });
 			second = readRunRevision(value.directory)!;
+			assert.deepEqual(second.priorSelectiveCommits, [...history.selective!.knownCommits, history.selective!.publication!.head]);
+			assert.equal(second.state, "draft");
 		} finally { manager.close(); }
 		fs.appendFileSync(path.join(value.directory, "004-after.md"), "\nSecond independent API revision.\n");
 		const prepared = await prepareRunRevision(value.directory, second.editToken);
+		assert.equal(prepared.selective?.version, 2);
 		assert.deepEqual(prepared.selective?.retainedPlanIds, ["003"]);
-		assert.deepEqual(prepared.selective?.rerunPlanIds, ["001", "002", "004"]);
+		assert.deepEqual(prepared.selective?.rerunPlanIds, ["004"]);
+		assert.deepEqual(prepared.selective?.preservedPlanIds, ["001", "002"]);
 		await confirmRunRevision(prepared);
 		const reply = (await finishRunRevision(value.directory, second.editToken)).reply!;
-		assert.deepEqual(reply.actions.map(action => action.planId), ["001", "004"]);
-		assert.ok(reply.actions.every(action => action.generation === 3));
+		assert.deepEqual(reply.actions, []);
 		const store = new RunStore(value.directory);
-		try { assert.equal(store.getAttentionRequests(record.run.runId, { unresolvedOnly: true }).length, 0); assert.equal(store.getRun()?.currentGeneration, 3); }
+		try { assert.equal(store.getAttentionRequests(record.run.runId, { unresolvedOnly: true }).length, 1); assert.equal(store.getRun()?.currentGeneration, 3); }
 		finally { store.close(); }
 		assert.equal(fs.readFileSync(path.join(record.run.integrationWorktree, "src/value.mjs"), "utf8"), "export const value = 1;\n");
 		assert.equal(fs.existsSync(path.join(record.run.integrationWorktree, "src/after.mjs")), false);
@@ -565,7 +599,8 @@ test("selective closure includes removed plans and old/new rewiring, but not ind
 	const spec = (planId: string, dependencies: string[] = [], planFingerprint = planId) => ({ planId, dependencies, planFingerprint }) as unknown as StoredPlanSpec;
 	const previous = [spec("001"), spec("002", ["001"]), spec("003", ["002"]), spec("004")];
 	const next = [spec("002", [], "rewired"), spec("003", ["002"]), spec("004"), spec("005", ["003"])];
-	assert.deepEqual(selectivePlanSets(previous, next, new Set(["001", "002", "003", "004"])), { retainedPlanIds: ["004"], rerunPlanIds: ["002", "003", "005"], removedPlanIds: ["001"] });
+	assert.deepEqual(selectivePlanSets(previous, next, new Set(["001", "002", "003", "004"])), { retainedPlanIds: ["004"], preservedPlanIds: [], rerunPlanIds: ["002", "003", "005"], removedPlanIds: ["001"] });
+	assert.deepEqual(selectivePlanSets(previous, next, new Set(["001", "002", "003"])), { retainedPlanIds: [], preservedPlanIds: ["004"], rerunPlanIds: ["002", "003", "005"], removedPlanIds: ["001"] });
 	assert.throws(() => selectivePlanSets(previous, previous, new Set()), /unchanged retry/);
 });
 
@@ -702,8 +737,8 @@ test("scope preview displays exact acceptance and permission changes, additions 
 });
 
 for (const stage of ["prepare", "confirm", "cleanup"] as const) {
-	for (const mutation of ["unstaged", "staged", "untracked", "committed"] as const) {
-		test(`selective revision ${stage} preserves non-DONE ${mutation} work`, { timeout: 30_000 }, async () => {
+	for (const mutation of ["unstaged", "staged", "untracked", "ignored", "committed"] as const) {
+		test(`selective revision ${stage} ${stage === "prepare" ? "authorizes affected discard of" : "refuses newly changed"} non-DONE ${mutation} work`, { timeout: 30_000 }, async () => {
 			const value = fixture();
 			try {
 				const { record } = await begin(value);
@@ -724,7 +759,8 @@ for (const stage of ["prepare", "confirm", "cleanup"] as const) {
 				revise(value);
 				const prepared = stage === "prepare" ? null : await prepareRunRevision(value.directory, record.editToken);
 				if (stage === "cleanup") await confirmRunRevision(prepared!);
-				const file = mutation === "untracked" ? "unfinished.txt" : "src/other.mjs";
+				const file = mutation === "untracked" ? "unfinished.txt" : mutation === "ignored" ? ".herder/ignored.txt" : "src/other.mjs";
+				fs.mkdirSync(path.dirname(path.join(worktree, file)), { recursive: true });
 				const contents = "// unfinished work must survive amendment\n";
 				fs.writeFileSync(path.join(worktree, file), contents);
 				if (mutation === "staged" || mutation === "committed") git(worktree, ["add", file]);
@@ -734,7 +770,18 @@ for (const stage of ["prepare", "confirm", "cleanup"] as const) {
 				const revision = readRunRevision(value.directory);
 				const operation = stage === "prepare" ? () => prepareRunRevision(value.directory, record.editToken)
 					: stage === "confirm" ? () => confirmRunRevision(prepared!) : () => finishRunRevision(value.directory, record.editToken);
-				await assert.rejects(operation, /non-DONE plan 002.*Preserve\/reconcile this work before amendment/);
+				if (stage === "prepare") {
+					const preview = await prepareRunRevision(value.directory, record.editToken);
+					const artifact = preview.selective!.artifacts.find(item => item.plan.planId === "002")!;
+					assert.ok(artifact.snapshot.sha256);
+					assert.equal(artifact.unreviewedCommits.length, mutation === "committed" ? 1 : 0);
+					if (mutation !== "committed") assert.ok(artifact.snapshot[mutation === "unstaged" ? "tracked" : mutation] > 0);
+					await confirmRunRevision(preview);
+					assert.deepEqual((await finishRunRevision(value.directory, record.editToken)).reply!.actions, []);
+					assert.equal(fs.existsSync(worktree), false);
+					return;
+				}
+				await assert.rejects(operation, /snapshot changed|inventory changed|moved|foreign refs/);
 				assert.equal(fs.readFileSync(path.join(worktree, file), "utf8"), contents);
 				assert.equal(driver.worktreeStatus(worktree), status);
 				assert.deepEqual(driver.readIntegrationRepairNamespace().refs, refs);
@@ -743,3 +790,224 @@ for (const stage of ["prepare", "confirm", "cleanup"] as const) {
 		});
 	}
 }
+
+function unfinishedPlan(value: ReturnType<typeof fixture>, run: NonNullable<ReturnType<RunStore["getRun"]>>, id = "002") {
+	const store = new RunStore(value.directory);
+	try {
+		const driver = revisionDriver(run), spec = store.getPlanSpecs(run.runId).find(spec => spec.planId === id)!;
+		const base = driver.branchHead(run.integrationBranch), execution = driver.ensurePlanWorktree(id, spec.assignment, base);
+		store.putPlan({ runId: run.runId, planId: id, generation: run.currentGeneration, round: 1, phase: "BLOCKED", branch: execution.branch, worktree: execution.worktree,
+			generationBase: base, assignmentPath: execution.assignment.bundlePath, assignmentSha256: execution.assignment.bundleSha256, snapshotSha256: execution.assignment.snapshotSha256,
+			reviewPass: 0, findings: [], repair: ["Preserve stopped work"], gates: [], approvedBase: null, approvedHead: null, approvedTree: null, rebase: null });
+		return store.getPlan(run.runId, id)!;
+	} finally { store.close(); }
+}
+
+for (const stage of ["confirmation", "publication", "deletion"] as const) for (const kind of ["tracked", "staged", "untracked", "ignored"] as const) {
+	test(`same-path same-status ${kind} byte edit before ${stage} refuses approved discard`, { timeout: 30_000 }, async () => {
+		const value = fixture(), originalReset = GitDriver.prototype.resetPlanExecution;
+		try {
+			const { record } = await begin(value), plan = unfinishedPlan(value, record.run);
+			const file = path.join(plan.worktree, kind === "ignored" ? ".herder/ignored.txt" : kind === "untracked" ? "untracked.txt" : "src/other.mjs");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, "first dirty bytes\n");
+			if (kind === "staged") git(plan.worktree, ["add", file]);
+			revise(value);
+			const prepared = await prepareRunRevision(value.directory, record.editToken);
+			const status = revisionDriver(record.run).worktreeStatus(plan.worktree);
+			if (kind === "ignored") assert.equal(git(plan.worktree, ["check-ignore", file]).status, 0);
+			const change = () => { fs.writeFileSync(file, "other dirty bytes\n"); if (kind === "staged") git(plan.worktree, ["add", file]); };
+			if (stage !== "confirmation") await confirmRunRevision(prepared);
+			if (stage === "deletion") GitDriver.prototype.resetPlanExecution = function(input) {
+				return originalReset.call(this, { ...input, onPrepare: step => { input.onPrepare?.(step); if (input.worktree === plan.worktree && step === "worktree_removed") change(); } });
+			};
+			else change();
+			await assert.rejects(stage === "confirmation" ? confirmRunRevision(prepared) : finishRunRevision(value.directory, record.editToken), /destructive snapshot changed/);
+			assert.equal(revisionDriver(record.run).worktreeStatus(plan.worktree), status);
+			assert.equal(fs.readFileSync(file, "utf8"), "other dirty bytes\n");
+			assert.equal(git(value.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${plan.branch}`]).status, 0);
+		} finally { GitDriver.prototype.resetPlanExecution = originalReset; value.dispose(); }
+	});
+}
+
+for (const state of ["complete", "abandoned"] as const) test(`terminal selective v1 ${state} remains immutable history for status and resume`, { timeout: 30_000 }, async () => {
+	const value = fixture();
+	try {
+		const { record } = await begin(value);
+		revise(value);
+		await confirmRunRevision(await prepareRunRevision(value.directory, record.editToken));
+		await finishRunRevision(value.directory, record.editToken);
+		const { legacy, file, bytes } = installLegacyHistory(value.directory, state);
+		assert.deepEqual(readRunRevision(value.directory), legacy);
+		await assert.rejects(confirmRunRevision(legacy), /history only/);
+		await assert.rejects(finishRunRevision(value.directory, record.editToken), /history only/);
+		await assert.rejects(finishWholeRunEdit(value.directory, record.editToken, { hasUI: true, ui: { confirm: async () => assert.fail("legacy history cannot request confirmation") } as never }, host), /history only/);
+		const manager = new HerderRunManager(value.directory);
+		try {
+			assert.equal(manager.reply().status, "paused");
+			const reply = await manager.start({ mode: "resume", repositoryRoot: value.repo, planDirectory: value.directory });
+			assert.equal(reply.runId, record.run.runId);
+			assert.equal(manager.store.getRun()!.currentGeneration, 2);
+			assert.equal(reply.actions.length, 2);
+		} finally { manager.close(); }
+		assert.equal(fs.readFileSync(file, "utf8"), bytes, "reads/resume never normalize legacy evidence");
+		for (const mutation of ["preview", "generation", "envelope"] as const) {
+			const changed = structuredClone(legacy);
+			if (mutation === "preview") changed.selective.previewSha256 = "0".repeat(64);
+			if (mutation === "generation") {
+				changed.selective.nextGeneration++;
+				changed.selective.previewSha256 = selectivePreviewSha256(changed.selective);
+			}
+			fs.writeFileSync(file, stableJson({ record: changed, sha256: mutation === "envelope" ? "0".repeat(64) : sha256(stableJson(changed)) }));
+			assert.throws(() => readRunRevision(value.directory), /Invalid .*revision/);
+		}
+	} finally { value.dispose(); }
+});
+
+for (const state of ["prepared", "confirmed", "resetting"] as const) test(`legacy selective v1 ${state} never receives destructive authority`, { timeout: 30_000 }, async () => {
+	const value = fixture();
+	try {
+		const { record, worktree } = await begin(value);
+		revise(value);
+		const prepared = await prepareRunRevision(value.directory, record.editToken);
+		const legacy = JSON.parse(JSON.stringify({ ...prepared, state }));
+		legacy.selective.version = 1;
+		delete legacy.selective.preservedPlanIds;
+		for (const artifact of legacy.selective.artifacts) { delete artifact.snapshot; delete artifact.unreviewedCommits; }
+		legacy.selective.previewSha256 = selectivePreviewSha256(legacy.selective);
+		fs.writeFileSync(path.join(value.directory, ".herder/run-revision.json"), stableJson({ record: legacy, sha256: sha256(stableJson(legacy)) }), { mode: 0o600 });
+		assert.throws(() => readRunRevision(value.directory), /Legacy selective revision is paused/);
+		await assert.rejects(finishRunRevision(value.directory, record.editToken), /explicit operator recovery/);
+		assert.ok(fs.existsSync(worktree));
+	} finally { value.dispose(); }
+});
+
+test("independent amendment preserves blocked runtime, dirty/unreviewed work, opening attention and old-generation retry", { timeout: 60_000 }, async () => {
+	const value = fixture();
+	try {
+		const index = path.join(value.directory, "README.md");
+		fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace("| 001 | BLOCKED", "| — | BLOCKED").replace("\n\n## Dependency notes", "\n| [003](003-rejected.md) | Rejected | P1 | S | — | REJECTED — preserve rejection |\n\n## Dependency notes"));
+		fs.writeFileSync(path.join(value.directory, "002-downstream.md"), fixturePlan({ id: "002", title: "Downstream", writePaths: ["src/other.mjs"] }));
+		fs.writeFileSync(path.join(value.directory, "003-rejected.md"), fixturePlan({ id: "003", title: "Rejected", writePaths: ["src/rejected.mjs"] }));
+		const manager = new HerderRunManager(value.directory);
+		let record, savedPlan, request: ManagerAttentionRequest, budget: ReturnType<RunStore["getBudget"]>, ledger: unknown;
+		try {
+			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			const run = manager.store.getRun()!;
+			completeFixturePlan(value, manager.store, "001", "src/value.mjs", "export const value = 2;\n");
+			savedPlan = unfinishedPlan(value, run);
+			fs.writeFileSync(path.join(savedPlan.worktree, "src/other.mjs"), "// unreviewed committed work\n");
+			git(savedPlan.worktree, ["add", "src/other.mjs"]); git(savedPlan.worktree, ["commit", "-qm", "unreviewed"]);
+			fs.writeFileSync(path.join(savedPlan.worktree, "unfinished.txt"), "untracked survives");
+			fs.mkdirSync(path.join(savedPlan.worktree, ".herder"), { recursive: true });
+			fs.writeFileSync(path.join(savedPlan.worktree, ".herder/ignored.txt"), "ignored survives");
+			fs.appendFileSync(path.join(savedPlan.worktree, "src/other.mjs"), "// dirty survives\n");
+			for (const pending of manager.store.getAttentionRequests(run.runId)) manager.store.resolveAttention(pending.requestId);
+			const requestId = randomUUID(), detail = "Stopped transport for preserved plan";
+			request = { schemaVersion: 1, requestId, runId: run.runId, planId: "002", generation: 1, round: 1, actionId: null,
+				kind: "operator_attention", state: "awaiting_input", cause: "transport_exhausted", detail, detailSha256: sha256(detail),
+				continuation: { role: "plan-implementer", phase: "READY_IMPLEMENTER" }, requestSha256: "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+			request.requestSha256 = attentionRequestSha256(request);
+			manager.store.putAttention(request);
+			request = manager.store.getAttention(requestId)!;
+			const resolution = { ...attentionResolutionFromRequest(request), action: "revise_run" };
+			grantHostAttention(run, resolution);
+			await manager.event({ eventId: randomUUID(), kind: "attention", attention: resolution });
+			record = readRunRevision(value.directory)!;
+			budget = manager.store.getBudget(run.runId);
+			ledger = manager.store.database.prepare("SELECT * FROM manager_budget_ledger").all();
+		} finally { manager.close(); }
+		const before = destructiveSnapshot(savedPlan.worktree), inode = fs.statSync(savedPlan.worktree).ino;
+		fs.appendFileSync(path.join(value.directory, "001-upstream.md"), "\nIndependent upstream amendment.\n");
+		const prepared = await prepareRunRevision(value.directory, record.editToken);
+		assert.deepEqual(prepared.selective!.preservedPlanIds, ["002", "003"]);
+		assert.deepEqual(prepared.selective!.artifacts.map(item => item.plan.planId), ["001"]);
+		await confirmRunRevision(prepared);
+		const reply = (await finishRunRevision(value.directory, record.editToken)).reply!;
+		assert.equal(reply.status, "paused"); assert.deepEqual(reply.actions, []);
+		assert.equal(reply.attention?.requestId, request.requestId);
+		assert.deepEqual(destructiveSnapshot(savedPlan.worktree), before); assert.equal(fs.statSync(savedPlan.worktree).ino, inode);
+		assert.deepEqual(buildGraph(value.directory).plans.map(plan => plan.status), ["TODO", "BLOCKED", "REJECTED"]);
+		for (let reopen = 0; reopen < 2; reopen++) {
+			const replay: ManagerReply = (await finishRunRevision(value.directory, record.editToken)).reply!;
+			assert.equal(replay.status, "paused");
+			assert.equal(replay.attention?.requestId, request.requestId);
+			const audit = new HerderRunManager(value.directory);
+			try {
+				const plans = audit.store.getPlans(record.run.runId), actions = audit.store.getActions(record.run.runId);
+				for (let tick = 0; tick < 3; tick++) {
+					const reply = await audit.auditScheduler();
+					assert.equal(reply.status, "paused"); assert.deepEqual(reply.actions, []);
+					assert.equal(reply.attention?.requestId, request.requestId);
+					assert.deepEqual(audit.store.getPlans(record.run.runId), plans);
+					assert.deepEqual(audit.store.getActions(record.run.runId), actions);
+					assert.equal(audit.store.getPlan(record.run.runId, "001"), null);
+					assert.deepEqual(audit.store.getBudget(record.run.runId), { ...budget, generation: 2, graphSha256: prepared.graphSha256 });
+					assert.deepEqual(audit.store.database.prepare("SELECT * FROM manager_budget_ledger").all(), ledger);
+				}
+			} finally { audit.close(); }
+		}
+		const recovered = new HerderRunManager(value.directory);
+		try {
+			assert.deepEqual(recovered.store.getPlan(record.run.runId, "002"), savedPlan);
+			assert.deepEqual(recovered.store.getAttention(request.requestId), request);
+			assert.deepEqual(recovered.store.getBudget(record.run.runId), { ...budget, generation: 2, graphSha256: prepared.graphSha256 });
+			assert.deepEqual(recovered.store.database.prepare("SELECT * FROM manager_budget_ledger").all(), ledger);
+			const stale = { runId: record.run.runId, generation: 1, reservationId: "invalid-old-generation", kind: "verification", planId: "002", round: 1, payloadSha256: "invalid" };
+			assert.throws(() => recovered.store.reserveBudget(stale), /generation is stale/);
+			assert.throws(() => recovered.store.reserveBudget({ ...stale, kind: "action:plan-implementer", round: 2 }), /generation is stale/);
+			assert.throws(() => recovered.store.reserveBudget({ ...stale, kind: "action:plan-implementer", planId: "001" }), /generation is stale/);
+			const resolution = { ...attentionResolutionFromRequest(request), action: "retry", rationale: "Retry exact stopped transport" };
+			grantHostAttention(recovered.store.getRun()!, resolution);
+			const retry = await recovered.event({ eventId: randomUUID(), kind: "attention", attention: resolution });
+			assert.equal(recovered.store.getAttention(request.requestId)!.state, "resolved");
+			assert.ok(retry.actions.some(action => action.planId === "002" && action.generation === 1 && action.round === 1 && action.assignmentSha256 === savedPlan.assignmentSha256));
+		} finally { recovered.close(); }
+	} finally { value.dispose(); }
+});
+
+test("destructive snapshot hashes symlink targets without following and refuses nested Git or special files", () => {
+	const value = fixture();
+	try {
+		const external = path.join(value.root, "external"); fs.writeFileSync(external, "outside");
+		fs.symlinkSync(external, path.join(value.repo, "link"));
+		const first = destructiveSnapshot(value.repo);
+		fs.writeFileSync(external, "outside changed");
+		assert.deepEqual(destructiveSnapshot(value.repo), first);
+		fs.unlinkSync(path.join(value.repo, "link")); fs.symlinkSync("different target", path.join(value.repo, "link"));
+		assert.notEqual(destructiveSnapshot(value.repo).sha256, first.sha256);
+		fs.mkdirSync(path.join(value.repo, "nested/.git"), { recursive: true });
+		assert.throws(() => destructiveSnapshot(value.repo), /nested Git/);
+		fs.rmSync(path.join(value.repo, "nested"), { recursive: true });
+		assert.equal(spawnSync("mkfifo", [path.join(value.repo, "pipe")]).status, 0);
+		assert.throws(() => destructiveSnapshot(value.repo), /unsafe special file/);
+	} finally { value.dispose(); }
+});
+
+test("exact host preview lists affected dirty/committed artifacts; no UI and dismissal cannot discard", { timeout: 30_000 }, async () => {
+	const value = fixture();
+	try {
+		const { record } = await begin(value), plan = unfinishedPlan(value, record.run);
+		fs.writeFileSync(path.join(plan.worktree, "src/other.mjs"), "// secret committed bytes\n");
+		git(plan.worktree, ["add", "src/other.mjs"]); git(plan.worktree, ["commit", "-qm", "unreviewed"]);
+		const unreviewed = revisionDriver(record.run).branchHead(plan.branch);
+		fs.writeFileSync(path.join(plan.worktree, "src/other.mjs"), "// secret staged bytes\n"); git(plan.worktree, ["add", "src/other.mjs"]);
+		fs.appendFileSync(path.join(plan.worktree, "src/other.mjs"), "// secret unstaged bytes\n");
+		fs.writeFileSync(path.join(plan.worktree, "untracked.txt"), "secret untracked bytes");
+		fs.mkdirSync(path.join(plan.worktree, ".herder"), { recursive: true });
+		fs.writeFileSync(path.join(plan.worktree, ".herder/ignored.txt"), "secret ignored bytes");
+		revise(value);
+		const before = destructiveSnapshot(plan.worktree);
+		await assert.rejects(finishWholeRunEdit(value.directory, record.editToken, { hasUI: false, ui: {} as never }, host), /interactive host confirmation/);
+		await assert.rejects(finishWholeRunEdit(value.directory, record.editToken, { hasUI: true, ui: { confirm: async (_title: string, body: string) => {
+			assert.match(body, /Preserve unfinished plans: none/); assert.match(body, /Rerun plans: 001, 002/);
+			assert.ok(body.includes(plan.branch) && body.includes(plan.worktree) && body.includes(unreviewed));
+			assert.match(body, /Dirty tracked \(unstaged\): 1; staged: 1; untracked: 1; ignored: [1-9]/);
+			assert.match(body, /BOTH old and new dependency graphs/); assert.match(body, /source checkout and branch will not be reset/);
+			assert.match(body, /no additional effort and does not resume execution/); assert.doesNotMatch(body, /secret (?:committed|staged|unstaged|untracked|ignored) bytes/);
+			return false;
+		} } as never }, host), /Confirmation dismissed/);
+		assert.deepEqual(destructiveSnapshot(plan.worktree), before);
+		assert.equal(revisionDriver(record.run).branchHead(plan.branch), unreviewed);
+	} finally { value.dispose(); }
+});

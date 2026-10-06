@@ -6,13 +6,15 @@ import { buildGraph, projectStatuses } from "./plans.ts";
 import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
 import { captureReworkSnapshot, ensurePrivateDirectory, fsyncDirectory, graphInputSha256, readRegularBytes, readReworkSnapshotFile, restoreGraphSnapshot } from "./plan-edit.ts";
 import { GitDriver } from "../daemon/git-driver.ts";
+import { lifecycleStatus } from "./workflow.ts";
+import { RunStore } from "../daemon/run-store.ts";
 import type { StoredRun, StoredPlanEdit } from "../daemon/run-store.ts";
 import { sha256, stableJson, type AttentionResolutionInput } from "../shared/protocol.ts";
 
-import { prepareSelectiveRevision, validateSelectiveArtifacts, selectivePreviewSha256, type SelectiveRevision } from "../daemon/git/selective-revision.ts";
+import { prepareSelectiveRevision, validateSelectiveArtifacts, selectivePreviewSha256, type SelectiveRevision, type LegacySelectiveRevision } from "../daemon/git/selective-revision.ts";
 
-export interface RunRevision {
-	selective?: SelectiveRevision;
+export interface RunRevision<T extends SelectiveRevision | LegacySelectiveRevision = SelectiveRevision | LegacySelectiveRevision> {
+	selective?: T;
 	/** Completed same-run revision attribution, carried into the next draft. */
 	priorSelectiveCommits?: string[];
 	version: 1;
@@ -45,9 +47,20 @@ export function readRunRevision(directory: string): RunRevision | null {
 		|| record.run.planDirectory !== fs.realpathSync(directory) || record.request.runId !== record.run.runId
 		|| !["draft", "prepared", "confirmed", "resetting", "restarting", "complete", "abandoned"].includes(record.state)
 		|| !["revise_run", "abandon_run"].includes(record.decision)) throw new Error("Invalid whole-run revision identity");
-	if (record.selective && (record.selective.version !== 1 || record.selective.sourceGeneration !== record.run.currentGeneration
-		|| record.selective.nextGeneration !== record.run.currentGeneration + 1 || selectivePreviewSha256(record.selective) !== record.selective.previewSha256)) throw new Error("Invalid selective revision generation or preview identity");
+	const selective = record.selective;
+	if (selective?.version === 1 && revisionPending(record)) throw new Error("Legacy selective revision is paused: no destructive snapshot authorization. Preserve execution; explicit operator recovery and a fresh preview/confirmation are required.");
+	if (selective && (![1, 2].includes(selective.version)
+		|| (selective.version === 2 && (!Array.isArray(selective.preservedPlanIds) || !Array.isArray(selective.artifacts)
+			|| selective.artifacts.some(artifact => !/^[a-f0-9]{64}$/.test(artifact.snapshot?.sha256))))
+		|| !Array.isArray(selective.knownCommits) || selective.knownCommits.some(commit => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit))
+		|| selective.sourceGeneration !== record.run.currentGeneration || selective.nextGeneration !== record.run.currentGeneration + 1
+		|| selectivePreviewSha256(selective) !== selective.previewSha256)) throw new Error("Invalid selective revision generation or preview identity");
 	return record;
+}
+
+/** Terminal legacy records are history, not fresh confirmation or replay authority. */
+export function assertCurrentRunRevision(record: RunRevision): asserts record is RunRevision<SelectiveRevision> {
+	if (record.selective && record.selective.version !== 2) throw new Error("Legacy selective revision is history only; explicit operator recovery and a fresh preview/confirmation are required");
 }
 
 export function writeRunRevision(directory: string, record: RunRevision, expected: RunRevision | null): void {
@@ -78,16 +91,17 @@ export async function verifyRevisionCheckout(record: RunRevision): Promise<void>
 	if (driver.worktreeHead(record.run.repositoryRoot) !== record.run.baseCommit) throw new Error("Whole-run revision requires the original checkout HEAD/base; never reset the user's branch");
 }
 
-export async function beginRunRevision(run: StoredRun, request: AttentionResolutionInput): Promise<RunRevision> {
+export async function beginRunRevision(run: StoredRun, request: AttentionResolutionInput): Promise<RunRevision<SelectiveRevision>> {
 	assertHostAttentionGrant(run, request);
 	const previous = readRunRevision(run.planDirectory);
 	const priorSelective = previous?.run.runId === run.runId ? previous.selective : undefined;
 	if (revisionPending(previous)) {
 		if (previous.run.runId !== run.runId || previous.request.requestId !== request.requestId || previous.request.requestSha256 !== request.requestSha256) throw new Error("Another whole-run revision owns this execution");
 		if (!["draft", "prepared"].includes(previous.state)) throw new Error(`Continue confirmed whole-run finish_edit with token ${previous.editToken}; do not replay attention begin`);
+		assertCurrentRunRevision(previous);
 		return previous;
 	}
-	const record: RunRevision = { version: 1, editToken: randomUUID(), run, request, state: "draft", decision: request.action as RunRevision["decision"], successorRunId: randomUUID(), snapshotSha256: "", ...(priorSelective ? { priorSelectiveCommits: [...priorSelective.knownCommits, ...(priorSelective.publication && priorSelective.publication.head !== priorSelective.integrationHead ? [priorSelective.publication.head] : [])] } : {}) };
+	const record: RunRevision<SelectiveRevision> = { version: 1, editToken: randomUUID(), run, request, state: "draft", decision: request.action as RunRevision["decision"], successorRunId: randomUUID(), snapshotSha256: "", ...(priorSelective ? { priorSelectiveCommits: [...priorSelective.knownCommits, ...(priorSelective.publication && priorSelective.publication.head !== priorSelective.integrationHead ? [priorSelective.publication.head] : [])] } : {}) };
 	await verifyRevisionCheckout(record);
 	if (compileGraphIdentity(buildGraph(run.planDirectory)) !== run.graphSha256) throw new Error("Resolve graph drift before opening whole-run revision");
 	const driver = revisionDriver(run);
@@ -104,15 +118,16 @@ export function restoreRevisionGraph(record: RunRevision, abandoned = false): vo
 	restoreGraphSnapshot(record.run.planDirectory, snapshot.snapshot);
 }
 
-export async function prepareRunRevision(directory: string, editToken: string, decision: RunRevision["decision"] = "revise_run"): Promise<RunRevision> {
+export async function prepareRunRevision(directory: string, editToken: string, decision: RunRevision["decision"] = "revise_run"): Promise<RunRevision<SelectiveRevision>> {
 	const record = readRunRevision(directory);
 	if (!record || record.editToken !== editToken) throw new Error("Whole-run edit token does not match");
+	assertCurrentRunRevision(record);
 	if (!["draft", "prepared"].includes(record.state)) return record;
 	await verifyRevisionCheckout(record);
 	if (decision === "abandon_run") {
 		const captured = captureReworkSnapshot(record.run, "RUN", record.successorRunId, record.run.baseCommit, revisionDriver(record.run).worktreeTree(record.run.repositoryRoot), "README.md", []);
 		const { selective: _selective, ...abandonRecord } = record;
-		const prepared: RunRevision = { ...abandonRecord, state: "prepared", decision, graphSha256: record.run.graphSha256, inputSha256: graphInputSha256(directory), abandonSnapshotSha256: captured.sha256 };
+		const prepared: RunRevision<SelectiveRevision> = { ...abandonRecord, state: "prepared", decision, graphSha256: record.run.graphSha256, inputSha256: graphInputSha256(directory), abandonSnapshotSha256: captured.sha256 };
 		writeRunRevision(directory, prepared, record);
 		return prepared;
 	}
@@ -128,25 +143,40 @@ export async function prepareRunRevision(directory: string, editToken: string, d
 	const manager = new HerderRunManager(directory);
 	try { manager.validateSelectiveApprovals(record.run); } finally { manager.close(); }
 	validateSelectiveArtifacts(record.run, selective, revisionDriver(record.run));
-	projectStatuses(directory, graph.plans.map(plan => ({ id: plan.id, status: selective.retainedPlanIds.includes(plan.id) ? "DONE" : "TODO" })));
-	const prepared: RunRevision = { ...record, selective, decision, state: "prepared", graphSha256, inputSha256: graphInputSha256(directory) };
+	projectStatuses(directory, revisionStatuses(record.run, selective));
+	const prepared: RunRevision<SelectiveRevision> = { ...record, selective, decision, state: "prepared", graphSha256, inputSha256: graphInputSha256(directory) };
 	writeRunRevision(directory, prepared, record);
 	return prepared;
 }
 
+function revisionStatuses(run: StoredRun, selective: SelectiveRevision) {
+	const store = new RunStore(run.planDirectory, { readOnly: true });
+	try {
+		return selective.specs.map(spec => {
+			const plan = selective.preservedPlanIds.includes(spec.planId) ? store.getPlan(run.runId, spec.planId) : null;
+			const status = lifecycleStatus(spec, plan);
+			const rawDetail = plan?.repair[0] || spec.initialStatusDetail;
+			return { id: spec.planId, status, detail: ["BLOCKED", "REJECTED"].includes(status) ? rawDetail.replace(/[\r\n]+/g, " ").replaceAll("|", ";").replace(/\s+/g, " ").trim() : "" };
+		});
+	} finally { store.close(); }
+}
+
 /** Status is absent from semantic identity; bind exact Markdown and proof-backed lifecycle too. */
 export function assertApprovedRevisionGraph(record: RunRevision, graph = buildGraph(record.run.planDirectory)): void {
+	assertCurrentRunRevision(record);
 	if (graphInputSha256(record.run.planDirectory) !== record.inputSha256) throw new Error("Replacement Markdown changed after host confirmation");
-	if (!graph.shapeReady || graph.plans.length === 0 || graph.plans.some(plan => plan.status !== (record.selective?.retainedPlanIds.includes(plan.id) ? "DONE" : "TODO"))) throw new Error("Whole-run replacement requires a valid nonempty graph with every plan TODO except proof-backed retained DONE plans");
+	const expected = record.selective ? revisionStatuses(record.run, record.selective) : [];
+	if (!graph.shapeReady || graph.plans.length === 0 || graph.plans.some(plan => plan.status !== expected.find(item => item.id === plan.id)?.status)) throw new Error("Whole-run replacement requires approved lifecycle statuses: affected plans TODO, proof-backed retained DONE, unchanged unfinished preserved");
 	if (compileGraphIdentity(graph) !== record.graphSha256) throw new Error("Replacement graph changed after host confirmation");
 }
 
-export async function confirmRunRevision(prepared: RunRevision): Promise<RunRevision> {
+export async function confirmRunRevision(prepared: RunRevision): Promise<RunRevision<SelectiveRevision>> {
+	assertCurrentRunRevision(prepared);
 	const directory = prepared.run.planDirectory;
 	await verifyRevisionCheckout(prepared);
 	if (prepared.state !== "prepared" || graphInputSha256(directory) !== prepared.inputSha256 || (prepared.decision === "revise_run" && compileGraphIdentity(buildGraph(directory)) !== prepared.graphSha256)) throw new Error("Whole-run replacement changed after confirmation was requested");
 	if (prepared.selective) validateSelectiveArtifacts(prepared.run, prepared.selective, revisionDriver(prepared.run));
-	const confirmed: RunRevision = { ...prepared, state: "confirmed" };
+	const confirmed: RunRevision<SelectiveRevision> = { ...prepared, state: "confirmed" };
 	writeRunRevision(directory, confirmed, prepared);
 	return confirmed;
 }
