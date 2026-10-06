@@ -1126,7 +1126,7 @@ export class RunStore {
 		if (exhausted) throw exhausted;
 		return result as T;
 	}
-	/** Baseline is sealed once; graph edits and reset/restart never mint authority. */
+	/** Baseline is sealed once; only explicit reset clears it, never revision/resume. */
 	private initializeBudget(): void {
 		const run = this.getRun();
 		if (!run || this.getBudget(run.runId)) return;
@@ -2263,11 +2263,12 @@ export class RunStore {
 		return this.getRun()!;
 	}
 
-	resetExecutionState(): void {
+	resetExecutionState(options: { clearBudgets?: boolean } = {}): void {
 		this.transaction(() => {
 			// Keep the schema/database and runtime directory intact, but remove all
-			// durable execution evidence so the next Fire is a fresh initialization.
+			// durable execution evidence. Internal revision resets preserve accounting.
 			for (const table of [
+				...(options.clearBudgets ? ["manager_budget_grants", "manager_budget_ledger", "manager_task_budgets", "manager_budgets"] : []),
 				// Delete children before their manager_runs parent. Foreign-key enforcement
 				// is enabled for every execution connection, so relying on cascade order
 				// here would make reset fail part-way through its transaction.

@@ -5,7 +5,7 @@ export class BudgetExhaustedError extends Error {
 	constructor(runId: string, message: string) { super(message); this.runId = runId; }
 }
 
-/** No cascading foreign keys: revision/reset must not erase spent authority. */
+/** No cascading foreign keys: internal revision resets retain spent authority; explicit reset deletes it. */
 export const BUDGET_SCHEMA = `
 CREATE TABLE manager_budgets (
  run_id TEXT PRIMARY KEY, current_run_id TEXT NOT NULL UNIQUE,

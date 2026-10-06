@@ -202,12 +202,26 @@ function statusProjection(value: Fixture) {
 	return buildGraph(value.planDir).plans.map(({ id, status, statusDetail }) => ({ id, status, detail: statusDetail }));
 }
 
+const budgetTables = ["manager_budgets", "manager_task_budgets", "manager_budget_ledger", "manager_budget_grants"];
+function budgetSnapshot(store: RunStore) {
+	return budgetTables.map(table => store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+}
+function spendBudget(store: RunStore): void {
+	const run = store.getRun()!;
+	store.grantBudget({ requestId: `grant:${run.runId}`, runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256, amount: 2, planId: "001", implementationRounds: 2, infrastructureRecoveries: 2 });
+	const reservation = { runId: run.runId, generation: run.currentGeneration, kind: "verification", payloadSha256: "test" };
+	const remaining = store.getBudget(run.runId)!.limit - store.getBudget(run.runId)!.used;
+	for (let i = 0; i < remaining; i++) store.reserveBudget({ ...reservation, reservationId: `test:${i}` });
+	assert.equal(store.reserveTransportRecovery(run.runId, "001", "test"), true);
+	assert.throws(() => store.reserveBudget({ ...reservation, reservationId: "exhausted" }), /Run execution budget exhausted/);
+}
+
 function namespaceSnapshot(value: Fixture): string {
 	const store = new RunStore(value.planDir, { readOnly: true });
 	let evidence;
 	try {
 		const run = store.getRun();
-		evidence = { run, actions: run && store.getActions(run.runId), specs: run && store.getPlanSpecs(run.runId) };
+		evidence = { run, budgets: budgetSnapshot(store), actions: run && store.getActions(run.runId), specs: run && store.getPlanSpecs(run.runId) };
 	} finally { store.close(); }
 	return JSON.stringify({
 		evidence,
@@ -256,7 +270,7 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 		for (let cycle = 0; cycle < 2; cycle++) {
 			projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "temporary execution detail" }]);
 			const store = new RunStore(value.planDir);
-			try { store.updateRun({ status: "complete" }); } finally { store.close(); }
+			try { spendBudget(store); } finally { store.close(); }
 			const planRoot = canonicalWorktreeRoot(value.planDir);
 			assert.equal(fs.realpathSync(path.join(planRoot, "integration")), fs.realpathSync(path.join(planRoot, "integration")));
 			command(value.repo, ["update-ref", `refs/plan-herder/${value.planName}/completed/001`, value.base]);
@@ -272,13 +286,25 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 			assert.doesNotMatch(fs.readFileSync(value.readme, "utf8"), /temporary execution detail/);
 			assert.equal(fs.readFileSync(path.join(value.planDir, ".gitignore"), "utf8"), beforeIgnore);
 			const empty = new RunStore(value.planDir);
-			try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
+			try { assert.equal(empty.getRun(), null); assert.deepEqual(budgetSnapshot(empty), [[], [], [], []]); } finally { empty.close(); }
 			const fresh = await ensureService(value.planDir);
 			const started = await requestManagerOperation(fresh, "start", {
 				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
 			});
 			assert.equal((started.reply as Record<string, unknown>).status, "running");
-			await stopService(value.planDir);
+			await withServiceExclusion(value.planDir, () => {}, { purpose: "revision" });
+			const restarted = new RunStore(value.planDir);
+			try {
+				const budget = restarted.getBudget(restarted.getRun()!.runId)!;
+				assert.equal(budget.limit, 21);
+				assert.equal(budget.stopReason, null);
+				assert.equal(budget.baselineGeneration, 1);
+				assert.equal(budget.used, restarted.getActions(budget.runId).length);
+				assert.equal(budgetSnapshot(restarted)[3]!.length, 0);
+				const allocation = restarted.database.prepare("SELECT round_limit, recovery_limit FROM manager_task_budgets").get()!;
+				assert.equal(allocation.round_limit, 3);
+				assert.equal(allocation.recovery_limit, 1);
+			} finally { restarted.close(); }
 		}
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
@@ -624,13 +650,19 @@ real_git "$@"
 	}, () => resetHerderPlanSet(resetInput(value))), operation === "branch" || operation === "ref" ? /could not delete moved ref/ : /injected deletion boundary/);
 }
 
-test("completed reset replays read-only after caller commit, branch, and detached checkout changes but rejects recreated refs", { timeout: 30_000 }, async () => {
+test("completed legacy reset replay clears retained budgets after checkout changes but rejects recreated refs", { timeout: 30_000 }, async (t) => {
 	const value = await initializedFixture();
 	try {
+		const seeded = new RunStore(value.planDir);
+		try { spendBudget(seeded); } finally { seeded.close(); }
+		// Simulate a completed receipt written by the old budget-preserving reset.
+		const original = RunStore.prototype.resetExecutionState;
+		const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) { original.call(this); });
 		const result = resetHerderPlanSet(resetInput(value));
+		mocked.mock.restore();
 		assert.equal(resetIntent(value).completed, true);
 		const store = new RunStore(value.planDir, { readOnly: true });
-		try { assert.equal(store.getRun(), null); } finally { store.close(); }
+		try { assert.equal(store.getRun(), null); assert.ok(budgetSnapshot(store).every(rows => rows.length > 0)); } finally { store.close(); }
 		const file = path.join(value.planDir, ".herder", "reset-intent.json");
 		const receipt = fs.readFileSync(file, "utf8");
 		for (const args of [
@@ -639,6 +671,9 @@ test("completed reset replays read-only after caller commit, branch, and detache
 			["checkout", "-q", "--detach"],
 		]) {
 			command(value.repo, args);
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), result);
+			const cleared = new RunStore(value.planDir, { readOnly: true });
+			try { assert.deepEqual(budgetSnapshot(cleared), [[], [], [], []]); } finally { cleared.close(); }
 			const before = namespaceSnapshot(value);
 			assert.deepEqual(resetHerderPlanSet(resetInput(value)), result);
 			assert.equal(namespaceSnapshot(value), before);
@@ -659,8 +694,8 @@ for (const boundary of ["deletion", "DB-cleared pending"] as const) {
 			if (boundary === "deletion") interruptDeletion(value);
 			else {
 				const original = RunStore.prototype.resetExecutionState;
-				const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
-					original.call(this);
+				const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore, options: Parameters<RunStore["resetExecutionState"]>[0]) {
+					original.call(this, options);
 					throw new Error("injected after DB clear");
 				});
 				assert.throws(() => resetHerderPlanSet(resetInput(value)), /injected after DB clear/);
@@ -738,8 +773,8 @@ for (const boundary of ["before", "after"] as const) {
 		try {
 			projectStatuses(value.planDir, [{ id: "001", status: "BLOCKED", detail: "execution failure" }]);
 			const original = RunStore.prototype.resetExecutionState;
-			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
-				if (boundary === "after") original.call(this);
+			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore, options: Parameters<RunStore["resetExecutionState"]>[0]) {
+				if (boundary === "after") original.call(this, options);
 				throw new Error("injected DB boundary");
 			});
 			assert.throws(() => resetHerderPlanSet(resetInput(value)), /injected DB boundary/);
@@ -801,6 +836,9 @@ for (const mode of ["ordinary", "revision"] as const) test(`${mode} reset uses s
 		const input = mode === "revision" ? revisionInput(value) : resetInput(value);
 		const head = git(value.repo, "rev-parse", "HEAD");
 		const plans = ["002", "003", "004"].map((id) => fs.readFileSync(path.join(value.planDir, `${id}-reset.md`), "utf8"));
+		const accounting = new RunStore(value.planDir);
+		let budgets;
+		try { spendBudget(accounting); budgets = budgetSnapshot(accounting); } finally { accounting.close(); }
 		const result = resetHerderPlanSet(input);
 		assert.deepEqual(result.resetPlans, ["002", "003", "004"]);
 		assert.ok(result.removedBranches.includes(`herder/${value.planName}/001`));
@@ -810,6 +848,13 @@ for (const mode of ["ordinary", "revision"] as const) test(`${mode} reset uses s
 		assert.equal(fs.readFileSync(path.join(value.repo, "fixture.txt"), "utf8"), "base\n");
 		assert.equal(git(value.repo, "rev-parse", "HEAD"), head);
 		assert.deepEqual(resetHerderPlanSet(input), result);
+		const cleared = new RunStore(value.planDir, { readOnly: true });
+		try { assert.deepEqual(budgetSnapshot(cleared), mode === "revision" ? budgets : [[], [], [], []]); } finally { cleared.close(); }
+		if (mode === "revision") {
+			assert.deepEqual(resetHerderPlanSet(resetInput(value)), result);
+			const abandoned = new RunStore(value.planDir, { readOnly: true });
+			try { assert.deepEqual(budgetSnapshot(abandoned), [[], [], [], []]); } finally { abandoned.close(); }
+		}
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
@@ -895,8 +940,8 @@ for (const completed of [false, true]) test(`${completed ? "completed" : "DB-cle
 		if (completed) resetHerderPlanSet(input);
 		else {
 			const original = RunStore.prototype.resetExecutionState;
-			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore) {
-				original.call(this);
+			const mocked = t.mock.method(RunStore.prototype, "resetExecutionState", function (this: RunStore, options: Parameters<RunStore["resetExecutionState"]>[0]) {
+				original.call(this, options);
 				throw new Error("injected after DB clear");
 			});
 			assert.throws(() => resetHerderPlanSet(input), /injected after DB clear/);
@@ -911,6 +956,11 @@ for (const completed of [false, true]) test(`${completed ? "completed" : "DB-cle
 		const receipt = fs.readFileSync(path.join(value.planDir, ".herder", "reset-intent.json"), "utf8");
 		const freshInput = revisionInput(value);
 		if (completed) {
+			command(value.repo, ["update-ref", `refs/heads/herder/${value.planName}/foreign`, value.base]);
+			const guarded = namespaceSnapshot(value);
+			assert.throws(() => resetHerderPlanSet(resetInput(value)), /unknown branch/);
+			assert.equal(namespaceSnapshot(value), guarded, "failed fresh preflight preserves successor accounting");
+			command(value.repo, ["update-ref", "-d", `refs/heads/herder/${value.planName}/foreign`]);
 			assert.notEqual(freshInput.revision.runId, input.revision.runId);
 			assert.throws(() => resetHerderPlanSet({ ...freshInput, revision: { ...freshInput.revision, baseCommit: value.base } }), /recorded runId/);
 			assert.equal(namespaceSnapshot(value), before);
@@ -1017,7 +1067,12 @@ for (const invalid of ["plan", "index"]) test(`host reset discards malformed rev
 		fs.writeFileSync(revision, "{old malformed revision", { mode: 0o600 });
 		fs.writeFileSync(grant, "old grant", { mode: 0o600 });
 		const before = namespaceSnapshot(value);
-		assert.match(await runResetCommand({ repositoryRoot: value.repo, planDirectory: value.planDir, confirm: async () => false }), /cancelled/);
+		assert.match(await runResetCommand({ repositoryRoot: value.repo, planDirectory: value.planDir, confirm: async (_title, message) => {
+			assert.match(message, /budget allocations, usage accounting, stop reasons, and grants are erased/);
+			assert.match(message, /next Fire starts with default budgets/);
+			assert.match(message, /Revise\/resume preserve accounting/);
+			return false;
+		} }), /cancelled/);
 		assert.equal(namespaceSnapshot(value), before);
 		assert.equal(fs.readFileSync(revision, "utf8"), "{old malformed revision");
 		assert.equal(fs.readFileSync(grant, "utf8"), "old grant");

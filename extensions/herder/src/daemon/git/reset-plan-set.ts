@@ -303,7 +303,13 @@ function executeIntent(repo: string, planDir: string, name: string, file: string
   ];
   validateReplay(repo, planDir, name, intent);
   if (intent.completed) {
-    if (abandonRevision) clearRevisionAuthority(planDir);
+    if (abandonRevision) {
+      // Upgrade completed legacy receipts that retained accounting. Successor
+      // runs take the fresh-preflight path before reaching this replay branch.
+      const writable = new RunStore(planDir);
+      try { writable.resetExecutionState({ clearBudgets: true }); } finally { writable.close(); }
+      clearRevisionAuthority(planDir);
+    }
     return m.result;
   }
   // ponytail: re-inventory per deletion is quadratic; batch only if large namespaces make it costly.
@@ -330,7 +336,7 @@ function executeIntent(repo: string, planDir: string, name: string, file: string
   try {
     const run = writable.getRun();
     if (run && run.runId !== m.run.runId) fail("Herder reset refused a successor run before clearing execution state.");
-    writable.resetExecutionState();
+    writable.resetExecutionState({ clearBudgets: abandonRevision });
   } finally { writable.close(); }
   clearExecutionRotationMarker(planDir);
   // Do not parse revision records: even legacy/corrupt drafts are abandoned.

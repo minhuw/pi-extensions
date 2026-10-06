@@ -19,9 +19,10 @@ function fixture() {
  return { store, directory, run, spec, action, cleanup() { store.close(); fs.rmSync(directory, { recursive: true, force: true }); } };
 }
 
-test("three implementation rounds survive generations, cancellation, reset and transport is separate", () => {
+test("three implementation rounds survive generations, cancellation, internal reset and transport is separate", () => {
  const f = fixture();
  try {
+  f.store.grantBudget({ requestId: "retained", runId: "run", generation: 1, graphSha256: f.run.graphSha256, amount: 2 });
   for (let generation = 1; generation <= 3; generation++) {
    f.store.updateRun({ currentGeneration: generation });
    const action = f.action(`a${generation}`, generation);
@@ -38,11 +39,66 @@ test("three implementation rounds survive generations, cancellation, reset and t
   f.store.updateRun({ status: "running", terminalDetail: null });
   assert.equal(f.store.getRun()!.status, "paused");
   assert.equal(f.store.getAction("four"), null);
+  const tables = ["manager_budgets", "manager_task_budgets", "manager_budget_ledger", "manager_budget_grants"];
+  const accounting = () => tables.map(table => f.store.database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+  const before = accounting();
   f.store.resetExecutionState();
+  assert.deepEqual(accounting(), before);
   f.store.createRun({ ...f.run, runId: "successor" });
   f.store.putPlanSpecs([{ ...f.spec, runId: "successor" }]);
   assert.equal(f.store.getBudget("successor")!.used, 3);
+  assert.equal(f.store.getBudget("successor")!.limit, 23);
+  assert.ok(f.store.getBudget("successor")!.stopReason);
+  assert.equal(f.store.reserveTransportRecovery("successor", "001", "new"), false);
   assert.throws(() => f.store.putAction(f.action("after-reset")), /implementation budget exhausted/);
+ } finally { f.cleanup(); }
+});
+
+test("explicit reset clears allocations, usage, stops and grants; next run seals a fresh baseline", () => {
+ const f = fixture();
+ try {
+  f.store.grantBudget({ requestId: "grant", runId: "run", generation: 1, graphSha256: f.run.graphSha256, amount: 5, planId: "001", implementationRounds: 1, infrastructureRecoveries: 1 });
+  for (let i = 0; i < 4; i++) f.store.putAction(f.action(`old${i}`));
+  assert.equal(f.store.reserveTransportRecovery("run", "001", "old0"), true);
+  assert.equal(f.store.reserveTransportRecovery("run", "001", "old1"), true);
+  assert.throws(() => f.store.putAction(f.action("exhausted")), /implementation budget exhausted/);
+  const before = f.store.getBudget("run")!;
+  assert.equal(before.limit, 26);
+  assert.equal(before.used, 4);
+  assert.ok(before.stopReason);
+  // Clearing accounting participates in the same execution reset transaction.
+  assert.throws(() => f.store.transaction(() => {
+   f.store.resetExecutionState({ clearBudgets: true });
+   throw new Error("rollback reset");
+  }), /rollback reset/);
+  assert.deepEqual(f.store.getBudget("run"), before);
+  assert.ok(f.store.getRun());
+  f.store.resetExecutionState({ clearBudgets: true });
+  for (const table of ["manager_budgets", "manager_task_budgets", "manager_budget_ledger", "manager_budget_grants"]) {
+   assert.equal(f.store.database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()!.count, 0, table);
+  }
+  assert.equal(f.store.getBudget("run"), null);
+  const run = { ...f.run, runId: "fresh", currentGeneration: 2, graphSha256: "d".repeat(64) };
+  f.store.createRun(run);
+  const specs = ["001", "002"].map((planId, ordinal) => ({ ...f.spec, runId: run.runId, graphGeneration: 2, planId, ordinal }));
+  f.store.putPlanSpecs(specs);
+  assert.deepEqual(f.store.getBudget("fresh"), {
+   runId: "fresh", baselineGeneration: 2, baselineGraphSha256: run.graphSha256,
+   baselineSpecsJson: stableJson(f.store.getPlanSpecs("fresh")), generation: 2,
+   graphSha256: run.graphSha256, limit: 30, used: 0, stopReason: null,
+  });
+  for (const planId of ["001", "002"]) {
+   const allocation = f.store.database.prepare("SELECT round_limit, recovery_limit FROM manager_task_budgets WHERE run_id = ? AND plan_id = ?").get("fresh", planId)!;
+   assert.equal(allocation.round_limit, 3);
+   assert.equal(allocation.recovery_limit, 1);
+  }
+  for (let i = 0; i < 3; i++) f.store.putAction(f.action(`new${i}`, 2));
+  assert.throws(() => f.store.putAction(f.action("fourth", 2)), /implementation budget exhausted/);
+  assert.equal(f.store.reserveTransportRecovery("fresh", "001", "new0"), true);
+  assert.equal(f.store.reserveTransportRecovery("fresh", "001", "new1"), false);
+  // A previous grant ID no longer carries replay authority into the fresh run.
+  f.store.grantBudget({ requestId: "grant", runId: "fresh", generation: 2, graphSha256: run.graphSha256, amount: 1 });
+  assert.equal(f.store.getBudget("fresh")!.limit, 31);
  } finally { f.cleanup(); }
 });
 
