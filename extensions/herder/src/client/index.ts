@@ -551,9 +551,11 @@ function ownerLockIsPresent(planDirectory: string): boolean {
 	catch { return false; }
 }
 
-async function waitForServiceShutdown(planDirectory: string, pid: number, timeoutMs: number): Promise<void> {
+async function waitForServiceShutdown(pid: number, timeoutMs: number): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
-	while (serviceProcessAlive(pid) || ownerLockIsPresent(planDirectory)) {
+	// SIGKILL cannot unlink the lock; acquireServiceOwnership validates and reclaims
+	// dead-owner evidence after exit, refusing malformed or replacement ownership.
+	while (serviceProcessAlive(pid)) {
 		if (Date.now() >= deadline) throw new Error("Cannot quiesce the Herder service before cleanup.");
 		await delay(50);
 	}
@@ -582,6 +584,7 @@ export async function withServiceExclusion<T>(
 	options: { waitMs?: number; purpose?: ServiceExclusionPurpose } = {},
 ): Promise<T> {
 	const purpose = options.purpose ?? "cleanup";
+	const mayTerminate = purpose === "force" || purpose === "reset";
 	const planDirectory = fs.realpathSync(path.resolve(planDirectoryInput));
 	const runtimeDirectory = path.join(planDirectory, ".herder");
 	ensureRuntimeDirectory(runtimeDirectory);
@@ -591,36 +594,40 @@ export async function withServiceExclusion<T>(
 	try {
 		const registered = registeredService(planDirectory);
 		if (registered && serviceProcessAlive(registered.pid)) {
+			// A daemon may have released ownership while its process is still exiting.
+			// Never signal without identity evidence; the shutdown wait below must settle it.
+			const terminate = () => purpose === "reset" && !ownerLockIsPresent(planDirectory)
+				? Promise.resolve() : terminateServiceProcess(planDirectory, registered);
 			const service = await healthyService(planDirectory);
 			if (!service) {
-				if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
-				await terminateServiceProcess(planDirectory, registered);
+				if (!mayTerminate) throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
+				await terminate();
 			} else {
 				let status: Record<string, unknown>;
 				try { status = managerReplyFromStatus(await requestService(service, "/v1/status", undefined, HEALTH_TIMEOUT_MS)); }
 				catch {
-					if (purpose !== "force") throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
-					await terminateServiceProcess(planDirectory, registered);
+					if (!mayTerminate) throw new Error(`A live Herder service owner is unresponsive; ${purpose} was not applied.`);
+					await terminate();
 					status = { status: "stopped" };
 				}
 				const serviceStatus = String(status.status || "");
 				if (!isTerminalRunStatus(serviceStatus)) {
 					if (!mayStopLiveRun(purpose)) throw new Error(`Herder service is ${serviceStatus || "active"}; cleanup requires a terminal run. Use /herder-stop first.`);
-					try { if (purpose !== "revision") await requestManagerOperation(service, "stop", {}); }
+					try { if (purpose !== "revision" && purpose !== "reset") await requestManagerOperation(service, "stop", {}); }
 					catch {
-						if (purpose !== "force") throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
-						await terminateServiceProcess(planDirectory, registered);
+						if (!mayTerminate) throw new Error(`A live Herder service could not be stopped; ${purpose} was not applied.`);
+						await terminate();
 					}
 				}
 				if (serviceProcessAlive(registered.pid)) {
 					try { await requestService(service, "/shutdown", {}); }
 					catch {
-						if (purpose !== "force") throw new Error(`A Herder service could not be stopped; ${purpose} was not applied.`);
-						await terminateServiceProcess(planDirectory, registered);
+						if (!mayTerminate) throw new Error(`A Herder service could not be stopped; ${purpose} was not applied.`);
+						await terminate();
 					}
 				}
 			}
-			await waitForServiceShutdown(planDirectory, registered.pid, options.waitMs ?? CLEANUP_EXCLUSION_WAIT_MS);
+			await waitForServiceShutdown(registered.pid, options.waitMs ?? CLEANUP_EXCLUSION_WAIT_MS);
 		}
 		ownership = acquireServiceOwnership(planDirectory, `${purpose}-${randomUUID()}`);
 		return await callback();

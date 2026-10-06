@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { graphInputSha256 } from "../../core/plan-edit.ts";
 import { compileGraphIdentity } from "../../core/plan-identity.ts";
 import { sha256 } from "../../shared/protocol.ts";
 import { buildGraph, projectStatuses } from "../../core/plans.ts";
@@ -52,21 +53,17 @@ function readExecution(planDir: string): { specs: StoredPlanSpec[]; run: StoredR
   } finally { store.close(); }
 }
 
-function validateSpecs(graph: ReturnType<typeof buildGraph>, specs: StoredPlanSpec[], revision?: HerderResetInput["revision"]): void {
+function validateSpecs(graph: ReturnType<typeof buildGraph> | null, specs: StoredPlanSpec[], revision?: HerderResetInput["revision"]): void {
   if (revision) {
-    if (!graph.shapeReady || !graph.plans.length) fail("Herder revision reset requires a nonempty, structurally valid, shape-ready graph.");
+    if (!graph?.shapeReady || !graph.plans.length) fail("Herder revision reset requires a nonempty, structurally valid, shape-ready graph.");
     if (compileGraphIdentity(graph) !== revision.graphSha256) fail("Herder revision reset graph hash does not match the authorized graph.");
-  } else if (specs.length !== graph.plans.length) fail("Herder reset refused: stored plan graph does not match the plan index.");
+  }
   const seen = new Set<string>();
   for (const spec of specs) {
     if (!/^\d{3,}$/.test(spec.planId) || seen.has(spec.planId) || spec.assignment.plan.id !== spec.planId
       || snapshot(spec.dependencies) !== snapshot(spec.assignment.plan.dependencies)) fail("Herder reset refused: corrupt stored plan ownership.");
     seen.add(spec.planId);
     if (!["TODO", "DONE", "BLOCKED", "REJECTED"].includes(spec.initialStatus)) fail(`Herder reset refused: invalid initial status for plan ${spec.planId}.`);
-  }
-  if (!revision) for (const plan of graph.plans) {
-    const spec = specs.find((candidate) => candidate.planId === plan.id);
-    if (!spec || spec.planFile !== path.basename(plan.file) || snapshot(spec.dependencies) !== snapshot(plan.dependencies)) fail(`Herder reset refused: stored plan graph is corrupt or has drifted (${plan.id}).`);
   }
 }
 
@@ -92,6 +89,8 @@ type ResetManifest = {
   run: StoredRun;
   specs: StoredPlanSpec[];
   graphSha256: string;
+  graphInputSha256?: string;
+  projectedInputSha256?: string;
   current: ReturnType<typeof currentCheckout>;
   projected: ReturnType<typeof projectedResetStatuses>;
   branches: ReturnType<typeof listHerderBranches>;
@@ -176,10 +175,39 @@ function writeIntent(file: string, intent: ResetIntent): void {
   finally { fs.rmSync(temporary, { force: true }); }
 }
 
+// Unchanged graphs retain semantic lifecycle replay. Drifted/invalid drafts bind
+// exact Markdown bytes and only admit our own durable README projection.
+function validateGraphInput(planDir: string, intent: ResetIntent): void {
+  const m = intent.manifest;
+  if (m.graphInputSha256) {
+    const actual = graphInputSha256(planDir);
+    const projected = intent.next === m.owned.length + m.branches.length + m.refs.length && !intent.pending;
+    if (actual !== m.graphInputSha256 && !(projected && actual === m.projectedInputSha256)) fail("Herder reset intent does not match this input or graph.");
+  } else if (compileGraphIdentity(buildGraph(planDir)) !== m.graphSha256) fail("Herder reset intent does not match this input or graph.");
+}
+
+function revisionAuthorityFiles(planDir: string): string[] {
+  const files: string[] = [];
+  for (const name of ["run-revision.json", "attention-host-grant.json"]) {
+    const file = path.join(planDir, ".herder", name);
+    assertSafePath(file);
+    const stat = statIfPresent(file);
+    if (!stat) continue;
+    if (!stat.isFile() || stat.nlink !== 1 || (process.getuid && stat.uid !== process.getuid())) fail(`Herder reset refused unsafe revision artifact: ${file}`);
+    files.push(file);
+  }
+  return files;
+}
+
+function clearRevisionAuthority(planDir: string): void {
+  for (const file of revisionAuthorityFiles(planDir)) fs.unlinkSync(file);
+  syncDirectory(path.join(planDir, ".herder"));
+}
+
 /** Missing is authorized only for completed deletions or the single durable in-flight deletion. */
 function validateReplay(repo: string, planDir: string, name: string, intent: ResetIntent): void {
   const m = intent.manifest;
-  if (compileGraphIdentity(buildGraph(planDir)) !== m.graphSha256) fail("Herder reset graph changed after preflight.");
+  validateGraphInput(planDir, intent);
   if (m.input.repoRoot !== repo || m.input.planDirectory !== planDir || m.run.repositoryRoot !== repo
     || m.run.planName !== name || m.run.integrationBranch !== `herder/${name}/integration`
     || (!intent.completed && JSON.stringify(currentCheckout(repo)) !== JSON.stringify(m.current))) fail("Herder reset checkout or run identity changed after preflight.");
@@ -258,7 +286,7 @@ function validateReplay(repo: string, planDir: string, name: string, intent: Res
   if (actualRefs.size) fail("Herder reset found new or foreign refs after preflight.");
 }
 
-function executeIntent(repo: string, planDir: string, name: string, file: string, intent: ResetIntent): HerderResetResult {
+function executeIntent(repo: string, planDir: string, name: string, file: string, intent: ResetIntent, abandonRevision = false): HerderResetResult {
   const m = intent.manifest;
   const deletions = [
     ...m.owned.map((w) => () => {
@@ -274,7 +302,10 @@ function executeIntent(repo: string, planDir: string, name: string, file: string
     ...m.refs.map((r) => () => { if (target(repo, r.ref) !== null) deleteRef(repo, r.ref, r.target); }),
   ];
   validateReplay(repo, planDir, name, intent);
-  if (intent.completed) return m.result;
+  if (intent.completed) {
+    if (abandonRevision) clearRevisionAuthority(planDir);
+    return m.result;
+  }
   // ponytail: re-inventory per deletion is quadratic; batch only if large namespaces make it costly.
   while (intent.next < deletions.length) {
     intent.pending = true;
@@ -287,9 +318,11 @@ function executeIntent(repo: string, planDir: string, name: string, file: string
   }
   validateReplay(repo, planDir, name, intent);
   // README projection is replayable; make it durable before clearing execution evidence.
-  projectStatuses(planDir, m.projected);
-  const readme = fs.openSync(path.join(planDir, "README.md"), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  try { fs.fsyncSync(readme); } finally { fs.closeSync(readme); }
+  if (m.projected.length) projectStatuses(planDir, m.projected);
+  if (statIfPresent(path.join(planDir, "README.md"))) {
+    const readme = fs.openSync(path.join(planDir, "README.md"), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try { fs.fsyncSync(readme); } finally { fs.closeSync(readme); }
+  }
   syncDirectory(planDir);
   intent.databasePending = true;
   writeIntent(file, intent);
@@ -300,6 +333,9 @@ function executeIntent(repo: string, planDir: string, name: string, file: string
     writable.resetExecutionState();
   } finally { writable.close(); }
   clearExecutionRotationMarker(planDir);
+  // Do not parse revision records: even legacy/corrupt drafts are abandoned.
+  // Keep this before the receipt so interruption replays the remaining unlinks.
+  if (abandonRevision) clearRevisionAuthority(planDir);
   intent.completed = true;
   writeIntent(file, intent);
   return m.result;
@@ -321,8 +357,18 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   validatePlanName(name);
   const intentPath = path.join(planDir, ".herder", "reset-intent.json");
   assertSafePath(path.dirname(intentPath));
+  if (!input.revision) revisionAuthorityFiles(planDir);
   const saved = readIntent(intentPath);
-  const graph = buildGraph(planDir);
+  // Draft validity is not execution ownership. Filesystem safety still fails closed.
+  for (const name of ["README.md", "CONTEXT.md"]) {
+    const file = path.join(planDir, name);
+    assertSafePath(file);
+    const stat = statIfPresent(file);
+    if (stat && !stat.isFile()) fail(`Herder reset refused non-regular Markdown artifact: ${file}`);
+  }
+  const inputSha256 = graphInputSha256(planDir);
+  let graph: ReturnType<typeof buildGraph> | null = null;
+  try { graph = buildGraph(planDir); } catch (error) { if (input.revision) throw error; }
   const execution = readExecution(planDir);
   const binding = { repoRoot: repo, planDirectory: planDir, revision: input.revision ? {
     runId: input.revision.runId, graphSha256: input.revision.graphSha256, baseCommit: input.revision.baseCommit,
@@ -335,11 +381,11 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const freshReset = saved?.completed && successor;
   if (freshReset && (saved.manifest.input.repoRoot !== repo || saved.manifest.input.planDirectory !== planDir)) fail("Herder reset intent does not match this input or graph.");
   if (saved && !freshReset) {
-    if (JSON.stringify(saved.manifest.input) !== JSON.stringify(binding) || saved.manifest.graphSha256 !== compileGraphIdentity(graph)) fail("Herder reset intent does not match this input or graph.");
+    if (JSON.stringify({ ...saved.manifest.input, ...(!input.revision ? { revision: null } : {}) }) !== JSON.stringify(binding)) fail("Herder reset intent does not match this input or graph.");
     if (execution.run ? executionIdentity(execution.run) !== executionIdentity(saved.manifest.run) || snapshot(execution.specs) !== snapshot(saved.manifest.specs)
       : !saved.databasePending) fail("Herder reset intent run identity changed or a successor run exists.");
     validateSpecs(graph, saved.manifest.specs, input.revision);
-    return executeIntent(repo, planDir, name, intentPath, saved);
+    return executeIntent(repo, planDir, name, intentPath, saved, !input.revision);
   }
   const { specs, run } = execution;
   if (!run) fail("Herder reset requires an initialized Herder run.");
@@ -353,7 +399,10 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   // Validate the README projection before any Git mutation so a later
   // status-format failure cannot leave a half-deleted namespace.
   if (input.revision && (input.revision.runId !== run.runId || input.revision.baseCommit !== run.baseCommit || current.head !== run.baseCommit)) fail("Herder revision reset requires the recorded runId and checkout HEAD equal to run.baseCommit and revision.baseCommit.");
-  const projected = input.revision ? graph.plans.map((plan) => ({ id: plan.id, status: "TODO", detail: "" })) : projectedResetStatuses(specs, execution.executedPlanIds);
+  const unchanged = graph && compileGraphIdentity(graph) === run.graphSha256;
+  const projected = graph ? (!input.revision && unchanged ? projectedResetStatuses(specs, execution.executedPlanIds)
+    : graph.plans.map((plan) => ({ id: plan.id, status: "TODO", detail: "" }))) : [];
+  const projectedReadme = projected.length ? projectStatuses(planDir, projected, { dryRun: true }).markdown : undefined;
   const integrationHead = target(repo, integrationRef), base = target(repo, baseRef);
   const allBranches = listHerderBranches(repo, name);
   const allRefs = listCoordinationRefs(repo, name);
@@ -379,10 +428,10 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   const owned = worktrees.filter((w) => w.branch.startsWith(`herder/${name}/`));
   const namespaceEmpty = !integrationHead && !base && allBranches.length === 0 && allRefs.length === 0 && owned.length === 0;
   if (!namespaceEmpty) {
-    if (!integrationHead) fail(`Herder reset requires integration branch ${integration}.`);
-    if (!base) fail(`Herder reset requires a valid base coordination ref ${baseRef}.`);
-    if (!isAncestor(repo, base, integrationHead)) fail("Herder reset refused: integration branch is unrelated to its base coordination ref.");
-    if (integrationHead !== base && isAncestor(repo, integrationHead, current.head)) fail("Herder reset cannot be performed because the integration branch has already been merged.");
+    if (input.revision && !integrationHead) fail(`Herder reset requires integration branch ${integration}.`);
+    if (input.revision && !base) fail(`Herder reset requires a valid base coordination ref ${baseRef}.`);
+    if (base && integrationHead && !isAncestor(repo, base, integrationHead)) fail("Herder reset refused: integration branch is unrelated to its base coordination ref.");
+    if (input.revision && integrationHead && integrationHead !== base && isAncestor(repo, integrationHead, current.head)) fail("Herder reset cannot be performed because the integration branch has already been merged.");
     const allowedPlans = new Set(specs.map((spec) => spec.planId));
     for (const branch of allBranches) {
       if (branch.relative !== "integration" && !/^\d{3,}$/.test(branch.relative)) fail(`Herder reset refused unknown branch in namespace: ${branch.branch}`);
@@ -391,7 +440,7 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
     for (const ref of allRefs) if (!ref.identity) fail(`Herder reset refused unknown coordination ref: ${ref.ref}`);
     const branchMap = new Map(allBranches.map((b) => [b.branch, b]));
     const integrationWorktrees = worktrees.filter((w) => w.branch === integration);
-    if (integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
+    if (input.revision && integrationWorktrees.length !== 1) fail(`Herder reset requires exactly one registered integration worktree for ${integration}.`);
     for (const w of owned) {
       if (!w.path) fail(`Herder reset refused pathless worktree record for branch: ${w.branch}`);
       if (!branchMap.has(w.branch)) fail(`Herder reset refused worktree for missing Herder branch: ${w.path}`);
@@ -406,7 +455,8 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   if (snapshot(listHerderBranches(repo, name)) !== snapshot(allBranches) || snapshot(listCoordinationRefs(repo, name)) !== snapshot(allRefs) || snapshot(finalWorktrees) !== snapshot(worktrees) || JSON.stringify(currentCheckout(repo)) !== JSON.stringify(current)) fail("Herder reset Git namespace changed after preflight.");
   const slots = [...new Set(["integration", ...specs.map((spec) => spec.planId)].flatMap((relative) => allowedWorktreePaths(repo, planDir, name, relative)))];
   const manifest: ResetManifest = {
-    input: binding, run, specs, graphSha256: compileGraphIdentity(graph), current, projected,
+    input: binding, run, specs, graphSha256: graph ? compileGraphIdentity(graph) : run.graphSha256,
+    ...(!unchanged ? { graphInputSha256: inputSha256, projectedInputSha256: graphInputSha256(planDir, projectedReadme) } : {}), current, projected,
     branches: allBranches, refs: allRefs, worktrees,
     owned: owned.map((w) => ({ ...w, identity: slotIdentity(w.path), attachment: attachment(w.path) })),
     slots: slots.map((slot) => ({ path: slot, identity: slotIdentity(slot) })),
@@ -416,5 +466,5 @@ export function resetHerderPlanSet(input: HerderResetInput): HerderResetResult {
   // Validate filesystem/ref identities too, before publishing deletion authority.
   validateReplay(repo, planDir, name, intent);
   writeIntent(intentPath, intent);
-  return executeIntent(repo, planDir, name, intentPath, intent);
+  return executeIntent(repo, planDir, name, intentPath, intent, !input.revision);
 }

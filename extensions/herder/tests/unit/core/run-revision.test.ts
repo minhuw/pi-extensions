@@ -19,6 +19,8 @@ import { destructiveSnapshot } from "../../../src/daemon/git/destructive-snapsho
 import { selectivePreviewSha256, selectivePlanSets, stageSelectiveReversal, SelectiveReversalConflict } from "../../../src/daemon/git/selective-revision.ts";
 import { compileGraphIdentity } from "../../../src/core/plan-identity.ts";
 import { beginUserScopeAmendment, scopeChangePreview, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "../../../adapters/run-revision.ts";
+import { applyHerderReset } from "../../../src/application/tools.ts";
+import { runResetCommand } from "../../../adapters/reset-command.ts";
 import { resetHerderPlanSet } from "../../../src/daemon/git/reset-plan-set.ts";
 import { buildCompletionProofPayload } from "../../../src/daemon/git/completion-proof.ts";
 import { parseWorkerResult, normalizeUsage, sha256, stableJson, attentionRequestSha256, attentionCapabilityToken } from "../../../src/shared/protocol.ts";
@@ -1011,3 +1013,52 @@ test("exact host preview lists affected dirty/committed artifacts; no UI and dis
 		assert.equal(revisionDriver(record.run).branchHead(plan.branch), unreviewed);
 	} finally { value.dispose(); }
 });
+
+for (const stage of ["draft", "prepared", "confirmed", "legacy", "after_publication", "after_cleanup_worktree_removed", "after_cleanup_branch_deleted", "after_restarting", "after_restart", "after_complete"]) {
+	test(`explicit host reset supersedes revision ${stage} without completion proofs or adoption`, { timeout: 45_000 }, async () => {
+		const value = fixture();
+		try {
+			const { record } = await begin(value);
+			const unfinished = unfinishedPlan(value, record.run);
+			fs.writeFileSync(path.join(unfinished.worktree, "src/other.mjs"), "unreviewed commit\n");
+			git(unfinished.worktree, ["commit", "-qam", "unreviewed"]);
+			fs.writeFileSync(path.join(unfinished.worktree, "src/other.mjs"), "dirty\n");
+			fs.writeFileSync(path.join(unfinished.worktree, "untracked.txt"), "untracked\n");
+			fs.mkdirSync(path.join(unfinished.worktree, ".herder"), { recursive: true });
+			fs.writeFileSync(path.join(unfinished.worktree, ".herder/ignored.txt"), "ignored\n");
+			revise(value);
+			if (stage !== "draft") {
+				const prepared = await prepareRunRevision(value.directory, record.editToken);
+				if (stage === "legacy") {
+					const { legacy, file } = installLegacyHistory(value.directory, "complete");
+					const pending = { ...legacy, state: "prepared" };
+					fs.writeFileSync(file, stableJson({ record: pending, sha256: sha256(stableJson(pending)) }));
+					assert.throws(() => readRunRevision(value.directory), /Legacy selective revision is paused/);
+				} else if (stage !== "prepared") await confirmRunRevision(prepared);
+			}
+			if (stage.startsWith("after_")) {
+				const module = new URL("../../../src/application/run-revision.ts", import.meta.url).href;
+				const child = spawnSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `import { finishRunRevision } from ${JSON.stringify(module)}; await finishRunRevision(${JSON.stringify(value.directory)}, ${JSON.stringify(record.editToken)});`], { env: { ...process.env, HERDER_TEST_RUN_REVISION_CRASH_AT: stage }, encoding: "utf8", timeout: 25_000 });
+				assert.equal(child.signal, "SIGKILL", child.stderr);
+			}
+			const draft = fs.readFileSync(path.join(value.directory, "001-upstream.md"), "utf8");
+			const context = { repositoryRoot: value.repo, planDirectory: value.directory };
+			const recordBytes = fs.readFileSync(path.join(value.directory, ".herder/run-revision.json"), "utf8");
+			assert.match(await runResetCommand({ ...context, confirm: async () => false }), /cancelled/);
+			assert.equal(fs.readFileSync(path.join(value.directory, ".herder/run-revision.json"), "utf8"), recordBytes);
+			assert.match(await runResetCommand({ ...context, confirm: async () => true }), /reset executed/);
+			assert.equal(readRunRevision(value.directory), null);
+			assert.equal(fs.existsSync(path.join(value.directory, ".herder/attention-host-grant.json")), false);
+			assert.equal(fs.readFileSync(path.join(value.directory, "001-upstream.md"), "utf8"), draft);
+			assert.equal(git(value.repo, ["rev-parse", "HEAD"]).stdout.trim(), value.originalHead);
+			await applyHerderReset({ repoRoot: value.repo, planDirectory: value.directory });
+			const manager = new HerderRunManager(value.directory);
+			try {
+				assert.equal(manager.store.getRun(), null);
+				const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+				assert.notEqual(reply.runId, record.run.runId);
+				assert.ok(reply.actions.length > 0);
+			} finally { manager.close(); }
+		} finally { value.dispose(); }
+	});
+}

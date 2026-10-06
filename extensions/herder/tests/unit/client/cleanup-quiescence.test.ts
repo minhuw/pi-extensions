@@ -153,8 +153,50 @@ process.stdin.destroy();
 	}
 }
 
-for (const legacy of [true, false]) {
-	test(`force exclusion refuses ${legacy ? "legacy" : "wrong birth"} live ownership without destructive callback`, async (t) => {
+for (const purpose of ["reset", "force"] as const) {
+	test(`${purpose} reclaims a verified killed service lock on the first invocation`, { timeout: 15_000 }, async () => {
+		const planDir = planDirectory();
+		const child = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+const { acquireServiceOwnership } = await import(process.env.OWNER_MODULE);
+const { RunStore } = await import(process.env.STORE_MODULE);
+const ownership = acquireServiceOwnership(process.env.PLAN_DIR, 'wedged-service');
+const store = new RunStore(process.env.PLAN_DIR);
+try { store.putService({ instanceId: 'wedged-service', pid: process.pid, port: 1,
+  authToken: 'fixture', dashboardUrl: 'http://127.0.0.1:1/', startedAt: new Date().toISOString() }); }
+finally { store.close(); }
+process.on('SIGTERM', () => {});
+setInterval(() => {}, 1000);
+console.log('held');
+`], { env: { ...process.env, PLAN_DIR: planDir,
+			OWNER_MODULE: new URL("../../../src/daemon/service-ownership.ts", import.meta.url).href,
+			STORE_MODULE: new URL("../../../src/daemon/run-store.ts", import.meta.url).href }, stdio: ["ignore", "pipe", "pipe"] });
+		const exited = once(child, "exit");
+		let stderr = "";
+		child.stderr.on("data", chunk => { stderr += chunk; });
+		const lines = createInterface({ input: child.stdout });
+		try {
+			assert.equal((await lines[Symbol.asyncIterator]().next()).value, "held", stderr);
+			let calls = 0;
+			await withServiceExclusion(planDir, () => {
+				calls++;
+				assert.equal(serviceProcessAlive(child.pid!), false);
+				assert.ok(readFileSync(serviceOwnershipLockPath(planDir), "utf8").startsWith(`${process.pid} ${purpose}-`));
+			}, { purpose, waitMs: 500 });
+			assert.equal(calls, 1);
+			assert.deepEqual(await exited, [null, "SIGKILL"]);
+			assert.equal(existsSync(serviceOwnershipLockPath(planDir)), false);
+			assert.equal(existsSync(path.join(planDir, ".herder/service-start.lock")), false);
+		} finally {
+			lines.close();
+			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			await exited;
+			rmSync(path.dirname(planDir), { recursive: true, force: true });
+		}
+	});
+}
+
+for (const purpose of ["force", "reset"] as const) for (const legacy of [true, false]) {
+	test(`${purpose} exclusion refuses ${legacy ? "legacy" : "wrong birth"} live ownership without destructive callback`, async (t) => {
 		const { acquireServiceOwnership, releaseServiceOwnership } = await import("../../../src/daemon/service-ownership.ts");
 		const { RunStore } = await import("../../../src/daemon/run-store.ts");
 		const planDir = planDirectory();
@@ -168,7 +210,7 @@ for (const legacy of [true, false]) {
 			finally { store.close(); }
 			writeFileSync(lock, legacy ? `${process.pid} unsafe\n` : readFileSync(lock, "utf8").replace(/linux:|darwin:/, "wrong:"));
 			t.mock.method(process, "kill", (_pid: number, signal: string | number = 0) => { if (signal !== 0) signals.push(String(signal)); return true; });
-			await assert.rejects(withServiceExclusion(planDir, () => { called = true; }, { purpose: "force" }), /refus|identity|ownership|shut down/i);
+			await assert.rejects(withServiceExclusion(planDir, () => { called = true; }, { purpose }), /refus|identity|ownership|shut down/i);
 			assert.equal(called, false);
 			assert.deepEqual(signals, []);
 			assert.equal(existsSync(lock), true);

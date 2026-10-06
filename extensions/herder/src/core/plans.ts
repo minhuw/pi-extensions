@@ -866,7 +866,7 @@ function formatStatus(status: PlanStatus, detail: string): string {
   return detail ? `${status} — ${detail}` : status
 }
 
-export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ id: unknown; status: unknown; detail?: unknown }> = []) {
+export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ id: unknown; status: unknown; detail?: unknown }> = [], options: { dryRun?: boolean } = {}) {
   const planDir = path.resolve(inputDir)
   const readme = path.join(planDir, "README.md")
   const readmeFile = readRegularFile(readme, { missingMessage: `Plan directory has no README.md: ${planDir}` })
@@ -891,8 +891,8 @@ export function projectStatuses(inputDir = DEFAULT_PLAN_DIR, projected: Array<{ 
     table.lines[row.lineIndex] = row.rawCells.join("|")
   }
   const nextMarkdown = table.lines.join(markdown.includes("\r\n") ? "\r\n" : "\n")
-  if (nextMarkdown !== markdown) {
+  if (!options.dryRun && nextMarkdown !== markdown) {
     atomicReplaceRegularFile(readme, nextMarkdown, readmeFile.identity, readmeFile.mode)
   }
-  return { planDir, projected: [...byId.keys()].sort() }
+  return { planDir, projected: [...byId.keys()].sort(), markdown: nextMarkdown }
 }

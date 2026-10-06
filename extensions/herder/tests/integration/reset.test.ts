@@ -5,10 +5,11 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { runResetCommand } from "../../adapters/reset-command.ts";
 import { applyHerderReset } from "../../src/application/tools.ts";
 import { buildGraph, initPlanDir, projectStatuses } from "../../src/core/plans.ts";
 import { ensureService, requestManagerOperation,
-	requestService, stopService } from "../../src/client/index.ts";
+	requestService, stopService, withServiceExclusion } from "../../src/client/index.ts";
 import { resetHerderPlanSet } from "../../src/daemon/git/reset-plan-set.ts";
 import { compileGraphIdentity } from "../../src/core/plan-identity.ts";
 import { canonicalWorktreeRoot, legacyWorktreeRoot } from "../../src/daemon/git/worktree-locations.ts";
@@ -152,7 +153,8 @@ async function initializedFixture(value = fixture()): Promise<Fixture> {
 		mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
 	});
 	assert.equal((response.reply as Record<string, unknown>).status, "running");
-	await stopService(value.planDir);
+	// stopService only waits for HTTP shutdown, not process exit/owner release.
+	await withServiceExclusion(value.planDir, () => {}, { purpose: "revision" });
 	const worktreeRoot = canonicalWorktreeRoot(value.planDir);
 	for (const worktree of [path.join(worktreeRoot, "integration"), path.join(worktreeRoot, "001")]) command(value.repo, ["worktree", "unlock", worktree], true);
 	return value;
@@ -311,7 +313,7 @@ test("ordinary reset reruns retained execution-backed DONE but preserves authore
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
-test("merged integration refuses without mutating artifacts or statuses", { timeout: 30_000 }, async () => {
+test("merged integration resets owned resources without changing the user branch", { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {
 		const integration = `herder/${value.planName}/integration`;
@@ -320,10 +322,11 @@ test("merged integration refuses without mutating artifacts or statuses", { time
 		command(integrationRoot, ["add", "merged.txt"]);
 		command(integrationRoot, ["commit", "-q", "-m", "test: merge integration"]);
 		command(value.repo, ["merge", "-q", "--ff-only", integration]);
-		const before = namespaceSnapshot(value);
-		await assert.rejects(async () => resetHerderPlanSet({ repoRoot: value.repo, planDirectory: value.planDir }), /already been merged/);
-		assert.equal(namespaceSnapshot(value), before);
-		assert.notEqual(git(value.repo, "show-ref", "--verify", `refs/heads/${integration}`), "");
+		const head = git(value.repo, "rev-parse", "HEAD");
+		resetHerderPlanSet(resetInput(value));
+		assert.equal(git(value.repo, "rev-parse", "HEAD"), head);
+		assert.equal(fs.readFileSync(path.join(value.repo, "merged.txt"), "utf8"), "merged\n");
+		assert.equal(command(value.repo, ["show-ref", "--verify", `refs/heads/${integration}`], true).status, 128);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
 
@@ -771,7 +774,7 @@ function revisionInput(value: Fixture) {
 	} finally { store.close(); }
 }
 
-test("revision uses stored ownership after IDs/topology change, discards integrated work and resets every revised status to TODO", { timeout: 30_000 }, async () => {
+for (const mode of ["ordinary", "revision"] as const) test(`${mode} reset uses stored ownership after IDs/topology change and resets revised statuses to TODO`, { timeout: 30_000 }, async () => {
 	const value = await initializedFixture();
 	try {
 		const root = canonicalWorktreeRoot(value.planDir);
@@ -795,8 +798,8 @@ test("revision uses stored ownership after IDs/topology change, discards integra
 		}
 		fs.writeFileSync(value.readme, fs.readFileSync(value.readme, "utf8").replace(/^\| \[001\].*$/m, rows.join("\n")));
 		assert.equal(buildGraph(value.planDir).shapeReady, true);
-		assert.throws(() => resetHerderPlanSet(resetInput(value)), /stored plan graph/);
-		const input = revisionInput(value);
+		const input = mode === "revision" ? revisionInput(value) : resetInput(value);
+		const head = git(value.repo, "rev-parse", "HEAD");
 		const plans = ["002", "003", "004"].map((id) => fs.readFileSync(path.join(value.planDir, `${id}-reset.md`), "utf8"));
 		const result = resetHerderPlanSet(input);
 		assert.deepEqual(result.resetPlans, ["002", "003", "004"]);
@@ -805,7 +808,7 @@ test("revision uses stored ownership after IDs/topology change, discards integra
 		assert.deepEqual(buildGraph(value.planDir).plans.map((p) => p.status), ["TODO", "TODO", "TODO"]);
 		assert.deepEqual(["002", "003", "004"].map((id) => fs.readFileSync(path.join(value.planDir, `${id}-reset.md`), "utf8")), plans);
 		assert.equal(fs.readFileSync(path.join(value.repo, "fixture.txt"), "utf8"), "base\n");
-		assert.equal(git(value.repo, "rev-parse", "HEAD"), input.revision.baseCommit);
+		assert.equal(git(value.repo, "rev-parse", "HEAD"), head);
 		assert.deepEqual(resetHerderPlanSet(input), result);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });
@@ -999,5 +1002,77 @@ test("reset preserves filesystem-equivalent owned path spelling across replay", 
 		const intent = resetIntent(value);
 		assert.ok(intent.manifest.result.removedWorktrees.includes(registeredPath));
 		assert.deepEqual(resetHerderPlanSet(resetInput(value)), intent.manifest.result);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const invalid of ["plan", "index"]) test(`host reset discards malformed revision with invalid ${invalid}, binds draft bytes, and resumes authority cleanup`, { timeout: 30_000 }, async (t) => {
+	const value = await initializedFixture();
+	try {
+		if (invalid === "plan") await ensureService(value.planDir); // Reset must not call manager.stop on malformed revision state.
+		const file = invalid === "plan" ? value.planFile : value.readme;
+		const original = fs.readFileSync(file, "utf8");
+		fs.writeFileSync(file, "Unfinished draft, deliberately not valid plan Markdown.\n");
+		const runtime = path.join(value.planDir, ".herder");
+		const revision = path.join(runtime, "run-revision.json"), grant = path.join(runtime, "attention-host-grant.json");
+		fs.writeFileSync(revision, "{old malformed revision", { mode: 0o600 });
+		fs.writeFileSync(grant, "old grant", { mode: 0o600 });
+		const before = namespaceSnapshot(value);
+		assert.match(await runResetCommand({ repositoryRoot: value.repo, planDirectory: value.planDir, confirm: async () => false }), /cancelled/);
+		assert.equal(namespaceSnapshot(value), before);
+		assert.equal(fs.readFileSync(revision, "utf8"), "{old malformed revision");
+		assert.equal(fs.readFileSync(grant, "utf8"), "old grant");
+		const unlink = fs.unlinkSync;
+		const mocked = t.mock.method(fs, "unlinkSync", (target: fs.PathLike) => {
+			unlink(target);
+			if (String(target).endsWith("/run-revision.json")) throw new Error("injected revision cleanup boundary");
+		});
+		await assert.rejects(runResetCommand({ repositoryRoot: value.repo, planDirectory: value.planDir, confirm: async () => true }), /injected revision cleanup boundary/);
+		mocked.mock.restore();
+		assert.equal(resetIntent(value).completed, false);
+		assert.equal(fs.existsSync(revision), false);
+		assert.equal(fs.existsSync(grant), true);
+		const draft = fs.readFileSync(file, "utf8");
+		fs.appendFileSync(file, "changed bytes");
+		await assert.rejects(applyHerderReset(resetInput(value)), /input or graph/);
+		fs.writeFileSync(file, draft);
+		const extra = path.join(value.planDir, "099-unindexed-draft.md");
+		fs.writeFileSync(extra, "new unindexed draft");
+		await assert.rejects(applyHerderReset(resetInput(value)), /input or graph/);
+		fs.unlinkSync(extra);
+		const result = await applyHerderReset(resetInput(value));
+		assert.deepEqual(result.resetPlans, []);
+		assert.equal(fs.existsSync(grant), false);
+		assert.equal(fs.readFileSync(file, "utf8"), draft);
+		assert.deepEqual(await applyHerderReset(resetInput(value)), result);
+		fs.writeFileSync(file, original);
+		await initializedFixture(value);
+		await applyHerderReset(resetInput(value));
+	} finally { t.mock.restoreAll(); await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+test("reset accepts a partially removed integration namespace without requiring vanished resources", { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		command(value.repo, ["worktree", "remove", "--force", path.join(canonicalWorktreeRoot(value.planDir), "integration")]);
+		command(value.repo, ["update-ref", "-d", `refs/heads/herder/${value.planName}/integration`]);
+		command(value.repo, ["update-ref", "-d", `refs/plan-herder/${value.planName}/base`]);
+		const head = git(value.repo, "rev-parse", "HEAD");
+		const result = await applyHerderReset(resetInput(value));
+		assert.ok(result.removedBranches.includes(`herder/${value.planName}/001`));
+		assert.equal(git(value.repo, "rev-parse", "HEAD"), head);
+		assert.deepEqual(await applyHerderReset(resetInput(value)), result);
+	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
+});
+
+for (const name of ["run-revision.json", "attention-host-grant.json"]) test(`reset refuses symlink ${name} without following it or deleting execution`, { timeout: 30_000 }, async () => {
+	const value = await initializedFixture();
+	try {
+		const outside = path.join(value.root, "foreign-authority.json");
+		fs.writeFileSync(outside, "foreign bytes");
+		fs.symlinkSync(outside, path.join(value.planDir, ".herder", name));
+		const before = namespaceSnapshot(value);
+		await assert.rejects(applyHerderReset(resetInput(value)), /symlink artifact/);
+		assert.equal(namespaceSnapshot(value), before);
+		assert.equal(fs.readFileSync(outside, "utf8"), "foreign bytes");
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });

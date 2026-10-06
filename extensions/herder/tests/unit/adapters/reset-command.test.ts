@@ -17,7 +17,10 @@ test("reset command asks for confirmation before applying and formats the result
 		},
 	});
 	assert.equal(calls.length, 1);
-	assert.match(calls[0]!, /Uncommitted changes and untracked files in Herder-owned worktrees will be permanently discarded/);
+	assert.match(calls[0]!, /supersedes and abandons any unfinished revision/);
+	assert.match(calls[0]!, /unreviewed commits/);
+	assert.match(calls[0]!, /current checkout and its commits are preserved/);
+	assert.match(calls[0]!, /Dirty, untracked, and ignored files in Herder-owned worktrees will be permanently discarded/);
 	assert.match(calls[0]!, /Plan Markdown and tracking setup are preserved/);
 	assert.equal(message, "Herder reset executed for custom-plans · removed 2 branches, 2 worktrees, and 1 coordination refs · restored 1 plan statuses.");
 });

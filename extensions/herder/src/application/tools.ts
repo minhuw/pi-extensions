@@ -1,5 +1,4 @@
 import { acquireAdapterOwnership, assertAdapterOwnership, readAdapterRuntimeIdentity, releaseAdapterOwnership, type AdapterOwnership } from "../../adapters/ownership.ts";
-import { readRunRevision, revisionPending } from "../core/run-revision.ts";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -724,14 +723,12 @@ export async function applyHerderReset(
 	request: HerderResetInput,
 	dependencies: { ownership?: AdapterOwnership; withExclusion?: <T>(planDirectory: string, callback: () => Promise<T> | T) => Promise<T> } = {},
 ): Promise<HerderResetResult> {
-	if (revisionPending(readRunRevision(request.planDirectory))) throw new Error("A whole-run revision owns this namespace; finish its edit or explicitly abandon_run instead of manual reset");
 	const runExclusion = dependencies.withExclusion ?? ((planDirectory, callback) => withServiceExclusion(planDirectory, callback, { purpose: "reset" }));
 	const claim = dependencies.ownership ?? acquireAdapterOwnership(request.planDirectory, "pending-reset", "direct-reset");
 	try {
 		assertAdapterOwnership(claim, request.planDirectory);
 		return await runExclusion(request.planDirectory, () => {
 			assertAdapterOwnership(claim, request.planDirectory);
-			if (revisionPending(readRunRevision(request.planDirectory))) throw new Error("A whole-run revision owns this namespace; finish its edit or explicitly abandon_run instead of manual reset");
 			return resetHerderPlanSet(request);
 		});
 	} finally {

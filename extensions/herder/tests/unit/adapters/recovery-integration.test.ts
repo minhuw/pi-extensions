@@ -3006,3 +3006,53 @@ for (const first of ["manager", "worker"] as const) {
 		}
 	});
 }
+
+test("actual reset command abandons a restored draft; late events and session reload cannot restore its authority", { timeout: 45_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-reset-revision-"));
+	const value = writeBlockedAttentionFixture(root);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+	const notifications: Warning[] = [];
+	let ctx: ExtensionContext | undefined;
+	try {
+		const record = await reserveWholeRunFixture(value);
+		const base = freshContext(value, notifications);
+		let consent = false;
+		ctx = { ...base, sessionManager: restoredContext(value, record.run.runId, notifications).sessionManager,
+			hasUI: true, ui: { ...base.ui,
+				theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+				confirm: async () => consent,
+			} } as unknown as ExtensionContext;
+		await api.invoke("session_start", ctx);
+		await assertWholeRunHook(api, ctx, value);
+		const file = path.join(value.planDirectory, "001-recover-worker.md");
+		const draft = fs.readFileSync(file, "utf8");
+		await api.command("herder-reset").handler("herder-plans", ctx);
+		assert.deepEqual(readRunRevision(value.planDirectory), record);
+		await assertWholeRunHook(api, ctx, value);
+		consent = true;
+		await api.command("herder-reset").handler("herder-plans", ctx);
+		assert.ok(notifications.some(entry => /Herder reset executed/.test(entry.message)), JSON.stringify(notifications));
+		assert.equal(readRunRevision(value.planDirectory), null);
+		assert.equal(fs.existsSync(path.join(value.planDirectory, ".herder/attention-host-grant.json")), false);
+		assert.equal(fs.readFileSync(file, "utf8"), draft);
+		const store = new RunStore(value.planDirectory, { readOnly: true });
+		try { assert.equal(store.getRun(), null); } finally { store.close(); }
+		const delivered = api.customMessages.length;
+		await api.invoke("agent_settled", ctx);
+		assert.equal(api.customMessages.length, delivered);
+		assert.equal(await api.handlers.get("tool_call")!({ toolName: "write", input: { path: "src/value.mjs", content: "allowed" } }, ctx), undefined);
+		await api.invoke("session_shutdown", ctx);
+		await api.invoke("session_start", ctx); // Intentionally retain the old run hint.
+		assert.equal(readRunRevision(value.planDirectory), null);
+		assert.equal(await api.handlers.get("tool_call")!({ toolName: "write", input: { path: "src/value.mjs", content: "allowed" } }, ctx), undefined);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		assert.ok(factory.requests.length > 0, JSON.stringify(notifications));
+		assert.notEqual(evidence(value).run?.runId, record.run.runId);
+	} finally {
+		if (ctx) await api.invoke("session_shutdown", ctx);
+		await stopService(value.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});

@@ -6,13 +6,13 @@ import type { PlanTransientRef } from "../daemon/git-driver.ts";
 import type { RunStore, StoredPlanEdit, StoredRun } from "../daemon/run-store.ts";
 import { sha256, stableJson } from "../shared/protocol.ts";
 
-export function graphInputSha256(planDirectory: string): string {
+export function graphInputSha256(planDirectory: string, readme?: string): string {
 	const files = planGraphFiles(planDirectory);
 	const hash = createHash("sha256");
 	for (const name of files) {
 		hash.update(name);
 		hash.update("\0");
-		hash.update(fs.readFileSync(path.join(planDirectory, name)));
+		hash.update(name === "README.md" && readme !== undefined ? readme : fs.readFileSync(path.join(planDirectory, name)));
 		hash.update("\0");
 	}
 	return hash.digest("hex");
