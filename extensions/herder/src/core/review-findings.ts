@@ -201,7 +201,11 @@ export function validateJudgeFindings(
 		dispositions.add(id);
 	}
 	if (result.decision === "DONE") {
-		if (result.findings.some(entry => !/^\[[^\[\]\s]+\]\[(NONBLOCKING_IN_SCOPE|DEFERRED_OUT_OF_SCOPE|REJECTED)\]\[(PLAN_REQUIREMENT|PATCH_REGRESSION|FOLLOWUP|INVALID)\]\s+\S/.test(entry))) fail("DONE requires classified nonblocking findings");
+		for (const [index, entry] of result.findings.entries()) {
+			if (!/^\[[^\[\]\s]+\]\[(NONBLOCKING_IN_SCOPE|DEFERRED_OUT_OF_SCOPE|REJECTED)\]\[(PLAN_REQUIREMENT|PATCH_REGRESSION|FOLLOWUP|INVALID)\]\s+\S/.test(entry)) {
+				fail(`DONE requires classified nonblocking findings: entry ${index + 1} ${JSON.stringify(entry.slice(0, 160))}${entry.length > 160 ? "…" : ""}; expected [ID][NONBLOCKING_IN_SCOPE|DEFERRED_OUT_OF_SCOPE|REJECTED][PLAN_REQUIREMENT|PATCH_REGRESSION|FOLLOWUP|INVALID] <nonempty body>`);
+			}
+		}
 		for (const finding of reviewerFindings) {
 			const id = finding.match(/^\[([^\[\]\s]+)\]/)?.[1];
 			const matches = result.findings.filter(entry => /^\[[^\[\]\s]+\]\[(NONBLOCKING_IN_SCOPE|DEFERRED_OUT_OF_SCOPE|REJECTED)\]\[(PLAN_REQUIREMENT|PATCH_REGRESSION|FOLLOWUP|INVALID|NEEDS_INPUT)\]\s+\S/.test(entry)

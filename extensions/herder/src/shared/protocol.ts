@@ -1014,7 +1014,7 @@ export interface ImplementerResult {
 	usage: UsageEvidence;
 }
 
-/** Finding strings retain their wire format; manager must validate them against
+/** Finding strings retain their wire format except an optional Markdown bullet; manager must validate them against
  * frozen contracts via core/review-findings.ts before granting repair authority. */
 export interface ReviewerResult {
 	kind: "reviewer";
@@ -1093,6 +1093,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 			usage: parseUsageLine(fields.get("USAGE")),
 		};
 	}
+	const findings = lines(fields.get("FINDINGS")).map(line => line.replace(/^[-*+]\s+(?=\[[^\[\]\s]+\])/, ""));
 	if (role === "plan-reviewer") {
 		const verdict = requiredField(fields, "VERDICT");
 		const scope = requiredField(fields, "SCOPE");
@@ -1102,7 +1103,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 			kind: "reviewer",
 			...(blockerKind ? { blockerKind } : {}),
 			verdict: verdict as ReviewerResult["verdict"],
-			findings: lines(fields.get("FINDINGS")),
+			findings,
 			fixGuidance: lines(fields.get("FIX_GUIDANCE")),
 			discoveredPaths: lines(fields.get("DISCOVERED_PATHS")),
 			scope: scope as ReviewerResult["scope"],
@@ -1123,7 +1124,7 @@ export function parseWorkerResult(role: WorkerRole, text: string): WorkerResult 
 		kind: "judge",
 		...(blockerKind ? { blockerKind } : {}),
 		decision: decision as JudgeResult["decision"],
-		findings: lines(fields.get("FINDINGS")),
+		findings,
 		authorizedBlockers: lines(fields.get("AUTHORIZED_BLOCKERS")).flatMap((line) => line.split(/[\s,]+/)).filter(Boolean),
 		repairContracts: lines(fields.get("REPAIR_CONTRACTS")),
 		...(passDocument !== undefined ? { passDocument } : {}),

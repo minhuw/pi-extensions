@@ -246,3 +246,76 @@ test("references preserve exclusions, repair binding and DONE completeness", () 
 	assert.throws(() => validateJudgeFindings({ ...result, decision: "DONE", authorizedBlockers: [], repairContracts: [] }, [incidentReviewer], contracts), /unbound/);
 	assert.throws(() => validateJudgeFindings({ ...result, decision: "DONE", findings: [], authorizedBlockers: [], repairContracts: [] }, [incidentReviewer], contracts), /exactly one disposition/);
 });
+
+test("finding bullets canonicalize the two-disposition DONE incident and reviewer findings only", () => {
+	const id = "F-8b3909eb358f6aec0cbd5248f8116f35dcaf8800ebb7e328806cd21fffdf1837";
+	const findings = [
+		`[${id}-1][NONBLOCKING_IN_SCOPE][PLAN_REQUIREMENT] Resolved. Independent checks recover both filenames while retaining shared payload and hashes.`,
+		`[${id}-2][NONBLOCKING_IN_SCOPE][PLAN_REQUIREMENT] Retained compatibility advisory. No supported string-ID producer or introduced/worsened regression established.`,
+	];
+	const advisory = `[${id}-2][P2][ADVISORY][PLAN_REQUIREMENT] Retained compatibility advisory.`;
+	const envelope = (entries: string[]) => `DECISION: DONE\nFINDINGS:\n${entries.join("\n")}\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nPASS_DOCUMENT: none\nCHECKS: - [check] retained`;
+	const canonical = parseWorkerResult("plan-judge", envelope(findings));
+	assert.ok(canonical.kind === "judge");
+	for (const bullet of ["- ", "* ", "+\t"]) {
+		const terminal = Object.freeze({ response: envelope(findings.map(entry => bullet + entry)) });
+		const raw = terminal.response;
+		const parsed = parseWorkerResult("plan-judge", terminal.response);
+		assert.ok(parsed.kind === "judge");
+		assert.deepEqual(parsed, canonical);
+		assert.deepEqual(validateJudgeFindings(parsed, [advisory], contracts), findings);
+		assert.equal(terminal.response, raw);
+		assert.deepEqual(parsed.checks, ["- [check] retained"]);
+
+		const reviewEnvelope = (entry: string) => `VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: ${entry}\nFIX_GUIDANCE: - [F001] keep bullet\nCHECKS: + [check] keep bullet`;
+		const review = parseWorkerResult("plan-reviewer", reviewEnvelope(bullet + finding));
+		assert.ok(review.kind === "reviewer");
+		assert.deepEqual(review, parseWorkerResult("plan-reviewer", reviewEnvelope(finding)));
+		assert.equal(validateReviewerResult(review, contracts).length, 1);
+	}
+});
+
+test("DONE keeps malformed entries and reports their index, escaped bounded preview and allowed format", () => {
+	const valid = "[F001][REJECTED][INVALID] Not a defect.";
+	for (const invalid of ["- prose", "- - " + valid, "-" + valid, "1. " + valid, "- [bad id][REJECTED][INVALID] bad ID",
+		"- " + valid.replace("REJECTED", "TYPO"), "* " + valid.replace("INVALID", "NEEDS_INPUT"),
+		"+ " + valid.replace("INVALID", "TYPO"), '- prose "quoted"\t\u0000' + "x".repeat(500),
+	]) {
+		const parsed = parseWorkerResult("plan-judge", `DECISION: DONE\nFINDINGS:\n${valid}\n${invalid}`);
+		assert.ok(parsed.kind === "judge");
+		assert.equal(parsed.findings.length, 2, "malformed lines are never dropped");
+		assert.throws(() => validateJudgeFindings(parsed, [], contracts), (error: Error) => {
+			assert.match(error.message, /DONE requires classified nonblocking findings: entry 2 /);
+			assert.ok(error.message.includes(JSON.stringify(parsed.findings[1]!.slice(0, 160))));
+			assert.match(error.message, /expected \[ID\]\[NONBLOCKING_IN_SCOPE\|DEFERRED_OUT_OF_SCOPE\|REJECTED\]\[PLAN_REQUIREMENT\|PATCH_REGRESSION\|FOLLOWUP\|INVALID\] <nonempty body>/);
+			assert.ok(error.message.length < 1300);
+			assert.ok(!/[\n\t\u0000]/.test(error.message));
+			return true;
+		});
+	}
+});
+
+test("bullet-prefixed repair findings still enforce tags, evidence, duplicates and authorization", () => {
+	for (const bullet of ["- ", "* ", "+ "]) {
+		const review = parseWorkerResult("plan-reviewer", `VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: ${bullet}${finding}`);
+		assert.ok(review.kind === "reviewer");
+		const parseJudge = (entries: string[], authorized = "F001") => {
+			const result = parseWorkerResult("plan-judge", `DECISION: REPAIR\nFINDINGS:\n${entries.map(entry => bullet + entry).join("\n")}\nAUTHORIZED_BLOCKERS: ${authorized}\nREPAIR_CONTRACTS: [F001] restore the integer result\nPASS_DOCUMENT: Repair F001.`);
+			assert.ok(result.kind === "judge");
+			return result;
+		};
+		assert.deepEqual(validateJudgeFindings(parseJudge(judge().findings), review.findings, contracts), judge().findings);
+		for (const [entry, expected] of [
+			[judge().findings[0]!.replace("PLAN_REQUIREMENT", "TYPO"), /invalid judge blocking disposition/],
+			[judge().findings[0]!.replace(/; evidence=[^;]+/, ""), /missing evidence/],
+			[judge().findings[0]!.replace("input 0", "input 1"), /mismatched: evidence/],
+		] as const) assert.throws(() => validateJudgeFindings(parseJudge([entry]), review.findings, contracts), expected);
+		assert.throws(() => validateJudgeFindings(parseJudge([...judge().findings, ...judge().findings]), review.findings, contracts), /duplicate judge blocker/);
+		assert.throws(() => validateJudgeFindings(parseJudge(judge().findings, "F999"), review.findings, contracts), /unbound/);
+		for (const entry of [finding.replace("P1", "P2"), finding.replace(/; evidence=[^;]+/, "")]) {
+			const malformed = parseWorkerResult("plan-reviewer", `VERDICT: REVISE\nSCOPE: PASS\nFINDINGS: ${bullet}${entry}`);
+			assert.ok(malformed.kind === "reviewer");
+			assert.throws(() => validateReviewerResult(malformed, contracts), /blocker requires|missing evidence/);
+		}
+	}
+});
