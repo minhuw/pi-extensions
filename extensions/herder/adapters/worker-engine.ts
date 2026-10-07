@@ -133,6 +133,7 @@ interface WorkerRecord {
 	aborting?: Promise<void>;
 	completion?: Promise<void>;
 	discarding?: Promise<void>;
+	cleanupSettled?: boolean;
 }
 
 type UpdateListener = (workers: readonly PiWorkerSnapshot[]) => void;
@@ -546,7 +547,7 @@ export class PiWorkerEngine {
 		try {
 			const preparations = [...this.preparations].filter(item => !planDirectory || item.request.planDirectory === planDirectory);
 			for (const preparation of preparations) preparation.retired = true;
-			const workers = [...this.workers.entries()].filter(([, worker]) => !planDirectory || worker.request.planDirectory === planDirectory);
+			const workers = [...this.workers.entries()].filter(([, worker]) => !worker.cleanupSettled && (!planDirectory || worker.request.planDirectory === planDirectory));
 			const results = await Promise.allSettled([
 				...preparations.map(item => item.settled),
 				...workers.map(([handle]) => this.stop(handle)),
@@ -843,6 +844,9 @@ export class PiWorkerEngine {
 				terminal.interrupted = true;
 				terminal.error = [terminal.error, this.unsafeErrors.get(worker.request.planDirectory)?.message].filter(Boolean).join("\n") || "Pi worker stopped";
 			}
+			// Cleanup is settled. A terminal listener may queue behind a manager drain;
+			// that drain must not wait on this listener's own completion.
+			worker.cleanupSettled = true;
 			await Promise.all([...this.terminals].map((listener) => listener(terminal)));
 		} finally {
 			this.workers.delete(handle);

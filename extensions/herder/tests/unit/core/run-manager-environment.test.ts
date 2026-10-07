@@ -1,3 +1,5 @@
+import { grantResumeRecovery, newResumeRecovery, previewResumeRecovery } from "../../../src/core/resume-recovery.ts";
+
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,7 +31,7 @@ function planText(id: string, head: string): string {
 	});
 }
 
-async function fixture(count = 1, beforeStart?: (planDirectory: string) => void) {
+async function fixture(count = 1, beforeStart?: (planDirectory: string) => void, maxParallel = 1) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-environment-"));
 	const ids = Array.from({ length: count }, (_, i) => String(i + 1).padStart(3, "0"));
 	const { repo, originalHead } = initFixtureRepo(root, {
@@ -43,7 +45,7 @@ async function fixture(count = 1, beforeStart?: (planDirectory: string) => void)
 	let manager = new HerderRunManager(planDirectory);
 	try {
 		beforeStart?.(planDirectory);
-		const reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory, profile: "eclipse", maxParallel: 1 });
+		const reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory, profile: "eclipse", maxParallel });
 		return {
 			get manager() { return manager; }, reply, repo, planDirectory,
 			restart() { manager.close(); manager = new HerderRunManager(planDirectory); },
@@ -805,5 +807,259 @@ for (const recovery of [false, true]) test(`answer_and_resume rejects wrong atte
 		assert.equal(request.kind, recovery ? "plan_recovery" : "operator_attention");
 		await assert.rejects(f.manager.event({ eventId: "wrong-kind", kind: "attention", attention: { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Within scope clarification" } }), /Stopped attention/);
 		assert.notEqual(f.manager.store.getAttention(request.requestId)?.state, "resolved");
+	} finally { f.close(); }
+});
+
+test("confirmed resume retains implementation commits, discards only dirty interrupted work, and leaves DONE alone", async () => {
+	const f = await fixture(2);
+	try {
+		const review = await reviewer(f);
+		await dispatch(f, review);
+		const next = await judged(f, await terminal(f, review, approve));
+		const a = action(next, "plan-implementer");
+		assert.equal(a.planId, "002");
+		const done = runtime(f, "001");
+		assert.equal(done.phase, "DONE");
+		const doneHead = git(done.worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		fs.writeFileSync(path.join(done.worktree, "keep-user-file"), "untouched");
+		await dispatch(f, a);
+		fs.writeFileSync(path.join(a.worktree, "value-002.mjs"), "export const value = 2;\n");
+		git(a.worktree, ["add", "."]); git(a.worktree, ["commit", "-qm", "keep interrupted commit"]);
+		const head = git(a.worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		fs.writeFileSync(path.join(a.worktree, "value-002.mjs"), "dirty\n");
+		git(a.worktree, ["add", "."]);
+		fs.writeFileSync(path.join(a.worktree, "scratch"), "discard untracked");
+		fs.mkdirSync(path.join(a.worktree, "node_modules"), { recursive: true });
+		fs.writeFileSync(path.join(a.worktree, "node_modules", "keep"), "setup");
+		git(a.worktree, ["config", "--local", "core.excludesfile", path.join(f.repo, ".git", "resume-ignore")]);
+		fs.writeFileSync(path.join(f.repo, ".git", "resume-ignore"), "node_modules/\n");
+		f.manager.stop();
+		const stopped = await f.manager.event({ eventId: "stopped-dirty", kind: "terminals", terminals: [{ actionId: a.actionId, hostHandle: a.actionId, interrupted: true }] });
+		assert.equal(stopped.attention?.cause, "transport_exhausted");
+		const budget = f.manager.store.getBudget(a.runId)!;
+		const request = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		assert.equal(request.amount, 0);
+		grantResumeRecovery(f.manager.store.getRun()!, request);
+		const resumed = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+		const retry = action(resumed, "plan-implementer");
+		assert.notEqual(retry.actionId, a.actionId);
+		assert.equal(retry.round, a.round);
+		assert.equal(git(a.worktree, ["rev-parse", "HEAD"]).stdout.trim(), head);
+		assert.equal(fs.readFileSync(path.join(a.worktree, "value-002.mjs"), "utf8"), "export const value = 2;\n");
+		assert.equal(fs.existsSync(path.join(a.worktree, "scratch")), false);
+		assert.equal(fs.readFileSync(path.join(a.worktree, "node_modules", "keep"), "utf8"), "setup");
+		assert.equal(git(done.worktree, ["rev-parse", "HEAD"]).stdout.trim(), doneHead);
+		assert.equal(fs.readFileSync(path.join(done.worktree, "keep-user-file"), "utf8"), "untouched");
+		assert.equal(runtime(f, "001").phase, "DONE");
+		assert.equal(resumed.attention, undefined);
+		assert.equal(f.manager.store.getBudget(a.runId)!.limit, budget.limit);
+		assert.deepEqual(runtime(f, "002").repair, []);
+		const replay = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+		assert.equal(action(replay).actionId, retry.actionId);
+	} finally { f.close(); }
+});
+
+test("confirmed resume handles a lost dirty Reviewer dispatch without rerunning Implementer or changing frozen HEAD", async () => {
+	const f = await fixture();
+	try {
+		const a = await reviewer(f);
+		await dispatch(f, a);
+		const head = git(a.worktree, ["rev-parse", "HEAD"]).stdout.trim();
+		fs.writeFileSync(path.join(a.worktree, "value-001.mjs"), "interrupted diagnostic edit");
+		f.manager.stop();
+		await assert.rejects(f.manager.event({ eventId: "dirty-reviewer-stop", kind: "terminals", terminals: [{ actionId: a.actionId, hostHandle: a.actionId, interrupted: true }] }), /mutated frozen/);
+		assert.equal(f.manager.store.getAction(a.actionId)!.state, "dispatched");
+		const request = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		grantResumeRecovery(f.manager.store.getRun()!, request);
+		const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+		assert.equal(action(reply).role, "plan-reviewer");
+		assert.equal(action(reply).round, a.round);
+		assert.equal(f.manager.store.getActions(a.runId).filter(a => a.role === "plan-implementer").length, 1);
+		assert.equal(git(a.worktree, ["rev-parse", "HEAD"]).stdout.trim(), head);
+		assert.equal(runtime(f).approvedHead, head);
+		assert.equal(f.manager.store.getAction(a.actionId)!.state, "terminal");
+	} finally { f.close(); }
+});
+
+test("resume recovery refuses changed frozen commits, stale confirmation, and ungranted requests", async () => {
+	const f = await fixture();
+	try {
+		const a = await reviewer(f);
+		await dispatch(f, a); f.manager.stop();
+		const request = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		await assert.rejects(f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request }));
+		grantResumeRecovery(f.manager.store.getRun()!, request);
+		fs.writeFileSync(path.join(a.worktree, "value-001.mjs"), "changed after approval\n");
+		await assert.rejects(f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request }), /changed/);
+		git(a.worktree, ["add", "."]); git(a.worktree, ["commit", "-qm", "reviewer mutated commit"]);
+		assert.throws(() => previewResumeRecovery(f.manager.store), /mutated frozen/);
+	} finally { f.close(); }
+});
+
+test("resume excludes requirement/safety attention and preserves ordinary clean resume", async () => {
+	for (const kind of ["REQUIREMENT", "SAFETY", "ENVIRONMENT"]) {
+		const f = await fixture();
+		try {
+			const a = action(f.reply); await dispatch(f, a);
+			const reply = await terminal(f, a, blocked(a.role, kind));
+			assert.ok(reply.attention);
+			assert.equal(previewResumeRecovery(f.manager.store), undefined);
+			const resumed = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory });
+			assert.equal(resumed.attention?.requestId, reply.attention.requestId);
+			assert.equal(resumed.actions.length, 0);
+		} finally { f.close(); }
+	}
+	const f = await fixture();
+	try {
+		f.manager.stop();
+		assert.equal(previewResumeRecovery(f.manager.store), undefined);
+		const resumed = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory });
+		assert.equal(action(resumed).actionId, action(f.reply).actionId);
+	} finally { f.close(); }
+});
+
+test("confirmed resume grants only exhausted retry effort and never double-reserves lost dispatches", async () => {
+	const f = await fixture();
+	try {
+		let a = action(f.reply);
+		for (let attempt = 0; attempt < 3; attempt++) {
+			await dispatch(f, a);
+			f.manager.stop();
+			const before = f.manager.store.getBudget(a.runId)!;
+			for (let index = before.used; index < before.limit; index++) f.manager.store.reserveBudget({ runId: a.runId, generation: a.generation, reservationId: `resume-spend:${attempt}:${index}`, kind: "repair", payloadSha256: sha256(String(index)) });
+			const spent = f.manager.store.getBudget(a.runId)!;
+			const request = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+			assert.equal(request.amount, 1);
+			assert.equal(request.targets[0]!.infrastructureRecoveries, attempt === 0 ? 0 : 1);
+			grantResumeRecovery(f.manager.store.getRun()!, request);
+			const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+			const next = action(reply, "plan-implementer");
+			assert.notEqual(next.actionId, a.actionId);
+			assert.equal(next.round, a.round);
+			const after = f.manager.store.getBudget(a.runId)!;
+			assert.equal(after.limit, spent.limit + 1);
+			assert.equal(after.used, spent.used + 1);
+			await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+			assert.deepEqual(f.manager.store.getBudget(a.runId), after);
+			a = next;
+		}
+	} finally { f.close(); }
+});
+
+for (const unrelated of [false, true]) test(`confirmed resume clears Reviewer exhaustion without stop (unrelated attention=${unrelated})`, async () => {
+	const f = await fixture(unrelated ? 2 : 1, undefined, unrelated ? 2 : 1);
+	try {
+		let other: ManagerAttentionRequest | undefined;
+		if (unrelated) {
+			const second = f.reply.actions.find(a => a.planId === "002")!;
+			await dispatch(f, second);
+			other = (await terminal(f, second, blocked(second.role, "REQUIREMENT"))).attention;
+		}
+		let a = await reviewer(f);
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await dispatch(f, a);
+			const reply = await f.manager.event({ eventId: `exhaust:${attempt}`, kind: "terminals", terminals: [{ actionId: a.actionId, hostHandle: a.actionId, interrupted: true, error: "connection lost" }] });
+			if (!attempt) a = action(reply, "plan-reviewer");
+		}
+		assert.equal(f.manager.store.getRun()!.status, "needs_input");
+		f.restart();
+		const request = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		grantResumeRecovery(f.manager.store.getRun()!, request);
+		const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: request });
+		assert.equal(action(reply).role, "plan-reviewer");
+		assert.equal(reply.status, unrelated ? "needs_input" : "running");
+		assert.equal(f.manager.store.getRun()!.terminalDetail, other?.detail ?? null);
+		assert.equal(reply.attention?.requestId, other?.requestId);
+	} finally { f.close(); }
+});
+
+for (const lostDispatch of [true, false]) test(`confirmed resume preserves clarification and guidance (lost dispatch=${lostDispatch})`, async () => {
+	const f = await fixture();
+	try {
+		const initial = action(f.reply);
+		await dispatch(f, initial);
+		const request = (await requirementDecision(f, initial)).attention!;
+		const attention = { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Keep the original value export requirement; do not expand scope." };
+		grantHostAttention(f.manager.store.getRun()!, attention);
+		const a = action(await f.manager.event({ eventId: "clarify-before-interruption", kind: "attention", attention }));
+		const guidance = runtime(f).repair;
+		await dispatch(f, a);
+		fs.writeFileSync(path.join(a.worktree, "scratch"), "interrupted edit");
+		if (!lostDispatch) await f.manager.event({ eventId: "clarified-transport-failure", kind: "terminals", terminals: [{ actionId: a.actionId, hostHandle: a.actionId, interrupted: true }] });
+		f.restart();
+		const recovery = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		grantResumeRecovery(f.manager.store.getRun()!, recovery);
+		const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: recovery });
+		assert.deepEqual(runtime(f).repair, guidance);
+		assert.ok(action(reply).prompt.includes(attention.answer));
+		assert.equal(fs.existsSync(path.join(a.worktree, "scratch")), false);
+	} finally { f.close(); }
+});
+
+test("confirmed resume funds its target ahead of unrelated ready roles and preserves paid dispatch across ticks", async () => {
+	const f = await fixture(2, undefined, 2);
+	try {
+		const first = f.reply.actions.find(a => a.planId === "001")!;
+		const target = f.reply.actions.find(a => a.planId === "002")!;
+		await dispatch(f, first); await dispatch(f, target);
+		f.manager.stop();
+		fs.writeFileSync(path.join(first.worktree, "value-001.mjs"), "export const value = 2;\n");
+		git(first.worktree, ["add", "."]); git(first.worktree, ["commit", "-qm", "ready unrelated review"]);
+		await terminal(f, first, "STATUS: COMPLETE\nCHECKS: fixture value inspected\nNOTES: complete");
+		assert.equal(runtime(f).phase, "READY_REVIEWER");
+		const before = f.manager.store.getBudget(target.runId)!;
+		for (let i = before.used; i < before.limit; i++) f.manager.store.reserveBudget({ runId: target.runId, generation: target.generation, reservationId: `spend:${i}`, kind: "repair", payloadSha256: sha256(String(i)) });
+		const recovery = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		assert.equal(recovery.amount, 1);
+		assert.deepEqual(recovery.targets.map(t => t.planId), ["002"]);
+		grantResumeRecovery(f.manager.store.getRun()!, recovery);
+		const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: recovery });
+		const retry = action(reply);
+		assert.equal(retry.planId, "002");
+		assert.equal(reply.actions.length, 1);
+		const after = f.manager.store.getBudget(target.runId)!;
+		assert.equal(after.limit, before.limit + 1);
+		assert.equal(after.used, after.limit);
+		assert.equal(after.stopReason, null);
+		f.restart();
+		const tick = await f.manager.auditScheduler();
+		assert.equal(tick.status, "running");
+		assert.equal(action(tick).actionId, retry.actionId);
+		assert.equal(tick.scheduler.workConserving, true);
+		await dispatch(f, retry);
+		assert.equal((await f.manager.auditScheduler()).status, "running");
+		assert.equal(runtime(f).phase, "READY_REVIEWER");
+		assert.deepEqual(f.manager.store.getBudget(target.runId), after);
+		assert.equal(f.manager.store.getActions(target.runId).filter(a => a.planId === "001").length, 1);
+	} finally { f.close(); }
+});
+
+for (const legacy of [false, true]) test(`round-two resume preserves guidance and clarification (legacy transport replacement=${legacy})`, async () => {
+	const f = await fixture();
+	try {
+		const review = await reviewer(f);
+		await dispatch(f, review);
+		const a = action(await judged(f, await terminal(f, review, revise), judgeRepair), "plan-implementer");
+		assert.equal(a.round, 2);
+		await dispatch(f, a);
+		const request = (await requirementDecision(f, a)).attention!;
+		const attention = { ...attentionResolutionFromRequest(request), action: "answer_and_resume", answer: "Preserve named exports while fixing the value." };
+		grantHostAttention(f.manager.store.getRun()!, attention);
+		const clarified = action(await f.manager.event({ eventId: "round-two-answer", kind: "attention", attention }));
+		await dispatch(f, clarified);
+		const guidance = runtime(f).repair;
+		const stopped = await f.manager.event({ eventId: "round-two-interrupted", kind: "terminals", terminals: [{ actionId: clarified.actionId, hostHandle: clarified.actionId, interrupted: true, error: "connection lost" }] });
+		if (legacy) {
+			// Old transport stops overwrote the Judge contract; retain the recorded answer.
+			f.manager.store.putPlan({ ...runtime(f), repair: [stopped.attention!.detail, ...guidance.filter(detail => detail.startsWith("ATTENTION_"))] });
+		}
+		f.restart();
+		const recovery = newResumeRecovery(previewResumeRecovery(f.manager.store)!);
+		grantResumeRecovery(f.manager.store.getRun()!, recovery);
+		const reply = await f.manager.resume({ mode: "resume", repositoryRoot: f.repo, planDirectory: f.planDirectory, resumeRecovery: recovery });
+		assert.ok(action(reply).prompt.includes(attention.answer));
+		assert.ok(runtime(f).repair.includes("[value] fix the value"));
+		if (!legacy) assert.deepEqual(runtime(f).repair, guidance);
+		assert.ok(!runtime(f).repair.includes(stopped.attention!.detail));
 	} finally { f.close(); }
 });

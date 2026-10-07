@@ -1827,3 +1827,19 @@ for (const failure of [false, true]) {
 		assert.equal(disposals, 1);
 	});
 }
+
+test("settled terminal callbacks can drain without waiting on themselves", { timeout: 5_000 }, async () => {
+	const factory = new FakeFactory();
+	const engine = new PiWorkerEngine(factory);
+	const finished = new Deferred();
+	engine.onTerminal(async () => {
+		assert.equal(factory.sessions[0]!.disposed, true);
+		await engine.drain("/tmp/repo/herder-plans");
+		finished.resolve();
+	});
+	const handle = await engine.prepare({ action: action(), planDirectory: "/tmp/repo/herder-plans" });
+	engine.start(handle);
+	await finished.promise;
+	await nextTurn();
+	assert.equal(engine.has(handle), false);
+});

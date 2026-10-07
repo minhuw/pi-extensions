@@ -1155,7 +1155,7 @@ export class RunStore {
 	/** Caller must first verify private, request-bound host approval. Never expose as a model approval tool. */
 	grantBudget(input: { requestId: string; runId: string; generation: number; graphSha256: string; amount: number; planId?: string; implementationRounds?: number; infrastructureRecoveries?: number }): void {
 		this.transaction(() => {
-			if (!input.requestId.trim() || !Number.isSafeInteger(input.amount) || input.amount <= 0) throw new Error("Budget grant requires a positive safe integer amount and request ID");
+			if (!input.requestId.trim() || !Number.isSafeInteger(input.amount) || input.amount < 0 || (input.amount === 0 && !input.infrastructureRecoveries)) throw new Error("Budget grant requires a positive safe integer amount and request ID");
 			for (const value of [input.implementationRounds, input.infrastructureRecoveries]) if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new Error("Task grants must be nonnegative safe integers");
 			if (!input.planId && (input.implementationRounds || input.infrastructureRecoveries)) throw new Error("Task grant requires a plan ID");
 			const run = this.getRun();
@@ -1219,6 +1219,24 @@ export class RunStore {
 			if (reason) throw new BudgetExhaustedError(input.runId, reason);
 			this.database.prepare("INSERT INTO manager_budget_ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(root, input.reservationId, kind, input.runId, input.planId ?? null, input.generation, input.round ?? null, input.payloadSha256);
 		});
+	}
+
+	/** Only after an exact host-approved recovery has supplied its missing reservations. */
+	clearResumeBudgetStop(runId: string): void {
+		const budget = this.getBudget(runId);
+		if (!budget || budget.used >= budget.limit) throw new Error("Resume still lacks dispatch effort");
+		this.database.prepare("UPDATE manager_budgets SET stop_reason = NULL WHERE current_run_id = ?").run(runId);
+	}
+
+	/** Extra task recovery tokens needed for this exact interrupted implementation. */
+	transportRecoveryIncrement(runId: string, planId: string, actionId: string): number {
+		const row = this.database.prepare("SELECT run_id FROM manager_budgets WHERE current_run_id = ?").get(runId) as { run_id: string } | undefined;
+		if (!row) throw new Error("Recovery budget is missing");
+		const tokens = this.database.prepare("SELECT reservation_id FROM manager_budget_ledger WHERE run_id = ? AND kind = 'transport' AND plan_id = ?").all(row.run_id, planId) as { reservation_id: string }[];
+		if (tokens.some(t => t.reservation_id === `transport:${actionId}`)) return 0;
+		const allocation = this.database.prepare("SELECT recovery_limit FROM manager_task_budgets WHERE run_id = ? AND plan_id = ?").get(row.run_id, planId) as { recovery_limit: number } | undefined;
+		if (!allocation) throw new Error(`Task ${planId} has no recovery allocation`);
+		return Math.max(0, tokens.length + 1 - allocation.recovery_limit);
 	}
 
 	/** One automatic, proven-safe recovery per task, across roles and generations. */

@@ -87,6 +87,8 @@ Improve and Simplify show a compact table, then automatically explain every vett
 
 Fire and resume accept `--profile <name>`, `--dashboard-port <port>`, and `--max-parallel <count>`. Scope amendment preserves the recorded execution configuration. Attach accepts only `--dashboard-port`, derives the immutable profile, review mode, and parallelism from manager status, and refuses takeover while another live Pi process owns the run.
 
+For interrupted work, `/herder-resume` asks once to keep manager-accepted DONE tasks and all commits, discard staged/unstaged/untracked changes only in the listed interrupted worktrees, and start fresh workers in the same failed roles. Ignored dependency setup and `.herder` assignment files are retained. The same confirmation authorizes only the missing retry effort; cancellation leaves work and budgets unchanged. Live workers must first be stopped. No worker session is restored, and requirement, safety, scope, or other non-transport blockers still require their normal resolution.
+
 ### YOLO: no independent review
 
 `/herder-fire [plan-dir] --yolo` opts a **new run** into YOLO mode. `--yolo` is a standalone boolean flag (no value or `=true` form), accepted only by Fire; resume, revise, and attach reject it. The backend persists the mode immutably, and resume/attach recover it without a new flag. A scope amendment cannot flip it. Without the flag, normal review behavior is unchanged.

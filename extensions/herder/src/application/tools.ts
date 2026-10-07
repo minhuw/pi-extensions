@@ -137,6 +137,7 @@ async function runTool(args: JsonObject): Promise<unknown> {
 		...(args.profile ? { profile: String(args.profile) } : {}),
 		...(args.maxParallel === undefined ? {} : { maxParallel: Number(args.maxParallel) }),
 		...(args.yolo === undefined ? {} : { yolo: args.yolo }),
+		...(args.resumeRecovery === undefined ? {} : { resumeRecovery: args.resumeRecovery }),
 	});
 	const currentService = await ensureService(directory);
 	await openDashboard(currentService);

@@ -1,3 +1,4 @@
+import { assertResumeRecoveryGrant, previewResumeRecovery, resumeWorktreeIdentity, type ResumeRecovery } from "./resume-recovery.ts";
 import { buildRoundProgress, excludedFindings } from "./round-progress.ts";
 import { BudgetExhaustedError } from "../daemon/budgets.ts";
 import { assertHostAttentionGrant, assertApprovedRevisionGraph, beginRunRevision, readRunRevision, revisionPending, type RunRevision } from "./run-revision.ts";
@@ -99,6 +100,7 @@ const PLUGIN_ROOT = path.resolve(CORE_ROOT, "../..");
 const HELPER_ROOT = path.join(PLUGIN_ROOT, "src/daemon/git");
 
 interface StartInput {
+	resumeRecovery?: ResumeRecovery;
 	yolo?: boolean;
 	mode: "fire" | "resume" | "revise";
 	repositoryRoot: string;
@@ -172,6 +174,7 @@ interface PlanEditReply {
 }
 
 function validateStartInput(input: StartInput): void {
+	if (input?.resumeRecovery && input.mode !== "resume") throw new Error("Recovery confirmation is resume-only");
 	if (input?.yolo !== undefined && typeof input.yolo !== "boolean") throw new Error("yolo must be a boolean");
 	if (!input || !["fire", "resume", "revise"].includes(input.mode)) throw new Error("Start mode must be fire, resume, or revise");
 	if (!input.repositoryRoot || !input.planDirectory) throw new Error("Start requires repositoryRoot and planDirectory");
@@ -1215,6 +1218,10 @@ export class HerderRunManager {
 			const namespace = driver.inspectNamespace("resume");
 			if (!namespace.ok) throw new Error(`Cannot resume ambiguous Herder namespace: ${namespace.reason}`);
 		}
+		if (input.resumeRecovery) {
+			await this.recoverConfirmedResume(run, input.resumeRecovery);
+			run = this.store.getRun()!;
+		}
 		const dropped = this.store.getPlans(run.runId).find(plan => plan.repair.some(detail => detail.startsWith("DROPPED_BY_USER [")));
 		if (dropped) {
 			this.store.updateRun({ status: "paused", terminalDetail: dropped.repair.find(detail => detail.startsWith("DROPPED_BY_USER ["))! });
@@ -1996,6 +2003,7 @@ export class HerderRunManager {
 		terminals: TerminalEvent[],
 		eventId: string,
 		payload: EventInput,
+		confirmedResume = false,
 	): Promise<{ changed: boolean; detail: string | null }> {
 		const run = this.store.getRun()!;
 		const driver = this.driver(run);
@@ -2091,9 +2099,11 @@ export class HerderRunManager {
 				};
 			} else if (terminal.interrupted || terminal.error) {
 				const detail = terminal.error || "Worker transport was interrupted";
-				transition = action.role === "plan-implementer"
-					? this.retryImplementerTransport(run, plan, action, detail)
-					: this.retryTransportOrPause(run, plan, action, detail);
+				transition = confirmedResume
+					? { plan: { ...plan, phase: readyPhaseForRole(action.role) } }
+					: action.role === "plan-implementer"
+						? this.retryImplementerTransport(run, plan, action, detail)
+						: this.retryTransportOrPause(run, plan, action, detail);
 			} else if (!parsed) {
 				const detail = [
 					"Worker protocol error; execution incomplete. Raw response and worktree are preserved; no product repair is authorized.",
@@ -2190,13 +2200,79 @@ export class HerderRunManager {
 		};
 	}
 
+	private async recoverConfirmedResume(run: StoredRun, request: ResumeRecovery): Promise<void> {
+		assertResumeRecoveryGrant(run, request);
+		const eventId = `manager-resume-recovery:${request.requestId}`;
+		const previous = this.store.readEvent(eventId);
+		if (previous) {
+			if (previous.payloadSha256 !== sha256(stableJson(request))) throw new Error("Resume recovery replay changed");
+			return;
+		}
+		const preview = previewResumeRecovery(this.store);
+		if (!preview || stableJson({ ...preview, requestId: request.requestId }) !== stableJson(request)) throw new Error("Resume recovery changed; confirm again");
+		const driver = this.driver(run);
+		// Validate every target before cleaning any, including immutable assignment evidence.
+		for (const target of request.targets) {
+			const plan = this.store.getPlan(run.runId, target.planId)!;
+			driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
+		}
+		for (const target of request.targets) {
+			const plan = this.store.getPlan(run.runId, target.planId)!;
+			const action = this.store.getAction(target.actionId)!;
+			const current = resumeWorktreeIdentity(run, plan, action);
+			if (current.head !== target.head || current.dirtySha256 !== target.dirtySha256) throw new Error("Resume worktree changed after confirmation");
+			git(plan.worktree, ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."]);
+			git(plan.worktree, ["clean", "-fd", "-e", ".herder/"]);
+			if (driver.worktreeHead(plan.worktree) !== target.head || driver.worktreeStatus(plan.worktree)) throw new Error("Resume cleanup did not preserve a clean HEAD");
+		}
+		// Record lost dispatches honestly, without reconciling/dispatching between targets.
+		const terminals = request.targets.map(t => this.store.getAction(t.actionId)!).filter(a => a.state === "dispatched")
+			.map(a => ({ actionId: a.actionId, hostHandle: a.hostHandle!, interrupted: true, error: "Host-confirmed resume: previous worker settled or lost" }));
+		if (terminals.length) await this.applyTerminals(terminals, `${eventId}:terminals`, { eventId: `${eventId}:terminals`, kind: "terminals", terminals }, true);
+		this.store.transaction(() => {
+			if (request.amount) this.store.grantBudget({ requestId: `${eventId}:effort`, runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256, amount: request.amount });
+			for (const target of request.targets) {
+				if (target.infrastructureRecoveries) this.store.grantBudget({ requestId: `${eventId}:${target.planId}`, runId: run.runId, generation: run.currentGeneration, graphSha256: run.graphSha256, amount: 0, planId: target.planId, infrastructureRecoveries: target.infrastructureRecoveries });
+				if (target.role === "plan-implementer" && !this.store.reserveTransportRecovery(run.runId, target.planId, target.actionId)) throw new Error("Confirmed recovery lacks its exact task effort");
+				const plan = this.store.getPlan(run.runId, target.planId)!;
+				const actions = this.store.getActions(run.runId).filter(a => a.planId === plan.planId && a.generation === plan.generation);
+				const diagnostics = new Set(this.store.getAttentionRequests(run.runId)
+					.filter(a => a.planId === plan.planId && a.generation === plan.generation && a.cause === "transport_exhausted").map(a => a.detail));
+				for (const action of actions.filter(a => a.round === plan.round)) {
+					const terminal = storedTerminalRecord(action)?.terminal;
+					if (terminal?.interrupted || terminal?.error) {
+						const detail = terminal.error || "Worker transport was interrupted";
+						diagnostics.add(detail);
+						diagnostics.add(`${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`);
+						diagnostics.add(`${action.role} exhausted the cumulative safe transport recovery for ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`);
+					}
+				}
+				let repair = plan.repair.filter(detail => !diagnostics.has(detail));
+				// Only legacy transport stops replaced substantive guidance with diagnostics.
+				if (target.role === "plan-implementer" && repair.length < plan.repair.length && repair.every(detail => detail.startsWith("ATTENTION_"))) {
+					const judge = actions.filter(a => a.round < plan.round && a.role === "plan-judge" && a.state === "terminal").at(-1);
+					const decision = judge ? storedWorkerResult(judge) : null;
+					if (decision?.kind === "judge" && decision.decision === "REPAIR") repair = [...decision.repairContracts, ...repair];
+				}
+				this.updatePlan(plan, { phase: readyPhaseForRole(target.role), repair });
+				this.store.recordEvent(run.runId, `manager-resume-target:${target.actionId}`, "resume_target", { actionId: target.actionId });
+				for (const attention of this.store.getAttentionRequests(run.runId, { unresolvedOnly: true })) {
+					if (attention.actionId === target.actionId && attention.kind === "operator_attention" && attention.cause === "transport_exhausted") this.store.resolveAttention(attention.requestId);
+				}
+			}
+			this.store.clearResumeBudgetStop(run.runId);
+			this.attentionStatusAfterResolution(run.runId);
+			this.store.recordEvent(run.runId, eventId, "resume_recovery", request);
+		});
+	}
+
 	private retryImplementerTransport(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
 		const driver = this.driver(run);
 		const mutationMayHaveOccurred = driver.worktreeHead(plan.worktree) !== plan.generationBase || Boolean(driver.worktreeStatus(plan.worktree));
 		if (!mutationMayHaveOccurred) return this.retryTransportOrPause(run, plan, action, detail);
 		const terminalDetail = `${action.role} transport failed after a mutated worktree at ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
 		return {
-			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
+			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail, ...plan.repair] },
 			runUpdate: { status: "needs_input", terminalDetail },
 			attention: this.attention({
 				run,
@@ -2215,11 +2291,11 @@ export class HerderRunManager {
 
 	private retryTransportOrPause(run: StoredRun, plan: StoredPlan, action: StoredAction, detail: string): TerminalTransition {
 		if (this.store.reserveTransportRecovery(run.runId, action.planId, action.actionId)) {
-			return { plan: { ...plan, phase: readyPhaseForRole(action.role), repair: [detail] } };
+			return { plan: { ...plan, phase: readyPhaseForRole(action.role), repair: [detail, ...plan.repair] } };
 		}
 		const terminalDetail = `${action.role} exhausted the cumulative safe transport recovery for ${action.planId} generation ${action.generation} round ${action.round}: ${detail}`;
 		return {
-			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail] },
+			plan: { ...plan, phase: "NEEDS_INPUT", repair: [terminalDetail, ...plan.repair] },
 			runUpdate: { status: "needs_input", terminalDetail },
 			attention: this.attention({
 				run,
@@ -3130,6 +3206,12 @@ export class HerderRunManager {
 			: options.includeReply === false ? null : this.reply();
 	}
 
+	// Do not let an unfunded reservation pause actions that already paid for dispatch.
+	private waitingForFundedActions(run: StoredRun, occupied: number): boolean {
+		const budget = this.store.getBudget(run.runId);
+		return occupied > 0 && Boolean(budget && budget.used >= budget.limit);
+	}
+
 	private async schedule(profile: ResolvedProfile): Promise<void> {
 		const run = this.store.getRun()!;
 		const driver = this.driver(run);
@@ -3142,8 +3224,15 @@ export class HerderRunManager {
 		let occupied = active.length;
 		const owned = new Set(active.map((action) => action.planId));
 		const plans = this.store.getPlans(run.runId);
-		for (const plan of plans.sort((a, b) => a.planId.localeCompare(b.planId))) {
-			if (occupied >= run.maxParallel) break;
+		// Durable target markers prioritize confirmed retries, including after restart.
+		const recoveryPlans = new Set(plans.filter(plan => {
+			const role = roleForPhase(plan.phase);
+			if (!role) return false;
+			const previous = this.store.getLatestAction(run.runId, { planId: plan.planId, generation: plan.generation, round: plan.round, role, state: "terminal" });
+			return previous && this.store.readEvent(`manager-resume-target:${previous.actionId}`);
+		}).map(plan => plan.planId));
+		for (const plan of plans.sort((a, b) => Number(recoveryPlans.has(b.planId)) - Number(recoveryPlans.has(a.planId)) || a.planId.localeCompare(b.planId))) {
+			if (occupied >= run.maxParallel || this.waitingForFundedActions(run, occupied)) return;
 			if (plan.planId === reservedPlanId) continue;
 			if (owned.has(plan.planId)) continue;
 			const role = roleForPhase(plan.phase);
@@ -3157,10 +3246,10 @@ export class HerderRunManager {
 			owned.add(plan.planId);
 		}
 
-		if (occupied >= run.maxParallel) return;
+		if (occupied >= run.maxParallel || this.waitingForFundedActions(run, occupied)) return;
 		const overview = summarizeRun(this.specs(run), this.store.getPlans(run.runId));
 		for (const spec of overview.ready) {
-			if (occupied >= run.maxParallel) break;
+			if (occupied >= run.maxParallel || this.waitingForFundedActions(run, occupied)) return;
 			const planId = spec.planId;
 			if (planId === reservedPlanId) continue;
 			if (this.store.getPlan(run.runId, planId)) continue;
@@ -3291,13 +3380,14 @@ export class HerderRunManager {
 			...summarizeRun(this.specs(run), plans).ready.filter((spec) => !runtimeIds.has(spec.planId) && spec.planId !== reservedPlanId).map((spec) => spec.planId),
 		].sort();
 		const freeSlots = Math.max(0, run.maxParallel - active.length);
-		const expectedNewActions = suppression === "revision-barrier" ? 0 : Math.min(freeSlots, runnablePlanIds.length);
+		const waitingForBudget = this.waitingForFundedActions(run, active.length);
+		const expectedNewActions = suppression === "revision-barrier" || waitingForBudget ? 0 : Math.min(freeSlots, runnablePlanIds.length);
 		const inactive = run.status !== "running" && run.status !== "needs_input";
 		const workConserving = inactive || suppression === "host-backpressure" || suppression === "revision-barrier" || expectedNewActions === 0;
 		const reason = inactive ? "inactive"
 			: suppression === "host-backpressure" ? "host-backpressure"
 				: suppression === "revision-barrier" ? "revision-barrier"
-				: freeSlots === 0 ? "saturated"
+				: freeSlots === 0 || waitingForBudget ? "saturated"
 					: runnablePlanIds.length === 0 ? "no-runnable-work"
 						: "scheduler-stall";
 		return { active: active.length, freeSlots, runnable: runnablePlanIds.length, runnablePlanIds, expectedNewActions, workConserving, reason, checkedAt: new Date().toISOString() };

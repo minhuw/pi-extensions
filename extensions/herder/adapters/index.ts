@@ -1,3 +1,4 @@
+import { confirmResumeRecovery } from "./resume.ts";
 import { grantUserBudget, parseBudgetArguments } from "./budget.ts";
 import { confirmHostAttention, beginUserScopeAmendment, finishWholeRunEdit, cancelWholeRunEdit, wholeRunToolPolicy, type RunRevisionHost } from "./run-revision.ts";
 import { readRunRevision, revisionPending, type RunRevision } from "../src/core/run-revision.ts";
@@ -738,10 +739,20 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 					assertSessionActive(epoch);
 					if (fresh.runId !== before.runId) throw new Error(`Herder run changed from ${before.runId} to ${fresh.runId || "idle"} before ${options.mode}; refusing to mutate it.`);
 					if (!fresh.profileName || fresh.profileName !== before.profileName) throw new Error(`Herder run ${before.runId} changed its immutable profile before ${options.mode}; refusing to mutate it.`);
+					before = fresh;
 				}
 				assertSafe(planDir);
+				const resumeRecovery = options.mode === "resume" ? await confirmResumeRecovery(planDir, ctx, async () => {
+					const local = [...workers.values()].filter(worker => path.resolve(worker.planDir) === planDir);
+					if (local.length && before?.status !== "stopped") throw new Error("Herder still has live tasks; use /herder-stop before interrupted recovery");
+					// Detach callbacks before waiting: no terminal may queue behind its own drain.
+					for (const worker of local) workers.delete(worker.handle);
+					await engine.drain(planDir);
+					interruptedPiWorkers(before!.active, handle => engine.has(handle)); // rejects foreign handles
+				}, () => { assertSessionActive(epoch); assertOwnership(planDir, before!.runId); assertLaunch(); }) : undefined;
 				const started = unwrapReply(await invokeHerderTool("herder_run", {
 					operation: options.mode,
+					...(resumeRecovery ? { resumeRecovery } : {}),
 					repositoryRoot: repoRoot,
 					planDirectory: planDir,
 					profile: profile.profile,
@@ -1172,7 +1183,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 				}));
 			}
 			for (const worker of active) workers.delete(worker.handle);
-			await Promise.all(active.map((worker) => engine.stop(worker.handle).catch(() => {})));
+			await engine.drain(state.planDir);
 			const interrupted: TerminalEvent[] = active.map((worker) => ({
 				actionId: worker.actionId,
 				hostHandle: worker.handle,

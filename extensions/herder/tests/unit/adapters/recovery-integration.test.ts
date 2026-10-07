@@ -3056,3 +3056,91 @@ test("actual reset command abandons a restored draft; late events and session re
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("resume command confirms once: cancel preserves dirty lost work; approval retries a fresh session", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-resume-command-"));
+	const fixture = writeFixture(root);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	const notifications: Warning[] = [];
+	const confirmations: string[] = [];
+	let consent = false;
+	const base = freshContext(fixture, notifications);
+	const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+		theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+		confirm: async (_title: string, body: string) => { confirmations.push(body); return consent; },
+	} } as unknown as ExtensionContext;
+	try {
+		const started = await startFixture(fixture, "pi-worker:lost-before-resume");
+		const worktree = started.before.plan!.worktree;
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "export const value = 2\n");
+		runCommand("git", ["-C", worktree, "add", "."]);
+		runCommand("git", ["-C", worktree, "commit", "-qm", "retain interrupted commit"]);
+		const head = runCommand("git", ["-C", worktree, "rev-parse", "HEAD"]).stdout.trim();
+		fs.writeFileSync(path.join(worktree, "src/value.mjs"), "dirty user content\n");
+		fs.writeFileSync(path.join(worktree, "user-untracked"), "discard only after confirmation");
+		await requestManagerOperation(started.service, "stop", {});
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		await api.invoke("session_start", ctx);
+		const before = evidence(fixture);
+		await api.command("herder-resume").handler("herder-plans", ctx);
+		assert.equal(confirmations.length, 1, JSON.stringify(notifications));
+		assert.match(confirmations[0]!, /untracked.*user-created/s);
+		assert.match(confirmations[0]!, /Additional dispatch units: 0/);
+		assert.equal(factory.requests.length, 0);
+		assert.deepEqual(evidence(fixture), before);
+		assert.equal(fs.readFileSync(path.join(worktree, "src/value.mjs"), "utf8"), "dirty user content\n");
+		assert.ok(fs.existsSync(path.join(worktree, "user-untracked")));
+		consent = true;
+		await api.command("herder-resume").handler("herder-plans", ctx);
+		assert.equal(confirmations.length, 2, JSON.stringify(notifications));
+		assert.equal(factory.requests.length, 1, JSON.stringify(notifications));
+		assert.notEqual(factory.requests[0]!.action.actionId, started.actionId);
+		assert.equal(factory.requests[0]!.action.role, "plan-implementer");
+		assert.equal(runCommand("git", ["-C", worktree, "rev-parse", "HEAD"]).stdout.trim(), head);
+		assert.equal(fs.readFileSync(path.join(worktree, "src/value.mjs"), "utf8"), "export const value = 2\n");
+		assert.equal(fs.existsSync(path.join(worktree, "user-untracked")), false);
+		assert.equal(evidence(fixture).actions[0]!.state, "terminal");
+	} finally {
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resume refuses live work; stop drains it before confirmed recovery", { timeout: 30_000 }, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-resume-live-"));
+	const fixture = writeFixture(root);
+	const api = new CapturedExtensionAPI();
+	const factory = new PendingWorkerFactory();
+	const notifications: Warning[] = [];
+	const base = freshContext(fixture, notifications);
+	const ctx = { ...base, hasUI: true, ui: { ...base.ui,
+		theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+		confirm: async () => true,
+	} } as unknown as ExtensionContext;
+	try {
+		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
+		await api.invoke("session_start", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await factory.sessions[0]!.started;
+		const worktree = factory.requests[0]!.action.worktree;
+		const sentinel = path.join(worktree, "unfinished");
+		fs.writeFileSync(sentinel, "keep while live");
+		await api.command("herder-resume").handler("herder-plans", ctx);
+		assert.equal(factory.sessions[0]!.aborted, false);
+		assert.equal(factory.requests.length, 1);
+		assert.equal(fs.readFileSync(sentinel, "utf8"), "keep while live");
+		await api.command("herder-stop").handler("", ctx);
+		assert.equal(factory.sessions[0]!.aborted, true);
+		assert.ok(fs.existsSync(sentinel));
+		await api.command("herder-resume").handler("herder-plans", ctx);
+		assert.equal(factory.requests.length, 2, JSON.stringify(notifications));
+		assert.equal(factory.requests[1]!.action.role, factory.requests[0]!.action.role);
+		assert.equal(fs.existsSync(sentinel), false);
+	} finally {
+		await api.invoke("session_shutdown", ctx).catch(() => {});
+		await stopService(fixture.planDirectory).catch(() => {});
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
