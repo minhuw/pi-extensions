@@ -110,7 +110,7 @@ test("final RUN attention prompts retain their separate request bindings and act
 	assert.match(userPrompt, /ROUND: 2/);
 	assert.match(userPrompt, /CONTINUATION_ROLE: plan-judge/);
 	assert.match(userPrompt, /CAUSE: judge_needs_input/);
-	assert.doesNotMatch(userPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256/);
+	assert.doesNotMatch(userPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|DETAIL_SHA256/);
 	assert.doesNotMatch(userPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
 	const operatorPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
@@ -126,7 +126,7 @@ test("final RUN attention prompts retain their separate request bindings and act
 	assert.match(operatorPrompt, /GENERATION: 1/);
 	assert.match(operatorPrompt, /ROUND: 2/);
 	assert.match(operatorPrompt, /Safe operator retry requires exact host confirmation/);
-	assert.doesNotMatch(operatorPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256/);
+	assert.doesNotMatch(operatorPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|DETAIL_SHA256/);
 	assert.doesNotMatch(operatorPrompt, /HERDER_ACTIVE_PLAN_RECOVERY_V1/);
 
 	const recoveryPrompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", {
@@ -163,10 +163,10 @@ test("final RUN attention prompts retain their separate request bindings and act
 	assert.match(recoveryPrompt, /ROUND: 2/);
 	assert.match(recoveryPrompt, /CONTINUATION_ROLE: plan-judge/);
 	assert.match(recoveryPrompt, /CAUSE: reviewer_blocked/);
-	assert.match(recoveryPrompt, /ALLOWED_ACTIONS: next round \(retry\)/);
+	assert.match(recoveryPrompt, /LATER_USER_CHOICES: next round \(retry\)/);
 	assert.match(recoveryPrompt, /001-plan\.md/);
 	assert.match(recoveryPrompt, /"changedPaths":/);
-	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|RUN_ID|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
+	assert.doesNotMatch(recoveryPrompt, /SCHEMA_VERSION|schemaVersion|REQUEST_SHA256|CAPABILITY_TOKEN|DETAIL_SHA256|RECOVERY_GIT_IDENTITY/);
 });
 
 test("attention messages render a compact card while preserving the full prompt", async () => {
@@ -405,7 +405,7 @@ test("adapter binds complete attention evidence, including recovery Git identity
 
 	const packageRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../..");
 	const prompt = await buildAttentionPrompt(packageRoot, "/repo/herder-plans", exhausted);
-	assert.match(prompt, /ALLOWED_ACTIONS: next round \(retry\)/);
+	assert.match(prompt, /LATER_USER_CHOICES: next round \(retry\)/);
 	assert.match(prompt, /accept as-is \(accept\).*not passed checks/);
 	assert.match(prompt, /drop plan \(reject\).*not destructive cleanup/);
 	assert.ok(prompt.includes(recovery.worktreeHead));

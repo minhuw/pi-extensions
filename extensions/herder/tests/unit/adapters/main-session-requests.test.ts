@@ -97,7 +97,7 @@ test("shutdown reset removes request capabilities", () => {
 });
 
 
-test("stopped attention is displayed once without triggering a model turn; old Reignite stays backlog", async () => {
+test("stopped attention triggers one diagnosis turn; old Reignite stays backlog", async () => {
 	const h = harness();
 	const value = reply({ status: "paused", attention, reigniteRequest: { state: "pending", requestId: "old-reignite" } as never });
 	for (let index = 0; index < 3; index++) {
@@ -106,7 +106,7 @@ test("stopped attention is displayed once without triggering a model turn; old R
 		await h.requests.settled();
 	}
 	assert.equal(h.customMessages.length, 1);
-	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: true }]);
 	assert.deepEqual(h.userMessages, []);
 	const complete = reply({ status: "complete", reigniteRequest: value.reigniteRequest });
 	h.requests.deliverReply(complete);
@@ -119,11 +119,12 @@ test("durable displayed hint suppresses the same report on session restoration",
 	const h = harness();
 	h.requests.observeReply(reply({ attention }));
 	await h.requests.settled();
-	h.requests.reset("session-start");
-	h.requests.restoreAttentionHint(attention.requestId);
-	h.requests.observeReply(reply({ status: "paused", attention }));
-	await h.requests.settled();
+	const restored = new MainSessionRequests(h.host);
+	restored.restoreAttentionHint(attention.requestId);
+	restored.observeReply(reply({ status: "paused", attention }));
+	await restored.settled();
 	assert.equal(h.customMessages.length, 1);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: true }]);
 });
 
 test("stopped verification requests never trigger a selector model turn", async () => {
@@ -232,3 +233,39 @@ test("only matching attention hides progress; all raw evidence and unrelated eve
 	resolved.requests.deliverReply(reply({ attention: { ...related, state: "resolved" }, roundProgress: [progress] }));
 	assert.equal((resolved.customMessages[0] as { display: boolean }).display, true);
 });
+
+
+test("attention delivery failure retries without prematurely persisting its hint", async () => {
+	const h = harness();
+	const send = h.host.pi.sendMessage;
+	h.host.pi.sendMessage = () => { throw new Error("delivery unavailable"); };
+	h.requests.observeReply(reply({ attention }));
+	await h.requests.settled();
+	assert.deepEqual(h.hints, []);
+	assert.equal(h.requests.attentionRequestId, undefined);
+	h.host.pi.sendMessage = send;
+	await h.requests.settled();
+	await h.requests.settled();
+	assert.equal(h.customMessages.length, 1);
+	assert.deepEqual(h.hints, [attention.requestId]);
+	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: true }]);
+});
+
+for (const transition of ["resolved", "successor", "foreign-run"] as const) {
+	test(`queued attention does not deliver after ${transition}`, async () => {
+		const h = harness();
+		h.requests.observeReply(reply({ attention }));
+		const pending = h.requests.drainAttentionNow();
+		await Promise.resolve();
+		if (transition === "foreign-run") {
+			h.setState({ ...h.host.current().state!, runId: "successor-run" } as Parameters<typeof h.setState>[0]);
+		} else {
+			h.requests.observeReply(reply({ attention: { ...attention,
+				...(transition === "resolved" ? { state: "resolved" as const } : { requestId: "successor" }),
+			} }));
+		}
+		await pending;
+		assert.deepEqual(h.customMessages, []);
+		assert.deepEqual(h.hints, []);
+	});
+}

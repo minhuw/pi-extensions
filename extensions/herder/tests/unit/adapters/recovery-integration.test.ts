@@ -321,7 +321,7 @@ async function pauseFixture(fixture: Fixture) {
 	return { service, before };
 }
 
-test("main-session attention stays quiet on status and refuses rejection without interactive host confirmation", { timeout: 30_000 }, async () => {
+test("main-session attention diagnoses once and stays quiet on repeated status and refuses rejection without interactive host confirmation", { timeout: 30_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-adapter-attention-"));
 	let fixture: Fixture | undefined;
 	let capturedApi: CapturedExtensionAPI | undefined;
@@ -368,7 +368,7 @@ test("main-session attention stays quiet on status and refuses rejection without
 		assert.match(String(messageDetails.nextAction), /Record an answer \(record only\), defer, or stop/);
 		assert.match(String(messageDetails.recommendedOperation), /clarify the missing decision/);
 		assert.equal(Object.hasOwn(messageDetails, "capabilityToken"), false);
-		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: false });
+		assert.deepEqual(api.customMessages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
 
 		await withDeadline(api.invoke("agent_settled", ctx), "attention agent_settled");
 		await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1123,7 +1123,7 @@ test("actual planning tool preserves unrelated dirty unfinished work and attenti
 		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
 		const message = await withDeadline(api.waitForAttentionMessage(), "whole-run attention delivery");
 		assert.match(message.content, /Only the user may invoke \/herder-revise/);
-		assert.deepEqual(message.options, { deliverAs: "followUp", triggerTurn: false });
+		assert.deepEqual(message.options, { deliverAs: "followUp", triggerTurn: true });
 		assert.equal(factory.sessions.length, 1);
 		await withDeadline(factory.sessions[0]!.started, "initial sibling started");
 		const oldWorktree = factory.requests[0]!.action.worktree;

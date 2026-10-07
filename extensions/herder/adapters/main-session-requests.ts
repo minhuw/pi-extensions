@@ -305,13 +305,15 @@ export class MainSessionRequests {
 		const epoch = this.host.current().epoch;
 		try {
 			const prompt = await buildAttentionPrompt(this.host.packageRoot, state.planDir, request);
-			if (!(this.host.current().active && this.host.current().epoch === epoch) || !this.host.current().context || !this.currentAttention || this.currentAttention.requestId !== requestId) return;
+			if (!(this.host.current().active && this.host.current().epoch === epoch) || !this.host.current().context
+				|| !this.currentAttention || this.currentAttention.requestId !== requestId || this.currentAttention.state === "resolved"
+				|| this.host.current().state?.runId !== request.runId || !this.host.ownsRun(state.planDir, request.runId)) return;
 			this.host.pi.sendMessage({
 				customType: HERDER_ATTENTION_MESSAGE,
 				content: prompt,
 				display: true,
 				details: attentionMessageDetails(request, state.planDir),
-			}, { deliverAs: "followUp", triggerTurn: false });
+			}, { deliverAs: "followUp", triggerTurn: true });
 			// A successful injection is the only acknowledgement held by the adapter.
 			// SQLite remains authoritative, so a replacement session can re-expose the
 			// request when this hint was not persisted before shutdown.
