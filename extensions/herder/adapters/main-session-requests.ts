@@ -174,8 +174,14 @@ export class MainSessionRequests {
 			if (progress.runId !== reply.runId) continue;
 			const reportKey = roundProgressKey(progress);
 			if (this.deliveredRounds.has(reportKey)) continue;
+			const attention = reply.attention;
+			const coveredByAttention = attention && attention.state !== "resolved"
+				&& attention.runId === progress.runId && attention.planId === progress.planId
+				&& attention.generation === progress.generation && attention.round === progress.round
+				&& (!attention.actionId || attention.actionId === progress.reportId);
 			try {
-				this.host.pi.sendMessage({ customType: HERDER_ROUND_PROGRESS_MESSAGE, content: renderRoundProgress(progress, reply), display: true, details: { reportKey } }, { deliverAs: "followUp", triggerTurn: false });
+				// Keep raw evidence and delivery identity, but avoid a second visible card for the same stop.
+				this.host.pi.sendMessage({ customType: HERDER_ROUND_PROGRESS_MESSAGE, content: renderRoundProgress(progress, reply, true), display: !coveredByAttention, details: { reportKey, collapsed: renderRoundProgress(progress, reply) } }, { deliverAs: "followUp", triggerTurn: false });
 				this.deliveredRounds.add(reportKey);
 			} catch (error) { this.notify(`Herder could not deliver round progress: ${message(error)}`, "warning"); }
 		}
@@ -304,7 +310,7 @@ export class MainSessionRequests {
 				customType: HERDER_ATTENTION_MESSAGE,
 				content: prompt,
 				display: true,
-				details: attentionMessageDetails(request),
+				details: attentionMessageDetails(request, state.planDir),
 			}, { deliverAs: "followUp", triggerTurn: false });
 			// A successful injection is the only acknowledgement held by the adapter.
 			// SQLite remains authoritative, so a replacement session can re-expose the

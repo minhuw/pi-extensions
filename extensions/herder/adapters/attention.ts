@@ -12,6 +12,7 @@ export const HERDER_ATTENTION_MESSAGE = "herder-attention-v1";
 
 export interface HerderAttentionMessageDetails {
 	requestId: string;
+	planDirectory?: string;
 	kind: ManagerAttentionRequest["kind"];
 	planId: string;
 	generation: number;
@@ -95,7 +96,7 @@ function requestBinding(request: ManagerAttentionRequest, planDirectory?: string
 	];
 }
 
-function compactLine(value: string | undefined, maxLength = 240): string | undefined {
+export function compactLine(value: string | undefined, maxLength = 240): string | undefined {
 	const line = value?.replace(/\s+/g, " ").trim();
 	if (!line) return undefined;
 	return line.length <= maxLength ? line : `${line.slice(0, maxLength - 1).trimEnd()}…`;
@@ -150,9 +151,10 @@ function recommendedOperation(request: ManagerAttentionRequest): string {
 	}
 }
 
-export function attentionMessageDetails(request: ManagerAttentionRequest): HerderAttentionMessageDetails {
+export function attentionMessageDetails(request: ManagerAttentionRequest, planDirectory?: string): HerderAttentionMessageDetails {
 	return {
 		requestId: request.requestId,
+		...(planDirectory ? { planDirectory } : {}),
 		kind: request.kind,
 		planId: request.planId,
 		generation: request.generation,
@@ -160,11 +162,9 @@ export function attentionMessageDetails(request: ManagerAttentionRequest): Herde
 		cause: request.cause,
 		role: request.continuation.role,
 		phase: request.continuation.phase,
-		reason: request.cause === "review_budget_exhausted"
-			? `${attentionReason(request)}\n${request.detail}`
-			: (request.cause === "verification_environment"
-				? request.detail.replace(/^WORKER_SELF_REPORT:[^\r\n]*\r?\nWORKTREE:[^\r\n]*\r?\n/, "")
-				: request.detail).trim() || request.question?.trim() || humanLabel(request.cause),
+		reason: request.cause === "review_budget_exhausted" ? attentionReason(request)
+			: compactLine(request.detail.match(/^(?:REASON|ERROR|STOPPED BECAUSE):[^\S\r\n]*(.+)$/m)?.[1]
+				?? request.question ?? request.detail.replace(/^WORKER_SELF_REPORT:[^\r\n]*\r?\nWORKTREE:[^\r\n]*\r?\n/, "")) ?? attentionReason(request),
 		question: request.question?.trim(),
 		reportedAdvice: request.recommendedAction?.trim(),
 		recommendedOperation: recommendedOperation(request),
@@ -186,19 +186,23 @@ export function attentionMessageDisplay(
 		typeof details?.round === "number" ? `round ${details.round}` : undefined,
 	].filter((value): value is string => Boolean(value)).join(" · ");
 	const lines = [`${title}${identity ? `  ${theme.fg("muted", identity)}` : ""}`];
-	if (details?.reason?.trim()) lines.push(`${theme.fg("dim", "  Reason:")} ${details.reason}`);
-	if (details?.question?.trim() && details.question.trim() !== details.reason?.trim()) {
-		lines.push(`${theme.fg("dim", "  Question:")} ${details.question}`);
-	}
-	if (details?.recommendedOperation?.trim()) {
-		lines.push(`${theme.fg("dim", "  Recommended next operation:")} ${details.recommendedOperation}`);
-		lines.push(theme.fg("muted", "  Recommendation only, not authorization."));
-	}
-	if (details?.nextAction?.trim()) lines.push(`${theme.fg("dim", "  Options:")} ${details.nextAction}`);
 	if (!expanded) {
-		lines.push(theme.fg("muted", `  ${expandHint}`));
+		const cause = details?.cause ? humanLabel(details.cause) : "Decision required";
+		const evidence = (details?.reason || content).match(/^(?:REASON|ERROR|STOPPED BECAUSE):[^\S\r\n]*(.+)$/m)?.[1];
+		const reason = compactLine(evidence || details?.reason || details?.question);
+		lines.push(`  ${cause}${reason && reason.toLowerCase() !== cause.toLowerCase() ? ` — ${reason}` : ""}`);
+		// Only adapter-owned metadata supplies command arguments, never dossier text.
+		const directory = details?.planDirectory;
+		if (details?.cause === "transport_exhausted" && directory && !/[\r\n]/.test(directory)) {
+			const quoted = '"' + directory.replace(/([\\"])/g, "\\$1") + '"';
+			lines.push(`  Continue (confirmed cleanup/retry): /herder-resume ${quoted}`);
+		} else {
+			lines.push("  No direct continuation until a decision or correction.");
+		}
+		lines.push("  Stop whole run: /herder-stop");
 		return lines.join("\n");
 	}
+
 	const binding = [
 		typeof details?.generation === "number" ? `generation ${details.generation}` : undefined,
 		details?.phase ? `phase ${details.phase}` : undefined,

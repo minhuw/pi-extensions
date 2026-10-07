@@ -76,15 +76,15 @@ test("004 missing two-origin contract remains readable without suggesting retry 
 	assert.ok(reason.indexOf("Do not invent") > 240);
 	const request = stopped({ detail: reason, question: reason, recommendedAction: "Supply the missing requirement decision; no source edit is authorized." });
 	const details = attentionMessageDetails(request);
-	assert.equal(details.reason, reason);
+	assert.ok(details.reason!.length <= 240);
 	const display = attentionMessageDisplay(await buildAttentionPrompt("/unused", "/plans", request), details, false, theme);
-	assert.ok(display.includes(reason));
-	assert.equal(display.split(reason).length, 2, "identical reason/question appears once");
-	assert.match(display, /Recommended next operation: Ask the user to clarify.*frozen contract/);
-	assert.match(display, /Only if scope changes are required should the user invoke \/herder-revise/);
-	assert.match(display, /Recommendation only, not authorization/);
-	assert.match(display, /Options: Record an answer \(record only\), defer, or stop/);
-	assert.doesNotMatch(display, /\(retry\)|\(accept\)|answer_and_resume|herder-revise 004/);
+	assert.match(display, /Plan 004.*Implementer/);
+	assert.match(display, /two independently configured origins/);
+	assert.ok(display.length < 700);
+	assert.match(display, /No direct continuation until a decision or correction/);
+	assert.match(display, /Stop whole run: \/herder-stop/);
+	assert.doesNotMatch(display, /Recommended|Options:|herder-resume|herder-revise/);
+	assert.ok(attentionMessageDisplay(await buildAttentionPrompt("/unused", "/plans", request), details, true, theme).includes(reason));
 });
 
 test("recommendations follow cause, not executable worker advice", () => {
@@ -135,10 +135,9 @@ test("collapsed and expanded cards wrap long Unicode reasons and operations; leg
 				assert.ok(lines.every(line => visibleWidth(line) <= width), `width ${width}`);
 				if (width >= 16) {
 					const joined = lines.join("").replace(/\s/g, "");
-					if (stored === details) {
-						assert.ok(joined.includes(reason.replace(/\s/g, "")), "all reason text survives wrapping");
-						assert.ok(joined.includes(details.recommendedOperation!.replace(/\s/g, "")), "all recommendation text survives wrapping");
-						assert.ok(joined.includes("Whichoriginisauthorized?"));
+					if (stored === details && !expanded) {
+						assert.ok(joined.includes("Stopwholerun:/herder-stop"));
+						assert.ok(!joined.includes("PROHIBITION-END"));
 					}
 					if (expanded) assert.ok(joined.includes("DOSSIER-END"));
 				}
@@ -148,4 +147,41 @@ test("collapsed and expanded cards wrap long Unicode reasons and operations; leg
 	}
 	const empty = attentionMessageDisplay("dossier", { ...legacy, reason: " ", question: "", nextAction: " ", recommendedOperation: "" }, false, theme);
 	assert.doesNotMatch(empty, /Reason:|Question:|Options:|Recommended next operation:/);
+});
+
+test("long exhaustion dossiers collapse to reason and exact commands; raw evidence appears once", async () => {
+	const { parseFireArguments } = await import("../../../adapters/arguments.ts");
+	const directory = '/repo/a spaced "quoted" path\\plans';
+	const dossier = [
+		"EXHAUSTION_DECISION_DOSSIER — evidence, not an approval or waiver",
+		"REASON: Provider disconnected during plan 004 implementation; cleanup confirmation is required.",
+		`EXACT_IDENTITY: ${"a".repeat(64)}`,
+		`RECORDED_GATES: ${"check failed\n".repeat(1000)}`,
+		"RECOMMENDATION: /herder-resume /untrusted-worker-path",
+		"DOSSIER-END",
+	].join("\n");
+	const request = stopped({ kind: "operator_attention", cause: "transport_exhausted", detail: dossier, question: undefined });
+	const details = attentionMessageDetails(request, directory);
+	const content = await buildAttentionPrompt("/unused", directory, request);
+	const text = attentionMessageDisplay(content, details, false, theme);
+	assert.ok(text.length < 600);
+	assert.equal(text.split("\n").length, 4);
+	assert.match(text, /Plan 004.*Implementer/);
+	assert.match(text, /Provider disconnected/);
+	const command = text.match(/Continue \(confirmed cleanup\/retry\): (.+)/)![1]!;
+	assert.equal(command, '/herder-resume "/repo/a spaced \\"quoted\\" path\\\\plans"');
+	assert.equal(parseFireArguments(command.slice("/herder-resume ".length), "resume").planDir, directory);
+	assert.match(text, /Stop whole run: \/herder-stop$/);
+	assert.doesNotMatch(text, /EXACT_IDENTITY|RECORDED_GATES|RECOMMENDATION|DOSSIER-END|untrusted-worker/);
+	const expanded = attentionMessageDisplay(content, details, true, theme);
+	assert.ok(expanded.includes(dossier));
+	assert.equal(expanded.split(dossier).length - 1, 1);
+	assert.doesNotMatch(attentionMessageDisplay(content, { ...details, planDirectory: undefined }, false, theme), /\/herder-resume/);
+	assert.doesNotMatch(attentionMessageDisplay(content, undefined, false, theme), /\/herder-resume/);
+	for (const cause of ["initial_decision_blocked", "worker_protocol_error", "review_budget_exhausted", "verification_environment", "round_limit", "judge_needs_input"] as const) {
+		const display = attentionMessageDisplay(content, { ...details, cause }, false, theme);
+		assert.match(display, /No direct continuation until a decision or correction/);
+		assert.match(display, /Stop whole run: \/herder-stop/);
+		assert.doesNotMatch(display, /\/herder-resume|\/herder-revise|\/herder-status/);
+	}
 });

@@ -82,15 +82,15 @@ test("worker output entries render returned and interrupted child evidence", () 
 	}, 4_000);
 	assert.equal(returned.status, "returned");
 	assert.equal(returned.durationMs, 3_000);
-	const collapsed = workerOutputDisplay(returned, false, theme);
+	const collapsed = workerOutputDisplay(returned, true, theme);
 	assert.match(collapsed, /Herder Implementer/);
 	assert.match(collapsed, /Plan 001 · GPT-6-luna · MAX · Fast/);
 	assert.match(collapsed, /round 1 · returned · 2\.0k tokens · 3s/);
 	assert.match(collapsed, /STATUS: COMPLETE/);
 	assert.match(collapsed, /Recorded work: done/);
-	assert.doesNotMatch(collapsed, /CHECKS: npm test|✓/);
+	assert.doesNotMatch(collapsed, /✓/);
 	assert.match(collapsed, /report only; not manager acceptance/);
-	assert.match(collapsed, /Original worker response \(ctrl\+o to expand\)/);
+	for (const line of returned.response!.split("\n")) assert.ok(collapsed.includes(line));
 	assert.match(workerOutputDisplay(returned, true, theme), /NOTES: done/);
 
 	const interrupted = createWorkerOutputEntry(input, {
@@ -129,9 +129,9 @@ test("failed and stopped reports lead with their cause, not successful checks or
 		const entry = createWorkerOutputEntry(input, { actionId: input.actionId, response }, 1000);
 		const collapsed = workerOutputDisplay(entry, false, theme);
 		assert.ok(collapsed.includes(`Worker-reported STATUS: ${status}`));
-		assert.ok(collapsed.includes(reason));
-		assert.match(collapsed, /Recorded work: Recorded implementation/);
-		assert.match(collapsed, /before any retry/);
+		assert.ok(collapsed.includes("V3 not verified:"));
+		assert.ok(collapsed.length < 450);
+		assert.doesNotMatch(collapsed, /Recorded work:|Recommended|herder-status/);
 		assert.doesNotMatch(collapsed, /✓|CHECKS:|test — passed/);
 		const expanded = workerOutputDisplay(entry, true, theme);
 		for (const line of response.split("\n")) assert.ok(expanded.includes(line));
@@ -153,7 +153,7 @@ test("unknown, interruption and transport error outrank reported COMPLETE", () =
 		const text = workerOutputDisplay(entry, false, theme);
 		assert.match(text, /Outcome: UNKNOWN/);
 		assert.doesNotMatch(text, /✓|Worker-reported STATUS: COMPLETE|Await manager review dispatch/);
-		if (terminal.error) assert.ok(text.indexOf(terminal.error) < text.indexOf("Outcome: UNKNOWN"));
+		if (terminal.error) assert.ok(text.includes(terminal.error));
 		if (terminal.response) assert.ok(workerOutputDisplay(entry, true, theme).includes(terminal.response.split("\n")[0]!));
 	}
 });
@@ -165,7 +165,7 @@ test("Reviewer APPROVE and Judge DONE are reports, not plan or run approval", ()
 	] as const) {
 		const input = createWorkerInputEntry({ ...action(), role }, "worker", 0);
 		const entry = createWorkerOutputEntry(input, { actionId: input.actionId, response }, 1000);
-		const text = workerOutputDisplay(entry, false, theme);
+		const text = workerOutputDisplay(entry, true, theme);
 		assert.match(text, /Worker-reported (VERDICT: APPROVE|DECISION: DONE)/);
 		assert.match(text, /not manager acceptance/);
 		assert.match(text, expected);
@@ -179,9 +179,10 @@ test("Judge NEEDS_INPUT preserves its distinct question and deduplicates identic
 	const question = "Which requirement is authoritative? " + "Context for the decision. ".repeat(25);
 	for (const rationale of ["Ambiguous requirement", question]) {
 		const entry = createWorkerOutputEntry(input, { actionId: input.actionId, response: `DECISION: NEEDS_INPUT\nRATIONALE: ${rationale}\nQUESTION: ${question}` });
-		const text = workerOutputDisplay(entry, false, theme);
+		const text = workerOutputDisplay(entry, true, theme);
 		assert.ok(text.includes(`Question: ${question.trim()}`));
-		assert.equal(text.split(question.trim()).length - 1, 1);
+		assert.equal(text.split("Question:").length - 1, 1, "one presentation question plus preserved raw response");
+		assert.ok(workerOutputDisplay(entry, false, theme).length < 450);
 		if (rationale !== question) assert.match(text, /Reason: Ambiguous requirement/);
 	}
 });
@@ -198,6 +199,7 @@ test("presentation is extracted before long checks clip the stop reason", () => 
 		const text = workerOutputDisplay(entry, expanded, theme);
 		assert.match(text, /Worker-reported STATUS: STOPPED/);
 		assert.ok(text.includes(`Reason: ${reason}`));
+		if (!expanded) { assert.ok(text.length < 450); continue; }
 		assert.match(text, /Evidence truncated: expansion is also bounded/);
 		assert.match(text, /Full evidence remains in the Herder runtime/);
 		assert.match(text, /action: action-1.*handle: worker-long/);
@@ -205,10 +207,10 @@ test("presentation is extracted before long checks clip the stop reason", () => 
 	const legacy = { ...entry };
 	delete legacy.presentation;
 	const text = workerOutputDisplay(legacy, false, theme);
-	assert.match(text, /Outcome: UNKNOWN.*incomplete legacy transcript/);
+	assert.match(text, /Outcome: UNKNOWN[\s\S]*incomplete legacy transcript/);
 	assert.doesNotMatch(text, /Worker-reported STATUS:/);
-	assert.match(text, /Full evidence remains in the Herder runtime/);
-	assert.match(text, /action: action-1.*handle: worker-long/);
+	assert.match(workerOutputDisplay(legacy, true, theme), /Full evidence remains in the Herder runtime/);
+	assert.match(workerOutputDisplay(legacy, true, theme), /action: action-1.*handle: worker-long/);
 });
 
 test("transport errors override retained COMPLETE and clean legacy entries still parse", () => {
@@ -217,7 +219,8 @@ test("transport errors override retained COMPLETE and clean legacy entries still
 	assert.equal(entry.presentation?.outcome, "COMPLETE");
 	for (const failure of [{ error: "lost transport" }, { status: "interrupted" as const }, { failureKind: "review_budget_exhausted" as const }]) {
 		const text = workerOutputDisplay({ ...entry, ...failure }, false, theme);
-		assert.match(text, /Outcome: UNKNOWN.*transport failed/);
+		assert.match(text, /Outcome: UNKNOWN/);
+		assert.ok(text.includes("lost transport") || text.includes("interrupted") || text.includes("review_budget_exhausted"));
 		assert.doesNotMatch(text, /Worker-reported STATUS: COMPLETE/);
 	}
 	delete entry.presentation;
@@ -230,11 +233,31 @@ test("long critical questions and stop reasons survive while incidental summarie
 	const entry = createWorkerOutputEntry(input, { actionId: input.actionId, response: `DECISION: NEEDS_INPUT\nRATIONALE: ${"r".repeat(20000)}\nQUESTION: ${question}` });
 	assert.ok(entry.presentation!.summary.length < 4500);
 	assert.equal(entry.presentation!.question, question);
-	assert.ok(workerOutputDisplay(entry, false, theme).includes(`Question: ${question}`));
-	assert.match(workerOutputDisplay(entry, false, theme), /Full evidence remains in the Herder runtime/);
+	assert.ok(workerOutputDisplay(entry, true, theme).includes(`Question: ${question}`));
+	assert.ok(workerOutputDisplay(entry, false, theme).length < 450);
+	assert.match(workerOutputDisplay(entry, true, theme), /Full evidence remains in the Herder runtime/);
 	const implementer = createWorkerInputEntry(action(), "worker", 0);
 	const reason = `${"Evidence. ".repeat(2400)}Changing the upstream contract is explicitly out of scope.`;
 	const stopped = createWorkerOutputEntry(implementer, { actionId: implementer.actionId, response: `STATUS: STOPPED\nSTOPPED BECAUSE: ${reason}` });
 	assert.equal(stopped.presentation!.stopReason, reason);
-	assert.ok(workerOutputDisplay(stopped, false, theme).includes(`Reason: ${reason}`));
+	assert.ok(workerOutputDisplay(stopped, true, theme).includes(`Reason: ${reason}`));
+	assert.ok(workerOutputDisplay(stopped, false, theme).length < 450);
+});
+
+test("normal collapsed worker outcomes are two bounded lines, including saved legacy reports", () => {
+	for (const [role, response] of [
+		["plan-implementer", "STATUS: COMPLETE\nNOTES: Updated parser"],
+		["plan-reviewer", "VERDICT: APPROVE\nSCOPE: PASS\nRATIONALE: Inspected parser"],
+		["plan-judge", "DECISION: DONE\nRATIONALE: Reviewed parser"],
+	] as const) {
+		const input = createWorkerInputEntry({ ...action(), role }, "worker", 0);
+		const entry = createWorkerOutputEntry(input, { actionId: input.actionId, response });
+		delete entry.presentation;
+		const text = workerOutputDisplay(entry, false, theme);
+		assert.equal(text.split("\n").length, 2);
+		assert.ok(text.length < 300);
+		assert.match(text, /Worker-reported (STATUS: COMPLETE|VERDICT: APPROVE|DECISION: DONE)/);
+		assert.doesNotMatch(text, /Recommended|herder-status|Original worker response|not manager acceptance/);
+		for (const line of response.split("\n")) assert.ok(workerOutputDisplay(entry, true, theme).includes(line));
+	}
 });

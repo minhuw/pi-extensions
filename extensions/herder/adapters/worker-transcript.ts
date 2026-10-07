@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { parseWorkerResult, type ManagerAction, type TerminalEvent, type UsageEvidence, type WorkerResult } from "../src/shared/protocol.ts";
+import { compactLine } from "./attention.ts";
 import { recommendedNextOperation } from "./round-progress.ts";
 
 export const HERDER_WORKER_INPUT_ENTRY = "herder-worker-input-v1";
@@ -245,6 +246,16 @@ export function workerOutputDisplay(
 	const incomplete = responseTruncated || [report?.summary, report?.stopReason, report?.question].some(isTruncated);
 	const warning = transportFailed || !report || ["FAILED", "STOPPED", "BLOCK", "BLOCKED", "NEEDS_INPUT"].includes(reportedOutcome ?? "UNKNOWN");
 	const icon = theme.fg(transportFailed ? "error" : warning ? "warning" : "muted", transportFailed ? "✗" : warning ? "!" : "•");
+	if (!expanded) {
+		const field = report?.kind === "implementer" ? "STATUS" : report?.kind === "reviewer" ? "VERDICT" : "DECISION";
+		const outcome = report ? `Worker-reported ${field}: ${reportedOutcome}` : `Outcome: UNKNOWN${transportFailed ? interrupted ? " (interrupted)" : " (transport failed)" : ""}`;
+		const reason = transportFailed ? entry.error || entry.failureKind || "interrupted; transport failed"
+			: report?.stopReason || report?.question || report?.summary || (responseTruncated ? "incomplete legacy transcript" : "no parseable worker report");
+		return [
+			`${icon} ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))} · Plan ${entry.planId} · round ${entry.round} · ${outcome}`,
+			theme.fg(warning ? "warning" : "dim", `  Reason: ${compactLine(reason)}`),
+		].join("\n");
+	}
 	const state = interrupted ? "interrupted" : (entry.error || entry.failureKind) ? "returned with transport error" : "returned";
 	const stats = [formatTokens(entry.usage), formatDuration(entry.durationMs)].filter((value): value is string => Boolean(value)).join(" · ");
 	const header = `${icon} ${theme.fg("toolTitle", theme.bold(`Herder ${roleLabel(entry.role)}`))}  ${theme.fg("muted", workerIdentity(entry))}`;

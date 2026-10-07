@@ -202,3 +202,33 @@ test("round delivery failure does not acknowledge evidence or create a model tur
 	assert.equal(h.userMessages.length, 0);
 	assert.deepEqual(h.messageOptions, [{ deliverAs: "followUp", triggerTurn: false }]);
 });
+
+test("only matching attention hides progress; all raw evidence and unrelated events survive", async () => {
+	const h = harness();
+	const progress = {
+		runId: "run", planId: "PLAN", generation: 1, round: 1, reportId: "terminal",
+		implementer: { actionId: "terminal", outcome: "STOPPED", summary: "Recorded work", stoppedBecause: "Missing second origin", interrupted: false, setup: [], checks: [] },
+		fixNext: [], notIntendedToFix: [], outcome: "STOPPED",
+	};
+	const related = { ...attention, actionId: "terminal" };
+	const value = reply({ attention: related, roundProgress: [progress,
+		{ ...progress, planId: "OTHER" }, { ...progress, generation: 2 }, { ...progress, round: 2 }, { ...progress, reportId: "different-action" },
+	] });
+	h.requests.observeReply(value);
+	h.requests.deliverReply(value);
+	await h.requests.settled();
+	const messages = h.customMessages as { customType: string; display: boolean; content: string; details: { collapsed?: string; planDirectory?: string } }[];
+	const rounds = messages.filter(message => message.customType === "herder-round-progress-v1");
+	assert.deepEqual(rounds.map(message => message.display), [false, true, true, true, true]);
+	assert.ok(rounds[0]!.content.includes("Missing second origin"));
+	assert.ok(rounds[0]!.details.collapsed!.includes("Missing second origin"));
+	assert.equal(messages.filter(message => message.customType === "herder-attention-v1").length, 1);
+	assert.equal(messages.at(-1)!.details.planDirectory, "/repo/herder-plans");
+	assert.deepEqual(h.userMessages, []);
+	const foreign = harness();
+	foreign.requests.deliverReply(reply({ attention: { ...related, runId: "foreign" }, roundProgress: [progress] }));
+	assert.equal((foreign.customMessages[0] as { display: boolean }).display, true);
+	const resolved = harness();
+	resolved.requests.deliverReply(reply({ attention: { ...related, state: "resolved" }, roundProgress: [progress] }));
+	assert.equal((resolved.customMessages[0] as { display: boolean }).display, true);
+});

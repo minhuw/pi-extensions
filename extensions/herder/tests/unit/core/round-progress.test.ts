@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { StoredAction } from "../../../src/daemon/run-store.ts";
 import { buildRoundProgress, excludedFindings } from "../../../src/core/round-progress.ts";
-import { renderRoundProgress, recommendedNextOperation } from "../../../adapters/round-progress.ts";
+import { renderRoundProgress as renderProgress, recommendedNextOperation } from "../../../adapters/round-progress.ts";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { parseWorkerResult } from "../../../src/shared/protocol.ts";
+
+const renderRoundProgress = (progress: Parameters<typeof renderProgress>[0], reply?: Parameters<typeof renderProgress>[1]) => renderProgress(progress, reply, true);
 
 function action(id: string, role: "implementer" | "reviewer" | "judge", overrides: Partial<StoredAction> = {}): StoredAction {
 	const envelopes = {
@@ -129,7 +131,7 @@ test("003 FAILED retains committed work but prioritizes the full V3 reason over 
 	assert.ok(text.indexOf(reason) < text.indexOf("npm test"));
 	assert.match(text, /Recorded work: Updated code/);
 	assert.match(text, /Retained commits \(worker-reported\): abcdef1/);
-	assert.match(text, /self-reported, not passed manager gates/);
+	assert.match(text, /self-reported/);
 	assert.match(text, /Inspect the stopped reason and current manager status\/attention before any retry/);
 	assert.doesNotMatch(text, /done:|fixNext:|notIntendedToFix:|Authorized repair:|Excluded finding:/);
 	assert.equal(text.match(/Recommended next operation:/g)?.length, 1);
@@ -178,16 +180,17 @@ test("only same-run historical manager snapshots override stage advice for pause
 });
 
 
-test("round check previews stay bounded without hiding the stop reason or counting pass/fail", () => {
+test("expanded progress preserves all checks without counting pass/fail", () => {
 	const progress = buildRoundProgress([stoppedAttempt("003", "FAILED", "abcdef1", "V3 not verified")])[0]!;
 	progress.implementer!.setup = ["install", "configure", "third setup item"];
 	progress.implementer!.checks = ["check one: " + "x".repeat(600), "second check", "third check", "fourth check"];
 	const text = renderRoundProgress(progress);
 	assert.match(text, /Reason: V3 not verified/);
-	assert.match(text, /1 additional items omitted; expand worker transcript/);
-	assert.match(text, /preview truncated; 2 additional items omitted; expand worker transcript/);
-	assert.doesNotMatch(text, /third setup item|third check|fourth check|\d+ passed|\d+ failed/);
-	assert.ok(text.split("\n").find(line => line.includes("Recorded checks ("))!.length < 700);
+	for (const item of [...progress.implementer!.setup, ...progress.implementer!.checks]) assert.ok(text.includes(item));
+	const collapsed = renderProgress(progress);
+	assert.match(collapsed, /V3 not verified/);
+	assert.doesNotMatch(collapsed, /third setup item|third check|fourth check|Recommended/);
+	assert.ok(collapsed.length < 400);
 });
 
 
@@ -208,4 +211,51 @@ test("no-context COMPLETE is mode-neutral, including YOLO; Reviewer BLOCK asks f
 	assert.doesNotMatch(text, /Await|wait.*review|review dispatch/);
 	assert.match(recommendedNextOperation("reviewer", "BLOCK"), /Judge adjudication/);
 	assert.doesNotMatch(recommendedNextOperation("reviewer", "BLOCK"), /retry|stopped reason|repair/);
+});
+
+test("collapsed progress shows only the latest worker role, with full dossier on expansion", () => {
+	const progress = buildRoundProgress([action("i", "implementer"), action("r", "reviewer"), action("j", "judge")])[0]!;
+	const message = "EXHAUSTION_DECISION_DOSSIER\nREASON: Transport lost\n" + "EXACT_IDENTITY: evidence\n".repeat(1000);
+	const snapshot = { runId: "run", status: "paused", message, active: [], actions: [] } as unknown as NonNullable<Parameters<typeof renderProgress>[1]>;
+	const compact = renderProgress(progress, snapshot);
+	assert.equal(compact.split("\n").length, 1);
+	assert.ok(compact.length < 400);
+	assert.match(compact, /001.*judge reported DONE/);
+	assert.doesNotMatch(compact, /implementer|reviewer|EXHAUSTION|Recommended|herder-status|plan complete|run complete/);
+	assert.ok(renderProgress(progress, snapshot, true).includes(message));
+	for (const outcome of ["FAILED", "STOPPED"] as const) {
+		const failed = buildRoundProgress([stoppedAttempt("004", outcome, "none", "V3 browser target unavailable. " + "evidence ".repeat(200))])[0]!;
+		const text = renderProgress(failed);
+		assert.ok(text.length < 400);
+		assert.match(text, /implementer reported (FAILED|STOPPED).*V3 browser target unavailable/);
+	}
+});
+
+test("registered progress renderer expands full stored evidence and handles legacy strings", async () => {
+	const { registerRoundProgressRenderer, HERDER_ROUND_PROGRESS_MESSAGE } = await import("../../../adapters/round-progress.ts");
+	const { initTheme } = await import("@earendil-works/pi-coding-agent");
+	type API = import("@earendil-works/pi-coding-agent").ExtensionAPI;
+	type Renderer = import("@earendil-works/pi-coding-agent").MessageRenderer<{ collapsed?: string }>;
+	let renderer: Renderer | undefined;
+	registerRoundProgressRenderer({ registerMessageRenderer: (_type: string, value: Renderer) => { renderer = value; } } as unknown as API);
+	initTheme("dark", false);
+	const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text } as unknown as import("@earendil-works/pi-coding-agent").Theme;
+	const progress = buildRoundProgress([action("i", "implementer"), action("j", "judge")])[0]!;
+	const content = renderProgress(progress, undefined, true);
+	for (const details of [undefined, { collapsed: renderProgress(progress) }]) {
+		for (const expanded of [false, true]) {
+			const component = renderer!({ role: "custom", customType: HERDER_ROUND_PROGRESS_MESSAGE, content, details, display: true, timestamp: 0 }, { expanded, outputPad: 1 }, theme)!;
+			const lines = component.render(80);
+			assert.ok(lines.every(line => visibleWidth(line) <= 80));
+			const text = lines.join("\n");
+			if (expanded) {
+				assert.match(text, /final gate — not run/);
+				assert.match(text, /implementer/);
+			} else {
+				assert.match(text, /judge/);
+				assert.doesNotMatch(text, /implementer|Recommended|Recorded checks/);
+				assert.ok(lines.length <= 4);
+			}
+		}
+	}
 });

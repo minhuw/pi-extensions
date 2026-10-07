@@ -203,7 +203,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		cause: "judge_needs_input",
 		role: "plan-judge",
 		phase: "READY_JUDGE",
-		reason: request.detail,
+		reason: request.question,
 		question: request.question,
 		reportedAdvice: request.recommendedAction,
 		recommendedOperation: "Ask the user to clarify the missing decision against the frozen contract. Only if scope changes are required should the user invoke /herder-revise; clarification alone does not authorize execution.",
@@ -247,11 +247,10 @@ test("attention messages render a compact card while preserving the full prompt"
 	} as unknown as Theme;
 	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
 	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
-	assert.match(collapsed, /Reason: The Judge needs a bounded product decision\./);
-	assert.match(collapsed, /Question: Should the optional compatibility alias remain in scope\?/);
-	assert.match(collapsed, /Recommended next operation: Ask the user to clarify/);
-	assert.match(collapsed, /Options: Record an answer \(record only\)/);
-	assert.match(collapsed, /ctrl\+o for full dossier/);
+	assert.match(collapsed, /Should the optional compatibility alias remain in scope\?/);
+	assert.match(collapsed, /No direct continuation until a decision or correction/);
+	assert.match(collapsed, /Stop whole run: \/herder-stop/);
+	assert.doesNotMatch(collapsed, /Recommended|Options:|herder-resume|herder-revise/);
 	assert.doesNotMatch(collapsed, /HERDER_MAIN_SESSION|REQUEST_ID|secret-capability-token/);
 
 	const expanded = attentionMessageDisplay(prompt, details, true, theme);
@@ -286,9 +285,9 @@ test("attention messages render a compact card while preserving the full prompt"
 	const compactComponent = renderer(message, { expanded: false, outputPad: 1 }, theme);
 	assert.ok(compactComponent);
 	const wrappedCard = compactComponent.render(80).join("\n").replace(/\s+/g, " ");
-	assert.match(wrappedCard, /Recommended next operation:/);
-	assert.match(wrappedCard, /clarification alone does not authorize execution\./);
-	assert.match(wrappedCard, /for full dossier/);
+	assert.match(wrappedCard, /No direct continuation until a decision or correction/);
+	assert.match(wrappedCard, /Stop whole run: \/herder-stop/);
+	assert.doesNotMatch(wrappedCard, /Recommended next operation:/);
 
 	const legacy = attentionMessageDisplay(prompt, {
 		requestId: details.requestId,

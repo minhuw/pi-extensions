@@ -1,3 +1,4 @@
+import { compactLine } from "./attention.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import type { ManagerReply, RoundProgress } from "../src/shared/protocol.ts";
@@ -21,14 +22,21 @@ export function recommendedNextOperation(role: string, outcome: string): string 
 export function renderRoundProgress(
 	progress: RoundProgress,
 	reply?: Pick<ManagerReply, "runId" | "status" | "message" | "active" | "actions" | "attention" | "scheduler">,
+	expanded = false,
 ): string {
+	if (!expanded) {
+		const role = (["implementer", "reviewer", "judge"] as const).find(role => progress[role]?.actionId === progress.reportId);
+		const evidence = role ? progress[role] : undefined;
+		const reason = compactLine(evidence?.stoppedBecause || evidence?.summary);
+		return `Herder · ${progress.planId} · round ${progress.round} · ${role ?? "worker"} reported ${evidence?.outcome ?? progress.outcome}${reason ? ` — ${reason}` : ""}`;
+	}
 	const compact = (text: string) => text.replace(/\s+/g, " ").trim();
 	const lines = [
 		`Herder · ${progress.planId} · generation ${progress.generation} · round ${progress.round} · Attempt result (not plan completion)`,
 		`Outcome: ${progress.outcome} · Scheduling is manager-owned`,
 	];
 	const snapshot = reply?.runId === progress.runId ? reply : undefined;
-	if (snapshot) lines.push(`Run at report (historical manager snapshot): ${snapshot.status} — ${compact(snapshot.message)}`);
+	if (snapshot) lines.push(`Run at report (historical manager snapshot): ${snapshot.status} — ${snapshot.message}`);
 	let latestRole = "";
 	for (const role of ["implementer", "reviewer", "judge"] as const) {
 		const evidence = progress[role];
@@ -49,12 +57,7 @@ export function renderRoundProgress(
 				if (label === "checks") lines.push(`${role} · Recorded checks: none recorded`);
 				continue;
 			}
-			const preview = items.slice(0, 2).map(compact).join("; ");
-			const notices = [
-				...(preview.length > 480 ? ["preview truncated"] : []),
-				...(items.length > 2 ? [`${items.length - 2} additional items omitted`] : []),
-			];
-			lines.push(`${role} · Recorded ${label} (self-reported${label === "checks" ? ", not passed manager gates" : ""}): ${preview.slice(0, 480)}${notices.length ? ` … [${notices.join("; ")}; expand worker transcript]` : ""}`);
+			lines.push(`${role} · Recorded ${label} (self-reported):\n${items.join("\n")}`);
 		}
 	}
 	for (const contract of progress.fixNext) lines.push(`Authorized repair: ${compact(contract)}`);
@@ -69,9 +72,17 @@ export function renderRoundProgress(
 }
 
 export function registerRoundProgressRenderer(pi: ExtensionAPI): void {
-	pi.registerMessageRenderer(HERDER_ROUND_PROGRESS_MESSAGE, (message, { outputPad }, theme) => {
+	pi.registerMessageRenderer<{ collapsed?: string }>(HERDER_ROUND_PROGRESS_MESSAGE, (message, { expanded, outputPad }, theme) => {
 		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
-		box.addChild(new Text(typeof message.content === "string" ? message.content : "Herder attempt evidence unavailable", 0, 0));
+		const content = typeof message.content === "string" ? message.content : "Herder attempt evidence unavailable";
+		// Legacy cards retain their original content on expansion; show only the latest role otherwise.
+		const legacyRole = [...content.matchAll(/^(implementer|reviewer|judge) · Outcome: .+$/gm)].at(-1);
+		const legacyReason = legacyRole && content.slice(legacyRole.index! + legacyRole[0].length).match(/^\s+(?:Reason|Recorded work): (.+)$/m)?.[1];
+		const legacy = legacyRole
+			? `${content.split("\n")[0]?.split(" · generation")[0]} · ${legacyRole[0].replace("Outcome:", "reported")}${legacyReason ? ` — ${legacyReason}` : ""}`
+			: content.split("\n")[0];
+		const display = expanded ? content : message.details?.collapsed ?? compactLine(legacy) ?? "Herder attempt evidence unavailable";
+		box.addChild(new Text(display, 0, 0));
 		return box;
 	});
 }
