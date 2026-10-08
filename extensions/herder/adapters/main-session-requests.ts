@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	HERDER_ATTENTION_MESSAGE,
 	attentionMessageDetails,
 	buildAttentionPrompt,
+	buildStopPrompt,
 } from "./attention.ts";
 import {
 	type IntegrationRepairRequest,
@@ -49,6 +51,7 @@ interface PendingVerificationFailure {
 	planDirectory: string;
 	detail: string;
 	sessionId?: string;
+	epoch: number;
 	repair?: IntegrationRepairRequest;
 }
 
@@ -65,7 +68,7 @@ export class MainSessionRequests {
 	private attentionHint: string | undefined;
 	private attentionDrain = Promise.resolve();
 	private readonly deferredAttention = new Set<string>();
-	private readonly notifiedVerificationFailures = new Set<string>();
+	private pendingStop: { key: string; reply: ManagerReply; epoch: number } | undefined;
 	private readonly deliveredVerificationFailureFollowUps = new Set<string>();
 	private pendingVerificationFailure: PendingVerificationFailure | undefined;
 	private sendingVerificationFailure = false;
@@ -85,6 +88,11 @@ export class MainSessionRequests {
 
 	reset(mode: "idle" | "cleanup" | "resume" | "session-start" | "shutdown"): void {
 		this.currentAttention = undefined;
+		this.pendingStop = undefined;
+		if (mode === "resume" && this.attentionHint?.startsWith("stop:")) {
+			this.attentionHint = undefined;
+			this.host.onAttentionHint(undefined);
+		}
 		if (mode !== "resume") this.attentionHint = undefined;
 		this.deferredAttention.clear();
 		if (mode === "resume") {
@@ -102,7 +110,6 @@ export class MainSessionRequests {
 		this.integrationRepairRequestStore.clear();
 		this.reigniteRequestStore.clear();
 		this.promptedReignites.clear();
-		if (mode === "idle" || mode === "cleanup") this.notifiedVerificationFailures.clear();
 		if (mode === "cleanup") this.deliveredVerificationFailureFollowUps.clear();
 		if (mode === "shutdown") this.sendingVerificationFailure = false;
 	}
@@ -138,25 +145,34 @@ export class MainSessionRequests {
 	}
 
 	observeReply(reply: ManagerReply, displayed?: { status: string; message: string }): void {
-		if (reply.status === "stopped" || reply.executionBudget?.stopReason) { this.pendingVerificationFailure = undefined; }
 		const owned = this.host.ownsRun(reply.planDirectory, reply.runId);
-		this.currentAttention = owned ? reply.attention : undefined;
-		if (!this.currentAttention || this.attentionHint !== this.currentAttention.requestId) {
-			const displayed = this.host.current().state?.attentionRequestId;
-			this.attentionHint = displayed === this.currentAttention?.requestId ? displayed : undefined;
-		}
+		this.currentAttention = owned && reply.attention?.state !== "resolved" ? reply.attention : undefined;
+		this.pendingStop = undefined;
+		this.pendingVerificationFailure = undefined;
 		const repair = this.bindIntegrationRepair(reply)?.request;
-		if (reply.status === "stopped" || reply.executionBudget?.stopReason) return;
-		if (!displayed) return;
-		if (["paused", "stopped"].includes(displayed.status) && reply.attention) { this.pendingVerificationFailure = undefined; return; }
-		const recovery = classifyVerificationRecovery(repair, repair?.ownerSessionId && this.host.current().context ? this.host.current().sessionId : "");
-		const verificationFailure = (/verification/i.test(displayed.message) && (displayed.status === "failed" || recovery.actionable)) || Boolean(repair && recovery.actionable) || recovery.ownerMismatch || recovery.ambiguity;
-		if (!verificationFailure) { this.pendingVerificationFailure = undefined; return; }
-		const failureKey = `${reply.runId}:${repair?.episodeId || repair?.requestId || displayed.message}:${repair?.round || 0}:${displayed.message}`;
-		this.pendingVerificationFailure = { key: failureKey, runId: reply.runId, planDirectory: reply.planDirectory, detail: displayed.message, sessionId: this.host.current().sessionId, ...(repair ? { repair } : {}) };
-		if (!this.notifiedVerificationFailures.has(failureKey)) {
-			this.notifiedVerificationFailures.add(failureKey);
-			this.notify(recovery.ownerMismatch ? "Herder final verification recovery belongs to another main session; operator recovery is required." : ((recovery.atLimit || recovery.ambiguity) ? "Herder final verification recovery requires an explicit user decision." : `Herder final verification failed: ${displayed.message}\nAutomatic request-bound recovery is available; Use /herder-resume for operator recovery.`), "error");
+		const recovery = classifyVerificationRecovery(repair, this.host.current().sessionId);
+		const status = displayed?.status ?? reply.status;
+		const detail = displayed?.message ?? reply.message;
+		const budgetStopped = Boolean(reply.executionBudget?.stopReason);
+		const verificationFailure = !this.currentAttention && !budgetStopped && reply.status !== "stopped"
+			&& ((/verification/i.test(detail) && (status === "failed" || recovery.actionable))
+				|| Boolean(repair && recovery.actionable) || recovery.ownerMismatch || recovery.ambiguity);
+		if (owned && verificationFailure) {
+			const key = `${reply.runId}:${repair?.episodeId || repair?.requestId || detail}:${repair?.round || 0}:${detail}`;
+			this.pendingVerificationFailure = { key, runId: reply.runId, planDirectory: reply.planDirectory, detail, sessionId: this.host.current().sessionId, epoch: this.host.current().epoch, ...(repair ? { repair } : {}) };
+		}
+		if (owned && !this.currentAttention && !reply.runRevision && !verificationFailure
+			&& (budgetStopped || reply.status === "stopped"
+				|| (["paused", "failed", "stopped"].includes(status) && !reply.verificationRequest
+					&& !(repair?.ownerSessionId === this.host.current().sessionId
+						&& ["active", "committing", "committed", "verifying"].includes(repair.state))))) {
+			// A delivery identity, never a manager attention request or capability.
+			const key = "stop:" + createHash("sha256").update(JSON.stringify([reply.planDirectory, reply.runId, reply.status, reply.message, reply.executionBudget])).digest("hex");
+			this.pendingStop = { key, reply, epoch: this.host.current().epoch };
+		}
+		const hint = this.currentAttention?.requestId ?? this.pendingStop?.key;
+		if (this.attentionHint !== hint) {
+			this.attentionHint = this.host.current().state?.attentionRequestId === hint ? hint : undefined;
 		}
 	}
 
@@ -297,7 +313,8 @@ export class MainSessionRequests {
 
 
 	private drainAttention = async (): Promise<void> => {
-		if (!this.host.current().active || !this.host.current().context || !this.currentAttention || !this.host.current().state) return;
+		if (!this.currentAttention) { this.drainStop(); return; }
+		if (!this.host.current().active || !this.host.current().context || !this.host.current().state) return;
 		const request = this.currentAttention;
 		const state = this.host.current().state!;
 		if (request.state === "resolved" || this.deferredAttention.has(request.requestId) || this.attentionHint === request.requestId) return;
@@ -311,7 +328,7 @@ export class MainSessionRequests {
 			this.host.pi.sendMessage({
 				customType: HERDER_ATTENTION_MESSAGE,
 				content: prompt,
-				display: true,
+				display: false,
 				details: attentionMessageDetails(request, state.planDir),
 			}, { deliverAs: "followUp", triggerTurn: true });
 			// A successful injection is the only acknowledgement held by the adapter.
@@ -324,6 +341,22 @@ export class MainSessionRequests {
 		}
 	};
 
+	private drainStop(): void {
+		const stop = this.pendingStop;
+		const current = this.host.current();
+		if (!stop || this.attentionHint === stop.key || !current.active || !current.context
+			|| current.epoch !== stop.epoch || current.state?.runId !== stop.reply.runId
+			|| current.state.planDir !== stop.reply.planDirectory || !this.host.ownsRun(stop.reply.planDirectory, stop.reply.runId)) return;
+		try {
+			this.host.pi.sendMessage({ customType: HERDER_ATTENTION_MESSAGE, content: buildStopPrompt(stop.reply), display: false,
+				details: { stopKey: stop.key, planDirectory: stop.reply.planDirectory } }, { deliverAs: "followUp", triggerTurn: true });
+			this.attentionHint = stop.key;
+			this.host.onAttentionHint(stop.key);
+		} catch (error) {
+			this.notify(`Herder could not delegate stop diagnosis: ${message(error)}`, "warning");
+		}
+	}
+
 	drainAttentionNow(): Promise<void> {
 		const next = this.attentionDrain.then(this.drainAttention, this.drainAttention);
 		this.attentionDrain = next.then(() => undefined, () => undefined);
@@ -333,6 +366,8 @@ export class MainSessionRequests {
 	private drainVerificationFailure = (): void => {
 		if (!this.host.current().active || this.sendingVerificationFailure || !this.host.current().context || !this.pendingVerificationFailure) return;
 		const failure = this.pendingVerificationFailure;
+		if (failure.epoch !== this.host.current().epoch || this.host.current().state?.runId !== failure.runId
+			|| !this.host.ownsRun(failure.planDirectory, failure.runId)) return;
 		const deliveryKey = `${this.host.current().epoch}:${failure.key}`;
 		if (this.deliveredVerificationFailureFollowUps.has(deliveryKey)) {
 			this.pendingVerificationFailure = undefined;
@@ -451,13 +486,16 @@ export class MainSessionRequests {
 					`LOG_PATH: ${logPath}`,
 					`RUNNER_EVIDENCE (observations, not defect classifications): ${verificationRunnerEvidence(repair?.verificationResult)}`,
 					"Inspect the log using read-only commands and explain the concrete failure to the user. Do not claim success, silently retry, or execute verification commands yourself.",
-					"Use /herder-resume for a fresh verification request after correcting a manifest or transient operational failure; for an integrated code defect, propose a corrective plan followed by /herder-revise.",
+					"Do not recommend a runnable /herder-resume until read-only inspection establishes a corrected manifest or transient operational failure. For an integrated code defect without a repair capability, ask about a corrective plan followed by user-invoked /herder-revise.",
 					"Do not edit the frozen integration worktree, move Git refs, or mutate manager state.",
 				].join("\n");
 		this.sendingVerificationFailure = true;
 		try {
 			if (["paused", "stopped"].includes(this.host.current().state?.status ?? "") || recovery.kind === "decision_required" || recovery.kind === "owner_mismatch") {
-				this.host.pi.sendMessage({ customType: HERDER_ATTENTION_MESSAGE, content: prompt, display: true }, { triggerTurn: false });
+				this.host.pi.sendMessage({ customType: HERDER_ATTENTION_MESSAGE, content: [prompt,
+					`PLAN_DIRECTORY: ${failure.planDirectory}`,
+					"First verify the current run/request and recovery state read-only, then read the recorded evidence. Explain briefly in the user’s language what is wrong and the exact supported next command or missing decision. Do not invent a runnable resume for an unknown failure. /herder-stop stops the whole active run. This handoff adds no authority beyond the request-bound recovery contract above; a decision or owner mismatch grants no mutation, budget, retry or test authority.",
+				].join("\n"), display: false }, { deliverAs: "followUp", triggerTurn: true });
 			} else this.host.pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 			this.deliveredVerificationFailureFollowUps.add(deliveryKey);
 			this.pendingVerificationFailure = undefined;

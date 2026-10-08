@@ -357,6 +357,7 @@ test("main-session attention diagnoses once and stays quiet on repeated status a
 		})(), "attention delivery");
 		assert.equal(api.customMessages.length, 1);
 		assert.equal(api.customMessages[0]!.customType, "herder-attention-v1");
+		assert.equal(api.customMessages[0]!.display, false, "diagnosis belongs to the main session, not a visible attention card");
 		assert.match(api.customMessages[0]!.content, /^HERDER_STOPPED_ATTENTION_V1/m);
 		assert.match(api.customMessages[0]!.content, /REQUEST_ID:/);
 		assert.doesNotMatch(api.customMessages[0]!.content, /REQUEST_SHA256|CAPABILITY_TOKEN|RECOVERY_GIT_IDENTITY|schemaVersion|exact request binding/);

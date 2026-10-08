@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attentionMessageDetails, attentionMessageDisplay, attentionResolutionFromRequest, buildAttentionPrompt, registerAttentionMessageRenderer, HERDER_ATTENTION_MESSAGE, type HerderAttentionMessageDetails } from "../../../adapters/attention.ts";
+import { attentionMessageDetails, attentionMessageDisplay, attentionResolutionFromRequest, buildAttentionPrompt, buildStopPrompt, registerAttentionMessageRenderer, HERDER_ATTENTION_MESSAGE, type HerderAttentionMessageDetails } from "../../../adapters/attention.ts";
 import { initTheme, type ExtensionAPI, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ManagerAttentionRequest } from "../../../src/shared/protocol.ts";
+import type { ManagerAttentionRequest, ManagerReply } from "../../../src/shared/protocol.ts";
 
 test("review-budget operator attention labels partial approval as incomplete diagnostic evidence", async () => {
 	const request: ManagerAttentionRequest = {
@@ -210,4 +210,18 @@ test("diagnosis prompt requires complete read-only evidence and a fresh request 
 	const command = transport.match(/TRANSPORT_CONTINUATION_COMMAND[^\n]*: (.+)/)![1]!;
 	const { parseFireArguments } = await import("../../../adapters/arguments.ts");
 	assert.equal(parseFireArguments(command.slice("/herder-resume ".length), "resume").planDir, directory);
+});
+
+
+test("run budget diagnosis quotes paths and refuses unknown budget continuation", () => {
+	const reply = { runId: "run", status: "paused", planDirectory: '/repo/a "quoted" path', message: "Exhausted",
+		executionBudget: { limit: 12, used: 12, remaining: 0, stopReason: "Run execution budget exhausted" } } as ManagerReply;
+	const prompt = buildStopPrompt(reply);
+	assert.ok(prompt.includes('/herder-budget 1 "/repo/a \\"quoted\\" path"'));
+	assert.match(prompt, /does not promise completion/);
+	assert.match(prompt, /RunStore with readOnly: true, getRun\/getBudget/);
+	assert.match(prompt, /page truncated evidence to completion/);
+	assert.match(prompt, /stale, resumed, superseded, or unverifiable/);
+	assert.doesNotMatch(buildStopPrompt({ ...reply, executionBudget: { ...reply.executionBudget!, stopReason: "Unknown budget decision" } }), /BUDGET_CONTINUATION|THEN_USER_COMMAND/);
+	assert.doesNotMatch(buildStopPrompt({ ...reply, planDirectory: "/repo/\nunsafe" }), /BUDGET_CONTINUATION|THEN_USER_COMMAND/);
 });
