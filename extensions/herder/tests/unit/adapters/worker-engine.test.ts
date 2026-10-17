@@ -92,7 +92,7 @@ class FakeSession {
 		this.messages.push(message);
 		this.emit({ type: "message_end", message: message as never });
 		this.emit({ type: "agent_end", messages: this.messages as never[], willRetry: false });
-		this.emit({ type: "agent_settled" });
+		this.emit({ type: "agent_settled", aborted: false });
 	}
 
 	async abort(): Promise<void> { this.aborted = true; }
@@ -396,7 +396,7 @@ export default function (pi) {
 					: ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]).sort(),
 			);
 			if (role === "plan-implementer") {
-				const injected = await session.extensionRunner.emitBeforeAgentStart("task", undefined, { cwd: worktree, forceSystemPrompt: "BASE" });
+				const injected = await session.extensionRunner.emitBeforeAgentStart({ messageType: "user", prompt: "task", images: undefined }, { cwd: worktree, forceSystemPrompt: "BASE" });
 				assert.match(injected?.systemPromptOptions.forceSystemPrompt ?? "", /BASE\nPONYTAIL_TEST/);
 			}
 			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

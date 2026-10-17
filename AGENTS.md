@@ -14,7 +14,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
 - `extensions/shared/` — shared Orca busy-state coordination and the provider-neutral native Responses compaction engine, lifecycle hooks, and tests.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
-- `extensions/subagents/` — vendored Claude Code-style autonomous subagents, examples, source, and tests.
+- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows, local fleet/integrations, and offline upstream/compatibility tests. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 
@@ -26,14 +26,14 @@ Run commands from the repository root with Node `>=22.19.0`.
 | Command                             | Coverage                                                                                                                                |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
-| `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the configured `extensions` sources; `extensions/subagents` is excluded.                    |
+| `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the collection and Subagents' dedicated source configuration.                              |
 | `npm test`                          | Run the safe collection suite: CLIProxyAPI Provider, Magpie Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
 | `npm run test:cliproxyapi-provider` | Run 53 offline Node catalog regression scenarios and the mocked Vitest provider/TPS entrypoint checks.                                  |
 | `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and the shared native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
-| `npm run test:subagents`            | Run the Subagents widget's Vitest suite.                                                                                                |
+| `npm run test:subagents`            | Run Subagents' offline upstream and local compatibility Vitest suites; live provider tests are not enabled.                            |
 | `npm run test:herder`               | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`.                                               |
 
 

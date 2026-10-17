@@ -255,7 +255,7 @@ USAGE: input_tokens=18; cached_input_tokens=2; output_tokens=9; reasoning_tokens
 
 	private finishLifecycle(): void {
 		this.emit({ type: "agent_end", messages: this.messages as never[], willRetry: false });
-		this.emit({ type: "agent_settled" });
+		this.emit({ type: "agent_settled", aborted: this.aborted });
 		this.settled.resolve();
 	}
 }
@@ -455,15 +455,13 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.match(String(ui.statuses.at(-1)?.value), /Herder running/i);
 		await withDeadline((async () => {
 			while (readVerification(fixture!).state !== "failed") await new Promise((resolve) => setTimeout(resolve, 50));
-			while (!ui.notifications.some((notification) => notification.message.startsWith("Herder final verification failed:"))) {
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
 		})(), "durable verification failure");
-		assert.ok(ui.notifications.some((notification) => notification.level === "error" && notification.message.includes("Use /herder-resume")));
-		const failurePrompt = (await withDeadline(
+		const failureMessage = await withDeadline(
 			api.waitForUserMessage(0, "HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1"),
 			"verification failure handoff",
-		)).content;
+		);
+		assert.deepEqual(failureMessage.options, { deliverAs: "followUp" });
+		const failurePrompt = failureMessage.content;
 		assert.match(failurePrompt, /^HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1/m);
 		assert.match(failurePrompt, /intentional-failure/);
 		assert.match(failurePrompt, /LOG_PATH: .*intentional-failure/);
@@ -471,15 +469,18 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.match(failurePrompt, /\/herder-resume/);
 		assert.match(failurePrompt, /corrective plan followed by \/herder-revise/);
 		assert.match(failurePrompt, /Do not edit the frozen integration worktree/);
-		const failureFollowUpCount = api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1")).length;
+		const failureFollowUps = () => [...api!.customMessages, ...api!.userMessages]
+			.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1"));
+		assert.equal(failureFollowUps().length, 1);
 		await withDeadline(
 			api.command("herder-status").handler("herder-plans", context),
 			"failed verification status refresh",
 		);
+		await withDeadline(api.invoke("agent_settled", context), "failed verification settlement refresh");
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		assert.equal(
-			api.userMessages.filter((entry) => entry.content.includes("HERDER_MAIN_SESSION_VERIFICATION_FAILURE_V1")).length,
-			failureFollowUpCount,
+			failureFollowUps().length,
+			1,
 			"durable failure refresh injected a duplicate main-session handoff",
 		);
 		assert.equal(factory.sessions.some((session) => session.action.workerMode === "FINAL_AUDIT"), false);

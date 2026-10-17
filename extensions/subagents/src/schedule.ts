@@ -12,7 +12,7 @@
  *     of dispatching a user message — schedule fires bypass maxConcurrent so
  *     a 5-minute interval can't be deferred behind 4 long-running agents.
  *   - Result delivery is implicit: spawn → background completion → existing
- *     `subagent-notification` followUp path. No new delivery code.
+ *     `subagent-notification` path. No new delivery code.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -20,6 +20,8 @@ import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { getAgentConfig } from "./agent-types.js";
+import { normalizeMaxTurns } from "./agent-runner.js";
+import { resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelSupportsServiceTier } from "./service-tier.js";
 import type { ScheduleStore } from "./schedule-store.js";
@@ -231,37 +233,51 @@ export class SubagentScheduler {
 
     store.update(id, { lastStatus: "running" });
 
-    // Resolve model at fire time — registry contents may have changed since the
-    // job was created (auth added/removed). Fall back silently to spawn-default
-    // if resolution fails; the spawn path handles undefined model gracefully.
-    const config = getAgentConfig(job.subagent_type);
-    const configuredModel = config?.model ?? job.model;
-    let resolvedModel: any | undefined;
-    if (configuredModel) {
-      const r = resolveModel(configuredModel, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
-    }
-    const effectiveThinking = config?.thinking ?? job.thinking;
-    let effectiveServiceTier = config?.serviceTier ?? job.service_tier;
-    if (effectiveServiceTier && resolvedModel && !modelSupportsServiceTier(resolvedModel)) effectiveServiceTier = undefined;
-
     let agentId: string;
     try {
-      agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
+      // Re-resolve at fire time against the registry as it stands. This does not
+      // reload from disk (the scheduler has no reason to rebuild process-global
+      // state from a timer), so it catches changes that went through /agents or
+      // an Agent call — not a file deleted directly from a shell. The catch below turns
+      // this into lastStatus: "error" plus an error event, like any other
+      // fire-time failure.
+      const dispatch = resolveSpawnType(job.subagent_type);
+      if (!dispatch.ok) throw new Error(dispatch.message);
+      // Resolve model at fire time — registry contents may have changed since the
+      // job was created (auth added/removed). Fall back silently to spawn-default
+      // if resolution fails; the spawn path handles undefined model gracefully.
+      const config = getAgentConfig(dispatch.type);
+      const configuredModel = config?.model ?? job.model;
+      let resolvedModel: any | undefined;
+      if (configuredModel) {
+        const r = resolveModel(configuredModel, ctx.modelRegistry);
+        if (typeof r !== "string") resolvedModel = r;
+      }
+      const effectiveThinking = config?.thinking ?? job.thinking;
+      let effectiveServiceTier = config?.serviceTier ?? job.service_tier;
+      if (effectiveServiceTier && resolvedModel && !modelSupportsServiceTier(resolvedModel)) effectiveServiceTier = undefined;
+
+      agentId = manager.spawn(pi, ctx, dispatch.type, job.prompt, {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
         model: resolvedModel,
-        maxTurns: job.max_turns,
+        maxTurns: config?.maxTurns ?? job.max_turns,
         isolated: job.isolated,
         thinkingLevel: effectiveThinking,
         serviceTier: effectiveServiceTier,
         isolation: job.isolation,
+        // A scheduled run has no tool call to build this, so without it the
+        // conversation viewer shows nothing about how the job was configured.
+        // The model is left out on purpose: agent-manager fills in the effective
+        // one when the session reports it, and naming the pre-session pick here
+        // would only be right until then.
         invocation: {
-          modelName: resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined,
           thinking: effectiveThinking,
           serviceTier: effectiveServiceTier,
-          maxTurns: job.max_turns,
+          // Normalized like the Agent tool's own snapshot: `0` means unlimited,
+          // and rendering it as "max turns: 0" would read as a limit of none.
+          maxTurns: normalizeMaxTurns(config?.maxTurns ?? job.max_turns),
           isolated: job.isolated,
           runInBackground: true,
           isolation: job.isolation,
@@ -276,7 +292,6 @@ export class SubagentScheduler {
 
     this.emit({ type: "fired", jobId: id, agentId, name: job.name });
 
-    const record = manager.getRecord(agentId);
     const finalize = (status: "success" | "error") => {
       const next = this.getNextRun(id);
       const current = store.get(id);
@@ -291,18 +306,16 @@ export class SubagentScheduler {
     // AgentManager's promise resolves either way (its .catch returns ""), so we
     // can't infer success/failure from the promise — read record.status instead.
     // Terminal states: completed/steered = success; error/aborted/stopped = error.
-    if (record?.promise) {
-      record.promise
-        .then(() => {
-          const r = manager.getRecord(agentId);
-          const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
-          finalize(failed ? "error" : "success");
-        })
-        .catch(() => finalize("error"));
-    } else {
-      // Spawn returned without a promise (defensive — bypassQueue path always sets one).
-      finalize("success");
-    }
+    // awaitStartup first: with isolation: "worktree" the run promise only exists
+    // once the repo copy is made, and a failed copy rejects here.
+    manager.awaitStartup(agentId)
+      .then(() => manager.getRecord(agentId)?.promise)
+      .then(() => {
+        const r = manager.getRecord(agentId);
+        const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
+        finalize(failed ? "error" : "success");
+      })
+      .catch(() => finalize("error"));
   }
 
   private emit(event: ScheduleChangeEvent): void {

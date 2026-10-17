@@ -11,6 +11,20 @@ import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 /**
+ * Project/global default for writing a subagent's `.output` transcript; a custom
+ * agent's `output_transcript` overrides it per agent.
+ *
+ * State lives here rather than in an index.ts closure because both spawn paths
+ * need it — the top-level Agent tool and the nested delegation tools. Same
+ * reason `scopeModels` lives in model-scope.ts: a setting only one path can read
+ * is a setting the other path silently ignores.
+ */
+let outputTranscriptDefault = true;
+
+export function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
+export function setOutputTranscriptDefault(b: boolean): void { outputTranscriptDefault = b; }
+
+/**
  * Encode a cwd path as a filesystem-safe directory name. Handles:
  *   - POSIX:   "/home/user/project"        → "home-user-project"
  *   - Windows: "C:\Users\foo\project"      → "Users-foo-project"
@@ -23,9 +37,14 @@ export function encodeCwd(cwd: string): string {
     .replace(/^-+/, "");           // strip leading dashes (POSIX root, UNC)
 }
 
-/** Create the output file path, ensuring the directory exists.
- *  Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks/{agentId}.output */
-export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
+/**
+ * The per-session scratch directory, created if missing.
+ * Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks
+ *
+ * Shared with the workflow tool, which persists each invocation's script here so
+ * iterating on one is edit-file-then-rerun — the same convention, one directory.
+ */
+export function sessionTaskDir(cwd: string, sessionId: string): string {
   const encoded = encodeCwd(cwd);
   const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -38,7 +57,27 @@ export function createOutputFilePath(cwd: string, agentId: string, sessionId: st
   }
   const dir = join(root, encoded, sessionId, "tasks");
   mkdirSync(dir, { recursive: true });
-  return join(dir, `${agentId}.output`);
+  return dir;
+}
+
+/** Create the output file path, ensuring the directory exists. */
+export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
+  return join(sessionTaskDir(cwd, sessionId), `${agentId}.output`);
+}
+
+/**
+ * Ensure a transcript file exists without disturbing what is already in it.
+ *
+ * A resume reuses the agent's existing transcript (same deterministic path), so
+ * it must never call `writeInitialEntry` — that truncates, discarding turns the
+ * completion notification still points the user at, and any history the session
+ * has since compacted away is gone for good. Appending nothing creates the file
+ * when this is the agent's first transcript and is a no-op when it is not.
+ */
+export function ensureOutputFile(path: string): void {
+  try {
+    appendFileSync(path, "", "utf-8");
+  } catch { /* ignore — streaming writes are best-effort too */ }
 }
 
 /** Write the initial user prompt entry. */
@@ -63,13 +102,29 @@ export function streamToOutputFile(
   path: string,
   agentId: string,
   cwd: string,
+  startIndex?: number,
 ): () => void {
-  let writtenCount = 1; // initial user prompt already written
+  // Index of the first message this stream is responsible for. A resume hands
+  // in the session's length as of just before the run: the session already
+  // holds every prior turn, and re-emitting those would duplicate history that
+  // is already in the file. A spawn has already written its prompt as the
+  // initial entry, so it starts after the first user message — found on the
+  // first flush, because pi puts a system message ahead of it and adds both
+  // only once the prompt runs.
+  let writtenCount = startIndex;
 
   const flush = () => {
     const messages = session.messages;
+    if (writtenCount === undefined) {
+      const prompt = messages.findIndex((m) => m.role === "user");
+      if (prompt === -1) return;
+      writtenCount = prompt + 1;
+    }
     while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
+      const msg = messages[writtenCount++];
+      // Pi's prompt and tool-loadout records; a Claude Code transcript has no
+      // such entry.
+      if (msg.role === "system") continue;
       const entry = {
         isSidechain: true,
         agentId,
@@ -81,7 +136,6 @@ export function streamToOutputFile(
       try {
         appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
       } catch { /* ignore write errors */ }
-      writtenCount++;
     }
   };
 

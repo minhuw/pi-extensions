@@ -6,11 +6,11 @@
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import type { AgentManager } from "../agent-manager.js";
+import { renderAgentName } from "../agent-color.js";
+import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, AgentRecord, SubagentType, WidgetMode } from "../types.js";
-import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
-import { orcaBusy } from "../../../shared/orca-busy.ts";
+import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
 
@@ -60,8 +60,6 @@ export interface AgentActivity {
   turnCount: number;
   /** Effective max turns for this agent (undefined = unlimited). */
   maxTurns?: number;
-  /** Lifetime usage breakdown — see LifetimeUsage docs. */
-  lifetimeUsage: LifetimeUsage;
 }
 
 /** Metadata attached to Agent tool results for custom rendering. */
@@ -77,7 +75,9 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Exact effective model name, preferably provider/modelId. */
+  /** Show the ctrl+b hint on this running foreground call's row — one row per batch. */
+  backgroundHint?: boolean;
+  /** Short label for the model the run used, e.g. "haiku 4.5". */
   modelName?: string;
   /** Effective thinking level for this spawn, when known. */
   thinking?: AgentInvocation["thinking"];
@@ -91,6 +91,8 @@ export interface AgentDetails {
   turnCount?: number;
   /** Effective max turns (undefined = unlimited). */
   maxTurns?: number;
+  /** Estimated cost in USD; 0 when the model has no pricing data. */
+  cost?: number;
   agentId?: string;
   error?: string;
 }
@@ -178,6 +180,31 @@ function formatTokenUsageText(text: string): string {
 }
 
 /**
+ * Format a cost as `~$0.0042`, or "" when there is nothing to show.
+ *
+ * The tilde is load-bearing: this is pi's own estimate from the model's listed
+ * rates, not a billed figure, and the surfaces that print it sit next to token
+ * counts that ARE exact.
+ *
+ * Nothing is printed for zero, which is also what a model with no pricing data
+ * reports: `$0.00` beside a local model's tokens would claim its cost was
+ * measured and found to be nothing, rather than never measured at all. For the
+ * same reason a real cost too small for four decimals reads `<$0.0001` — it was
+ * measured, and rounding it to `~$0.0000` would say the opposite.
+ */
+export function formatCost(cost: number): string {
+  if (!(cost > 0)) return "";                     // also catches NaN
+  if (cost < 0.0001) return "<$0.0001";
+  if (cost >= 1) return `~$${cost.toFixed(2)}`;
+  // Under a dollar: cents at minimum, four decimals at most, nothing trailing.
+  // Most single runs land between a tenth of a cent and a dime, where rounding
+  // to cents would collapse a 4x difference in spend into the same figure.
+  const rounded = Number(cost.toFixed(4));
+  const decimals = (String(rounded).split(".")[1] ?? "").length;
+  return `~$${rounded.toFixed(Math.max(2, decimals))}`;
+}
+
+/**
  * Token count with optional context-fill % and compaction-count annotations.
  * Thresholds for percent: <70% dim, 70–85% warning, ≥85% error.
  * Compaction count rendered as `⇊N` in dim.
@@ -252,17 +279,22 @@ export function formatAgentIdentity(source?: {
 /** Mode label is not included — callers add it where they want it. */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelName?: string; identity?: string; tags: string[] } {
+): { modelName?: string; modelId?: string; identity?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
+  const asked = (value: string | undefined, requested: string | undefined) =>
+    value && requested && requested !== value ? `${value} (asked ${requested})` : value;
+  const modelName = asked(invocation.modelName, invocation.requestedModel);
+  const thinking = asked(invocation.thinking, invocation.requestedThinking);
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground === true) tags.push("background");
   else if (invocation.runInBackground === false) tags.push("foreground");
   return {
-    modelName: invocation.modelName,
-    identity: formatAgentIdentity(invocation),
+    modelName,
+    modelId: asked(invocation.modelId, invocation.requestedModel),
+    identity: formatAgentIdentity({ ...invocation, modelName, thinking }),
     tags,
   };
 }
@@ -272,7 +304,7 @@ export function formatAgentNameIdentity(
   theme: Pick<Theme, "fg">,
   invocation: AgentInvocation | undefined,
 ): string {
-  const identity = formatAgentIdentity(invocation);
+  const { identity } = buildInvocationTags(invocation);
   return identity ? ` ${theme.fg("dim", `· ${identity}`)}` : "";
 }
 
@@ -346,8 +378,6 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
-  /** Parent-session idle probe for Orca busy re-assertion. */
-  private idleProbe: () => boolean = () => true;
 
   constructor(
     private manager: AgentManager,
@@ -358,11 +388,21 @@ export class AgentWidget {
      * extension also defaults to `"all"`.
      */
     private mode: () => WidgetMode = () => "all",
+    /**
+     * Read live at render time, like `mode`. Whether running agents show an
+     * estimated cost beside their token count. Defaults to off — the extension
+     * supplies the user's `showCost` setting.
+     */
+    private showCost: () => boolean = () => false,
+    /**
+     * Read live at render time, like `mode`. Whether running agents name the
+     * model driving them and the thinking level it is running at. Defaults to
+     * off — the extension supplies the user's `showModel` setting — because the
+     * row is already dense and the same pair is on the tool result and in the
+     * conversation viewer unconditionally.
+     */
+    private showModel: () => boolean = () => false,
   ) {}
-
-  bindOrcaIdle(probe: () => boolean): void {
-    this.idleProbe = probe;
-  }
 
   /**
    * Agents eligible for the widget, per the current `WidgetMode`:
@@ -376,7 +416,7 @@ export class AgentWidget {
    *   - `all`: every agent.
    */
   private widgetAgents() {
-    const all = this.manager.listAgents().filter((agent) => agent.owner !== "herder");
+    const all = this.manager.listAgents().filter(record => !record.owner && isTopLevelAgent(record));
     switch (this.mode()) {
       case "off": return [];
       case "background": return all.filter(a => a.isBackground !== false);
@@ -430,9 +470,19 @@ export class AgentWidget {
     }
   }
 
+  /**
+   * Drop an agent's finished-age (call when a settled agent starts running
+   * again, i.e. a background resume). markFinished only seeds an age it has not
+   * seen before, so a resumed agent would otherwise keep the age from its
+   * previous run — already past the linger limit, hiding the new run's
+   * completion line entirely.
+   */
+  markRunning(agentId: string) {
+    this.finishedTurnAge.delete(agentId);
+  }
+
   /** Render a finished agent line. */
   private renderFinishedLine(a: AgentRecord, theme: Theme): string {
-    const name = getDisplayName(a.type);
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
 
@@ -465,11 +515,13 @@ export class AgentWidget {
     const maxTurns = activity?.maxTurns ?? a.maxTurns;
     if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
     if (a.toolUses > 0) parts.push(formatToolUses(a.toolUses));
+    const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
+    if (costText) parts.push(costText);
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const identityTag = formatAgentNameIdentity(theme, invocation);
-    return `${icon} ${theme.fg("dim", name)}${modeTag}${identityTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
+    return `${icon} ${renderAgentName(a.type, theme, { fallbackColor: "dim" })}${modeTag}${identityTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
   /**
@@ -507,16 +559,20 @@ export class AgentWidget {
 
     const runningLines: string[][] = []; // each entry is [header, activity]
     for (const a of running) {
-      const name = getDisplayName(a.type);
       const modeLabel = getPromptModeLabel(a.type);
       const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
       const elapsed = formatMs(Date.now() - a.startedAt);
 
       const bg = this.agentActivity.get(a.id);
       const toolUses = bg?.toolUses ?? a.toolUses;
-      const tokens = getLifetimeTotal(bg?.lifetimeUsage);
+      // Spend comes from the record, never from the activity tracker: the record
+      // is the one that survives the agent finishing, and the one nested-tools
+      // folds a hidden child's spend into. Reading the tracker while an agent
+      // runs and the record once it stops made the figure jump at completion.
+      const tokens = getLifetimeTotal(a.lifetimeUsage);
       const contextPercent = getSessionContextPercent(bg?.session);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
+      const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
 
       const invocation = buildRecordInvocation(a);
       const { tags } = buildInvocationTags(invocation);
@@ -526,30 +582,26 @@ export class AgentWidget {
       if (turnCount > 0) parts.push(formatTurns(turnCount, maxTurns));
       if (toolUses > 0) parts.push(formatToolUses(toolUses));
       if (tokenText) parts.push(tokenText);
+      if (costText) parts.push(costText);
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
-      const identityTag = formatAgentNameIdentity(theme, invocation);
+      const identityTag = this.showModel() ? formatAgentNameIdentity(theme, invocation) : "";
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}${identityTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${renderAgentName(a.type, theme, { bold: true })}${modeTag}${identityTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
 
-    const queuedLines = queued.map((a) => {
-      const name = getDisplayName(a.type);
-      const invocation = buildRecordInvocation(a);
-      const { tags } = buildInvocationTags(invocation);
-      const identityTag = formatAgentNameIdentity(theme, invocation);
-      const suffix = tags.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", tags.join(" · "))}` : "";
-      return truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.bold(name)}${identityTag}  ${theme.fg("muted", a.description)}${suffix}`);
-    });
+    const queuedLine = queued.length > 0
+      ? truncate(theme.fg("dim", "├─") + ` ${theme.fg("muted", "◦")} ${theme.fg("dim", `${queued.length} queued`)}`)
+      : undefined;
 
     // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).
     const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
-    const totalBody = finishedLines.length + runningLines.length * 2 + queuedLines.length;
+    const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
 
     const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
 
@@ -557,7 +609,7 @@ export class AgentWidget {
       // Everything fits — add all lines and fix up connectors for the last item.
       lines.push(...finishedLines);
       for (const pair of runningLines) lines.push(...pair);
-      lines.push(...queuedLines);
+      if (queuedLine) lines.push(queuedLine);
 
       // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
       if (lines.length > 1) {
@@ -565,7 +617,7 @@ export class AgentWidget {
         lines[last] = lines[last].replace("├─", "└─");
         // If last item is a running agent activity line, fix indent of that line
         // and fix the header line above it.
-        if (runningLines.length > 0 && queuedLines.length === 0) {
+        if (runningLines.length > 0 && !queuedLine) {
           // The last two lines are the last running agent's header + activity.
           if (last >= 2) {
             lines[last - 1] = lines[last - 1].replace("├─", "└─");
@@ -580,6 +632,16 @@ export class AgentWidget {
       let hiddenRunning = 0;
       let hiddenFinished = 0;
 
+      // Reserve the queued line's row up front. It is a single summary of N
+      // waiting agents, so it cannot be folded into the "+N more" count (which
+      // is denominated in agents) without either under-reporting it as 1 or
+      // inflating the total with agents that were never getting their own rows.
+      // Reserving costs at most one running agent — which IS counted below —
+      // and makes the drop unreachable. It matters most exactly when it used to
+      // vanish: the pool is saturated and the queue is what the user needs to see.
+      const queuedReserve = queuedLine ? 1 : 0;
+      budget -= queuedReserve;
+
       // 1. Running agents (2 lines each)
       for (const pair of runningLines) {
         if (budget >= 2) {
@@ -590,15 +652,11 @@ export class AgentWidget {
         }
       }
 
-      // 2. Queued agents
-      let hiddenQueued = 0;
-      for (const queuedLine of queuedLines) {
-        if (budget >= 1) {
-          lines.push(queuedLine);
-          budget--;
-        } else {
-          hiddenQueued++;
-        }
+      // 2. Queued line (always fits — its row was reserved above)
+      if (queuedLine) {
+        budget += queuedReserve;
+        lines.push(queuedLine);
+        budget--;
       }
 
       // 3. Finished agents
@@ -614,10 +672,9 @@ export class AgentWidget {
       // Overflow summary
       const overflowParts: string[] = [];
       if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
-      if (hiddenQueued > 0) overflowParts.push(`${hiddenQueued} queued`);
       if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
       const overflowText = overflowParts.join(", ");
-      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenQueued + hiddenFinished} more (${overflowText})`)}`)
+      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
       );
     }
 
@@ -639,7 +696,6 @@ export class AgentWidget {
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
-    orcaBusy.set("subagents", hasActive, { isIdle: this.idleProbe, ui: this.uiCtx as { setTitle?(title: string): void } });
 
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished) {
@@ -698,6 +754,7 @@ export class AgentWidget {
   }
 
   dispose() {
+    this.finishedTurnAge.clear();
     if (this.widgetInterval) {
       clearInterval(this.widgetInterval);
       this.widgetInterval = undefined;

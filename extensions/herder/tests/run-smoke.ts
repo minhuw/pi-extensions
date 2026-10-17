@@ -99,7 +99,7 @@ if (focusedArguments.length > 0) {
 	const checks: Array<[string, string[], string]> = [
 		["npm", ["run", "typecheck"], repositoryRoot],
 		[process.execPath, ["--experimental-strip-types", "--test", "--test-concurrency=2", ...typedIntegration], extensionRoot],
-		[process.execPath, ["--experimental-strip-types", "--test", ...unit], extensionRoot],
+		[process.execPath, ["--experimental-strip-types", "--test", "--test-concurrency=2", ...unit], extensionRoot],
 	];
 
 	for (const [command, args, cwd] of checks) {

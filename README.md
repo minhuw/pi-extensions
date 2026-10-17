@@ -9,7 +9,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Commit](extensions/commit/README.md) | A lightweight native prompt for committing current changes as a self-contained patch series. |
 | [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
-| [Subagents](extensions/subagents/README.md) | Vendored Claude Code–style autonomous sub-agents (`@tintinweb/pi-subagents` v0.14.3). |
+| [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [CLIProxyAPI Provider](extensions/cliproxyapi-provider/README.md) | Editable locally patched 1.4.15 snapshot: dynamic models, catalog protection, and elapsed/TPS telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
@@ -25,7 +25,7 @@ Select it with `/settings` or `"theme": "material-bloom"` in `~/.pi/agent/settin
 
 ## Install
 
-Node >=22.19.0 is required. With Pi already installed, this block sets up the collection and every external extension used by Herder's isolated workers:
+Node >=22.19.0 and Pi >=1.3.0 are required. With Pi already installed, this block sets up the collection and every external extension used by Herder's isolated workers:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions

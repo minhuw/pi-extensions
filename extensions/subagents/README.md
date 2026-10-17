@@ -1,35 +1,20 @@
 # Subagents (vendored)
 
-Claude Code–style autonomous sub-agents for [Pi](https://pi.dev).
-
-Vendored fork of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents).
-Edit source in place under `src/`.
+Editable fork of [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents): autonomous subagents and scriptable multi-agent workflows for Pi. Requires **Pi >=1.3.0** in this collection.
 
 ## Upstream pin
 
 | Field | Value |
 | --- | --- |
 | Package | `@tintinweb/pi-subagents` |
-| Repository | https://github.com/tintinweb/pi-subagents |
-| Version | **v0.14.3** |
-| Tag | `v0.14.3` |
-| Commit | `c10b1836256e760da75296ccd4e57a77ada1325e` |
-| Vendored on | 2026-08-09 |
+| Version / tag | **v0.22.0** |
+| Commit | `85a704cb8f35c96c0cabfa665b572bab296942e5` |
+| Previous vendor base | v0.14.3, `c10b1836256e760da75296ccd4e57a77ada1325e` |
 | Entry | [`src/index.ts`](./src/index.ts) |
 
-Update this table when resyncing from upstream.
+[Upstream documentation](UPSTREAM.md), [changelog](CHANGELOG.md), and [local patch ledger](LOCAL-PATCHES.md). The local behavior described here takes precedence over upstream defaults.
 
-## Layout
-
-```text
-extensions/subagents/
-  README.md   ← this file (pin, license, usage)
-  LICENSE     ← upstream MIT (Copyright (c) 2026 tintinweb)
-  examples/
-  src/        ← extension source
-```
-
-## Install / load
+## Install
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
@@ -39,71 +24,78 @@ pi install /absolute/path/to/pi-extensions
 pi -e ./extensions/subagents/src/index.ts
 ```
 
-Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile.
+Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. After updating Pi and this collection, restart Pi or `/reload` while no agents are running. Existing agent definitions and `subagents.json` settings remain supported; no settings or session data migration is performed.
 
-## License
+## Local defaults and compatibility
 
-**MIT** — [`LICENSE`](./LICENSE), Copyright (c) 2026 tintinweb.
+- **Foreground by default:** `Agent` still waits unless `run_in_background: true` is requested. Upstream's `backgroundByDefault` setting is supported, but defaults to `false` here.
+- **Default fleet:** `recon`, `worker`, and `reviewer` replace upstream Explore/Plan/general-purpose. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
+- **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
+- **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
+- **Workflow orchestration requires explicit user opt-in:** `SubagentWorkflow` is available under upstream's workflow registration/collision rules. Its model-facing instructions require a user request for orchestration, a named workflow, or an explicitly invoked workflow command. This is an instruction policy, not a security sandbox. Set `workflowsEnabled: false` to disable registration and reload.
+- **Background completion delivery changed:** upstream now batches completions at the parent's turn boundary, with an idle-parent delivery path, rather than relying only on a short notification timer.
+- **Local integrations remain:** service tiers, scoped host/telemetry ownership, Orca busy-state coordination, and compact invocation/model metadata.
 
-Keep the license file when distributing. Packaging notes here and monorepo
-registration are under the root [pi-extensions MIT](../../LICENSE).
+Settings live in the global or project `subagents.json`; see [upstream configuration](UPSTREAM.md) for locations and precedence. For example:
 
-## Dependencies
-
-Monorepo `package.json`: `@sinclair/typebox`, `croner`, `nanoid`.  
-Peers: `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`.
+```json
+{
+  "backgroundByDefault": false,
+  "packageAgents": false,
+  "packageWorkflows": false,
+  "fallbackSubagent": "none"
+}
+```
 
 ## Usage
 
-- Tools: `Agent`, `get_subagent_result`, `steer_subagent`
-- Command: `/agents`
-- Custom types: `.pi/agents/<name>.md` (project) or global agents dir
-- Built-in fleet: **`recon`** → **`worker`** → **`reviewer`** (replaces upstream Explore/Plan/general-purpose)
+Tools: `Agent`, `get_subagent_result`, `steer_subagent`, and `SubagentWorkflow`. Use `/agents` for the fleet, settings, and workflows. Custom agent definitions can override embedded names; upstream also supports mentions and saved workflows.
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only codebase recon; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, `service_tier: fast` |
-| `worker` | Bounded implementation + verify | all coding tools | inherit parent |
-| `reviewer` | Read-only severity-ranked review; no edits | read-only | inherit parent |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, service tier `fast` |
+| `worker` | Bounded implementation and verification | coding tools | inherit parent |
+| `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
 
-The embedded fleet uses Pi's built-in `grep`/`find` tools and excludes an ambient search extension that could replace them. Custom agent definitions remain free to opt into their own extension set.
-
-Typical handoff: recon maps the surface → worker implements → reviewer gates the diff.
-
-Upstream package docs (pre-fork): [README v0.14.3](https://github.com/tintinweb/pi-subagents/blob/v0.14.3/README.md).
-
-## Resync
-
-1. Clone the new tag from https://github.com/tintinweb/pi-subagents  
-2. Merge/copy `src/`, `examples/`, `LICENSE` carefully over local edits  
-3. Bump monorepo deps if upstream `package.json` requires it  
-4. Update the pin table above  
-
-## Local modifications
-
-| Change | Files | Notes |
-| --- | --- | --- |
-| **Service tier** | `src/service-tier.ts`, wiring in types/runner/manager/schedule/index/… | Pin OpenAI-style service tier per agent type / spawn |
-| **Default fleet** | `src/default-agents.ts` (+ fallbacks in agent-types/runner/index) | Replace Explore/Plan/general-purpose with recon/worker/reviewer |
+The embedded fleet uses Pi's built-in `grep`/`find` and excludes the ambient search extension that can replace them. Custom definitions remain free to choose their extension set. Read-only role instructions are not an OS sandbox.
 
 ### Service tier
 
-Frontmatter (authoritative when set):
+Agent frontmatter is authoritative when set:
 
 ```yaml
 model: openai/gpt-6-luna
 thinking: max
-service_tier: fast   # fast|standard, or priority|default|flex|auto
+service_tier: fast
 ```
 
-Tool param (only if frontmatter omits `service_tier`):
+Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `priority`; `standard` maps to `default`. Raw `priority`, `default`, `flex`, and `auto` are also supported. Compatible APIs are `openai-responses`, `openai-codex-responses`, and `cliproxyapi-codex-responses`. An unsupported explicit tool override is rejected; an incompatible frontmatter default is warned about and not applied. See `src/service-tier.ts`.
 
-```ts
-Agent({ subagent_type: "scout", service_tier: "fast", prompt: "...", description: "..." })
+### Workflows versus Herder
+
+`SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed from their journal. Scripts are not Herder plans.
+
+Herder separately owns approved scope, persistent dispatch budgets, independent review, dependency-aware integration, and exact-tree final verification. Neither extension delegates authority to the other; installing Workflow does not change Herder's execution protocol.
+
+## Verification
+
+From the repository root:
+
+```bash
+npm run typecheck:subagents
+npm run test:subagents
 ```
 
-Mapping: `fast` → provider `priority`, `standard` → `default`. Applied by wrapping
-the child session stream (same approach as Herder). Only OpenAI-compatible APIs
-(`openai-responses`, `openai-codex-responses`, `cliproxyapi-codex-responses`).
-Caller-supplied unsupported tier → hard error; frontmatter on unsupported model →
-warning and run without tier.
+The suite includes imported upstream regression tests and local compatibility tests. The default command uses offline/faux providers, not paid provider-backed tests. The collection's `npm run typecheck` also checks Subagents through its dedicated strict configuration.
+
+## Resync
+
+1. Compare the pinned tag with the next release; read its changelog and dependency requirements.
+2. Three-way merge `src/` against the previous upstream base. Update `test/`, `examples/`, `docs/`, `UPSTREAM.md`, `CHANGELOG.md`, and `LICENSE` from the same tag.
+3. Reconcile the [local patch ledger](LOCAL-PATCHES.md); prefer upstream implementations where they replace local patches. Preserve deliberate local defaults and integration contracts.
+4. Update the root dependency lock and test fixtures for the supported Pi SDK. Run Subagents typechecking/tests and the full safe collection suite. Do not enable live E2E implicitly.
+5. Update the pin and record any selective post-release backports separately; do not claim an unmodified upstream snapshot.
+
+## License
+
+[MIT](LICENSE), Copyright (c) 2026 tintinweb. Preserve the upstream license when distributing. Collection registration and local packaging are under the [repository MIT license](../../LICENSE).
