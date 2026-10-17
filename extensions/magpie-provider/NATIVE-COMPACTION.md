@@ -48,8 +48,12 @@ The engine sends Codex remote-compaction-v2 to the effective gateway's ordinary 
 
 ```text
 POST http://127.0.0.1:3425/v1/responses
-{"model":"<provider>/<model>","instructions":"","input":[...,{"type":"compaction_trigger"}]}
+{"model":"<provider>/<model>","stream":true,"instructions":"","input":[...,{"type":"compaction_trigger"}]}
 ```
+
+The request accepts SSE (`text/event-stream`) and JSON. For SSE, only the terminal `response.completed` response is validated and stored; partial output items, failed/incomplete/error events, and streams ending without completion cannot create a checkpoint. JSON responses remain supported.
+
+Streaming is required for Magpie to relay native compaction to stream-only Codex accounts. The old non-streaming request could instead fail with the misleading “Codex doesn't serve … on the Responses API” error even when native compaction was enabled.
 
 The returned opaque item is stored in the Pi session. On later turns, the `before_provider_request` hook restores the canonical Responses history and appends post-checkpoint turns; Pi's ordinary Responses serializer alone does not replay the checkpoint.
 
@@ -67,7 +71,7 @@ The legacy wrapper no longer owns the `magpie` provider, even if its configurati
 
 Offline tests cover the Magpie configuration and lifecycle, shared history/transport logic, checkpoint replay, exact gates, malformed history, fallback/cancellation safeguards, and co-loading with the legacy integration. A standalone-loading test copies only Magpie and the shared engine into a temporary package to check that both CLIProxyAPI directories can be absent.
 
-These tests do **not** prove compatibility with a running gateway or upstream. The engine expects a non-streaming JSON response; the Magpie native-compaction tests inspected primarily exercise streamed responses. Validate that JSON path with your actual gateway/upstream, plus tools, cancellation, a second compaction, and session resume before using important sessions.
+These tests do **not** prove compatibility with a running gateway or upstream. Offline transport tests cover Magpie's stream-only relay gate, split/multiline SSE frames, terminal failures, cancellation, and JSON compatibility. Validate streaming with your actual gateway/upstream, plus tools, cancellation, a second compaction, and session resume before using important sessions.
 
 A sealed checkpoint is bound to its writer. Magpie records that affinity and refuses incompatible rerouting; losing or disabling the account, hitting its quota, or losing the checkpoint-affinity record can prevent continuation. Magpie currently retains at most 1,024 writer records for 30 days. Do not delete its `compactions.json` to troubleshoot an active compacted session. Switching to another provider/model is blocked after an opaque checkpoint; use a new session instead. Changing `/login magpie` to a different gateway or account does not make old checkpoints portable either; start a new session when changing their backend.
 

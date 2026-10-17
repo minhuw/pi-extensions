@@ -105,6 +105,9 @@ export function validateReplacementHistory(value: unknown): ResponseItem[] {
 
 export function parseCompactResponse(value: unknown): CompactResponse {
 	if (!isJsonObject(value)) throw new Error("Native Responses returned a non-object compact response.");
+	if (value.error || (value.status !== undefined && value.status !== "completed")) {
+		throw new Error("Native Responses returned an unsuccessful compact response.");
+	}
 	return {
 		output: validateReplacementHistory(value.output),
 		usage: value.usage,
@@ -500,7 +503,7 @@ export function buildCompactHeaders(params: {
 		if (typeof value === "string") headers.set(name, value);
 	}
 	headers.set("authorization", `Bearer ${params.apiKey}`);
-	headers.set("accept", "application/json");
+	headers.set("accept", "text/event-stream, application/json");
 	headers.set("content-type", "application/json");
 	headers.set("originator", "pi");
 	headers.set("user-agent", "pi-native-responses-compaction");
@@ -515,6 +518,7 @@ export function buildCompactHeaders(params: {
 export function buildCompactRequestBody(model: Model<any>, input: ResponseItem[]): JsonObject {
 	return {
 		model: model.id,
+		stream: true,
 		instructions: "",
 		input: [...input.map(normalizeResponseInputItem), { type: "compaction_trigger" }],
 	};
@@ -584,6 +588,66 @@ export function usageFromResponse(model: Model<any>, value: unknown): Usage | un
 	return usage;
 }
 
+async function readCompactResponse(response: Response, signal?: AbortSignal): Promise<CompactResponse> {
+	if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "text/event-stream") {
+		return parseCompactResponse(await response.json());
+	}
+	if (!response.body) throw new Error("Native Responses returned an empty event stream.");
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let event = "";
+	let data: string[] = [];
+	const onAbort = () => { void reader.cancel(signal?.reason).catch(() => {}); };
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		while (true) {
+			signal?.throwIfAborted();
+			const { value, done } = await reader.read();
+			signal?.throwIfAborted();
+			buffer += decoder.decode(value, { stream: !done });
+			let newline: number;
+			while ((newline = buffer.search(/[\r\n]/)) !== -1) {
+				// A CR at a chunk boundary may be the first half of CRLF.
+				if (!done && buffer[newline] === "\r" && newline === buffer.length - 1) break;
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + (buffer.slice(newline, newline + 2) === "\r\n" ? 2 : 1));
+				if (line === "") {
+					const eventName = event;
+					const payload = data.join("\n");
+					event = "";
+					data = [];
+					if (!payload) continue;
+					if (payload === "[DONE]") throw new Error("Native Responses stream ended without response.completed.");
+					const message: unknown = JSON.parse(payload);
+					if (!isJsonObject(message)) throw new Error("Native Responses returned a non-object stream event.");
+					if (eventName && message.type !== undefined && eventName !== message.type) {
+						throw new Error("Native Responses returned conflicting stream event types.");
+					}
+					const type = message.type ?? eventName;
+					if (type === "error" || type === "response.failed" || type === "response.incomplete" || type === "response.error") {
+						const detail = isJsonObject(message.error) ? message.error : message;
+						const text = `Native Responses compaction stream failed (${type}): ${typeof detail.message === "string" ? detail.message : "unsuccessful response"}`;
+						throw isAuthUnavailableMessage(text) ? new NonRetryableCompactionError(text) : new Error(text);
+					}
+					if (type === "response.completed") return parseCompactResponse(message.response);
+					continue;
+				}
+				const colon = line.indexOf(":");
+				const field = colon === -1 ? line : line.slice(0, colon);
+				const content = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "");
+				if (field === "data") data.push(content);
+				else if (field === "event") event = content;
+			}
+			if (done) throw new Error("Native Responses stream ended without response.completed.");
+		}
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		await reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+}
+
 export async function callRemoteCompaction(params: {
 	url: string;
 	headers: Headers;
@@ -616,7 +680,8 @@ export async function callRemoteCompaction(params: {
 				await delay(parseRetryDelay(response) ?? 1000 * 2 ** attempt, params.signal);
 				continue;
 			}
-			const parsed = parseCompactResponse(await response.json());
+			const parsed = await readCompactResponse(response, params.signal);
+			params.signal?.throwIfAborted();
 			const input = Array.isArray(params.body.input)
 				? (params.body.input as unknown[]).filter(isResponseItem).filter((item) => item.type !== "compaction_trigger")
 				: [];

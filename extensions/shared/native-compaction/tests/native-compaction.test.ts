@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Model } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -65,7 +65,7 @@ describe("compact endpoint transport", () => {
 		expect(headers.get("authorization")).toBe("Bearer plain-cpa-key");
 		expect(headers.get("chatgpt-account-id")).toBeNull();
 		expect(headers.get("x-extra")).toBe("kept");
-		expect(headers.get("accept")).toBe("application/json");
+		expect(headers.get("accept")).toBe("text/event-stream, application/json");
 		expect(headers.get("x-codex-beta-features")).toBe("remote_compaction_v2");
 	});
 
@@ -73,6 +73,7 @@ describe("compact endpoint transport", () => {
 		const input = [{ role: "user", content: [{ type: "input_text", text: "hello" }] }];
 		expect(buildCompactRequestBody(model, input)).toEqual({
 			model: "gpt-6-luna",
+			stream: true,
 			instructions: "",
 			input: [...input, { type: "compaction_trigger" }],
 		});
@@ -99,6 +100,7 @@ describe("compact endpoint transport", () => {
 
 		expect(buildCompactRequestBody(model, input)).toEqual({
 			model: "gpt-6-luna",
+			stream: true,
 			instructions: "",
 			input: [
 				{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque" },
@@ -236,6 +238,7 @@ describe("provider-neutral configuration", () => {
 				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer magpie-pi");
 				expect(JSON.parse(String(init?.body))).toEqual({
 					model: magpieModel.id,
+					stream: true,
 					instructions: "",
 					input: [...input, { type: "compaction_trigger" }],
 				});
@@ -430,5 +433,141 @@ describe("canonical compacted output", () => {
 				],
 			}),
 		).toThrow("expected exactly one");
+	});
+});
+
+describe("streamed remote compaction", () => {
+	const opaque = { type: "compaction", encrypted_content: "sealed-✓" };
+	const completed = { type: "response.completed", response: {
+		status: "completed", output: [opaque], usage: { input_tokens: 10, output_tokens: 5 },
+	} };
+	const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+	const request = {
+		url: "http://magpie.example/v1/responses",
+		headers: buildCompactHeaders({ apiKey: "gateway-key", sessionId: "session" }),
+		body: buildCompactRequestBody({ ...model, id: "codex/gpt-6.1-sol" }, []),
+		model,
+	};
+	function streamResponse(text: string, leaveOpen = false) {
+		const cancel = vi.fn();
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				// Split even CRLF and multibyte UTF-8 characters across reads.
+				for (const byte of new TextEncoder().encode(text)) controller.enqueue(Uint8Array.of(byte));
+				if (!leaveOpen) controller.close();
+			},
+			cancel,
+		});
+		return { response: new Response(body, { headers: { "content-type": "text/event-stream; charset=utf-8" } }), body, cancel };
+	}
+
+	it("passes Magpie's stream-only Codex native relay gate and consumes completed output", async () => {
+		const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+			if (JSON.parse(String(init?.body)).stream !== true) {
+				return new Response("Codex doesn't serve gpt-6.1-sol on the Responses API, so Codex's native compaction can't be asked of it", { status: 400 });
+			}
+			expect(new Headers(init?.headers).get("accept")).toContain("text/event-stream");
+			return streamResponse(frame({ type: "response.output_item.done", item: opaque }) + frame(completed)).response;
+		});
+		await expect(callRemoteCompaction({ ...request, body: { ...request.body, stream: false }, fetchImpl }))
+			.rejects.toThrow("Codex doesn't serve gpt-6.1-sol on the Responses API");
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+		const result = await callRemoteCompaction({ ...request, fetchImpl });
+		expect(result.replacementHistory).toEqual([opaque]);
+		expect(result.usage).toMatchObject({ input: 10, output: 5, totalTokens: 15 });
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+	});
+
+	it.each(["\n", "\r\n", "\r"])("decodes split multiline frames with %j and cancels after completion", async (newline) => {
+		const text = [": heartbeat", "id: ignored", "event: response.completed",
+			'data: {"type":"response.completed",', `data: "response":${JSON.stringify(completed.response)}}`, "", ""].join(newline);
+		// An extra comment resolves the last CR without closing the stream.
+		const { response, body, cancel } = streamResponse(text + ": still open\n", true);
+		await expect(callRemoteCompaction({ ...request, fetchImpl: async () => response }))
+			.resolves.toMatchObject({ replacementHistory: [opaque] });
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(body.locked).toBe(false);
+	});
+
+	it.each([
+		["partial output only", frame({ type: "response.output_item.done", item: opaque })],
+		["DONE without completion", "data: [DONE]\n\n"],
+		["malformed JSON", "data: {bad}\n\n"],
+		["non-object", "data: null\n\n"],
+		["unterminated frame", frame(completed).trimEnd()],
+		["failed", frame({ type: "response.failed", response: completed.response })],
+		["incomplete", frame({ type: "response.incomplete", response: completed.response })],
+		["error", frame({ type: "error", message: "upstream error" })],
+		["response error", frame({ type: "response.error", error: { message: "upstream error" } })],
+		["failed completed status", frame({ ...completed, response: { ...completed.response, status: "failed" } })],
+		["completed response error", frame({ ...completed, response: { ...completed.response, error: { message: "failed" } } })],
+		["missing opaque item", frame({ ...completed, response: { output: [] } })],
+		["conflicting event type", `event: response.failed\n${frame(completed)}`],
+	])("fails closed for %s, preserving bounded retries and releasing readers", async (_name, text) => {
+		vi.useFakeTimers();
+		const bodies: ReadableStream[] = [];
+		const fetchImpl = vi.fn<typeof fetch>(async () => {
+			const { response, body } = streamResponse(text);
+			bodies.push(body);
+			return response;
+		});
+		try {
+			const assertion = expect(callRemoteCompaction({ ...request, fetchImpl })).rejects.toThrow();
+			await vi.runAllTimersAsync();
+			await assertion;
+			expect(fetchImpl).toHaveBeenCalledTimes(3);
+			expect(bodies.every((body) => !body.locked)).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels an open malformed stream on every failed attempt", async () => {
+		vi.useFakeTimers();
+		const streams: ReturnType<typeof streamResponse>[] = [];
+		try {
+			const assertion = expect(callRemoteCompaction({ ...request, fetchImpl: async () => {
+				const stream = streamResponse("data: {bad}\n\n", true);
+				streams.push(stream);
+				return stream.response;
+			} })).rejects.toThrow();
+			await vi.runAllTimersAsync();
+			await assertion;
+			expect(streams).toHaveLength(3);
+			for (const { body, cancel } of streams) {
+				expect(cancel).toHaveBeenCalledOnce();
+				expect(body.locked).toBe(false);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("cleans up a stream when already aborted", async () => {
+		const reason = new Error("already cancelled");
+		const { response, body, cancel } = streamResponse("", true);
+		const fetchImpl = vi.fn<typeof fetch>(async () => response);
+		await expect(callRemoteCompaction({ ...request, signal: AbortSignal.abort(reason), fetchImpl })).rejects.toBe(reason);
+		expect(fetchImpl).toHaveBeenCalledOnce();
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(body.locked).toBe(false);
+	});
+
+	it("propagates abort during a pending read without retrying and cancels the stream", async () => {
+		const controller = new AbortController();
+		const reason = new Error("cancel compaction");
+		const cancel = vi.fn();
+		const body = new ReadableStream<Uint8Array>({
+			pull() { controller.abort(reason); },
+			cancel,
+		}, { highWaterMark: 0 });
+		const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+			expect(init?.signal).toBe(controller.signal);
+			return new Response(body, { headers: { "content-type": "text/event-stream" } });
+		});
+		await expect(callRemoteCompaction({ ...request, signal: controller.signal, fetchImpl })).rejects.toBe(reason);
+		expect(fetchImpl).toHaveBeenCalledOnce();
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(body.locked).toBe(false);
 	});
 });
