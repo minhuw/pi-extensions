@@ -1,13 +1,13 @@
 ---
-name: summary
-description: This skill should be used when providing concise summaries of research paper text. Use for quickly understanding the core content, arguments, and contributions of paper sections targeting top-tier computer science conferences.
+description: Summarize research-paper text while preserving technical claims.
+argument-hint: "[task or excerpt]"
 ---
 
 # Academic Text Summarizer
 
 Generate concise summaries of research paper text that capture main arguments, key information, and primary takeaways while maintaining technical accuracy.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Summarizing research paper sections for quick understanding
 - Extracting core arguments and claims from dense technical text
@@ -100,3 +100,8 @@ Graduate students, professors, and researchers in computer science who need quic
 - Stay faithful to the original text's meaning
 - Do not introduce information not in the source text
 - Keep language appropriate for academic audience
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

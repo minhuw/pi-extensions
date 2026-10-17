@@ -1,13 +1,13 @@
 ---
-name: conference-reviewer
-description: This skill should be used when writing official conference-style reviews for research papers as if from a top-tier systems conference reviewer. Use when the author wants a realistic, formal peer review with scores, strengths, weaknesses, and detailed feedback following standard conference review formats.
+description: Review a paper as a top-tier systems conference reviewer.
+argument-hint: "[task or excerpt]"
 ---
 
 # Conference Reviewer
 
 Act as an official reviewer from a top-tier computer systems conference and write comprehensive, formal peer reviews following standard conference review formats.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Writing official-style reviews for research papers
 - Getting realistic peer review feedback before submission
@@ -301,3 +301,8 @@ Score: [0-5]
 ## Output Format
 
 Provide the complete review in the standard format with all required sections. Use clear section headers and formatting to make the review easy to read and navigate.
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

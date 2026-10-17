@@ -55,15 +55,24 @@
 	},
 	"pi": {
 		"themes": ["./themes"],
-		"prompts": ["./extensions/commit/prompts/commit.md"],
+		"prompts": [
+			"./extensions/commit/prompts/commit.md",
+			"./extensions/writer/prompts/conference-reviewer.md",
+			"./extensions/writer/prompts/evaluate.md",
+			"./extensions/writer/prompts/grammar-checker.md",
+			"./extensions/writer/prompts/paper-validator.md",
+			"./extensions/writer/prompts/polish.md",
+			"./extensions/writer/prompts/selection.md",
+			"./extensions/writer/prompts/summary.md",
+			"./extensions/writer/prompts/validation.md"
+		],
 		"extensions": [
 			"./extensions/cliproxyapi-provider/index.ts",
 			"./extensions/magpie-provider/index.ts",
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/index.ts",
-			"./extensions/subagents/src/index.ts",
-			"./extensions/writer/index.ts"
+			"./extensions/subagents/src/index.ts"
 		]
 	}
 }

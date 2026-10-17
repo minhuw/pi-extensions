@@ -1,13 +1,13 @@
 ---
-name: selection
-description: This skill should be used when suggesting word or phrase alternatives for placeholders in academic research papers. Use when the author needs help selecting appropriate technical terminology for top-tier computer science conferences.
+description: Propose scored word or phrase candidates for a placeholder.
+argument-hint: "[task or excerpt]"
 ---
 
 # Academic Word Selection
 
 Propose three distinct candidate words or short phrases for placeholders in research paper text, with scoring and justification for each option.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Selecting appropriate technical terminology for research papers
 - Choosing between multiple word options for academic writing
@@ -99,3 +99,8 @@ Graduate students, professors, and researchers in computer science writing for t
 - Explain trade-offs between candidates
 - Avoid overly complex or obscure terminology unless necessary
 - Consider how the choice affects the overall argument or claim
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

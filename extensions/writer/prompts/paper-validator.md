@@ -1,13 +1,13 @@
 ---
-name: paper-validator
-description: This skill should be used when conducting comprehensive reviews of research papers for top-tier computer science conferences. Use for identifying weaknesses, unclear statements, missing evidence, and structural issues in academic papers. The skill autonomously reads files, searches for patterns, analyzes structure, and provides constructive peer-reviewer feedback.
+description: Review a paper draft for weaknesses, evidence gaps, and structure.
+argument-hint: "[task or excerpt]"
 ---
 
 # Research Paper Reviewer
 
 Conduct comprehensive, critical reviews of research papers targeting top-tier computer science conferences by autonomously analyzing content, identifying issues, and providing constructive feedback.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Reviewing research paper drafts before conference submission
 - Conducting peer-review-style analysis of academic papers
@@ -162,3 +162,8 @@ Research papers targeting top-tier computer science conferences:
 - Networking: SIGCOMM, NSDI, CoNEXT
 - Security: Oakland, USENIX Security, CCS, NDSS
 - Other top-tier CS conferences
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

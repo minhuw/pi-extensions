@@ -1,13 +1,13 @@
 ---
-name: validation
-description: This skill should be used when validating whether a specific word or phrase is appropriate, commonly used, and correct in academic technical contexts. Use for checking terminology in research papers targeting top-tier computer science conferences.
+description: Validate whether a marked word or phrase fits academic usage.
+argument-hint: "[task or excerpt]"
 ---
 
 # Academic Word Validator
 
 Assess whether marked words or phrases are appropriate, commonly used, and correct in the context of technical research papers, providing alternatives when needed.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Validating word choices in research papers
 - Checking if terminology is commonly used in the field
@@ -120,3 +120,8 @@ Graduate students, professors, and researchers in computer science writing for t
 - Consider the specific context and field
 - Explain trade-offs between alternatives
 - Focus on common usage in the target publication venues
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

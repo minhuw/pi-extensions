@@ -15,7 +15,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/shared/` — shared Orca busy-state coordination and the provider-neutral native Responses compaction engine, lifecycle hooks, and tests.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
 - `extensions/subagents/` — vendored Claude Code-style autonomous subagents, examples, source, and tests.
-- `extensions/writer/` — command-owned academic writing workflows and skills for conference papers, with tests.
+- `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 
 ## Verification commands

@@ -1,13 +1,13 @@
 ---
-name: grammar-checker
-description: This skill should be used when performing systematic scans of research paper text to identify and fix typos, grammar errors, inappropriate words, and awkward expressions. Use for thorough proofreading and error correction in academic writing for computer science conferences.
+description: Scan and fix typos, grammar, and awkward academic phrasing.
+argument-hint: "[task or excerpt]"
 ---
 
 # Grammar Checker
 
 Systematically scan research paper text through multiple passes to identify and fix typos, grammar errors, inappropriate word choices, and awkward expressions.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Proofreading research papers before submission
 - Performing systematic error detection across multiple categories
@@ -298,3 +298,8 @@ Issues by category:
 
 [Full corrected version of the text]
 ```
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

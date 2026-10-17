@@ -1,13 +1,13 @@
 ---
-name: polish
-description: This skill should be used when polishing academic research paper text for grammar, clarity, fluency, and natural phrasing. Specifically designed for non-native English speakers writing for top-tier computer science conferences.
+description: Polish academic text for grammar, fluency, and conference style.
+argument-hint: "[task or excerpt]"
 ---
 
 # Academic Text Polish
 
 Rewrite and refine research paper text to improve grammar, clarity, fluency, and academic style while preserving technical accuracy and LaTeX integrity.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Polishing research paper text for conference submissions
 - Improving grammar and sentence structure
@@ -90,3 +90,8 @@ If the text is already well-written, state "No significant improvements needed" 
 - Focus on significant improvements that enhance clarity or correctness
 - Respect technical terminology and domain-specific phrasing
 - Preserve the author's intended meaning and argument structure
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS

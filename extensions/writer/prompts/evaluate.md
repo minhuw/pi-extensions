@@ -1,13 +1,13 @@
 ---
-name: evaluate
-description: This skill should be used when evaluating the logical flow, structure, readability, and overall quality of research paper text. Use for assessing academic writing targeting top-tier computer science conferences.
+description: Score research-paper text for flow, structure, and clarity.
+argument-hint: "[task or excerpt]"
 ---
 
 # Academic Text Evaluator
 
 Evaluate research paper text for logical flow, structure, clarity, and readability without modifying the original content.
 
-## When to Use This Skill
+## When to Use This Workflow
 
 - Assessing the quality of research paper sections
 - Evaluating logical flow and argument structure
@@ -87,3 +87,8 @@ Follow these principles when providing feedback:
 3. **Key Issues**: List of significant problems identified
 4. **Specific Suggestions**: Actionable improvements with estimated score impact
 5. **Strengths**: Only if score > 85
+
+Apply this workflow only to this invocation, not as permanent session rules.
+
+Writing task or excerpt:
+$ARGUMENTS
