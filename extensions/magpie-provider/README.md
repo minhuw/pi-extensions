@@ -1,0 +1,69 @@
+# Magpie provider
+
+A standalone native Pi provider named `magpie`. It discovers the running Magpie gateway's chat models and delegates streaming to Pi's existing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages implementations. It does not replace other providers, implement a transport/parser, or change CLIProxyAPI behavior.
+
+## Use
+
+Start Magpie separately, then load this extension (or the containing Pi package):
+
+```sh
+pi -e ./extensions/magpie-provider/index.ts
+```
+
+Run `/login magpie` for interactive setup, then use `/model` to select a discovered Magpie model. Enter the gateway URL (blank accepts the displayed current/local default), then its API key in the **secret** prompt. Blank keys use `magpie-pi` only for loopback; remote gateways require a newly entered key. Login never reuses a stored or environment key, even when the URL is unchanged. It validates authenticated `/v1/models` before Pi atomically saves the key and canonical URL in its credential store. An empty valid catalog is allowed at login. Failed/cancelled validation leaves the existing credential and catalog untouched. This is one native API-key method, not OAuth or a separate command.
+
+The extension marks the key prompt as secret, but masking is controlled by Pi's client. The Pi TUI implementation inspected renders ordinary input even for secret prompts; avoid screen sharing or terminal recording while entering a key.
+
+Discovery finishes before provider registration, so startup model selection and model listing can see the catalog. IDs are preserved exactly, including `group/foo`. Startup reads only Magpie's optional saved credential through Pi's public read-only helper; no other credentials are resolved. Environment-only setup remains supported:
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `MAGPIE_BASE_URL` | `http://127.0.0.1:3425` | HTTP(S) gateway origin; an optional trailing `/v1` or `/v1/` is removed. |
+| `MAGPIE_API_KEY` | `magpie-pi` on loopback only | Bearer credential for discovery and fallback request authentication. Required for remote gateways. |
+
+Loopback means `localhost`, IPv4 `127.0.0.0/8`, or IPv6 `::1`, not arbitrary names resolving locally. Userinfo, queries, fragments, other URL paths, and non-HTTP(S) protocols are rejected. Use HTTPS for remote gateways: explicit HTTP sends credentials without encryption. Configuration errors are surfaced during extension loading.
+
+Saved URL/key take precedence over environment values per field; older saved keys without a URL use the environment/local URL. Native refresh uses Pi's effective credential, including its URL. A remote URL without a key still registers so `/login magpie` can configure it; no unauthenticated discovery is sent.
+
+`/logout` removes the stored connection and returns to environment/local defaults. Saved credentials never become permanent fallback configuration. Pi refreshes discovery after successful authentication. Request authentication supplies both key and endpoint, so even a previously selected model uses the current connection; Anthropic delegates remove the final `/v1` before their SDK adds `/v1/messages`.
+
+## Refresh and failures
+
+Open `/model` to run Pi's standard catalog refresh, including Magpie. It reports refresh errors and keeps the previous catalog only for the same URL/key. No extra refresh command is needed. `/reload` reloads the extension and rereads its environment configuration.
+
+With `pi --offline` or `PI_OFFLINE=1` (also `true`/`yes`, case-insensitive), startup discovery is skipped entirely and an empty provider is registered. There is no offline disk catalog, so startup selection of a discovered Magpie model is unavailable. Later native refresh obeys Pi's `allowNetwork` decision.
+
+Every discovery uses authenticated `GET /v1/models`, disallows redirects, and has a **3-second timeout**, including body reading. Native refresh also honors Pi's cancellation signal and `allowNetwork: false`. New models are installed only through Pi's generation-checked `publish({ update })` callback.
+
+A stopped/unavailable gateway does not break ordinary Pi startup: initial discovery failure quietly registers an empty provider. Start the gateway and open `/model` to retry. Selecting a Magpie model at startup still requires successful discovery. There is no disk cache, so an offline restart does not retain the previous run's models. Network failures, malformed catalogs, and catalogs with no usable chat models retain the current in-memory list only for the same connection. A URL/key change clears the old catalog through Pi's publication callback, even offline or if subsequent discovery fails. Error messages never include response bodies or credentials.
+
+## Magpie's built-in Pi adapter
+
+This extension requires **one configuration owner**: remove the entire `providers.magpie` entry from the standard Pi `models.json`, and stop Magpie's Pi config-sync feature (or use the adapter without this extension). Configure the native extension through `/login magpie` or `MAGPIE_BASE_URL`/`MAGPIE_API_KEY` instead. Back up your configuration first; preserve other providers and settings. The extension checks this file at startup, login, authentication resolution, refresh, and discovery, including live `/model` reloads. It only reads the file and reports an actionable error; it never rewrites it.
+
+All Magpie overlays are blocked, including empty entries, metadata-only `modelOverrides`, headers, compatibility overrides, and API-key fallbacks. Even a metadata-only overlay activates Pi's provider composer, which can bypass Magpie's Anthropic endpoint normalization when a connection change clears the native catalog and discovery fails. A stale selected model could then use a malformed endpoint. Metadata overrides cannot be supported until the host guarantees native delegation independently of the live catalog.
+
+No placeholder models or Pi runtime patches are used. The guard reads `getAgentDir()/models.json` and matches the installed Pi parser's BOM, `//` comments and trailing commas; block comments are not supported. Nonstandard programmatic `ModelRuntime.modelsPath` files are outside this guard's supported configuration.
+
+## Metadata and limitations
+
+- API preference: advertised `/v1/responses`, then `/v1/messages`, otherwise Chat Completions. OpenAI base URLs end in `/v1`; Anthropic uses the origin because its SDK adds `/v1/messages`.
+- Chat Completions and Anthropic Messages enable Pi's session-affinity headers, matching Magpie's built-in adapter, so the gateway can associate requests with a Pi session for routing and configured conversation recording. Responses already sends session identity through Pi's delegate. Pi controls these headers (for example, `cacheRetention: "none"` suppresses them).
+- Text input is the default; image input is enabled only when advertised. Clearly image/audio-only output models are excluded. No image generation, audio, or classifier integration is provided.
+- Missing/invalid limits use **32,768 context tokens** and **4,096 output tokens**. Limits must be positive safe integers, and output is capped at context size. These conservative defaults are not measured model capabilities.
+- Prices are **unknown**, represented as zero because Pi requires numeric cost metadata. Zero does **not** mean the service is free; displayed costs are not billing estimates.
+- Explicit reasoning efforts populate every Pi thinking level, with unsupported levels set to `null` and `off` mapped to `none`. Unknown/empty effort lists retain Pi defaults. Claude on native Messages may offer `off` without `none`. Adaptive thinking is enabled only for Claude versions recognized by Magpie's upstream rule (4.6 onward), not for arbitrary Anthropic-compatible models.
+- Metadata mapping follows Magpie `internal/gateway/gateway.go:modelObject`, `internal/agent/agents.go:piThinkingLevels`/`piModelJSON`, and `internal/gateway/anthropic.go:AdaptiveThinking`/`ThinksOnlyWhenAsked` (reviewed Magpie commit `1755713`).
+
+The extension itself never writes Magpie files, Pi settings, `models.json`, or credential files; Pi alone persists successful login and logout. No process management, telemetry, or runtime patches are implemented. Streaming message conversion, tools, images, usage, cancellation, and parser behavior remain Pi's responsibility. Gateway compatibility still requires live validation.
+
+Native compaction is bundled and **enabled by default, experimental and unverified live**. With `models` omitted, it automatically allows exact registry IDs in the `openai/<model>` and `codex/<model>` namespaces advertised as Magpie Responses models, including `codex/gpt-6.1-sol` and future names. This is an identification heuristic, not proof of backend capability: the remote Magpie provider still requires `compaction=native`. Other namespaces/aliases need an explicit verified exact list; groups are excluded. Run `/reload`, open `/model` to refresh, then inspect `/magpie-native-compaction`. An explicit `models` list replaces discovery; remove that key from old `magpie-native-compaction.json` files to restore automatic selection. Existing `enabled: false` and `models: []` remain optouts. Default fallback to ordinary compaction is allowed only before the first native checkpoint, never after. See [Native compaction setup](NATIVE-COMPACTION.md) for configuration, checkpoint safety, and migration from the old experimental recipe. Magpie uses the provider-neutral engine in `extensions/shared/native-compaction/` and has no runtime dependency on either CLIProxyAPI extension.
+
+## Offline checks
+
+```sh
+npm run test:magpie-provider
+npm run typecheck
+```
+
+Tests cover native login persistence/cancellation, connection precedence/logout, isolated saved-credential startup, URL/auth validation, metadata mapping, bounded discovery, publication and retention, and offline registration. Real Pi runtime/delegate tests verify stale-model endpoint overrides, secret pairing, request hooks, and session-affinity headers with intercepted HTTP. They do not require a Magpie executable or credentials.

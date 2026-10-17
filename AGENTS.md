@@ -8,10 +8,11 @@ The published extension table and installation details live in the root [README]
 ## Layout
 
 - `extensions/cliproxyapi-provider/` — editable locally patched CLIProxyAPI 1.4.15 snapshot, provider/TPS wrapper, and offline catalog/entrypoint tests.
+- `extensions/magpie-provider/` — live Magpie gateway model discovery, built-in Pi API delegation, and automatic native compaction for OpenAI/Codex Responses models with configurable opt-out and exact overrides.
 - `extensions/cliproxyapi-native-compaction/` — native OpenAI Responses compaction for eligible CLIProxyAPI-backed Pi sessions.
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
-- `extensions/shared/` — shared Orca busy-state coordination plus its strict Node test.
+- `extensions/shared/` — shared Orca busy-state coordination and the provider-neutral native Responses compaction engine, lifecycle hooks, and tests.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
 - `extensions/subagents/` — vendored Claude Code-style autonomous subagents, examples, source, and tests.
 - `extensions/writer/` — command-owned academic writing workflows and skills for conference papers, with tests.
@@ -26,8 +27,9 @@ Run commands from the repository root with Node `>=22.19.0`.
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
 | `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the configured `extensions` sources; `extensions/subagents` is excluded.                    |
-| `npm test`                          | Run the safe collection suite: CLIProxyAPI Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
+| `npm test`                          | Run the safe collection suite: CLIProxyAPI Provider, Magpie Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
 | `npm run test:cliproxyapi-provider` | Run 53 offline Node catalog regression scenarios and the mocked Vitest provider/TPS entrypoint checks.                                  |
+| `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and the shared native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |

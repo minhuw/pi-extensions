@@ -96,6 +96,12 @@ The implementation accepts both opaque item names encountered in supported Respo
 
 For legacy version-1 checkpoints, the complete dedicated-endpoint `output` array remains preserved. For new version-2 checkpoints, the extension follows Codex's retention shape: user context is retained within a bounded token budget, obsolete reasoning/tool/assistant history is dropped, and the single opaque compaction item is appended.
 
+## Magpie and the shared engine
+
+Magpie now bundles its own opt-in compaction integration and does not require this extension. The protocol/history engine lives in `extensions/shared/native-compaction/`; this extension retains its CLIProxyAPI configuration and command as a thin wrapper. Existing checkpoint format identifiers remain unchanged.
+
+This wrapper no longer handles the `magpie` provider, even if an older experimental configuration retargeted it there. Migrate verified model IDs and enable/fallback settings to `magpie-native-compaction.json` using the [Magpie setup guide](../magpie-provider/NATIVE-COMPACTION.md). This avoids duplicate compactions when both integrations are loaded.
+
 ## Attribution and license
 
 Parts of the Pi lifecycle and history conversion are adapted from Can Celik's MIT-licensed [`pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction). See the included [MIT license notice](LICENSE).
