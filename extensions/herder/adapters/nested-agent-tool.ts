@@ -88,7 +88,7 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			"recon uses gpt-6-luna at max on the fast tier. searcher uses this run's profile binding when supplied, otherwise the same package scout binding. worker and reviewer inherit this role's exact model, thinking level, and service tier.",
 			"Every child inherits this action's stable worktree and lifetime.",
 			`Allowed types in this scope: ${scope.allowedTypes.join(", ")}. recon is repository-read-only source navigation and bounded static defect candidate scouting; searcher is web research with delegated local read-only search; worker may mutate (Implementer only); reviewer independently reviews (root Reviewer only).`,
-			"Recon uses worktree-scoped read/grep/find/ls overrides; other children use Pi's built-in local tools. searcher loads only pi-web-access, worker loads only Ponytail's trusted pi-extension entry, and recon/reviewer load no extensions.",
+			"Recon uses worktree-scoped read/grep/find/ls overrides; other children use Pi's built-in local tools. searcher loads only pi-web-access, and worker/recon/reviewer load no extensions.",
 			"Only reviewer children get Agent/result tools, restricted to recon leaves: one concurrent scout and two launches total. Other children cannot delegate. No child inherits conversation, skills, scheduling, resume, or a secondary worktree.",
 			"recon has a fixed one-hour execution deadline, including setup and retries; timeouts return partial output and never retry automatically.",
 		].join(" "),

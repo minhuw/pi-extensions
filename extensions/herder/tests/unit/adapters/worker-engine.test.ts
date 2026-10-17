@@ -19,7 +19,6 @@ import {
 	finalAssistantResult,
 	PiWorkerEngine,
 	trustedNestedExtensionPath,
-	trustedRoleExtensionEntry,
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
@@ -267,65 +266,16 @@ test("npm extensions resolve only from their exact trusted user package paths", 
 	}
 });
 
-test("role extensions resolve only the exact entry inside the trusted user git package", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-"));
-	try {
-		const agentDir = path.join(root, "agent");
-		const installed = path.join(agentDir, "git/github.com/DietrichGebert/ponytail");
-		const entry = path.join(installed, "pi-extension/index.js");
-		await mkdir(path.dirname(entry), { recursive: true });
-		await writeFile(entry, "export default () => {};");
-		const source = "git:github.com/DietrichGebert/ponytail";
-		assert.equal(trustedRoleExtensionEntry(agentDir, installed, source), await realpath(entry));
-
-		await rm(entry);
-		await assert.rejects(
-			async () => trustedRoleExtensionEntry(agentDir, installed, source),
-			/pi install git:github\.com\/DietrichGebert\/ponytail/,
-		);
-
-		const outsideEntry = path.join(root, "outside-index.js");
-		await writeFile(outsideEntry, "export default () => {};");
-		await symlink(outsideEntry, entry, "file");
-		assert.throws(
-			() => trustedRoleExtensionEntry(agentDir, installed, source),
-			/entry resolves outside the trusted user package/,
-		);
-
-		await rm(installed, { recursive: true, force: true });
-		const siblingPackage = path.join(agentDir, "git/github.com/example/sibling");
-		await mkdir(path.join(siblingPackage, "pi-extension"), { recursive: true });
-		await writeFile(path.join(siblingPackage, "pi-extension/index.js"), "export default () => {};");
-		await mkdir(path.dirname(installed), { recursive: true });
-		await symlink(siblingPackage, installed, "dir");
-		assert.throws(
-			() => trustedRoleExtensionEntry(agentDir, installed, source),
-			/does not resolve to the exact trusted Ponytail package/,
-		);
-
-		const outsidePackage = path.join(root, "outside-package");
-		await mkdir(path.join(outsidePackage, "pi-extension"), { recursive: true });
-		await writeFile(path.join(outsidePackage, "pi-extension/index.js"), "export default () => {};");
-		const shadow = path.join(agentDir, "git/github.com/DietrichGebert/shadow");
-		await symlink(outsidePackage, shadow, "dir");
-		assert.throws(
-			() => trustedRoleExtensionEntry(agentDir, shadow, source),
-			/resolves outside the trusted user git store/,
-		);
-	} finally {
-		await rm(root, { recursive: true, force: true });
-	}
-});
-
-test("production factory loads exact role and nested extensions", async () => {
+async function assertProductionExtensions(ponytailInstalled: boolean): Promise<void> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-runtime-"));
 	try {
 		const agentDir = path.join(root, "agent");
 		const ponytail = path.join(agentDir, "git/github.com/DietrichGebert/ponytail/pi-extension/index.js");
 		const web = path.join(agentDir, "npm/node_modules/pi-web-access");
 		const events = path.join(root, "events.log");
-		await mkdir(path.dirname(ponytail), { recursive: true });
-		await writeFile(ponytail, `import { appendFileSync } from "node:fs";
+		if (ponytailInstalled) {
+			await mkdir(path.dirname(ponytail), { recursive: true });
+			await writeFile(ponytail, `import { appendFileSync } from "node:fs";
 export default function (pi) {
 	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "ponytail-start\\n"));
 	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "ponytail-shutdown\\n"));
@@ -335,6 +285,11 @@ export default function (pi) {
 	});
 }
 `);
+			// Even explicitly configured user extensions must not leak into isolated sessions.
+			await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ extensions: [ponytail] }));
+		} else {
+			await assert.rejects(() => readFile(ponytail), { code: "ENOENT" });
+		}
 		await mkdir(web, { recursive: true });
 		await writeFile(path.join(web, "package.json"), JSON.stringify({
 			name: "pi-web-access",
@@ -387,8 +342,9 @@ export default function (pi) {
 			const prepared = await factory.create({ action: roleAction(role), planDirectory });
 			const session = prepared.session as AgentSession;
 			assert.equal(session.messages.length, 0);
-			const hasPonytail = session.extensionRunner.hasHandlers("before_agent_start");
-			assert.equal(hasPonytail, role === "plan-implementer");
+			for (const event of ["session_start", "before_agent_start", "session_shutdown"] as const) {
+				assert.equal(session.extensionRunner.hasHandlers(event), false);
+			}
 			assert.deepEqual(
 				session.agent.state.tools.map((tool) => tool.name).sort(),
 				(role === "plan-implementer"
@@ -397,7 +353,12 @@ export default function (pi) {
 			);
 			if (role === "plan-implementer") {
 				const injected = await session.extensionRunner.emitBeforeAgentStart({ messageType: "user", prompt: "task", images: undefined }, { cwd: worktree, forceSystemPrompt: "BASE" });
-				assert.match(injected?.systemPromptOptions.forceSystemPrompt ?? "", /BASE\nPONYTAIL_TEST/);
+				assert.equal(injected?.systemPromptOptions.forceSystemPrompt ?? "BASE", "BASE");
+				faux.setResponses([(context) => {
+					assert.doesNotMatch(JSON.stringify(context.messages), /PONYTAIL_TEST/);
+					return fauxAssistantMessage("Implementer result");
+				}]);
+				await session.prompt("Implement the bounded task");
 			}
 			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			session.dispose();
@@ -405,7 +366,7 @@ export default function (pi) {
 			const afterRole = await eventLines();
 			assert.deepEqual(
 				afterRole.slice(beforeRole.length).sort(),
-				role === "plan-implementer" ? ["ponytail-before", "ponytail-shutdown", "ponytail-start"] : [],
+				[],
 			);
 		}
 
@@ -414,7 +375,7 @@ export default function (pi) {
 		const handle = await engine.prepare({ action: roleAction("plan-implementer"), planDirectory });
 		await engine.discard(handle);
 		const afterDiscard = await eventLines();
-		assert.deepEqual(afterDiscard.slice(beforeDiscard.length).sort(), ["ponytail-shutdown", "ponytail-start"]);
+		assert.deepEqual(afterDiscard.slice(beforeDiscard.length), []);
 
 		// Exercise the production override, not just advertised tool names, at both Recon depths.
 		await mkdir(path.join(worktree, "src"));
@@ -431,12 +392,13 @@ export default function (pi) {
 		const nestedCases = [
 			{ type: "recon", tools: ["read", "grep", "find", "ls"], events: [] },
 			{ type: "searcher", tools: ["web_search", "source_check", "fetch_content", "get_search_content", "find", "grep"], events: ["web-shutdown", "web-start"] },
-			{ type: "worker", tools: ["read", "edit", "write", "bash", "grep", "find", "ls"], events: ["ponytail-before", "ponytail-shutdown", "ponytail-start"] },
+			{ type: "worker", tools: ["read", "edit", "write", "bash", "grep", "find", "ls"], events: [] },
 		] as const;
 		for (const nestedCase of nestedCases) {
 			const beforeNested = await eventLines();
 			let providerTools: string[] = [];
 			const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
+				assert.doesNotMatch(JSON.stringify(context.messages), /PONYTAIL_TEST/);
 				providerTools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
 				if (nestedCase.type === "recon") {
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
@@ -570,30 +532,6 @@ export default function (pi) {
 			await missingWebParent.nested.stop("test cleanup");
 		}
 
-		const missingPonytailParent = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
-		await rm(path.dirname(path.dirname(ponytail)), { recursive: true, force: true });
-		try {
-			const missingPonytail = await missingPonytailParent.nested.run({
-				type: "worker",
-				prompt: "Implement the bounded child task",
-				description: "implement child task",
-			});
-			assert.equal(missingPonytail.status, "error");
-			assert.match(
-				missingPonytail.error ?? "",
-				/Herder nested extension git:github\.com\/DietrichGebert\/ponytail is not installed.*pi install git:github\.com\/DietrichGebert\/ponytail/,
-			);
-		} finally {
-			const missingPonytailSession = missingPonytailParent.session as AgentSession;
-			await missingPonytailSession.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			missingPonytailSession.dispose();
-			await missingPonytailParent.nested.stop("test cleanup");
-		}
-		await assert.rejects(
-			() => factory.create({ action: roleAction("plan-implementer"), planDirectory }),
-			/Herder role extension git:github\.com\/DietrichGebert\/ponytail is not installed.*pi install git:github\.com\/DietrichGebert\/ponytail/,
-		);
-
 		const beforeExtensionless = await eventLines();
 		const extensionlessReviewer = await factory.create({ action: roleAction("plan-reviewer"), planDirectory });
 		try {
@@ -615,7 +553,13 @@ export default function (pi) {
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
-});
+}
+
+for (const ponytailInstalled of [false, true]) {
+	test(`production factory loads only web access with Ponytail ${ponytailInstalled ? "installed" : "absent"}`, async () => {
+		await assertProductionExtensions(ponytailInstalled);
+	});
+}
 
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
 	const factory = new FakeFactory();

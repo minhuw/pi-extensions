@@ -37,7 +37,6 @@ import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { createReconTools } from "./recon-tools.ts";
 import {
 	loadHerderPiRole,
-	PONYTAIL_EXTENSION_SOURCE,
 	WEB_ACCESS_EXTENSION_SOURCE,
 	type HerderPiRoleDefinition,
 	type HerderNestedAgentDefinition,
@@ -264,29 +263,6 @@ export function trustedNestedExtensionPath(agentDir: string, installed: string, 
 	return realInstalled;
 }
 
-export function trustedRoleExtensionEntry(agentDir: string, installed: string, source: string): string {
-	const installCommand = `pi install ${source}`;
-	if (source !== PONYTAIL_EXTENSION_SOURCE) throw new Error(`Herder role extension ${source} is not allowed.`);
-	const realRoot = realpathSync(path.join(agentDir, "git"));
-	const realInstalled = realpathSync(installed);
-	if (!isInside(realRoot, realInstalled)) {
-		throw new Error(`Herder role extension ${source} resolves outside the trusted user git store.`);
-	}
-	const expectedPackage = path.join(realRoot, "github.com", "DietrichGebert", "ponytail");
-	if (realInstalled !== expectedPackage) {
-		throw new Error(`Herder role extension ${source} does not resolve to the exact trusted Ponytail package.`);
-	}
-	const entry = path.join(realInstalled, "pi-extension", "index.js");
-	if (!existsSync(entry)) {
-		throw new Error(`Herder role extension ${source} is missing pi-extension/index.js. Reinstall it explicitly with: ${installCommand}`);
-	}
-	const realEntry = realpathSync(entry);
-	if (!isInside(realInstalled, realEntry) || !isInside(realRoot, realEntry)) {
-		throw new Error(`Herder role extension ${source} entry resolves outside the trusted user package.`);
-	}
-	return realEntry;
-}
-
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
 	private readonly agentDir: string;
@@ -325,9 +301,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			if (!installed || !existsSync(installed)) {
 				throw new Error(`Herder ${owner} extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
 			}
-			return source === PONYTAIL_EXTENSION_SOURCE
-				? trustedRoleExtensionEntry(this.agentDir, installed, source)
-				: trustedNestedExtensionPath(this.agentDir, installed, source);
+			return trustedNestedExtensionPath(this.agentDir, installed, source);
 		});
 	}
 

@@ -49,7 +49,8 @@ test("live setup installs trusted worker packages through the selected Pi before
 	]) {
 		const lines = setup.split("\n").map((line) => line.trim());
 		const binary = lines.findIndex((line) => line.startsWith("pi_bin="));
-		for (const source of [`"${checkout}"`, "git:github.com/DietrichGebert/ponytail", "npm:pi-web-access"]) {
+		assert.doesNotMatch(setup, /ponytail/i);
+		for (const source of [`"${checkout}"`, "npm:pi-web-access"]) {
 			const install = lines.indexOf(`"$pi_bin" install ${source} --approve`);
 			assert.ok(install > binary, `${label} installs ${source} in the user store after selecting Pi`);
 		}
@@ -71,11 +72,11 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.deepEqual(lock.packages[""].engines, { node: ">=22.19.0" });
 	assert.match(rootReadme, /Node >=22\.19\.0/);
 	assert.match(rootReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
-	assert.match(rootReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
+	assert.doesNotMatch(rootReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(rootReadme, /pi install npm:pi-web-access/);
 	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.match(herderReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
-	assert.match(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
+	assert.doesNotMatch(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
 	assert.match(herderReadme, /pi install npm:pi-web-access/);
 	assert.match(planTemplate, /Prerequisites/);
 	assert.match(planTemplate, /restore missing dependencies with repository-declared `npm ci`/);
@@ -314,13 +315,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(engine, /getInstalledPath\(source, "user"\)/);
 	assert.doesNotMatch(engine, /getInstalledPath\(source, "project"\)/);
 	assert.match(engine, /realpathSync\(path\.join\(agentDir, "npm"\)\)/);
-	assert.match(engine, /realpathSync\(path\.join\(agentDir, "git"\)\)/);
-	assert.match(engine, /"pi-extension", "index\.js"/);
-	assert.match(engine, /"github\.com", "DietrichGebert", "ponytail"/);
-	assert.match(engine, /does not resolve to the exact trusted Ponytail package/);
+	assert.doesNotMatch(engine + roleConfig + nestedTool, /ponytail/i);
 	assert.match(engine, /resolves outside the trusted user package store/);
 	assert.match(engine, /does not resolve to its exact trusted package path/);
-	assert.match(engine, /entry resolves outside the trusted user package/);
 	assert.match(engine, /pi install \$\{source\}/);
 	assert.match(engine, /SEARCHER_WEB_TOOL_NAMES/);
 	assert.match(engine, /SEARCHER_LOCAL_TOOL_NAMES/);
@@ -336,7 +333,6 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /run_in_background/);
 	assert.match(nestedTool, /name: "get_subagent_result"/);
 	assert.doesNotMatch(nestedTool, /resolvedModel|thinking:|service_tier/);
-	assert.match(roleConfig, /PONYTAIL_EXTENSION_SOURCE = "git:github\.com\/DietrichGebert\/ponytail"/);
 	assert.match(roleConfig, /WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access"/);
 	assert.match(roleConfig, /ROLE_EXTENSION_SOURCES/);
 	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker", "reviewer"\]/);
@@ -375,7 +371,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
 	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content, find, grep$/m);
 	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
-	assert.match(worker, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
+	assert.doesNotMatch(worker, /^extensions:/m);
 	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls$/m);
 	assert.match(worker, /only when the parent explicitly delegates sole setup ownership/);
 	assert.match(worker, /never compete with parent or sibling installs/);
@@ -414,11 +410,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.doesNotMatch(contents, /^tools: .*(?:steer_subagent|herder)/m);
 		assert.match(contents, /^tools: .*\bgrep\b.*\bfind\b/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
-		if (role === "plan-implementer") {
-			assert.match(contents, /^extensions: git:github\.com\/DietrichGebert\/ponytail$/m);
-		} else {
-			assert.doesNotMatch(contents, /^extensions:/m);
-		}
+		assert.doesNotMatch(contents, /^extensions:/m);
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");
 		assert.match(contract, /Return exactly the envelope below/);
 		assert.match(contract, /^SETUP: </m);

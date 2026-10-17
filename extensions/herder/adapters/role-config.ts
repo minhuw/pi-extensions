@@ -54,17 +54,16 @@ const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
 	"read", "grep", "find", "ls",
 	"web_search", "source_check", "fetch_content", "get_search_content",
 ]);
-export const PONYTAIL_EXTENSION_SOURCE = "git:github.com/DietrichGebert/ponytail";
 export const WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access";
 const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {
-	"plan-implementer": [PONYTAIL_EXTENSION_SOURCE],
+	"plan-implementer": [],
 	"plan-reviewer": [],
 	"plan-judge": [],
 };
 const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]> = {
 	recon: [],
 	searcher: [WEB_ACCESS_EXTENSION_SOURCE],
-	worker: [PONYTAIL_EXTENSION_SOURCE],
+	worker: [],
 	reviewer: [],
 };
 

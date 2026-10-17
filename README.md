@@ -29,11 +29,9 @@ Node >=22.19.0 and Pi >=1.3.0 are required. With Pi already installed, this bloc
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
-pi install git:github.com/DietrichGebert/ponytail
 pi install npm:pi-web-access
 ```
 
-- Ponytail keeps Herder implementers and nested workers focused on minimal changes.
 - Pi's built-in `grep` and `find` tools provide Herder's repository search.
 - `pi-web-access` provides remote research tools to Herder's nested searcher.
 
@@ -41,7 +39,6 @@ For a local checkout, replace only the first command:
 
 ```bash
 pi install /absolute/path/to/pi-extensions
-pi install git:github.com/DietrichGebert/ponytail
 pi install npm:pi-web-access
 ```
 

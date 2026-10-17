@@ -23,7 +23,7 @@ test("Herder loads exact scoped Pi role definitions", async () => {
 	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
 	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
-	assert.deepEqual(implementer.extensions, ["git:github.com/DietrichGebert/ponytail"]);
+	assert.deepEqual(implementer.extensions, []);
 	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
 	assert.deepEqual(reviewer.extensions, []);
 	assert.deepEqual(judge.extensions, []);
@@ -50,7 +50,7 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
-	assert.deepEqual(worker.extensions, ["git:github.com/DietrichGebert/ponytail"]);
+	assert.deepEqual(worker.extensions, []);
 	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
 	assert.equal(reviewer.readOnly, false);
 	assert.equal(reviewer.binding, "inherit");
@@ -313,6 +313,7 @@ Search.
 			["recon", "git:github.com/DietrichGebert/ponytail"],
 			["searcher", "git:github.com/DietrichGebert/ponytail"],
 			["worker", "npm:pi-web-access"],
+			["worker", "git:github.com/DietrichGebert/ponytail"],
 		] as const) {
 			await writeFile(path.join(nestedRoot, `${type}.md`), `---
 name: ${type}
@@ -336,7 +337,7 @@ Test.
 test("role loading fails closed on disallowed extension metadata", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-role-extension-"));
 	try {
-		for (const role of ["plan-reviewer", "plan-judge"] as const) {
+		for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 			await writeFile(path.join(root, `${role}.md`), `---
 name: ${role}
 package: herder
