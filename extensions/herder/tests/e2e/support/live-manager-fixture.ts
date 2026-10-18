@@ -209,10 +209,16 @@ async function verifyFixture(workspace: string, profile: string): Promise<void> 
   assert.equal(manager.run?.status, "complete")
   assert.equal(manager.run?.host, "pi")
   assert.equal(manager.run?.profile, profile)
-  assert.equal(manager.actions.some((action) => action.role === "plan-judge"), false)
+  assert.equal(manager.run?.yolo, false)
+  assert.equal(manager.verification?.state, "passed")
+  assert.equal(manager.actions.filter((action) => action.role === "plan-judge").length, 2)
   assert.equal(manager.actions.filter((action) => action.role === "plan-implementer").length, 1)
   assert.equal(manager.actions.filter((action) => action.role === "plan-reviewer").length, 2)
-  assert.equal(manager.actions.length, 3)
+  assert.equal(manager.actions.length, 5)
+  assert.deepEqual(manager.actions.map(({ planId, role }) => [planId, role]), [
+    ["001", "plan-implementer"], ["001", "plan-reviewer"], ["001", "plan-judge"],
+    ["RUN", "plan-reviewer"], ["RUN", "plan-judge"],
+  ])
   assert.equal(manager.actions.every((action) => action.state === "terminal"), true)
   assert.equal(manager.actions.every((action) => {
     const expected = resolvedProfile.roles[action.role as WorkerRole]
@@ -224,8 +230,9 @@ async function verifyFixture(workspace: string, profile: string): Promise<void> 
   const usage = readUsageState(fixture.planDirectory)
   assert.equal(usage.records.filter((record) => record.role === "plan-implementer").length, 1)
   assert.equal(usage.records.filter((record) => record.role === "plan-reviewer").length, 2)
-  assert.equal(usage.records.length, 3)
-  assert.deepEqual(usage.records.map((record) => record.outcome), ["COMPLETE", "APPROVE", "APPROVE"])
+  assert.equal(usage.records.filter((record) => record.role === "plan-judge").length, 2)
+  assert.equal(usage.records.length, 5)
+  assert.deepEqual(usage.records.map((record) => record.outcome), ["COMPLETE", "APPROVE", "DONE", "APPROVE", "DONE"])
   assert.equal(run("git", ["rev-parse", "HEAD"], { cwd: fixture.repository }).stdout.trim(), fixture.originalHead)
   assert.equal(run("git", ["status", "--short"], { cwd: fixture.repository }).stdout.trim(), "")
   assert.equal(fs.readFileSync(path.join(fixture.repository, "src/value.mjs"), "utf8"), "export const value = 1\n")
@@ -240,7 +247,7 @@ async function verifyFixture(workspace: string, profile: string): Promise<void> 
   assert.equal(fs.existsSync(path.join(fixture.repository, ".pi-subagents")), false)
   const sessionRoot = path.join(fixture.planDirectory, ".herder", "pi-sessions")
   const sessionFiles = fs.readdirSync(sessionRoot).filter((file) => file.endsWith(".jsonl"))
-  assert.equal(sessionFiles.length, 3)
+  assert.equal(sessionFiles.length, 5)
   for (const file of sessionFiles) {
     const [firstLine] = fs.readFileSync(path.join(sessionRoot, file), "utf8").split("\n")
     const header = JSON.parse(firstLine)
