@@ -22,10 +22,8 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       extensions: true,
       excludeExtensions: DEFAULT_EXCLUDED_EXTENSIONS,
       skills: true,
-      // Fast tier + high effort on Luna — cheap-ish latency path for search fan-out.
-      model: "openai/gpt-6-luna",
-      thinking: "max",
-      serviceTier: "fast",
+      model: "deepseek/deepseek-flash",
+      thinking: "high",
       systemPrompt: `# READ-ONLY RECON
 
 You are a codebase reconnaissance specialist. You locate and explain existing code.

@@ -103,16 +103,17 @@ test("model checks accept provider-qualified catalog entries without substitutio
 		{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3" },
 		{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash" },
 		{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna" },
+		{ provider: "magpie", id: "deepseek/deepseek-flash", fullId: "magpie/deepseek/deepseek-flash" },
 	];
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[2]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna", "deepseek/deepseek-flash"]);
 });
 
 test("model availability includes optional rescue and Searcher bindings", () => {
 	const profile = resolvePiProfile("universe", catalog);
-	const available = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"].map((id) => ({ provider: "proxy", id }));
+	const available = ["gpt-6-astra", "gpt-6-sol", "deepseek/deepseek-flash"].map((id) => ({ provider: "proxy", id }));
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[0]), true);
 	const custom = {
@@ -121,7 +122,8 @@ test("model availability includes optional rescue and Searcher bindings", () => 
 		searcher: { ...profile.searcher!, model: "searcher-only" },
 	};
 	assert.deepEqual(unavailableProfileModels(custom, available), ["rescue-only", "searcher-only"]);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["deepseek/deepseek-flash"]);
+	assert.deepEqual(unavailableProfileModels({ ...profile, searcher: undefined }, available), ["gpt-6-luna"]);
 });
 
 test("Pi profile catalogs require exactly the canonical worker roles", async () => {

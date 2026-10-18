@@ -147,7 +147,7 @@ Scope approval and budget approval are separate: an amendment does not restore c
 | `poorman` | Luna orchestrates, reviews, and judges while DeepSeek implements. |
 | `epic` | Fable orchestrates and judges, Opus implements, and Sol reviews. |
 | `lightspeed` | Grok 4.6 orchestrates and implements while Luna reviews and judges. |
-| `universe` (default) | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Luna max/fast is Recon-only. |
+| `universe` (default) | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Recon uses DeepSeek Flash high with no service-tier pin. |
 
 Exact model, effort, and service-tier bindings live in `assets/profiles/profiles.json` and are resolved by the runtime.
 

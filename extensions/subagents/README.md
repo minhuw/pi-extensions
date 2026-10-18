@@ -53,7 +53,7 @@ Tools: `Agent`, `get_subagent_result`, `steer_subagent`, and `SubagentWorkflow`.
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only reconnaissance; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, service tier `fast` |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only | `deepseek/deepseek-flash`, thinking `high`, normal tier (no override) |
 | `worker` | Bounded implementation and verification | coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
 
@@ -61,7 +61,7 @@ The embedded fleet uses Pi's built-in `grep`/`find` and excludes the ambient sea
 
 ### Service tier
 
-Agent frontmatter is authoritative when set:
+Recon leaves the service tier unset to use DeepSeek's normal/default service without sending an OpenAI priority-tier field. Agent frontmatter is authoritative when set; for example, an OpenAI-compatible agent can opt into fast tier:
 
 ```yaml
 model: openai/gpt-6-luna

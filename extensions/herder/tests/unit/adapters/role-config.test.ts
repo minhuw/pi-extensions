@@ -11,7 +11,10 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const catalog = path.join(packageRoot, "assets/profiles/profiles.json");
 const agentRoot = path.join(packageRoot, "assets/roles/pi");
 
+const reconModel = { provider: "magpie", id: "deepseek/deepseek-flash", fullId: "magpie/deepseek/deepseek-flash", api: "openai-completions", reasoning: true, thinkingLevelMap: { high: "high", xhigh: null, max: null } };
+
 const available = [
+	reconModel,
 	{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3", thinkingLevelMap: { max: "max" } },
 	{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash", thinkingLevelMap: { high: "high", max: null } },
 	{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
@@ -41,7 +44,7 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
 	assert.equal(recon.binding, "own");
-	assert.deepEqual(recon.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(recon.modelBinding, { model: "deepseek/deepseek-flash", effort: "high" });
 	assert.equal(searcher.readOnly, true);
 	assert.equal(searcher.binding, "own");
 	assert.deepEqual(searcher.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
@@ -67,7 +70,7 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	}
 });
 
-test("universe keeps Luna on Recon and validates rescue and Searcher overrides", async () => {
+test("universe keeps DeepSeek on Recon and validates rescue and Searcher overrides", async () => {
 	const profile = resolvePiProfile("universe", catalog);
 	const models = [
 		...available,
@@ -77,7 +80,7 @@ test("universe keeps Luna on Recon and validates rescue and Searcher overrides",
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, models));
 	const parent = { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6-sol", effort: "xhigh" });
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "deepseek/deepseek-flash", effort: "high" });
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast" });
 	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
 		...profile, rescue: { ...profile.rescue!, model: "rescue-only" },
@@ -254,11 +257,22 @@ test("Herder validates package roles against the built-in engine model catalog",
 	);
 });
 
-test("Herder refuses own-model nested agents when Luna cannot honor the scout tier", async () => {
+test("Recon accepts completions high without a tier and rejects missing or unsupported high", async () => {
+	const profile = resolvePiProfile("poorman", catalog);
+	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, available));
+	for (const models of [
+		available.filter((model) => model !== reconModel),
+		available.map((model) => model === reconModel ? { ...model, thinkingLevelMap: { high: null, max: null } } : model),
+	]) {
+		await assert.rejects(() => validateHerderRoleAgents(agentRoot, profile, models), /nested agent recon .* deepseek\/deepseek-flash does not support thinking high/);
+	}
+});
+
+test("Herder refuses own-model nested agents when Luna cannot honor the Searcher tier", async () => {
 	const profile = resolvePiProfile("poorman", catalog);
 	await assert.rejects(
 		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "gpt-6-luna" ? { ...model, api: "openai-completions" } : model)),
-		/nested agent recon cannot start because gpt-6-luna .* does not support service tier fast/,
+		/nested agent searcher cannot start because gpt-6-luna .* does not support service tier fast/,
 	);
 });
 
@@ -266,6 +280,7 @@ test("Herder refuses tiered roles when the resolved model cannot honor the tier"
 	const profile = resolvePiProfile("eclipse", catalog);
 	assert.equal(profile.roles["plan-implementer"].service_tier, "fast");
 	const tiered = [
+		reconModel,
 		{ provider: "cliproxyapi", id: "gpt-6-sol", fullId: "cliproxyapi/gpt-6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
 		{ provider: "cliproxyapi", id: "gpt-6-luna", fullId: "cliproxyapi/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 	];

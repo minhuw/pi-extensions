@@ -47,6 +47,13 @@ export const availableModels = [
 		reasoning: true,
 		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 	},
+	{
+		provider: "magpie",
+		id: "deepseek/deepseek-flash",
+		api: "openai-completions",
+		reasoning: true,
+		thinkingLevelMap: { high: "high", xhigh: null, max: null },
+	},
 ] as const;
 
 export function object(value: unknown): Record<string, unknown> {

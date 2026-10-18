@@ -141,14 +141,14 @@ test("nested Agent runs one package-owned foreground recon child with the scout 
 	assert.equal(sessions.length, 1);
 	assert.equal(sessions[0]!.disposed, true);
 	const snapshot = value.snapshots()[0]!;
-	assert.equal(snapshot.model, "gpt-6-luna");
-	assert.equal(snapshot.effort, "max");
-	assert.equal(snapshot.serviceTier, "fast");
+	assert.equal(snapshot.model, "deepseek/deepseek-flash");
+	assert.equal(snapshot.effort, "high");
+	assert.equal(snapshot.serviceTier, undefined);
 	assert.equal(snapshot.status, "completed");
 	assert.deepEqual(snapshot.activeTools, []);
 });
 
-test("universe dispatches Searcher on Sol and only Recon on Luna", async () => {
+test("universe dispatches Searcher on Sol and Recon on DeepSeek", async () => {
 	const profile = resolvePiProfile("universe");
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 		const mapping = role === "plan-implementer" ? profile.rescue! : profile.roles[role];
@@ -168,9 +168,9 @@ test("universe dispatches Searcher on Sol and only Recon on Luna", async () => {
 			assert.equal(result.status, "completed");
 		}
 		assert.deepEqual(created[0]!.binding, { model: "gpt-6-sol", effort: "xhigh" });
-		assert.deepEqual(created[1]!.binding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
+		assert.deepEqual(created[1]!.binding, { model: "deepseek/deepseek-flash", effort: "high" });
 		if (created[2]) assert.deepEqual(created[2].binding, { model: mapping.model, effort: mapping.effort });
-		assert.deepEqual(value.snapshots().filter((child) => child.model === "gpt-6-luna").map((child) => child.type), ["recon"]);
+		assert.deepEqual(value.snapshots().filter((child) => child.model === "deepseek/deepseek-flash").map((child) => child.type), ["recon"]);
 		await value.stop("test complete");
 	}
 });

@@ -360,12 +360,18 @@ export default function (pi) {
 		const faux = fauxProvider({
 			api: "openai-responses",
 			provider: "test",
-			models: [{ id: "test-model", reasoning: true }, { id: "gpt-6-luna", reasoning: true }],
+			models: [{ id: "test-model", reasoning: true }, { id: "gpt-6-luna", reasoning: true }, { id: "deepseek/deepseek-flash", reasoning: true }],
 		});
 		Object.assign(faux.getModel("gpt-6-luna")!, {
 			thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
 		});
+		Object.assign(faux.getModel("deepseek/deepseek-flash")!, {
+			api: "openai-completions",
+			thinkingLevelMap: { high: "high", xhigh: null, max: null },
+		});
 		runtime.registerNativeProvider(faux.provider);
+		// Never resolve package-owned model IDs against ambient authenticated providers.
+		runtime.getAvailable = async () => faux.models;
 		const factory = new DefaultPiWorkerSessionFactory(agentRoot, agentDir);
 		factory.bindModelRegistry(new ModelRegistry(runtime));
 		const roleAction = (role: ManagerAction["role"]): ManagerAction => ({
@@ -432,7 +438,7 @@ export default function (pi) {
 			fauxToolCall("read", { path: "src/probe.ts" }),
 			fauxToolCall("grep", { pattern: "RECON_PROBE", glob: "**/*" }),
 		];
-		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
+		const prepared = await factory.create({ action: { ...roleAction("plan-implementer"), serviceTier: "fast" }, planDirectory });
 		const nestedCases = [
 			{ type: "recon", tools: ["read", "grep", "find", "ls"], events: [] },
 			{ type: "searcher", tools: SEARCHER_TOOLS, events: [] },
@@ -442,7 +448,7 @@ export default function (pi) {
 			const beforeNested = await eventLines();
 			const beforeRequests: number = magpie.requests.length;
 			let providerTools: string[] = [];
-			const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
+			const respond: Parameters<typeof faux.setResponses>[0][number] = async (context, options, _state, model) => {
 				assert.doesNotMatch(JSON.stringify(context.messages), /PONYTAIL_TEST/);
 				providerTools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
 				assert.deepEqual(providerTools, [...nestedCase.tools].sort(), "exact tools at the first provider request, including late MCP registrations");
@@ -461,6 +467,11 @@ export default function (pi) {
 					assert.match(JSON.stringify(results[1]!.content), /fixture web_fetch/);
 				}
 				if (nestedCase.type === "recon") {
+					assert.equal(model.id, "deepseek/deepseek-flash");
+					assert.equal(options?.reasoning, "high");
+					assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, undefined);
+					const payload = { model: model.id };
+					assert.deepEqual(await options?.onPayload?.(payload, model) ?? payload, payload);
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
 					assert.equal(results.length, 3);
@@ -507,13 +518,15 @@ export default function (pi) {
 		const review = await factory.create({ action: { ...roleAction("plan-reviewer"), serviceTier: "fast" }, planDirectory });
 		try {
 			const observedModels: string[] = [];
-			const respond: Parameters<typeof faux.setResponses>[0][number] = (context, options, _state, model) => {
+			const respond: Parameters<typeof faux.setResponses>[0][number] = async (context, options, _state, model) => {
 				observedModels.push(model.id);
 				const tools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
-				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
-				if (model.id === "gpt-6-luna") {
+				if (model.id === "deepseek/deepseek-flash") {
+					assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, undefined);
+					const payload = { model: model.id };
+					assert.deepEqual(await options?.onPayload?.(payload, model) ?? payload, payload);
 					assert.deepEqual(tools, ["read", "grep", "find", "ls"].sort());
-					assert.equal(options?.reasoning, "max");
+					assert.equal(options?.reasoning, "high");
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) {
 						const conversation = context.messages.filter((entry) => entry.role !== "system");
@@ -533,6 +546,7 @@ export default function (pi) {
 					return fauxAssistantMessage("STATUS: ANSWERED\nANSWER: source trace\nEVIDENCE: src/probe.ts:1\nREMAINING: none");
 				}
 				assert.equal(model.id, "test-model");
+				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
 				assert.equal(options?.reasoning, "high");
 				assert.deepEqual(tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"].sort());
 				const results = context.messages.filter((entry) => entry.role === "toolResult");
@@ -564,7 +578,7 @@ export default function (pi) {
 			})));
 			for (const result of results) assert.equal(result.status, "completed", result.error ?? result.output);
 			assert.equal(observedModels.filter((model) => model === "test-model").length, 12);
-			assert.equal(observedModels.filter((model) => model === "gpt-6-luna").length, 8);
+			assert.equal(observedModels.filter((model) => model === "deepseek/deepseek-flash").length, 8);
 			const snapshots = review.nested.treeSnapshots();
 			assert.equal(snapshots.length, 8);
 			for (const result of results) {
@@ -1179,9 +1193,8 @@ test("worker terminal keeps parent usage separate from nested model slices", asy
 	assert.equal(result.usage.source, "herder pi worker session");
 	assert.deepEqual(result.usage.nested, [{
 		type: "recon",
-		model: "gpt-6-luna",
-		effort: "max",
-		serviceTier: "fast",
+		model: "deepseek/deepseek-flash",
+		effort: "high",
 		count: 1,
 		inputTokens: 10,
 		cachedInputTokens: 2,

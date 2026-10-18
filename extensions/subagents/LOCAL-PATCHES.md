@@ -18,7 +18,7 @@ No changes to user configuration, provider credentials, runtime databases, or ex
 
 | Change | Primary source | Compatibility contract |
 | --- | --- | --- |
-| Default fleet | `src/default-agents.ts`, `src/agent-types.ts`, runner/workflow defaults | `recon` / `worker` / `reviewer`; canonical fallback is `worker`, not an absent upstream `general-purpose` agent. Built-in search remains available without an external search dependency. |
+| Default fleet | `src/default-agents.ts`, `src/agent-types.ts`, runner/workflow defaults | `recon` / `worker` / `reviewer`; Recon defaults to `deepseek/deepseek-flash`, high thinking, and no tier override. Canonical fallback is `worker`, not an absent upstream `general-purpose` agent. Built-in search remains available without an external search dependency. |
 | Service tiers | `src/service-tier.ts`, types, config, runner, manager, schedule, tool entry | Agent-file tier takes precedence over a spawn override; compatible streams receive the normalized provider tier. |
 | Scoped host | `src/host-registry.ts`, manager and entry | Preserve registration ownership and host spawning. Generic resume/stop/steer cannot take over externally owned agents; parent cancellation remains effective. |
 | Telemetry | manager and entry | Preserve ownership, parentage, activity, turn count, usage, and bounded response metadata. |

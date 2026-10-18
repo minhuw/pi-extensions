@@ -4,9 +4,8 @@ package: herder
 kind: nested
 readOnly: true
 binding: own
-model: gpt-6-luna
-effort: max
-service_tier: fast
+model: deepseek/deepseek-flash
+effort: high
 description: Bounded read-only source navigation, static traces, and defect candidate scouting with early useful handoff.
 tools: read, grep, find, ls
 ---

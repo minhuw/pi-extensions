@@ -41,15 +41,15 @@ export function modelMatches(requested: string, candidate: AvailableModel): bool
 	return requested === id || requested === fullId || fullId.endsWith(`/${requested}`);
 }
 
-export const HERDER_OWN_NESTED_MODEL = "gpt-6-luna";
+export const HERDER_RECON_MODEL = "deepseek/deepseek-flash";
 
 export function unavailableProfileModels(profile: ResolvedProfile, available: readonly AvailableModel[]): string[] {
 	const required = new Set([
 		profile.orchestrator.model,
 		...WORKER_ROLES.map((role) => profile.roles[role].model),
 		...(profile.rescue ? [profile.rescue.model] : []),
-		...(profile.searcher ? [profile.searcher.model] : []),
-		HERDER_OWN_NESTED_MODEL,
+		profile.searcher?.model ?? "gpt-6-luna",
+		HERDER_RECON_MODEL,
 	]);
 	return [...required].filter((model) => !available.some((candidate) => modelMatches(model, candidate)));
 }

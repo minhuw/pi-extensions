@@ -29,6 +29,13 @@ describe("resolveModel", () => {
       expect(result).toEqual(MODELS[0]);
     });
 
+    it("resolves the Recon model through either native DeepSeek or Magpie's namespaced catalog", () => {
+      const direct = { provider: "deepseek", id: "deepseek-flash", name: "DeepSeek Flash" };
+      const gateway = { provider: "magpie", id: "deepseek/deepseek-flash", name: "DeepSeek Flash" };
+      expect(resolveModel("deepseek/deepseek-flash", makeRegistry([gateway, direct]))).toEqual(direct);
+      expect(resolveModel("deepseek/deepseek-flash", makeRegistry([gateway]))).toEqual(gateway);
+    });
+
     it("resolves another exact provider/modelId", () => {
       const result = resolveModel("openai/gpt-4o", makeRegistry());
       expect(result).toEqual(MODELS[3]);
