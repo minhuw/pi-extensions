@@ -93,7 +93,7 @@ Separately authorize representative comparisons of direct review versus bounded 
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.
 
-Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies and register this checkout (including the vendored Pi provider) in Pi's user package store:
+Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies and register this checkout (including the native Magpie provider) in Pi's user package store:
 
 ```sh
 set -eu
@@ -102,7 +102,7 @@ npm --version
 npm ci
 
 pi_bin="${HERDER_PI_BIN:-$PWD/node_modules/.bin/pi}"
-provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/cliproxyapi-provider/index.ts}"
+provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/magpie-provider/index.ts}"
 herder_entry="$PWD/extensions/herder/adapters/index.ts"
 test -x "$pi_bin"
 test -f "$herder_entry"
@@ -112,51 +112,60 @@ export HERDER_PI_BIN="$pi_bin"
 export HERDER_PI_PROVIDER_EXTENSION="$provider_extension"
 ```
 
-The default provider extension is this checkout's `extensions/cliproxyapi-provider/index.ts`. Do not also install the upstream npm provider. Set `HERDER_PI_BIN` or `HERDER_PI_PROVIDER_EXTENSION` before running the setup when using a different binary or provider extension. Keep those exports in the shell used for the preflight and test. The fixture disables extension discovery and explicitly loads both the provider extension and this checkout's `extensions/herder/adapters/index.ts`, so it does not depend on a globally discovered Herder copy.
+The default provider extension is this checkout's `extensions/magpie-provider/index.ts`. Use one configuration owner: remove any `providers.magpie` overlay from Pi's `models.json` and disable Magpie's Pi config-sync before using this extension (back up configuration first). Saved `/login magpie` values take precedence over environment values; ensure they identify the intended gateway. Set `HERDER_PI_BIN` or `HERDER_PI_PROVIDER_EXTENSION` before running the setup when using a different binary or provider extension. Keep those exports in the shell used for the preflight and test. The fixture disables extension discovery and explicitly loads both the provider extension and this checkout's `extensions/herder/adapters/index.ts`, so it does not depend on a globally discovered Herder copy.
 
-Web research additionally requires a running Magpie and the user-level `magpie-web-search` MCP entry described in [Magpie setup](README.md#magpie-web-search). This code-only live fixture and its CI workflow do not provision Magpie or establish live search compatibility. Searcher calls without that setup return an explicit failure, not a fallback to `pi-web-access`.
+Web research additionally requires a running Magpie with its search backend and a `magpie-web-search` MCP registration, via saved `/login magpie` or a user-level entry described in [Magpie setup](README.md#magpie-web-search). Environment-only provider setup does not automatically enable web MCP. This code-only live fixture and its CI workflow do not provision Magpie/search or establish live search compatibility. Searcher calls without that setup return an explicit failure, not a fallback to `pi-web-access`.
 
 The deterministic worker-engine tests exercise native MCP discovery and tool calls against a temporary local fixture, without contacting Magpie or a search provider. Check that only Searcher connects, both allowed tools appear before its first model request, unrelated/project servers stay untouched, credentials are not included in diagnostics, and missing/disabled/broken servers cannot produce a successful research session. Keep the local find/grep boundary and session cancellation/cleanup coverage.
 
 ### Provider variables and secret-safe preflight
 
-Provider runtime variables and CI/artifact-redaction variables have different names:
+Provider runtime, CI repository secrets, and artifact redaction all use the same names:
 
-| Use | Variables | Meaning |
-| --- | --- | --- |
-| Provider runtime | `CLIPROXYAPI_API_KEY`, `CLIPROXYAPI_BASE_URL` | Credentials and the normalized root URL read by the Pi provider. |
-| CI and artifact redaction | `CLIPROXY_API_KEY`, `CLIPROXY_BASE_URL` | Workflow secret names and the values supplied to the diagnostic redactor; they are not the provider's runtime variable names. |
+| Variable | Meaning |
+| --- | --- |
+| `MAGPIE_API_KEY` | Bearer credential; required for remote gateways. The provider defaults to `magpie-pi` only on loopback, but this preflight and CI require an explicit key. |
+| `MAGPIE_BASE_URL` | HTTP(S) gateway origin, optionally ending in `/`, `/v1`, or `/v1/`. The provider defaults to `http://127.0.0.1:3425`; this preflight and CI require an explicit URL. |
 
-Set the runtime variables through the shell or a secret manager without putting their values in this file, a repository file, or command output. Do not use shell tracing or commands that print the environment. Normalize a configured URL by removing its trailing slash, then a trailing `/backend-api` or `/v1`, before using it as the provider root:
+Set these through the shell or a secret manager without putting values in a repository file or command output. Do not use shell tracing or print the environment. Magpie canonicalizes to the URL origin, removing the optional `/v1`; `/backend-api`, other paths, userinfo, queries, fragments, and non-HTTP(S) protocols are rejected. Use HTTPS remotely: explicit HTTP sends credentials without encryption. See the [Magpie provider README](../magpie-provider/README.md) for connection precedence and URL rules.
+
+This intentionally networked preflight uses the provider's parser, rejects redirects, and never prints credentials, URLs, response bodies, or raw network errors:
 
 ```sh
-set -eu
-: "${CLIPROXYAPI_API_KEY:?Set CLIPROXYAPI_API_KEY in the environment}"
-: "${CLIPROXYAPI_BASE_URL:?Set CLIPROXYAPI_BASE_URL in the environment}"
-
-proxy_root="${CLIPROXYAPI_BASE_URL%/}"
-proxy_root="${proxy_root%/backend-api}"
-proxy_root="${proxy_root%/v1}"
-export CLIPROXYAPI_BASE_URL="$proxy_root"
-
-curl --fail --silent --show-error --max-time 30 \
-  --header "Authorization: Bearer $CLIPROXYAPI_API_KEY" \
-  "$proxy_root/v1/models?client_version=herder-ci" \
-  --output /dev/null
+node --experimental-strip-types --input-type=module <<'NODE'
+import { readConfig } from "./extensions/magpie-provider/index.ts";
+try {
+  if (!process.env.MAGPIE_API_KEY?.trim() || !process.env.MAGPIE_BASE_URL?.trim()) {
+    throw new Error("Missing configuration");
+  }
+  const { origin, apiKey } = readConfig();
+  const response = await fetch(`${origin}/v1/models`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(30_000),
+  });
+  await response.body?.cancel();
+  if (!response.ok) throw new Error("Unsuccessful response");
+} catch {
+  console.error("Magpie preflight failed: check MAGPIE_API_KEY, MAGPIE_BASE_URL, and gateway availability. Redirects are not allowed.");
+  process.exitCode = 1;
+}
+NODE
 ```
 
-The probe checks authorization and endpoint reachability without writing a response body. Then verify the provider extension and every model/effort binding required by the `poorman` profile:
+The probe checks authorization and endpoint reachability without writing a response body. Then verify the provider extension and the model IDs required by the `poorman` profile and Recon:
 
 ```sh
 set -eu
 pi_bin="${HERDER_PI_BIN:-$PWD/node_modules/.bin/pi}"
-provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/cliproxyapi-provider/index.ts}"
+provider_extension="${HERDER_PI_PROVIDER_EXTENSION:-$PWD/extensions/magpie-provider/index.ts}"
 test -x "$pi_bin"
 test -f "$provider_extension"
-models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models cliproxyapi)
+models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models magpie)
 for required_model_id in \
   'gpt-6-luna' \
-  'deepseek-v4-flash'
+  'deepseek-v4-flash' \
+  'deepseek/deepseek-flash'
 do
   if ! printf '%s\n' "$models" | grep -Fq -- "$required_model_id"; then
     printf 'Required model is not listed: %s\n' "$required_model_id" >&2
@@ -165,7 +174,7 @@ do
 done
 ```
 
-`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the exact `poorman` bindings from `assets/profiles/profiles.json` before dispatch.
+`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the exact `poorman` bindings from `assets/profiles/profiles.json` before dispatch. Recon additionally requires `deepseek/deepseek-flash`; preserve these IDs rather than substituting Magpie aliases. Successful discovery/preflight does not guarantee a live run succeeds.
 
 ## Run, limits, and artifacts
 
@@ -175,7 +184,7 @@ Run the provider-backed fixture only after the preflight succeeds:
 npm run test:e2e:herder
 ```
 
-The command starts Pi in RPC mode with `cliproxyapi`, the `poorman` profile, and the explicit provider and Herder extensions. It verifies the Implementer, independent reviews, manager-executed evidence, exact model bindings and usage, an unchanged user checkout, the integrated result, dashboard health, and parentless Pi worker trajectories. It does not belong in the ordinary `npm test` gate because it spends model time.
+The command starts Pi in RPC mode with `magpie`, the `poorman` profile, and the explicit provider and Herder extensions. It verifies the Implementer, independent reviews, manager-executed evidence, exact model bindings and usage, an unchanged user checkout, the integrated result, dashboard health, and parentless Pi worker trajectories. It does not belong in the ordinary `npm test` gate because it spends model time.
 
 The local defaults and overrides are:
 
@@ -203,14 +212,14 @@ After inspecting a retained run, delete the exact fixture path printed by the te
 
 ## Live CI
 
-`.github/workflows/herder-live-e2e.yml` runs the Pi/Poorman fixture after Herder- or provider-related pushes to `master` and through manual dispatch. It uses Node 22.19.0, `npm ci`, loads this checkout's vendored CLIProxyAPI provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
+`.github/workflows/herder-live-e2e.yml` runs the Pi/Poorman fixture after Herder-, Magpie-, or shared-extension-related pushes to `master` and through manual dispatch. It uses Node 22.19.0, `npm ci`, loads this checkout's native Magpie provider, probes the configured endpoint before spending model time, and uploads redacted fixture diagnostics even when the run fails.
 
-CI sets `HERDER_E2E_TIMEOUT_MS` to 2,400,000 ms (40 minutes) while the job has a 45-minute workflow timeout. It sets `HERDER_KEEP_E2E=1` so diagnostics remain available, maps the `CLIPROXY_API_KEY` and `CLIPROXY_BASE_URL` repository secrets to the provider's `CLIPROXYAPI_API_KEY` and `CLIPROXYAPI_BASE_URL` variables, and passes the normalized root to the provider. Never place credential values in workflow files, logs, fixtures, committed environment files, or documentation.
+CI sets `HERDER_E2E_TIMEOUT_MS` to 2,400,000 ms (40 minutes) while the job has a 45-minute workflow timeout. It sets `HERDER_KEEP_E2E=1` so diagnostics remain available, passes the `MAGPIE_API_KEY` and `MAGPIE_BASE_URL` repository secrets unchanged to the provider and artifact collector. Preflight validates the URL with Magpie's existing parser and probes `/v1/models` without redirects; the provider canonicalizes the same URL itself. Never place credential values in workflow files, logs, fixtures, committed environment files, or documentation.
 
 ## Troubleshooting
 
-- **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun `npm ci` and verify the vendored provider exists in this checkout, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
-- **Endpoint authorization or normalization:** check that the runtime variables are set without printing them, apply the trailing-slash/`/backend-api`/`/v1` normalization, and rerun the body-free `curl` probe. Do not substitute the CI/artifact variable names for the provider runtime names.
-- **Missing model or effort:** rerun the explicit `--list-models` check and compare both exact IDs (gpt-6-luna and deepseek-v4-flash). A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
+- **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun `npm ci` and verify the Magpie provider exists in this checkout, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
+- **Endpoint authorization or normalization:** check `MAGPIE_API_KEY` and `MAGPIE_BASE_URL` without printing them, use an origin or optional `/v1` suffix (not `/backend-api`), and rerun the body-free Node preflight. Redirects are rejected. Check for saved-login precedence or a conflicting `providers.magpie` overlay if CLI discovery differs from the environment-only probe.
+- **Missing model or effort:** rerun the explicit `--list-models` check and compare the exact poorman IDs (`gpt-6-luna` and `deepseek-v4-flash`) plus Recon's `deepseek/deepseek-flash`. A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
 - **Early RPC exit:** inspect `pi.log` and verify the provider install, `--no-extensions`, the explicit provider extension, and the checkout's `extensions/herder/adapters/index.ts`. Treat logs as potentially sensitive before copying or uploading them.
 - **Stalls:** inspect the printed progress, `pi.log`, and the retained `.herder` diagnostics. Increase `HERDER_E2E_STALL_TIMEOUT_MS` or `HERDER_E2E_TIMEOUT_MS` only for a diagnosed slow provider, remembering that a longer overall limit can increase model spend.

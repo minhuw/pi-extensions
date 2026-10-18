@@ -11,9 +11,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
 | [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
-| [CLIProxyAPI Provider](extensions/cliproxyapi-provider/README.md) | Editable locally patched 1.4.15 snapshot: dynamic models, catalog protection, and elapsed/TPS telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
-| [CLIProxyAPI Native Compaction](extensions/cliproxyapi-native-compaction/README.md) | OpenAI Responses native compaction for genuine OpenAI models routed through CLIProxyAPI. |
 
 ## Themes
 
@@ -40,7 +38,9 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
-Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. CLIProxyAPI Provider is also vendored from the locally installed patched 1.4.15 snapshot, including TPS — do not also load `npm:@router-for-me/pi-cliproxyapi-provider` in the same Pi profile. Existing `/login` credentials and `cliproxyapi.json` configuration remain compatible. See each extension's README for setup, activation conditions, and usage.
+Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
+
+The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
 
 Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
 
@@ -54,7 +54,7 @@ npm test        # full suite; includes the full TypeScript check
 # or, for a quick standalone check: npm run typecheck
 ```
 
-For editable provider development, install the local checkout as above and edit `extensions/cliproxyapi-provider/src/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:cliproxyapi-provider` for the offline catalog and entrypoint checks.
+For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and shared native-compaction checks.
 
 ## License
 

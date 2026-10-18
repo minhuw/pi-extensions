@@ -10,7 +10,7 @@
 		"herder",
 		"multi-agent",
 		"subagents",
-		"cliproxyapi",
+		"magpie",
 		"compaction",
 		"writer",
 		"academic"
@@ -19,8 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:cliproxyapi-provider && npm run test:magpie-provider && npm run test:commit && npm run test:statusline && npm run test:subagents && vitest run extensions/cliproxyapi-native-compaction/tests/native-compaction.test.ts && npm run test:herder && npm run test:writer",
-		"test:cliproxyapi-provider": "node extensions/cliproxyapi-provider/tests/catalog-refresh-regression.mjs && vitest run extensions/cliproxyapi-provider/tests/entrypoint.test.ts",
+		"test": "npm run test:magpie-provider && npm run test:commit && npm run test:statusline && npm run test:subagents && npm run test:herder && npm run test:writer",
 		"test:magpie-provider": "vitest run extensions/magpie-provider/tests extensions/shared/native-compaction/tests",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
 		"test:writer": "node --experimental-strip-types --test extensions/writer/tests/*.test.ts",
@@ -68,10 +67,8 @@
 			"./extensions/writer/prompts/validation.md"
 		],
 		"extensions": [
-			"./extensions/cliproxyapi-provider/index.ts",
 			"./extensions/magpie-provider/index.ts",
 			"./extensions/statusline-footer/index.ts",
-			"./extensions/cliproxyapi-native-compaction/index.ts",
 			"./extensions/herder/adapters/index.ts",
 			"./extensions/subagents/src/index.ts"
 		]

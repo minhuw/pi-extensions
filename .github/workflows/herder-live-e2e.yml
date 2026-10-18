@@ -7,7 +7,8 @@ on:
     paths:
       - .github/workflows/herder-live-e2e.yml
       - extensions/herder/**
-      - extensions/cliproxyapi-provider/**
+      - extensions/magpie-provider/**
+      - extensions/shared/**
       - package.json
       - package-lock.json
       - tsconfig.json
@@ -39,30 +40,35 @@ jobs:
       - name: Install package dependencies
         run: npm ci
 
-      - name: Validate CLIProxyAPI credentials
-        id: proxy
+      - name: Validate Magpie credentials
         shell: bash
         env:
-          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
-          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
+          MAGPIE_API_KEY: ${{ secrets.MAGPIE_API_KEY }}
+          MAGPIE_BASE_URL: ${{ secrets.MAGPIE_BASE_URL }}
         run: |
           set -euo pipefail
-          if [[ -z "$CLIPROXY_API_KEY" || -z "$CLIPROXY_BASE_URL" ]]; then
-            echo "CLIPROXY_API_KEY and CLIPROXY_BASE_URL repository secrets are required." >&2
-            exit 1
-          fi
-
-          proxy_root="${CLIPROXY_BASE_URL%/}"
-          proxy_root="${proxy_root%/backend-api}"
-          proxy_root="${proxy_root%/v1}"
-          echo "::add-mask::$proxy_root"
-          echo "::add-mask::$proxy_root/v1"
-          echo "root=$proxy_root" >> "$GITHUB_OUTPUT"
-
-          curl --fail --silent --show-error --max-time 30 \
-            --header "Authorization: Bearer $CLIPROXY_API_KEY" \
-            "$proxy_root/v1/models?client_version=herder-ci" \
-            --output /dev/null
+          node --experimental-strip-types --input-type=module <<'NODE'
+          import { readConfig } from "./extensions/magpie-provider/index.ts";
+          try {
+            if (!process.env.MAGPIE_API_KEY?.trim() || !process.env.MAGPIE_BASE_URL?.trim()) {
+              throw new Error("Missing configuration");
+            }
+            const { origin, apiKey } = readConfig();
+            for (const suffix of ["", "/", "/v1", "/v1/"]) {
+              console.log(`::add-mask::${origin}${suffix}`);
+            }
+            const response = await fetch(`${origin}/v1/models`, {
+              headers: { Authorization: `Bearer ${apiKey}` },
+              redirect: "error",
+              signal: AbortSignal.timeout(30_000),
+            });
+            await response.body?.cancel();
+            if (!response.ok) throw new Error("Unsuccessful response");
+          } catch {
+            console.error("Magpie preflight failed: check MAGPIE_API_KEY, MAGPIE_BASE_URL, and gateway availability. Redirects are not allowed.");
+            process.exitCode = 1;
+          }
+          NODE
 
       - name: Install and configure Pi
         shell: bash
@@ -75,17 +81,15 @@ jobs:
       - name: Run live Pi E2E
         env:
           HERDER_KEEP_E2E: "1"
-          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
-          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
-          CLIPROXYAPI_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
-          CLIPROXYAPI_BASE_URL: ${{ steps.proxy.outputs.root }}
+          MAGPIE_API_KEY: ${{ secrets.MAGPIE_API_KEY }}
+          MAGPIE_BASE_URL: ${{ secrets.MAGPIE_BASE_URL }}
         run: npm run test:e2e:herder
 
       - name: Prepare live E2E diagnostics
         if: always()
         env:
-          CLIPROXY_API_KEY: ${{ secrets.CLIPROXY_API_KEY }}
-          CLIPROXY_BASE_URL: ${{ secrets.CLIPROXY_BASE_URL }}
+          MAGPIE_API_KEY: ${{ secrets.MAGPIE_API_KEY }}
+          MAGPIE_BASE_URL: ${{ secrets.MAGPIE_BASE_URL }}
         run: >-
           node --experimental-strip-types extensions/herder/tests/e2e/support/collect-live-artifacts.ts
           --host pi

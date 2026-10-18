@@ -1,6 +1,6 @@
 # Magpie provider
 
-A standalone native Pi provider named `magpie`. It discovers the running Magpie gateway's chat models and delegates streaming to Pi's existing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages implementations. It does not replace other providers, implement a transport/parser, or change CLIProxyAPI behavior.
+A standalone native Pi provider named `magpie`. It discovers the running Magpie gateway's chat models and delegates streaming to Pi's existing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages implementations. It does not replace other providers or implement a transport/parser.
 
 ## Use
 

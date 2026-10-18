@@ -1,6 +1,6 @@
 # Native compaction through Magpie
 
-Magpie Provider includes its own native-compaction integration. **Neither CLIProxyAPI extension needs to be loaded or installed.** Its protocol and replay engine lives in `extensions/shared/native-compaction/`, outside both CLIProxyAPI directories; keep that shared directory with Magpie when removing the legacy extensions.
+Magpie Provider includes its own native-compaction integration. Its protocol and replay engine lives in `extensions/shared/native-compaction/`; keep that shared directory with Magpie. The legacy CLIProxyAPI extensions are no longer included in this collection.
 
 **Enabled by default, experimental and unverified live:** the Magpie protocol assessment inspected commit `1755713`; no live gateway/upstream compaction has been run. Automatic eligibility uses known OpenAI/Codex namespaces as an identification heuristic, not runtime proof of native capability. The remote Magpie provider still requires `compaction=native`.
 
@@ -65,11 +65,11 @@ The shared engine deliberately retains the historical checkpoint kind `cliproxya
 
 Older instructions retargeted `cliproxyapi-native-compaction.json` to Magpie. Magpie now reads only `magpie-native-compaction.json`; copy the verified model IDs and desired enable/fallback settings into the new file. Do not copy `providerId`, `apiId`, or `endpoint` fields. No old configuration is read or migrated automatically.
 
-The legacy wrapper no longer owns the `magpie` provider, even if its configuration names Magpie. This prevents duplicate native requests when both integrations are loaded. CLIProxyAPI's own provider remains independently configurable, so both can be used in the same Pi installation until the legacy extensions are removed. When removing those directories, also remove their package manifest entries and legacy test commands; Magpie's entrypoint and tests remain independent.
+Remove any explicit Pi settings entries for the removed CLIProxyAPI extension paths or separately installed legacy wrappers. This collection does not edit user settings, saved credentials, or legacy configuration files.
 
 ## Verification and remaining risks
 
-Offline tests cover the Magpie configuration and lifecycle, shared history/transport logic, checkpoint replay, exact gates, malformed history, fallback/cancellation safeguards, and co-loading with the legacy integration. A standalone-loading test copies only Magpie and the shared engine into a temporary package to check that both CLIProxyAPI directories can be absent.
+Offline tests cover the Magpie configuration and lifecycle, shared history/transport logic, checkpoint replay, exact gates, malformed history, and fallback/cancellation safeguards. A standalone-loading test copies only Magpie and the shared engine into a temporary package to check that both CLIProxyAPI directories can be absent.
 
 These tests do **not** prove compatibility with a running gateway or upstream. Offline transport tests cover Magpie's stream-only relay gate, split/multiline SSE frames, terminal failures, cancellation, and JSON compatibility. Validate streaming with your actual gateway/upstream, plus tools, cancellation, a second compaction, and session resume before using important sessions.
 

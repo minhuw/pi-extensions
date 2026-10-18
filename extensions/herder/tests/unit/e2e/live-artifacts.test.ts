@@ -64,7 +64,7 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 		const output = path.join(root, "output");
 		const serviceToken = "synthetic-service-credential";
 		const key = "test-secret-key-value";
-		const base = "https://proxy.example.invalid";
+		const base = "https://magpie.example.invalid";
 		fs.mkdirSync(workspace, { recursive: true });
 		createServiceDatabase(planDirectory, serviceToken, key);
 		fs.writeFileSync(path.join(workspace, "pi.log"), `\u001b[32mProvider=synthetic key=${key} endpoint=${base}/v1 service=${serviceToken}\u001b[0m\n`);
@@ -77,16 +77,16 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 			host: "pi",
 			output,
 			tmpRoot,
-			environment: { CLIPROXY_API_KEY: key, CLIPROXY_BASE_URL: base },
+			environment: { MAGPIE_API_KEY: key, MAGPIE_BASE_URL: base },
 		});
 		const copied = path.join(output, "fixtures", path.basename(workspace));
 		const trajectory = fs.readFileSync(path.join(copied, "pi.log"), "utf8");
 		assert.doesNotMatch(trajectory, new RegExp(key));
 		assert.doesNotMatch(trajectory, new RegExp(serviceToken));
-		assert.doesNotMatch(trajectory, /proxy\.example\.invalid/);
+		assert.doesNotMatch(trajectory, /magpie\.example\.invalid/);
 		assert.match(trajectory, /\u001b\[32m/);
-		assert.match(trajectory, /\[REDACTED:CLIPROXY_API_KEY\]/);
-		assert.match(trajectory, /\[REDACTED:CLIPROXY_BASE_URL\]/);
+		assert.match(trajectory, /\[REDACTED:MAGPIE_API_KEY\]/);
+		assert.match(trajectory, /\[REDACTED:MAGPIE_BASE_URL\]/);
 		assert.match(trajectory, new RegExp(`\\[REDACTED:${SERVICE_TOKEN_MARKER.slice(10, -1)}\\]`));
 
 		const copiedDatabasePath = path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3");
@@ -96,8 +96,8 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 			assert.equal(copiedDatabase.prepare("SELECT auth_token FROM manager_service WHERE singleton = 1").get()?.auth_token, SERVICE_TOKEN_MARKER);
 			assert.deepEqual({ ...(copiedDatabase.prepare("SELECT plan_id, model, source, input_tokens, output_tokens FROM attempts").get() as Record<string, unknown>) }, {
 				plan_id: "014",
-				model: "[REDACTED:CLIPROXY_API_KEY]",
-				source: "[REDACTED:CLIPROXY_API_KEY]",
+				model: "[REDACTED:MAGPIE_API_KEY]",
+				source: "[REDACTED:MAGPIE_API_KEY]",
 				input_tokens: 12,
 				output_tokens: 34,
 			});
@@ -112,8 +112,8 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3-shm")), false);
 		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "unknown.bin")), false);
 		assert.equal(fs.existsSync(path.join(copied, "repository", "herder-plans", ".herder", "trajectory-link")), false);
-		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
-		assert.equal(report.redactedOccurrences.CLIPROXY_BASE_URL, 1);
+		assert.equal(report.redactedOccurrences.MAGPIE_API_KEY, 1);
+		assert.equal(report.redactedOccurrences.MAGPIE_BASE_URL, 1);
 		assert.equal(report.redactedOccurrences.HERDER_SERVICE_AUTH_TOKEN, 1);
 		assert.equal(report.omittedSensitiveFiles.includes(path.join(workspace, "pi.log")), false);
 		assert.ok(report.omittedSensitiveFiles.includes(path.join(runtime, "execution.sqlite3-wal")));
@@ -122,6 +122,32 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 		assert.deepEqual(report.skippedSpecialFiles, [path.join(runtime, "trajectory-link")]);
 		assert.match(fs.readFileSync(path.join(output, "README.txt"), "utf8"), /Herder live E2E diagnostics/);
 		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")), report);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("redacts Magpie origin and v1 variants for every accepted trailing slash form", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-magpie-url-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const workspace = path.join(tmpRoot, "herder-pi-live-magpie-url");
+		const configuredOrigin = "https://MAGPIE.example.invalid:443";
+		const canonicalOrigin = "https://magpie.example.invalid";
+		const suffixes = ["", "/", "/v1", "/v1/"];
+		const urls = [configuredOrigin, canonicalOrigin].flatMap((origin) => suffixes.map((suffix) => `${origin}${suffix}`));
+		fs.mkdirSync(workspace, { recursive: true });
+		fs.writeFileSync(path.join(workspace, "pi.log"), urls.join("\n"));
+		for (const [index, suffix] of suffixes.entries()) {
+			const output = path.join(root, `output-${index}`);
+			await collectLiveArtifacts({
+				host: "pi", output, tmpRoot,
+				environment: { MAGPIE_BASE_URL: `${configuredOrigin}${suffix}` },
+			});
+			const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
+			assert.equal(copied, urls.map(() => "[REDACTED:MAGPIE_BASE_URL]").join("\n"));
+			assert.equal(readFiles(output).some((bytes) => bytes.toString().toLowerCase().includes("magpie.example.invalid")), false);
+		}
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
@@ -141,16 +167,16 @@ test("redacts provider secrets interrupted by ANSI sequences while preserving di
 			host: "pi",
 			output,
 			tmpRoot,
-			environment: { CLIPROXY_API_KEY: secret },
+			environment: { MAGPIE_API_KEY: secret },
 		});
 		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
 		const ansiStripped = copied.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "");
 		assert.equal(copied.includes(secret), false);
 		assert.equal(ansiStripped.includes(secret), false);
-		assert.match(copied, /\[REDACTED:CLIPROXY_API_KEY\]/);
+		assert.match(copied, /\[REDACTED:MAGPIE_API_KEY\]/);
 		assert.match(copied, /\u001b\[31m/);
 		assert.match(copied, /\u001b\[0m/);
-		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+		assert.equal(report.redactedOccurrences.MAGPIE_API_KEY, 1);
 		assert.equal(report.omittedSensitiveFiles.includes(path.join(workspace, "pi.log")), false);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
@@ -171,12 +197,12 @@ test("does not preserve credentials embedded in ANSI sequences", async () => {
 			host: "pi",
 			output,
 			tmpRoot,
-			environment: { CLIPROXY_API_KEY: secret },
+			environment: { MAGPIE_API_KEY: secret },
 		});
 		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
-		assert.equal(copied, "[REDACTED:CLIPROXY_API_KEY]");
+		assert.equal(copied, "[REDACTED:MAGPIE_API_KEY]");
 		assert.equal(readFiles(output).some((bytes) => bytes.includes(Buffer.from(secret))), false);
-		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+		assert.equal(report.redactedOccurrences.MAGPIE_API_KEY, 1);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
@@ -196,7 +222,7 @@ test("does not reconstruct credentials from overlapping raw and ANSI spans", asy
 			host: "pi",
 			output,
 			tmpRoot,
-			environment: { CLIPROXY_API_KEY: secret },
+			environment: { MAGPIE_API_KEY: secret },
 		});
 		const copied = fs.readFileSync(path.join(output, "fixtures", path.basename(workspace), "pi.log"), "utf8");
 		const ansiStripped = copied.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "");
@@ -205,8 +231,8 @@ test("does not reconstruct credentials from overlapping raw and ANSI spans", asy
 		assert.equal(readFiles(output).some((bytes) => bytes.includes(Buffer.from(secret))), false);
 		assert.match(copied, /\u001b\[31m/);
 		assert.match(copied, /\u001b\[0m/);
-		assert.match(copied, /\[REDACTED:CLIPROXY_API_KEY\]/);
-		assert.equal(report.redactedOccurrences.CLIPROXY_API_KEY, 1);
+		assert.match(copied, /\[REDACTED:MAGPIE_API_KEY\]/);
+		assert.equal(report.redactedOccurrences.MAGPIE_API_KEY, 1);
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}

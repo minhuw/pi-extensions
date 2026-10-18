@@ -40,13 +40,23 @@ const SERVICE_TOKEN_MARKER = `[REDACTED:${SERVICE_TOKEN_LABEL}]`;
 
 function patterns(environment: NodeJS.ProcessEnv): SecretPattern[] {
 	const values: SecretPattern[] = [];
-	const key = environment.CLIPROXY_API_KEY?.trim();
-	const base = environment.CLIPROXY_BASE_URL?.trim().replace(/\/$/, "");
-	if (key) values.push({ label: "CLIPROXY_API_KEY", value: key });
+	const key = environment.MAGPIE_API_KEY?.trim();
+	const base = environment.MAGPIE_BASE_URL?.trim().replace(/\/$/, "");
+	if (key) values.push({ label: "MAGPIE_API_KEY", value: key });
 	if (base) {
-		const root = base.replace(/\/(?:v1|backend-api)$/, "");
-		for (const value of new Set([`${root}/backend-api`, `${root}/v1`, base, root])) {
-			if (value) values.push({ label: "CLIPROXY_BASE_URL", value });
+		const root = base.replace(/\/v1$/, "");
+		const variants = new Set([base, root, `${root}/`, `${root}/v1`, `${root}/v1/`]);
+		try {
+			// Match Magpie's URL canonicalization (host casing, default ports, etc.).
+			const { origin } = new URL(base);
+			if (origin !== "null") {
+				for (const suffix of ["", "/", "/v1", "/v1/"]) variants.add(`${origin}${suffix}`);
+			}
+		} catch {
+			// Still redact literal configuration when setup failed before validation.
+		}
+		for (const value of variants) {
+			if (value) values.push({ label: "MAGPIE_BASE_URL", value });
 		}
 	}
 	return mergePatterns(values);

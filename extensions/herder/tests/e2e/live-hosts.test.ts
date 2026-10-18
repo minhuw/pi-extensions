@@ -12,7 +12,7 @@ const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 const fixtureScript = path.join(extensionRoot, "tests/e2e/support/live-manager-fixture.ts");
 const extensionEntry = path.join(extensionRoot, "adapters/index.ts");
 const providerExtension = process.env.HERDER_PI_PROVIDER_EXTENSION
-	|| path.resolve(extensionRoot, "../cliproxyapi-provider/index.ts");
+	|| path.resolve(extensionRoot, "../magpie-provider/index.ts");
 const enabled = process.env.HERDER_LIVE_E2E === "1";
 const keep = process.env.HERDER_KEEP_E2E === "1";
 const timeout = Number(process.env.HERDER_E2E_TIMEOUT_MS || 30 * 60_000);
@@ -27,7 +27,7 @@ function liveEnvironment(): NodeJS.ProcessEnv {
 async function invokePi(repository: string, planDirectory: string, logFile: string): Promise<void> {
 	writeFileSync(logFile, "");
 	const child = spawn(process.env.HERDER_PI_BIN || "pi", [
-		"--mode", "rpc", "--provider", "cliproxyapi", "--model", "gpt-6-luna", "--thinking", "max", "--approve",
+		"--mode", "rpc", "--provider", "magpie", "--model", "gpt-6-luna", "--thinking", "max", "--approve",
 		"--no-extensions", "--extension", providerExtension, "--extension", extensionEntry,
 	], { cwd: repository, env: liveEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
 	child.stdout.on("data", (chunk) => appendFileSync(logFile, chunk));
