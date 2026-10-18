@@ -131,6 +131,26 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     return active;
   }
 
+  it("default extension discovery exposes FFF tools and honors explicit opt-outs", async () => {
+    mkdirSync(join(cwd, ".pi", "extensions"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "extensions", "pi-fff.js"),
+      `export default (pi) => { for (const name of ["fffind", "ffgrep"]) pi.registerTool({ name, label: name, description: name, parameters: { type: "object", properties: {} }, async execute() { return { content: [] }; } }); };`,
+    );
+
+    const inherited = await activeToolsFor({ extensions: true }, true);
+    expect(inherited).toContain("fffind");
+    expect(inherited).toContain("ffgrep");
+
+    const excluded = await activeToolsFor({ extensions: true, excludeExtensions: ["pi-fff"] }, true);
+    expect(excluded).not.toContain("fffind");
+    expect(excluded).not.toContain("ffgrep");
+
+    const isolated = await activeToolsFor({ extensions: true, isolated: true }, true);
+    expect(isolated).not.toContain("fffind");
+    expect(isolated).not.toContain("ffgrep");
+  });
+
   it("real pi-mono admits an extension-registered tool when it's in the allowlist (#47)", async () => {
     const active = await activeToolsFor({ extensions: [FIXTURE] });
     // The extension actually loaded and its tool reached the live session.

@@ -116,6 +116,8 @@ The default provider extension is this checkout's `extensions/magpie-provider/in
 
 Web research additionally requires a running Magpie with its search backend and a `magpie-web-search` MCP registration, via saved `/login magpie` or a user-level entry described in [Magpie setup](README.md#magpie-web-search). Environment-only provider setup does not automatically enable web MCP. This code-only live fixture and its CI workflow do not provision Magpie/search or establish live search compatibility. Searcher calls without that setup return an explicit failure, not a fallback to `pi-web-access`.
 
+The deterministic worker-engine tests exercise real native FFF file/content search and pagination against temporary local worktrees, including direct Recon and reviewer scouts, without a model provider. All role tool sets include `fffind`/`ffgrep`; ambient extensions remain excluded. The FFF adapter checks restricted paths and output evidence, rejects cross-session cursors, and refuses unsafe ignore-file initialization while preserving built-in scoped tools.
+
 The deterministic worker-engine tests exercise native MCP discovery and tool calls against a temporary local fixture, without contacting Magpie or a search provider. Check that only Searcher connects, both allowed tools appear before its first model request, unrelated/project servers stay untouched, credentials are not included in diagnostics, and missing/disabled/broken servers cannot produce a successful research session. Keep the local find/grep boundary and session cancellation/cleanup coverage.
 
 ### Provider variables and secret-safe preflight

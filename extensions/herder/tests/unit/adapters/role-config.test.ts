@@ -24,9 +24,9 @@ test("Herder loads exact scoped Pi role definitions", async () => {
 	const reviewer = await loadHerderPiRole(agentRoot, "plan-reviewer");
 	const judge = await loadHerderPiRole(agentRoot, "plan-judge");
 	assert.equal(implementer.agentType, "herder.plan-implementer");
-	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(implementer.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "fffind", "ffgrep", "Agent", "get_subagent_result"]);
 	assert.deepEqual(implementer.extensions, []);
-	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "fffind", "ffgrep", "Agent", "get_subagent_result"]);
 	assert.deepEqual(reviewer.extensions, []);
 	assert.deepEqual(judge.extensions, []);
 	assert.doesNotMatch(implementer.systemPrompt, /^---/);
@@ -39,7 +39,7 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	const searcher = await loadHerderNestedAgent(agentRoot, "searcher");
 	const worker = await loadHerderNestedAgent(agentRoot, "worker");
 	const reviewer = await loadHerderNestedAgent(agentRoot, "reviewer");
-	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls"]);
+	assert.deepEqual(recon.tools, ["read", "grep", "find", "ls", "fffind", "ffgrep"]);
 	assert.deepEqual(recon.extensions, []);
 	assert.equal(recon.readOnly, true);
 	assert.equal(recon.binding, "own");
@@ -48,17 +48,17 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	assert.equal(searcher.binding, "own");
 	assert.deepEqual(searcher.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
 	assert.deepEqual(searcher.extensions, []);
-	assert.deepEqual(searcher.tools, ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep"]);
+	assert.deepEqual(searcher.tools, ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep", "fffind", "ffgrep"]);
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
 	assert.deepEqual(worker.extensions, []);
-	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls"]);
+	assert.deepEqual(worker.tools, ["read", "edit", "write", "bash", "grep", "find", "ls", "fffind", "ffgrep"]);
 	assert.equal(reviewer.readOnly, false);
 	assert.equal(reviewer.binding, "inherit");
 	assert.equal(reviewer.modelBinding, undefined);
 	assert.deepEqual(reviewer.extensions, []);
-	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]);
+	assert.deepEqual(reviewer.tools, ["read", "bash", "grep", "find", "ls", "fffind", "ffgrep", "Agent", "get_subagent_result"]);
 	for (const serviceTier of ["fast", "standard", undefined] as const) {
 		const parent = { model: "parent/reviewer", effort: "max", ...(serviceTier ? { serviceTier } : {}) };
 		assert.deepEqual(resolveNestedBinding(reviewer, parent), parent);
@@ -130,7 +130,9 @@ test("roles encourage bounded Recon exploration without delegating judgment", as
 test("recon positively defines bounded static work and early caller-owned handoff", async () => {
 	const { systemPrompt } = await loadHerderNestedAgent(agentRoot, "recon");
 	assert.match(systemPrompt, /source-navigation child in the supplied current worktree/);
-	assert.match(systemPrompt, /reading files, locating paths and symbols with guarded read\/grep\/find\/ls tools/);
+	assert.match(systemPrompt, /reading files, locating paths and symbols with guarded read\/grep\/find\/ls and fffind\/ffgrep tools/);
+	assert.match(systemPrompt, /Built-in grep\/find disable ignore files for safe traversal/);
+	assert.match(systemPrompt, /FFF follows ordinary ignore rules and refuses unsafe ignore-file setups/);
 	assert.match(systemPrompt, /tracing static callers, data flow, and contracts/);
 	assert.match(systemPrompt, /Start with capability triage/);
 	assert.match(systemPrompt, /runtime execution, implementation,[^\n]*`HANDOFF_REQUIRED` immediately/);
@@ -186,7 +188,7 @@ test("nested reviewer rejects widened, incomplete, or dishonest permission metad
 		await mkdir(path.join(root, "nested"));
 		const file = path.join(root, "nested/reviewer.md");
 		const original = await readFile(path.join(agentRoot, "nested/reviewer.md"), "utf8");
-		const tools = "read, bash, grep, find, ls, Agent, get_subagent_result";
+		const tools = "read, bash, grep, find, ls, fffind, ffgrep, Agent, get_subagent_result";
 		const cases: [string, string, RegExp][] = [
 			["binding: inherit", "binding: own\nmodel: gpt-6-luna\neffort: max", /must inherit its parent binding/],
 			["binding: inherit", "binding: other", /invalid binding/],
@@ -229,7 +231,7 @@ test("Searcher rejects missing, legacy, and widened tool envelopes", async () =>
 	try {
 		await mkdir(path.join(root, "nested"));
 		const original = await readFile(path.join(agentRoot, "nested/searcher.md"), "utf8");
-		const tools = ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep"];
+		const tools = ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep", "fffind", "ffgrep"];
 		const cases = [
 			...tools.map((missing) => tools.filter((tool) => tool !== missing)),
 			...["read", "ls"].map((extra) => [...tools, extra]),

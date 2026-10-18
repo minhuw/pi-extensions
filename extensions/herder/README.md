@@ -46,8 +46,8 @@ Missing both configuration and registration, disabled entries, or invalid config
 ## What Herder owns
 
 - Dependency-aware scheduling with a configurable global worker limit.
-- Clean, parentless Pi worker sessions using Pi's built-in `grep` and `find` tools; Implementer, Reviewer, and Judge load no extensions.
-- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Recon's local tools enforce worktree scope; other children use built-in repository search. `searcher` uses only the configured Magpie search MCP server; `worker`, `recon`, and `reviewer` load no extensions. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
+- Clean, parentless Pi worker sessions with built-in repository search plus pinned FFF `fffind`/`ffgrep`; ambient extensions stay disabled.
+- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Recon's local tools enforce worktree scope; all children also receive FFF search. `searcher` additionally uses only the configured Magpie search MCP server; no child discovers ambient extensions. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
 - One stable Herder branch and isolated Git worktree per plan, stored under `<plan-dir>/.herder/worktrees/` so they stay inside the plan set.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.
@@ -150,6 +150,8 @@ Scope approval and budget approval are separate: an amendment does not restore c
 | `universe` (default) | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Recon uses DeepSeek Flash high with no service-tier pin. |
 
 Exact model, effort, and service-tier bindings live in `assets/profiles/profiles.json` and are resolved by the runtime.
+
+All Herder roles and nested agents have `fffind` and `ffgrep` from pinned `npm:@ff-labs/pi-fff`, alongside their existing tools. The collection installs the dependency; no separate Herder configuration is needed. FFF initializes on first use and shuts down with the child session. Recon and Searcher retain source/worktree restrictions. See [FFF search](adapters/README.md#fff-search) for tool behavior and scoped fallbacks.
 
 Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`. Optional `rescue` and `searcher` bindings override only round-3 Implementer and nested web Searcher; existing profiles retain their bindings and `universe` is the default for new runs. Astra/Sol bindings in `universe` do not pin a service tier.
 

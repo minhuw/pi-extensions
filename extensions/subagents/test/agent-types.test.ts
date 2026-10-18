@@ -502,9 +502,9 @@ describe("local fleet runtime tool selection", () => {
     for (const retired of ["Explore", "Plan", "general-purpose"]) expect(isValidType(retired)).toBe(false);
     for (const name of ["recon", "reviewer"]) {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
-      expect(getConfig(name).excludeExtensions).toEqual(["pi-fff"]);
+      expect(getConfig(name).excludeExtensions).toBeUndefined();
     }
     expect(getToolNamesForType("worker")).toEqual(BUILTIN_TOOL_NAMES);
-    expect(getConfig("worker").excludeExtensions).toEqual(["pi-fff"]);
+    expect(getConfig("worker").excludeExtensions).toBeUndefined();
   });
 });

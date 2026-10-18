@@ -34,6 +34,7 @@ import {
 } from "./nested-agent-executor.ts";
 import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { createReconTools } from "./recon-tools.ts";
+import { configureHerderFff, FFF_EXTENSION_PATH, FFF_TOOL_NAMES } from "./fff-search.ts";
 import {
 	loadHerderPiRole,
 	type HerderPiRoleDefinition,
@@ -204,7 +205,7 @@ function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: nu
 }
 
 const SEARCHER_WEB_TOOL_NAMES = new Set<string>(MAGPIE_SEARCH_TOOLS);
-const SEARCHER_LOCAL_TOOL_NAMES = new Set(["find", "grep"]);
+const SEARCHER_LOCAL_TOOL_NAMES = new Set(["find", "grep", ...FFF_TOOL_NAMES]);
 
 function searchPathStaysWithinWorktree(worktree: string, rawPath: string): boolean {
 	const value = rawPath.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").trim();
@@ -312,6 +313,12 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: options.cwd,
 			agentDir: this.agentDir,
+			additionalExtensionPaths: [FFF_EXTENSION_PATH],
+			extensionsOverride: (base) => configureHerderFff(base, {
+				worktree: options.cwd, agentDir: this.agentDir,
+				sourceOnly: searcher || nested && definition.name === "recon",
+				signal: options.signal,
+			}),
 			extensionFactories: searcher ? [{
 				name: "herder-searcher-policy",
 				factory: async (childPi) => {

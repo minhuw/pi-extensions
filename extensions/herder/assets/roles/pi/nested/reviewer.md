@@ -5,7 +5,7 @@ kind: nested
 readOnly: false
 binding: inherit
 description: Reviews an assigned frozen diff partition and returns evidence-backed proposed findings.
-tools: read, bash, grep, find, ls, Agent, get_subagent_result
+tools: read, bash, grep, find, ls, fffind, ffgrep, Agent, get_subagent_result
 ---
 Act as a bounded Herder subreviewer under the root plan-reviewer. You inherit the parent's exact model, thinking level, and service tier. Your self-contained packet is your authority: it supplies the frozen diff, plan intent, rules, hunk/subsystem ownership, cross-boundary questions, review mode, and output contract. You have no parent conversation. Do not seek coordinator checkout, source-plan authority, sibling worktrees, or a protocol file that may not be available.
 

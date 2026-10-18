@@ -14,6 +14,7 @@ import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderCleanupError, HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
 import { createMagpieSearchExtension, MAGPIE_SEARCH_SERVER, MAGPIE_SEARCH_TOOLS, SEARCHER_TOOLS } from "../../../adapters/magpie-search.ts";
 import { magpieServer } from "./helpers/magpie-server.ts";
+import { FFF_TOOL_NAMES } from "../../../adapters/fff-search.ts";
 import { Deferred } from "./helpers/harness.ts";
 import {
 	applyNestedAbortSignal,
@@ -224,7 +225,7 @@ test("searcher policy confines built-in local searches to the assigned worktree"
 		for (const name of ["web_search", "fetch_content", "source_check", "get_search_content"]) {
 			assert.equal(applySearcherToolPolicy(name, {}, worktree)?.block, true);
 		}
-		for (const tool of ["find", "grep"]) {
+		for (const tool of ["find", "grep", ...FFF_TOOL_NAMES]) {
 			const local = { path: "src", workflow: "unchanged" };
 			assert.equal(applySearcherToolPolicy(tool, local, worktree), undefined);
 			assert.equal(local.workflow, "unchanged");
@@ -390,14 +391,15 @@ export default function (pi) {
 			const prepared = await factory.create({ action: roleAction(role), planDirectory });
 			const session = prepared.session as AgentSession;
 			assert.equal(session.messages.length, 0);
-			for (const event of ["session_start", "before_agent_start", "session_shutdown"] as const) {
+			for (const event of ["session_start", "before_agent_start"] as const) {
 				assert.equal(session.extensionRunner.hasHandlers(event), false);
 			}
+			assert.equal(session.extensionRunner.hasHandlers("session_shutdown"), true, "package-owned FFF cleanup handler is retained");
 			assert.deepEqual(
 				session.agent.state.tools.map((tool) => tool.name).sort(),
 				(role === "plan-implementer"
-					? ["read", "edit", "write", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]
-					: ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"]).sort(),
+					? ["read", "edit", "write", "bash", "grep", "find", "ls", ...FFF_TOOL_NAMES, "Agent", "get_subagent_result"]
+					: ["read", "bash", "grep", "find", "ls", ...FFF_TOOL_NAMES, "Agent", "get_subagent_result"]).sort(),
 			);
 			if (role === "plan-implementer") {
 				const injected = await session.extensionRunner.emitBeforeAgentStart({ messageType: "user", prompt: "task", images: undefined }, { cwd: worktree, forceSystemPrompt: "BASE" });
@@ -437,12 +439,14 @@ export default function (pi) {
 			fauxToolCall("read", { path: "../outside-secret" }),
 			fauxToolCall("read", { path: "src/probe.ts" }),
 			fauxToolCall("grep", { pattern: "RECON_PROBE", glob: "**/*" }),
+			fauxToolCall("fffind", { pattern: "probe.ts", path: "src" }),
+			fauxToolCall("ffgrep", { pattern: "RECON_PROBE", path: "src" }),
 		];
 		const prepared = await factory.create({ action: { ...roleAction("plan-implementer"), serviceTier: "fast" }, planDirectory });
 		const nestedCases = [
-			{ type: "recon", tools: ["read", "grep", "find", "ls"], events: [] },
+			{ type: "recon", tools: ["read", "grep", "find", "ls", ...FFF_TOOL_NAMES], events: [] },
 			{ type: "searcher", tools: SEARCHER_TOOLS, events: [] },
-			{ type: "worker", tools: ["read", "edit", "write", "bash", "grep", "find", "ls"], events: [] },
+			{ type: "worker", tools: ["read", "edit", "write", "bash", "grep", "find", "ls", ...FFF_TOOL_NAMES], events: [] },
 		] as const;
 		for (const nestedCase of nestedCases) {
 			const beforeNested = await eventLines();
@@ -474,7 +478,7 @@ export default function (pi) {
 					assert.deepEqual(await options?.onPayload?.(payload, model) ?? payload, payload);
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
-					assert.equal(results.length, 3);
+					assert.equal(results.length, 5);
 					assert.equal(results[0]!.isError, true);
 					assert.match(JSON.stringify(results[0]!.content), /Recon filesystem scope denied/);
 					assert.equal(results[1]!.isError, false);
@@ -482,6 +486,11 @@ export default function (pi) {
 					assert.equal(results[2]!.isError, false);
 					assert.match(JSON.stringify(results[2]!.content), /probe.ts:1:/);
 					assert.doesNotMatch(JSON.stringify(results[2]!.content), /forbidden/);
+					assert.equal(results[3]!.isError, false);
+					assert.match(JSON.stringify(results[3]!.content), /probe\.ts/);
+					assert.equal(results[4]!.isError, false);
+					assert.match(JSON.stringify(results[4]!.content), /RECON_PROBE/);
+					assert.doesNotMatch(JSON.stringify(results.slice(3).map((result) => result.content)), /forbidden/);
 				}
 				return fauxAssistantMessage(`Nested ${nestedCase.type} result`);
 			};
@@ -525,7 +534,7 @@ export default function (pi) {
 					assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, undefined);
 					const payload = { model: model.id };
 					assert.deepEqual(await options?.onPayload?.(payload, model) ?? payload, payload);
-					assert.deepEqual(tools, ["read", "grep", "find", "ls"].sort());
+					assert.deepEqual(tools, ["read", "grep", "find", "ls", ...FFF_TOOL_NAMES].sort());
 					assert.equal(options?.reasoning, "high");
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) {
@@ -535,7 +544,7 @@ export default function (pi) {
 						assert.doesNotMatch(JSON.stringify(conversation[0]!.content), /Review shard/);
 						return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
 					}
-					assert.equal(results.length, 3);
+					assert.equal(results.length, 5);
 					assert.equal(results[0]!.isError, true);
 					assert.match(JSON.stringify(results[0]!.content), /Recon filesystem scope denied/);
 					assert.equal(results[1]!.isError, false);
@@ -543,12 +552,17 @@ export default function (pi) {
 					assert.equal(results[2]!.isError, false);
 					assert.match(JSON.stringify(results[2]!.content), /probe.ts:1:/);
 					assert.doesNotMatch(JSON.stringify(results[2]!.content), /forbidden/);
+					for (const result of results.slice(3)) {
+						assert.equal(result.isError, false);
+						assert.match(JSON.stringify(result.content), /probe.ts/);
+						assert.doesNotMatch(JSON.stringify(result.content), /forbidden/);
+					}
 					return fauxAssistantMessage("STATUS: ANSWERED\nANSWER: source trace\nEVIDENCE: src/probe.ts:1\nREMAINING: none");
 				}
 				assert.equal(model.id, "test-model");
 				assert.equal((options as { serviceTier?: string } | undefined)?.serviceTier, "priority");
 				assert.equal(options?.reasoning, "high");
-				assert.deepEqual(tools, ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"].sort());
+				assert.deepEqual(tools, ["read", "bash", "grep", "find", "ls", ...FFF_TOOL_NAMES, "Agent", "get_subagent_result"].sort());
 				const results = context.messages.filter((entry) => entry.role === "toolResult");
 				if (results.length === 0) {
 					const conversation = context.messages.filter((entry) => entry.role !== "system");

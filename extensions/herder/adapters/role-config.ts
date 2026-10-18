@@ -17,6 +17,7 @@ import {
 	type WorkerRole,
 } from "../src/shared/protocol.ts";
 import { MAGPIE_SEARCH_TOOLS, SEARCHER_TOOLS } from "./magpie-search.ts";
+import { FFF_TOOL_NAMES } from "./fff-search.ts";
 
 export interface HerderPiRoleDefinition {
 	role: WorkerRole;
@@ -50,9 +51,9 @@ export interface HerderNestedAgentDefinition {
 }
 
 // Bash is unrestricted; reviewer source preservation is a prompt contract, not a sandbox.
-const REVIEWER_NESTED_TOOLS = ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"] as const;
+const REVIEWER_NESTED_TOOLS = ["read", "bash", "grep", "find", "ls", ...FFF_TOOL_NAMES, "Agent", "get_subagent_result"] as const;
 const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
-	"read", "grep", "find", "ls",
+	"read", "grep", "find", "ls", ...FFF_TOOL_NAMES,
 	...MAGPIE_SEARCH_TOOLS,
 ]);
 const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {

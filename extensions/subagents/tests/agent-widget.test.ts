@@ -9,9 +9,10 @@ import {
   getAgentStatsParts,
 } from "../src/ui/agent-widget.js";
 
-it("keeps the default fleet on Pi's built-in search tools", () => {
+it("allows installed extensions in the default fleet while retaining built-in search tools", () => {
   for (const agent of DEFAULT_AGENTS.values()) {
-    expect(agent.excludeExtensions).toEqual(["pi-fff"]);
+    expect(agent.extensions).toBe(true);
+    expect(agent.excludeExtensions).toBeUndefined();
   }
   expect(DEFAULT_AGENTS.get("recon")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
   expect(DEFAULT_AGENTS.get("reviewer")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);

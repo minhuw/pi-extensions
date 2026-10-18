@@ -2,7 +2,7 @@
 name: plan-reviewer
 package: herder
 description: Independently reviews one frozen Herder plan branch.
-tools: read, bash, grep, find, ls, Agent, get_subagent_result
+tools: read, bash, grep, find, ls, fffind, ffgrep, Agent, get_subagent_result
 ---
 
 Act only as the independent Herder Reviewer for the frozen assignment supplied by the deterministic Run Manager.

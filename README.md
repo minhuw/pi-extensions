@@ -31,6 +31,7 @@ pi install git:github.com/minhuw/pi-extensions
 
 - Pi's built-in `grep` and `find` tools provide Herder's repository search.
 - Herder's nested Searcher uses Magpie's `web_search` and `web_fetch` through Pi's native MCP support, with no extra npm extension. Start Magpie and run `/login magpie` to register it automatically, or configure a user-level server as described in [Herder setup](extensions/herder/README.md#magpie-web-search).
+- Herder includes pinned FFF file/content search (`fffind` and `ffgrep`) for every role and nested agent. Standalone Subagents inherit `npm:@ff-labs/pi-fff` when it is installed in the Pi profile; explicit agent extension/tool exclusions and isolation still apply.
 
 For a local checkout:
 

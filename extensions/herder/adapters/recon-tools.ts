@@ -41,11 +41,11 @@ function boundedNumber(value: number | undefined, fallback: number, max: number,
 	return Math.min(value, max);
 }
 
-/** Same-name overrides, used only by Recon (including reviewer grandchildren). */
-export function createReconTools(worktree: string, scopeSignal: AbortSignal, agentDir = getAgentDir()) {
+/** Shared source admission for Recon's built-in and FFF search tools. */
+export function createReconPathGuard(worktree: string, scopeSignal: AbortSignal) {
 	const lexicalRoot = path.resolve(worktree);
 	const root = realpathSync(lexicalRoot);
-	const checked = (raw: string = "."): string => {
+	return (raw: string = "."): string => {
 		scopeSignal.throwIfAborted();
 		const relative = reconRelativePath(raw, lexicalRoot, root);
 		let candidate = root;
@@ -60,6 +60,12 @@ export function createReconTools(worktree: string, scopeSignal: AbortSignal, age
 		if (!isInside(root, canonical) || components(path.relative(root, canonical)).some(reserved)) return deny("resolved path leaves source scope");
 		return canonical;
 	};
+}
+
+/** Same-name overrides, used only by Recon (including reviewer grandchildren). */
+export function createReconTools(worktree: string, scopeSignal: AbortSignal, agentDir = getAgentDir()) {
+	const root = realpathSync(path.resolve(worktree));
+	const checked = createReconPathGuard(worktree, scopeSignal);
 	const read = createReadToolDefinition(root, {
 		operations: {
 			access: async (file) => {

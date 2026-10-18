@@ -2,13 +2,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createMcpExtension, getAgentDir, type ExtensionAPI, type ExtensionFactory, type McpServerConfig } from "@earendil-works/pi-coding-agent";
 import { MAGPIE_SEARCH_SERVER } from "../../magpie-provider/mcp.ts";
+import { FFF_TOOL_NAMES } from "./fff-search.ts";
 
 export { MAGPIE_SEARCH_SERVER };
 export const MAGPIE_SEARCH_TOOLS = [
 	"mcp__magpie_web_search__web_search",
 	"mcp__magpie_web_search__web_fetch",
 ] as const;
-export const SEARCHER_TOOLS = [...MAGPIE_SEARCH_TOOLS, "find", "grep"] as const;
+export const SEARCHER_TOOLS = [...MAGPIE_SEARCH_TOOLS, "find", "grep", ...FFF_TOOL_NAMES] as const;
 
 export function isHttpUrlWithoutCredentials(value: unknown): value is string {
 	if (typeof value !== "string" || !/^https?:\/\//i.test(value) || /^https?:\/\/[^/?#]*@/i.test(value)) return false;

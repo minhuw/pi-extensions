@@ -357,17 +357,17 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	}
 	const recon = await readFile(path.join(agentDir, "nested/recon.md"), "utf8");
 	assert.doesNotMatch(recon, /^extensions:/m);
-	assert.match(recon, /^tools: read, grep, find, ls$/m);
+	assert.match(recon, /^tools: read, grep, find, ls, fffind, ffgrep$/m);
 	assert.match(recon, /runtime restricts filesystem access to the assigned worktree/);
 	assert.match(nestedTool, /paths in a prompt do not grant access/);
 	assert.match(nestedTool, /historical diffs or external evidence inline/);
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
 	assert.doesNotMatch(searcher, /^extensions:/m);
-	assert.match(searcher, /^tools: mcp__magpie_web_search__web_search, mcp__magpie_web_search__web_fetch, find, grep$/m);
+	assert.match(searcher, /^tools: mcp__magpie_web_search__web_search, mcp__magpie_web_search__web_fetch, find, grep, fffind, ffgrep$/m);
 	assert.match(searcher, /no `workflow`, `source_check`, or stored-content retrieval tool/);
 	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
 	assert.doesNotMatch(worker, /^extensions:/m);
-	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls$/m);
+	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls, fffind, ffgrep$/m);
 	assert.match(worker, /only when the parent explicitly delegates sole setup ownership/);
 	assert.match(worker, /never compete with parent or sibling installs/);
 	const reviewer = await readFile(path.join(agentDir, "nested/reviewer.md"), "utf8");
@@ -376,7 +376,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(reviewer, /^binding: inherit$/m);
 	assert.match(reviewer, /^readOnly: false$/m);
 	assert.doesNotMatch(reviewer, /^extensions:/m);
-	assert.match(reviewer, /^tools: read, bash, grep, find, ls, Agent, get_subagent_result$/m);
+	assert.match(reviewer, /^tools: read, bash, grep, find, ls, fffind, ffgrep, Agent, get_subagent_result$/m);
 	assert.doesNotMatch(reviewer, /^(?:model|effort|service_tier):/m);
 	assert.match(reviewer, /Reuse parent-prepared dependencies/);
 	assert.match(reviewer, /delegates sole pre-check setup ownership/);
@@ -403,7 +403,7 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 		assert.match(contents, /^package: herder$/m);
 		assert.match(contents, /^tools: .*Agent.*get_subagent_result/m);
 		assert.doesNotMatch(contents, /^tools: .*(?:steer_subagent|herder)/m);
-		assert.match(contents, /^tools: .*\bgrep\b.*\bfind\b/m);
+		assert.match(contents, /^tools: .*\bgrep\b.*\bfind\b.*\bfffind\b.*\bffgrep\b/m);
 		assert.match(contents, /ROLE_CONTRACT_PATH/);
 		assert.doesNotMatch(contents, /^extensions:/m);
 		const contract = await readFile(path.join(extensionRoot, "assets/roles/contracts", `${role}.md`), "utf8");

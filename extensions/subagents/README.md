@@ -57,7 +57,7 @@ Tools: `Agent`, `get_subagent_result`, `steer_subagent`, and `SubagentWorkflow`.
 | `worker` | Bounded implementation and verification | coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
 
-The embedded fleet uses Pi's built-in `grep`/`find` and excludes the ambient search extension that can replace them. Custom definitions remain free to choose their extension set. Read-only role instructions are not an OS sandbox.
+The embedded fleet keeps Pi's built-in `grep`/`find` and inherits installed search extensions, including `npm:@ff-labs/pi-fff` (`fffind`/`ffgrep`). This also applies to nested agents through normal discovery. Explicit `extensions: false`, `exclude_extensions`, `disallowed_tools`, `ext:` selectors, and `isolated: true` still control which tools load. Custom definitions retain their chosen extension set. Read-only role instructions are not an OS sandbox.
 
 ### Service tier
 
