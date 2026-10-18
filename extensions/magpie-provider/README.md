@@ -27,6 +27,29 @@ Saved URL/key take precedence over environment values per field; older saved key
 
 `/logout` removes the stored connection and returns to environment/local defaults. Saved credentials never become permanent fallback configuration. Pi refreshes discovery after successful authentication. Request authentication supplies both key and endpoint, so even a previously selected model uses the current connection; Anthropic delegates remove the final `/v1` before their SDK adds `/v1/messages`.
 
+## Automatic web-search MCP
+
+A saved `/login magpie` connection automatically registers **one** native MCP server, `magpie-web-search`, at `<gateway-origin>/mcp/magpie/web-search`. It exposes only `web_search` and `web_fetch` directly (Pi names them `mcp__magpie_web_search__web_search` and `mcp__magpie_web_search__web_fetch`); other server tools stay hidden. Start Magpie and configure its web-search backend separately. Model discovery validates login, not search-backend availability.
+
+Registration happens at startup for an existing saved login and after Pi persists a successful login. It follows accepted key/gateway changes and is removed on logout; failed or cancelled login does not change it. The Authorization header and gateway are paired in memory, not stored in `mcp.json`, and a new gateway's key is never resolved against an old registered URL. Environment-only model configuration does not auto-enable search; use `/login magpie` or a manual MCP entry.
+
+Pi's native MCP extension owns connection startup and cleanup. A same-name `mcp.json` entry takes precedence and is never overwritten. To disable automatic search persistently, add a complete disabled user-level entry (use your gateway URL):
+
+```json
+{
+  "mcpServers": {
+    "magpie-web-search": {
+      "url": "http://127.0.0.1:3425/mcp/magpie/web-search",
+      "enabled": false
+    }
+  }
+}
+```
+
+`--no-mcp` disables MCP for a run. `/mcp` shows the session registration; `pi mcp list` does not, because shell MCP commands do not load extensions. No configuration files are created or edited by this extension.
+
+Herder's Searcher uses the host registration when no user-level entry exists, while other Herder roles remain isolated. New ordinary Subagents load it when both the Magpie provider and native MCP extensions are enabled; `isolated: true`, `extensions: false`, and extension/tool exclusions still apply. Already-running children retain their own connection until they finish; newly launched children use the current login.
+
 ## Refresh and failures
 
 Open `/model` to run Pi's standard catalog refresh, including Magpie. It reports refresh errors and keeps the previous catalog only for the same URL/key. No extra refresh command is needed. `/reload` reloads the extension and rereads its environment configuration.
@@ -66,4 +89,4 @@ npm run test:magpie-provider
 npm run typecheck
 ```
 
-Tests cover native login persistence/cancellation, connection precedence/logout, isolated saved-credential startup, URL/auth validation, metadata mapping, bounded discovery, publication and retention, and offline registration. Real Pi runtime/delegate tests verify stale-model endpoint overrides, secret pairing, request hooks, and session-affinity headers with intercepted HTTP. They do not require a Magpie executable or credentials.
+Tests cover native login persistence/cancellation, connection precedence/logout, isolated saved-credential startup, URL/auth validation, metadata mapping, bounded discovery, publication and retention, and offline registration. A loopback MCP fixture verifies same-session login activation, both real native tool calls, literal bearer forwarding, and tool withdrawal on logout without an MCP configuration file. Real Pi runtime/delegate tests verify stale-model endpoint overrides, secret pairing, request hooks, and session-affinity headers with intercepted HTTP. They do not require a Magpie executable or credentials.

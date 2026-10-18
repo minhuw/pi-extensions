@@ -6,11 +6,10 @@ This is the maintained, Pi-first Herder implementation. The former standalone `m
 
 ## Install
 
-Install the extension collection and its explicitly injected searcher dependency:
+Install the extension collection:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
-pi install npm:pi-web-access
 ```
 
 For development, install this repository by absolute path. No separate subagent package is required.
@@ -28,11 +27,27 @@ pi --model <provider>/gpt-6-astra --thinking high
 
 Herder refuses to start when Pi's active providers cannot resolve every required model and thinking level. It never substitutes a different model after failure.
 
+### Magpie web search
+
+Searcher uses Pi's native MCP support, not `npm:pi-web-access`. Start Magpie separately, configure its web-search backend, and run `/login magpie` with the collection's [Magpie provider](../magpie-provider/README.md) loaded. The provider automatically registers `magpie-web-search` for the saved gateway; Herder passes only that registration to Searcher. No `mcp.json` entry or duplicated credential is needed.
+
+Alternatively, without the Magpie provider, add this **user-level** server (do not use `--local`):
+
+```sh
+pi mcp add magpie-web-search --url http://127.0.0.1:3425/mcp/magpie/web-search --exposure direct
+```
+
+For a manually configured remote Magpie, use its HTTPS URL and add `--bearer-token-env-var MAGPIE_API_KEY`; supply that variable securely to Pi. Existing unrelated servers and personal web extensions need not be removed. Native OAuth uses Pi's process agent directory; a programmatically supplied different `agentDir` requires an explicit Authorization header or `auth.provider` instead of borrowing that directory's OAuth credentials. MCP logs stay in the selected agent directory.
+
+Herder prefers the exact `magpie-web-search` entry from `<agent-dir>/mcp.json` (`~/.pi/agent/mcp.json` by default), including an explicit `enabled: false` opt-out. Only when that entry is absent does it use the host's current registration. Malformed/unreadable files or invalid/disabled entries never fall back to the registration. Herder ignores project MCP configuration and all other servers, accepts only HTTP(S), and exposes exactly `mcp__magpie_web_search__web_search` and `mcp__magpie_web_search__web_fetch`, plus Searcher's worktree-scoped `find`/`grep`. Other roles remain without direct web tools and can delegate to Searcher. Searcher's model/profile binding is independent of Magpie's search backend.
+
+Missing both configuration and registration, disabled entries, or invalid configuration fail the Searcher launch; unavailable required tools fail before its model request. `--no-mcp` also disables Searcher. There is no package fallback. Pi bounds initial direct-tool discovery to ten seconds and owns MCP transport, authentication, and connection cleanup. This replaces search/fetch only: `source_check`, `get_search_content`, and interactive curator workflows are not provided. No user configuration is rewritten by Herder.
+
 ## What Herder owns
 
 - Dependency-aware scheduling with a configurable global worker limit.
 - Clean, parentless Pi worker sessions using Pi's built-in `grep` and `find` tools; Implementer, Reviewer, and Judge load no extensions.
-- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Recon's local tools enforce worktree scope; other children use built-in repository search. `searcher` loads only `npm:pi-web-access`; `worker`, `recon`, and `reviewer` load no extensions. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
+- A package-owned bounded nested executor: root Reviewers can launch actual `reviewer` children with optional `recon` leaves; Implementer and Judge delegation stays unchanged. Recon's local tools enforce worktree scope; other children use built-in repository search. `searcher` uses only the configured Magpie search MCP server; `worker`, `recon`, and `reviewer` load no extensions. This is not a general recursive agent. See [Scoped nested delegation](adapters/README.md#scoped-nested-delegation) for permissions, limits, collection, and the ephemeral two-level tree.
 - One stable Herder branch and isolated Git worktree per plan, stored under `<plan-dir>/.herder/worktrees/` so they stay inside the plan set.
 - Immutable worker assignments, review rounds, completion proofs, and exact-tree verification evidence.
 - Persistent SQLite accounting, crash recovery, and resumable runs.

@@ -45,8 +45,8 @@ test("Herder loads package-owned nested definitions with reviewer-only delegatio
 	assert.equal(searcher.readOnly, true);
 	assert.equal(searcher.binding, "own");
 	assert.deepEqual(searcher.modelBinding, { model: "gpt-6-luna", effort: "max", serviceTier: "fast" });
-	assert.deepEqual(searcher.extensions, ["npm:pi-web-access"]);
-	assert.deepEqual(searcher.tools, ["web_search", "source_check", "fetch_content", "get_search_content", "find", "grep"]);
+	assert.deepEqual(searcher.extensions, []);
+	assert.deepEqual(searcher.tools, ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep"]);
 	assert.equal(worker.readOnly, false);
 	assert.equal(worker.binding, "inherit");
 	assert.equal(worker.modelBinding, undefined);
@@ -222,6 +222,29 @@ test("nested reviewer rejects widened, incomplete, or dishonest permission metad
 	}
 });
 
+test("Searcher rejects missing, legacy, and widened tool envelopes", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-pi-searcher-envelope-"));
+	try {
+		await mkdir(path.join(root, "nested"));
+		const original = await readFile(path.join(agentRoot, "nested/searcher.md"), "utf8");
+		const tools = ["mcp__magpie_web_search__web_search", "mcp__magpie_web_search__web_fetch", "find", "grep"];
+		const cases = [
+			...tools.map((missing) => tools.filter((tool) => tool !== missing)),
+			...["read", "ls"].map((extra) => [...tools, extra]),
+		];
+		for (const envelope of cases) {
+			await writeFile(path.join(root, "nested/searcher.md"), original.replace(/^tools: .*$/m, `tools: ${envelope.join(", ")}`));
+			await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /exact Searcher tool envelope/);
+		}
+		for (const extra of ["web_search", "fetch_content", "source_check", "get_search_content", "mcp__other__web_search", "list_mcp_resources"]) {
+			await writeFile(path.join(root, "nested/searcher.md"), original.replace(/^tools: .*$/m, `tools: ${[...tools, extra].join(", ")}`));
+			await assert.rejects(() => loadHerderNestedAgent(root, "searcher"), /mutating or unrestricted tool/);
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("Herder validates package roles against the built-in engine model catalog", async () => {
 	const profile = resolvePiProfile("poorman", catalog);
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, available));
@@ -312,6 +335,7 @@ Search.
 		for (const [type, extension] of [
 			["recon", "git:github.com/DietrichGebert/ponytail"],
 			["searcher", "git:github.com/DietrichGebert/ponytail"],
+			["searcher", "npm:pi-web-access"],
 			["worker", "npm:pi-web-access"],
 			["worker", "git:github.com/DietrichGebert/ponytail"],
 		] as const) {

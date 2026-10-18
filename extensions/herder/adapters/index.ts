@@ -84,6 +84,7 @@ import {
 } from "./ownership.ts";
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerSessionFactory, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
+import { MAGPIE_SEARCH_SERVER } from "./magpie-search.ts";
 import { orcaBusy } from "../../shared/orca-busy.ts";
 import {
 	createWorkerInputEntry,
@@ -173,7 +174,8 @@ function unwrapReply(value: Record<string, unknown>): ManagerReply {
 }
 
 export default function registerHerderPi(pi: ExtensionAPI): void {
-	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT);
+	const sessionFactory = new DefaultPiWorkerSessionFactory(PI_AGENT_ROOT, undefined,
+		() => pi.getMcpServers().find(({ name }) => name === MAGPIE_SEARCH_SERVER)?.config);
 	registerHerderPiWithWorkerFactory(pi, sessionFactory);
 }
 

@@ -5,17 +5,16 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
-	DefaultPackageManager,
 	DefaultResourceLoader,
 	getAgentDir,
 	ModelRegistry,
 	ModelRuntime,
 	SessionManager,
-	SettingsManager,
 	type AgentSession,
 	type AgentSessionEvent,
 	type ToolDefinition,
 	type SessionStats,
+	type McpServerConfig,
 } from "@earendil-works/pi-coding-agent";
 import { WORKER_ROLES, type ManagerAction, type UsageEvidence, type WorkerRole } from "../src/shared/protocol.ts";
 import {
@@ -37,10 +36,10 @@ import { createNestedAgentTools } from "./nested-agent-tool.ts";
 import { createReconTools } from "./recon-tools.ts";
 import {
 	loadHerderPiRole,
-	WEB_ACCESS_EXTENSION_SOURCE,
 	type HerderPiRoleDefinition,
 	type HerderNestedAgentDefinition,
 } from "./role-config.ts";
+import { createMagpieSearchExtension, isHttpUrlWithoutCredentials, MAGPIE_SEARCH_TOOLS } from "./magpie-search.ts";
 import { finalAssistantResult } from "./assistant-message.ts";
 import { cloneSessionSnapshot, observeSessionEvent } from "./session-telemetry.ts";
 import { record, sessionUsageTotals } from "./usage-accounting.ts";
@@ -204,7 +203,7 @@ function usageEvidence(session: WorkerSession, startedAt: number, finishedAt: nu
 	};
 }
 
-const SEARCHER_WEB_TOOL_NAMES = new Set(["web_search", "source_check", "fetch_content", "get_search_content"]);
+const SEARCHER_WEB_TOOL_NAMES = new Set<string>(MAGPIE_SEARCH_TOOLS);
 const SEARCHER_LOCAL_TOOL_NAMES = new Set(["find", "grep"]);
 
 function searchPathStaysWithinWorktree(worktree: string, rawPath: string): boolean {
@@ -237,40 +236,22 @@ export function applySearcherToolPolicy(toolName: string, rawInput: unknown, wor
 		return undefined;
 	}
 	if (!SEARCHER_WEB_TOOL_NAMES.has(toolName)) return { block: true, reason: `Herder searcher cannot call unexpected tool ${toolName}.` };
-	if (!input) return undefined;
-	// Apply by capability envelope rather than assumed semantic name: pi-web-access
-	// permits configured tool-name swaps, so every allowed web call gets both guards.
-	input.workflow = "none";
-	const values = [input.url, ...(Array.isArray(input.urls) ? input.urls : [])]
-		.filter((value): value is string => typeof value === "string");
-	if (values.some((value) => /^(?:file:|\/|\.\.?\/)/i.test(value.trim()))) {
-		return { block: true, reason: "Herder searcher may fetch only remote URLs." };
+	if (toolName === MAGPIE_SEARCH_TOOLS[1] && !isHttpUrlWithoutCredentials(input?.url)) {
+		return { block: true, reason: "Herder searcher may fetch only HTTP(S) URLs without embedded credentials." };
 	}
 	return undefined;
-}
-
-export function trustedNestedExtensionPath(agentDir: string, installed: string, source: string): string {
-	if (source !== WEB_ACCESS_EXTENSION_SOURCE) throw new Error(`Herder npm extension ${source} is not allowed.`);
-	const packagePath = ["pi-web-access"];
-	const realRoot = realpathSync(path.join(agentDir, "npm"));
-	const realInstalled = realpathSync(installed);
-	if (!isInside(realRoot, realInstalled)) {
-		throw new Error(`Herder npm extension ${source} resolves outside the trusted user package store.`);
-	}
-	if (realInstalled !== path.join(realRoot, "node_modules", ...packagePath)) {
-		throw new Error(`Herder npm extension ${source} does not resolve to its exact trusted package path.`);
-	}
-	return realInstalled;
 }
 
 export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 	private readonly agentRoot: string;
 	private readonly agentDir: string;
+	private readonly registeredMagpieConfig?: () => McpServerConfig | undefined;
 	private modelRuntime?: ModelRuntime;
 
-	constructor(agentRoot: string, agentDir = getAgentDir()) {
+	constructor(agentRoot: string, agentDir = getAgentDir(), registeredMagpieConfig?: () => McpServerConfig | undefined) {
 		this.agentRoot = agentRoot;
 		this.agentDir = agentDir;
+		this.registeredMagpieConfig = registeredMagpieConfig;
 	}
 
 	bindModelRegistry(registry: ModelRegistry): void {
@@ -290,19 +271,6 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 
 	async availableModels(): Promise<readonly AvailableModel[]> {
 		return await this.runtime().getAvailable();
-	}
-
-	private resolveExtensionPaths(sources: readonly string[], cwd: string, owner: "role" | "nested"): string[] {
-		if (sources.length === 0) return [];
-		const settingsManager = SettingsManager.create(cwd, this.agentDir);
-		const packageManager = new DefaultPackageManager({ cwd, agentDir: this.agentDir, settingsManager });
-		return sources.map((source) => {
-			const installed = packageManager.getInstalledPath(source, "user");
-			if (!installed || !existsSync(installed)) {
-				throw new Error(`Herder ${owner} extension ${source} is not installed in the trusted user package store. Install it explicitly with: pi install ${source}`);
-			}
-			return trustedNestedExtensionPath(this.agentDir, installed, source);
-		});
 	}
 
 	private resolveModel(
@@ -339,14 +307,24 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		const label = nested ? `Herder nested agent ${definition.name}` : `Herder role ${definition.role}`;
 		const sessionManager = SessionManager.create(options.cwd, options.sessionDirectory);
 		if (sessionManager.getHeader()?.parentSession) throw new Error(`Herder ${nested ? "nested agents" : "Pi workers"} cannot inherit a parent session.`);
-		const extensionPaths = this.resolveExtensionPaths(definition.extensions, options.cwd, owner);
+		const searcher = nested && definition.name === "searcher";
+		let searcherMcpFailed = false;
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: options.cwd,
 			agentDir: this.agentDir,
-			additionalExtensionPaths: extensionPaths,
-			extensionFactories: nested && definition.name === "searcher" ? [{
+			extensionFactories: searcher ? [{
 				name: "herder-searcher-policy",
-				factory: (childPi) => {
+				factory: async (childPi) => {
+					await createMagpieSearchExtension(this.agentDir, this.registeredMagpieConfig)(childPi);
+					// Native MCP waits for direct tools in its earlier hook. A broken discovery can
+					// leave both names registered, so also fail on native startup diagnostics.
+					childPi.on("before_agent_start", (_event, ctx) => {
+						ctx.signal?.throwIfAborted();
+						const active = childPi.getActiveTools();
+						if (searcherMcpFailed || active.length !== definition.tools.length || definition.tools.some((tool) => !active.includes(tool))) {
+							throw new Error("Herder Searcher: required Searcher tools are unavailable; check the magpie-web-search server connection and its web_search/web_fetch tools from /login magpie or user mcp.json.");
+						}
+					});
 					childPi.on("tool_call", (event) => applySearcherToolPolicy(event.toolName, event.input, options.cwd));
 				},
 			}] : [],
@@ -381,6 +359,12 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			session = created.session;
 			await session.bindExtensions({
 				mode: "print",
+				...(searcher ? { uiContext: {
+					...session.extensionRunner.getUIContext(),
+					// This isolated child has only native MCP. Never retain or print its raw diagnostics,
+					// and never throw from an asynchronous notification callback.
+					notify: () => { searcherMcpFailed = true; },
+				} } : {}),
 				onError: (error) => {
 					throw new Error(`Herder ${owner} extension failed during ${error.event}: ${error.extensionPath}: ${error.error}`);
 				},
@@ -389,7 +373,9 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 			session.setActiveToolsByName(definition.tools);
 			if (session.messages.length !== 0) throw new Error(`Herder ${nested ? "nested agent" : "Pi worker"} session was not created with clean history.`);
 			const activeTools = new Set(session.agent.state.tools.map((tool) => tool.name));
-			const missingTools = definition.tools.filter((tool) => !activeTools.has(tool));
+			// Only native MCP tools may arrive after bindExtensions; local admission stays immediate.
+			const missingTools = definition.tools.filter((tool) => !activeTools.has(tool)
+				&& !(searcher && SEARCHER_WEB_TOOL_NAMES.has(tool)));
 			const unexpectedTools = [...activeTools].filter((tool) => !definition.tools.includes(tool));
 			if (missingTools.length > 0) throw new Error(`${label} is missing required tools: ${missingTools.join(", ")}.`);
 			if (unexpectedTools.length > 0) throw new Error(`${label} exposed unexpected tools: ${unexpectedTools.join(", ")}.`);

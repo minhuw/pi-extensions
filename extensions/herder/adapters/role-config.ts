@@ -16,6 +16,7 @@ import {
 	type ThinkingEffort,
 	type WorkerRole,
 } from "../src/shared/protocol.ts";
+import { MAGPIE_SEARCH_TOOLS, SEARCHER_TOOLS } from "./magpie-search.ts";
 
 export interface HerderPiRoleDefinition {
 	role: WorkerRole;
@@ -52,9 +53,8 @@ export interface HerderNestedAgentDefinition {
 const REVIEWER_NESTED_TOOLS = ["read", "bash", "grep", "find", "ls", "Agent", "get_subagent_result"] as const;
 const STRICT_READ_ONLY_NESTED_TOOLS = new Set([
 	"read", "grep", "find", "ls",
-	"web_search", "source_check", "fetch_content", "get_search_content",
+	...MAGPIE_SEARCH_TOOLS,
 ]);
-export const WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access";
 const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {
 	"plan-implementer": [],
 	"plan-reviewer": [],
@@ -62,7 +62,7 @@ const ROLE_EXTENSION_SOURCES: Record<WorkerRole, readonly string[]> = {
 };
 const NESTED_EXTENSION_SOURCES: Record<HerderNestedAgentType, readonly string[]> = {
 	recon: [],
-	searcher: [WEB_ACCESS_EXTENSION_SOURCE],
+	searcher: [],
 	worker: [],
 	reviewer: [],
 };
@@ -199,6 +199,9 @@ export async function loadHerderNestedAgent(agentRoot: string, type: HerderNeste
 	const readOnly = parsed.frontmatter.readOnly;
 	if (readOnly && tools.some((tool) => !STRICT_READ_ONLY_NESTED_TOOLS.has(tool))) {
 		throw new Error(`read-only nested agent ${type} requests a mutating or unrestricted tool in ${file}`);
+	}
+	if (type === "searcher" && (tools.length !== SEARCHER_TOOLS.length || tools.some((tool) => !(SEARCHER_TOOLS as readonly string[]).includes(tool)))) {
+		throw new Error(`nested searcher requires the exact Searcher tool envelope in ${file}`);
 	}
 	return {
 		name: type,

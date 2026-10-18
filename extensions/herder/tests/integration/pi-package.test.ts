@@ -32,7 +32,7 @@ function testPlanV2Template(template: string): void {
 	assert.match(template, /agent SETUP\/CHECKS remain self-report/);
 }
 
-test("live setup installs trusted worker packages through the selected Pi before E2E", async () => {
+test("live setup installs the checkout without legacy worker packages before E2E", async () => {
 	const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/herder-live-e2e.yml"), "utf8");
 	const testing = await readFile(path.join(extensionRoot, "TESTING.md"), "utf8");
 	const workflowSetup = workflow.match(/      - name: Install and configure Pi\n([\s\S]*?)(?=\n      - name:)/)?.[1];
@@ -49,11 +49,9 @@ test("live setup installs trusted worker packages through the selected Pi before
 	]) {
 		const lines = setup.split("\n").map((line) => line.trim());
 		const binary = lines.findIndex((line) => line.startsWith("pi_bin="));
-		assert.doesNotMatch(setup, /ponytail/i);
-		for (const source of [`"${checkout}"`, "npm:pi-web-access"]) {
-			const install = lines.indexOf(`"$pi_bin" install ${source} --approve`);
-			assert.ok(install > binary, `${label} installs ${source} in the user store after selecting Pi`);
-		}
+		assert.doesNotMatch(setup, /ponytail|pi-web-access/i);
+		const install = lines.indexOf(`"$pi_bin" install "${checkout}" --approve`);
+		assert.ok(install > binary, `${label} installs the checkout in the user store after selecting Pi`);
 	}
 	assert.match(workflowSetup, /echo "HERDER_PI_BIN=\$pi_bin" >> "\$GITHUB_ENV"/);
 	assert.match(localSetup, /^export HERDER_PI_BIN="\$pi_bin"$/m);
@@ -73,11 +71,15 @@ test("Pi package registers Herder while keeping planning skills command-owned", 
 	assert.match(rootReadme, /Node >=22\.19\.0/);
 	assert.match(rootReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
 	assert.doesNotMatch(rootReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
-	assert.match(rootReadme, /pi install npm:pi-web-access/);
+	assert.doesNotMatch(rootReadme, /pi install npm:pi-web-access/);
+	assert.match(rootReadme, /Magpie.*native MCP/);
 	assert.match(herderReadme, /Node >=22\.19\.0/);
 	assert.match(herderReadme, /pi install git:github\.com\/minhuw\/pi-extensions/);
 	assert.doesNotMatch(herderReadme, /pi install git:github\.com\/DietrichGebert\/ponytail/);
-	assert.match(herderReadme, /pi install npm:pi-web-access/);
+	assert.doesNotMatch(herderReadme, /pi install npm:pi-web-access/);
+	assert.match(herderReadme, /pi mcp add magpie-web-search --url http:\/\/127\.0\.0\.1:3425\/mcp\/magpie\/web-search --exposure direct/);
+	assert.match(herderReadme, /--bearer-token-env-var MAGPIE_API_KEY/);
+	assert.match(herderReadme, /ignores project MCP configuration and all other servers/);
 	assert.match(planTemplate, /Prerequisites/);
 	assert.match(planTemplate, /restore missing dependencies with repository-declared `npm ci`/);
 	assert.match(planTemplate, /pinned assets/);
@@ -310,19 +312,12 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.doesNotMatch(extension, /registerEntryRenderer<HerderRunState>/);
 	assert.doesNotMatch(extension + engine + nestedExecutor + nestedTool + roleConfig, /extensions\/subagents|subagents\/src|subagents:telemetry|registerSubagentHost|getSubagentHost/);
 	// worker-engine.test.ts exercises clean sessions, exact tool envelopes,
-	// trusted extension loading and shutdown through the production factory.
+	// isolated MCP loading and shutdown through the production factory.
 	assert.match(engine, /noExtensions: true/);
-	assert.match(engine, /getInstalledPath\(source, "user"\)/);
-	assert.doesNotMatch(engine, /getInstalledPath\(source, "project"\)/);
-	assert.match(engine, /realpathSync\(path\.join\(agentDir, "npm"\)\)/);
-	assert.doesNotMatch(engine + roleConfig + nestedTool, /ponytail/i);
-	assert.match(engine, /resolves outside the trusted user package store/);
-	assert.match(engine, /does not resolve to its exact trusted package path/);
-	assert.match(engine, /pi install \$\{source\}/);
+	assert.doesNotMatch(engine + roleConfig + nestedTool, /ponytail|pi-web-access|DefaultPackageManager/i);
 	assert.match(engine, /SEARCHER_WEB_TOOL_NAMES/);
 	assert.match(engine, /SEARCHER_LOCAL_TOOL_NAMES/);
-	assert.match(engine, /input\.workflow = "none"/);
-	assert.match(engine, /Herder searcher may fetch only remote URLs/);
+	assert.doesNotMatch(engine, /input\.workflow/);
 	assert.match(engine, /noSkills: true/);
 	assert.match(engine, /noPromptTemplates: true/);
 	assert.match(engine, /noThemes: true/);
@@ -333,7 +328,6 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /run_in_background/);
 	assert.match(nestedTool, /name: "get_subagent_result"/);
 	assert.doesNotMatch(nestedTool, /resolvedModel|thinking:|service_tier/);
-	assert.match(roleConfig, /WEB_ACCESS_EXTENSION_SOURCE = "npm:pi-web-access"/);
 	assert.match(roleConfig, /ROLE_EXTENSION_SOURCES/);
 	assert.match(roleConfig, /HERDER_NESTED_AGENT_TYPES = \["recon", "searcher", "worker", "reviewer"\]/);
 	assert.match(roleConfig, /\["Agent", "get_subagent_result"\]/);
@@ -368,8 +362,9 @@ test("deterministic manager owns scheduling while Pi workers delegate only throu
 	assert.match(nestedTool, /paths in a prompt do not grant access/);
 	assert.match(nestedTool, /historical diffs or external evidence inline/);
 	const searcher = await readFile(path.join(agentDir, "nested/searcher.md"), "utf8");
-	assert.match(searcher, /^extensions: npm:pi-web-access$/m);
-	assert.match(searcher, /^tools: web_search, source_check, fetch_content, get_search_content, find, grep$/m);
+	assert.doesNotMatch(searcher, /^extensions:/m);
+	assert.match(searcher, /^tools: mcp__magpie_web_search__web_search, mcp__magpie_web_search__web_fetch, find, grep$/m);
+	assert.match(searcher, /no `workflow`, `source_check`, or stored-content retrieval tool/);
 	const worker = await readFile(path.join(agentDir, "nested/worker.md"), "utf8");
 	assert.doesNotMatch(worker, /^extensions:/m);
 	assert.match(worker, /^tools: read, edit, write, bash, grep, find, ls$/m);

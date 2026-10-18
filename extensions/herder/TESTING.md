@@ -93,7 +93,7 @@ Separately authorize representative comparisons of direct review versus bounded 
 
 The live fixture is provider-backed and can spend model credits. Run it intentionally after the safe preflight below; it is not a normal repository test gate.
 
-Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies, this checkout (including the vendored Pi provider), and the required searcher package in Pi's user package store:
+Use Node >=22.19.0 and npm from the repository root. Install the locked dependencies and register this checkout (including the vendored Pi provider) in Pi's user package store:
 
 ```sh
 set -eu
@@ -107,13 +107,16 @@ herder_entry="$PWD/extensions/herder/adapters/index.ts"
 test -x "$pi_bin"
 test -f "$herder_entry"
 "$pi_bin" install "$PWD" --approve
-"$pi_bin" install npm:pi-web-access --approve
 test -f "$provider_extension"
 export HERDER_PI_BIN="$pi_bin"
 export HERDER_PI_PROVIDER_EXTENSION="$provider_extension"
 ```
 
 The default provider extension is this checkout's `extensions/cliproxyapi-provider/index.ts`. Do not also install the upstream npm provider. Set `HERDER_PI_BIN` or `HERDER_PI_PROVIDER_EXTENSION` before running the setup when using a different binary or provider extension. Keep those exports in the shell used for the preflight and test. The fixture disables extension discovery and explicitly loads both the provider extension and this checkout's `extensions/herder/adapters/index.ts`, so it does not depend on a globally discovered Herder copy.
+
+Web research additionally requires a running Magpie and the user-level `magpie-web-search` MCP entry described in [Magpie setup](README.md#magpie-web-search). This code-only live fixture and its CI workflow do not provision Magpie or establish live search compatibility. Searcher calls without that setup return an explicit failure, not a fallback to `pi-web-access`.
+
+The deterministic worker-engine tests exercise native MCP discovery and tool calls against a temporary local fixture, without contacting Magpie or a search provider. Check that only Searcher connects, both allowed tools appear before its first model request, unrelated/project servers stay untouched, credentials are not included in diagnostics, and missing/disabled/broken servers cannot produce a successful research session. Keep the local find/grep boundary and session cancellation/cleanup coverage.
 
 ### Provider variables and secret-safe preflight
 

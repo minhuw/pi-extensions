@@ -9,6 +9,7 @@ import {
 import { readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { assertNativeCatalog } from "./models-config.ts";
+import { MAGPIE_SEARCH_SERVER, magpieSearchConfig, type MagpieSearchConnection } from "./mcp.ts";
 
 export const DISCOVERY_TIMEOUT_MS = 3000;
 type MagpieApi = "openai-completions" | "openai-responses" | "anthropic-messages";
@@ -110,7 +111,10 @@ export async function discoverModels(config: Config, signal?: AbortSignal, allow
 	return parseModels(body, config.origin);
 }
 
-export function createMagpieProvider(env: NodeJS.ProcessEnv = process.env): Provider<MagpieApi> {
+export function createMagpieProvider(
+	env: NodeJS.ProcessEnv = process.env,
+	publishConnection?: (connection: MagpieSearchConnection | undefined) => void,
+): Provider<MagpieApi> {
 	// Keep raw ambient values separate from saved credentials and loopback defaults.
 	const ambient = { MAGPIE_BASE_URL: env.MAGPIE_BASE_URL, MAGPIE_API_KEY: env.MAGPIE_API_KEY };
 	const connection = (credential?: ApiKeyCredential) => readConfig({
@@ -168,14 +172,25 @@ export function createMagpieProvider(env: NodeJS.ProcessEnv = process.env): Prov
 			if (!context.allowNetwork) {
 				const credential = context.credential?.type === "api_key" ? context.credential : undefined;
 				const identity = credential ? JSON.stringify([credential.key, credential.env?.MAGPIE_BASE_URL]) : undefined;
-				// An absent raw credential is not the composed models.json fallback key.
+				// Native Models runs this raw-credential phase before resolved network auth.
+				// Only this phase can establish/remove stored provenance: ambient auth must
+				// never enable MCP, and must not clear a retained effective-key catalog.
 				if (identity !== storedIdentity) {
-					await context.publish({ update: () => { storedIdentity = identity; current = config; models = []; } });
+					await context.publish({ update: () => {
+						storedIdentity = identity;
+						current = config;
+						models = [];
+						publishConnection?.(credential && config.apiKey ? { origin: config.origin, apiKey: config.apiKey } : undefined);
+					} });
 				}
 				return;
 			}
 			if (config.origin !== current.origin || config.apiKey !== current.apiKey) {
-				const accepted = await context.publish({ update: () => { current = config; models = []; } });
+				const accepted = await context.publish({ update: () => {
+					current = config;
+					models = [];
+					if (storedIdentity !== undefined) publishConnection?.(config.apiKey ? { origin: config.origin, apiKey: config.apiKey } : undefined);
+				} });
 				if (!accepted) return;
 			}
 			if (!config.apiKey) return;
@@ -190,7 +205,10 @@ export function createMagpieProvider(env: NodeJS.ProcessEnv = process.env): Prov
 
 export default async function magpie(pi: ExtensionAPI): Promise<void> {
 	assertNativeCatalog();
-	const provider = createMagpieProvider();
+	const provider = createMagpieProvider(process.env, connection => {
+		if (connection) pi.registerMcpServer(MAGPIE_SEARCH_SERVER, magpieSearchConfig(connection));
+		else pi.unregisterMcpServer(MAGPIE_SEARCH_SERVER);
+	});
 	const credential = readStoredCredential("magpie");
 	// Validate saved configuration outside the best-effort network refresh.
 	if (credential?.type === "api_key") readConfig({ ...process.env, ...credential.env, MAGPIE_API_KEY: credential.key ?? process.env.MAGPIE_API_KEY });

@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent, type SessionStats } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent, type SessionStats, type McpServerConfig } from "@earendil-works/pi-coding-agent";
 import { getCurrentTools } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ManagerAction } from "../../../src/shared/protocol.ts";
 import { HerderCleanupError, HerderNestedAgentScope, type NestedSessionCreator, type NestedWorkerSession } from "../../../adapters/nested-agent-executor.ts";
+import { createMagpieSearchExtension, MAGPIE_SEARCH_SERVER, MAGPIE_SEARCH_TOOLS, SEARCHER_TOOLS } from "../../../adapters/magpie-search.ts";
+import { magpieServer } from "./helpers/magpie-server.ts";
 import { Deferred } from "./helpers/harness.ts";
 import {
 	applyNestedAbortSignal,
@@ -18,7 +22,6 @@ import {
 	DefaultPiWorkerSessionFactory,
 	finalAssistantResult,
 	PiWorkerEngine,
-	trustedNestedExtensionPath,
 	type PiWorkerRequest,
 	type PiWorkerSessionFactory,
 	type PiWorkerTerminal,
@@ -205,16 +208,22 @@ test("searcher policy confines built-in local searches to the assigned worktree"
 		await mkdir(sibling);
 		await symlink(sibling, path.join(worktree, "escape"), "dir");
 		await symlink(sibling, path.join(worktree, "escape "), "dir");
-		const search: { queries: string[]; workflow?: string } = { queries: ["current docs"] };
-		assert.equal(applySearcherToolPolicy("fetch_content", search, worktree), undefined);
-		assert.equal(search.workflow, "none");
-		const remote: { url: string; workflow?: string } = { url: "https://example.com" };
-		assert.equal(applySearcherToolPolicy("web_search", remote, worktree), undefined);
-		assert.equal(remote.workflow, "none");
-		assert.deepEqual(applySearcherToolPolicy("web_search", { url: "file:///tmp/secret" }, worktree), {
-			block: true,
-			reason: "Herder searcher may fetch only remote URLs.",
-		});
+		const search = Object.freeze({ query: "current docs" });
+		assert.equal(applySearcherToolPolicy(MAGPIE_SEARCH_TOOLS[0], search, worktree), undefined);
+		assert.deepEqual(search, { query: "current docs" });
+		for (const url of ["https://example.com", "http://example.com/path"]) {
+			const remote = Object.freeze({ url, max_chars: 100, offset: 10 });
+			assert.equal(applySearcherToolPolicy(MAGPIE_SEARCH_TOOLS[1], remote, worktree), undefined);
+		}
+		for (const url of ["file:///tmp/secret", "/tmp/secret", "../secret", "data:text/plain,secret", "ftp://example.com", "https://user:secret@example.com", "https://secret@example.com", "https://@example.com", "http:example.com", "not a url", "", undefined, 42]) {
+			assert.deepEqual(applySearcherToolPolicy(MAGPIE_SEARCH_TOOLS[1], { url }, worktree), {
+				block: true,
+				reason: "Herder searcher may fetch only HTTP(S) URLs without embedded credentials.",
+			});
+		}
+		for (const name of ["web_search", "fetch_content", "source_check", "get_search_content"]) {
+			assert.equal(applySearcherToolPolicy(name, {}, worktree)?.block, true);
+		}
 		for (const tool of ["find", "grep"]) {
 			const local = { path: "src", workflow: "unchanged" };
 			assert.equal(applySearcherToolPolicy(tool, local, worktree), undefined);
@@ -235,32 +244,65 @@ test("searcher policy confines built-in local searches to the assigned worktree"
 	}
 });
 
-test("npm extensions resolve only from their exact trusted user package paths", async () => {
-	const root = await mkdtemp(path.join(os.tmpdir(), "herder-npm-extension-"));
+test("Magpie config selects only trusted user HTTP config and reports credential-safe errors", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-magpie-config-"));
+	const file = path.join(root, "mcp.json");
+	const secret = "CONFIG_SECRET_DO_NOT_PRINT";
+	const loader = () => new DefaultResourceLoader({
+		cwd: root, agentDir: root, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		extensionFactories: [createMagpieSearchExtension(root)],
+	});
 	try {
-		const agentDir = path.join(root, "agent");
-		const web = path.join(agentDir, "npm/node_modules/pi-web-access");
-		await mkdir(web, { recursive: true });
-		assert.equal(trustedNestedExtensionPath(agentDir, web, "npm:pi-web-access"), await realpath(web));
-		assert.throws(
-			() => trustedNestedExtensionPath(agentDir, web, "npm:untrusted-extension"),
-			/Herder npm extension npm:untrusted-extension is not allowed/,
-		);
-
-		const sibling = path.join(agentDir, "npm/node_modules/shadow");
-		await mkdir(sibling);
-		assert.throws(
-			() => trustedNestedExtensionPath(agentDir, sibling, "npm:pi-web-access"),
-			/does not resolve to its exact trusted package path/,
-		);
-		const outsidePackage = path.join(root, "outside/pi-web-access");
-		await mkdir(outsidePackage, { recursive: true });
-		const shadow = path.join(agentDir, "npm/node_modules/outside-shadow");
-		await symlink(outsidePackage, shadow, "dir");
-		assert.throws(
-			() => trustedNestedExtensionPath(agentDir, shadow, "npm:pi-web-access"),
-			/resolves outside the trusted user package store/,
-		);
+		const cases: [unknown, RegExp][] = [
+			[undefined, /missing or invalid selected server entry/],
+			[`{"mcpServers": "${secret}`, /cannot read valid user MCP JSON/],
+			[{}, /missing or invalid selected server entry/],
+			[{ mcpServers: [] }, /missing or invalid selected server entry/],
+			...[null, [], secret].map((selected): [unknown, RegExp] => [{ mcpServers: { [MAGPIE_SEARCH_SERVER]: selected } }, /missing or invalid selected server entry/]),
+			...[
+				[{ url: "https://example.com", enabled: false }, /disabled/],
+				[{ command: secret }, /HTTP, not stdio/],
+				[{ url: "https://example.com", command: secret }, /HTTP, not stdio/],
+				[{ url: "https://example.com", type: "stdio" }, /HTTP, not stdio/],
+				[{ url: "https://example.com", type: "sse" }, /HTTP, not stdio/],
+				[{ url: `https://user:${secret}@example.com` }, /without embedded credentials/],
+				[{ url: `file:///${secret}` }, /without embedded credentials/],
+				[{ url: secret }, /without embedded credentials/],
+				[{ url: "https://example.com", enabled: secret }, /Pi MCP validation/],
+				[{ url: "https://example.com", headers: { Authorization: { secret } } }, /Pi MCP validation/],
+				[{ url: "https://example.com", timeout: secret }, /Pi MCP validation/],
+				[{ url: "https://example.com", oauth: { clientId: { secret } } }, /Pi MCP validation/],
+			].map(([selected, expected]): [unknown, RegExp] => [{ mcpServers: { [MAGPIE_SEARCH_SERVER]: selected } }, expected as RegExp]),
+		];
+		for (const [raw, expected] of cases) {
+			await rm(file, { force: true });
+			if (raw !== undefined) await writeFile(file, typeof raw === "string" ? raw : JSON.stringify(raw));
+			const resources = loader();
+			await resources.reload();
+			const { errors, runtime } = resources.getExtensions();
+			assert.equal(errors.length, 1);
+			assert.match(errors[0]!.error, expected);
+			assert.match(errors[0]!.error, /magpie-web-search.*mcp\.json/);
+			assert.ok(!JSON.stringify(errors).includes(secret), "diagnostics must not contain credential contents");
+			assert.equal(runtime.mcpServers.list().length, 0);
+		}
+		const selected = { type: "streamable-http", url: "https://example.com/mcp", headers: { Authorization: "Bearer ${EXPLICIT_TOKEN}" }, exposure: "direct", toolExposure: { "*": "direct" } };
+		await writeFile(file, JSON.stringify({ mcpServers: { [MAGPIE_SEARCH_SERVER]: selected, ignored: { command: secret }, invalid: null } }));
+		const resources = loader();
+		await resources.reload();
+		const { errors, runtime } = resources.getExtensions();
+		assert.deepEqual(errors, []);
+		assert.deepEqual(runtime.mcpServers.list().map(({ name, config }) => ({ name, config })), [{
+			name: MAGPIE_SEARCH_SERVER,
+			config: { ...selected, exposure: "hidden", toolExposure: { web_search: "direct", web_fetch: "direct" } },
+		}]);
+		process.argv.push("--no-mcp");
+		try {
+			const disabled = loader();
+			await disabled.reload();
+			assert.match(disabled.getExtensions().errors[0]!.error, /remove --no-mcp/);
+			assert.equal(disabled.getExtensions().runtime.mcpServers.list().length, 0);
+		} finally { process.argv.pop(); }
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
@@ -268,10 +310,13 @@ test("npm extensions resolve only from their exact trusted user package paths", 
 
 async function assertProductionExtensions(ponytailInstalled: boolean): Promise<void> {
 	const root = await mkdtemp(path.join(os.tmpdir(), "herder-role-extension-runtime-"));
+	const magpie = await magpieServer();
+	const previousAuth = process.env.HERDER_MAGPIE_TEST_AUTH;
+	process.env.HERDER_MAGPIE_TEST_AUTH = "fixture-secret";
 	try {
 		const agentDir = path.join(root, "agent");
 		const ponytail = path.join(agentDir, "git/github.com/DietrichGebert/ponytail/pi-extension/index.js");
-		const web = path.join(agentDir, "npm/node_modules/pi-web-access");
+		await mkdir(agentDir, { recursive: true });
 		const events = path.join(root, "events.log");
 		if (ponytailInstalled) {
 			await mkdir(path.dirname(ponytail), { recursive: true });
@@ -290,31 +335,27 @@ export default function (pi) {
 		} else {
 			await assert.rejects(() => readFile(ponytail), { code: "ENOENT" });
 		}
-		await mkdir(web, { recursive: true });
-		await writeFile(path.join(web, "package.json"), JSON.stringify({
-			name: "pi-web-access",
-			type: "module",
-			pi: { extensions: ["./index.js"] },
-		}));
-		await writeFile(path.join(web, "index.js"), `import { appendFileSync } from "node:fs";
-const parameters = { type: "object", properties: {} };
-export default function (pi) {
-	for (const name of ["web_search", "source_check", "fetch_content", "get_search_content", "unexpected_web_tool"]) pi.registerTool({
-		name,
-		label: name,
-		description: name,
-		parameters,
-		async execute() { return { content: [{ type: "text", text: "fixture" }] }; },
-	});
-	pi.on("session_start", () => appendFileSync(${JSON.stringify(events)}, "web-start\\n"));
-	pi.on("session_shutdown", () => appendFileSync(${JSON.stringify(events)}, "web-shutdown\\n"));
-}
-`);
+		const mcpConfig = path.join(agentDir, "mcp.json");
+		const commandMarker = path.join(root, "unselected-command-ran");
+		await writeFile(mcpConfig, JSON.stringify({ mcpServers: {
+			[MAGPIE_SEARCH_SERVER]: {
+				url: magpie.url, headers: { Authorization: "Bearer ${HERDER_MAGPIE_TEST_AUTH}" },
+				exposure: "direct", toolExposure: { "*": "direct" },
+			},
+			ambient: { url: magpie.url.replace("/mcp", "/ambient"), headers: { Authorization: `!touch ${commandMarker}` } },
+			stdio: { command: "touch", args: [commandMarker] },
+			invalid: { url: 42 },
+		} }));
 		await writeFile(events, "");
 		const eventLines = async () => (await readFile(events, "utf8")).split("\n").filter(Boolean);
 		const worktree = path.join(root, "worktree");
 		const planDirectory = path.join(worktree, "herder-plans");
 		await mkdir(planDirectory, { recursive: true });
+		await mkdir(path.join(worktree, ".pi"));
+		await writeFile(path.join(worktree, ".pi/mcp.json"), JSON.stringify({ mcpServers: {
+			[MAGPIE_SEARCH_SERVER]: { url: magpie.url.replace("/mcp", "/project") },
+			project: { url: magpie.url.replace("/mcp", "/project") },
+		} }));
 		const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
 		const faux = fauxProvider({
 			api: "openai-responses",
@@ -339,6 +380,7 @@ export default function (pi) {
 
 		for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 			const beforeRole = await eventLines();
+			assert.equal(magpie.requests.length, 0);
 			const prepared = await factory.create({ action: roleAction(role), planDirectory });
 			const session = prepared.session as AgentSession;
 			assert.equal(session.messages.length, 0);
@@ -364,6 +406,7 @@ export default function (pi) {
 			session.dispose();
 			await prepared.nested.stop("test cleanup");
 			const afterRole = await eventLines();
+			assert.equal(magpie.requests.length, 0);
 			assert.deepEqual(
 				afterRole.slice(beforeRole.length).sort(),
 				[],
@@ -375,6 +418,7 @@ export default function (pi) {
 		const handle = await engine.prepare({ action: roleAction("plan-implementer"), planDirectory });
 		await engine.discard(handle);
 		const afterDiscard = await eventLines();
+		assert.equal(magpie.requests.length, 0);
 		assert.deepEqual(afterDiscard.slice(beforeDiscard.length), []);
 
 		// Exercise the production override, not just advertised tool names, at both Recon depths.
@@ -391,15 +435,31 @@ export default function (pi) {
 		const prepared = await factory.create({ action: roleAction("plan-implementer"), planDirectory });
 		const nestedCases = [
 			{ type: "recon", tools: ["read", "grep", "find", "ls"], events: [] },
-			{ type: "searcher", tools: ["web_search", "source_check", "fetch_content", "get_search_content", "find", "grep"], events: ["web-shutdown", "web-start"] },
+			{ type: "searcher", tools: SEARCHER_TOOLS, events: [] },
 			{ type: "worker", tools: ["read", "edit", "write", "bash", "grep", "find", "ls"], events: [] },
 		] as const;
 		for (const nestedCase of nestedCases) {
 			const beforeNested = await eventLines();
+			const beforeRequests: number = magpie.requests.length;
 			let providerTools: string[] = [];
 			const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
 				assert.doesNotMatch(JSON.stringify(context.messages), /PONYTAIL_TEST/);
 				providerTools = getCurrentTools(context.messages).map((tool) => tool.name).sort();
+				assert.deepEqual(providerTools, [...nestedCase.tools].sort(), "exact tools at the first provider request, including late MCP registrations");
+				if (nestedCase.type === "searcher") {
+					const results = context.messages.filter((entry) => entry.role === "toolResult");
+					if (results.length === 0) return fauxAssistantMessage([
+						fauxToolCall(MAGPIE_SEARCH_TOOLS[0], { query: "fixture docs" }),
+						fauxToolCall(MAGPIE_SEARCH_TOOLS[1], { url: "https://example.com/docs" }),
+						fauxToolCall(MAGPIE_SEARCH_TOOLS[1], { url: "file:///tmp/secret" }),
+						fauxToolCall("mcp__magpie_web_search__unexpected_tool", {}),
+						fauxToolCall("list_mcp_resources", {}),
+					], { stopReason: "toolUse" });
+					assert.equal(results.length, 5);
+					assert.deepEqual(results.map((result) => result.isError), [false, false, true, true, true]);
+					assert.match(JSON.stringify(results[0]!.content), /fixture web_search/);
+					assert.match(JSON.stringify(results[1]!.content), /fixture web_fetch/);
+				}
 				if (nestedCase.type === "recon") {
 					const results = context.messages.filter((entry) => entry.role === "toolResult");
 					if (results.length === 0) return fauxAssistantMessage(probeCalls, { stopReason: "toolUse" });
@@ -420,11 +480,22 @@ export default function (pi) {
 				prompt: `Run the bounded ${nestedCase.type} task`,
 				description: `${nestedCase.type} child task`,
 			});
-			assert.equal(nestedResult.status, "completed");
+			assert.equal(nestedResult.status, "completed", nestedResult.error);
 			assert.equal(nestedResult.output, `Nested ${nestedCase.type} result`);
 			assert.deepEqual(providerTools, [...nestedCase.tools].sort());
 			const afterNested = await eventLines();
 			assert.deepEqual(afterNested.slice(beforeNested.length).sort(), [...nestedCase.events].sort());
+			if (nestedCase.type !== "searcher") assert.equal(magpie.requests.length, beforeRequests, "non-web children never connect MCP");
+			else {
+				assert.deepEqual(magpie.requests.filter((request) => request.rpc === "tools/call").map((request) => ({ name: request.params?.name, arguments: request.params?.arguments })), [
+					{ name: "web_search", arguments: { query: "fixture docs" } },
+					{ name: "web_fetch", arguments: { url: "https://example.com/docs" } },
+				]);
+				assert.ok(magpie.requests.some((request) => request.method === "DELETE"), "session_shutdown closes native MCP session");
+				assert.ok(magpie.requests.every((request) => request.path === "/mcp"), "no project or ambient requests");
+				assert.ok(magpie.requests.every((request) => request.headers.authorization === "Bearer fixture-secret"), "configured auth forwarded");
+				await assert.rejects(() => readFile(commandMarker), { code: "ENOENT" });
+			}
 		}
 		const parent = prepared.session as AgentSession;
 		await parent.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -432,6 +503,7 @@ export default function (pi) {
 		await prepared.nested.stop("test cleanup");
 
 		const beforeReview = await eventLines();
+		const beforeReviewRequests = magpie.requests.length;
 		const review = await factory.create({ action: { ...roleAction("plan-reviewer"), serviceTier: "fast" }, planDirectory });
 		try {
 			const observedModels: string[] = [];
@@ -511,19 +583,23 @@ export default function (pi) {
 			reviewSession.dispose();
 		}
 		assert.deepEqual((await eventLines()).slice(beforeReview.length), []);
+		assert.equal(magpie.requests.length, beforeReviewRequests, "review and deeper Recon never connect MCP");
 
-		await rm(web, { recursive: true, force: true });
+		await rm(mcpConfig);
 		const missingWebParent = await factory.create({ action: roleAction("plan-reviewer"), planDirectory });
 		try {
+			let providerCalls = 0;
+			faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("should not run"); }]);
 			const missingWeb = await missingWebParent.nested.run({
 				type: "searcher",
 				prompt: "Find external documentation",
 				description: "find external documentation",
 			});
 			assert.equal(missingWeb.status, "error");
+			assert.equal(providerCalls, 0);
 			assert.match(
 				missingWeb.error ?? "",
-				/Herder nested extension npm:pi-web-access is not installed.*pi install npm:pi-web-access/,
+				/missing or invalid selected server entry.*magpie-web-search.*mcp\.json/,
 			);
 		} finally {
 			const missingWebSession = missingWebParent.session as AgentSession;
@@ -551,15 +627,315 @@ export default function (pi) {
 		}
 		assert.deepEqual((await eventLines()).slice(beforeExtensionless.length), []);
 	} finally {
+		await magpie.close();
+		if (previousAuth === undefined) delete process.env.HERDER_MAGPIE_TEST_AUTH;
+		else process.env.HERDER_MAGPIE_TEST_AUTH = previousAuth;
 		await rm(root, { recursive: true, force: true });
 	}
 }
 
 for (const ponytailInstalled of [false, true]) {
-	test(`production factory loads only web access with Ponytail ${ponytailInstalled ? "installed" : "absent"}`, async () => {
+	test(`production factory isolates native Magpie MCP with Ponytail ${ponytailInstalled ? "installed" : "absent"}`, async () => {
 		await assertProductionExtensions(ponytailInstalled);
 	});
 }
+
+async function withMagpieRuntime(run: (fixture: {
+	agentDir: string;
+	magpie: Awaited<ReturnType<typeof magpieServer>>;
+	faux: ReturnType<typeof fauxProvider>;
+	nested: HerderNestedAgentScope;
+	setRegisteredConfig: (config: McpServerConfig | undefined) => void;
+}) => Promise<void>, useHostRegistration = false): Promise<void> {
+	const root = await mkdtemp(path.join(os.tmpdir(), "herder-magpie-lifecycle-"));
+	const magpie = await magpieServer();
+	let prepared: Awaited<ReturnType<DefaultPiWorkerSessionFactory["create"]>> | undefined;
+	try {
+		const agentDir = path.join(root, "agent");
+		const worktree = path.join(root, "worktree");
+		await mkdir(agentDir);
+		await mkdir(worktree);
+		let registeredConfig: McpServerConfig | undefined = { url: magpie.url, headers: { Authorization: "Bearer lifecycle-fixture" }, timeout: 2 };
+		if (!useHostRegistration) await writeFile(path.join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: {
+			[MAGPIE_SEARCH_SERVER]: registeredConfig,
+		} }));
+		const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
+		const faux = fauxProvider({ api: "openai-responses", provider: "test", models: [{ id: "test-model", reasoning: true }] });
+		runtime.registerNativeProvider(faux.provider);
+		const factory = new DefaultPiWorkerSessionFactory(agentRoot, agentDir, useHostRegistration ? () => registeredConfig : undefined);
+		factory.bindModelRegistry(new ModelRegistry(runtime));
+		prepared = await factory.create({
+			action: { ...action(), worktree, model: "test/test-model", searcherBinding: { model: "test/test-model", effort: "high" } },
+			planDirectory: path.join(worktree, "plans"),
+		});
+		assert.equal(magpie.requests.length, 0, "root never starts native MCP");
+		await run({ agentDir, magpie, faux, nested: prepared.nested, setRegisteredConfig: (config) => { registeredConfig = config; } });
+	} finally {
+		if (prepared) {
+			await prepared.nested.stop("test cleanup");
+			await prepared.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
+			prepared.session.dispose();
+		}
+		await magpie.close();
+		await rm(root, { recursive: true, force: true });
+	}
+}
+
+test("Searcher uses current host Magpie registration without writing config and observes logout", async () => {
+	await withMagpieRuntime(async ({ agentDir, magpie, faux, nested, setRegisteredConfig }) => {
+		let providerCalls = 0;
+		const respond: Parameters<typeof faux.setResponses>[0][number] = (context) => {
+			providerCalls++;
+			assert.deepEqual(getCurrentTools(context.messages).map((tool) => tool.name).sort(), [...SEARCHER_TOOLS].sort());
+			return fauxAssistantMessage("ready");
+		};
+		faux.setResponses([respond, respond]);
+		const first = await nested.run({ type: "searcher", prompt: "Search", description: "use provider registration" });
+		assert.equal(first.status, "completed", first.error);
+		assert.ok(magpie.requests.length > 0);
+		assert.ok(magpie.requests.every((request) => request.headers.authorization === "Bearer lifecycle-fixture"));
+		const beforeRotation = magpie.requests.length;
+		setRegisteredConfig({ url: magpie.url, headers: { Authorization: "Bearer rotated-fixture" } });
+		const rotated = await nested.run({ type: "searcher", prompt: "Search", description: "use rotated registration" });
+		assert.equal(rotated.status, "completed", rotated.error);
+		assert.ok(magpie.requests.slice(beforeRotation).every((request) => request.headers.authorization === "Bearer rotated-fixture"));
+		setRegisteredConfig(undefined);
+		const beforeLogout = magpie.requests.length;
+		const loggedOut = await nested.run({ type: "searcher", prompt: "Search", description: "reject after logout" });
+		assert.equal(loggedOut.status, "error");
+		assert.match(loggedOut.error ?? "", /Use \/login magpie/);
+		assert.equal(providerCalls, 2);
+		assert.equal(magpie.requests.length, beforeLogout);
+		await assert.rejects(() => readFile(path.join(agentDir, "mcp.json")), { code: "ENOENT" });
+	}, true);
+});
+
+test("custom Magpie agent directories reject ambient OAuth and keep native logs in the selected directory", { timeout: 15_000 }, async (t) => {
+	const ambientDir = await mkdtemp(path.join(os.tmpdir(), "herder-magpie-default-agent-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = ambientDir;
+	try {
+		await withMagpieRuntime(async ({ agentDir, magpie, faux, nested }) => {
+			const ambientAuth = path.join(ambientDir, "mcp-auth.json");
+			const privateToken = "AMBIENT_OAUTH_PRIVATE_TOKEN";
+			const credentials = JSON.stringify({ [`mcp__magpie_web_search|${magpie.url}`]: {
+				tokens: { access_token: privateToken, token_type: "Bearer" },
+			} });
+			await writeFile(ambientAuth, credentials);
+			const originalRead = fs.readFileSync;
+			let ambientReads = 0;
+			const readSpy = t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+				if (String(args[0]) === ambientAuth) ambientReads++;
+				return Reflect.apply(originalRead, fs, args);
+			});
+			syncBuiltinESMExports();
+			try {
+				const configure = (auth: object) => writeFile(path.join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: {
+					[MAGPIE_SEARCH_SERVER]: { url: magpie.url, ...auth },
+				} }));
+				let providerCalls = 0;
+				const respond = () => { providerCalls++; return fauxAssistantMessage("ready"); };
+				faux.setResponses([respond, respond]);
+				await configure({});
+				const denied = await nested.run({ type: "searcher", prompt: "Search", description: "reject ambient OAuth" });
+				assert.equal(denied.status, "error");
+				assert.match(denied.error ?? "", /custom agent directory requires explicit Authorization header or auth.provider/);
+				assert.ok(!JSON.stringify(denied).includes(privateToken), "configuration diagnostics must not reveal ambient credentials");
+				assert.equal(providerCalls, 0);
+				assert.equal(magpie.requests.length, 0, "OAuth directory mismatch must fail before any request");
+				assert.equal(ambientReads, 0, "ambient OAuth credentials must not be read");
+				await assert.rejects(() => readFile(path.join(ambientDir, "mcp.log")), { code: "ENOENT" });
+				await assert.rejects(() => readFile(path.join(agentDir, "mcp.log")), { code: "ENOENT" });
+
+				magpie.setLogMessage("selected-directory-log-marker");
+				// Native OAuth exclusion uses case-insensitive key presence, even for an empty value.
+				for (const authorization of ["", "Bearer selected-fixture"]) {
+					await configure({ headers: { aUtHoRiZaTiOn: authorization } });
+					const firstRequest = magpie.requests.length;
+					const allowed = await nested.run({ type: "searcher", prompt: "Search", description: "explicit isolated auth" });
+					assert.equal(allowed.status, "completed", allowed.error);
+					assert.ok(magpie.requests.slice(firstRequest).every((request) => request.headers.authorization === authorization), "only explicitly configured auth is forwarded");
+				}
+				assert.equal(providerCalls, 2);
+				assert.equal(ambientReads, 0);
+				assert.ok(!JSON.stringify(magpie.requests).includes(privateToken), "ambient token must never reach the server");
+				assert.equal(await readFile(ambientAuth, "utf8"), credentials);
+				assert.match(await readFile(path.join(agentDir, "mcp.log"), "utf8"), /selected-directory-log-marker/);
+				await assert.rejects(() => readFile(path.join(ambientDir, "mcp.log")), { code: "ENOENT" });
+
+				// Public configuration loading permits explicit provider auth without resolving a token,
+				// and keeps ordinary process-directory OAuth supported without connecting in this test.
+				for (const [directory, auth] of [[agentDir, { auth: { provider: "test" } }], [ambientDir, {}]] as const) {
+					await writeFile(path.join(directory, "mcp.json"), JSON.stringify({ mcpServers: {
+						[MAGPIE_SEARCH_SERVER]: { url: magpie.url, ...auth },
+					} }));
+					const resources = new DefaultResourceLoader({
+						cwd: agentDir, agentDir: directory, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+						extensionFactories: [createMagpieSearchExtension(directory)],
+					});
+					await resources.reload();
+					assert.deepEqual(resources.getExtensions().errors, []);
+				}
+				assert.equal(ambientReads, 0);
+			} finally {
+				readSpy.mock.restore();
+				syncBuiltinESMExports();
+			}
+		});
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		await rm(ambientDir, { recursive: true, force: true });
+	}
+});
+
+test("Searcher rejects native partial discovery after both allowed tools register", { timeout: 15_000 }, async () => {
+	await withMagpieRuntime(async ({ magpie, faux, nested }) => {
+		// Pi registers these in order: both allowed tools survive before this extra description fails.
+		const privateToolName = "PRIVATE_EXTRA_TOOL_DATA";
+		magpie.setTools(["web_search", "web_fetch", privateToolName]);
+		magpie.setToolDescription(privateToolName, 42);
+		let providerCalls = 0;
+		faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("must not run"); }]);
+		const result = await nested.run({ type: "searcher", prompt: "Search", description: "reject broken discovery" });
+		assert.equal(result.status, "error");
+		assert.equal(providerCalls, 0, "active tool names alone must not admit a broken connection");
+		assert.match(result.error ?? "", /required Searcher tools are unavailable.*magpie-web-search server connection/);
+		for (const privateValue of [privateToolName, "lifecycle-fixture"]) {
+			assert.ok(!JSON.stringify(result).includes(privateValue), "raw MCP diagnostics must not escape the admission guard");
+		}
+		assert.ok(magpie.requests.some((request) => request.rpc === "tools/list"));
+		assert.ok(magpie.requests.some((request) => request.method === "DELETE"), "failed discovery still closes the native session");
+	});
+});
+
+test("Searcher rejects partial tools when retry initialization outlasts the native startup wait", { timeout: 20_000 }, async (t) => {
+	await withMagpieRuntime(async ({ agentDir, magpie, faux, nested }) => {
+		// The SDK registers the allowed tools, fails on the extra metadata, then retries this
+		// TypeError. Keep that retry pending past the real 10s startup wait, not a request timeout.
+		await writeFile(path.join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: {
+			[MAGPIE_SEARCH_SERVER]: { url: magpie.url, headers: { Authorization: "Bearer lifecycle-fixture" }, timeout: 30 },
+		} }));
+		magpie.setTools(["web_search", "web_fetch", "unexpected_tool"]);
+		magpie.setToolDescription("unexpected_tool", 42);
+		const retry = magpie.holdRetryInitialization();
+		const controller = new AbortController();
+		let providerCalls = 0;
+		faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("must not run"); }]);
+		const startedAt = performance.now();
+		const running = nested.run({ type: "searcher", prompt: "Search", description: "reject stalled discovery retry" }, AbortSignal.any([controller.signal, t.signal]));
+		try {
+			await Promise.race([
+				retry.started,
+				running.then(() => { throw new Error("Searcher settled before retry initialization started"); }),
+			]);
+			assert.equal(providerCalls, 0);
+			const result = await running;
+			assert.ok(performance.now() - startedAt >= 9_900, "the actual native startup wait must expire before admission fails");
+			assert.equal(result.status, "error");
+			assert.equal(providerCalls, 0, "native startup INFO must reject the stale, partially registered tool envelope");
+			assert.match(result.error ?? "", /required Searcher tools are unavailable.*magpie-web-search server connection/);
+			assert.ok(!JSON.stringify(result).includes("lifecycle-fixture"), "admission diagnostics must not expose configured auth");
+			assert.equal(magpie.requests.filter((request) => request.rpc === "initialize").length, 2);
+			assert.equal(magpie.requests.filter((request) => request.rpc === "tools/list").length, 1);
+			assert.ok(magpie.requests.some((request) => request.method === "DELETE"), "the initial connection is closed before retry");
+			let closeTimer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					retry.closed,
+					new Promise<never>((_resolve, reject) => {
+						closeTimer = setTimeout(() => reject(new Error("Shutdown did not close the stalled retry request")), 2_000);
+					}),
+				]);
+			} finally {
+				clearTimeout(closeTimer);
+			}
+		} finally {
+			controller.abort();
+			retry.cancel();
+			await running;
+		}
+	});
+});
+
+for (const failure of ["initialize", "tools/list", "missing search", "missing fetch", "sanitized name collision"] as const) {
+	test(`Searcher rejects native MCP ${failure} before the first provider request`, { timeout: 15_000 }, async () => {
+		await withMagpieRuntime(async ({ magpie, faux, nested }) => {
+			if (failure === "initialize" || failure === "tools/list") magpie.setFailure(failure);
+			else magpie.setTools(failure === "missing search" ? ["web_fetch"] : failure === "missing fetch" ? ["web_search"] : ["web_search", "web_fetch", "web-search"]);
+			let providerCalls = 0;
+			faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("must not run"); }]);
+			const result = await nested.run({ type: "searcher", prompt: "Search", description: "search readiness" });
+			assert.equal(result.status, "error");
+			assert.match(result.error ?? "", /required Searcher tools are unavailable.*server connection.*web_search\/web_fetch/);
+			assert.equal(providerCalls, 0);
+			assert.ok(!JSON.stringify(result).includes("lifecycle-fixture"), "connection diagnostics must not expose auth");
+			assert.ok(magpie.requests.some((request) => request.rpc === "initialize"));
+			if (failure !== "initialize") assert.ok(magpie.requests.some((request) => request.method === "DELETE"));
+		});
+	});
+}
+
+test("Searcher admits both late-registered native tools together at the first provider request", { timeout: 15_000 }, async () => {
+	await withMagpieRuntime(async ({ magpie, faux, nested }) => {
+		const discovery = magpie.holdDiscovery();
+		let providerCalls = 0;
+		faux.setResponses([(context) => {
+			providerCalls++;
+			assert.deepEqual(getCurrentTools(context.messages).map((tool) => tool.name).sort(), [...SEARCHER_TOOLS].sort());
+			return fauxAssistantMessage("ready");
+		}]);
+		const running = nested.run({ type: "searcher", prompt: "Search", description: "late discovery" });
+		await discovery.started;
+		assert.equal(providerCalls, 0);
+		discovery.release();
+		const result = await running;
+		assert.equal(result.status, "completed", result.error);
+		assert.equal(providerCalls, 1);
+		assert.ok(magpie.requests.some((request) => request.method === "DELETE"));
+	});
+});
+
+test("Searcher waits for late native discovery without a provider request and aborts safely", { timeout: 15_000 }, async () => {
+	await withMagpieRuntime(async ({ magpie, faux, nested }) => {
+		const discovery = magpie.holdDiscovery();
+		const controller = new AbortController();
+		let providerCalls = 0;
+		faux.setResponses([() => { providerCalls++; return fauxAssistantMessage("must not run"); }]);
+		const running = nested.run({ type: "searcher", prompt: "Search", description: "cancel startup" }, controller.signal);
+		await discovery.started;
+		assert.equal(providerCalls, 0, "no partial tool envelope is sent during discovery");
+		controller.abort(new Error("cancel startup"));
+		discovery.release();
+		const result = await running;
+		assert.equal(result.status, "aborted");
+		assert.equal(providerCalls, 0);
+		assert.ok(magpie.requests.some((request) => request.method === "DELETE"), "shutdown closes startup connection");
+	});
+});
+
+test("Searcher cancellation aborts an actual native MCP call and closes the session", { timeout: 15_000 }, async () => {
+	await withMagpieRuntime(async ({ magpie, faux, nested }) => {
+		const called = magpie.holdCalls();
+		const controller = new AbortController();
+		let providerCalls = 0;
+		faux.setResponses([(context) => {
+			providerCalls++;
+			assert.deepEqual(getCurrentTools(context.messages).map((tool) => tool.name).sort(), [...SEARCHER_TOOLS].sort());
+			return fauxAssistantMessage(fauxToolCall(MAGPIE_SEARCH_TOOLS[0], { query: "cancel this search" }), { stopReason: "toolUse" });
+		}]);
+		const running = nested.run({ type: "searcher", prompt: "Search", description: "cancel request" }, controller.signal);
+		await called.started;
+		controller.abort(new Error("cancel request"));
+		const result = await running;
+		assert.equal(result.status, "aborted");
+		assert.equal(providerCalls, 1, "no provider continuation after cancellation");
+		// Shutdown may close the transport before the best-effort cancellation notification arrives.
+		// The still-pending HTTP call must nevertheless be cancelled, not left waiting for its timeout.
+		await called.closed;
+		assert.ok(magpie.requests.some((request) => request.method === "DELETE"), "SDK closes the MCP session");
+	});
+});
 
 test("built-in Pi engine starts an exact clean worker and reports its terminal directly", async () => {
 	const factory = new FakeFactory();

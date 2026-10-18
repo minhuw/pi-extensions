@@ -166,7 +166,7 @@ it.each([false, true])("startup reads only the saved connection using public hel
 	writeFileSync(path, contents);
 	vi.stubEnv("PI_OFFLINE", offline ? "1" : "0");
 	const registerProvider = vi.fn();
-	await magpie({ registerProvider, on: vi.fn(), registerCommand: vi.fn() } as unknown as ExtensionAPI);
+	await magpie({ registerProvider, on: vi.fn(), registerCommand: vi.fn(), registerMcpServer: vi.fn(), unregisterMcpServer: vi.fn() } as unknown as ExtensionAPI);
 	const provider = registerProvider.mock.calls[0][0] as Provider;
 	expect(readFileSync(path, "utf8")).toBe(contents);
 	if (offline) expect(fetch).not.toHaveBeenCalled();
@@ -181,7 +181,7 @@ it.each([false, true])("startup reads only the saved connection using public hel
 });
 
 it("startup accepts absent credentials but surfaces malformed saved URLs", async () => {
-	const pi = { registerProvider: vi.fn(), on: vi.fn(), registerCommand: vi.fn() } as unknown as ExtensionAPI;
+	const pi = { registerProvider: vi.fn(), on: vi.fn(), registerCommand: vi.fn(), registerMcpServer: vi.fn(), unregisterMcpServer: vi.fn() } as unknown as ExtensionAPI;
 	await magpie(pi);
 	writeFileSync(join(directory, "auth.json"), JSON.stringify({ magpie: { ...saved, env: { MAGPIE_BASE_URL: "https://secret@host/path" } } }));
 	await expect(magpie(pi)).rejects.toThrow("MAGPIE_BASE_URL");

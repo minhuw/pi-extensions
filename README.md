@@ -25,26 +25,24 @@ Select it with `/settings` or `"theme": "material-bloom"` in `~/.pi/agent/settin
 
 ## Install
 
-Node >=22.19.0 and Pi >=1.3.0 are required. With Pi already installed, this block sets up the collection and every external extension used by Herder's isolated workers:
+Node >=22.19.0 and Pi >=1.3.0 are required. With Pi already installed, install the collection:
 
 ```bash
 pi install git:github.com/minhuw/pi-extensions
-pi install npm:pi-web-access
 ```
 
 - Pi's built-in `grep` and `find` tools provide Herder's repository search.
-- `pi-web-access` provides remote research tools to Herder's nested searcher.
+- Herder's nested Searcher uses Magpie's `web_search` and `web_fetch` through Pi's native MCP support, with no extra npm extension. Start Magpie and run `/login magpie` to register it automatically, or configure a user-level server as described in [Herder setup](extensions/herder/README.md#magpie-web-search).
 
-For a local checkout, replace only the first command:
+For a local checkout:
 
 ```bash
 pi install /absolute/path/to/pi-extensions
-pi install npm:pi-web-access
 ```
 
 Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. CLIProxyAPI Provider is also vendored from the locally installed patched 1.4.15 snapshot, including TPS — do not also load `npm:@router-for-me/pi-cliproxyapi-provider` in the same Pi profile. Existing `/login` credentials and `cliproxyapi.json` configuration remain compatible. See each extension's README for setup, activation conditions, and usage.
 
-Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key, or configure it through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
+Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
 
 ## Development
 
