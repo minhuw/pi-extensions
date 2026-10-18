@@ -154,18 +154,20 @@ export function createNestedAgentTools(scope: HerderNestedAgentScope) {
 			"Each wait is bounded to 60 seconds and never cancels the child. Retry collection if it is still running; listing alone does not collect.",
 		],
 		parameters: Type.Object({
-			agent_id: Type.Optional(Type.String({ description: "Direct child ID returned by Agent. Omit both agent_id and wait_any to list all direct children." })),
-			wait_any: Type.Optional(Type.Boolean({ description: "Collect one uncollected background direct child, whichever completes first. Mutually exclusive with agent_id. Defaults to waiting when true." })),
+			agent_id: Type.Optional(Type.String({ description: "Direct child ID returned by Agent. An empty string is ignored. Omit both selectors, or use empty agent_id and wait_any: false, to list all direct children." })),
+			wait_any: Type.Optional(Type.Boolean({ description: "Collect one uncollected background direct child, whichever completes first. True is mutually exclusive with a nonempty agent_id; false is ignored. Defaults to waiting when true." })),
 			wait: Type.Optional(Type.Boolean({ description: "Wait up to 60 seconds, without cancelling the child. Default: true with agent_id or wait_any: true." })),
 		}),
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal) {
-			if (params.agent_id !== undefined && params.wait_any !== undefined) {
+			const agentId = params.agent_id?.trim() || undefined;
+			const waitAny = params.wait_any === true;
+			if (agentId !== undefined && waitAny) {
 				throw new Error("agent_id and wait_any are mutually exclusive.");
 			}
-			const lookup = params.wait_any === true
+			const lookup = waitAny
 				? await scope.resultAny(params.wait !== false, signal)
-				: params.agent_id !== undefined ? await scope.result(params.agent_id, params.wait !== false, signal) : undefined;
+				: agentId !== undefined ? await scope.result(agentId, params.wait !== false, signal) : undefined;
 			if (!lookup) {
 				const pending = new Set(scope.uncollectedBackgroundIds());
 				const snapshots = scope.snapshots().filter((snapshot) => params.wait_any !== true || pending.has(snapshot.agentId));

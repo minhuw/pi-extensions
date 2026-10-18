@@ -228,6 +228,24 @@ test("background children return IDs and must be collected through the scoped re
 	assert.deepEqual(value.uncollectedBackgroundIds(), []);
 });
 
+for (const selection of ["specific", "any"] as const) {
+	test(`background collection accepts inactive selector fields for ${selection}`, async () => {
+		const { value } = scope();
+		const [agentTool, resultTool] = createNestedAgentTools(value);
+		try {
+			const launched = await agentTool.execute("background", params({ run_in_background: true }), undefined, undefined, undefined as never);
+			const agentId = (launched.details as { agentId: string }).agentId;
+			// Responses callers can fill every optional field with an inactive default.
+			const selectionParams = selection === "specific"
+				? { agent_id: agentId, wait_any: false, wait: true }
+				: { agent_id: "", wait_any: true, wait: true };
+			const collected = await resultTool.execute("collect", selectionParams, undefined, undefined, undefined as never);
+			assert.equal((collected.details as { agent: PiNestedAgentSnapshot }).agent.agentId, agentId);
+			assert.deepEqual(value.uncollectedBackgroundIds(), []);
+		} finally { await value.stop("test cleanup"); }
+	});
+}
+
 test("each role may run four children concurrently and rejects a fifth", async () => {
 	const sessions: BlockingNestedSession[] = [];
 	const value = new HerderNestedAgentScope({
@@ -472,12 +490,10 @@ test("wait-any collects a ready sibling, never lists-to-collect or collects a re
 		assert.match(resultText(completed), new RegExp(`Uncollected background IDs: ${blocked.id}`));
 		assert.deepEqual(value.uncollectedBackgroundIds(), [blocked.id]);
 		assert.equal(sessions[0]!.aborted, false);
-		await tool.execute("list", {}, undefined, undefined, undefined as never);
+		await tool.execute("list", { agent_id: "", wait_any: false, wait: false }, undefined, undefined, undefined as never);
 		assert.deepEqual(value.uncollectedBackgroundIds(), [blocked.id]);
 		assert.equal(await value.resultAny(false), undefined);
-		for (const wait_any of [true, false]) {
-			await assert.rejects(tool.execute("invalid", { agent_id: ready.id, wait_any }, undefined, undefined, undefined as never), /mutually exclusive/);
-		}
+		await assert.rejects(tool.execute("invalid", { agent_id: ready.id, wait_any: true }, undefined, undefined, undefined as never), /mutually exclusive/);
 		const waits = [value.resultAny(true), value.resultAny(true)];
 		sessions[0]!.completion.reject(new Error("provider failure"));
 		const results = await Promise.all(waits);
