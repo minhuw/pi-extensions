@@ -1,18 +1,16 @@
 import {
-	lazyApi,
 	type Model,
 	type ApiKeyCredential,
 	type Provider,
-	type ProviderStreams,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 import { readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { assertNativeCatalog } from "./models-config.ts";
 import { MAGPIE_SEARCH_SERVER, magpieSearchConfig, type MagpieSearchConnection } from "./mcp.ts";
+import { createMagpieStreams, type MagpieApi } from "./streams.ts";
 
 export const DISCOVERY_TIMEOUT_MS = 3000;
-type MagpieApi = "openai-completions" | "openai-responses" | "anthropic-messages";
 interface Config { origin: string; apiKey?: string }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -126,11 +124,7 @@ export function createMagpieProvider(
 	let models: Model<MagpieApi>[] = [];
 	const requestModel = (model: Model<MagpieApi>) => model.api === "anthropic-messages"
 		? { ...model, baseUrl: model.baseUrl.replace(/\/v1\/?$/, "") } : model;
-	const apis: Record<MagpieApi, ProviderStreams> = {
-		"openai-completions": lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions")),
-		"openai-responses": lazyApi(() => import("@earendil-works/pi-ai/api/openai-responses")),
-		"anthropic-messages": lazyApi(() => import("@earendil-works/pi-ai/api/anthropic-messages")),
-	};
+	const apis = createMagpieStreams();
 	return {
 		id: "magpie", name: "Magpie",
 		auth: { apiKey: {

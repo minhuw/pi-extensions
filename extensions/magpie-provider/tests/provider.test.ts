@@ -11,9 +11,13 @@ const delegates = vi.hoisted(() => ({
 	responses: { stream: vi.fn(), streamSimple: vi.fn() },
 	messages: { stream: vi.fn(), streamSimple: vi.fn() },
 }));
-vi.mock("@earendil-works/pi-ai/api/openai-completions", () => delegates.chat);
-vi.mock("@earendil-works/pi-ai/api/openai-responses", () => delegates.responses);
-vi.mock("@earendil-works/pi-ai/api/anthropic-messages", () => delegates.messages);
+vi.mock("@earendil-works/pi-ai/providers/all", () => ({
+	builtinProviders: () => [
+		{ id: "groq", ...delegates.chat },
+		{ id: "openai", ...delegates.responses },
+		{ id: "anthropic", ...delegates.messages },
+	],
+}));
 vi.mock("@earendil-works/pi-coding-agent", async importOriginal => ({ ...await importOriginal<object>(), readStoredCredential: vi.fn() }));
 const config = readConfig({});
 const catalog = (id = "group/foo") => ({ data: [{ id }] });
