@@ -1,6 +1,6 @@
 # Testing Herder
 
-Run the collection suite from the `pi-extensions` repository root:
+Run the collection suite from the `pi-extensions` repository root with Node >=22.19.0 and `ripgrep` (`rg`) installed on `PATH`:
 
 ```sh
 npm test
@@ -21,7 +21,7 @@ npm run test:herder -- extensions/herder/tests/unit/core/verification.test.ts
 npm run test:herder -- extensions/herder/tests/integration/architecture.test.ts
 ```
 
-Focused runs execute only the named test files and skip typecheck.
+Focused runs execute only the named test files and skip typecheck. Recon search tests, including worker-engine tests that launch Recon children, require `rg`; the runtime deliberately does not download it. On Ubuntu, install it with `sudo apt-get update && sudo apt-get install --yes ripgrep`, as the deterministic CI workflow does.
 
 Manager/adapter lifecycle tests reuse `tests/support/plan-v2.ts::fixturePlan` for valid plan setup, with scenario-specific facts at the call site. Parser and assignment-contract tests keep independent literal fixtures. Prefer assertions on registered tools, dispatched sessions, delivered messages, and durable outcomes over regexes matching TypeScript implementation spelling; retain explicit checks for package assets and model-facing prompt contracts.
 
