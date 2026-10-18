@@ -29,7 +29,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 		poorman: {
 			orchestrator: { model: "gpt-6-luna", effort: "max", service_tier: "fast" },
 			roles: {
-				"plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek-v4-flash", effort: "high" },
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "deepseek/deepseek-flash", effort: "high" },
 				"plan-reviewer": {
 					agent_type: "herder.plan-reviewer",
 					model: "gpt-6-luna",
@@ -74,7 +74,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 
 	const existingHashes = {
 		eclipse: "f0b97201eb7be74fb8fea936e95c516e028b22651736616bbb2b6bcfdaaeac49",
-		poorman: "816b0142bf97f50e563178de123acdc8d008b6c2bb2a5a880655fe430411c65b",
+		poorman: "97a6d2505bff72f466494a7050ebf5f3187262b2b242f536143eb5189eef2023",
 		epic: "8ba10eace351b1c7938556d18c058412453538a27cb5a7545f00dda8ac2fc8af",
 		lightspeed: "cb67146ee26d31ed0e6aba3e5982bc3fb1f20a9eee648ae4bd69d72c06465c6e",
 	};

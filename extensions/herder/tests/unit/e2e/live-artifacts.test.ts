@@ -127,6 +127,50 @@ test("live artifacts preserve diagnostics while structurally sanitizing executio
 	}
 });
 
+test("collects an initialized execution database before the service row exists", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-no-service-"));
+	try {
+		const tmpRoot = path.join(root, "tmp");
+		const workspace = path.join(tmpRoot, "herder-pi-live-no-service");
+		const planDirectory = path.join(workspace, "repository", "herder-plans");
+		const output = path.join(root, "output");
+		const providerSecret = "early-startup-provider-secret";
+		fs.mkdirSync(workspace, { recursive: true });
+		const store = new RunStore(planDirectory);
+		store.close();
+		fs.writeFileSync(path.join(workspace, "pi.log"), `startup failed with key=${providerSecret}\n`);
+		const originalDatabase = path.join(planDirectory, ".herder", "execution.sqlite3");
+		const originalBytes = fs.readFileSync(originalDatabase);
+
+		const report = await collectLiveArtifacts({
+			host: "pi",
+			output,
+			tmpRoot,
+			environment: { MAGPIE_API_KEY: providerSecret },
+		});
+		const copied = path.join(output, "fixtures", path.basename(workspace));
+		const copiedLog = fs.readFileSync(path.join(copied, "pi.log"), "utf8");
+		assert.doesNotMatch(copiedLog, new RegExp(providerSecret));
+		assert.match(copiedLog, /\[REDACTED:MAGPIE_API_KEY\]/);
+
+		const copiedDatabasePath = path.join(copied, "repository", "herder-plans", ".herder", "execution.sqlite3");
+		const copiedDatabase = new DatabaseSync(copiedDatabasePath, { readOnly: true });
+		try {
+			assert.equal((copiedDatabase.prepare("PRAGMA quick_check").get() as Record<string, unknown>).quick_check, "ok");
+			assert.equal(copiedDatabase.prepare("SELECT COUNT(*) AS count FROM manager_service").get()?.count, 0);
+		} finally {
+			copiedDatabase.close();
+		}
+		assert.equal(fs.readFileSync(originalDatabase).equals(originalBytes), true);
+		assert.equal(fs.readFileSync(path.join(workspace, "pi.log"), "utf8"), `startup failed with key=${providerSecret}\n`);
+		assert.equal(readFiles(output).some((bytes) => bytes.includes(Buffer.from(providerSecret))), false);
+		assert.equal(report.redactedOccurrences.MAGPIE_API_KEY, 1);
+		assert.equal(report.omittedSensitiveFiles.includes(path.join(workspace, "pi.log")), false);
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("redacts Magpie origin and v1 variants for every accepted trailing slash form", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-artifact-magpie-url-"));
 	try {

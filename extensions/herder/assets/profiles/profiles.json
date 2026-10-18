@@ -17,7 +17,7 @@
       "description": "Luna orchestrates, reviews, and judges while DeepSeek implements.",
       "orchestrator": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
       "roles": {
-        "plan-implementer": { "model": "deepseek-v4-flash", "effort": "high" },
+        "plan-implementer": { "model": "deepseek/deepseek-flash", "effort": "high" },
         "plan-reviewer": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" },
         "plan-judge": { "model": "gpt-6-luna", "effort": "max", "service_tier": "fast" }
       }

@@ -280,7 +280,7 @@ function assertSameRowCounts(before: Map<string, number>, after: Map<string, num
 	}
 }
 
-function serviceAuthToken(database: DatabaseSync): string {
+function serviceAuthToken(database: DatabaseSync): string | undefined {
 	const table = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'manager_service'").get() as { name?: unknown } | undefined;
 	if (!table) throw new Error("Execution database service schema is missing manager_service");
 	const columns = database.prepare("PRAGMA table_info(manager_service)").all() as Array<{ name?: unknown }>;
@@ -288,7 +288,8 @@ function serviceAuthToken(database: DatabaseSync): string {
 		throw new Error("Execution database service schema is missing auth_token");
 	}
 	const row = database.prepare("SELECT auth_token FROM manager_service WHERE singleton = 1").get() as { auth_token?: unknown } | undefined;
-	if (typeof row?.auth_token !== "string" || row.auth_token.length === 0) {
+	if (!row) return undefined;
+	if (typeof row.auth_token !== "string" || row.auth_token.length === 0) {
 		throw new Error("Execution database does not contain a service credential");
 	}
 	if (SERVICE_TOKEN_MARKER.includes(row.auth_token)) {
@@ -328,12 +329,14 @@ async function sanitizeDatabase(source: string, destination: string, privateDire
 		assertQuickCheck(workingDatabase, "before sanitization");
 		const retainedRows = tableRowCounts(workingDatabase);
 		const authToken = serviceAuthToken(workingDatabase);
-		const databaseSecrets = mergePatterns(providerSecrets, [{ label: SERVICE_TOKEN_LABEL, value: authToken }]);
+		const databaseSecrets = mergePatterns(providerSecrets, authToken === undefined ? [] : [{ label: SERVICE_TOKEN_LABEL, value: authToken }]);
 
 		workingDatabase.exec("BEGIN IMMEDIATE");
 		try {
-			const replacement = workingDatabase.prepare("UPDATE manager_service SET auth_token = ? WHERE singleton = 1").run(SERVICE_TOKEN_MARKER);
-			if (Number(replacement.changes) !== 1) throw new Error("Execution database service credential replacement failed");
+			if (authToken !== undefined) {
+				const replacement = workingDatabase.prepare("UPDATE manager_service SET auth_token = ? WHERE singleton = 1").run(SERVICE_TOKEN_MARKER);
+				if (Number(replacement.changes) !== 1) throw new Error("Execution database service credential replacement failed");
+			}
 			redactDatabaseText(workingDatabase, providerSecrets);
 			workingDatabase.exec("COMMIT");
 		} catch (error) {
@@ -347,7 +350,7 @@ async function sanitizeDatabase(source: string, destination: string, privateDire
 		assertQuickCheck(workingDatabase, "after sanitization");
 		assertSameRowCounts(retainedRows, tableRowCounts(workingDatabase));
 		const replaced = workingDatabase.prepare("SELECT auth_token FROM manager_service WHERE singleton = 1").get() as { auth_token?: unknown } | undefined;
-		if (replaced?.auth_token !== SERVICE_TOKEN_MARKER) throw new Error("Execution database replacement marker was not retained");
+		if (authToken !== undefined && replaced?.auth_token !== SERVICE_TOKEN_MARKER) throw new Error("Execution database replacement marker was not retained");
 		workingDatabase.prepare("VACUUM INTO ?").run(compactPath);
 		workingDatabase.close();
 		workingDatabase = undefined;
@@ -357,7 +360,7 @@ async function sanitizeDatabase(source: string, destination: string, privateDire
 			assertQuickCheck(compactedDatabase, "after compaction");
 			assertSameRowCounts(retainedRows, tableRowCounts(compactedDatabase));
 			const compactedService = compactedDatabase.prepare("SELECT auth_token FROM manager_service WHERE singleton = 1").get() as { auth_token?: unknown } | undefined;
-			if (compactedService?.auth_token !== SERVICE_TOKEN_MARKER) throw new Error("Execution database replacement marker was not retained after compaction");
+			if (authToken !== undefined && compactedService?.auth_token !== SERVICE_TOKEN_MARKER) throw new Error("Execution database replacement marker was not retained after compaction");
 		} finally {
 			compactedDatabase.close();
 		}

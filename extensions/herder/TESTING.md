@@ -164,7 +164,6 @@ test -f "$provider_extension"
 models=$("$pi_bin" --no-extensions --extension "$provider_extension" --list-models magpie)
 for required_model_id in \
   'gpt-6-luna' \
-  'deepseek-v4-flash' \
   'deepseek/deepseek-flash'
 do
   if ! printf '%s\n' "$models" | grep -Fq -- "$required_model_id"; then
@@ -174,7 +173,7 @@ do
 done
 ```
 
-`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the exact `poorman` bindings from `assets/profiles/profiles.json` before dispatch. Recon additionally requires `deepseek/deepseek-flash`; preserve these IDs rather than substituting Magpie aliases. Successful discovery/preflight does not guarantee a live run succeeds.
+`--list-models` emits provider model IDs without Herder's effort suffixes, so this check intentionally validates IDs only. It does not prove the exact effort mappings. Herder validates the exact `poorman` bindings from `assets/profiles/profiles.json` before dispatch. The Implementer and Recon both use `deepseek/deepseek-flash`; preserve this gateway model ID rather than substituting an unavailable alias. Successful discovery/preflight does not guarantee a live run succeeds.
 
 ## Run, limits, and artifacts
 
@@ -201,6 +200,8 @@ HERDER_E2E_STALL_TIMEOUT_MS=600000 HERDER_E2E_TIMEOUT_MS=2400000 npm run test:e2
 
 Set `HERDER_KEEP_E2E=1` to retain a successful fixture for inspection; without it, a successful run is cleaned up after the service-stop attempt. A failed run retains its workspace and includes the fixture path in the error. The test also attempts to stop the Herder service after verification and again during cleanup.
 
+The fixture reads Pi's RPC failures and error notifications and stops immediately with that diagnostic; unattended interactive dialogs also fail instead of hanging. The artifact collector preserves logs and valid execution databases even when startup failed before a service credential existed.
+
 Each run creates a temporary workspace named `$TMPDIR/herder-pi-live-*` (or the platform temporary directory when `TMPDIR` is unset). It contains:
 
 - `pi.log`, the Pi RPC, stdout, and stderr log named in the test output.
@@ -220,6 +221,6 @@ CI sets `HERDER_E2E_TIMEOUT_MS` to 2,400,000 ms (40 minutes) while the job has a
 
 - **Missing Pi binary or provider extension:** confirm `test -x "$pi_bin"` and `test -f "$provider_extension"`, rerun `npm ci` and verify the Magpie provider exists in this checkout, or set `HERDER_PI_BIN`/`HERDER_PI_PROVIDER_EXTENSION` to the intended paths. The fixture must use the explicit provider extension and this checkout's Herder entrypoint.
 - **Endpoint authorization or normalization:** check `MAGPIE_API_KEY` and `MAGPIE_BASE_URL` without printing them, use an origin or optional `/v1` suffix (not `/backend-api`), and rerun the body-free Node preflight. Redirects are rejected. Check for saved-login precedence or a conflicting `providers.magpie` overlay if CLI discovery differs from the environment-only probe.
-- **Missing model or effort:** rerun the explicit `--list-models` check and compare the exact poorman IDs (`gpt-6-luna` and `deepseek-v4-flash`) plus Recon's `deepseek/deepseek-flash`. A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
+- **Missing model or effort:** rerun the explicit `--list-models` check and compare the exact poorman IDs (`gpt-6-luna` and `deepseek/deepseek-flash`, also used by Recon). A listed model is not proof of its required effort; Herder's profile validation must accept the `poorman` bindings before dispatch.
 - **Early RPC exit:** inspect `pi.log` and verify the provider install, `--no-extensions`, the explicit provider extension, and the checkout's `extensions/herder/adapters/index.ts`. Treat logs as potentially sensitive before copying or uploading them.
 - **Stalls:** inspect the printed progress, `pi.log`, and the retained `.herder` diagnostics. Increase `HERDER_E2E_STALL_TIMEOUT_MS` or `HERDER_E2E_TIMEOUT_MS` only for a diagnosed slow provider, remembering that a longer overall limit can increase model spend.

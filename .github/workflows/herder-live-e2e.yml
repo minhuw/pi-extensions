@@ -37,6 +37,12 @@ jobs:
           node-version: 22.19.0
           cache: npm
 
+      - name: Install search dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          rg --version
+
       - name: Install package dependencies
         run: npm ci
 

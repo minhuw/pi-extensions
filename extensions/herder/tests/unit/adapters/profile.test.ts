@@ -25,7 +25,7 @@ test("Pi resolves the poorman profile into three generic package agents", async 
 	assert.deepEqual(profile.roles, {
 		"plan-implementer": {
 			agent_type: "herder.plan-implementer",
-			model: "deepseek-v4-flash",
+			model: "deepseek/deepseek-flash",
 			effort: "high",
 		},
 		"plan-reviewer": {
@@ -101,14 +101,13 @@ test("model checks accept provider-qualified catalog entries without substitutio
 	const profile = resolvePiProfile("poorman", catalog);
 	const available = [
 		{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3" },
-		{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash" },
-		{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna" },
+		{ provider: "magpie", id: "codex/gpt-6-luna", fullId: "magpie/codex/gpt-6-luna" },
 		{ provider: "magpie", id: "deepseek/deepseek-flash", fullId: "magpie/deepseek/deepseek-flash" },
 	];
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
-	assert.equal(activeModelMatches(profile, available[2]), true);
+	assert.equal(activeModelMatches(profile, available[1]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
-	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["gpt-6-luna", "deepseek/deepseek-flash"]);
+	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["deepseek/deepseek-flash"]);
 });
 
 test("model availability includes optional rescue and Searcher bindings", () => {

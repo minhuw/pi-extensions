@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stopService } from "../../src/client/index.ts";
 import { readManagerState } from "../../src/daemon/run-store.ts";
+import { createPiRpcMonitor } from "./support/pi-rpc-monitor.ts";
 
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureScript = path.join(extensionRoot, "tests/e2e/support/live-manager-fixture.ts");
@@ -30,7 +31,13 @@ async function invokePi(repository: string, planDirectory: string, logFile: stri
 		"--mode", "rpc", "--provider", "magpie", "--model", "gpt-6-luna", "--thinking", "max", "--approve",
 		"--no-extensions", "--extension", providerExtension, "--extension", extensionEntry,
 	], { cwd: repository, env: liveEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
-	child.stdout.on("data", (chunk) => appendFileSync(logFile, chunk));
+	const rpc = createPiRpcMonitor();
+	let spawnError: Error | undefined;
+	child.on("error", (error) => { spawnError = error; });
+	child.stdout.on("data", (chunk: Buffer) => {
+		appendFileSync(logFile, chunk);
+		rpc.consume(chunk);
+	});
 	child.stderr.on("data", (chunk) => appendFileSync(logFile, chunk));
 	child.stdin.write(`${JSON.stringify({
 		id: "herder-fire",
@@ -44,7 +51,9 @@ async function invokePi(repository: string, planDirectory: string, logFile: stri
 	process.stderr.write(`# live Herder log: ${logFile}\n`);
 	try {
 		while (Date.now() < deadline) {
-			if (child.exitCode !== null) throw new Error(`Pi RPC exited ${child.exitCode} before the run completed`);
+			if (spawnError) throw new Error(`Pi RPC failed to start: ${spawnError.message}`);
+			rpc.assertHealthy();
+			if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Pi RPC exited ${child.exitCode ?? child.signalCode} before the run completed`);
 			const manager = readManagerState(planDirectory);
 			if (manager.run?.status === "complete") return;
 			const progress = JSON.stringify({

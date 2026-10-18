@@ -16,7 +16,6 @@ const reconModel = { provider: "magpie", id: "deepseek/deepseek-flash", fullId: 
 const available = [
 	reconModel,
 	{ provider: "proxy", id: "kimi-k3", fullId: "proxy/kimi-k3", thinkingLevelMap: { max: "max" } },
-	{ provider: "proxy", id: "deepseek-v4-flash", fullId: "proxy/deepseek-v4-flash", thinkingLevelMap: { high: "high", max: null } },
 	{ provider: "proxy", id: "gpt-6-luna", fullId: "proxy/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 ];
 
@@ -252,7 +251,7 @@ test("Herder validates package roles against the built-in engine model catalog",
 	const profile = resolvePiProfile("poorman", catalog);
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, available));
 	await assert.rejects(
-		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "deepseek-v4-flash" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
+		() => validateHerderRoleAgents(agentRoot, profile, available.map((model) => model.id === "deepseek/deepseek-flash" ? { ...model, thinkingLevelMap: { high: null, max: null } } : model)),
 		/does not support thinking high/,
 	);
 });
