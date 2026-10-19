@@ -10,9 +10,9 @@ The published extension table and installation details live in the root [README]
 - `extensions/magpie-provider/` — live Magpie gateway model discovery, built-in Pi API delegation, and automatic native compaction for OpenAI/Codex Responses models with configurable opt-out and exact overrides.
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
-- `extensions/shared/` — shared Orca busy-state coordination and the provider-neutral native Responses compaction engine, lifecycle hooks, and tests.
+- `extensions/shared/` — shared Orca busy-state coordination, native Responses compaction, Magpie search selection, and agent frontmatter parsing (`agent-definitions.ts`). Canonical script runtime, metadata, journal, progress, structured-output, and worker-source primitives live in `extensions/shared/workflow/`, consumed by Subagents, which keeps compatibility exports at its old paths.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
-- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows, local fleet/integrations, and offline upstream/compatibility tests. See its `LOCAL-PATCHES.md` before resyncing.
+- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), local fleet/integrations, and offline upstream/compatibility tests. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 
@@ -30,7 +30,7 @@ Run commands from the repository root with Node `>=22.19.0`.
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
-| `npm run test:subagents`            | Run Subagents' offline upstream and local compatibility Vitest suites; live provider tests are not enabled.                            |
+| `npm run test:subagents`            | Run Subagents' offline upstream and local compatibility Vitest suites, including scripted workflows; live provider tests are not enabled.                            |
 | `npm run test:herder`               | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`.                                               |
 
 
@@ -41,6 +41,7 @@ Run commands from the repository root with Node `>=22.19.0`.
 ## Conventions
 
 - Use conventional commits with a scope, for example `fix(herder): persist restack targets` and `test(client): cover terminal operation failure recovery`.
+- Workflow scripts run only on an explicit orchestration request. Subagents workflow children share the run cwd and current files, including existing edits and dependencies; `isolation: "worktree"` gives a single child its own worktree when parallel writers would conflict. Await relevant writers before verification. Herder retains its own worktree, integration, and verification policy.
 - TypeScript is strict and configured with `noEmit`.
 - Commit, Writer, and Herder tests use strict TypeScript with Node's `node --test`; Statusline Footer, Subagents, and native compaction tests use Vitest.
 - Herder integration tests run sequentially within each file, and temporary fixtures under `os.tmpdir()` are removed in `finally` blocks.

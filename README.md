@@ -9,7 +9,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Commit](extensions/commit/README.md) | A lightweight native prompt for committing current changes as a self-contained patch series. |
 | [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
-| [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations. |
+| [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; supplies the collection's `SubagentWorkflow` orchestrator. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 
@@ -39,7 +39,7 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
-Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
+Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Subagents provides the scripted-workflow orchestrator (`SubagentWorkflow`, `workflowsEnabled`) and keeps its `Agent` tools; Herder retains its own execution policy. Scripted workflows require an explicit user request for orchestration. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
 
 The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
 

@@ -38,7 +38,7 @@ These do not change the declared release base:
 
 The intervening main-branch usage-event and RPC-steer features are not implied by these backports.
 
-Integration review also required two local corrections: host delegation rejects agent frontmatter that disables its mandatory isolation, and foreground resumes report turn-limit/user-stop outcomes in model-visible text instead of presenting partial output as an ordinary completed answer. Both have regression coverage.
+Integration review also required two local corrections: standalone Subagents host delegation rejects agent frontmatter that disables its mandatory isolation, and foreground resumes report turn-limit/user-stop outcomes in model-visible text instead of presenting partial output as an ordinary completed answer. Both have regression coverage.
 
 ## Tests and deliberate adaptations
 
@@ -55,6 +55,6 @@ Checked with Pi SDK 1.3.0 and Vitest 4.1.12:
 - CLIProxyAPI Provider, Magpie/shared compaction, native compaction, Commit, Statusline, and Writer checks passed.
 - Herder: **252 integration tests** passed. The first full collection run timed out during the unbounded unit phase with several test deadline failures; rerunning all **1,044 unit tests** at two-file concurrency passed. The smoke runner now uses that same bound for both phases. These are separate verification runs, not a claim that the original `npm test` invocation passed.
 - Package dry-run, dependency audit, and diff whitespace checks passed.
-- Independent integration review found mandatory-host-isolation and resumed-output disclosure defects; both were fixed, regression-tested, and approved on focused re-review.
+- Independent integration review found standalone Subagents mandatory-host-isolation and resumed-output disclosure defects; both were fixed, regression-tested, and approved on focused re-review.
 
 No real-provider E2E or live terminal/Orca interaction was performed. Mocked and faux-provider tests exercise the integration contracts, not real gateway reliability or visual rendering on every terminal.
