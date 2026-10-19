@@ -25,6 +25,7 @@ No changes to user configuration, provider credentials, runtime databases, or ex
 | Orca coordination | entry, shared busy-state module | Keep the pane busy while owned asynchronous work runs; release leases on completion and shutdown. |
 | Invocation UI | `src/ui/`, entry | Preserve compact actual model/thinking/tier and invocation details while retaining upstream fullscreen, costs, and render caching. |
 | Default policies | invocation config, settings, package resources | Foreground by default; package agents/workflows require opt-in. Existing explicit settings continue to win. |
+| Shared workflow extraction | `../shared/workflow/`, `src/workflow/`, `src/structured-output.ts` | Canonical runtime, metadata, journal, progress, JSON Schema, structured-output, and worker-source primitives live under `extensions/shared/workflow/`. Old Subagents paths re-export them for import compatibility; keep attribution/license with the extracted code. Subagents owns the only scripted-workflow frontend (`SubagentWorkflow`) and keeps its legacy isolation and resume support in the shared runtime; extraction does not transfer Herder authority. |
 | Pi SDK baseline | root manifest, runner/entry and regression fixtures | Pi >=1.3.0, checked against the same SDK version used by the host. |
 
 ## Selective post-release backports
