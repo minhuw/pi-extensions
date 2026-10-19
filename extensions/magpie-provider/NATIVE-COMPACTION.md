@@ -1,6 +1,6 @@
 # Native compaction through Magpie
 
-Magpie Provider includes its own native-compaction integration. Its protocol and replay engine lives in `extensions/shared/native-compaction/`; keep that shared directory with Magpie. The legacy CLIProxyAPI extensions are no longer included in this collection.
+Magpie Provider includes its own native-compaction integration. Its protocol and replay engine lives in `extensions/magpie-provider/native-compaction/`, alongside its configuration and lifecycle integration. The legacy CLIProxyAPI extensions are no longer included in this collection.
 
 **Enabled by default, experimental and unverified live:** the Magpie protocol assessment inspected commit `1755713`; no live gateway/upstream compaction has been run. Automatic eligibility uses known OpenAI/Codex namespaces as an identification heuristic, not runtime proof of native capability. The remote Magpie provider still requires `compaction=native`.
 
@@ -59,7 +59,7 @@ The returned opaque item is stored in the Pi session. On later turns, the `befor
 
 Magpie rejects the legacy `/responses/compact` route for Magpie-qualified models. The integration uses `/v1/responses`, not that legacy route.
 
-The shared engine deliberately retains the historical checkpoint kind `cliproxyapi-openai-native-compaction` and reads version-1 and version-2 checkpoints. This is a persisted format identifier, **not a runtime dependency**. Existing Magpie checkpoints produced with the old experimental bridge remain readable, including their exact provider/API/model binding. CLIProxyAPI-bound checkpoints are not silently migrated to Magpie and cannot be replayed under a different model identity.
+The engine deliberately retains the historical checkpoint kind `cliproxyapi-openai-native-compaction` and reads version-1 and version-2 checkpoints. This is a persisted format identifier, **not a runtime dependency**. Existing Magpie checkpoints produced with the old experimental bridge remain readable, including their exact provider/API/model binding. CLIProxyAPI-bound checkpoints are not silently migrated to Magpie and cannot be replayed under a different model identity.
 
 ## Migrating from the experimental CLIProxyAPI recipe
 
@@ -69,7 +69,7 @@ Remove any explicit Pi settings entries for the removed CLIProxyAPI extension pa
 
 ## Verification and remaining risks
 
-Offline tests cover the Magpie configuration and lifecycle, shared history/transport logic, checkpoint replay, exact gates, malformed history, and fallback/cancellation safeguards. A standalone-loading test copies only Magpie and the shared engine into a temporary package to check that both CLIProxyAPI directories can be absent.
+Offline tests cover the Magpie configuration and lifecycle, history/transport logic, checkpoint replay, exact gates, malformed history, and fallback/cancellation safeguards. A standalone-loading test copies only the Magpie directory into a temporary package to check that it loads without sibling extensions.
 
 These tests do **not** prove compatibility with a running gateway or upstream. Offline transport tests cover Magpie's stream-only relay gate, split/multiline SSE frames, terminal failures, cancellation, and JSON compatibility. Validate streaming with your actual gateway/upstream, plus tools, cancellation, a second compaction, and session resume before using important sessions.
 
@@ -84,4 +84,4 @@ Magpie allows native compaction for groups only when every member qualifies, but
 - [Magpie provider setting and restrictions](https://github.com/yetone/magpie/blob/1755713/internal/provider/native_compaction.go)
 - [Magpie gateway-routing documentation](https://github.com/yetone/magpie/blob/1755713/docs/subsystems/gateway-routing.md)
 
-The shared engine includes its original MIT attribution in `extensions/shared/native-compaction/LICENSE`.
+The engine includes its original MIT attribution in `extensions/magpie-provider/native-compaction/LICENSE`.

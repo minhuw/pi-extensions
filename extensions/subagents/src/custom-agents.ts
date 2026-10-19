@@ -5,8 +5,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { parseAgentDefinition, parseAgentFrontmatter } from "../../shared/agent-definitions.js";
-export { parseAgentFrontmatter } from "../../shared/agent-definitions.js";
+import { parseAgentDefinition, parseAgentFrontmatter } from "./agent-definitions.js";
+export { parseAgentFrontmatter } from "./agent-definitions.js";
 import {
   isPackageResourceExcluded,
   MAX_PACKAGE_RESOURCE_BYTES,

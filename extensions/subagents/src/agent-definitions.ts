@@ -1,7 +1,7 @@
 /** Pure agent-file parsing shared by Subagents and Workflow. No registry or discovery state. */
 import { createCodingTools, createReadOnlyTools, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { parseServiceTier } from "../subagents/src/service-tier.js";
-import type { AgentConfig, ServiceTierInput, IsolationMode, MemoryScope, ThinkingLevel } from "../subagents/src/types.js";
+import { parseServiceTier } from "./service-tier.js";
+import type { AgentConfig, ServiceTierInput, IsolationMode, MemoryScope, ThinkingLevel } from "./types.js";
 
 export const AGENT_BUILTIN_TOOL_NAMES = [...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map(tool => tool.name))];
 const BUILTIN_TOOL_NAMES = AGENT_BUILTIN_TOOL_NAMES;

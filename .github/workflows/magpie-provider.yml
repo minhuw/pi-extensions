@@ -5,7 +5,6 @@ on:
     paths:
       - .github/workflows/magpie-provider.yml
       - extensions/magpie-provider/**
-      - extensions/shared/**
       - package.json
       - package-lock.json
       - tsconfig.json
@@ -16,7 +15,6 @@ on:
     paths:
       - .github/workflows/magpie-provider.yml
       - extensions/magpie-provider/**
-      - extensions/shared/**
       - package.json
       - package-lock.json
       - tsconfig.json

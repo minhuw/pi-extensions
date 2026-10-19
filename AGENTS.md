@@ -7,12 +7,12 @@ The published extension table and installation details live in the root [README]
 
 ## Layout
 
-- `extensions/magpie-provider/` — live Magpie gateway model discovery, built-in Pi API delegation, and automatic native compaction for OpenAI/Codex Responses models with configurable opt-out and exact overrides.
+- `extensions/magpie-provider/` — live Magpie gateway model discovery, built-in Pi API delegation, and automatic native compaction for OpenAI/Codex Responses models with configurable opt-out and exact overrides. Its protocol/replay engine and tests live in `native-compaction/`.
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
-- `extensions/shared/` — shared Orca busy-state coordination, native Responses compaction, Magpie search selection, and agent frontmatter parsing (`agent-definitions.ts`). Canonical script runtime, metadata, journal, progress, structured-output, and worker-source primitives live in `extensions/shared/workflow/`, consumed by Subagents, which keeps compatibility exports at its old paths.
+- `extensions/shared/` — Orca busy-state coordination shared by Herder and Subagents.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
-- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), local fleet/integrations, and offline upstream/compatibility tests. See its `LOCAL-PATCHES.md` before resyncing.
+- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), local fleet/integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 
@@ -26,7 +26,7 @@ Run commands from the repository root with Node `>=22.19.0`.
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
 | `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the collection and Subagents' dedicated source configuration.                              |
 | `npm test`                          | Run the safe collection suite: Magpie Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
-| `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and the shared native-compaction suite. |
+| `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and its native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |

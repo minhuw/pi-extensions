@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAgentDefinition, parseAgentFrontmatter } from "../../shared/agent-definitions.js";
+import { parseAgentDefinition, parseAgentFrontmatter } from "../src/agent-definitions.js";
 import { parseAgentFrontmatter as subagentsFrontmatter } from "../src/custom-agents.js";
 
 const options = { filename: "fallback", sourcePath: "/agents/fixture.md", source: "project" as const };

@@ -27,7 +27,7 @@ import { fullWorkflowToolDescription } from "../src/workflow/tool-description.js
 
 const description = fullWorkflowToolDescription;
 const workerSource = readFileSync(
-  fileURLToPath(new URL("../../shared/workflow/worker-source.ts", import.meta.url)),
+  fileURLToPath(new URL("../src/workflow/worker-source.ts", import.meta.url)),
   "utf8",
 );
 

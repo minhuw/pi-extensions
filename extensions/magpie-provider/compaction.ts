@@ -2,8 +2,8 @@ import type { Model } from "@earendil-works/pi-ai";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerNativeCompaction } from "../shared/native-compaction/lifecycle.ts";
-import type { NativeCompactionConfig } from "../shared/native-compaction/types.ts";
+import { registerNativeCompaction } from "./native-compaction/lifecycle.ts";
+import type { NativeCompactionConfig } from "./native-compaction/types.ts";
 
 export const COMPACTION_CONFIG_FILE = "magpie-native-compaction.json";
 

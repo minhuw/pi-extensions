@@ -206,11 +206,10 @@ it("uses ordinary compaction for a non-eligible model and cancels on bad configu
 	expect(fetch).not.toHaveBeenCalled();
 });
 
-it("loads and registers compaction with both CLIProxyAPI directories absent", () => {
+it("loads and registers compaction from the Magpie directory alone", () => {
 	const extensions = join(root, "extensions");
 	mkdirSync(extensions);
 	cpSync(resolve("extensions/magpie-provider"), join(extensions, "magpie-provider"), { recursive: true });
-	cpSync(resolve("extensions/shared/native-compaction"), join(extensions, "shared/native-compaction"), { recursive: true });
 	symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir");
 	writeFileSync(join(root, "package.json"), '{"type":"module"}');
 	const entry = pathToFileURL(join(extensions, "magpie-provider/index.ts")).href;
