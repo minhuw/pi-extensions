@@ -188,6 +188,8 @@ describe("statusline footer visual language", () => {
 	});
 
 	it("washes max thinking labels across a rainbow", () => {
+		expect(thinkingCaps("minimal")).toBe("MINIMAL");
+		expect(thinkingCaps("medium")).toBe("MEDIUM");
 		expect(thinkingCaps("xhigh")).toBe("XHIGH");
 		expect(thinkingCaps("max")).toBe("MAX");
 		const painted = rainbow("MAX");

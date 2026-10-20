@@ -572,18 +572,8 @@ function glyph(theme: Theme, icon: string, color?: ThemeToken): string {
 
 // ── rendering ───────────────────────────────────────────────────────
 
-const THINKING_CAPS: Record<string, string> = {
-	off: "OFF",
-	minimal: "MIN",
-	low: "LOW",
-	medium: "MED",
-	high: "HIGH",
-	xhigh: "XHIGH",
-	max: "MAX",
-};
-
 export function thinkingCaps(level: string): string {
-	return THINKING_CAPS[level] ?? level.toUpperCase();
+	return level.toUpperCase();
 }
 
 export function renderThinking(theme: Theme, level: string): string {
