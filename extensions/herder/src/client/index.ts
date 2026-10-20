@@ -156,15 +156,21 @@ function registeredService(planDirectory: string): StoredService | null {
 	return service;
 }
 
+function compatibleService(health: Record<string, unknown>, service: StoredService): boolean {
+	return health.instanceId === service.instanceId
+		&& Number(health.pid) === service.pid
+		&& health.runtimeExecutable === process.execPath
+		&& Number(health.managerProtocolVersion) === MANAGER_PROTOCOL_VERSION
+		&& Number(health.executionSchemaVersion) === EXECUTION_SCHEMA_VERSION
+		&& Array.isArray(health.capabilities)
+		&& health.capabilities.includes("durable-operations");
+}
+
 async function incompatibleService(service: StoredService): Promise<boolean> {
 	try {
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
 		return health.instanceId === service.instanceId && Number(health.pid) === service.pid
-			&& (health.runtimeExecutable !== process.execPath
-				|| Number(health.managerProtocolVersion) !== MANAGER_PROTOCOL_VERSION
-				|| Number(health.executionSchemaVersion) !== EXECUTION_SCHEMA_VERSION
-				|| !Array.isArray(health.capabilities)
-				|| !health.capabilities.includes("durable-operations"));
+			&& !compatibleService(health, service);
 	} catch { return false; }
 }
 
@@ -173,14 +179,7 @@ export async function healthyService(planDirectory: string): Promise<StoredServi
 	if (!service) return null;
 	try {
 		const health = await requestService(service, "/health", undefined, HEALTH_TIMEOUT_MS);
-		const compatible = health.instanceId === service.instanceId
-			&& Number(health.pid) === service.pid
-			&& health.runtimeExecutable === process.execPath
-			&& Number(health.managerProtocolVersion) === MANAGER_PROTOCOL_VERSION
-			&& Number(health.executionSchemaVersion) === EXECUTION_SCHEMA_VERSION
-			&& Array.isArray(health.capabilities)
-			&& health.capabilities.includes("durable-operations");
-		if (!compatible) return null;
+		if (!compatibleService(health, service)) return null;
 		return existingServiceLogIsSafe(path.join(path.resolve(planDirectory), ".herder", "service.log")) ? service : null;
 	} catch {
 		return null;
