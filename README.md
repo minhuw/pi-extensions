@@ -55,7 +55,7 @@ npm test        # full suite; includes the full TypeScript check
 # or, for a quick standalone check: npm run typecheck
 ```
 
-For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and shared native-compaction checks.
+For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and native-compaction checks.
 
 ## License
 

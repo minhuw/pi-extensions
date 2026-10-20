@@ -12,9 +12,7 @@ it("loads the installed extension with Pi's actual bundled modules and no checko
 	const root = mkdtempSync(join(tmpdir(), "magpie-bundled-"));
 	try {
 		const extensions = fileURLToPath(new URL("../../", import.meta.url));
-		for (const name of ["magpie-provider", "shared"]) {
-			cpSync(join(extensions, name), join(root, "extensions", name), { recursive: true });
-		}
+		cpSync(join(extensions, "magpie-provider"), join(root, "extensions/magpie-provider"), { recursive: true });
 		const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 		// A separate Node process avoids Vitest's module mocks and resolution hooks.
 		const result = await run(process.execPath, ["--input-type=module", "-e", String.raw`
