@@ -143,14 +143,6 @@ function appendTranscript(
 	dependencies.appendEntry(entry);
 }
 
-function statusCounts(preview: CleanupPreview): { eligible: number; skipped: number; blockers: number } {
-	return {
-		eligible: preview.outcomes.reduce((total, outcome) => total + outcome.result.actions.length, 0),
-		skipped: preview.skippedPlanIds.length + preview.outcomes.reduce((total, outcome) => total + outcome.result.skipped.length, 0),
-		blockers: preview.blockers.length,
-	};
-}
-
 function branchLabels(preview: CleanupPreview): string[] {
 	return [...new Set(preview.outcomes.flatMap((outcome) => outcome.result.actions
 		.map((item) => typeof item.branch === "string" ? item.branch : itemPlanId(item, outcome.planId))
@@ -163,7 +155,7 @@ function deepSummary(preview: CleanupPreview): string {
 }
 
 export function formatCleanupPreview(preview: CleanupPreview): string {
-	const counts = statusCounts(preview);
+	const eligible = preview.outcomes.reduce((total, outcome) => total + outcome.result.actions.length, 0);
 	const selected = preview.selectedPlanIds.length ? preview.selectedPlanIds.join(", ") : "none";
 	const failed = preview.failedPlanIds.length ? ` · failed evidence: ${preview.failedPlanIds.join(", ")}` : "";
 	const skipped = skippedIds(preview);
@@ -174,14 +166,14 @@ export function formatCleanupPreview(preview: CleanupPreview): string {
 		? (preview.terminal ? "terminal" : `eligible (${preview.durableStatus})`)
 		: (preview.terminal ? "blocked" : `preview-only (${preview.durableStatus})`);
 	if (mode === "cleanup") {
-		return `Cleanup preview · ${state} · selected: ${selected}${failed} · eligible actions: ${counts.eligible} · skipped: ${skippedText} · blockers: ${blockers}.`;
+		return `Cleanup preview · ${state} · selected: ${selected}${failed} · eligible actions: ${eligible} · skipped: ${skippedText} · blockers: ${blockers}.`;
 	}
 	const branches = branchLabels(preview);
 	const refs = refLabels(preview, "refsPlanned");
 	if (mode === "force") {
-		return `Force cleanup preview · ${state} · mode: force · selected: ${selected} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · run status ignored: ${preview.durableStatus} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed · plan directory: removed · blockers: ${blockers}.`;
+		return `Force cleanup preview · ${state} · mode: force · selected: ${selected} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${eligible} · run status ignored: ${preview.durableStatus} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed · plan directory: removed · blockers: ${blockers}.`;
 	}
-	return `Cleanup preview · ${state} · mode: deep · selected: ${selected}${failed} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${counts.eligible} · deep cleanup: ${deepSummary(preview)} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed only by deep cleanup · skipped: ${skippedText} · blockers: ${blockers}.`;
+	return `Cleanup preview · ${state} · mode: deep · selected: ${selected}${failed} · branches: ${branches.length ? branches.join(", ") : "none"} · eligible actions: ${eligible} · deep cleanup: ${deepSummary(preview)} · refs planned: ${refs.length ? refs.join(", ") : "none"} · integration: removed only by deep cleanup · skipped: ${skippedText} · blockers: ${blockers}.`;
 }
 
 export function formatCleanupApplied(preview: CleanupPreview, applied: CleanupApplyResult): string {
