@@ -45,7 +45,6 @@ function parse(input: string, mode: Mode): Options {
 	const result: Options = { path: "", focus: false, staged: false };
 	const seen = new Set<string>();
 	let positionalOnly = false;
-	let hasPath = false;
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
 		if (!positionalOnly && token === "--") { positionalOnly = true; continue; }
@@ -62,12 +61,11 @@ function parse(input: string, mode: Mode): Options {
 				result[token === "--line" ? "line" : "column"] = value;
 			} else throw new NavigationError("Unknown or unsupported option. " + usage(mode));
 		} else {
-			if (hasPath || !token) throw new NavigationError(usage(mode));
+			if (result.path || !token) throw new NavigationError(usage(mode));
 			result.path = token;
-			hasPath = true;
 		}
 	}
-	if (!hasPath) throw new NavigationError(usage(mode));
+	if (!result.path) throw new NavigationError(usage(mode));
 	if (result.column && !result.line) throw new NavigationError("--column requires --line. " + usage(mode));
 	return result;
 }
