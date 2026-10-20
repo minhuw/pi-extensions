@@ -35,7 +35,28 @@ export async function withDeadline<T>(operation: Promise<T>, label: string, time
 export const availableModels = [
 	{
 		provider: "fake",
+		id: "gpt-6-astra",
+		api: "openai-responses",
+		reasoning: true,
+		thinkingLevelMap: { medium: "medium", high: "high", xhigh: "xhigh", max: null },
+	},
+	...(["claude-opus-5.5", "claude-fable-5.1"] as const).map((id) => ({
+		provider: "fake",
+		id,
+		api: "anthropic-messages",
+		reasoning: true,
+		thinkingLevelMap: { high: "high", xhigh: null, max: null },
+	})),
+	{
+		provider: "fake",
 		id: "gpt-6-sol",
+		api: "openai-responses",
+		reasoning: true,
+		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+	},
+	{
+		provider: "fake",
+		id: "gpt-6.1-sol",
 		api: "openai-responses",
 		reasoning: true,
 		thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },

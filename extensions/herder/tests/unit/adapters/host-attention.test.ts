@@ -22,7 +22,7 @@ test("round choices require interactive confirmation and bind the exact acceptan
 	fs.writeFileSync(path.join(directory, "001-value.md"), fixturePlan({ id: "001", title: "Value", head: originalHead }));
 	const manager = new HerderRunManager(directory);
 	try {
-		await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "eclipse", maxParallel: 1 });
+		await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "epic", maxParallel: 1 });
 		const run = manager.store.getRun()!;
 		const detail = "Choose unresolved findings";
 		const request: ManagerAttentionRequest = {

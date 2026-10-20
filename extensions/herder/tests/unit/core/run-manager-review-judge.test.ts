@@ -119,7 +119,7 @@ function eventId(prefix: string, kind: string, candidate: JsonRecord): string {
 	return `${prefix}-${kind}-${String(candidate.attemptId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-async function startRun(service: Service, fixture: Fixture, prefix: string, profile = "eclipse", maxParallel = 1): Promise<JsonRecord> {
+async function startRun(service: Service, fixture: Fixture, prefix: string, profile = "epic", maxParallel = 1): Promise<JsonRecord> {
 	const response = payload(await requestManagerOperation(service, "start", {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
@@ -249,23 +249,23 @@ function blocker(round: number): ReviewerEnvelope {
 	};
 }
 
-async function reachJudge(service: Service, fixture: Fixture, prefix: string, profile = "eclipse", started?: JsonRecord): Promise<{ reply: JsonRecord; judge: JsonRecord; reviewer: JsonRecord }> {
+async function reachJudge(service: Service, fixture: Fixture, prefix: string, profile = "epic", started?: JsonRecord): Promise<{ reply: JsonRecord; judge: JsonRecord; reviewer: JsonRecord }> {
 	let reply = started ?? await startRun(service, fixture, prefix, profile);
 	let implementer = action(reply, "plan-implementer");
 	let reviewer!: JsonRecord;
 	for (let round = 1; round <= 2; round += 1) {
 		assert.equal(Number(implementer.round), round);
-		if (profile === "universe") {
-			assert.equal(implementer.model, "gpt-6-astra");
-			assert.equal(implementer.effort, "medium");
+		if (profile === "universe" || profile === "epic") {
+			assert.equal(implementer.model, profile === "epic" ? "claude-opus-5.5" : "gpt-6-astra");
+			assert.equal(implementer.effort, profile === "epic" ? "high" : "medium");
 			assert.equal(implementer.serviceTier, undefined);
-			assert.deepEqual(implementer.searcherBinding, { model: "gpt-6-sol", effort: "xhigh" });
+			assert.deepEqual(implementer.searcherBinding, { model: "gpt-6.1-sol", effort: "xhigh" });
 		}
 		reply = await finishImplementer(service, implementer, prefix);
 		reviewer = action(reply, "plan-reviewer");
 		assert.equal(Number(reviewer.round), round);
-		if (profile === "universe") {
-			assert.equal(reviewer.model, "gpt-6-sol");
+		if (profile === "universe" || profile === "epic") {
+			assert.equal(reviewer.model, "gpt-6.1-sol");
 			assert.equal(reviewer.effort, "xhigh");
 			assert.equal(reviewer.serviceTier, undefined);
 			assert.deepEqual(reviewer.searcherBinding, implementer.searcherBinding);
@@ -452,7 +452,7 @@ test("blocking Reviewer outcomes await Judge repair or blocking decisions in eve
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 			dashboardUrl: service.dashboardUrl,
 		}));
@@ -588,15 +588,13 @@ test("Judge DONE creates exact Reviewer/Judge approval evidence and integrates",
 	});
 });
 
-for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR supplies immutable bindings and PASS_DOCUMENT to round-3 RESCUE after restart`, { timeout: 45_000 }, async (t) => {
+for (const profile of ["epic", "universe"]) test(`${profile}: Judge REPAIR supplies immutable bindings and PASS_DOCUMENT to round-3 RESCUE after restart`, { timeout: 45_000 }, async (t) => {
 	await withFixture("judge-repair", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-repair", profile);
-		if (profile === "universe") {
-			assert.equal(state.judge.model, "gpt-6-astra");
-			assert.equal(state.judge.effort, "xhigh");
-			assert.equal(state.judge.serviceTier, undefined);
-			assert.deepEqual(state.judge.searcherBinding, { model: "gpt-6-sol", effort: "xhigh" });
-		}
+		assert.equal(state.judge.model, profile === "epic" ? "claude-fable-5.1" : "gpt-6-astra");
+		assert.equal(state.judge.effort, profile === "epic" ? "high" : "xhigh");
+		assert.equal(state.judge.serviceTier, undefined);
+		assert.deepEqual(state.judge.searcherBinding, { model: "gpt-6.1-sol", effort: "xhigh" });
 		await dispatch(service, state.judge, "judge-repair");
 		await stopService(fixture.planDirectory);
 		const changedCatalog = loadPiProfileCatalog();
@@ -637,10 +635,10 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 		assert.equal(implementer.round, 3);
 		assert.equal(implementer.workerMode, "RESCUE");
 		assert.equal(implementer.agentType, "herder.plan-implementer");
-		assert.equal(implementer.model, profile === "universe" ? "gpt-6-astra" : "gpt-6-luna");
-		assert.equal(implementer.effort, profile === "universe" ? "xhigh" : "max");
-		assert.equal(implementer.serviceTier, profile === "universe" ? undefined : "fast");
-		assert.deepEqual(implementer.searcherBinding, profile === "universe" ? { model: "gpt-6-sol", effort: "xhigh" } : undefined);
+		assert.equal(implementer.model, "gpt-6-astra");
+		assert.equal(implementer.effort, "xhigh");
+		assert.equal(implementer.serviceTier, undefined);
+		assert.deepEqual(implementer.searcherBinding, { model: "gpt-6.1-sol", effort: "xhigh" });
 
 		assert.match(String(implementer.prompt), /PASS_DOCUMENT_ACTION_ID:/);
 		assert.match(String(implementer.prompt), new RegExp(String(state.judge.actionId)));
@@ -653,14 +651,14 @@ for (const profile of ["eclipse", "universe"]) test(`${profile}: Judge REPAIR su
 			assert.equal(inspected.plan.round, 3);
 			assert.deepEqual(inspected.plan.repair, ["[F001] Implement the adjudicated repair contract exactly"]);
 			assertNoApproval(inspected.store, inspected.run!.runId);
-			assert.equal(implementer.model, inspected.store.getActions(inspected.run!.runId).find((a) => a.role === "plan-implementer")!.model);
+			assert.equal(implementer.model, inspected.store.getActions(inspected.run!.runId).find((a) => a.actionId === implementer.actionId)!.model);
 		} finally {
 			inspected.store.close();
 		}
 		reply = await finishImplementer(service, implementer, "judge-repair");
 		const reviewer = action(reply, "plan-reviewer");
 		assert.equal(reviewer.round, 3);
-		assert.equal(reviewer.model, "gpt-6-sol");
+		assert.equal(reviewer.model, "gpt-6.1-sol");
 		assert.equal(reviewer.effort, "xhigh");
 		assert.deepEqual(reviewer.searcherBinding, implementer.searcherBinding);
 		assert.match(String(reviewer.prompt), /PASS_DOCUMENT_ACTION_ID:/);
@@ -756,7 +754,7 @@ test("Judge BLOCKED ends the run without approval", { timeout: 45_000 }, async (
 });
 
 async function exhaustReview(service: Service, fixture: Fixture, prefix: string, started?: JsonRecord): Promise<{ reply: JsonRecord; reviewer: JsonRecord; judge: JsonRecord }> {
-	const state = await reachJudge(service, fixture, prefix, "eclipse", started);
+	const state = await reachJudge(service, fixture, prefix, "epic", started);
 	let reply = await finishJudge(service, state.judge, prefix, {
 		decision: "REPAIR", findings: [JUDGE_FINDING],
 		repairContracts: ["[F001] Fix the incorrect value"], authorizedBlockers: ["F001"],
@@ -888,7 +886,7 @@ test("exhaustion preserves independent sibling evidence and never unlocks blocke
 		].join("\n")));
 		fs.writeFileSync(path.join(fixture.planDirectory, "002-independent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 002:").replaceAll("src/value.mjs", "src/independent.mjs"));
 		fs.writeFileSync(path.join(fixture.planDirectory, "003-dependent.md"), FIXTURE_PLAN(fixture.originalHead).replace("# Plan 001:", "# Plan 003:").replace("**Depends on**: none", "**Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")).replaceAll("src/value.mjs", "src/dependent.mjs"));
-		const started = await startRun(service, fixture, "accept-scheduling", "eclipse", 2);
+		const started = await startRun(service, fixture, "accept-scheduling", "epic", 2);
 		const sibling = records(started.actions).find(candidate => candidate.planId === "002");
 		assert.ok(sibling);
 		assert.equal(sibling.role, "plan-implementer");

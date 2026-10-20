@@ -213,7 +213,7 @@ try {
   assert.equal(recordRunConfiguration(valid.planDir, runProfile).recorded, false)
   assert.deepEqual(required(readRunConfiguration(valid.planDir).configuration).roles, runProfile.roles)
   expectFailure(
-    () => recordRunConfiguration(valid.planDir, { ...runProfile, profile: "eclipse" }),
+    () => recordRunConfiguration(valid.planDir, { ...runProfile, profile: "epic" }),
     /already bound to poorman/,
   )
   const implementerUsage = {

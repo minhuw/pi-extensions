@@ -19,7 +19,7 @@ test("application forwards explicit YOLO, reports it, and cannot change it throu
 	initPlanDir(directory);
 	fs.writeFileSync(path.join(directory, "README.md"), "# Plans\n\n## Execution order & status\n\n| Plan | Title | Priority | Effort | Depends on | Status |\n|---|---|---|---|---|---|\n| [001](001-value.md) | Value | P1 | S | — | TODO |\n\n## Dependency notes\n\nNone.\n\n## Considered and rejected\n\nNone.\n");
 	fs.writeFileSync(path.join(directory, "001-value.md"), fixturePlan({ head: originalHead }));
-	const args = { repositoryRoot: repo, planDirectory: directory, profile: "eclipse", maxParallel: 1 };
+	const args = { repositoryRoot: repo, planDirectory: directory, profile: "epic", maxParallel: 1 };
 	try {
 		const { reply } = await invokeHerderTool("herder_run", { ...args, operation: "fire", yolo: true }) as { reply: ManagerReply };
 		assert.equal(reply.yolo, true);

@@ -34,7 +34,7 @@ function seedRun(database: NonNullable<ReturnType<typeof openExecutionDatabase>>
 			run_id, repository_root, plan_directory, plan_name, host, profile_name, profile_sha256,
 			max_parallel, current_generation, graph_sha256, status, checkout_state_token, base_commit,
 			integration_branch, integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
-		) VALUES (?, '/repo', '/repo/herder-plans', 'herder-plans', 'pi', 'eclipse', ?, 2, 1, ?, 'running', 'checkout-token', ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, '/repo', '/repo/herder-plans', 'herder-plans', 'pi', 'epic', ?, 2, 1, ?, 'running', 'checkout-token', ?, ?, ?, ?, ?, ?, ?)
 	`).run(
 		runId,
 		PROFILE_SHA256,
@@ -247,7 +247,7 @@ test("manager projection preserves populated manager domains", () => {
 			runId: RUN_ID,
 			planName: "herder-plans",
 			host: "pi",
-			profile: "eclipse",
+			profile: "epic",
 			profileSha256: PROFILE_SHA256,
 			maxParallel: 2,
 			currentGeneration: 1,

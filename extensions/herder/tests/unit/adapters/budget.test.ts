@@ -27,7 +27,7 @@ test("host budget grant requires UI, exact confirmation, freshness and durable a
 	fs.writeFileSync(path.join(directory, "001-value.md"), fixturePlan({ id: "001", title: "Value" }));
 	const manager = new HerderRunManager(directory);
 	try {
-		await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "eclipse", maxParallel: 1 });
+		await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "epic", maxParallel: 1 });
 		const run = manager.store.getRun()!;
 		const original = manager.store.getBudget(run.runId)!;
 		await assert.rejects(grantUserBudget(directory, { amount: 4 }, { hasUI: false, ui: {} as never }, () => {}), /interactive/);

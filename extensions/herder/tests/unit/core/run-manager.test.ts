@@ -178,7 +178,7 @@ async function prepareSinglePlan(
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 1,
 		dashboardUrl: service.dashboardUrl,
 	})).reply);
@@ -307,7 +307,7 @@ function judgeDoneEnvelope(leak: string): string {
 
 async function reachAtomicJudge(service: Awaited<ReturnType<typeof ensureService>>, fixture: { repo: string; planDirectory: string }, prefix: string): Promise<Record<string, unknown>> {
 	const started = payload(payload(await requestManagerOperation(service, "start", {
-		mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+		mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 	})).reply);
 	let implementer = payload((started.actions as unknown[])[0]);
 	for (let round = 1; round <= 1; round += 1) {
@@ -407,7 +407,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 			mode: "fire",
 			repositoryRoot: doneFixture.repo,
 			planDirectory: doneFixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.notEqual(started.status, "idle");
 		const store = new RunStore(doneFixture.planDirectory);
@@ -421,7 +421,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 			mode: "fire",
 			repositoryRoot: doneFixture.repo,
 			planDirectory: doneFixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		}), /already exists; use resume/);
 	} finally {
 		await stopService(doneFixture.planDirectory).catch(() => {});
@@ -441,7 +441,7 @@ test("fresh runs compile authored DONE as skip and still reject IN PROGRESS", { 
 			mode: "fire",
 			repositoryRoot: progressFixture.repo,
 			planDirectory: progressFixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		}), /cannot adopt prior execution state: 001=IN PROGRESS/);
 	} finally {
 		await stopService(progressFixture.planDirectory).catch(() => {});
@@ -460,7 +460,7 @@ test("non-terminal reconcile leaves authored README status unchanged", { timeout
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		assert.equal(started.status, "running");
@@ -483,7 +483,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		assert.match(fs.readFileSync(readme, "utf8"), /\| TODO \|/);
@@ -499,7 +499,7 @@ test("terminal stop snapshots live status and a projection throw leaves the run 
 				mode: "fire",
 				repositoryRoot: throwFixture.repo,
 				planDirectory: throwFixture.planDirectory,
-				profile: "eclipse",
+				profile: "epic",
 				maxParallel: 1,
 			});
 			fs.writeFileSync(path.join(throwFixture.planDirectory, "README.md"), "# not a plan index\n");
@@ -532,7 +532,7 @@ test("malformed clean worker envelopes require protocol correction without retry
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 			dashboardUrl: service.dashboardUrl,
 		})).reply);
@@ -563,7 +563,7 @@ test("malformed clean worker envelopes require protocol correction without retry
 			assert.equal(store.getAttentionRequests(run.runId, { unresolvedOnly: true }).filter((candidate) => candidate.cause === "worker_protocol_error").length, 1);
 		} finally { store.close(); }
 		const resumed = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		assert.equal(resumed.status, "needs_input");
 		assert.equal(payload(resumed.attention).requestId, attention.requestId);
@@ -583,7 +583,7 @@ test("manager events reject mixed payloads before replay or mutation", { timeout
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		const runId = String(started.runId);
@@ -652,7 +652,7 @@ test("mixed manager events fail for recorded and interrupted operations", { time
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		const runId = String(started.runId);
@@ -729,7 +729,7 @@ test("manager events retain unknown keys and multi-result dispatch behavior", { 
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 2,
 		})).reply);
 		const actions = (started.actions as unknown[]).map(payload);
@@ -772,7 +772,7 @@ test("dispatch batches preflight before any state or journal mutation", { timeou
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		const action = payload((started.actions as unknown[])[0]);
 		const event = {
@@ -814,7 +814,7 @@ test("terminal batches preflight before terminal, usage, and journal writes", { 
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		const action = payload((started.actions as unknown[])[0]);
 		await requestManagerOperation(service, "event", {
@@ -874,7 +874,7 @@ test("successful terminal batches commit every result and one journal entry", { 
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 2,
 		})).reply);
 		const actions = (started.actions as unknown[]).map(payload);
 		assert.equal(actions.length, 2);
@@ -925,7 +925,7 @@ test("exact dispatch replay preserves capacity suppression and rejects changed p
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 2,
 		})).reply);
 		const actions = (started.actions as unknown[]).map(payload);
 		const event = {
@@ -1074,7 +1074,7 @@ test(`Reignite persistence failure recovers as skipped through ${recovery} after
 			}
 			const recovered = recovery === "refresh" ? manager.refreshReply()
 				: recovery === "replay" ? await manager.event(event)
-				: await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse" });
+				: await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic" });
 			assert.equal(recovered.status, "complete");
 			assert.equal(recovered.actions.length, 0);
 			const dossier = store.getReigniteRequest(run.runId, run.currentGeneration)!;
@@ -1085,7 +1085,7 @@ test(`Reignite persistence failure recovers as skipped through ${recovery} after
 			assert.equal(recovered.reigniteRequest, undefined);
 			manager.refreshReply();
 			await manager.event(event);
-			await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse" });
+			await manager.resume({ mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic" });
 			assert.deepEqual(store.getReigniteRequest(run.runId, run.currentGeneration), dossier);
 			assert.equal(usageCount(store), usageBefore + 1);
 			assert.ok(store.readEvent(event.eventId));
@@ -1206,7 +1206,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 2,
 			dashboardUrl: "http://127.0.0.1:1/",
 		}));
@@ -1338,7 +1338,7 @@ test("persistent service drives a complete deterministic run and reuses its proc
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		}));
 		assert.equal(payload(resumed.reply).status, "complete");
 	} finally {
@@ -1526,7 +1526,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "paused");
 		const replacementRequest = payload(resumed.verificationRequest);
@@ -1650,7 +1650,7 @@ test("persisted FINAL_APPROVED completion fails closed without matching exact-tr
 					mode: "resume",
 					repositoryRoot: fixture.repo,
 					planDirectory: fixture.planDirectory,
-					profile: "eclipse",
+					profile: "epic",
 				})).reply);
 				const state = readManagerState(fixture.planDirectory);
 				const storedPlan = state.plans.find((plan) => plan.planId === "RUN");
@@ -1713,7 +1713,7 @@ test("final Judge retains Reviewer blockers across resume and restart without su
 				assertPaused(payload(payload(await requestService(service, "/v1/status")).reply));
 			}
 			assertPaused(payload(payload(await requestManagerOperation(service, "start", {
-				mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse",
+				mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic",
 			})).reply));
 			const store = new RunStore(fixture.planDirectory);
 			try {
@@ -1784,7 +1784,7 @@ test("complete pending reignite resume re-exposes the dossier after plan-graph d
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "complete");
 		assert.equal((resumed.actions as unknown[]).length, 0);
@@ -1867,7 +1867,7 @@ test("final Reviewer approve with no findings persists a skipped reignite dossie
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "complete");
 		assert.equal(resumed.reigniteRequest, undefined);
@@ -2023,7 +2023,7 @@ test("pending reignite allocation is stable and skips an existing README", { tim
 			mode: "resume",
 			repositoryRoot: occupied.repo,
 			planDirectory: occupied.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "complete");
 		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, resolvedRepoPath(occupied.repo, "herder-reignite-2"));
@@ -2210,7 +2210,7 @@ test("reignite failed ack and invalid writes leave the source complete and pendi
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "complete");
 		assert.equal(payload(resumed.reigniteRequest).requestId, reignite.requestId);
@@ -2302,7 +2302,7 @@ test("reconcile refreshes graph drift after scheduling before publication", { ti
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		assert.equal(started.status, "paused");
@@ -2323,7 +2323,7 @@ test("reply is pure until an explicit refresh handles graph drift", { timeout: 2
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		});
 		await stopService(fixture.planDirectory);
 		appendIndependentPlan(fixture);
@@ -2397,7 +2397,7 @@ test("complete pending reignite allocation refreshes at startup and resume bound
 		finally { store.close(); }
 		fs.rmSync(allocated, { recursive: true, force: true });
 		const resumed = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse",
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic",
 		})).reply);
 		assert.equal(resumed.status, "complete");
 		assert.equal(payload(resumed.reigniteRequest).allocatedPlanDirectory, allocated);
@@ -2461,7 +2461,7 @@ test("startup and exact event replay publish graph drift without waiting for the
 	try {
 		let service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		const action = payload((started.actions as unknown[])[0]);
 		const event = {
@@ -2558,7 +2558,7 @@ test("changed-tree verification resume rejects replacement", { timeout: 30_000 }
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		}), /Cannot retry verification because the frozen integration tree changed/);
 		const state = readManagerState(fixture.planDirectory);
 		assert.equal(state.run?.status, "failed");
@@ -2589,7 +2589,7 @@ test("one manager fills the role-agnostic worker pool across independent plans",
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 2,
 			dashboardUrl: service.dashboardUrl,
 		}));
@@ -2715,7 +2715,7 @@ test("stop preserves evidence without creating attention", { timeout: 10_000 }, 
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		});
 		const stopped = payload(await requestManagerOperation(service, "stop", {}));
 		const reply = payload(stopped.reply);
@@ -2740,7 +2740,7 @@ test("pending initial recovery attention does not block unrelated scheduling", {
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		assert.equal(started.status, "running");
 		const attention = payload(started.attention);
@@ -2770,7 +2770,7 @@ test("daemon audit detects and repairs a non-work-conserving scheduler state", {
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 2, dashboardUrl: service.dashboardUrl,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 2, dashboardUrl: service.dashboardUrl,
 		})).reply);
 		const actions = (started.actions as unknown[]).map(payload);
 		assert.equal(actions.length, 2);
@@ -2811,7 +2811,7 @@ test("stable scheduler audits suppress replies while graph drift remains publish
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		assert.equal((started.actions as unknown[]).length, 1);
 		await stopService(fixture.planDirectory);
@@ -2839,7 +2839,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		let reply = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		const implementer = payload((reply.actions as unknown[])[0]);
 		await requestManagerOperation(service, "event", {
@@ -2869,7 +2869,7 @@ test("integration requires an atomic exact approval proof", { timeout: 20_000 },
 		assert.equal(store.getApproval(run.runId, "001", plan.generation), null);
 		store.close();
 		await assert.rejects(() => requestManagerOperation(service, "start", {
-			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		}), /no durable approval proof/);
 		assert.equal(git(fixture.repo, ["show-ref", "--verify", "--quiet", "refs/plan-herder/herder-plans/completed/001"], true).status, 1);
 	} finally {
@@ -2885,7 +2885,7 @@ test("active Grill public begin rejects started and unstarted plans without a ho
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		});
 		for (const planId of ["001", "002"]) await assert.rejects(() => requestManagerOperation(service, "edit", { operation: "begin", planId }), /user-invoked.*herder-revise/);
 		const store = new RunStore(fixture.planDirectory);
@@ -2905,7 +2905,7 @@ test("active Grill confirm and finish cannot adopt or disturb an active worker w
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const started = payload(payload(await requestManagerOperation(service, "start", {
-			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		})).reply);
 		const implementer = payload((started.actions as unknown[])[0]);
 		assert.equal(implementer.planId, "001");
@@ -2955,10 +2955,10 @@ test("raw plan graph adoption refuses additions while preserving exact completed
 
 		appendIndependentPlan(fixture);
 		await assert.rejects(() => requestManagerOperation(service, "start", {
-			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "resume", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		}), /Use revise instead of resume/);
 		await assert.rejects(requestManagerOperation(service, "start", {
-			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "eclipse", maxParallel: 1,
+			mode: "revise", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory, profile: "epic", maxParallel: 1,
 		}), /Raw graph adoption is not authorized/);
 		const store = new RunStore(fixture.planDirectory);
 		try {
@@ -3223,7 +3223,7 @@ test("non-initial repair cannot recapture namespace evidence", { timeout: 60_000
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		assert.equal(resumed.status, "failed");
@@ -3868,7 +3868,7 @@ test("awaiting repair successor resumes the persisted manifest", { timeout: 60_0
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		assert.equal(fs.readFileSync(orderLog, "utf8"), "first\nsecond\n");
@@ -3890,7 +3890,7 @@ test("awaiting repair successor resumes the persisted manifest", { timeout: 60_0
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		assert.equal(fs.readFileSync(orderLog, "utf8"), "first\nsecond\n");
@@ -4092,7 +4092,7 @@ test("awaiting repair successor rejects a replacement manifest", { timeout: 60_0
 				mode: "resume",
 				repositoryRoot: fixture.repo,
 				planDirectory: fixture.planDirectory,
-				profile: "eclipse",
+				profile: "epic",
 				maxParallel: 1,
 			}),
 			/persisted hash/,
@@ -4631,7 +4631,7 @@ test("replacement failure cannot recapture namespace evidence from prior repair"
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		assert.equal(resumed.status, "paused");

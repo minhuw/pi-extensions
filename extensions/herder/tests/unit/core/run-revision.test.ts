@@ -77,7 +77,7 @@ function completeFixturePlan(value: ReturnType<typeof fixture>, store: RunStore,
 async function begin(value: ReturnType<typeof fixture>, conflict = false, restack = false, completeDownstream = false, duplicate = false) {
 	const manager = new HerderRunManager(value.directory);
 	try {
-		const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+		const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 		const store = new RunStore(value.directory);
 		let worktree: string;
 		try {
@@ -142,7 +142,7 @@ test("whole-run revision replaces integrated upstream and blocked downstream on 
 		const store = new RunStore(value.directory, { readOnly: true });
 		try {
 			assert.equal(store.getRun()?.baseCommit, value.originalHead);
-			assert.equal(store.getRun()?.profileName, "eclipse");
+			assert.equal(store.getRun()?.profileName, "epic");
 			assert.equal(store.getRun()?.maxParallel, 2);
 			assert.deepEqual(store.getPlanSpecs(record.run.runId).map(spec => [spec.planId, spec.initialStatus, spec.dependencies]), [["001", "TODO", []], ["002", "TODO", []]]);
 			assert.equal(store.getAttention(request.requestId)?.state, "resolved");
@@ -329,7 +329,7 @@ for (const point of ["after_restarting", "after_restart"]) {
 			await assert.rejects(finishRunRevision(value.directory, record.editToken), /Markdown changed after host confirmation/);
 			const manager = new HerderRunManager(value.directory);
 			try {
-				await assert.rejects(manager.start({ mode: point === "after_restart" ? "resume" : "fire", repositoryRoot: record.run.repositoryRoot, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 }), /Markdown changed after host confirmation|Finish the whole-run revision/);
+				await assert.rejects(manager.start({ mode: point === "after_restart" ? "resume" : "fire", repositoryRoot: record.run.repositoryRoot, planDirectory: value.directory, profile: "epic", maxParallel: 2 }), /Markdown changed after host confirmation|Finish the whole-run revision/);
 				const run = manager.store.getRun();
 				if (point === "after_restarting") assert.equal(run?.currentGeneration, 1, "original generation remains until adoption");
 				if (run) assert.equal(manager.store.countActions(run.runId, { generation: 2 }), 0, "no skipped or partial execution may start");
@@ -394,7 +394,7 @@ test("ordinary reset requeues TODO-origin completion retained from an earlier se
 		let approval;
 		let ref;
 		try {
-			const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 			assert.deepEqual(reply.actions.map(action => [action.planId, action.role]), [["001", "plan-implementer"]]);
 			const store = new RunStore(value.directory);
 			try {
@@ -437,7 +437,7 @@ test("ordinary reset requeues TODO-origin completion retained from an earlier se
 		assert.deepEqual(buildGraph(value.directory).plans.map(plan => [plan.id, plan.status, plan.statusDetail]), [["001", "TODO", ""], ["002", "TODO", ""]]);
 		const fresh = new HerderRunManager(value.directory);
 		try {
-			const reply = await fresh.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			const reply = await fresh.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 			assert.notEqual(reply.runId, record.run.runId);
 			assert.deepEqual(reply.actions.map(action => [action.planId, action.role]), [["001", "plan-implementer"]], "discarded prerequisite must run before its dependent");
 			assert.equal(fs.readFileSync(path.join(reply.actions[0]!.worktree, "src/value.mjs"), "utf8"), "export const value = 1;\n");
@@ -716,7 +716,7 @@ test("user scope command can open a draft after a run-level stop without worker 
 	try {
 		const manager = new HerderRunManager(value.directory);
 		try {
-			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 			for (const request of manager.store.getAttentionRequests(manager.store.getRun()!.runId)) manager.store.resolveAttention(request.requestId);
 			manager.store.updateRun({ status: "paused", terminalDetail: "Final audit stopped" });
 		} finally { manager.close(); }
@@ -894,7 +894,7 @@ test("independent amendment preserves blocked runtime, dirty/unreviewed work, op
 		const manager = new HerderRunManager(value.directory);
 		let record, savedPlan, request: ManagerAttentionRequest, budget: ReturnType<RunStore["getBudget"]>, ledger: unknown;
 		try {
-			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 			const run = manager.store.getRun()!;
 			completeFixturePlan(value, manager.store, "001", "src/value.mjs", "export const value = 2;\n");
 			savedPlan = unfinishedPlan(value, run);
@@ -1055,7 +1055,7 @@ for (const stage of ["draft", "prepared", "confirmed", "legacy", "after_publicat
 			const manager = new HerderRunManager(value.directory);
 			try {
 				assert.equal(manager.store.getRun(), null);
-				const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "eclipse", maxParallel: 2 });
+				const reply = await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 				assert.notEqual(reply.runId, record.run.runId);
 				assert.ok(reply.actions.length > 0);
 			} finally { manager.close(); }

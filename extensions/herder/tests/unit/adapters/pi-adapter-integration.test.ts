@@ -134,8 +134,8 @@ function contextFor(fixture: Fixture, ui: CapturedUI): ExtensionContext {
 		cwd: fixture.repo,
 		sessionManager,
 		modelRegistry,
-		model: availableModels[0],
-		thinkingLevel: "xhigh",
+		model: availableModels.find((model) => model.id === "gpt-6-astra")!,
+		thinkingLevel: "high",
 		scopedModels: [],
 		isIdle: () => true,
 		isProjectTrusted: () => true,
@@ -407,7 +407,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.equal(factory.boundRegistries.length, 1);
 
 		await withDeadline(
-			api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context),
+			api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context),
 			"/herder-fire dispatch",
 		);
 		const implementer = await withDeadline(
@@ -432,7 +432,7 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		assert.equal(ui.notifications.some((notification) => notification.level === "error"), false);
 		assert.ok(api.execCalls.some((call) => call.command === "git" && call.args.includes("rev-parse")));
 		const stateEntries = api.appendedEntries.filter((entry) => entry.customType === HERDER_STATE_ENTRY).map((entry) => object(entry.data));
-		assert.ok(stateEntries.some((state) => state.status === "running" && state.profile === "eclipse" && state.maxParallel === 1));
+		assert.ok(stateEntries.some((state) => state.status === "running" && state.profile === "epic" && state.maxParallel === 1));
 		assert.ok(stateEntries.every((state) => !Object.hasOwn(state, "asyncDir") && !Object.hasOwn(state, "dashboardEnabled")));
 
 		implementer.release();
@@ -556,8 +556,8 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 		const manifest = durableVerification.manifest;
 		assert.ok(manifest);
 		assert.deepEqual(manifest.selector, {
-			model: "fake/gpt-6-sol",
-			thinkingLevel: "xhigh",
+			model: "fake/gpt-6-astra",
+			thinkingLevel: "high",
 			sessionId: "main-session-011",
 		});
 		assert.deepEqual(manifest.gates, [{
@@ -625,7 +625,7 @@ test("request-bound integration repair edits only after begin and automatically 
 		const ui = new CapturedUI();
 		context = contextFor(fixture, ui);
 		await withDeadline(api.invoke("session_start", context), "repair session_start");
-		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "repair fire");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context), "repair fire");
 		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "repair implementer");
 		await withDeadline(implementer.started.promise, "repair implementer start");
 		implementer.release();
@@ -717,7 +717,7 @@ test("failed repaired verification replays through manager deduplication", { tim
 		const ui = new CapturedUI();
 		context = contextFor(fixture, ui);
 		await withDeadline(api.invoke("session_start", context), "repair replay session_start");
-		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "repair replay fire");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context), "repair replay fire");
 		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "repair replay implementer");
 		await withDeadline(implementer.started.promise, "repair replay implementer start");
 		implementer.release();
@@ -806,7 +806,7 @@ async function fireThroughPassingVerification(
 	context: ExtensionContext,
 ): Promise<ControlledSession> {
 	await withDeadline(
-		api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context),
+		api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context),
 		"/herder-fire dispatch",
 	);
 	const implementer = await withDeadline(
@@ -1088,7 +1088,7 @@ test("adapter forwards host review budget exhaustion unchanged instead of accept
 		const ui = new CapturedUI();
 		context = contextFor(fixture, ui);
 		await withDeadline(api.invoke("session_start", context), "budget session start");
-		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "budget fire");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context), "budget fire");
 		const implementer = await withDeadline(factory.waitForSession((session) => session.action.role === "plan-implementer"), "budget implementer");
 		await withDeadline(implementer.started.promise, "budget implementer started");
 		assert.equal(implementer.promptText, implementer.action.prompt);
@@ -1159,7 +1159,7 @@ RATIONALE: The unresolved requirement needs an explicit user decision.`;
 		const ui = new CapturedUI();
 		context = contextFor(fixture, ui);
 		await withDeadline(api.invoke("session_start", context), "accept session start");
-		await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", context), "accept fire");
+		await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", context), "accept fire");
 		const implementer = await withDeadline(factory.waitForSession(session => session.action.role === "plan-implementer"), "accept implementer");
 		await withDeadline(implementer.started.promise, "accept implementer start");
 		implementer.release();

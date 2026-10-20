@@ -55,7 +55,7 @@ test("Pi profile catalogs normalize singleton service tiers", () => {
 		modified.profiles[0].orchestrator.service_tier = ["fast"];
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		assert.equal(resolvePiProfile("eclipse", fixture).orchestrator.service_tier, "fast");
+		assert.equal(resolvePiProfile("poorman", fixture).orchestrator.service_tier, "fast");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -68,7 +68,7 @@ test("Pi profile catalogs reject unsupported effort values", () => {
 		modified.profiles[0].orchestrator.effort = "bogus";
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		assert.throws(() => resolvePiProfile("eclipse", fixture), /invalid effort/);
+		assert.throws(() => resolvePiProfile("poorman", fixture), /invalid effort/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -112,7 +112,7 @@ test("model checks accept provider-qualified catalog entries without substitutio
 
 test("model availability includes optional rescue and Searcher bindings", () => {
 	const profile = resolvePiProfile("universe", catalog);
-	const available = ["gpt-6-astra", "gpt-6-sol", "deepseek/deepseek-flash"].map((id) => ({ provider: "proxy", id }));
+	const available = ["gpt-6-astra", "gpt-6.1-sol", "deepseek/deepseek-flash"].map((id) => ({ provider: "proxy", id }));
 	assert.deepEqual(unavailableProfileModels(profile, available), []);
 	assert.equal(activeModelMatches(profile, available[0]), true);
 	const custom = {
@@ -133,7 +133,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		const missingFixture = path.join(root, "missing.json");
 		writeFileSync(missingFixture, JSON.stringify(missing));
 		assert.throws(
-			() => resolvePiProfile("eclipse", missingFixture),
+			() => resolvePiProfile("poorman", missingFixture),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
 
@@ -142,7 +142,7 @@ test("Pi profile catalogs require exactly the canonical worker roles", async () 
 		const extraFixture = path.join(root, "extra.json");
 		writeFileSync(extraFixture, JSON.stringify(extra));
 		assert.throws(
-			() => resolvePiProfile("eclipse", extraFixture),
+			() => resolvePiProfile("poorman", extraFixture),
 			/must define exactly plan-implementer, plan-reviewer, plan-judge/,
 		);
 	} finally {
@@ -157,7 +157,7 @@ test("Pi profile catalogs reject host-specific compatibility fields", async () =
 		modified.profiles[0].hosts = ["codex"];
 		const fixture = path.join(root, "profiles.json");
 		writeFileSync(fixture, JSON.stringify(modified));
-		assert.throws(() => resolvePiProfile("eclipse", fixture), /unknown fields: hosts/);
+		assert.throws(() => resolvePiProfile("poorman", fixture), /unknown fields: hosts/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

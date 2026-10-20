@@ -195,7 +195,7 @@ async function reachPreservedConflict(fixture: Fixture, prefix: string): Promise
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 2,
 		dashboardUrl: service.dashboardUrl,
 	});
@@ -333,7 +333,7 @@ async function reachDispatchAction(fixture: Fixture, prefix: string): Promise<Di
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 1,
 		dashboardUrl: service.dashboardUrl,
 	});
@@ -382,7 +382,7 @@ test("retryable dispatch rejection resets the plan and resumes scheduling", { ti
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		});
 		assert.equal(resumed.status, "running");
 		const replacement = findAction(resumed, "001", "plan-implementer");
@@ -447,7 +447,7 @@ test("dispatch rejection survives release failure and preserves a re-owned lease
 				mode: "resume",
 				repositoryRoot: fixture.repo,
 				planDirectory: fixture.planDirectory,
-				profile: "eclipse",
+				profile: "epic",
 			});
 			assert.equal(resumed.status, "running");
 			assert.equal(internals.terminalSideEffectsDirty, false);
@@ -502,7 +502,7 @@ test("preserved integration conflict retries and completes guided rebase recover
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		});
 		assert.equal(resumed.status, "running");
 		const replacement = findAction(resumed, "002", "plan-implementer");
@@ -584,7 +584,7 @@ test("altered preserved rebase is rejected before replacement dispatch", { timeo
 			mode: "resume",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 		}), /Active rebase state changed|active rebase state mismatch/);
 		const after = readPlanState(fixture, "002");
 		assert.deepEqual(after.plan.rebase, beforeCapacity.plan.rebase, "tampering cannot replace the sealed evidence");

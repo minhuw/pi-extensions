@@ -121,7 +121,7 @@ test("restart backfills terminal usage without duplicating the attempt", { timeo
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		const action = object((started.actions as unknown[])[0]);
@@ -165,7 +165,7 @@ test("restart backfills terminal usage without duplicating the attempt", { timeo
 			mode: "resume",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		assert.equal(resumed.status, "running");
@@ -203,7 +203,7 @@ test("plan recovery freezes the entire execution and rejects ungranted decisions
 	let service: Service | undefined;
 	try {
 		service = await ensureService(value.planDirectory);
-		const started = await managerReply(service, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 2 });
+		const started = await managerReply(service, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "epic", maxParallel: 2 });
 		const attention = object(started.attention);
 		assert.equal(attention.planId, "001");
 		const original = (started.actions as unknown[]).map(object);
@@ -235,7 +235,7 @@ test("plan recovery freezes the entire execution and rejects ungranted decisions
 		const replay = await managerReply(service, "event", { eventId: "open-whole-run", kind: "attention", attention: resolution });
 		assert.deepEqual(replay.runRevision, opened.runRevision);
 		assert.deepEqual(replay.actions, []);
-		await assert.rejects(managerReply(service, "start", { mode: "resume", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "eclipse", maxParallel: 2 }), /unchanged resume/);
+		await assert.rejects(managerReply(service, "start", { mode: "resume", repositoryRoot: value.repo, planDirectory: value.planDirectory, profile: "epic", maxParallel: 2 }), /unchanged resume/);
 		await assert.rejects(managerReply(service, "event", { eventId: "stale-dispatch", kind: "dispatch_results", dispatchResults: [{ actionId: original[0]!.actionId, accepted: true, hostHandle: "pi-worker:stale" }] }), /barrier forbids new worker dispatch/);
 	} finally {
 		if (service) await stopService(value.planDirectory).catch(() => {});
@@ -254,7 +254,7 @@ test("recovery resolution rejects a mismatched capability or Git identity before
 			mode: "fire",
 			repositoryRoot: fixtureValue.repo,
 			planDirectory: fixtureValue.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		});
 		const attention = object(started.attention);

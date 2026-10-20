@@ -202,7 +202,7 @@ None.
 		planDirectory: fs.realpathSync(planDir),
 		planName,
 		host: "pi",
-		profileName: "eclipse",
+		profileName: "epic",
 		profileSha256: "c".repeat(64),
 		maxParallel: 1,
 		currentGeneration: 1,

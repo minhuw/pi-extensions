@@ -223,7 +223,7 @@ function writeOverlay(
     planDirectory: fs.realpathSync(fixture.planDir),
     planName: "plans",
     host: "pi",
-    profileName: "eclipse",
+    profileName: "epic",
     profileSha256: "c".repeat(64),
     maxParallel: 1,
     currentGeneration: 1,

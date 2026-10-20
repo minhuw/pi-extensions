@@ -140,7 +140,7 @@ async function startRun(service: Service, value: Fixture, maxParallel = 2): Prom
 		mode: "fire",
 		repositoryRoot: value.repo,
 		planDirectory: value.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel,
 	});
 }

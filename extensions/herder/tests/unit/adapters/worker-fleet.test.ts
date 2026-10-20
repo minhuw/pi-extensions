@@ -57,7 +57,7 @@ function worker(overrides: Partial<PiWorkerSnapshot> = {}): PiWorkerSnapshot {
 function model(workers: PiWorkerSnapshot[]): HerderWidgetModel {
 	return {
 		status: "running",
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 5,
 		planName: "herder-plans",
 		summaryLine: "1/3 done · 2 in progress · 0 rejected",
@@ -81,7 +81,7 @@ test("Pi worker fleet flattens Plan and Role and renders direct child stats on o
 		}),
 	]), theme, 160, 66_000, 0);
 
-	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
+	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  epic ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected");
 	assert.match(lines[1]!, /^├─ Plan 018 · ⠋ Reviewer · gpt-6-sol · xhigh · fast  running command…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
 	assert.match(lines[2]!, /^│ {13}└─ ⠋ Recon · gpt-6-sol · xhigh · fast  reading…\s+↻1 · 2 tools · 2\.5k \(34% · ⇊1\) · 1m 00s$/);
 	assert.match(lines[3]!, /^└─ Plan 019 · ⠋ Implementer · gpt-6-sol · xhigh · fast  editing…\s+r2 · ↻2 · 3 tools · 12\.4k \(72% · ⇊2\) · 1m 05s$/);
@@ -292,7 +292,7 @@ test("live widget registers once and requests lightweight rerenders", () => {
 test("header shows the total run elapsed time to the right of progress", () => {
 	const current = { ...model([]), startedAt: 1_000 };
 	const lines = workerFleetTreeLines(current, theme, 200, 66_250);
-	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  eclipse ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected ·  Elapsed 1m 05s");
+	assert.equal(lines[0], " Herder  RUNNING ·  Dashboard http://127.0.0.1:4312/ ·  epic ·  max 5 ·  herder-plans ·  Progress 1/3 done · 2 in progress · 0 rejected ·  Elapsed 1m 05s");
 	const later = workerFleetTreeLines(current, theme, 200, 3_667_250);
 	assert.match(later[0]!, / ·  Elapsed 1h 01m 06s$/);
 	const withoutStart = workerFleetTreeLines(model([]), theme, 200, 66_250);

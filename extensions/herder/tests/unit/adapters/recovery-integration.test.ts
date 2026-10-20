@@ -188,7 +188,7 @@ function restoredContext(fixture: Fixture, runId: string, warnings: Warning[]): 
 		runId,
 		repoRoot: fixture.repo,
 		planDir: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 1,
 		dashboardEnabled: true,
 		startedAt: Date.now(),
@@ -233,8 +233,8 @@ function freshContext(fixture: Fixture, notifications: Warning[]): ExtensionCont
 		cwd: fixture.repo,
 		sessionManager: { getEntries: () => [] },
 		modelRegistry: { getAvailable: () => [...availableModels] } as unknown as ModelRegistry,
-		model: availableModels[0],
-		thinkingLevel: "xhigh",
+		model: availableModels.find((model) => model.id === "gpt-6-astra")!,
+		thinkingLevel: "high",
 		scopedModels: [],
 		isIdle: () => true,
 		isProjectTrusted: () => true,
@@ -279,7 +279,7 @@ async function startFixture(fixture: Fixture, hostHandle: string) {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 1,
 		dashboardUrl: service.dashboardUrl,
 	});
@@ -305,7 +305,7 @@ async function pauseFixture(fixture: Fixture) {
 		mode: "fire",
 		repositoryRoot: fixture.repo,
 		planDirectory: fixture.planDirectory,
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 1,
 		dashboardUrl: service.dashboardUrl,
 	});
@@ -339,7 +339,7 @@ test("main-session attention diagnoses once and stays quiet on repeated status a
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		const attention = object(started.attention);
@@ -421,7 +421,7 @@ test("exhausted plan attention refuses acceptance even with a forged confirmatio
 		const service = await ensureService(fixture.planDirectory);
 		let reply = object((await requestManagerOperation(service, "start", {
 			mode: "fire", repositoryRoot: fixture.repo, planDirectory: fixture.planDirectory,
-			profile: "eclipse", maxParallel: 1,
+			profile: "epic", maxParallel: 1,
 		})).reply);
 		const complete = async (action: Record<string, unknown>, response: string) => {
 			const actionId = String(action.actionId);
@@ -520,7 +520,7 @@ test("foreign status observers cannot receive or resolve an owned attention requ
 			mode: "fire",
 			repositoryRoot: fixture.repo,
 			planDirectory: fixture.planDirectory,
-			profile: "eclipse",
+			profile: "epic",
 			maxParallel: 1,
 		})).reply);
 		const attention = object(started.attention);
@@ -663,7 +663,7 @@ test("fresh Pi session attaches, interrupts a stale worker, and dispatches its r
 			.filter((entry) => entry.customType === HERDER_STATE_ENTRY)
 			.map((entry) => object(entry.data));
 		assert.ok(states.some((state) => state.mode === "attach"
-			&& state.profile === "eclipse"
+			&& state.profile === "epic"
 			&& state.maxParallel === 1
 			&& state.repoRoot === fs.realpathSync(fixture!.repo)
 			&& state.runId === started.before.run!.runId));
@@ -738,7 +738,7 @@ test("Fire publishes startup ownership before another session can attach", { tim
 		registerHerderPiWithWorkerFactory(fireApi as unknown as ExtensionAPI, fireFactory);
 		fireContext = freshContext(fixture, []);
 		await withDeadline(fireApi.invoke("session_start", fireContext), "Fire ownership session_start");
-		const firing = fireApi.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", fireContext);
+		const firing = fireApi.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", fireContext);
 		await withDeadline(fireFactory.createEntered.promise, "Fire worker preparation");
 		const before = evidence(fixture);
 		assert.equal(before.run!.status, "running");
@@ -847,7 +847,7 @@ test("live Pi ownership blocks resume before a paused run changes manager eviden
 		const ctx = capturedContext = freshContext(fixture, notifications);
 
 		await withDeadline(api.invoke("session_start", ctx), "owned resume session_start");
-		await withDeadline(api.command("herder-resume").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "owned /herder-resume");
+		await withDeadline(api.command("herder-resume").handler("herder-plans --profile epic --max-parallel 1", ctx), "owned /herder-resume");
 		assert.equal(factory.requests.length, 0);
 		assert.ok(notifications.some((notification) => notification.level === "error" && /already owned by live Pi pid/.test(notification.message)));
 		const after = evidence(fixture);
@@ -1015,7 +1015,7 @@ for (const outcome of ["failed receipt", "lost accepted receipt"] as const) {
 				}
 				return originalFetch(input, init);
 			};
-			await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "dispatch transport");
+			await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx), "dispatch transport");
 			assert.equal(factory.sessions.length, 1, "receipt recovery must not create another worker");
 			const session = factory.sessions[0]!;
 			if (outcome === "failed receipt") {
@@ -1121,7 +1121,7 @@ test("actual planning tool preserves unrelated dirty unfinished work and attenti
 			confirm: async (_title: string, text: string) => { confirmations.push(text); return consent; },
 		} } as ExtensionContext;
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 2", ctx);
 		const message = await withDeadline(api.waitForAttentionMessage(), "whole-run attention delivery");
 		assert.match(message.content, /Only the user may invoke \/herder-revise/);
 		assert.deepEqual(message.options, { deliverAs: "followUp", triggerTurn: true });
@@ -1180,7 +1180,7 @@ async function reserveWholeRunFixture(value: Fixture) {
 	const ctx = { ...base, hasUI: true, ui: { ...base.ui, theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text }, confirm: async () => true } } as unknown as ExtensionContext;
 	try {
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		await api.command("herder-revise").handler("herder-plans", ctx);
 		assert.ok(readRunRevision(value.planDirectory), JSON.stringify(notifications));
 	} finally {
@@ -1415,7 +1415,7 @@ for (const phase of ["active worker", "admitted startup"] as const) {
 		} } as unknown as ExtensionContext;
 		try {
 			await api.invoke("session_start", ctx);
-			const firing = api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			const firing = api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 			if (factory instanceof GatedPrepareWorkerFactory) await withDeadline(factory.createEntered.promise, "startup admitted");
 			else await withDeadline(firing, "Fire");
 			const lock = fs.readFileSync(adapterOwnershipLockPath(value.planDirectory), "utf8");
@@ -1441,7 +1441,7 @@ for (const phase of ["active worker", "admitted startup"] as const) {
 				factory.allowCreate.resolve();
 			} else {
 				await withDeadline(stopped.promise, "reset worker stop");
-				await api.command("herder-fire").handler("herder-plans --profile eclipse", ctx);
+				await api.command("herder-fire").handler("herder-plans --profile epic", ctx);
 				assert.ok(notifications.some(entry => /reset is in progress/.test(entry.message)));
 				allowStop.resolve();
 			}
@@ -1449,7 +1449,7 @@ for (const phase of ["active worker", "admitted startup"] as const) {
 			assert.ok(notifications.some(entry => /Herder reset executed/.test(entry.message)), JSON.stringify(notifications));
 			assert.ok(factory.sessions.every(session => session.disposed));
 			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
-			await withDeadline(api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx), "fresh Fire");
+			await withDeadline(api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx), "fresh Fire");
 			assert.ok(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)));
 		} finally {
 			if (factory instanceof GatedPrepareWorkerFactory) factory.allowCreate.resolve();
@@ -1514,7 +1514,7 @@ for (const resetFirst of [true, false]) {
 			} } as unknown as ExtensionContext;
 			try {
 				await api.invoke("session_start", ctx);
-				await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+				await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 				const original = ownershipEvidence(value);
 				assert.equal(original.record.resetCleanupRequired, undefined);
 				const runId = evidence(value).run!.runId;
@@ -1727,7 +1727,7 @@ test("shutdown marker persistence failure never aborts or disposes workers", { t
 	const fsync = fs.fsyncSync;
 	try {
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		const original = ownershipEvidence(value);
 		let attempted = false;
 		fs.fsyncSync = descriptor => {
@@ -1790,7 +1790,7 @@ for (const duringPreparation of [false, true]) {
 		} } } as unknown as ExtensionContext;
 		try {
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 2", ctx);
 			const original = ownershipEvidence(value);
 			if (!duringPreparation) {
 				assert.equal(original.record.resetCleanupRequired, undefined);
@@ -1863,7 +1863,7 @@ test("unsafe shutdown retains the original root output after drain without advan
 	let shutdown: Promise<void> | undefined;
 	try {
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		const session = factory.sessions[0]!;
 		await withDeadline(session.started, "pending root start");
 		const original = ownershipEvidence(value);
@@ -1979,7 +1979,7 @@ for (const action of ["herder-revise", "herder-stop"] as const) {
 			fs.writeFileSync(index, fs.readFileSync(index, "utf8").replace(row, `${row}\n| [002](002-active.md) | Active sibling | P1 | S | — | TODO |`));
 			fs.writeFileSync(path.join(value.planDirectory, "002-active.md"), fixturePlan({ id: "002", title: "Active sibling", writePaths: ["src/other.mjs"] }));
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 2", ctx);
 			const message = await withDeadline(api.waitForAttentionMessage(), "queued attention delivery");
 			assert.equal(factory.sessions.length, 1);
 			const session = factory.sessions[0]!;
@@ -2067,7 +2067,7 @@ for (const failure of ["marker persistence", "quarantine replacement", "abort", 
 		let exclusions = 0;
 		try {
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 			const original = ownershipEvidence(value);
 			const before = evidence(value);
 			const lock = fs.readFileSync(original.lockPath, "utf8");
@@ -2265,7 +2265,7 @@ for (const target of ["distinct", "same"] as const) {
 		let firing: Promise<unknown> | undefined;
 		try {
 			await api.invoke("session_start", ctx);
-			firing = api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			firing = api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 			await withDeadline(preflightEntered.promise, "pre-ownership Fire preflight");
 			assert.equal(fs.existsSync(adapterOwnershipLockPath(value.planDirectory)), false);
 			const bindings = factory.bindings;
@@ -2313,7 +2313,7 @@ test("owned Fire A terminal advances its real database while force B awaits shut
 	let cleaning: Promise<unknown> | undefined;
 	try {
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		await ensureService(other);
 		const serviceA = await ensureService(value.planDirectory);
 		const before = evidence(value);
@@ -2396,7 +2396,7 @@ for (const disposalFails of [false, true]) {
 		let exclusions = 0;
 		try {
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 			original = ownershipEvidence(value);
 			const before = evidence(value);
 			const service = await ensureService(value.planDirectory);
@@ -2532,11 +2532,11 @@ registerHerderPiWithWorkerFactory(api, {
 });
 const ctx = { cwd: value.repo, hasUI: true, ui,
 	sessionManager: { getEntries: () => [], getSessionId: () => "force-owner" },
-	modelRegistry: { getAvailable: () => [...availableModels] }, model: availableModels[0], thinkingLevel: "xhigh",
+	modelRegistry: { getAvailable: () => [...availableModels] }, model: availableModels.find((model) => model.id === "gpt-6-astra"), thinkingLevel: "high",
 	isProjectTrusted: () => true, isIdle: () => true,
 };
 await api.invoke("session_start", ctx);
-await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 const store = new RunStore(value.planDirectory);
 const run = store.getRun();
 const plan = store.getPlan(run.runId, "001");
@@ -2706,7 +2706,7 @@ for (const scenario of ["confirmation collision", "marker persistence", "distinc
 			PiWorkerEngine.prototype.onTerminal = onTerminal;
 			if (cleaner !== api) registerHerderPiWithWorkerFactory(cleaner as unknown as ExtensionAPI, new PendingWorkerFactory());
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 			const session = factory.sessions[0]!;
 			await withDeadline(session.started, "A8 active worker");
 			const original = ownershipEvidence(value);
@@ -2826,7 +2826,7 @@ test("force B settles an admitted A terminal HTTP 500 without attributing A's fa
 	let terminals = 0;
 	try {
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		await withDeadline(factory.sessions[0]!.started, "A worker start");
 		await ensureService(other);
 		const before = evidence(value);
@@ -2931,7 +2931,7 @@ for (const first of ["manager", "worker"] as const) {
 		let terminals = 0;
 		try {
 			await api.invoke("session_start", ctx);
-			await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 2", ctx);
+			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 2", ctx);
 			assert.equal(factory.sessions.length, 2);
 			await Promise.all(factory.sessions.map(session => session.started));
 			const original = ownershipEvidence(value);
@@ -3048,7 +3048,7 @@ test("actual reset command abandons a restored draft; late events and session re
 		await api.invoke("session_start", ctx); // Intentionally retain the old run hint.
 		assert.equal(readRunRevision(value.planDirectory), null);
 		assert.equal(await api.handlers.get("tool_call")!({ toolName: "write", input: { path: "src/value.mjs", content: "allowed" } }, ctx), undefined);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		assert.ok(factory.requests.length > 0, JSON.stringify(notifications));
 		assert.notEqual(evidence(value).run?.runId, record.run.runId);
 	} finally {
@@ -3123,7 +3123,7 @@ test("resume refuses live work; stop drains it before confirmed recovery", { tim
 	try {
 		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 		await api.invoke("session_start", ctx);
-		await api.command("herder-fire").handler("herder-plans --profile eclipse --max-parallel 1", ctx);
+		await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 1", ctx);
 		await factory.sessions[0]!.started;
 		const worktree = factory.requests[0]!.action.worktree;
 		const sentinel = path.join(worktree, "unfinished");

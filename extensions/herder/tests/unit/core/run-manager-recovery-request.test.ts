@@ -26,7 +26,7 @@ function insertRun(store: RunStore, planDirectory: string): void {
 			integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
 		) VALUES (?, ?, ?, ?, 'pi', ?, ?, 2, 1, ?, 'running', ?, ?, ?, ?, NULL, NULL, ?, ?)
 	`).run(
-		"run-1", planDirectory, planDirectory, "plans", "eclipse", "p".repeat(64), "g".repeat(64),
+		"run-1", planDirectory, planDirectory, "plans", "epic", "p".repeat(64), "g".repeat(64),
 		"checkout", "b".repeat(40), "herder/plans/integration", path.join(planDirectory, "integration"),
 		"2026-08-11T00:00:00.000Z", "2026-08-11T00:00:00.000Z",
 	);

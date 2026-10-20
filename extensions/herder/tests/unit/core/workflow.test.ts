@@ -132,7 +132,7 @@ function createRun(store: RunStore, planDir: string): string {
 		planDirectory: planDir,
 		planName: "herder-plans",
 		host: "pi",
-		profileName: "eclipse",
+		profileName: "epic",
 		profileSha256: "p".repeat(64),
 		maxParallel: 1,
 		currentGeneration: 1,

@@ -77,7 +77,7 @@ test("YOLO is a standalone fire-only flag and cannot change an existing run", ()
 test("attach accepts only a plan directory and dashboard port", () => {
 	assert.deepEqual(parseAttachArguments(""), { planDir: "herder-plans", dashboardPort: 0 });
 	assert.deepEqual(parseAttachArguments('"plans with spaces" --dashboard-port 4312'), { planDir: "plans with spaces", dashboardPort: 4312 });
-	assert.throws(() => parseAttachArguments("--profile eclipse"), /Unknown option: --profile/);
+	assert.throws(() => parseAttachArguments("--profile epic"), /Unknown option: --profile/);
 	assert.throws(() => parseAttachArguments("--max-parallel 2"), /Unknown option: --max-parallel/);
 	assert.throws(() => parseAttachArguments("--dashboard-port 65536"), /0 through 65535/);
 	assert.throws(() => parseAttachArguments("one two"), /Unexpected argument/);

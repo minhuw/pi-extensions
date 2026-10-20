@@ -15,7 +15,7 @@ function seedRun(database: NonNullable<ReturnType<typeof openExecutionDatabase>>
 			run_id, repository_root, plan_directory, plan_name, host, profile_name, profile_sha256,
 			max_parallel, current_generation, graph_sha256, status, checkout_state_token, base_commit,
 			integration_branch, integration_worktree, dashboard_url, terminal_detail, created_at, updated_at
-		) VALUES (?, '/repo', '/repo/herder-plans', 'herder-plans', 'pi', 'eclipse', ?, 1, 1, ?, 'failed', 'token', ?, 'herder/herder-plans/integration', '/repo/.herder-integration', NULL, NULL, ?, ?)
+		) VALUES (?, '/repo', '/repo/herder-plans', 'herder-plans', 'pi', 'epic', ?, 1, 1, ?, 'failed', 'token', ?, 'herder/herder-plans/integration', '/repo/.herder-integration', NULL, NULL, ?, ?)
 	`).run(runId, "a".repeat(64), "b".repeat(64), "c".repeat(40), now, now);
 }
 

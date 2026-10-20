@@ -30,7 +30,7 @@ test("session restoration accepts attach mode", () => {
 		runId: "run-attached",
 		repoRoot: "/tmp/repo",
 		planDir: "/tmp/repo/herder-plans",
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 3,
 		startedAt: 1,
 		updatedAt: 2,
@@ -46,7 +46,7 @@ test("historical state with legacy fields remains restorable", () => {
 		runId: "run-legacy",
 		repoRoot: "/tmp/repo",
 		planDir: "/tmp/repo/herder-plans",
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 2,
 		startedAt: 1,
 		updatedAt: 2,
@@ -64,7 +64,7 @@ test("state persistence ignores heartbeat-only timestamp changes", () => {
 		runId: "run-1",
 		repoRoot: "/tmp/repo",
 		planDir: "/tmp/repo/herder-plans",
-		profile: "eclipse",
+		profile: "epic",
 		maxParallel: 5,
 		startedAt: 1,
 		updatedAt: 2,
@@ -76,7 +76,7 @@ test("state persistence ignores heartbeat-only timestamp changes", () => {
 test("YOLO display hints restore without changing legacy normal-mode state", () => {
 	const state: HerderRunState = {
 		version: 1, mode: "attach", status: "paused", runId: "yolo-run",
-		repoRoot: "/tmp/repo", planDir: "/tmp/repo/herder-plans", profile: "eclipse",
+		repoRoot: "/tmp/repo", planDir: "/tmp/repo/herder-plans", profile: "epic",
 		maxParallel: 5, startedAt: 1, updatedAt: 2,
 	};
 	const entry = (data: unknown) => ({ type: "custom", customType: HERDER_STATE_ENTRY, data });

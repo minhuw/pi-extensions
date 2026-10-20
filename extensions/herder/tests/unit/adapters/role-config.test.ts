@@ -74,11 +74,11 @@ test("universe keeps DeepSeek on Recon and validates rescue and Searcher overrid
 	const models = [
 		...available,
 		{ provider: "proxy", id: "gpt-6-astra", api: "openai-completions", thinkingLevelMap: { medium: "medium", xhigh: "xhigh", max: null } },
-		{ provider: "proxy", id: "gpt-6-sol", thinkingLevelMap: { xhigh: "xhigh", max: null } },
+		{ provider: "proxy", id: "gpt-6.1-sol", thinkingLevelMap: { xhigh: "xhigh", max: null } },
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, models));
 	const parent = { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast", searcherBinding: profile.searcher };
-	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6-sol", effort: "xhigh" });
+	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "searcher"), parent), { model: "gpt-6.1-sol", effort: "xhigh" });
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "recon"), parent), { model: "deepseek/deepseek-flash", effort: "high" });
 	assert.deepEqual(resolveNestedBinding(await loadHerderNestedAgent(agentRoot, "reviewer"), parent), { model: "gpt-6-sol", effort: "xhigh", serviceTier: "fast" });
 	await assert.rejects(() => validateHerderRoleAgents(agentRoot, {
@@ -278,11 +278,10 @@ test("Herder refuses own-model nested agents when Luna cannot honor the Searcher
 });
 
 test("Herder refuses tiered roles when the resolved model cannot honor the tier", async () => {
-	const profile = resolvePiProfile("eclipse", catalog);
-	assert.equal(profile.roles["plan-implementer"].service_tier, "fast");
+	const profile = resolvePiProfile("poorman", catalog);
+	assert.equal(profile.roles["plan-reviewer"].service_tier, "fast");
 	const tiered = [
 		reconModel,
-		{ provider: "cliproxyapi", id: "gpt-6-sol", fullId: "cliproxyapi/gpt-6-sol", api: "cliproxyapi-codex-responses", thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
 		{ provider: "cliproxyapi", id: "gpt-6-luna", fullId: "cliproxyapi/gpt-6-luna", api: "cliproxyapi-codex-responses", thinkingLevelMap: { max: "max" } },
 	];
 	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, tiered));

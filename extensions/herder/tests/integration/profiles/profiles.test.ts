@@ -8,24 +8,11 @@ import { sha256, stableJson, WORKER_ROLES, type ResolvedProfile } from "../../..
 
 test("profile registry exposes the supported Pi profiles", () => {
 	const catalog = loadPiProfileCatalog();
-	assert.equal(catalog.profiles.length, 5);
-	assert.deepEqual(catalog.profiles.map((profile) => profile.name), ["eclipse", "poorman", "epic", "lightspeed", "universe"]);
+	assert.equal(catalog.profiles.length, 4);
+	assert.deepEqual(catalog.profiles.map((profile) => profile.name), ["poorman", "epic", "lightspeed", "universe"]);
 	for (const profile of catalog.profiles) assert.equal(sha256(stableJson(profile)), resolvePiProfile(profile.name).profile_sha256);
 
 	const expectedProfiles: Record<string, { orchestrator: ResolvedProfile["orchestrator"]; roles: ResolvedProfile["roles"] }> = {
-		eclipse: {
-			orchestrator: { model: "gpt-6-sol", effort: "xhigh" },
-			roles: {
-				"plan-implementer": {
-					agent_type: "herder.plan-implementer",
-					model: "gpt-6-luna",
-					effort: "max",
-					service_tier: "fast",
-				},
-				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
-				"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-sol", effort: "xhigh" },
-			},
-		},
 		poorman: {
 			orchestrator: { model: "gpt-6-luna", effort: "max", service_tier: "fast" },
 			roles: {
@@ -45,11 +32,11 @@ test("profile registry exposes the supported Pi profiles", () => {
 			},
 		},
 		epic: {
-			orchestrator: { model: "claude-fable-5", effort: "high" },
+			orchestrator: { model: "gpt-6-astra", effort: "high" },
 			roles: {
-				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5", effort: "high" },
-				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
-				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5", effort: "high" },
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5.5", effort: "high" },
+				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6.1-sol", effort: "xhigh" },
+				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5.1", effort: "high" },
 			},
 		},
 		lightspeed: {
@@ -73,37 +60,35 @@ test("profile registry exposes the supported Pi profiles", () => {
 	};
 
 	const existingHashes = {
-		eclipse: "f0b97201eb7be74fb8fea936e95c516e028b22651736616bbb2b6bcfdaaeac49",
 		poorman: "97a6d2505bff72f466494a7050ebf5f3187262b2b242f536143eb5189eef2023",
-		epic: "8ba10eace351b1c7938556d18c058412453538a27cb5a7545f00dda8ac2fc8af",
+		epic: "3c59916ef39bd45fcdda62a73ab1511e1111a35e06ece089a0c3946550f67626",
 		lightspeed: "cb67146ee26d31ed0e6aba3e5982bc3fb1f20a9eee648ae4bd69d72c06465c6e",
 	};
 	for (const [name, hash] of Object.entries(existingHashes)) {
 		const profile = resolvePiProfile(name);
 		assert.equal(profile.profile_sha256, hash);
-		assert.equal(Object.hasOwn(profile, "rescue"), false);
-		assert.equal(Object.hasOwn(profile, "searcher"), false);
+		if (name !== "epic") {
+			assert.equal(Object.hasOwn(profile, "rescue"), false);
+			assert.equal(Object.hasOwn(profile, "searcher"), false);
+		}
 	}
 	assert.equal(catalog.default, "universe");
 	const universe = resolvePiProfile("universe");
 	assert.deepEqual(universe.orchestrator, { model: "gpt-6-astra", effort: "high" });
 	assert.deepEqual(universe.roles, {
 		"plan-implementer": { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "medium" },
-		"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6-sol", effort: "xhigh" },
+		"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6.1-sol", effort: "xhigh" },
 		"plan-judge": { agent_type: "herder.plan-judge", model: "gpt-6-astra", effort: "xhigh" },
 	});
 	assert.deepEqual(universe.rescue, { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh" });
-	assert.deepEqual(universe.searcher, { model: "gpt-6-sol", effort: "xhigh" });
+	assert.deepEqual(universe.searcher, { model: "gpt-6.1-sol", effort: "xhigh" });
 	assert.deepEqual(Object.keys(universe.roles), WORKER_ROLES);
 
 	assert.deepEqual(resolvePiProfile(), universe);
 
-	const eclipse = resolvePiProfile("eclipse");
-	assert.equal(eclipse.profile, "eclipse");
-	assert.equal(eclipse.host, "pi");
-	assert.deepEqual(eclipse.orchestrator, expectedProfiles.eclipse.orchestrator);
-	assert.deepEqual(eclipse.roles, expectedProfiles.eclipse.roles);
-	assert.deepEqual(Object.keys(eclipse.roles), WORKER_ROLES);
+	const epic = resolvePiProfile("epic");
+	assert.deepEqual(epic.rescue, { agent_type: "herder.plan-implementer", model: "gpt-6-astra", effort: "xhigh" });
+	assert.deepEqual(epic.searcher, { model: "gpt-6.1-sol", effort: "xhigh" });
 
 	for (const name of ["poorman", "epic", "lightspeed"]) {
 		const profile = resolvePiProfile(name);
@@ -114,6 +99,7 @@ test("profile registry exposes the supported Pi profiles", () => {
 		assert.deepEqual(Object.keys(profile.roles), WORKER_ROLES);
 	}
 
+	assert.throws(() => resolvePiProfile("eclipse"), /Unknown Herder profile/);
 	assert.throws(() => resolvePiProfile("codex"), /Unknown Herder profile/);
 });
 

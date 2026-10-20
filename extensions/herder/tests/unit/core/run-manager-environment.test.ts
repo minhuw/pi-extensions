@@ -45,7 +45,7 @@ async function fixture(count = 1, beforeStart?: (planDirectory: string) => void,
 	let manager = new HerderRunManager(planDirectory);
 	try {
 		beforeStart?.(planDirectory);
-		const reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory, profile: "eclipse", maxParallel });
+		const reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory, profile: "epic", maxParallel });
 		return {
 			get manager() { return manager; }, reply, repo, planDirectory,
 			restart() { manager.close(); manager = new HerderRunManager(planDirectory); },

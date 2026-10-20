@@ -20,7 +20,7 @@ async function fixture() {
 	git(repo, ["worktree", "add", "-qb", driver.integrationBranch, driver.integrationWorktree, "HEAD"]);
 	let store = new RunStore(planDirectory);
 	const token = await driver.captureCheckout();
-	store.createRun({ runId: "run-env", repositoryRoot: repo, planDirectory, planName: "environment-test", host: "pi", profileName: "eclipse", profileSha256: "a".repeat(64), maxParallel: 1, currentGeneration: 1, graphSha256: "b".repeat(64), status: "running", checkoutStateToken: token, baseCommit: originalHead, integrationBranch: driver.integrationBranch, integrationWorktree: driver.integrationWorktree, dashboardUrl: null });
+	store.createRun({ runId: "run-env", repositoryRoot: repo, planDirectory, planName: "environment-test", host: "pi", profileName: "epic", profileSha256: "a".repeat(64), maxParallel: 1, currentGeneration: 1, graphSha256: "b".repeat(64), status: "running", checkoutStateToken: token, baseCommit: originalHead, integrationBranch: driver.integrationBranch, integrationWorktree: driver.integrationWorktree, dashboardUrl: null });
 	const assignmentPath = path.join(planDirectory, "assignment.json");
 	fs.writeFileSync(assignmentPath, "immutable assignment");
 	const assignmentSha256 = sha256("immutable assignment");

@@ -143,9 +143,8 @@ Scope approval and budget approval are separate: an amendment does not restore c
 
 | Profile | Role intent |
 | --- | --- |
-| `eclipse` | Sol orchestrates, reviews, and judges while Luna implements. |
 | `poorman` | Luna orchestrates, reviews, and judges while DeepSeek implements. |
-| `epic` | Fable orchestrates and judges, Opus implements, and Sol reviews. |
+| `epic` | Astra high orchestrates; Opus 5.5 high implements; Sol xhigh reviews and searches; Fable 5.1 high judges; Astra xhigh rescues. |
 | `lightspeed` | Grok 4.6 orchestrates and implements while Luna reviews and judges. |
 | `universe` (default) | Astra high orchestrates; Astra medium implements; Sol xhigh reviews and searches; Astra xhigh judges and rescues. Recon uses DeepSeek Flash high with no service-tier pin. |
 
@@ -153,7 +152,7 @@ Exact model, effort, and service-tier bindings live in `assets/profiles/profiles
 
 All Herder roles and nested agents have `fffind` and `ffgrep` from pinned `npm:@ff-labs/pi-fff`, alongside their existing tools. The collection installs the dependency; no separate Herder configuration is needed. FFF initializes on first use and shuts down with the child session. Recon and Searcher retain source/worktree restrictions. See [FFF search](adapters/README.md#fff-search) for tool behavior and scoped fallbacks.
 
-Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`. Optional `rescue` and `searcher` bindings override only round-3 Implementer and nested web Searcher; existing profiles retain their bindings and `universe` is the default for new runs. Astra/Sol bindings in `universe` do not pin a service tier.
+Profiles configure three generic package roles: `herder.plan-implementer`, `herder.plan-reviewer`, and `herder.plan-judge`. Optional `rescue` and `searcher` bindings override only round-3 Implementer and nested web Searcher; existing profiles retain their bindings and `universe` is the default for new runs. Bindings in `epic` and `universe` do not pin a service tier.
 
 To use the default `universe` profile (or select it explicitly with `--profile universe`):
 

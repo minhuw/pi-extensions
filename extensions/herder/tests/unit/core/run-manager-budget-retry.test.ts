@@ -20,7 +20,7 @@ test("host grant and additional budget cannot invent a repair list after unrevie
  fs.writeFileSync(path.join(directory, "001-value.md"), fixturePlan({ id: "001", title: "Value", head: originalHead }));
  const manager = new HerderRunManager(directory);
  try {
-  let reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "eclipse", maxParallel: 1 });
+  let reply = await manager.start({ mode: "fire", repositoryRoot: repo, planDirectory: directory, profile: "epic", maxParallel: 1 });
   async function fail(action: ManagerAction) {
    await manager.event({ eventId: `dispatch:${action.actionId}`, kind: "dispatch_results", dispatchResults: [{ actionId: action.actionId, accepted: true, hostHandle: action.actionId }] });
    return manager.event({ eventId: `terminal:${action.actionId}`, kind: "terminals", terminals: [{ actionId: action.actionId, hostHandle: action.actionId, response: "STATUS: FAILED\nCOMMITS: none\nCHECKS: none\nFILES CHANGED: none\nDISCOVERED_PATHS: none\nNOTES: bounded product failure" }] });

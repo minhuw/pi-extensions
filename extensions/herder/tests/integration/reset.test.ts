@@ -150,7 +150,7 @@ function fixture(initialStatus = "TODO"): Fixture {
 async function initializedFixture(value = fixture()): Promise<Fixture> {
 	const service = await ensureService(value.planDir);
 	const response = await requestManagerOperation(service, "start", {
-		mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
+		mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "epic", maxParallel: 1,
 	});
 	assert.equal((response.reply as Record<string, unknown>).status, "running");
 	// stopService only waits for HTTP shutdown, not process exit/owner release.
@@ -289,7 +289,7 @@ test("reset removes the real Herder namespace, restores immutable statuses, pres
 			try { assert.equal(empty.getRun(), null); assert.deepEqual(budgetSnapshot(empty), [[], [], [], []]); } finally { empty.close(); }
 			const fresh = await ensureService(value.planDir);
 			const started = await requestManagerOperation(fresh, "start", {
-				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
+				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "epic", maxParallel: 1,
 			});
 			assert.equal((started.reply as Record<string, unknown>).status, "running");
 			await withServiceExclusion(value.planDir, () => {}, { purpose: "revision" });
@@ -325,7 +325,7 @@ test("ordinary reset reruns retained execution-backed DONE but preserves authore
 			try { assert.equal(empty.getRun(), null); } finally { empty.close(); }
 			const service = await ensureService(value.planDir);
 			const started = await requestManagerOperation(service, "start", {
-				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1,
+				mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "epic", maxParallel: 1,
 			});
 			assert.equal((started.reply as Record<string, unknown>).status, "running");
 			await stopService(value.planDir);
@@ -948,7 +948,7 @@ for (const completed of [false, true]) test(`${completed ? "completed" : "DB-cle
 			mocked.mock.restore();
 		}
 		const fresh = await ensureService(value.planDir);
-		await requestManagerOperation(fresh, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "eclipse", maxParallel: 1 });
+		await requestManagerOperation(fresh, "start", { mode: "fire", repositoryRoot: value.repo, planDirectory: value.planDir, profile: "epic", maxParallel: 1 });
 		await stopService(value.planDir);
 		const before = namespaceSnapshot(value);
 		assert.throws(() => resetHerderPlanSet(input), /successor run/);

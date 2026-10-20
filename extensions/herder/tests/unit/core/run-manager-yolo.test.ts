@@ -21,7 +21,7 @@ function fixture(writePaths = ["src/value.mjs"]) {
 	initPlanDir(directory);
 	fs.writeFileSync(path.join(directory, "README.md"), "# Plans\n\n## Execution order & status\n\n| Plan | Title | Priority | Effort | Depends on | Status |\n|---|---|---|---|---|---|\n| [001](001-value.md) | Value | P1 | S | — | TODO |\n\n## Dependency notes\n\nNone.\n\n## Considered and rejected\n\nNone.\n");
 	fs.writeFileSync(path.join(directory, "001-value.md"), fixturePlan({ head: originalHead, writePaths }));
-	return { root, repo, directory, originalHead, input: { mode: "fire" as const, repositoryRoot: repo, planDirectory: directory, profile: "eclipse", maxParallel: 1 } };
+	return { root, repo, directory, originalHead, input: { mode: "fire" as const, repositoryRoot: repo, planDirectory: directory, profile: "epic", maxParallel: 1 } };
 }
 const complete = "STATUS: COMPLETE\nCOMMITS: fixture commit\nCHECKS: passed\nFILES CHANGED: src/value.mjs\nDISCOVERED_PATHS: none\nNOTES: implemented";
 const approve = "VERDICT: APPROVE\nFINDINGS: none\nFIX_GUIDANCE: none\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: passed\nRATIONALE: focused outcome passes";
