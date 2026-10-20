@@ -32,7 +32,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 - **Default fleet:** `recon`, `worker`, `reviewer`, and `expert` replace upstream Explore/Plan/general-purpose. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
 - **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
-- **Workflow orchestration requires explicit user opt-in:** `SubagentWorkflow` is available under upstream's workflow registration/collision rules. Its model-facing instructions require a user request for orchestration, a named workflow, or an explicitly invoked workflow command. This is an instruction policy, not a security sandbox. Set `workflowsEnabled: false` to disable registration and reload.
+- **Scripted workflows are disabled by default pending reliability fixes:** `SubagentWorkflow`, the workflow inspector menu entry, and startup workflow execution are off unless `workflowsEnabled: true` is explicitly configured. Existing explicit opt-ins remain supported; set `workflowsEnabled: false` to disable them. Reload while no agents are running to apply changes to tool registration. When enabled, orchestration still requires an explicit user request.
 - **Background completion delivery changed:** upstream now batches completions at the parent's turn boundary, with an idle-parent delivery path, rather than relying only on a short notification timer.
 - **Local integrations remain:** service tiers, scoped host/telemetry ownership, Orca busy-state coordination, and compact invocation/model metadata.
 
@@ -41,6 +41,7 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 ```json
 {
   "backgroundByDefault": false,
+  "workflowsEnabled": false,
   "packageAgents": false,
   "packageWorkflows": false,
   "fallbackSubagent": "none"
@@ -49,7 +50,7 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 
 ## Usage
 
-Tools: `Agent`, `get_subagent_result`, `steer_subagent`, and `SubagentWorkflow`. Use `/agents` for the fleet, settings, and workflows. Custom agent definitions can override embedded names; upstream also supports mentions and saved workflows.
+Default tools: `Agent`, `get_subagent_result`, and `steer_subagent`. Use `/agents` for the fleet and settings. Custom agent definitions can override embedded names; upstream also supports mentions. `SubagentWorkflow` and its inspector are available only after explicit configuration opt-in.
 
 Select an existing agent type with `subagent_type` (`agentType` in workflows). Its user-configured frontmatter `model` is authoritative; without one, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type's model, edit its agent definition. Trusted external hosts such as Herder retain their own model bindings.
 
@@ -78,7 +79,7 @@ Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `pri
 
 ### Workflows versus Herder
 
-`SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed from their journal. Scripts are not Herder plans.
+Scripted workflows are disabled by default because validation errors can be swallowed as successful empty results, and reloads lose the in-memory run records required for resume. If explicitly enabled, `SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed while the run record remains available. Scripts are not Herder plans.
 
 Herder separately owns approved scope, persistent dispatch budgets, independent review, dependency-aware integration, and exact-tree final verification. Neither extension delegates authority to the other; installing Workflow does not change Herder's execution protocol.
 

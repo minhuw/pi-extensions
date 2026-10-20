@@ -166,7 +166,7 @@ describe("toolDescriptionMode", () => {
   });
 
   it.each(["full", "compact", "custom"])("enforces configured-type-or-inherit guidance in %s mode", mode => {
-    const tools = setup({ toolDescriptionMode: mode }, () => {
+    const tools = setup({ toolDescriptionMode: mode, workflowsEnabled: true }, () => {
       if (mode === "custom") {
         writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "My custom delegation guidance.");
       }

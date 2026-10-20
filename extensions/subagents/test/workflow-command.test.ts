@@ -108,9 +108,9 @@ describe("/agents → Workflows", () => {
     expect(ui.agentsMenu().some(option => WORKFLOWS_ENTRY.test(option))).toBe(true);
   });
 
-  it("hides the entry when workflows are off", async () => {
+  it.each([{}, { workflowsEnabled: false }])("hides the entry when workflows are off (%j)", async settings => {
     hermetic.restore();
-    hermetic = hermeticDir({ settings: { workflowsEnabled: false } });
+    hermetic = hermeticDir({ settings });
     const { command } = bootCommand();
     const ui = commandCtx();
 

@@ -27,7 +27,7 @@ const context = () => ctx({ mode: "print", isIdle: () => true });
 const busy = () => snapshots.at(-1)?.activities.length !== 0;
 
 beforeEach(() => {
-  env = hermeticDir({ settings: { schedulingEnabled: false, widgetMode: "off", fleetView: false } });
+  env = hermeticDir({ settings: { workflowsEnabled: true, schedulingEnabled: false, widgetMode: "off", fleetView: false } });
   activations = [];
   snapshots = [];
   runs = [];

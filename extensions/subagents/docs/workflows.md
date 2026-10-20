@@ -1,5 +1,7 @@
 # Scripted workflows
 
+> In this collection, scripted workflows are disabled by default pending fixes to error reporting and reload recovery. The workflow tool, inspector menu entry, and startup execution require an explicit `workflowsEnabled: true` setting. Set it to `false` and reload to disable an existing opt-in. Direct `Agent` calls remain available.
+
 A workflow is a small JavaScript program that spawns and coordinates many subagents: fan out over a list, push every item through the same stages, verify each result, return a summary. It runs in the background and reports as it goes.
 
 The thing worth understanding up front is that **you do not write these — the model does.** You describe the work; it emits the script; you keep the file and re-run it. This guide is about that loop.
@@ -315,7 +317,7 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 ### Settings and the CLI flag
 
-`workflowsEnabled` is **on**; leaving it unset means *auto*, which is on unless another extension already offers a `Workflow` or `SubagentWorkflow` tool, in which case this one stands down for the session. Setting it explicitly pins it. See [Persistent settings](../README.md#persistent-settings).
+`workflowsEnabled` is **off by default** in this collection pending reliability fixes. Setting it explicitly to `true` enables workflows; `false` disables them. Reload to apply tool registration changes. Explicit choices use upstream's collision reporting rules rather than automatically yielding to another workflow tool. See [Persistent settings](../README.md#local-defaults-and-compatibility).
 
 `pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
 

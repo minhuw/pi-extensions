@@ -1498,18 +1498,11 @@ export default function (pi: ExtensionAPI) {
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
-  // Master switch for scripted workflows. Defaults to ON. Off means the
-  // `SubagentWorkflow` tool is never registered: the model is not told the
-  // feature exists (zero context cost) and has nothing to call. The
-  // `/agents → Workflows` view and `--subagents-workflow-file` are refused too, so
-  // there is no second door into the same machinery.
-  //
-  // `workflowsPinned` records that the answer came from the user — a boolean in
-  // subagents.json, or the settings toggle — rather than from this default. It
-  // is what `resolveWorkflowCollisions` checks before yielding to another
-  // extension's workflow tool: a default may be overridden by what else is
-  // loaded, an explicit choice may not.
-  let workflowsEnabled = true;
+  // Scripted workflows are disabled by default while their error reporting and
+  // reload recovery remain unreliable. Explicit opt-in uses the existing master
+  // switch: off omits the tool, menu entry, and startup execution path.
+  // `workflowsPinned` distinguishes an explicit setting from the default.
+  let workflowsEnabled = false;
   let workflowsPinned = false;
   function isWorkflowsEnabled(): boolean { return workflowsEnabled; }
   function isWorkflowsPinned(): boolean { return workflowsPinned; }
@@ -4069,8 +4062,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "workflowsEnabled",
           label: "Workflows",
           description:
-            "Scripted workflows, on unless another extension provides a workflow tool "
-            + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
+            "Scripted workflows are off by default pending reliability fixes "
+            + "(changing tool registration requires a reload)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },

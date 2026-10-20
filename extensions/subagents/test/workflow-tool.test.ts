@@ -1247,12 +1247,13 @@ describe("workflowsEnabled — the master switch", () => {
     return booted;
   };
 
-  it("is on with no setting at all", () => {
+  it("is off with no setting while direct agent tools remain available", () => {
     const booted = boot({});
 
-    expect(booted.tools.has("SubagentWorkflow")).toBe(true);
-    // Nothing else is affected.
+    expect(booted.tools.has("SubagentWorkflow")).toBe(false);
     expect(booted.tools.has("Agent")).toBe(true);
+    expect(booted.tools.has("get_subagent_result")).toBe(true);
+    expect(booted.tools.has("steer_subagent")).toBe(true);
   });
 
   it("stays off when the setting says so explicitly", () => {
@@ -1265,10 +1266,9 @@ describe("workflowsEnabled — the master switch", () => {
     expect(boot({ workflowsEnabled: true }).tools.has("SubagentWorkflow")).toBe(true);
   });
 
-  it("refuses the startup flag while off, instead of running the script anyway", async () => {
-    // The flag is the same machinery by another door, so the switch has to
-    // close it too — and say why, rather than appearing to do nothing.
-    const booted = boot({ workflowsEnabled: false });
+  it.each([{}, { workflowsEnabled: false }])("refuses the startup flag while off (%j)", async settings => {
+    // A startup flag cannot bypass the disabled default or explicit setting.
+    const booted = boot(settings);
     const path = join(hermetic.dir, "flow.js");
     writeFileSync(path, fileScript);
     booted.pi.getFlag.mockReturnValue(path);
@@ -1375,16 +1375,8 @@ describe("collisions with another extension", () => {
     expect(warnings(context)).toEqual([]);
   });
 
-  /* ----------------------------------------------------------------------- *
-   * Standing down for another extension's workflow tool
-   *
-   * The default is ON, so this extension can be the second orchestrator in a
-   * session. Two workflow tools in one spec is worse than either alone, and
-   * the one that was installed on purpose should be the one that survives.
-   * ----------------------------------------------------------------------- */
-
-  /** Boot with no `workflowsEnabled` at all — on by default, and unpinned. */
-  const bootAuto = () => boot({});
+  /** Boot without an explicit opt-in; workflows remain disabled. */
+  const bootDefault = () => boot({});
 
   const foreign = (name: string, source = "other-ext") => ({
     name,
@@ -1392,89 +1384,20 @@ describe("collisions with another extension", () => {
     sourceInfo: { source, path: `/x/${source}.ts` },
   });
 
-  it("withdraws its tool when another extension provides a `Workflow` tool", async () => {
-    const booted = bootAuto();
-    // Registered, because the collision is only visible after every extension
-    // has loaded — which is after ours registered.
-    expect(booted.tools.has("SubagentWorkflow")).toBe(true);
-    expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
-    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
-    const context = uiContext();
+  it.each(["Workflow", "workflow", "SubagentWorkflow"])(
+    "leaves another extension's %s tool alone while disabled by default", async name => {
+      const booted = bootDefault();
+      expect(booted.tools.has("SubagentWorkflow")).toBe(false);
+      booted.pi.getAllTools.mockReturnValue([foreign(name)]);
+      const context = uiContext();
 
-    await booted.lifecycle.get("session_start")?.({}, context);
+      await booted.lifecycle.get("session_start")?.({}, context);
 
-    // Withdrawn for real: pi rebuilds the system prompt from the active set,
-    // and session_start runs before any turn, so the model never sees it.
-    expect(booted.pi.setActiveTools).toHaveBeenCalled();
-    expect(booted.pi.getActiveTools()).not.toContain("SubagentWorkflow");
-    // Everything else this extension registered stays.
-    expect(booted.pi.getActiveTools()).toContain("Agent");
-    expect(warnings(context).some(m => /already provides a "Workflow" tool/.test(m))).toBe(true);
-    expect(warnings(context).some(m => /other-ext/.test(m))).toBe(true);
-  });
-
-  it("withdraws its tool when another extension provides a lowercase `workflow` tool", async () => {
-    // #283: `@quintinshaw/pi-dynamic-workflows` — the second orchestrator most
-    // likely to be installed alongside this one — registers its tool as
-    // lowercase `workflow`. The match is exact, so the name has to be listed by
-    // hand; without it neither orchestrator stands down and the model is
-    // offered both, with no warning that it happened.
-    const booted = bootAuto();
-    booted.pi.getAllTools.mockReturnValue([
-      foreign("workflow", "pi-dynamic-workflows"),
-      foreign("workflow_control", "pi-dynamic-workflows"),
-    ]);
-    const context = uiContext();
-
-    await booted.lifecycle.get("session_start")?.({}, context);
-
-    expect(booted.pi.getActiveTools()).not.toContain("SubagentWorkflow");
-    expect(booted.pi.getActiveTools()).toContain("Agent");
-    expect(warnings(context).some(m => /already provides a "workflow" tool/.test(m))).toBe(true);
-    expect(warnings(context).some(m => /pi-dynamic-workflows/.test(m))).toBe(true);
-  });
-
-  it("names the setting that keeps both", async () => {
-    const booted = bootAuto();
-    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
-    const context = uiContext();
-
-    await booted.lifecycle.get("session_start")?.({}, context);
-
-    expect(warnings(context).some(m => /workflowsEnabled/.test(m))).toBe(true);
-  });
-
-  it("stands down without withdrawing when the foreign tool took our own name", async () => {
-    // First registration wins, so ours never reached the registry. There is
-    // nothing to withdraw — but the menu and the CLI flag would still be live,
-    // driving a tool the model cannot call, so the feature comes down anyway.
-    const booted = bootAuto();
-    booted.pi.getAllTools.mockReturnValue([foreign("SubagentWorkflow")]);
-    const context = uiContext();
-
-    await booted.lifecycle.get("session_start")?.({}, context);
-
-    expect(booted.pi.setActiveTools).not.toHaveBeenCalled();
-    expect(warnings(context).some(m => /already provides a "SubagentWorkflow" tool/.test(m))).toBe(true);
-  });
-
-  it("refuses the startup flag once it has stood down", async () => {
-    // The flag is the same machinery by another door. The collision check runs
-    // first in session_start precisely so this door closes with the tool.
-    hermetic = hermeticDir({ settings: {} });
-    const path = join(hermetic.dir, "flow.js");
-    writeFileSync(path, fileScript);
-    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
-    subagentsExtension(booted.pi);
-    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
-    const context = uiContext();
-
-    await booted.lifecycle.get("session_start")?.({}, context);
-
-    const notices = context.ui.notify.mock.calls.map((c: any[]) => String(c[0]));
-    expect(notices.some((m: string) => /workflows are off/i.test(m))).toBe(true);
-    expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
-  });
+      expect(booted.pi.setActiveTools).not.toHaveBeenCalled();
+      expect(booted.pi.getActiveTools()).toContain("Agent");
+      expect(warnings(context)).toEqual([]);
+    },
+  );
 
   it("keeps ours when the setting pins workflows on", async () => {
     // A default yields to what else is loaded. A choice does not.
@@ -1527,12 +1450,8 @@ describe("collisions with another extension", () => {
   const savedSettings = () =>
     JSON.parse(readFileSync(join(hermetic.dir, ".pi", "subagents.json"), "utf-8"));
 
-  it("does not persist a stand-down as an explicit setting", async () => {
-    // The stand-down is scoped to the session that detected it. Writing it to
-    // the file would let an unrelated settings change three menus away freeze
-    // it into an explicit `false` — which then outlives the extension it was
-    // deferring to, leaving workflows mysteriously off after an uninstall.
-    const booted = bootAuto();
+  it("does not persist the disabled default as an explicit setting", async () => {
+    const booted = bootDefault();
     booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
     await booted.lifecycle.get("session_start")?.({}, uiContext());
 
@@ -1552,7 +1471,7 @@ describe("collisions with another extension", () => {
   it("ignores tool names that merely contain the word", async () => {
     // A substring test would turn any CI integration into a silent shutdown of
     // this feature — the kind of bug nobody can see from the outside.
-    const booted = bootAuto();
+    const booted = boot({ workflowsEnabled: true });
     booted.pi.getAllTools.mockReturnValue([
       foreign("list_workflows"),
       foreign("github_workflow_run"),
