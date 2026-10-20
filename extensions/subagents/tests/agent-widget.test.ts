@@ -16,6 +16,7 @@ it("allows installed extensions in the default fleet while retaining built-in se
   }
   expect(DEFAULT_AGENTS.get("recon")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
   expect(DEFAULT_AGENTS.get("reviewer")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
+  expect(DEFAULT_AGENTS.get("expert")?.builtinToolNames).toEqual(["read", "bash", "grep", "find", "ls"]);
 });
 
 describe("foreground agent metadata", () => {

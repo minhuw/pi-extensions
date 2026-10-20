@@ -21,7 +21,7 @@ import {
   setFallbackSubagent,
 } from "../src/agent-types.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
-import type { AgentConfig } from "../src/types.js";
+import { DEFAULT_AGENT_NAMES, type AgentConfig } from "../src/types.js";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -46,9 +46,9 @@ describe("agent type registry", () => {
 
   describe("default agents", () => {
     it("recognizes all default agent types", () => {
-      expect(isValidType("worker")).toBe(true);
-      expect(isValidType("recon")).toBe(true);
-      expect(isValidType("reviewer")).toBe(true);
+      expect(getAvailableTypes()).toEqual(["recon", "worker", "reviewer", "expert"]);
+      expect(DEFAULT_AGENT_NAMES).toEqual(getAvailableTypes());
+      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(true);
     });
 
     it("does not include removed agents", () => {
@@ -65,6 +65,7 @@ describe("agent type registry", () => {
       expect(isValidType("recon")).toBe(true);
       expect(isValidType("RECON")).toBe(true);
       expect(isValidType("Worker")).toBe(true);
+      expect(isValidType("EXPERT")).toBe(true);
       expect(isValidType("reviewer")).toBe(true);
     });
 
@@ -103,16 +104,30 @@ describe("agent type registry", () => {
       expect(cfg?.serviceTier).toBeUndefined();
     });
 
+    it("expert pins Astra with xhigh thinking and read-only built-ins", () => {
+      const cfg = getAgentConfig("expert");
+      expect(cfg).toMatchObject({
+        displayName: "Expert",
+        model: "magpie/codex/gpt-6-astra",
+        thinking: "xhigh",
+        builtinToolNames: ["read", "bash", "grep", "find", "ls"],
+        extensions: true,
+        skills: true,
+        promptMode: "replace",
+      });
+      expect(cfg?.serviceTier).toBeUndefined();
+      expect(cfg?.allowedSubagents).toBeUndefined();
+    });
+
     it("default agents are marked isDefault", () => {
-      const cfg = getAgentConfig("worker");
-      expect(cfg?.isDefault).toBe(true);
+      for (const name of DEFAULT_AGENT_NAMES) expect(getAgentConfig(name)?.isDefault).toBe(true);
     });
 
     // Regression guard for #37 — default agents must not bake in callsite-strategy fields.
     // An explicit `false` here would silently win over the caller's `true` via `??` in
     // resolveAgentInvocationConfig, breaking documented Agent tool params.
     it("default agents do not lock strategy fields (run_in_background / inherit_context / isolated)", () => {
-      for (const name of ["worker", "recon", "reviewer"]) {
+      for (const name of DEFAULT_AGENT_NAMES) {
         const cfg = getAgentConfig(name);
         expect(cfg?.runInBackground, `${name}.runInBackground`).toBeUndefined();
         expect(cfg?.inheritContext, `${name}.inheritContext`).toBeUndefined();
@@ -121,10 +136,7 @@ describe("agent type registry", () => {
     });
 
     it("getDefaultAgentNames returns default agent names", () => {
-      const names = getDefaultAgentNames();
-      expect(names).toContain("worker");
-      expect(names).toContain("recon");
-      expect(names).toContain("reviewer");
+      expect(getDefaultAgentNames()).toEqual(DEFAULT_AGENT_NAMES);
     });
 
     it("BUILTIN_TOOL_NAMES includes all built-in tools", () => {
@@ -155,9 +167,7 @@ describe("agent type registry", () => {
       registerAgents(new Map());
 
       expect(getAvailableTypes()).toEqual([]);
-      expect(isValidType("worker")).toBe(false);
-      expect(isValidType("recon")).toBe(false);
-      expect(isValidType("reviewer")).toBe(false);
+      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(false);
     });
 
     it("user agents are unaffected when defaults are disabled", () => {
@@ -169,6 +179,16 @@ describe("agent type registry", () => {
       expect(getDefaultAgentNames()).toEqual([]);
     });
 
+    it("custom expert remains available when defaults are disabled", () => {
+      setDefaultsDisabled(true);
+      const expert = makeAgentConfig({ name: "expert", model: "custom/model", thinking: "low" });
+      registerAgents(new Map([["expert", expert]]));
+
+      expect(getAvailableTypes()).toEqual(["expert"]);
+      expect(getAgentConfig("expert")).toBe(expert);
+      expect(getDefaultAgentNames()).toEqual([]);
+    });
+
     it("re-enabling restores defaults on next registerAgents", () => {
       setDefaultsDisabled(true);
       registerAgents(new Map());
@@ -176,9 +196,7 @@ describe("agent type registry", () => {
 
       setDefaultsDisabled(false);
       registerAgents(new Map());
-      expect(isValidType("worker")).toBe(true);
-      expect(isValidType("recon")).toBe(true);
-      expect(isValidType("reviewer")).toBe(true);
+      for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(true);
     });
 
     it("getConfig falls back to the hardcoded config when defaults are disabled and no user agents exist", () => {
@@ -292,28 +310,27 @@ describe("agent type registry", () => {
       expect(isValidType("worker")).toBe(true);
     });
 
-    it("user agent overrides default with same name", () => {
-      const agents = new Map([["recon", makeAgentConfig({
-        name: "recon",
-        description: "Custom recon",
+    it.each(["recon", "expert"])("user agent overrides default %s", name => {
+      const override = makeAgentConfig({
+        name,
+        description: `Custom ${name}`,
         builtinToolNames: BUILTIN_TOOL_NAMES,
-      })]]);
-      registerAgents(agents);
+        model: "custom/model",
+        thinking: "low",
+      });
+      registerAgents(new Map([[name, override]]));
 
-      const config = getConfig("recon");
-      expect(config.description).toBe("Custom recon");
+      expect(getAgentConfig(name)).toBe(override);
+      const config = getConfig(name);
+      expect(config.description).toBe(`Custom ${name}`);
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
     });
 
-    it("disabled agent is excluded from available types", () => {
-      const agents = new Map([["reviewer", makeAgentConfig({
-        name: "reviewer",
-        enabled: false,
-      })]]);
-      registerAgents(agents);
+    it.each(["reviewer", "expert"])("disabled agent %s is excluded from available types", name => {
+      registerAgents(new Map([[name, makeAgentConfig({ name, enabled: false })]]));
 
-      expect(isValidType("reviewer")).toBe(false);
-      expect(getAvailableTypes()).not.toContain("reviewer");
+      expect(isValidType(name)).toBe(false);
+      expect(getAvailableTypes()).not.toContain(name);
     });
 
     it("worker can be disabled but fallback still works", () => {
@@ -495,12 +512,12 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
 });
 
 describe("local fleet runtime tool selection", () => {
-  it("uses read-only search tools for recon/reviewer and full tools for worker", () => {
+  it("uses read-only search tools for recon/reviewer/expert and full tools for worker", () => {
     registerAgents(new Map());
     setDefaultsDisabled(false);
-    expect(getAvailableTypes()).toEqual(expect.arrayContaining(["recon", "worker", "reviewer"]));
+    expect(getAvailableTypes()).toEqual(DEFAULT_AGENT_NAMES);
     for (const retired of ["Explore", "Plan", "general-purpose"]) expect(isValidType(retired)).toBe(false);
-    for (const name of ["recon", "reviewer"]) {
+    for (const name of ["recon", "reviewer", "expert"]) {
       expect(getToolNamesForType(name)).toEqual(["read", "bash", "grep", "find", "ls"]);
       expect(getConfig(name).excludeExtensions).toBeUndefined();
     }

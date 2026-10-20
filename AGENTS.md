@@ -13,7 +13,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/orca-bridge/` — Orca hook delivery, background activity aggregation in terminal panes, prompt-aware titles, file/diff navigation, and stock Orca compatibility checks; Herder and Subagents publish snapshots through Pi's event bus. Integrations must use released Orca interfaces without modifying Orca.
 - `extensions/loop/` — session-owned recurring prompts, fixed/cron/model-paced scheduling, completion and lifetime limits, and footer integration.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
-- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), local fleet/integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
+- `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), a local fleet (`recon`, `worker`, `reviewer`, `expert`), integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 

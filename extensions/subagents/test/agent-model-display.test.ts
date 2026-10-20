@@ -66,6 +66,7 @@ function session(provider: string, id: string, thinkingLevel: string, name?: str
 const MODELS = [
   { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus 4.6" },
   { provider: "anthropic", id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+  { provider: "magpie", id: "codex/gpt-6-astra", name: "GPT-6 Astra" },
 ];
 
 const MODEL_NAMES: Record<string, string> = Object.fromEntries(MODELS.map(m => [m.id, m.name]));
@@ -86,10 +87,10 @@ function render(tool: any, result: any, expanded = false): string {
  * reloads the registry from `process.cwd()` on every call, so a pinned setting
  * only survives if it is on disk where that reload will find it.
  */
-function pinnedAgent(frontmatter: string): void {
+function pinnedAgent(frontmatter: string, name = "pinned"): void {
   const dir = join(cwd, ".pi", "agents");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "pinned.md"), `---\ndescription: pins its own settings\n${frontmatter}---\n\nPinned.\n`);
+  writeFileSync(join(dir, `${name}.md`), `---\ndescription: pins its own settings\n${frontmatter}---\n\nPinned.\n`);
 }
 
 let cwd: string;
@@ -244,6 +245,45 @@ describe("Agent tool result — effective model", () => {
     }, undefined, vi.fn(), ctx());
     expect(result.details.modelName).toBe("anthropic/claude-haiku-4-5");
     expect(vi.mocked(runAgent).mock.calls[0]?.[3]?.model).toBe(MODELS[1]);
+  });
+
+  it("resolves Expert's exact Astra pin over a different parent model and caller thinking", async () => {
+    const tool = agentTool();
+    const context = ctx();
+    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "advice", aborted: false, steered: false }) as never);
+
+    const result = await tool.execute("expert-pin", {
+      prompt: "Assess the design tradeoffs", description: "Assess design tradeoffs",
+      subagent_type: "expert", thinking: "low", run_in_background: false,
+    }, undefined, vi.fn(), context);
+
+    const options = vi.mocked(runAgent).mock.calls[0]?.[3];
+    expect(runAgent).toHaveBeenCalledOnce();
+    expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toBe("expert");
+    expect(options?.model).toBe(MODELS[2]);
+    expect(options?.model).not.toBe(context.model);
+    expect(options?.thinkingLevel).toBe("xhigh");
+    expect(options?.serviceTier).toBeUndefined();
+    expect(result.isError).not.toBe(true);
+    expect(result.details.modelName).toBe("magpie/codex/gpt-6-astra");
+    expect(result.details.identity).toContain("xhigh (asked low)");
+  });
+
+  it("discovers a custom expert.md in place of the embedded Expert", async () => {
+    pinnedAgent("model: anthropic/claude-haiku-4-5\nthinking: low\n", "expert");
+    const tool = agentTool();
+    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "advice", aborted: false, steered: false }) as never);
+
+    const result = await tool.execute("expert-override", {
+      prompt: "Assess the design", description: "Assess design",
+      subagent_type: "expert", thinking: "high", run_in_background: false,
+    }, undefined, vi.fn(), ctx());
+
+    const options = vi.mocked(runAgent).mock.calls[0]?.[3];
+    expect(options?.model).toBe(MODELS[1]);
+    expect(options?.thinkingLevel).toBe("low");
+    expect(result.details.modelName).toBe("anthropic/claude-haiku-4-5");
+    expect(result.details.identity).toContain("low (asked high)");
   });
 
   it("passes the exact current parent model when the agent has no configured model", async () => {

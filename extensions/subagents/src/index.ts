@@ -1918,7 +1918,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration, spawn Agent with subagent_type recon. For implementation use worker; for post-change review use reviewer. Otherwise use direct tools (read, grep, find) when the target is already known.",
+      "For broad codebase exploration, spawn Agent with subagent_type recon. For implementation use worker; for post-change review use reviewer. Select expert for difficult technical judgment, not routine questions. Otherwise use direct tools (read, grep, find) when the target is already known.",
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
@@ -4113,7 +4113,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "disableDefaultAgents",
           label: "Disable defaults",
-          description: "Hide built-in agents (recon, worker, reviewer) — custom agents are unaffected",
+          description: "Hide built-in agents (recon, worker, reviewer, expert) — custom agents are unaffected",
           currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },

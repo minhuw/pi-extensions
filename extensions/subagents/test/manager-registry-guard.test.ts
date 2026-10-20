@@ -56,9 +56,13 @@ describe("local host registry lifecycle", () => {
   it("exposes the local fleet without mutation or interactive control capabilities", async () => {
     await boot();
     const host = getSubagentHost()!;
-    expect(host.describeTypes().map(type => type.name)).toEqual(["recon", "worker", "reviewer"]);
+    expect(host.describeTypes().map(type => type.name)).toEqual(["recon", "worker", "reviewer", "expert"]);
     expect(host.resolveType("RECON")).toMatchObject({ name: "recon", readOnly: true });
     expect(host.resolveType("worker")).toMatchObject({ readOnly: false });
+    expect(host.resolveType("expert")).toMatchObject({
+      name: "expert", displayName: "Expert", readOnly: true,
+      builtinToolNames: ["read", "bash", "grep", "find", "ls"],
+    });
     for (const capability of ["spawn", "abort", "steer", "getRecord"]) expect(host).not.toHaveProperty(capability);
   });
 

@@ -29,7 +29,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 ## Local defaults and compatibility
 
 - **Foreground by default:** `Agent` still waits unless `run_in_background: true` is requested. Upstream's `backgroundByDefault` setting is supported, but defaults to `false` here.
-- **Default fleet:** `recon`, `worker`, and `reviewer` replace upstream Explore/Plan/general-purpose. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
+- **Default fleet:** `recon`, `worker`, `reviewer`, and `expert` replace upstream Explore/Plan/general-purpose. Unknown types fall back to `worker`; set `fallbackSubagent: "none"` to reject unknown types instead.
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
 - **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
 - **Workflow orchestration requires explicit user opt-in:** `SubagentWorkflow` is available under upstream's workflow registration/collision rules. Its model-facing instructions require a user request for orchestration, a named workflow, or an explicitly invoked workflow command. This is an instruction policy, not a security sandbox. Set `workflowsEnabled: false` to disable registration and reload.
@@ -58,6 +58,9 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 | `recon` | Read-only reconnaissance; compressed handoff | read-only | `deepseek/deepseek-flash`, thinking `high`, normal tier (no override) |
 | `worker` | Bounded implementation and verification | coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
+| `expert` | Read-only advice on plans, designs, tradeoffs, and complicated technical questions; selected by user/parent for difficult judgment, not routine questions | read-only | `magpie/codex/gpt-6-astra`, thinking `xhigh`, no tier override |
+
+A custom `expert.md` overrides the embedded Expert through normal agent discovery. `disableDefaultAgents: true` hides Expert along with the other built-ins; custom agents remain available.
 
 The embedded fleet keeps Pi's built-in `grep`/`find` and inherits installed search extensions, including `npm:@ff-labs/pi-fff` (`fffind`/`ffgrep`). This also applies to nested agents through normal discovery. Explicit `extensions: false`, `exclude_extensions`, `disallowed_tools`, `ext:` selectors, and `isolated: true` still control which tools load. Custom definitions retain their chosen extension set. Read-only role instructions are not an OS sandbox.
 
