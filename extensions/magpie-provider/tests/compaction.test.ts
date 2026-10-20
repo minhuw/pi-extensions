@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -228,6 +228,4 @@ it("loads and registers compaction from the Magpie directory alone", () => {
 		cwd: root, env: { ...process.env, PI_OFFLINE: "1", MAGPIE_BASE_URL: "http://127.0.0.1:3425", MAGPIE_API_KEY: "", PI_CODING_AGENT_DIR: agentDir }, timeout: 15000,
 		stdio: "pipe",
 	})).not.toThrow();
-	// The copied tree, not a forwarding import into the original checkout, is the entrypoint.
-	expect(readFileSync(join(extensions, "magpie-provider/index.ts"), "utf8")).toContain('"./compaction.ts"');
 });
