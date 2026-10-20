@@ -92,9 +92,3 @@ export function applyServiceTier(session: AgentSession, tier: ServiceTierInput |
     } as typeof options);
   };
 }
-
-/** Short UI label for tags, e.g. "tier: fast". */
-export function serviceTierLabel(tier: ServiceTierInput | string | undefined): string | undefined {
-  if (!tier) return undefined;
-  return `tier: ${String(tier).toLowerCase()}`;
-}

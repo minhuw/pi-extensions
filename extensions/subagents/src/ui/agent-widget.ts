@@ -138,16 +138,7 @@ export function buildResumedInvocation(source: {
 export function buildRecordInvocation(record: Pick<AgentRecord,
   "invocation" | "session" | "model" | "thinking" | "serviceTier" | "maxTurns" | "isBackground" | "worktree"
 >): AgentInvocation {
-  return buildResumedInvocation({
-    invocation: record.invocation,
-    session: record.session,
-    model: record.model,
-    thinking: record.thinking,
-    serviceTier: record.serviceTier,
-    maxTurns: record.maxTurns,
-    isBackground: record.isBackground,
-    worktree: record.worktree,
-  });
+  return buildResumedInvocation(record);
 }
 
 const TOOL_USES_ICON = "\uF0AD"; // Nerd Font wrench

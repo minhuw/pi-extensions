@@ -55,17 +55,6 @@ export interface SubagentHostResult {
 }
 
 export type SubagentModelResolver = (input: string, registry: ExtensionContext["modelRegistry"]) => Model<any> | string;
-export type SubagentHostModelScopeDecision = "allow" | "warn" | "reject";
-
-/** Mirror Agent scope policy: explicit runtime choices reject; config/inherit warns. */
-export function subagentHostModelScopeDecision(
-  model: { provider: string; id: string },
-  allowed: Set<string> | undefined,
-  explicit: boolean,
-): SubagentHostModelScopeDecision {
-  if (!allowed || allowed.has(`${model.provider}/${model.id}`.toLowerCase())) return "allow";
-  return explicit ? "reject" : "warn";
-}
 
 /** Resolve foreground host model precedence: explicit request, then config, then parent. */
 export function resolveSubagentHostModel(

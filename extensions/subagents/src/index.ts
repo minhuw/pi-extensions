@@ -2156,9 +2156,10 @@ Terse command-style prompts produce shallow, generic work.
       const customConfig = getAgentConfig(subagentType);
 
       // Validate service_tier tool param early (frontmatter already sanitized at load).
+      let toolServiceTier: ReturnType<typeof parseServiceTier>;
       if (params.service_tier != null && params.service_tier !== "") {
         try {
-          parseServiceTier(params.service_tier);
+          toolServiceTier = parseServiceTier(params.service_tier);
         } catch (err) {
           return textResult(err instanceof Error ? err.message : String(err));
         }
@@ -2169,18 +2170,8 @@ Terse command-style prompts produce shallow, generic work.
         defaultRunInBackground: getBackgroundByDefault(),
       });
 
-      // Normalize resolved service tier (frontmatter wins; tool param fills gap).
-      let serviceTier = resolvedConfig.serviceTier;
-      if (serviceTier != null) {
-        try {
-          serviceTier = parseServiceTier(serviceTier);
-        } catch (err) {
-          if (resolvedConfig.serviceTierFromParams) {
-            return textResult(err instanceof Error ? err.message : String(err));
-          }
-          serviceTier = undefined;
-        }
-      }
+      // Frontmatter wins; the already-normalized tool value fills the gap.
+      let serviceTier = resolvedConfig.serviceTierFromParams ? toolServiceTier : resolvedConfig.serviceTier;
 
       // Resolve model from agent config first; tool-call params only fill gaps.
       let model = ctx.model;
