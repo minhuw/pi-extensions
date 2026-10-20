@@ -166,18 +166,22 @@ describe("createWorkflowHost — spawn mapping", () => {
     }
   });
 
-  it("rejects a model the script named and cannot be resolved", async () => {
+  it.each(["not-a-model", "anthropic/very-expensive", undefined, null])("rejects raw model %s before host side effects", async model => {
     const stub = stubManager();
-    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+    const context = ctx();
+    const host = createWorkflowHost({ pi: {} as any, ctx: context, manager: stub.manager });
 
-    const result = await host.spawnAgent(request({ model: "not-a-model" }));
+    const result = await host.spawnAgent(request({ model } as any));
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/Model not found/);
+    expect(result.error).toMatch(/Model overrides are unavailable/);
     expect(stub.spawnAndWait).not.toHaveBeenCalled();
+    expect(stub.resume).not.toHaveBeenCalled();
+    expect(context.modelRegistry.find).not.toHaveBeenCalled();
   });
 
-  it("resolves a model the script named through the session's registry", async () => {
+  it("resolves the configured agent model through the session's registry", async () => {
+    registerAgents(new Map([["pinned", { name: "pinned", model: "haiku" } as any]]));
     const stub = stubManager();
     const model = { id: "claude-haiku-4-5", name: "Haiku", provider: "anthropic" };
     const host = createWorkflowHost({
@@ -191,8 +195,17 @@ describe("createWorkflowHost — spawn mapping", () => {
       manager: stub.manager,
     });
 
-    await host.spawnAgent(request({ model: "haiku" }));
+    await host.spawnAgent(request({ agentType: "pinned" }));
 
+    expect(stub.spawnAndWait.mock.calls[0][4].model).toBe(model);
+  });
+
+  it("inherits the exact current parent model when the type has no configured model", async () => {
+    const stub = stubManager();
+    const model = { provider: "parent", id: "custom", cost: { input: 7 } };
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx({ model }), manager: stub.manager });
+    const result = await host.spawnAgent(request());
+    expect(result.ok).toBe(true);
     expect(stub.spawnAndWait.mock.calls[0][4].model).toBe(model);
   });
 
@@ -307,12 +320,7 @@ describe("createWorkflowHost — spawn mapping", () => {
  * scopeModels on the workflow spawn path
  * ------------------------------------------------------------------------- */
 
-/**
- * A workflow script is written by the model, so `agent({ model })` is a runtime
- * LLM choice — exactly what `scopeModels` guards. These pin the split the policy
- * turns on: what the SCRIPT named is refused, what the user authored (an agent
- * file's `model:`, the parent's own model) warns and proceeds.
- */
+/** Configured and inherited models preserve the user's scopeModels policy. */
 describe("createWorkflowHost — scopeModels", () => {
   const ALLOWED = { id: "allowed-model", name: "Allowed", provider: "anthropic" };
   const BLOCKED = { id: "blocked-model", name: "Blocked", provider: "anthropic" };
@@ -377,7 +385,7 @@ describe("createWorkflowHost — scopeModels", () => {
     registerAgents(new Map());
   });
 
-  it("refuses a model the script named that is out of scope, and fails only that agent", async () => {
+  it("refuses script model requests even when the requested model is in scope", async () => {
     setScopeModelsEnabled(true);
     const stub = stubManager();
     const host = createWorkflowHost({ pi: {} as any, ctx: scopedCtx(), manager: stub.manager });
@@ -387,14 +395,14 @@ describe("createWorkflowHost — scopeModels", () => {
     // `{ok: false}` rather than a throw: the runtime turns this into `null` for
     // the script, so one refused model does not take the run's siblings down.
     expect(blocked.ok).toBe(false);
-    expect(blocked.error).toMatch(/Model not in scope/);
-    expect(blocked.error).toContain("  anthropic/allowed-model");
+    expect(blocked.error).toMatch(/Model overrides are unavailable/);
     expect(stub.spawnAndWait).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
 
     const inScope = await host.spawnAgent(request({ model: "anthropic/allowed-model" }));
-    expect(inScope.ok).toBe(true);
-    expect(stub.spawnAndWait.mock.calls[0][4].model).toBe(ALLOWED);
+    expect(inScope.ok).toBe(false);
+    expect(inScope.error).toMatch(/Model overrides are unavailable/);
+    expect(stub.spawnAndWait).not.toHaveBeenCalled();
   });
 
   it("warns but still spawns when the agent file pinned the out-of-scope model", async () => {
@@ -445,7 +453,7 @@ describe("createWorkflowHost — scopeModels", () => {
     expect(notify).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves every spawn alone when scopeModels is off — the default", async () => {
+  it("rejects script model overrides when scopeModels is off while preserving configured spawns", async () => {
     setScopeModelsEnabled(false);
     const stub = stubManager();
     const host = createWorkflowHost({ pi: {} as any, ctx: scopedCtx(), manager: stub.manager });
@@ -453,9 +461,10 @@ describe("createWorkflowHost — scopeModels", () => {
     const named = await host.spawnAgent(request({ model: "anthropic/blocked-model" }));
     const pinnedAgent = await host.spawnAgent(request({ agentId: "wf-agent-1", agentType: "pinned" }));
 
-    expect(named.ok).toBe(true);
+    expect(named.ok).toBe(false);
+    expect(named.error).toMatch(/Model overrides are unavailable/);
     expect(pinnedAgent.ok).toBe(true);
-    expect(stub.spawnAndWait).toHaveBeenCalledTimes(2);
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(1);
     expect(stub.spawnAndWait.mock.calls[0][4].model).toBe(BLOCKED);
     expect(notify).not.toHaveBeenCalled();
   });

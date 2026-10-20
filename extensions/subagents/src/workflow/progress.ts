@@ -76,10 +76,9 @@ export interface WorkflowAgentEntry {
   /**
    * Short model label for tight rows, e.g. `haiku 4.5`.
    *
-   * Seeded from what the script asked for and then REPLACED by what the child
-   * actually ran on, once its session exists to report one — the same
-   * effective-not-requested rule every other subagent surface follows (#168).
-   * An `agent()` that named no model therefore starts blank and fills in.
+   * Reported by the child session once its configured or inherited model is
+   * known. A new agent starts blank and fills in; resume and journal replay
+   * retain the effective model metadata.
    */
   model?: string;
   /** Canonical `provider/model-id`, for the dialog, which has room for it. */

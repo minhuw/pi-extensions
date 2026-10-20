@@ -54,6 +54,13 @@ export function isolationParam(enabled: boolean): Partial<typeof isolationParamS
   return enabled ? isolationParamShape : {};
 }
 
+/** Model selection at LLM boundaries is limited to user-configured agent types. */
+export const MODEL_SELECTION_GUIDANCE =
+  "Select an existing agent type; its configured model is authoritative, otherwise inherit the current parent model. Model overrides are unavailable.";
+
+export const MODEL_OVERRIDE_ERROR =
+  "Model overrides are unavailable. Remove the model field and select an existing agent type (subagent_type or agentType); configure its model in the agent definition, or inherit the current parent model.";
+
 interface AgentInvocationParams {
   model?: string;
   thinking?: string;

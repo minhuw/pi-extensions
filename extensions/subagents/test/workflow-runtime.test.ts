@@ -538,7 +538,7 @@ describe("abort", () => {
     const rowsFor = (seen: WorkflowEntry[][], index: number): WorkflowAgentEntry[] =>
       seen.flat().filter((e): e is WorkflowAgentEntry => e.type === "workflow_agent" && e.index === index);
 
-    it("replaces the requested model with the effective one, before the agent settles", async () => {
+    it("reports the configured model before the agent settles", async () => {
       const seen: WorkflowEntry[][] = [];
       const host = {
         async spawnAgent(request: any) {
@@ -549,16 +549,15 @@ describe("abort", () => {
         abortAgent() {},
       };
 
-      const result = await run('return await agent("go", { model: "haiku" });', {
+      const result = await run('return await agent("go", { agentType: "configured" });', {
         host,
         onProgress(entries) { seen.push([...entries]); },
       });
       expect(result.status).toBe("completed");
 
       const rows = rowsFor(seen, 0);
-      // The fuzzy request is what the row starts with...
-      expect(rows[0]?.model).toBe("haiku");
-      // ...and the resolved id is what it ends with, on a row still running.
+      // Model identity becomes known from the session, while still running.
+      expect(rows[0]?.model).toBeUndefined();
       const corrected = rows.find(r => r.model === "haiku 4.5");
       expect(corrected).toBeDefined();
       expect(corrected?.state).not.toBe("done");
@@ -608,7 +607,7 @@ describe("abort", () => {
       // CompletedChild's own contract: "the progress entry has to show the same
       // thing the first entry showed". A resumed call never goes through
       // spawnAgent, so without reporting on the resume path too the continuation
-      // of a child would fall back to the model the script asked for.
+      // of a child would lose the effective session model.
       const seen: WorkflowEntry[][] = [];
       const host = {
         async spawnAgent(request: any) {
@@ -623,12 +622,13 @@ describe("abort", () => {
       };
 
       const result = await run(
-        'await agent("go", { label: "impl", model: "haiku" });\nreturn await agent("again", { resume: "impl" });',
+        'await agent("go", { label: "impl", agentType: "configured" });\nreturn await agent("again", { resume: "impl" });',
         { host, onProgress(e) { seen.push([...e]); } },
       );
       expect(result.status).toBe("completed");
 
-      // Index 1 is the resumed call — the same child, so the same label.
+      // The resumed row retains the actual model even before a fresh report.
+      expect(rowsFor(seen, 1)[0]?.model).toBe("haiku 4.5");
       expect(rowsFor(seen, 1).at(-1)?.model).toBe("haiku 4.5");
     });
 
@@ -655,14 +655,14 @@ describe("abort", () => {
     });
 
     it("leaves the row alone when the host reports nothing", async () => {
-      // `onResolved` is optional; a host that never calls it must not blank the
-      // requested values the row already had.
+      // `onResolved` is optional; a host that never calls it leaves model
+      // identity unknown. The runtime must not invent a model.
       const seen: WorkflowEntry[][] = [];
       const { host } = stubHost();
 
-      await run('return await agent("go", { model: "haiku" });', { host, onProgress(e) { seen.push([...e]); } });
+      await run('return await agent("go", { agentType: "configured" });', { host, onProgress(e) { seen.push([...e]); } });
 
-      expect(rowsFor(seen, 0).at(-1)?.model).toBe("haiku");
+      expect(rowsFor(seen, 0).at(-1)?.model).toBeUndefined();
     });
   });
 
@@ -928,6 +928,23 @@ describe("pause and the concurrency limit", () => {
  * ------------------------------------------------------------------------- */
 
 describe("Claude Code option compatibility", () => {
+  it.each([
+    '{ model: "unknown/no-such-model" }',
+    '{ model: "anthropic/very-expensive" }',
+    '{ ["mo" + "del"]: "anthropic/very-expensive", agentType: "configured" }',
+    'Object.create({ model: "anthropic/very-expensive" })',
+    '{ model: undefined }',
+    '{ model: null }',
+  ])("rejects raw model options before requesting any spawn: %s", async opts => {
+    const stub = stubHost();
+    const result = await run(`return await agent("go", ${opts});`, { host: stub.host });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("Model overrides are unavailable");
+    expect(result.error).toContain("agentType");
+    expect(stub.calls).toEqual([]);
+    expect(result.agentCount).toBe(0);
+  });
+
   it("names a misspelt option rather than ignoring it", async () => {
     const stub = stubHost();
     const result = await run("return await agent('go', { agenttype: 'recon' });", { host: stub.host });
@@ -937,10 +954,10 @@ describe("Claude Code option compatibility", () => {
     expect(result.error).toMatch(/agentType/);
   });
 
-  it("accepts every option a Claude Code script actually uses", async () => {
+  it("accepts supported Claude Code options with model selected by agent type", async () => {
     const stub = stubHost();
     const result = await run(
-      "return await agent('go', { label: 'L', phase: 'P', agentType: 'worker', model: 'haiku', effort: 'high', isolation: 'worktree' });",
+      "return await agent('go', { label: 'L', phase: 'P', agentType: 'worker', effort: 'high', isolation: 'worktree' });",
       { host: stub.host },
     );
 

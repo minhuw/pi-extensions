@@ -98,6 +98,8 @@ let originalAgentDir: string | undefined;
 let originalHome: string | undefined;
 
 beforeEach(() => {
+  vi.mocked(runAgent).mockClear();
+  vi.mocked(resumeAgent).mockClear();
   originalCwd = process.cwd();
   cwd = mkdtempSync(join(tmpdir(), "agent-model-display-"));
   process.chdir(cwd);
@@ -233,62 +235,45 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.identity).toContain("low (asked max)");
   });
 
-  it("discloses a model an agent file pinned over the caller's (#182)", async () => {
+  it("retains an agent file's configured model without a caller model parameter", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
-
-    const result = await tool.execute(
-      "tc-5",
-      {
-        prompt: "go",
-        description: "d",
-        subagent_type: "pinned",
-        model: "anthropic/claude-opus-4-6",
-        run_in_background: true,
-      },
-      undefined,
-      undefined,
-      ctx(),
-    );
-
-    expect(result.details.modelName).toBe("anthropic/claude-haiku-4-5 (asked anthropic/claude-opus-4-6)");
-  });
-
-  it("stays quiet when the caller's spelling names the model that won", async () => {
-    // Model input is fuzzy: `"haiku"` and `"anthropic/claude-haiku-4-5"` are the
-    // same model, and the frontmatter did not take anything away from the
-    // caller. Comparing the raw strings would print "anthropic/claude-haiku-4-5 (asked haiku)".
-    pinnedAgent("model: anthropic/claude-haiku-4-5\n");
-    const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
-
-    const result = await tool.execute(
-      "tc-5b",
-      { prompt: "go", description: "d", subagent_type: "pinned", model: "haiku", run_in_background: true },
-      undefined,
-      undefined,
-      ctx(),
-    );
-
+    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "done", aborted: false, steered: false }) as never);
+    const result = await tool.execute("configured", {
+      prompt: "go", description: "d", subagent_type: "pinned", run_in_background: false,
+    }, undefined, vi.fn(), ctx());
     expect(result.details.modelName).toBe("anthropic/claude-haiku-4-5");
+    expect(vi.mocked(runAgent).mock.calls[0]?.[3]?.model).toBe(MODELS[1]);
   });
 
-  it("discloses a spelling that names no available model at all", async () => {
-    pinnedAgent("model: anthropic/claude-haiku-4-5\n");
+  it("passes the exact current parent model when the agent has no configured model", async () => {
     const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
-
-    const result = await tool.execute(
-      "tc-5c",
-      { prompt: "go", description: "d", subagent_type: "pinned", model: "gpt-9", run_in_background: true },
-      undefined,
-      undefined,
-      ctx(),
-    );
-
-    expect(result.details.modelName).toBe("anthropic/claude-haiku-4-5 (asked gpt-9)");
+    const context = ctx();
+    vi.mocked(runAgent).mockImplementation(async () => ({ responseText: "done", aborted: false, steered: false }) as never);
+    await tool.execute("inherit", {
+      prompt: "go", description: "d", subagent_type: "worker", run_in_background: false,
+    }, undefined, vi.fn(), context);
+    expect(vi.mocked(runAgent).mock.calls[0]?.[3]?.model).toBe(context.model);
   });
+
+  it.each(["unknown/no-such-model", "anthropic/claude-opus-4-6", "haiku", undefined, null])(
+    "rejects raw model %s before direct, background, scheduled or resume execution", async model => {
+      pinnedAgent("model: anthropic/claude-haiku-4-5\n");
+      const tool = agentTool();
+      const context = ctx();
+      for (const extra of [{}, { run_in_background: true }, { schedule: "in 1m" }, { resume: "old-child" }]) {
+        const result = await tool.execute("reject", {
+          prompt: "go", description: "d", subagent_type: "pinned", model, ...extra,
+        }, undefined, vi.fn(), context);
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain("Model overrides are unavailable");
+        expect(result.content[0].text).toContain("subagent_type or agentType");
+      }
+      expect(runAgent).not.toHaveBeenCalled();
+      expect(resumeAgent).not.toHaveBeenCalled();
+      expect(context.modelRegistry.find).not.toHaveBeenCalled();
+    },
+  );
 
   it("says nothing about a request that was honored", async () => {
     vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, options: any) => {
@@ -313,9 +298,8 @@ describe("Agent tool result — effective model", () => {
 
 describe("Agent tool result — resume", () => {
   it("renders the reopened session's settings, not the resume call's", async () => {
-    // resumeAgent only prompts the existing session: model and thinking on a
-    // resume call cannot take effect, so rendering them advertises a
-    // configuration the run never had.
+    // resumeAgent only prompts the existing session. A thinking parameter cannot
+    // change it; the display must keep the existing model and thinking level.
     const s = session("anthropic", "claude-haiku-4-5", "low");
     vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, options: any) => {
       options.onSessionCreated?.(s);
@@ -340,7 +324,6 @@ describe("Agent tool result — resume", () => {
         description: "changed",
         subagent_type: "worker",
         run_in_background: false,
-        model: "anthropic/claude-opus-4-6",
         thinking: "max",
         resume: first.details.agentId,
       },

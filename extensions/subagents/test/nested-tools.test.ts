@@ -180,31 +180,44 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("applies the scopeModels allowlist to a caller-supplied model", async () => {
-    writeFileSync(
-      join(cwd, ".pi", "settings.json"),
-      JSON.stringify({ enabledModels: ["anthropic/allowed"] }),
-    );
+  it.each(["unknown/no-such-model", "anthropic/very-expensive", "anthropic/allowed", undefined, null])(
+    "rejects raw model %s before spawning or resuming, regardless of scopeModels", async model => {
+      setScopeModelsEnabled(true);
+      const [agent] = tools();
+      expect((agent.parameters as any).properties).not.toHaveProperty("model");
+      expect(agent.description).toContain("configured model is authoritative");
+      for (const extra of [{}, { run_in_background: true }, { resume: "child-1" }]) {
+        const result = await execute(agent, {
+          subagent_type: "scout", description: "find files", prompt: "Find them", model, ...extra,
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain("Model overrides are unavailable");
+      }
+      expect(spawn).not.toHaveBeenCalled();
+      expect(spawnAndWait).not.toHaveBeenCalled();
+      expect(manager.resume).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the configured model, including the existing scopeModels warning policy", async () => {
+    writeAgent("scout", "model: anthropic/blocked\n");
+    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["anthropic/allowed"] }));
     setScopeModelsEnabled(true);
     const [agent] = tools();
+    const result = await execute(agent, { subagent_type: "scout", description: "find", prompt: "Find" });
+    expect(result.isError).toBe(false);
+    expect(spawnAndWait.mock.calls[0][4].model).toEqual({ provider: "anthropic", id: "blocked" });
+  });
 
-    const blocked = await execute(agent, {
-      subagent_type: "scout",
-      description: "find files",
-      prompt: "Find them",
-      model: "anthropic/blocked",
-    });
-    expect(blocked.isError).toBe(true);
-    expect(blocked.content[0].text).toContain("Model not in scope");
-    expect(spawnAndWait).not.toHaveBeenCalled();
-
-    const inScope = await execute(agent, {
-      subagent_type: "scout",
-      description: "find files",
-      prompt: "Find them",
-      model: "anthropic/allowed",
-    });
-    expect(inScope.isError).toBe(false);
+  it("inherits the exact parent model object when the type has no configured model", async () => {
+    const [agent] = tools();
+    const context = ctx();
+    context.model = { provider: "parent", id: "custom", cost: { input: 7 } };
+    const result = await agent.execute("call", {
+      subagent_type: "scout", description: "find", prompt: "Find",
+    }, undefined, undefined, context);
+    expect(result.isError).toBe(false);
+    expect(spawnAndWait.mock.calls[0][4].model).toBe(context.model);
   });
 
   it("queues a steer for an owned child whose session is not ready yet", async () => {

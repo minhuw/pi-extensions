@@ -4,9 +4,9 @@
  * Every other subagent surface names the model the child ACTUALLY ran on, read
  * back from its session onto `AgentRecord.invocation` once pi has resolved its
  * defaults and clamped the thinking level. Workflow rows used to be the
- * exception: they showed `payload.model`, the raw string the script wrote, so a
- * fuzzy `"haiku"` stayed `"haiku"` and an `agent()` that named no model showed
- * nothing at all for the whole run.
+ * exception: they once showed the raw model request and left inherited models
+ * blank. Model selection now comes only from agent configuration or the parent;
+ * the effective identity must still be read back from the session.
  *
  * The runtime side — that a reported value updates the row in place, mid-run —
  * is covered in `test/workflow-runtime.test.ts`. This file covers the seam that
@@ -88,13 +88,11 @@ describe("the workflow host reports a child's effective configuration", () => {
     manager = new AgentManager();
   });
 
-  it("hands over the model the session actually resolved to, not the script's spelling", async () => {
+  it("hands over the model the session actually resolved to from the agent configuration", async () => {
     // `name` too: resolveModel fuzzy-matches across id, name and provider/id.
     const haiku = { provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku 4.5" };
     childSessionReports({ model: haiku });
-    // The registry has to resolve the script's fuzzy spelling, or the spawn is
-    // refused before it ever reaches a session — which is the correct behaviour
-    // for an unresolvable model, and not what this test is about.
+    registerAgents(new Map([["pinned", { name: "pinned", model: "haiku" } as any]]));
     const host = createWorkflowHost({
       pi,
       ctx: ctx({ modelRegistry: { find: vi.fn(() => haiku), getAvailable: vi.fn(() => [haiku]) } }),
@@ -102,8 +100,8 @@ describe("the workflow host reports a child's effective configuration", () => {
     });
     const reported: unknown[] = [];
 
-    // The script asked fuzzily; the row must not keep saying "haiku".
-    await host.spawnAgent(spawnRequest({ model: "haiku", onResolved: configCollector(reported) }));
+    // The user configuration is fuzzy; the row reports the effective model.
+    await host.spawnAgent(spawnRequest({ agentType: "pinned", onResolved: configCollector(reported) }));
 
     expect(reported).toHaveLength(1);
     expect(reported[0]).toMatchObject({ modelId: "anthropic/claude-haiku-4-5" });
@@ -135,22 +133,16 @@ describe("the workflow host reports a child's effective configuration", () => {
     expect(reported[0]?.requestedThinking).toBe("max");
   });
 
-  // Why the workflow path never discloses a model override at all: unlike the
-  // Agent tool (`agentConfig?.model ?? params.model`), this path resolves
-  // `request.model ?? config?.model`, so the script outranks the agent file and
-  // therefore always got the model it asked for. Seeding a `requestedModel` here
-  // would describe a precedence that does not exist.
-  it("lets the script's model outrank the agent file's, so there is nothing to disclose", async () => {
+  it("keeps the configured agent model authoritative over the parent", async () => {
     const haiku = { provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku 4.5" };
     const opus = { provider: "anthropic", id: "claude-opus-4-6", name: "Opus 4.6" };
-    registerAgents(new Map([["pinned", { name: "pinned", model: "anthropic/claude-opus-4-6" } as any]]));
+    registerAgents(new Map([["pinned", { name: "pinned", model: "anthropic/claude-haiku-4-5" } as any]]));
     childSessionReports({ model: haiku });
     const host = createWorkflowHost({
       pi,
       ctx: ctx({
+        model: opus,
         modelRegistry: {
-          // Resolves by what it was ASKED for — a stub that answers `haiku` to
-          // everything would let the assertion below pass whichever model won.
           find: vi.fn((provider: string, id: string) =>
             [haiku, opus].find(m => m.provider === provider && m.id === id),
           ),
@@ -160,14 +152,8 @@ describe("the workflow host reports a child's effective configuration", () => {
       manager,
     });
     const reported: { requestedModel?: string }[] = [];
-
-    await host.spawnAgent(
-      spawnRequest({ agentType: "pinned", model: "haiku", onResolved: configCollector(reported) }),
-    );
-
-    // The script's "haiku" won over the file's pinned opus...
-    expect(vi.mocked(runAgent).mock.calls[0]?.[3]).toMatchObject({ model: haiku });
-    // ...so nothing was overridden, and nothing is disclosed.
+    await host.spawnAgent(spawnRequest({ agentType: "pinned", onResolved: configCollector(reported) }));
+    expect(vi.mocked(runAgent).mock.calls[0]?.[3]?.model).toBe(haiku);
     expect(reported[0]?.requestedModel).toBeUndefined();
   });
 

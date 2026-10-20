@@ -70,7 +70,7 @@ A **card in the transcript**, updating as the run goes:
 
 A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
 
-Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
+Each row names the model the child *actually* ran on, read back from its session once pi has resolved the agent configuration or inherited the parent model. Resumed children retain their actual session model; stored model identity metadata remains available when inspecting prior runs.
 
 The **inspector**, at `/agents → Workflows` — two panes, two levels: phases on the left, that phase's agents on the right, and `⏎` to descend into one agent's prompt, activity and outcome. The detail pane has room for the canonical `provider/model-id` and the thinking level, including a level pi clamped (`thinking: low (asked max)`). The full key table is in [the README](../README.md#commands); the four that change the run rather than the view are:
 
@@ -239,7 +239,6 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 | `label` | string | Display name in the progress tree. Also the handle `resume` addresses |
 | `phase` | string | Put this agent in a named group, overriding the ambient `phase()`. **Use it inside `pipeline`/`parallel` stages**, where the ambient phase races |
 | `agentType` | string | Which agent definition to use. Defaults to `general-purpose`; built-ins are `general-purpose`, `Explore`, `Plan`, plus your custom agents |
-| `model` | string | `provider/modelId`, or fuzzy like `haiku` |
 | `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Omitted, the agent definition's own `thinking` decides, then the parent's |
 | `isolation` | `"worktree"` | Run in a throwaway git worktree. Only when agents write files in parallel and would collide — it costs setup time and disk per agent. Only this option decides, as in Claude Code — an agent file's `isolation:` does not apply to workflow children |
 | `gate` | string | A shell command run after the agent finishes; a non-zero exit fails the agent and its output becomes the error |
@@ -248,7 +247,9 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 
 Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to `general-purpose` silently.
 
-Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
+Select an existing `agentType`; its configured frontmatter model is authoritative, otherwise the child inherits the current parent model. The `model` option is rejected, including in old saved scripts. Remove it and configure the desired model in the agent definition. Phase `model` metadata is display-only.
+
+Combination rules: `resume` cannot be combined with `agentType`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
 
 ### `pipeline()` and `parallel()`
 
@@ -379,7 +380,7 @@ The script called `Date.now()`, `new Date()` or `Math.random()`. A script that v
 `meta` is evaluated before the script runs, in an empty context, so it cannot reference anything. Move the dynamic part into the body.
 
 **`agent() opts.<key> is not a recognised option.`**
-A typo, or an option from a different tool. The supported set is `label`, `phase`, `model`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`.
+A typo, or an option from a different tool. The supported set is `label`, `phase`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`.
 
 **An agent ran as the wrong type and nothing said so.**
 An `agentType` that names no known agent falls back to `general-purpose` **silently** — unlike the `Agent` tool, which tells you. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
@@ -417,7 +418,7 @@ The sandbox is a determinism and accident boundary, not a defence against a deli
 
 ## Coming from Claude Code
 
-This is a port of Claude Code's `Workflow` tool down to its state model, so **a script written for Claude Code runs here unchanged.** `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
+This is a port of Claude Code's `Workflow` tool down to its state model, with local model selection policy: **select agent types; per-call model overrides are rejected.** `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
 
 Identical: `agent()`, `pipeline()`, `parallel()`, `workflow()`, `phase()`, `log()`, `args`, `budget`; the `meta` block; `schema` returning a validated object; one-level `workflow()` nesting; the determinism throws.
 
@@ -439,7 +440,7 @@ Every file below is executed by `test/workflow-examples.test.ts` against a stub 
 | [`fan-out-audit.js`](../examples/workflows/fan-out-audit.js) | Runtime fan-out, `pipeline`, `label`, per-stage `phase` | Yes — takes `args.root` |
 | [`structured-findings.js`](../examples/workflows/structured-findings.js) | `schema` on both stages, objects instead of prose | Yes |
 | [`gated-fix.js`](../examples/workflows/gated-fix.js) | `gate`, `isolation: "worktree"`, `resume` retry loop | Needs a real test command |
-| [`review-panel.js`](../examples/workflows/review-panel.js) | An earned `parallel` barrier, `effort` tiering, `model` | Yes |
+| [`review-panel.js`](../examples/workflows/review-panel.js) | An earned `parallel` barrier, `effort` tiering, agent type selection | Yes |
 | [`compose.js`](../examples/workflows/compose.js) | `workflow()` nesting and `args` plumbing | Needs `lib/count-child.js` saved |
 
 Copy one into `.pi/workflows/` to make it yours.

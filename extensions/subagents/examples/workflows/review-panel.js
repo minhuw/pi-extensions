@@ -2,7 +2,7 @@
  * review-panel.js — the case where a barrier is actually earned.
  *
  * Demonstrates: `parallel` used correctly, `effort` tiering (cheap reviewers,
- * an expensive judge), and a `model` override.
+ * a deeper judge), and agent type selection with configured models or parent inheritance.
  *
  * Most of the time `pipeline` beats `parallel`, because a barrier idles every
  * fast agent until the slowest finishes. This is the exception: the synthesis

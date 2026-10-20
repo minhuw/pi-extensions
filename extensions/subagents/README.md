@@ -51,6 +51,8 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 
 Tools: `Agent`, `get_subagent_result`, `steer_subagent`, and `SubagentWorkflow`. Use `/agents` for the fleet, settings, and workflows. Custom agent definitions can override embedded names; upstream also supports mentions and saved workflows.
 
+Select an existing agent type with `subagent_type` (`agentType` in workflows). Its user-configured frontmatter `model` is authoritative; without one, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type's model, edit its agent definition. Trusted external hosts such as Herder retain their own model bindings.
+
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
 | `recon` | Read-only reconnaissance; compressed handoff | read-only | `deepseek/deepseek-flash`, thinking `high`, normal tier (no override) |

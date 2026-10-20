@@ -36,6 +36,7 @@ import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
+import { MODEL_OVERRIDE_ERROR } from "../invocation-config.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
 import type { AgentRecord, ThinkingLevel } from "../types.js";
@@ -194,37 +195,27 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
 
   return {
     async spawnAgent(request) {
+      // Old persisted scripts and raw requests must fail before any side effects.
+      if ("model" in request) return { ok: false, error: MODEL_OVERRIDE_ERROR };
+
       const dispatch = resolveSpawnType(request.agentType);
       if (!dispatch.ok) return { ok: false, error: dispatch.message };
 
-      // Same precedence as the Agent tool: the caller's model wins, the agent
-      // definition's is next, and the parent's is the floor. A model the script
-      // named and we cannot resolve is an error; one the definition named falls
-      // back to the parent silently, because the script never asked for it.
+      // The selected agent's configuration is authoritative; otherwise inherit.
       let model = ctx.model;
       const config = getAgentConfig(dispatch.type);
-      const modelInput = request.model ?? config?.model;
+      const modelInput = config?.model;
       if (modelInput !== undefined) {
         const resolved = resolveModel(modelInput, ctx.modelRegistry);
-        if (typeof resolved === "string") {
-          if (request.model !== undefined) return { ok: false, error: resolved };
-        } else {
-          model = resolved;
-        }
+        if (typeof resolved !== "string") model = resolved;
       }
 
-      // Same scopeModels policy as the Agent tool and the nested delegation
-      // tools: a script's `agent({ model })` is a runtime LLM choice, and the
-      // script is written by the model, so it must not reach a model the user's
-      // enabledModels list excludes. `callerSupplied` keys off `request.model`
-      // and NOT `modelInput` — the latter has already absorbed the agent file's
-      // own `model:`, which is user-authored config and so earns the
-      // warn-and-proceed branch rather than a refusal.
+      // User-authored configuration retains scopeModels warn-and-proceed policy.
       const scopeVerdict = checkModelScope({
         model,
         cwd: ctx.cwd,
         modelRegistry: ctx.modelRegistry,
-        callerSupplied: request.model !== undefined,
+        callerSupplied: false,
         agentLabel: config?.displayName ?? dispatch.type,
         modelInput,
       });
@@ -321,11 +312,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // nothing for it to compare against, so a level pi clamped would be
             // indistinguishable from one that was honoured.
             //
-            // Only the level. #182's other half — a caller parameter an agent
-            // file outranked — cannot arise here: this path resolves
-            // `request.model ?? config?.model`, so the script always wins and
-            // therefore always got what it asked for. Seeding a `requestedModel`
-            // would describe a precedence this path does not have.
+            // Model choice comes only from user configuration or inheritance.
             invocation: {
               serviceTier: config?.serviceTier,
               ...(request.effort !== undefined ? { thinking: request.effort as ThinkingLevel } : {}),

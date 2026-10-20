@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
+import { DEFAULT_AGENT_NAMES } from "../src/types.js";
 
 const EXAMPLE_TEMPLATE = fileURLToPath(new URL("../examples/agent-tool-description.md", import.meta.url));
 
@@ -108,7 +109,7 @@ describe("toolDescriptionMode", () => {
     expect(desc).not.toContain("## Usage notes");
     expect(desc).not.toContain("## Writing the prompt");
     // Type list keeps every agent but only the first sentence of each description.
-    expect(desc).toContain("- worker:");
+    for (const name of DEFAULT_AGENT_NAMES) expect(desc).toContain(`- ${name}:`);
     expect(desc).toContain("- recon: Fast read-only codebase reconnaissance. (Tools:");
     expect(desc).not.toContain('"thorough"');
     // The point of the feature: materially smaller than the full version.
@@ -164,9 +165,27 @@ describe("toolDescriptionMode", () => {
     }
   });
 
+  it.each(["full", "compact", "custom"])("enforces configured-type-or-inherit guidance in %s mode", mode => {
+    const tools = setup({ toolDescriptionMode: mode }, () => {
+      if (mode === "custom") {
+        writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "My custom delegation guidance.");
+      }
+    });
+    expect(tools.has("list_subagent_models")).toBe(false);
+    const agent = tools.get("Agent");
+    expect(agent.parameters.properties).not.toHaveProperty("model");
+    expect(agent.description).toContain("Select an existing agent type");
+    expect(agent.description).toContain("configured model is authoritative");
+    expect(agent.description).toContain("inherit the current parent model");
+    expect(agent.description).toContain("Model overrides are unavailable");
+    expect(tools.get("SubagentWorkflow").description).not.toContain("model?: string");
+    expect(tools.get("SubagentWorkflow").description).toContain("Model overrides are unavailable");
+    if (mode === "compact") expect(agent.description.length).toBeLessThan(1600);
+  });
+
   it("every strategy param carries a real description of its own", () => {
     const props = setup().get("Agent").parameters?.properties ?? {};
-    for (const name of ["run_in_background", "model", "thinking", "inherit_context"]) {
+    for (const name of ["run_in_background", "thinking", "inherit_context"]) {
       // Long enough to be an explanation the model can act on, not a bare label.
       expect(props[name]?.description?.length ?? 0).toBeGreaterThan(40);
     }

@@ -15,6 +15,7 @@
 
 import { cpus } from "node:os";
 import { Worker } from "node:worker_threads";
+import { MODEL_OVERRIDE_ERROR } from "../invocation-config.js";
 import { type JournalKeyInput, journalKey, type WorkflowJournalEntry } from "./journal.js";
 import { type CompiledSchema, compileJsonSchema } from "./json-schema.js";
 import { extractMeta, type WorkflowMeta } from "./meta.js";
@@ -57,6 +58,7 @@ export interface WorkflowSpawnRequest {
   prompt: string;
   label: string;
   agentType: string;
+  /** @deprecated Legacy requests are rejected. Select agentType/config or inherit. */
   model?: string;
   /**
    * Reasoning effort for this child, as one of pi's thinking levels.
@@ -71,10 +73,8 @@ export interface WorkflowSpawnRequest {
    * Called by the host once the child's EFFECTIVE configuration is known —
    * which is when its session exists, not when the spawn resolves.
    *
-   * Without it a row could only ever show what the script asked for: a fuzzy
-   * `model: "haiku"` stays `haiku` instead of the id it resolved to, an
-   * `agent()` that named no model shows nothing at all, and a level pi clamped
-   * is presented as the level that was requested (#168, #182).
+   * Without it a row cannot name the configured or inherited model, and a
+   * level pi clamped is presented as the level that was requested (#168, #182).
    *
    * Plain strings, like `effort` above: this interface is the host boundary and
    * deliberately knows nothing about pi's `AgentInvocation`. Optional, so a host
@@ -202,9 +202,8 @@ export interface WorkflowHost {
     prompt: string,
     /**
      * Same reporter {@link WorkflowSpawnRequest.onResolved} carries, for the
-     * same reason: a resumed row is rebuilt from scratch, so without it the
-     * continuation of a child would show the model the script *asked* for while
-     * the row above it shows the one that ran.
+     * same reason: a resumed row is rebuilt from scratch. Reporting here keeps
+     * its identity current with the model its existing session actually uses.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
   ): Promise<WorkflowSpawnResult>;
@@ -433,7 +432,6 @@ class Semaphore {
 interface AgentCallPayload {
   prompt: string;
   label?: string;
-  model?: string;
   agentType?: string;
   isolation?: "worktree";
   phaseIndex?: number;
@@ -780,6 +778,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     }
 
     async function handleAgent(callId: number, payload: AgentCallPayload): Promise<void> {
+      if ("model" in payload) {
+        respond(callId, false, undefined, MODEL_OVERRIDE_ERROR, true);
+        return;
+      }
+
       // Bound now: the optional methods are checked once, up front, so a
       // capability the host lacks fails before an agent is spawned rather than
       // after — a gate that never ran must not be mistaken for a gate that
@@ -856,7 +859,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       const agentId = resumed?.agentId ?? `wf-agent-${index}`;
       const label = payload.label ?? resumed?.label ?? derivedLabel(payload.prompt);
       const agentType = resumed?.agentType ?? payload.agentType ?? "worker";
-      const model = resumed !== undefined ? resumed.model : payload.model;
+      const model = resumed?.model;
       const isolation = resumed !== undefined ? resumed.isolation : payload.isolation;
       openLaunches.set(callId, label);
 
@@ -1029,7 +1032,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     prompt: payload.prompt,
                     label,
                     agentType,
-                    ...(model !== undefined ? { model } : {}),
                     ...(payload.effort !== undefined ? { effort: payload.effort } : {}),
                     ...(compiledSchema !== undefined ? { schema: compiledSchema } : {}),
                     ...(isolation !== undefined ? { isolation } : {}),
@@ -1048,7 +1050,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                 agentId,
                 label,
                 agentType,
-                ...(model !== undefined ? { model } : {}),
+                ...(base.model !== undefined ? { model: base.model } : {}),
                 ...(isolation !== undefined ? { isolation } : {}),
               });
               // Re-checked here, not just in the child's tool: this is the one

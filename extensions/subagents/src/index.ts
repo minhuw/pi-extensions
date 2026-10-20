@@ -28,7 +28,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, type SubagentHost, type SubagentTelemetry, type SubagentTypeDescriptor } from "./host-registry.js";
-import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -1804,16 +1804,17 @@ export default function (pi: ExtensionAPI) {
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
   // the same load-bearing facts as the full version at ~75% fewer tokens, for
   // small/local models. Per-option details live in the param descriptions.
-  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+  const compactAgentToolDescription = `Launch an autonomous agent for complex tasks. Agent types:
 ${buildCompactTypeListText()}
 
 Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
 
 Notes:
-- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls — they run concurrently.
-- Individual agents run in the foreground by default. Use run_in_background: true only when explicitly requested. Never fabricate pending results. Use SubagentWorkflow only when the user explicitly opts into a multi-agent workflow; do not replace a Herder plan with it.
-- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- ${MODEL_SELECTION_GUIDANCE}
+- description: 3-5 words. Prompts must be self-contained.
+- Parallel work: multiple Agent calls in one message.
+- run_in_background: true requires an explicit request. Never fabricate pending results.
+- Results are hidden from the user; summarize them. Verify claimed code changes before reporting completion.
 - resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
@@ -1842,7 +1843,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
+- ${MODEL_SELECTION_GUIDANCE}
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
 
@@ -1901,7 +1902,7 @@ Terse command-style prompts produce shallow, generic work.
     if (mode === "compact") return compactAgentToolDescription;
     if (mode === "custom") {
       const custom = loadCustomToolDescription();
-      if (custom) return custom;
+      if (custom) return custom.includes(MODEL_SELECTION_GUIDANCE) ? custom : `${custom}\n\n${MODEL_SELECTION_GUIDANCE}`;
       console.warn('[pi-subagents] toolDescriptionMode is "custom" but no agent-tool-description.md found — using "full"');
     }
     return fullAgentToolDescription;
@@ -1937,12 +1938,6 @@ Terse command-style prompts produce shallow, generic work.
       subagent_type: Type.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
-      model: Type.Optional(
-        Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
-        }),
-      ),
       thinking: Type.Optional(
         Type.String({
           description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
@@ -2002,7 +1997,7 @@ Terse command-style prompts produce shallow, generic work.
       const displayName = subagentType ? getDisplayName(subagentType) : "Agent";
       const config = subagentType ? getAgentConfig(subagentType) : undefined;
       const desc = args.description ?? "";
-      const model = config?.model ?? args.model;
+      const model = config?.model;
       const thinking = config?.thinking ?? args.thinking;
       const serviceTier = config?.serviceTier ?? args.service_tier;
       const identity = formatAgentIdentity({
@@ -2118,6 +2113,9 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      // Unknown keys survive stale/raw tool calls; refuse before scheduling or resuming.
+      if ("model" in params) return { ...textResult(MODEL_OVERRIDE_ERROR), isError: true };
+
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -2165,7 +2163,7 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params, {
+      const resolvedConfig = resolveAgentInvocationConfig(customConfig, { ...params, model: undefined }, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
         defaultRunInBackground: getBackgroundByDefault(),
       });
@@ -2173,12 +2171,11 @@ Terse command-style prompts produce shallow, generic work.
       // Frontmatter wins; the already-normalized tool value fills the gap.
       let serviceTier = resolvedConfig.serviceTierFromParams ? toolServiceTier : resolvedConfig.serviceTier;
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // Only the selected agent definition can choose a model; otherwise inherit.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
@@ -2192,7 +2189,7 @@ Terse command-style prompts produce shallow, generic work.
         model,
         cwd: ctx.cwd,
         modelRegistry: ctx.modelRegistry,
-        callerSupplied: resolvedConfig.modelFromParams,
+        callerSupplied: false,
         agentLabel: customConfig?.displayName ?? subagentType,
         modelInput: resolvedConfig.modelInput,
       });
@@ -2238,17 +2235,6 @@ Terse command-style prompts produce shallow, generic work.
       // This is the pre-session snapshot — agent-manager overwrites it with the
       // effective values the moment a session reports them.
       const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
-      // What the caller SPELLED, kept only if it names a different model than the
-      // one that won. Model input is fuzzy — `"haiku"` and
-      // `"anthropic/claude-haiku-4-5"` are the same model — so comparing the two
-      // strings would disclose an override that never happened. A spelling that
-      // resolves to nothing is still worth disclosing: it cannot have taken effect.
-      const askedModel = ((asked: string | undefined) => {
-        if (!asked) return undefined;
-        const resolvedAsked = resolveModel(asked, ctx.modelRegistry);
-        if (typeof resolvedAsked === "string") return asked;
-        return resolvedAsked.provider === model?.provider && resolvedAsked.id === model?.id ? undefined : asked;
-      })(resolvedConfig.overridden?.model);
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName: formatModelName(model) ?? modelName,
@@ -2258,7 +2244,6 @@ Terse command-style prompts produce shallow, generic work.
         // Only set where the agent file outranked the caller, so the surfaces can
         // disclose a parameter that was accepted but could not take effect (#182).
         requestedThinking: resolvedConfig.overridden?.thinking,
-        requestedModel: askedModel,
         // Explicit value only — the default fallback would just add noise.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
@@ -2340,7 +2325,6 @@ Terse command-style prompts produce shallow, generic work.
             // at fire time, and the original is what a user edits.
             subagent_type: requestedType,
             prompt: params.prompt as string,
-            model: params.model as string | undefined,
             thinking: thinking,
             service_tier: serviceTier,
             max_turns: effectiveMaxTurns,

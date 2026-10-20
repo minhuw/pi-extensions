@@ -16,7 +16,7 @@ import {
   resolveTypeIn,
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolationParam, MODEL_OVERRIDE_ERROR, MODEL_SELECTION_GUIDANCE, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import {
@@ -164,12 +164,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     label: "Agent",
     description:
       "Launch a child-safe nested subagent for bounded delegated work. " +
-      "Only use agent types allowed by this parent agent; nesting is depth-limited.",
+      "Only use agent types allowed by this parent agent; nesting is depth-limited. " + MODEL_SELECTION_GUIDANCE,
     parameters: Type.Object({
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
       subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
-      model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
       thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
       run_in_background: Type.Optional(
@@ -183,6 +182,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      if ("model" in params) return textResult(MODEL_OVERRIDE_ERROR, true);
+
       if (params.resume) {
         const existing = context.manager.getRecord(params.resume);
         if (!ownsRecord(existing, context.parentAgentId)) {
@@ -230,7 +231,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const config = getAgentConfigIn(registry, resolvedType);
       // Foreground regardless of `backgroundByDefault` — see the reasoning on
       // ResolveOptions. An explicit `true` here still opts in.
-      const invocation = resolveAgentInvocationConfig(config, params, {
+      const invocation = resolveAgentInvocationConfig(config, { ...params, model: undefined }, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
         defaultRunInBackground: false,
       });
@@ -238,7 +239,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (invocation.modelInput) {
         const resolvedModel = resolveModel(invocation.modelInput, ctx.modelRegistry);
         if (typeof resolvedModel === "string") {
-          if (invocation.modelFromParams) return textResult(resolvedModel, true);
+          // Preserve the existing fallback for an unavailable configured model.
         } else {
           model = resolvedModel;
         }
@@ -251,7 +252,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         model,
         cwd: context.configCwd,
         modelRegistry: ctx.modelRegistry,
-        callerSupplied: invocation.modelFromParams,
+        callerSupplied: false,
         agentLabel: config?.displayName ?? resolvedType,
         modelInput: invocation.modelInput,
       });

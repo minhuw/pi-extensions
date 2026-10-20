@@ -272,7 +272,7 @@ describe("resume", () => {
 
     const result = await run(
       [
-        'const first = await agent("write the parser", { label: "impl", agentType: "recon", model: "haiku" });',
+        'const first = await agent("write the parser", { label: "impl", agentType: "recon" });',
         'const second = await agent("now handle escapes", { resume: "impl" });',
         "return [first, second];",
       ].join("\n"),
@@ -292,7 +292,7 @@ describe("resume", () => {
     // The revived child keeps the contract it was started with, and the row
     // says so rather than falling back to worker.
     expect(second?.agentType).toBe("recon");
-    expect(second?.model).toBe("haiku");
+    expect(second?.model).toBeUndefined();
     expect(second?.label).toBe("impl");
     expect(second?.promptPreview).toBe("now handle escapes");
     // It went through the same start → done lifecycle as any other agent.
@@ -413,7 +413,7 @@ describe("resume", () => {
       [
         "model",
         'await agent("b", { resume: "impl", model: "haiku" });',
-        "agent() opts.resume and opts.model are mutually exclusive",
+        "Model overrides are unavailable",
       ],
       [
         "isolation",
