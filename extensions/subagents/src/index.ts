@@ -86,7 +86,6 @@ import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkf
 import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
-import { orcaBusy } from "../../shared/orca-busy.ts";
 
 // ---- Shared helpers ----
 
@@ -597,18 +596,28 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // One lease for all work owned by this activation, independent of visible UI rows.
-  function updateOrcaBusy(): void {
+  // Publish one entry per operation; visibility and parent settlement do not own activity.
+  function updateActivity(): void {
     if (shuttingDown || !hostRegistration || !currentCtx) return;
-    const active = manager.listAgents().some(record => !record.owner
-      && (record.status === "running" || record.status === "queued"))
-      || [...workflowTasks.values()].some(task => task.status === "running" || task.status === "paused");
-    orcaBusy.set("subagents", active, currentCtx);
+    const activities = [
+      ...manager.listAgents()
+        .filter(record => !record.owner && (record.status === "running" || record.status === "queued"))
+        .map(record => ({ id: `agent:${record.id}`, label: "Agent" })),
+      ...[...workflowTasks.values()]
+        .filter(task => task.status === "running" || task.status === "paused")
+        .map(task => ({ id: `workflow:${task.id}`, label: "Workflow" })),
+    ];
+    const visible = activities.length <= 128 ? activities : [
+      ...activities.slice(0, 127),
+      { id: "overflow", label: `${activities.length - 127} more activities` },
+    ];
+    pi.events.emit("pi-extensions:activity", { source: "subagents", activities: visible });
   }
+  const unsubscribeActivity = pi.events.on("pi-extensions:activity-request", () => updateActivity());
 
   // Background completion: route through group join or send individual nudge
   const emitTelemetry = (record: AgentRecord, phase: SubagentTelemetry["phase"]) => {
-    updateOrcaBusy();
+    updateActivity();
     const activeTools = [...record.activeTools];
     const activityMap = new Map(activeTools.map((name, index) => [`${index}:${name}`, name]));
     const telemetry: SubagentTelemetry = {
@@ -980,7 +989,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     hostRegistration ??= registerSubagentHost(host);
-    updateOrcaBusy();
+    updateActivity();
     // Pi resolves project trust before the first session starts, so this is the
     // earliest honest answer. The activation-time load defaulted to untrusted,
     // so a trusted project's `packages[]` only becomes visible now.
@@ -1290,8 +1299,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     currentCtx = ctx;
-    updateOrcaBusy();
-    if (!shuttingDown && hostRegistration) orcaBusy.onParentSettled(ctx);
+    updateActivity();
   });
 
   pi.on("session_before_switch", () => {
@@ -1303,8 +1311,9 @@ export default function (pi: ExtensionAPI) {
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    unsubscribeActivity();
     if (hostRegistration) {
-      orcaBusy.set("subagents", false, { isIdle: () => true, ui: currentCtx?.ui });
+      pi.events.emit("pi-extensions:activity", { source: "subagents", activities: [] });
     }
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
@@ -2790,7 +2799,7 @@ Terse command-style prompts produce shallow, generic work.
    * detached — a rejection would surface as an unhandled one.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
-    updateOrcaBusy();
+    updateActivity();
     try {
       const result = await runWorkflow({
         script: task.script,
@@ -2819,7 +2828,7 @@ Terse command-style prompts produce shallow, generic work.
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     } finally {
-      updateOrcaBusy();
+      updateActivity();
     }
   }
 

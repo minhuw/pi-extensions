@@ -360,6 +360,29 @@ test("integration repair rejects commitMessage at the adapter boundary", async (
 	assert.deepEqual(api.execCalls, []);
 });
 
+test("headless Herder publishes and replays activity without Orca imports", async () => {
+	const api = new CapturedExtensionAPI();
+	const snapshots: unknown[] = [];
+	api.events.on("pi-extensions:activity", value => snapshots.push(value));
+	registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, new CapturedWorkerFactory());
+	const context = {
+		hasUI: false,
+		cwd: process.cwd(),
+		sessionManager: { getEntries: () => [], getSessionId: () => "headless" },
+		modelRegistry: { getAvailable: () => [] },
+	} as unknown as ExtensionContext;
+	await api.invoke("session_start", context);
+	assert.deepEqual(snapshots.at(-1), { source: "herder", activities: [] });
+	const beforeReplay = snapshots.length;
+	api.events.emit("pi-extensions:activity-request", {});
+	assert.equal(snapshots.length, beforeReplay + 1);
+	await api.invoke("session_shutdown", context);
+	assert.deepEqual(snapshots.at(-1), { source: "herder", activities: [] });
+	const afterShutdown = snapshots.length;
+	api.events.emit("pi-extensions:activity-request", {});
+	assert.equal(snapshots.length, afterShutdown);
+});
+
 test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout: 60_000 }, async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "herder-pi-adapter-integration-"));
 	let fixture: Fixture | undefined;
@@ -369,6 +392,8 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 	try {
 		fixture = writeFixture(root);
 		api = new CapturedExtensionAPI();
+		const activities: { source: string; activities: Array<{ id: string; label: string }> }[] = [];
+		api.events.on("pi-extensions:activity", value => activities.push(value as typeof activities[number]));
 		const factory = new CapturedWorkerFactory();
 		registerHerderPiWithWorkerFactory(api as unknown as ExtensionAPI, factory);
 
@@ -390,6 +415,9 @@ test("complete Pi adapter wiring is provider-free and shutdown-safe", { timeout:
 			"implementer creation",
 		);
 		await withDeadline(implementer.started.promise, "implementer start");
+		assert.equal(activities.at(-1)?.source, "herder");
+		assert.equal(activities.at(-1)?.activities.length, 1);
+		assert.equal(activities.at(-1)?.activities[0]?.label, "Herder");
 		assert.match(implementer.promptText, /HERDER_MANAGER_WORKER_V1/);
 		assert.match(implementer.promptText, /ROLE_CONTRACT_PATH: .*plan-implementer\.md/);
 		assert.equal(implementer.messages.length, 0, "worker session inherited root history");

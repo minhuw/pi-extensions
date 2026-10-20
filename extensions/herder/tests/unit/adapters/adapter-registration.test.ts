@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerHerderPiWithWorkerFactory } from "../../../adapters/index.ts";
 import type { PiWorkerSessionFactory } from "../../../adapters/worker-engine.ts";
 
@@ -13,6 +13,7 @@ type CapturedTool = {
 };
 
 class CapturedExtensionAPI {
+	readonly events = createEventBus();
 	readonly commands = new Map<string, unknown>();
 	readonly tools: CapturedTool[] = [];
 	readonly handlers = new Map<string, CapturedHandler>();

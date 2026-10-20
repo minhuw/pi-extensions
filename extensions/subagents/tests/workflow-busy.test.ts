@@ -2,9 +2,6 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../shared/orca-busy.ts", () => ({
-  orcaBusy: { set: vi.fn(), onParentSettled: vi.fn() },
-}));
 vi.mock("../src/workflow/runtime.js", async () => ({
   ...await vi.importActual<typeof import("../src/workflow/runtime.js")>("../src/workflow/runtime.js"),
   runWorkflow: vi.fn(),
@@ -14,7 +11,6 @@ vi.mock("../src/agent-runner.js", async () => ({
   runAgent: vi.fn(),
 }));
 
-import { orcaBusy } from "../../shared/orca-busy.ts";
 import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { getSubagentHost } from "../src/host-registry.js";
@@ -26,12 +22,14 @@ const script = 'export const meta = { name: "busy-test", description: "lease reg
 let env: Hermetic;
 let activations: ReturnType<typeof makePi>[];
 let runs: { signal: AbortSignal; finish(status?: "completed" | "failed" | "killed"): void; fail(): void }[];
+let snapshots: { source: string; activities: { id: string; label: string }[] }[];
 const context = () => ctx({ mode: "print", isIdle: () => true });
-const busy = () => vi.mocked(orcaBusy.set).mock.lastCall?.[1];
+const busy = () => snapshots.at(-1)?.activities.length !== 0;
 
 beforeEach(() => {
   env = hermeticDir({ settings: { schedulingEnabled: false, widgetMode: "off", fleetView: false } });
   activations = [];
+  snapshots = [];
   runs = [];
   vi.mocked(runWorkflow).mockImplementation(options => new Promise((resolve, reject) => {
     runs.push({
@@ -54,6 +52,9 @@ afterEach(async () => {
 function activate(flags = {}) {
   const activation = makePi(flags);
   activations.push(activation);
+  activation.pi.events.emit.mockImplementation((channel: string, value: any) => {
+    if (channel === "pi-extensions:activity") snapshots.push(value);
+  });
   // Pi dispatches every registered handler, not just the last one for an event.
   activation.pi.on.mockImplementation((event: string, handler: (...args: any[]) => any) => {
     const prior = activation.lifecycle.get(event);
@@ -74,7 +75,7 @@ async function start(activation: ReturnType<typeof makePi>) {
   return activation.tools.get("SubagentWorkflow").execute("workflow-call", { script }, undefined, undefined, context());
 }
 
-describe("workflow Orca busy ownership", () => {
+describe("workflow activity publication", () => {
   it.each(["completed", "failed", "killed"] as const)("holds a workflow-only headless run until %s", async status => {
     const activation = await boot();
     expect(busy()).toBe(false);
@@ -84,7 +85,7 @@ describe("workflow Orca busy ownership", () => {
     expect(runAgent).not.toHaveBeenCalled();
     // UI visibility and parent settlement must not clear a workflow-only lease.
     await activation.lifecycle.get("agent_settled")({}, context());
-    expect(orcaBusy.onParentSettled).toHaveBeenCalledTimes(1);
+    expect(snapshots.at(-1)?.source).toBe("subagents");
     expect(busy()).toBe(true);
     runs[0].finish(status);
     await flush();
@@ -103,8 +104,12 @@ describe("workflow Orca busy ownership", () => {
     const activation = await boot();
     await start(activation);
     await start(activation);
+    const ids = snapshots.at(-1)!.activities.map(row => row.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
     runs[0].finish();
     await flush();
+    expect(snapshots.at(-1)!.activities.map(row => row.id)).toEqual([ids[1]]);
     expect(busy()).toBe(true);
     runs[1].finish();
     await flush();
@@ -131,11 +136,35 @@ describe("workflow Orca busy ownership", () => {
     expect(busy()).toBe(false);
   });
 
+  it("replays current activity for a bridge that starts after the producer", async () => {
+    const activation = await boot();
+    await start(activation);
+    const request = activation.pi.events.on.mock.calls.find(([channel]: [string]) => channel === "pi-extensions:activity-request")![1];
+    const latest = snapshots.at(-1);
+    snapshots = [];
+    request({ consumer: "orca-bridge" });
+    expect(snapshots).toEqual([latest]);
+  });
+
+  it("represents fleets larger than the bridge snapshot bound with a counted overflow", async () => {
+    const activation = await boot();
+    const list = vi.spyOn(AgentManager.prototype, "listAgents").mockReturnValue(
+      Array.from({ length: 140 }, (_, index) => ({ id: String(index), status: "running" } as any)),
+    );
+    const request = activation.pi.events.on.mock.calls.find(([channel]: [string]) => channel === "pi-extensions:activity-request")![1];
+    request({});
+    expect(snapshots.at(-1)!.activities).toHaveLength(128);
+    expect(snapshots.at(-1)!.activities.at(-1)).toEqual({ id: "overflow", label: "13 more activities" });
+    list.mockReturnValue([]);
+    request({});
+    expect(busy()).toBe(false);
+  });
+
   it("claims startup workflow activity only after the host owns session_start", async () => {
     const path = join(env.dir, "startup.js");
     writeFileSync(path, script);
     const activation = activate({ [WORKFLOW_FILE_FLAG]: path });
-    expect(orcaBusy.set).not.toHaveBeenCalled();
+    expect(snapshots).toHaveLength(0);
     expect(runWorkflow).not.toHaveBeenCalled();
     await activation.lifecycle.get("session_start")({}, context());
     expect(getSubagentHost()).toBeDefined();
@@ -149,12 +178,12 @@ describe("workflow Orca busy ownership", () => {
     const root = await boot();
     await start(root);
     const host = getSubagentHost();
-    const calls = vi.mocked(orcaBusy.set).mock.calls.length;
+    const calls = snapshots.length;
     const child = await boot();
     await child.lifecycle.get("agent_settled")({}, context());
     await child.lifecycle.get("session_shutdown")({}, context());
     expect(getSubagentHost()).toBe(host);
-    expect(orcaBusy.set).toHaveBeenCalledTimes(calls);
+    expect(snapshots).toHaveLength(calls);
     expect(busy()).toBe(true);
   });
 
@@ -168,10 +197,10 @@ describe("workflow Orca busy ownership", () => {
     expect(runs[0].signal.aborted).toBe(true);
     expect(busy()).toBe(false);
     expect(getSubagentHost()).toBeUndefined();
-    const calls = vi.mocked(orcaBusy.set).mock.calls.length;
+    const calls = snapshots.length;
     runs[0].finish("killed");
     await flush();
-    expect(orcaBusy.set).toHaveBeenCalledTimes(calls);
+    expect(snapshots).toHaveLength(calls);
     expect(activation.pi.sendMessage).not.toHaveBeenCalled();
     expect(activation.pi.appendEntry).not.toHaveBeenCalled();
   });

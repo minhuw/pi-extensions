@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type AgentSessionEvent, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runCommand } from "../../../../src/daemon/git-driver.ts";
 
 export const agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../assets/roles/pi");
@@ -85,6 +85,7 @@ export interface CapturedCustomMessage {
 }
 
 export class CapturedExtensionAPI {
+	readonly events = createEventBus();
 	readonly commands = new Map<string, unknown>();
 	readonly tools: unknown[] = [];
 	readonly handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();

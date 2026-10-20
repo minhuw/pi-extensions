@@ -1,0 +1,50 @@
+name: Orca bridge CI
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/orca-bridge.yml
+      - extensions/orca-bridge/**
+      - extensions/subagents/**
+      - extensions/herder/adapters/index.ts
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/orca-bridge.yml
+      - extensions/orca-bridge/**
+      - extensions/subagents/**
+      - extensions/herder/adapters/index.ts
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orca-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check types
+        run: npm run typecheck
+      - name: Test Orca bridge
+        run: npm run test:orca-bridge
+      - name: Test Subagents activity reporting
+        run: npm run test:subagents

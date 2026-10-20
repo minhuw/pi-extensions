@@ -19,7 +19,8 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:magpie-provider && npm run test:commit && npm run test:statusline && npm run test:subagents && npm run test:herder && npm run test:writer",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:statusline && npm run test:subagents && npm run test:herder && npm run test:writer",
+		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
 		"test:writer": "node --experimental-strip-types --test extensions/writer/tests/*.test.ts",
@@ -68,6 +69,7 @@
 			"./extensions/writer/prompts/validation.md"
 		],
 		"extensions": [
+			"./extensions/orca-bridge/index.ts",
 			"./extensions/magpie-provider/index.ts",
 			"./extensions/statusline-footer/index.ts",
 			"./extensions/herder/adapters/index.ts",

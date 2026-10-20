@@ -85,7 +85,6 @@ import {
 import { DefaultPiWorkerSessionFactory, PiWorkerEngine, type PiWorkerSessionFactory, type PiWorkerTerminal } from "./worker-engine.ts";
 import { HerderWidget } from "./worker-fleet.ts";
 import { MAGPIE_SEARCH_SERVER } from "./magpie-search.ts";
-import { orcaBusy } from "../../shared/orca-busy.ts";
 import {
 	createWorkerInputEntry,
 	createWorkerOutputEntry,
@@ -258,13 +257,24 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		catch { /* Transcript rendering is best-effort and must never block manager progress. */ }
 	};
 
+	let activity: Array<{ id: string; label: string }> = [];
+	const publishActivity = (next = activity): void => {
+		activity = next;
+		pi.events.emit("pi-extensions:activity", { source: "herder", activities: activity });
+	};
+	const unsubscribeActivity = pi.events.on("pi-extensions:activity-request", () => {
+		if (!shuttingDown && lastContext) publishActivity();
+	});
+
 	const render = (ctx = lastContext) => {
+		publishActivity(!shuttingDown && currentState && !isTerminalRunStatus(currentState.status)
+			&& !cleanupClosed.has(path.resolve(currentState.planDir))
+			? [{ id: currentState.runId, label: "Herder" }] : []);
 		if (!ctx?.hasUI) return;
 		if (currentState && cleanupClosed.has(path.resolve(currentState.planDir))) return;
 		if (!currentState) {
 			ctx.ui.setStatus("herder", undefined);
 			widget.update(ctx, undefined);
-			orcaBusy.set("herder", false, ctx);
 			return;
 		}
 		const statusColor = currentState.status === "complete"
@@ -288,10 +298,10 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			...(isTerminalRunStatus(currentState.status) ? { finishedAt: currentState.updatedAt } : {}),
 			workers: engine.snapshots(),
 		});
-		orcaBusy.set("herder", !isTerminalRunStatus(currentState.status), ctx);
 	};
 
 	const renderLaunching = (ctx: ExtensionContext, planDir: string, profile: string, maxParallel: number) => {
+		publishActivity([{ id: "initializing", label: "Herder initializing" }]);
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus("herder", ctx.ui.theme.fg("accent", "Herder initializing"));
 		widget.update(ctx, {
@@ -301,7 +311,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			planName: path.basename(planDir),
 			workers: [],
 		});
-		orcaBusy.set("herder", true, ctx);
 	};
 
 	const repositoryRoot = async (ctx: ExtensionContext): Promise<string> => {
@@ -1951,7 +1960,6 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 		if (shuttingDown) return;
 		lastContext = ctx;
 		await mainSessionRequests.settled();
-		orcaBusy.onParentSettled(ctx);
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -2032,6 +2040,8 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 	pi.on("session_shutdown", async () => {
 		sessionEpoch += 1;
 		shuttingDown = true;
+		unsubscribeActivity();
+		publishActivity([]);
 		widget.dispose();
 		mainSessionRequests.reset("shutdown");
 		currentRunRevision = undefined;

@@ -10,6 +10,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
 | [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; supplies the collection's `SubagentWorkflow` orchestrator. |
+| [Orca Bridge](extensions/orca-bridge/README.md) | Orca pane activity, prompt-aware titles, background-work tracking, file/diff navigation, and `/orca-status` diagnostics. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 
@@ -42,6 +43,8 @@ pi install /absolute/path/to/pi-extensions
 Installing the collection loads all registered extensions, the `/commit` prompt template, and themes. Subagents provides the scripted-workflow orchestrator (`SubagentWorkflow`, `workflowsEnabled`) and keeps its `Agent` tools; Herder retains its own execution policy. Scripted workflows require an explicit user request for orchestration. Herder's command-owned planning workflows load their packaged instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
 
 The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
+
+Orca Bridge activates inside Orca panes and combines the main Pi turn with Herder, agents, and workflows. It cooperates with Orca's installed status extension when available and provides standalone hook delivery otherwise. Use `/orca-status` to inspect activity and delivery, `/orca-open <path> --line <n>` to open a file or review report, and `/orca-diff <path> --staged` for a staged diff; add `--focus` to switch view. Background tracking currently applies to Orca's terminal view; stock Orca's native-chat adapter does not expose the corresponding extension activity integration. See its [setup and compatibility guide](extensions/orca-bridge/README.md).
 
 Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
 
