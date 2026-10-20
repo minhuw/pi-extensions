@@ -828,8 +828,7 @@ export function snapshotPlan(inputDir = DEFAULT_PLAN_DIR, inputId: unknown): Pla
   return snapshotPlanFromGraph(buildGraph(inputDir), inputId)
 }
 
-export function getShapeReport(inputDir = DEFAULT_PLAN_DIR) {
-  const graph = buildGraph(inputDir)
+export function getShapeReport(inputDir = DEFAULT_PLAN_DIR, graph = buildGraph(inputDir)) {
   return {
     planDir: graph.planDir,
     contextFile: graph.contextFile,

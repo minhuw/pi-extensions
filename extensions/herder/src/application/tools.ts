@@ -94,7 +94,7 @@ async function planTool(args: JsonObject): Promise<unknown> {
 	if (operation === "status") return readPlanLifecycleGraph(directory);
 	if (operation === "shape") {
 		const graph = buildGraph(directory);
-		return withCompiledGraphIdentity(graph, getShapeReport(directory));
+		return withCompiledGraphIdentity(graph, getShapeReport(directory, graph));
 	}
 	if (operation === "snapshot") return snapshotPlan(directory, requiredString(args, "planId"));
 	if (operation === "report") return getExecutionReport(directory, typeof args.planId === "string" ? args.planId : "RUN");
