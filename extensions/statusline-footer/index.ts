@@ -656,6 +656,7 @@ function renderIdentityRow(
 	state: SessionState,
 	s: Stats,
 	compactMode: boolean,
+	loopStatus?: string,
 ): string {
 	const set = icons();
 	const usage = ctx.getContextUsage();
@@ -667,11 +668,20 @@ function renderIdentityRow(
 	] : [];
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([context, ...tail], "  ");
-	if (visibleWidth(left) + visibleWidth(right) + 3 <= width) return alignRow(left, right, width);
+	const loop = compactMode && loopStatus ? theme.fg("accent", loopStatus) : "";
+	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + 5 <= width) {
+		return alignRow(cluster([left, loop], "  "), right, width);
+	}
+	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
+	// Compact already renders the provider-free label, so it is the fallback identity too.
+	const compactIdentity = compactMode ? left
+		: renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
+	const showLoop = Boolean(loop) && visibleWidth(compactIdentity) + visibleWidth(loop) + minimumContext + 5 <= width;
+	if (!showLoop && visibleWidth(left) + visibleWidth(right) + 3 <= width) return alignRow(left, right, width);
 
 	// Keep identity and context percent; shed provider, token counts, and compact extras first.
-	left = renderModelLabel(ctx, theme, false, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
-	const minimumContext = usage?.percent != null ? visibleWidth(`${usage.percent.toFixed(1)}%`) : 0;
+	left = showLoop ? cluster([compactIdentity, loop], "  ") : compactIdentity;
+	// A status is optional: never shorten the model or percent to make space for it.
 	left = truncateToWidth(left, Math.max(0, width - minimumContext - 3));
 	const budget = Math.max(0, width - visibleWidth(left) - 3);
 	while (tail.length && visibleWidth(cluster(tail, "  ")) + 2 + minimumContext > budget) tail.pop();
@@ -687,8 +697,10 @@ function renderCompact(
 	theme: Theme,
 	width: number,
 	state: SessionState,
+	footerData: ReadonlyFooterDataProvider,
 ): string {
-	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true);
+	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true,
+		footerData.getExtensionStatuses().get("loop"));
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -770,8 +782,12 @@ function renderFull(
 			: gitStatus === "unavailable"
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
-	const statuses = [...footerData.getExtensionStatuses().values()].filter(Boolean);
-	const gitLeft = cluster([
+	const extensionStatuses = footerData.getExtensionStatuses();
+	const loopStatus = extensionStatuses.get("loop");
+	const statuses = [...extensionStatuses.entries()]
+		.filter(([key, status]) => key !== "loop" && Boolean(status))
+		.map(([, status]) => theme.fg("accent", status));
+	const gitBase = cluster([
 		branch
 			? theme.fg(gitColor, `${glyph(theme, set.branch, gitColor)} ${branch}`)
 			: theme.fg("dim", `${glyph(theme, set.branch)} no git`),
@@ -779,13 +795,17 @@ function renderFull(
 		state.gitStat.ahead > 0 || state.gitStat.behind > 0
 			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
 			: "",
-		...statuses.map((status) => theme.fg("accent", status)),
-	], "  ");
-	const gitRight = cluster([
-		s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "",
-		theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`),
 	], sep);
-	const line3 = alignRow(gitLeft, gitRight, width);
+	const loop = loopStatus ? theme.fg("accent", loopStatus) : "";
+	const gitLeft = cluster([gitBase, loop, ...statuses], sep);
+	const fileCount = s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "";
+	const cwd = theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`);
+	// Reserve room for the loop status before a long path consumes the git row.
+	const gitRight = cluster([fileCount, cwd], sep);
+	const loopFits = Boolean(loop) && visibleWidth(cluster([gitBase, loop], sep)) + 3 <= width;
+	const line3 = alignRow(gitLeft, loopFits
+		? truncateToWidth(gitRight, Math.max(0, width - Math.min(visibleWidth(gitLeft), width - 3) - 3))
+		: gitRight, width);
 
 	return [line1, hairline(width, theme), line2, line3];
 }
@@ -816,7 +836,7 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					if (mode === "off") return [];
 					return mode === "compact"
-						? [renderCompact(ctx, theme, width, state)]
+						? [renderCompact(ctx, theme, width, state, footerData)]
 						: renderFull(ctx, theme, footerData, width, state);
 				},
 			};

@@ -40,6 +40,7 @@ type HarnessOptions = {
 	cwd?: string;
 	gitBranch?: string | null;
 	extensionStatuses?: string[];
+	keyedExtensionStatuses?: Record<string, string>;
 	isIdle?: boolean;
 	hasPendingMessages?: boolean;
 };
@@ -55,6 +56,8 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	let footerDisposeCount = 0;
 	const branchSubscribe = vi.fn();
 	const branchUnsubscribe = vi.fn();
+	const extensionStatuses = new Map((options.extensionStatuses ?? ["READY"]).map((status) => [status, status]));
+	for (const [key, status] of Object.entries(options.keyedExtensionStatuses ?? {})) extensionStatuses.set(key, status);
 
 	const tui = { requestRender };
 	const footerData = {
@@ -63,7 +66,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 			return () => branchUnsubscribe();
 		}),
 		getGitBranch: () => options.gitBranch ?? "main",
-		getExtensionStatuses: () => new Map((options.extensionStatuses ?? ["READY"]).map((status) => [status, status])),
+		getExtensionStatuses: () => extensionStatuses,
 	};
 	const theme = {
 		fg: (_token: string, text: string) => text,
@@ -130,6 +133,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 		entries,
 		notifications,
 		requestRender,
+		setStatus: (key: string, status?: string) => status ? extensionStatuses.set(key, status) : extensionStatuses.delete(key),
 		getFooter: () => footer,
 		disposeFooter() {
 			if (footer) {
@@ -532,6 +536,84 @@ describe("statusline footer rendering", () => {
 		expect(full).toHaveLength(4);
 		for (const line of full) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		harness.getFooter()?.dispose?.();
+	});
+
+	it("shows changing loop status in compact mode only while identity and percent fit", async () => {
+		const harness = createHarness("compact-loop-status", "tui", {
+			keyedExtensionStatuses: { loop: "↻ build · next 4m", other: "SYNC" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			for (const width of [120, 60, 38, 30, 24, 1]) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				if (width >= 38) expect(line).toContain("↻ build · next 4m");
+				else expect(line).not.toContain("↻ build");
+				if (width >= 24) {
+					expect(line).toContain("k3");
+					expect(line).toContain("42.5%");
+				}
+				expect(line).not.toContain("SYNC");
+			}
+			harness.setStatus("loop", "↻ paused");
+			expect(harness.getFooter()!.render(60)[0]).toContain("↻ paused");
+			expect(harness.getFooter()!.render(60)[0]).not.toContain("↻ build");
+			harness.setStatus("loop");
+			expect(harness.getFooter()!.render(120)[0]).not.toContain("↻ paused");
+			expect(harness.getFooter()!.render(120)[0]).toContain("42.5%");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("fits wide Unicode loop status without clipping model or context", async () => {
+		const harness = createHarness("compact-unicode-loop", "tui", {
+			model: { id: "模型模型", reasoning: true },
+			keyedExtensionStatuses: { loop: "↻ 構築 · 次 4m" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			for (const width of [28, 32, 36, 60]) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				expect(line).toContain("模型模型");
+				expect(line).toContain("42.5%");
+				if (width === 28) expect(line).not.toContain("構築");
+				if (width === 60) expect(line).toContain("↻ 構築 · 次 4m");
+			}
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps loop and generic statuses visible ahead of a long cwd in full mode", async () => {
+		const harness = createHarness("full-loop-status", "tui", {
+			cwd: `/tmp/${"深い階層/".repeat(30)}project`,
+			keyedExtensionStatuses: { loop: "↻ build · next 4m", other: "SYNC" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			for (const width of [55, 80, 120]) {
+				const lines = harness.getFooter()!.render(width);
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				expect(lines[3]).toContain("↻ build · next 4m");
+				expect(lines[3]!.split("↻ build · next 4m")).toHaveLength(2);
+				expect(lines[3]).toContain("READY");
+				expect(lines[3]).toContain("SYNC");
+				expect(lines[3]).toContain("main");
+				expect(lines[3]).not.toContain("project");
+			}
+			expect(harness.getFooter()!.render(240)[3]).toContain("/tmp/");
+			harness.setStatus("loop", "↻ wait · next 4m");
+			expect(harness.getFooter()!.render(80)[3]).toContain("↻ wait · next 4m");
+		} finally {
+			harness.disposeFooter();
+		}
 	});
 
 	it("does not throw or overflow at narrow width with missing model and context", async () => {

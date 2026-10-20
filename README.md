@@ -11,6 +11,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
 | [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents and scriptable workflows (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; supplies the collection's `SubagentWorkflow` orchestrator. |
 | [Orca Bridge](extensions/orca-bridge/README.md) | Orca pane activity, prompt-aware titles, background-work tracking, file/diff navigation, and `/orca-status` diagnostics. |
+| [Loop](extensions/loop/README.md) | Session-owned recurring prompts with fixed, cron, or model-paced scheduling, bounded execution, and footer status. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 

@@ -11,6 +11,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
 - `extensions/orca-bridge/` — Orca hook delivery, background activity aggregation in terminal panes, prompt-aware titles, file/diff navigation, and stock Orca compatibility checks; Herder and Subagents publish snapshots through Pi's event bus. Integrations must use released Orca interfaces without modifying Orca.
+- `extensions/loop/` — session-owned recurring prompts, fixed/cron/model-paced scheduling, completion and lifetime limits, and footer integration.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
 - `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), local fleet/integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
@@ -25,12 +26,13 @@ Run commands from the repository root with Node `>=22.19.0`.
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
 | `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the collection and Subagents' dedicated source configuration.                              |
-| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Statusline Footer, Subagents, native compaction, Herder, and Writer tests. |
+| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Statusline Footer, Loop, Subagents, native compaction, Herder, and Writer tests. |
 | `npm run test:orca-bridge` | Run Orca Bridge's offline activity, lifecycle, navigation, release compatibility, real Pi RPC, title, and transport tests. |
 | `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and its native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:writer`               | Run Writer's strict TypeScript `node --test` suite.                                                                                     |
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
+| `npm run test:loop` | Run Loop's offline scheduling, command, lifecycle, persistence, and Pi integration tests. |
 | `npm run test:subagents`            | Run Subagents' offline upstream and local compatibility Vitest suites, including scripted workflows; live provider tests are not enabled.                            |
 | `npm run test:herder`               | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`.                                               |
 
