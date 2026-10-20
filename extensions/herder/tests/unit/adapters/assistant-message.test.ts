@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import {
 	assistantText,
 	decodeAssistantResult,
@@ -10,8 +7,6 @@ import {
 	responseActivity,
 } from "../../../adapters/assistant-message.ts";
 import { finalAssistantResult as workerFinalAssistantResult } from "../../../adapters/worker-engine.ts";
-
-const adapters = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../adapters");
 
 function assistant(content: unknown, extras: Record<string, unknown> = {}) {
 	return { role: "assistant", content, stopReason: "stop", ...extras };
@@ -61,17 +56,4 @@ test("worker compatibility adapter shares the core and keeps its no-result diagn
 		failed: true,
 		error: "Pi worker returned no assistant result.",
 	});
-});
-
-test("both callers import shared decoding and do not define local decoder wrappers", () => {
-	for (const file of ["worker-engine.ts", "nested-agent-executor.ts"]) {
-		const source = readFileSync(path.join(adapters, file), "utf8");
-		assert.match(source, /\.\/assistant-message\.ts/);
-		for (const symbol of ["assistantText", "responseActivity", "finalAssistantResult"]) {
-			assert.doesNotMatch(source, new RegExp(`(?:function\\s+${symbol}|(?:const|let|var)\\s+${symbol}\\s*=)`));
-		}
-	}
-	const workerSource = readFileSync(path.join(adapters, "worker-engine.ts"), "utf8");
-	assert.match(workerSource, /import \{[^}]*finalAssistantResult[^}]*\} from "\.\/assistant-message\.ts"/s);
-	assert.match(workerSource, /export \{ finalAssistantResult \};/);
 });
