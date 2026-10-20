@@ -217,5 +217,27 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 		// Optional gateway may be stopped. /model retries and reports discovery errors.
 	}
 	pi.registerProvider(provider);
+	pi.registerCommand("magpie-refresh", {
+		description: "Refresh Magpie's model list immediately",
+		async handler(_args, ctx) {
+			try {
+				const result = await ctx.modelRegistry.refresh({
+					providers: ["magpie"], allowNetwork: true, force: true, signal: ctx.signal,
+				});
+				if (result.aborted) {
+					ctx.ui.notify("Magpie model refresh cancelled.", "warning");
+					return;
+				}
+				if (result.errors.has("magpie")) throw new Error("Magpie refresh failed");
+				const count = ctx.modelRegistry.getAll().filter(model => model.provider === "magpie").length;
+				ctx.ui.notify(count
+					? `Magpie model list refreshed: ${count} model${count === 1 ? "" : "s"}.`
+					: "No Magpie models available. Configure the gateway with /login magpie, then retry /magpie-refresh.",
+					count ? "info" : "warning");
+			} catch {
+				ctx.ui.notify("Magpie model refresh failed; check gateway availability, /login magpie credentials, and models.json configuration.", "error");
+			}
+		},
+	});
 	registerMagpieCompaction(pi);
 }

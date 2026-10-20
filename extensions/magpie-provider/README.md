@@ -52,13 +52,15 @@ Herder's Searcher uses the host registration when no user-level entry exists, wh
 
 ## Refresh and failures
 
-Open `/model` to run Pi's standard catalog refresh, including Magpie. It reports refresh errors and keeps the previous catalog only for the same URL/key. No extra refresh command is needed. `/reload` reloads the extension and rereads its environment configuration.
+Run `/magpie-refresh` to immediately fetch Magpie's latest model list without opening the model picker. It refreshes only Magpie, explicitly allows network discovery even in an offline session, and reports the updated model count, cancellation, or failure. It uses Pi's standard credential resolution and catalog publication; failures retain the previous catalog only for the same URL/key.
+
+Opening `/model` also runs Pi's standard catalog refresh, including Magpie. `/reload` reloads the extension and rereads its environment configuration.
 
 With `pi --offline` or `PI_OFFLINE=1` (also `true`/`yes`, case-insensitive), startup discovery is skipped entirely and an empty provider is registered. There is no offline disk catalog, so startup selection of a discovered Magpie model is unavailable. Later native refresh obeys Pi's `allowNetwork` decision.
 
 Every discovery uses authenticated `GET /v1/models`, disallows redirects, and has a **3-second timeout**, including body reading. Native refresh also honors Pi's cancellation signal and `allowNetwork: false`. New models are installed only through Pi's generation-checked `publish({ update })` callback.
 
-A stopped/unavailable gateway does not break ordinary Pi startup: initial discovery failure quietly registers an empty provider. Start the gateway and open `/model` to retry. Selecting a Magpie model at startup still requires successful discovery. There is no disk cache, so an offline restart does not retain the previous run's models. Network failures, malformed catalogs, and catalogs with no usable chat models retain the current in-memory list only for the same connection. A URL/key change clears the old catalog through Pi's publication callback, even offline or if subsequent discovery fails. Error messages never include response bodies or credentials.
+A stopped/unavailable gateway does not break ordinary Pi startup: initial discovery failure quietly registers an empty provider. Start the gateway and run `/magpie-refresh` or open `/model` to retry. Selecting a Magpie model at startup still requires successful discovery. There is no disk cache, so an offline restart does not retain the previous run's models. Network failures, malformed catalogs, and catalogs with no usable chat models retain the current in-memory list only for the same connection. A URL/key change clears the old catalog through Pi's publication callback, even offline or if subsequent discovery fails. Error messages never include response bodies or credentials.
 
 ## Magpie's built-in Pi adapter
 
