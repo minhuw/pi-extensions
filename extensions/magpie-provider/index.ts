@@ -9,6 +9,7 @@ import { registerMagpieCompaction } from "./compaction.ts";
 import { assertNativeCatalog } from "./models-config.ts";
 import { MAGPIE_SEARCH_SERVER, magpieSearchConfig, type MagpieSearchConnection } from "./mcp.ts";
 import { createMagpieStreams, type MagpieApi } from "./streams.ts";
+import { createMagpiePricingResolver, withMagpiePricing, type MagpiePricing } from "./pricing.ts";
 
 export const DISCOVERY_TIMEOUT_MS = 3000;
 interface Config { origin: string; apiKey?: string }
@@ -39,6 +40,7 @@ function limit(value: unknown, fallback: number): number {
 export function parseModels(value: unknown, origin: string): Model<MagpieApi>[] {
 	if (!object(value) || !Array.isArray(value.data)) throw new Error("Magpie returned an invalid model catalog.");
 	const models: Model<MagpieApi>[] = [];
+	const resolvePricing = createMagpiePricingResolver();
 	const seen = new Set<string>();
 	for (const entry of value.data) {
 		if (!object(entry) || typeof entry.id !== "string" || !entry.id.trim() || seen.has(entry.id)) continue;
@@ -67,7 +69,9 @@ export function parseModels(value: unknown, origin: string): Model<MagpieApi>[] 
 			if (api === "anthropic-messages" && claude && thinkingLevelMap.off === null) delete thinkingLevelMap.off;
 		}
 		const contextWindow = limit(entry.context_window, 32768);
+		const cost = resolvePricing(entry.id);
 		models.push({
+			magpiePricing: cost.magpiePricing,
 			id: entry.id, name: typeof entry.display_name === "string" && entry.display_name.trim() ? entry.display_name : entry.id,
 			provider: "magpie", api, baseUrl: api === "anthropic-messages" ? origin : `${origin}/v1`,
 			reasoning: entry.reasoning === true || efforts.length > 0,
@@ -78,8 +82,8 @@ export function parseModels(value: unknown, origin: string): Model<MagpieApi>[] 
 			} } : {}),
 			input: strings(modalities.input).includes("image") ? ["text", "image"] : ["text"],
 			contextWindow, maxTokens: Math.min(contextWindow, limit(entry.max_output_tokens, 4096)),
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		});
+			cost,
+		} as Model<MagpieApi>);
 		seen.add(entry.id);
 	}
 	if (!models.length) throw new Error("Magpie returned no usable chat models; keeping the previous catalog.");
@@ -112,6 +116,7 @@ export async function discoverModels(config: Config, signal?: AbortSignal, allow
 export function createMagpieProvider(
 	env: NodeJS.ProcessEnv = process.env,
 	publishConnection?: (connection: MagpieSearchConnection | undefined) => void,
+	recordPricing?: (pricing: MagpiePricing) => void,
 ): Provider<MagpieApi> {
 	// Keep raw ambient values separate from saved credentials and loopback defaults.
 	const ambient = { MAGPIE_BASE_URL: env.MAGPIE_BASE_URL, MAGPIE_API_KEY: env.MAGPIE_API_KEY };
@@ -192,8 +197,8 @@ export function createMagpieProvider(
 			context.signal.throwIfAborted();
 			await context.publish({ update: () => { current = config; models = next; } });
 		},
-		stream: (model, context, options) => apis[model.api].stream(requestModel(model), context, options),
-		streamSimple: (model, context, options) => apis[model.api].streamSimple(requestModel(model), context, options),
+		stream: (model, context, options) => withMagpiePricing(apis[model.api].stream(requestModel(model), context, options), model, recordPricing),
+		streamSimple: (model, context, options) => withMagpiePricing(apis[model.api].streamSimple(requestModel(model), context, options), model, recordPricing),
 	};
 }
 
@@ -202,6 +207,10 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 	const provider = createMagpieProvider(process.env, connection => {
 		if (connection) pi.registerMcpServer(MAGPIE_SEARCH_SERVER, magpieSearchConfig(connection));
 		else pi.unregisterMcpServer(MAGPIE_SEARCH_SERVER);
+	}, pricing => {
+		// Pi's split-summary usage merger drops extension fields. Keep provenance
+		// on the session branch as well, without counting the usage twice.
+		pi.appendEntry("magpie-pricing", { pricing });
 	});
 	const credential = readStoredCredential("magpie");
 	// Validate saved configuration outside the best-effort network refresh.

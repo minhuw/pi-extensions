@@ -48,6 +48,7 @@ for (const endpoint of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]
   calls = [];
   const response = await provider[method](model, context, { apiKey: "magpie-fixture" }).result();
   assert.equal(response.stopReason, "error");
+  assert.equal(response.usage.cost.magpiePricing, "unavailable");
   assert.match(response.errorMessage, /bundled fixture rejection/);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url.origin, "https://gateway.example");

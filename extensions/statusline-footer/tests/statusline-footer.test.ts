@@ -32,7 +32,7 @@ type FooterComponent = {
 };
 
 type HarnessOptions = {
-	model?: { id: string; provider?: string; reasoning?: boolean } | null;
+	model?: { id: string; provider?: string; reasoning?: boolean; magpiePricing?: "estimate" | "unavailable"; cost?: { input: number; output: number; cacheRead: number; cacheWrite: number } } | null;
 	thinkingLevel?: string;
 	contextUsage?: { percent?: number; tokens?: number; contextWindow: number } | null;
 	branch?: any[];
@@ -632,6 +632,194 @@ describe("statusline footer rendering", () => {
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
+	});
+});
+
+describe("statusline footer pricing", () => {
+	const usage = (total: number, magpiePricing?: "estimate" | "unavailable", tokens = { input: 20, output: 5, cacheRead: 2, cacheWrite: 1 }) => ({
+		...tokens, cost: { total, ...(magpiePricing ? { magpiePricing } : {}) },
+	});
+	const assistant = (provider: string, total: number, marker?: "estimate" | "unavailable") => ({
+		type: "message", message: { role: "assistant", provider, usage: usage(total, marker) },
+	});
+	const freeModel = { id: "free", provider: "other", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+
+	it.each(["full", "compact"] as const)("shows unavailable %s pricing alongside other providers' usage", async (mode) => {
+		const harness = createHarness(`pricing-mixed-${mode}`, "tui", {
+			model: freeModel,
+			branch: [
+				{ type: "message", message: { role: "user" } },
+				assistant("other", 1.25),
+				assistant("magpie", 0, "unavailable"),
+			],
+		});
+		try {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			await harness.runCommand("footer", mode);
+			const lines = harness.getFooter()!.render(240);
+			const priceLine = mode === "full" ? lines[2]! : lines[0]!;
+			expect(priceLine).toContain("price unavailable");
+			expect(priceLine).not.toContain("$1.25");
+			expect(priceLine).not.toContain("/turn");
+			if (mode === "full") {
+				expect(priceLine).toContain("40"); // Both providers' input tokens remain counted.
+				expect(priceLine).toContain("10"); // Both providers' output tokens remain counted.
+			}
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps legacy zero-cost Magpie history unavailable after switching to a priced model", async () => {
+		const harness = createHarness("pricing-legacy-history", "tui", {
+			model: { id: "priced", provider: "other" },
+			branch: [assistant("magpie", 0), assistant("other", 2)],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		const line = harness.getFooter()!.render(240)[2]!;
+		expect(line).toContain("price unavailable");
+		expect(line).not.toContain("$2.00");
+		harness.disposeFooter();
+	});
+
+	it("keeps known free costs from other providers at zero", async () => {
+		const harness = createHarness("pricing-free-other", "tui", {
+			model: freeModel, branch: [assistant("other", 0)],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("$0.000");
+		expect(harness.getFooter()!.render(240)[2]).not.toContain("price unavailable");
+		harness.disposeFooter();
+	});
+
+	it("counts explicit known zero pricing as free and marks positive untagged Magpie costs estimated", async () => {
+		const harness = createHarness("pricing-estimates", "tui", {
+			model: freeModel,
+			branch: [
+				{ type: "message", message: { role: "user" } },
+				assistant("magpie", 0, "estimate"),
+				assistant("magpie", 0.75),
+				assistant("other", 0),
+			],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		const full = harness.getFooter()!.render(240)[2]!;
+		expect(full).toContain("~$0.750");
+		expect(full).toContain("/turn");
+		await harness.runCommand("footer", "compact");
+		expect(harness.getFooter()!.render(240)[0]).toContain("~$0.750");
+		harness.disposeFooter();
+	});
+
+	it.each(["toolResult", "compaction", "branch_summary"] as const)("honors explicit pricing on %s usage", async (source) => {
+		const entry = source === "toolResult"
+			? { type: "message", message: { role: "toolResult", usage: usage(0, "unavailable") } }
+			: { type: source, usage: usage(0, "unavailable") };
+		const harness = createHarness(`pricing-${source}`, "tui", { branch: [entry] });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		harness.disposeFooter();
+	});
+
+	it.each(["input", "output", "cacheRead", "cacheWrite"] as const)("treats %s tokens with unavailable pricing as unpriced", async (counter) => {
+		const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, [counter]: 1 };
+		const harness = createHarness(`pricing-${counter}-only`, "tui", {
+			branch: [{ type: "compaction", usage: usage(0, "unavailable", tokens) }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		harness.disposeFooter();
+	});
+
+	it("keeps zero-token unavailable usage out of the missing-price count", async () => {
+		const harness = createHarness("pricing-empty-usage", "tui", {
+			branch: [{ type: "compaction", usage: usage(0, "unavailable", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }) }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("$0.000");
+		expect(harness.getFooter()!.render(240)[2]).not.toContain("price unavailable");
+		harness.disposeFooter();
+	});
+
+	it("treats explicitly estimated native compaction usage as priced even at zero cost", async () => {
+		const harness = createHarness("pricing-compaction-estimate", "tui", {
+			branch: [{ type: "compaction", usage: usage(0, "estimate") }],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("~$0.000");
+		harness.disposeFooter();
+	});
+
+	it.each(["unavailable", "estimate"] as const)("retains %s provenance when Pi merges split-summary usage", async pricing => {
+		const harness = createHarness(`pricing-merged-summary-${pricing}`, "tui", {
+			model: freeModel,
+			branch: [
+				{ type: "custom", customType: "magpie-pricing", data: { pricing } },
+				{ type: "compaction", usage: usage(pricing === "estimate" ? 0.25 : 0) },
+			],
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "resume" });
+		const line = harness.getFooter()!.render(240)[2]!;
+		expect(line).toContain(pricing === "unavailable" ? "price unavailable" : "~$0.250");
+		harness.disposeFooter();
+	});
+
+	it("shows selected Magpie model's unavailable price before any usage", async () => {
+		const harness = createHarness("pricing-current-empty", "tui", {
+			model: { ...freeModel, id: "unpriced", provider: "magpie", magpiePricing: "unavailable" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		expect(harness.getFooter()!.render(240)[2]).toContain("price unavailable");
+		await harness.runCommand("footer", "compact");
+		expect(harness.getFooter()!.render(240)[0]).toContain("price unavailable");
+		harness.disposeFooter();
+	});
+
+	it("reads the current model on every render, even at the same branch leaf", async () => {
+		const harness = createHarness("pricing-model-switch", "tui", { model: freeModel, branch: [assistant("other", 1)] });
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		const full = () => harness.getFooter()!.render(240)[2]!;
+		expect(full()).toContain("$1.00");
+		harness.ctx.model = { ...freeModel, id: "unpriced", provider: "magpie", magpiePricing: "unavailable" } as unknown as typeof harness.ctx.model;
+		expect(full()).toContain("price unavailable");
+		await harness.runCommand("footer", "compact");
+		expect(harness.getFooter()!.render(240)[0]).toContain("price unavailable");
+		harness.ctx.model = { ...freeModel, id: "legacy", provider: "magpie" } as typeof harness.ctx.model;
+		expect(harness.getFooter()!.render(240)[0]).toContain("price unavailable");
+		harness.ctx.model = { ...freeModel, id: "known-free", provider: "magpie", magpiePricing: "estimate" } as unknown as typeof harness.ctx.model;
+		expect(harness.getFooter()!.render(240)[0]).toContain("$1.00");
+		harness.disposeFooter();
+	});
+
+	it("renders one dollar symbol with ASCII icons and keeps the Nerd Font cost glyph", async () => {
+		const harness = createHarness("pricing-icons", "tui", { branch: [assistant("other", 1)] });
+		try {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "0");
+			for (const mode of ["full", "compact"]) {
+				await harness.runCommand("footer", mode);
+				const priceLine = harness.getFooter()!.render(240)[mode === "full" ? 2 : 0]!;
+				expect(priceLine).toContain("$1.00");
+				expect(priceLine).not.toMatch(/\$\s+\$1\.00/);
+			}
+			vi.stubEnv("STATUSLINE_NERD_FONTS", "1");
+			expect(harness.getFooter()!.render(240)[0]).toContain(`${String.fromCodePoint(0xF01C1)} $1.00`);
+		} finally {
+			vi.unstubAllEnvs();
+			harness.disposeFooter();
+		}
 	});
 });
 

@@ -190,10 +190,15 @@ function cluster(parts: Array<string | false | null | undefined>, sep: string): 
 // renders during streaming — the hot path — always hit the cache.
 // Only durationMs is recomputed per render (Date.now() moves).
 
+type MagpiePricing = "estimate" | "unavailable";
+type PricedUsage = Usage & { cost: Usage["cost"] & { magpiePricing?: MagpiePricing } };
+
 interface Stats {
 	input: number;
 	output: number;
 	cost: number;
+	priceUnavailable: boolean;
+	priceEstimated: boolean;
 	cacheRead: number;
 	cacheWrite: number;
 	reasoning: number;
@@ -205,14 +210,23 @@ interface Stats {
 	durationMs: number;
 }
 
-function addUsage(stats: Stats, usage: Usage | undefined): void {
+function addUsage(stats: Stats, usage: Usage | undefined, provider?: string): void {
 	if (!usage) return;
 	stats.input += usage.input;
 	stats.output += usage.output;
 	stats.cacheRead += usage.cacheRead;
 	stats.cacheWrite += usage.cacheWrite ?? 0;
 	stats.reasoning += usage.reasoning ?? 0;
-	stats.cost += usage.cost.total;
+	const marker = (usage as PricedUsage).cost.magpiePricing;
+	const hasTokens = Boolean(usage.input || usage.output || usage.cacheRead || usage.cacheWrite);
+	if ((marker === "unavailable" || (provider === "magpie" && marker === undefined && usage.cost.total === 0)) && hasTokens) {
+		stats.priceUnavailable = true;
+	} else {
+		stats.cost += usage.cost.total;
+		if (marker === "estimate" || (provider === "magpie" && marker === undefined && usage.cost.total > 0)) {
+			stats.priceEstimated = true;
+		}
+	}
 }
 
 interface StatsCache {
@@ -244,6 +258,8 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 		input: 0,
 		output: 0,
 		cost: 0,
+		priceUnavailable: false,
+		priceEstimated: false,
 		cacheRead: 0,
 		cacheWrite: 0,
 		reasoning: 0,
@@ -258,6 +274,12 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 	let firstTs: number | undefined;
 
 	for (const e of ctx.sessionManager.getBranch()) {
+		if (e.type === "custom" && e.customType === "magpie-pricing") {
+			const pricing = (e.data as { pricing?: unknown } | undefined)?.pricing;
+			if (pricing === "unavailable") s.priceUnavailable = true;
+			if (pricing === "estimate") s.priceEstimated = true;
+			continue;
+		}
 		if (e.type === "compaction") {
 			s.compactions++;
 			addUsage(s, e.usage);
@@ -275,7 +297,7 @@ function collectStats(ctx: ExtensionContext, state: SessionState): Stats {
 			s.turns++;
 		} else if (m.role === "assistant") {
 			const a = m as AssistantMessage;
-			addUsage(s, a.usage);
+			addUsage(s, a.usage, a.provider);
 			for (const block of a.content ?? []) {
 				if (block.type !== "toolCall") continue;
 				s.toolCalls++;
@@ -639,6 +661,26 @@ function renderContext(
 	return truncateToWidth(compact, maxWidth);
 }
 
+function priceUnavailableForModel(ctx: ExtensionContext): boolean {
+	const model = ctx.model as (NonNullable<ExtensionContext["model"]> & { magpiePricing?: MagpiePricing }) | undefined;
+	if (model?.provider !== "magpie") return false;
+	if (model.magpiePricing === "unavailable") return true;
+	if (model.magpiePricing === "estimate") return false;
+	return model.cost.input === 0 && model.cost.output === 0
+		&& model.cost.cacheRead === 0 && model.cost.cacheWrite === 0;
+}
+
+function renderPrice(ctx: ExtensionContext, s: Stats, theme: Theme, set: IconSet, perTurn = false): string {
+	const unavailable = s.priceUnavailable || priceUnavailableForModel(ctx);
+	const amount = unavailable ? "price unavailable" : `${s.priceEstimated ? "~" : ""}${fmtCost(s.cost)}`;
+	// The ASCII cost icon is itself a dollar sign; the amount already contains one.
+	const icon = hasNerdFonts() ? `${glyph(theme, set.cost, "warning")} ` : "";
+	return theme.fg("warning", `${icon}${amount}`)
+		+ (!unavailable && perTurn && s.turns > 0
+			? theme.fg("dim", ` (~${fmtCost(s.cost / s.turns)}/turn)`)
+			: "");
+}
+
 function renderIdentityRow(
 	ctx: ExtensionContext,
 	theme: Theme,
@@ -653,7 +695,7 @@ function renderIdentityRow(
 	const barWidth = compactMode ? COMPACT_BAR_WIDTH : BAR_WIDTH;
 	let left = renderModelLabel(ctx, theme, !compactMode, !ctx.isIdle(), ctx.hasPendingMessages(), state.serviceTier);
 	const tail = compactMode ? [
-		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`),
+		renderPrice(ctx, s, theme, set),
 		theme.fg("dim", fmtDuration(s.durationMs)),
 	] : [];
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
@@ -741,8 +783,7 @@ function renderFull(
 	], sep);
 
 	const money = cluster([
-		theme.fg("warning", `${glyph(theme, set.cost, "warning")} ${fmtCost(s.cost)}`)
-			+ (s.turns > 0 ? theme.fg("dim", ` (~${fmtCost(s.cost / s.turns)}/turn)`) : ""),
+		renderPrice(ctx, s, theme, set, true),
 		theme.fg("toolDiffAdded", `${glyph(theme, set.input, "toolDiffAdded")} ${fmtTokens(s.input)}`)
 			+ " "
 			+ theme.fg("toolDiffRemoved", `${glyph(theme, set.output, "toolDiffRemoved")} ${fmtTokens(s.output)}`)

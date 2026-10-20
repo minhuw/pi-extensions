@@ -585,6 +585,9 @@ export function usageFromResponse(model: Model<any>, value: unknown): Usage | un
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);
+	// Preserve optional pricing provenance supplied by the provider's catalog.
+	const pricing = (model.cost as { magpiePricing?: unknown }).magpiePricing;
+	if (pricing === "estimate" || pricing === "unavailable") Object.assign(usage.cost, { magpiePricing: pricing });
 	return usage;
 }
 

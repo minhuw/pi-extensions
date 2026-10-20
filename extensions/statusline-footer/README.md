@@ -58,7 +58,7 @@ Compact mode keeps identity on the left and the bar, cost, and elapsed time on t
 - Streaming metrics are measured passively from Pi's provider and message events rather than estimated. Completed samples survive `/reload` through a small session custom entry; a new, resumed, or restarted session starts fresh streaming metrics.
 - Telemetry is scoped to the interactive TUI session, so programmatic child sessions such as `@tintinweb/pi-subagents` cannot reset or contaminate parent TTFT and token-throughput samples.
 - TTFB and TTFT are shown separately to distinguish connection latency from a silent or buffered stream.
-- Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history.
+- Session cost, cost per turn, cache hit ratio, input/output totals, turns, compactions, tool calls, and errors come from session history. Magpie costs use upstream API estimates, displayed with `~$`. An unpriced selected Magpie model or any unpriced session usage shows **price unavailable** in both layouts and hides the dollar-per-turn average. Earlier Magpie messages with tokens but zero recorded cost remain unpriced; historical costs are not recalculated. Explicitly priced zero-cost usage and free models from other providers still display zero. ASCII mode shows a single dollar sign.
 - Git branch and working-tree additions/deletions refresh asynchronously in the background.
 - Session statistics are cached by the current branch leaf, keeping streaming renders inexpensive.
 - Icons and semantic colors follow the active Pi theme.

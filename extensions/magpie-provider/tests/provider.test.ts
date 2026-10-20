@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { normalizeContext, createModels, type ModelsPublication, type RefreshModelsContext, type Provider } from "@earendil-works/pi-ai";
+import { normalizeContext, createModels, createAssistantMessageEventStream, type AssistantMessage, type ModelsPublication, type RefreshModelsContext, type Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import magpie, { createMagpieProvider, discoverModels, parseModels, readConfig, DISCOVERY_TIMEOUT_MS } from "../index.ts";
 
@@ -13,9 +13,9 @@ const delegates = vi.hoisted(() => ({
 }));
 vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 	builtinProviders: () => [
-		{ id: "groq", ...delegates.chat },
-		{ id: "openai", ...delegates.responses },
-		{ id: "anthropic", ...delegates.messages },
+		{ id: "groq", getModels: () => [], ...delegates.chat },
+		{ id: "openai", getModels: () => [], ...delegates.responses },
+		{ id: "anthropic", getModels: () => [], ...delegates.messages },
 	],
 }));
 vi.mock("@earendil-works/pi-coding-agent", async importOriginal => ({ ...await importOriginal<object>(), readStoredCredential: vi.fn() }));
@@ -186,6 +186,26 @@ describe("discovery and lifecycle", () => {
 		expect((await resolve({ ctx, signal: new AbortController().signal, credential: { type: "api_key", key: "stored" } }))?.auth.apiKey).toBe("stored");
 		expect((await resolve({ ctx, signal: new AbortController().signal }))?.auth.apiKey).toBe("env-key");
 	});
+});
+
+it("records session pricing provenance for usage that Pi may merge into a summary", async () => {
+	vi.stubEnv("PI_OFFLINE", "1");
+	vi.stubEnv("MAGPIE_BASE_URL", "http://127.0.0.1:3425");
+	const registerProvider = vi.fn();
+	const appendEntry = vi.fn();
+	await magpie({ registerProvider, appendEntry, on: vi.fn(), registerCommand: vi.fn() } as unknown as ExtensionAPI);
+	const provider = registerProvider.mock.calls[0][0] as Provider;
+	const [model] = parseModels(catalog(), config.origin);
+	const source = createAssistantMessageEventStream();
+	const message: AssistantMessage = { role: "assistant", provider: "magpie", model: model.id, api: model.api,
+		content: [], stopReason: "stop", timestamp: 0,
+		usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+	source.push({ type: "done", reason: "stop", message });
+	delegates.chat.streamSimple.mockReturnValue(source);
+	const result = await provider.streamSimple(model, normalizeContext({ messages: [] })).result();
+	expect(result.usage.cost).toMatchObject({ magpiePricing: "unavailable" });
+	expect(appendEntry).toHaveBeenCalledExactlyOnceWith("magpie-pricing", { pricing: "unavailable" });
 });
 
 it.each([
