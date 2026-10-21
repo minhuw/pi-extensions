@@ -688,7 +688,7 @@ function renderIdentityRow(
 	state: SessionState,
 	s: Stats,
 	compactMode: boolean,
-	loopStatus?: string,
+	workflowStatus?: string,
 ): string {
 	const set = icons();
 	const usage = ctx.getContextUsage();
@@ -700,7 +700,7 @@ function renderIdentityRow(
 	] : [];
 	const context = renderContext(theme, usage, barWidth, s.compactions, set.compact);
 	const right = cluster([context, ...tail], "  ");
-	const loop = compactMode && loopStatus ? theme.fg("accent", loopStatus) : "";
+	const loop = compactMode && workflowStatus ? theme.fg("accent", workflowStatus) : "";
 	if (loop && visibleWidth(left) + visibleWidth(loop) + visibleWidth(right) + 5 <= width) {
 		return alignRow(cluster([left, loop], "  "), right, width);
 	}
@@ -732,7 +732,7 @@ function renderCompact(
 	footerData: ReadonlyFooterDataProvider,
 ): string {
 	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true,
-		footerData.getExtensionStatuses().get("loop"));
+		footerData.getExtensionStatuses().get("autoresearch") ?? footerData.getExtensionStatuses().get("loop"));
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -814,9 +814,9 @@ function renderFull(
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
 	const extensionStatuses = footerData.getExtensionStatuses();
-	const loopStatus = extensionStatuses.get("loop");
+	const workflowStatuses = [extensionStatuses.get("autoresearch"), extensionStatuses.get("loop")].filter(Boolean);
 	const statuses = [...extensionStatuses.entries()]
-		.filter(([key, status]) => key !== "loop" && Boolean(status))
+		.filter(([key, status]) => key !== "autoresearch" && key !== "loop" && Boolean(status))
 		.map(([, status]) => theme.fg("accent", status));
 	const gitBase = cluster([
 		branch
@@ -827,14 +827,14 @@ function renderFull(
 			? theme.fg("success", `↑${state.gitStat.ahead}`) + " " + theme.fg("warning", `↓${state.gitStat.behind}`)
 			: "",
 	], sep);
-	const loop = loopStatus ? theme.fg("accent", loopStatus) : "";
-	const gitLeft = cluster([gitBase, loop, ...statuses], sep);
+	const workflow = workflowStatuses.map(status => theme.fg("accent", status!));
+	const gitLeft = cluster([gitBase, ...workflow, ...statuses], sep);
 	const fileCount = s.files > 0 ? theme.fg("dim", `${glyph(theme, set.file)} ${s.files} touched`) : "";
 	const cwd = theme.fg("dim", `${glyph(theme, set.cwd)} ${formatPath(ctx.cwd)}`);
-	// Reserve room for the loop status before a long path consumes the git row.
+	// Reserve room for the first workflow status before a long path consumes the Git row.
 	const gitRight = cluster([fileCount, cwd], sep);
-	const loopFits = Boolean(loop) && visibleWidth(cluster([gitBase, loop], sep)) + 3 <= width;
-	const line3 = alignRow(gitLeft, loopFits
+	const workflowFits = workflow.length > 0 && visibleWidth(cluster([gitBase, workflow[0]], sep)) + 3 <= width;
+	const line3 = alignRow(gitLeft, workflowFits
 		? truncateToWidth(gitRight, Math.max(0, width - Math.min(visibleWidth(gitLeft), width - 3) - 3))
 		: gitRight, width);
 

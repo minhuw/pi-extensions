@@ -33,11 +33,11 @@ Full mode is three content rows plus a hairline under the identity row. Primary 
 | --- | --- | --- |
 | 1 | Live pulse, queued chip, model, thinking, non-standard service tier, provider | Compactions, gradient bar, percent, used/window |
 | 2 | Turns, elapsed, TTFT, TTFB, throughput, tool calls, errors | Cost, input / output / cached-input tokens, reasoning tokens, cache hit rate |
-| 3 | Git branch, working-tree diff, ahead/behind, extension statuses (including loop) | Files touched, current directory |
+| 3 | Git branch, working-tree diff, ahead/behind, extension statuses (including research and loop) | Files touched, current directory |
 
 Thinking levels are colored: dim off, amber low, green medium, lilac high, and a rainbow wash at `xhigh`/`max`. The context bar interpolates success → warning → error across its width and uses the same `▉` block for filled and empty cells so the unused portion stays a quiet charcoal instead of a checkerboard. Segments are separated by space, not mid-dots.
 
-Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right. When another extension publishes `ctx.ui.setStatus("loop", "↻ build · next 4m")`, compact mode also shows that summary when there is room; full mode shows it once on the Git row alongside other extension statuses. A long directory path yields space to the statuses. At narrow widths, both layouts prioritize the model and context percentage: the loop summary and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing the `loop` status removes it from the footer.
+Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right. When another extension publishes `ctx.ui.setStatus("autoresearch", ...)` or `ctx.ui.setStatus("loop", ...)`, compact mode also shows a workflow summary when there is room. Research reports take priority over Loop; clearing the research report restores the Loop summary. Full mode shows both once on the Git row alongside other extension statuses, with research first. A long directory path yields space to workflow statuses. At narrow widths, both layouts prioritize the model and context percentage: workflow summaries and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing a status removes it from the footer. See [Autoresearch](../autoresearch/README.md) for baseline review, approved iterations, and the reporting tool.
 
 ## Commands
 

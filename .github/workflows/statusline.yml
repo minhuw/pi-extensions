@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - extensions/statusline-footer/**
+      - extensions/autoresearch/**
       - .github/workflows/statusline.yml
       - package.json
       - package-lock.json
@@ -13,6 +14,7 @@ on:
       - master
     paths:
       - extensions/statusline-footer/**
+      - extensions/autoresearch/**
       - .github/workflows/statusline.yml
       - package.json
       - package-lock.json
@@ -45,6 +47,9 @@ jobs:
 
       - name: Run focused statusline tests
         run: npm run test:statusline -- --cache=false
+
+      - name: Run autoresearch tests
+        run: npm run test:autoresearch -- --cache=false
 
       - name: Run typecheck
         run: npm run typecheck
