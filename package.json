@@ -19,10 +19,11 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:statusline && npm run test:loop && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:simplify && npm run test:statusline && npm run test:loop && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
+		"test:simplify": "node --experimental-strip-types --test extensions/simplify/tests/*.test.ts",
 		"test:writer": "node --experimental-strip-types --test extensions/writer/tests/*.test.ts",
 		"test:statusline": "vitest run extensions/statusline-footer/tests/statusline-footer.test.ts",
 		"test:loop": "vitest run extensions/loop",
@@ -61,6 +62,7 @@
 		"themes": ["./themes"],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
+			"./extensions/simplify/prompts/simplify.md",
 			"./extensions/writer/prompts/conference-reviewer.md",
 			"./extensions/writer/prompts/evaluate.md",
 			"./extensions/writer/prompts/grammar-checker.md",
