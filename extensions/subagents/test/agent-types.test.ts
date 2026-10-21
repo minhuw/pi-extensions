@@ -51,11 +51,6 @@ describe("agent type registry", () => {
       for (const name of DEFAULT_AGENT_NAMES) expect(isValidType(name)).toBe(true);
     });
 
-    it("does not include removed agents", () => {
-      expect(isValidType("statusline-setup")).toBe(false);
-      expect(isValidType("claude-code-guide")).toBe(false);
-    });
-
     it("rejects unknown types", () => {
       expect(isValidType("nonexistent")).toBe(false);
       expect(isValidType("")).toBe(false);
@@ -76,7 +71,6 @@ describe("agent type registry", () => {
     });
 
     it("resolveType returns canonical key or undefined", () => {
-      expect(resolveType("recon")).toBe("recon");
       expect(resolveType("recon")).toBe("recon");
       expect(resolveType("WORKER")).toBe("worker");
       expect(resolveType("nonexistent")).toBeUndefined();

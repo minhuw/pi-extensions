@@ -132,32 +132,17 @@ export function createMentionProvider(
 
     async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
       const mine = isEnabled() ? mentionItems(roster(), lines[cursorLine] ?? "", cursorCol) : null;
-      // Asked unconditionally: pi owns `@` and must keep answering for it even
-      // when a handle matches too. That is the same work vanilla pi does on any
-      // `@` keystroke — a capped `fd` search, or nothing at all when the host
-      // configured no `fd` path — but we now do it on tokens we used to answer
-      // alone, so it must not be able to take the popup down with it. The
-      // wrapped provider is not always pi's: another extension may sit inside
-      // us, and before this it was never called for a token naming an agent.
-      // try/catch, not `.catch()`: a provider that throws SYNCHRONOUSLY never
-      // returns the promise a `.catch()` would attach to, and the throw escapes
-      // this method as a rejection — which pi does not handle either
-      // (components/editor.js:1892 awaits with no catch of its own).
+      // Always ask the wrapped provider so file completions remain available
+      // alongside agent handles. Its failures must not break the agent popup.
       let theirs: AutocompleteSuggestions | null = null;
       try {
         theirs = await current.getSuggestions(lines, cursorLine, cursorCol, options);
       } catch (err) {
-        // Safe to treat as "no files": pi discards any response whose request is
-        // no longer current, so an aborted search that surfaces as a rejection
-        // cannot leave a stale popup behind (`isAutocompleteRequestCurrent`).
-        // Warned rather than swallowed outright — the failure is invisible in
-        // the popup, and the same `console.warn` channel already carries this
-        // extension's other non-fatal failures.
+        // Pi discards stale autocomplete requests; report a provider failure once.
         if (!warnedInnerFailure) {
           warnedInnerFailure = true;
           console.warn("[pi-subagents] the autocomplete provider below us failed; showing agent rows only:", err);
         }
-        theirs = null;
       }
       if (!mine) return theirs;
       if (!theirs) return mine;

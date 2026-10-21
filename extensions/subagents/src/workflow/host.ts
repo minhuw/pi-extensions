@@ -1,35 +1,10 @@
 /**
- * host.ts — binds a workflow run to the real `AgentManager`.
+ * Bind workflow handles to AgentManager records, retaining them for resume.
+ * Dispatch uses the Agent tool's type and model policy. Spawn failures become
+ * failed workflow results.
  *
- * `runtime.ts` deliberately knows nothing about this extension: its only seam is
- * the injected {@link WorkflowHost}, which is what keeps the runtime's tests
- * free of sessions, models and git. This file is the other half of that seam —
- * everything the script can reach through `agent()`, `resume` and `gate` ends up
- * here, and nowhere else.
- *
- * Four mappings carry most of the weight:
- *
- *   - **ids.** The runtime hands out its own `wf-agent-N` handles before
- *     anything spawns, because it needs a stable progress-entry identity. The
- *     manager issues a different id when the child actually starts. `records`
- *     is the translation, and it is kept for the whole run rather than cleared
- *     on completion: `resume` reaches back to a child that has already
- *     finished.
- *   - **agent type and model.** Resolved through `resolveSpawnType` and
- *     `getAgentConfig` — the same dispatch the `Agent` tool uses — so a
- *     workflow and a tool call disagree about nothing.
- *   - **failure.** A strict worktree-isolation failure throws out of
- *     `spawnAndWait`; the script must see that as an agent that failed
- *     (`{ok: false}` → `null`), not as an unhandled rejection that takes the
- *     run down.
- *   - **when a `gate` runs.** For an isolated child it cannot wait until the
- *     spawn resolves: the manager commits the worktree to a branch and deletes
- *     the copy inside the child's own settle, so by then the only tree left to
- *     run `npm test` in is the main one — which would report on code the child
- *     never wrote. So the gate runs from `onBeforeWorktreeCleanup`, inside that
- *     settle, and the verdict travels back on the spawn result. `runGate` still
- *     exists for a child that had no worktree; the runtime uses whichever of
- *     the two happened, never both.
+ * Isolated gates run in onBeforeWorktreeCleanup: spawnAndWait commits and
+ * removes the child's worktree before resolving. Non-isolated gates use runGate.
  */
 
 import { existsSync } from "node:fs";
@@ -71,17 +46,7 @@ export interface WorkflowHostOptions {
   gateTimeoutMs?: number;
 }
 
-/**
- * Where the child worked, when that directory still exists.
- *
- * The guard is not defensive padding. `cleanupWorktree` commits the child's
- * changes to a branch and *removes* the copy before `spawnAndWait` resolves, so
- * an isolated child's worktree is normally already gone by the time a result is
- * built. That is exactly why a gate cannot wait until here — it runs from
- * `onBeforeWorktreeCleanup` instead — and why this reports nothing rather than
- * a path that no longer exists: handing a stale path to a command would fail
- * every gated worktree agent with a spawn error instead of a test result.
- */
+/** Cleanup removes isolated worktrees before spawnAndWait resolves; omit stale paths. */
 function childCwd(record: AgentRecord): string | undefined {
   // `path`, not `workPath`: a workflow spawn never passes a cwd, so the manager
   // runs the child at the copied repo's root.
@@ -98,7 +63,6 @@ function succeeded(record: AgentRecord | undefined): boolean {
   return record?.status === "completed" || record?.status === "steered";
 }
 
-/** Translate a settled record into what the script sees. */
 /**
  * The effective-configuration half of a record, in the runtime's pi-free shape.
  *
@@ -118,6 +82,7 @@ function resolvedInfo(record: AgentRecord | undefined) {
   };
 }
 
+/** Translate a settled record into what the script sees. */
 function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
   const tokens = getLifetimeTotal(record.lifetimeUsage);
   // Reported separately from `tokens`, which is the lifetime total. The script's

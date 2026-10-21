@@ -43,6 +43,8 @@ Integration review also required two local corrections: standalone Subagents hos
 
 ## Tests and deliberate adaptations
 
+Maintenance cleanup shares the config projection for selected and fallback agents while retaining the disabled/missing-worker defaults. Source comments describe current contracts; tests omit duplicate assertions and checks for artifacts deleted during earlier migrations. Keep behavioral coverage for dispatch, prompt loading, cancellation, and worktree gate ordering.
+
 `test/` is the imported upstream suite, adapted where the default fleet, foreground/package policy, SDK 1.3 APIs, or collection layout differs. `tests/` holds local compatibility regressions. The scoped Vitest configuration prevents the default collection command from spending real provider credits. Keep assertions for upstream correctness fixes; do not silence failures simply because a file was vendored.
 
 The dedicated TypeScript configuration checks the source and is invoked by root `npm run typecheck`. Root SDK-fixture updates are part of the upgrade where Pi's event/API contracts changed; they do not change Herder's execution policy.

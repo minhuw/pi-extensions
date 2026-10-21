@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,9 +35,6 @@ test("package loads eight explicit native Writer prompts without runtime or skil
 	);
 	assert.ok(!manifest.pi.extensions.some((entry) => entry.includes("extensions/writer/")));
 	assert.ok(!manifest.pi.skills?.some((entry) => entry.includes("extensions/writer/")));
-	for (const removed of ["index.ts", "skills"]) {
-		await assert.rejects(access(path.join(writerRoot, removed)), { code: "ENOENT" });
-	}
 	assert.deepEqual((await readdir(path.join(writerRoot, "prompts"))).sort(), names.map((name) => `${name}.md`).sort());
 
 	const temporary = await mkdtemp(path.join(os.tmpdir(), "pi-writer-prompts-"));
@@ -82,11 +79,6 @@ test("package loads eight explicit native Writer prompts without runtime or skil
 				);
 			}
 		}
-		assert.deepEqual(loader.getExtensions().extensions, []);
-		assert.deepEqual(loader.getExtensions().errors, []);
-		assert.deepEqual(loader.getSkills().skills, []);
-		assert.deepEqual(loader.getThemes().themes, []);
-		assert.deepEqual(loader.getAgentsFiles().agentsFiles, []);
 	} finally {
 		await rm(temporary, { recursive: true, force: true });
 	}

@@ -716,10 +716,7 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
   return run;
 }
 
-/**
- * Wire an AbortSignal to abort a session.
- * Returns a cleanup function to remove the listener.
- */
+/** Resolve a configured session directory relative to the agent's working directory. */
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
@@ -800,8 +797,7 @@ export async function runAgent(
   if (agentConfig) {
     systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
   } else {
-    // Unknown type fallback: spread the canonical worker config (defensive —
-    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
+    // Direct runner callers may bypass registry dispatch; use the built-in worker prompt.
     const fallback = DEFAULT_AGENTS.get("worker");
     if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
     systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);

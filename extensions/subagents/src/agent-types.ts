@@ -302,7 +302,8 @@ export function getConfig(type: string): {
   promptMode: "replace" | "append";
 } {
   const key = resolveKey(type);
-  const config = key ? agents.get(key) : undefined;
+  let config = key ? agents.get(key) : undefined;
+  if (!config || config.enabled === false) config = agents.get("worker");
   if (config && config.enabled !== false) {
     return {
       displayName: config.displayName ?? config.name,
@@ -316,22 +317,7 @@ export function getConfig(type: string): {
     };
   }
 
-  // Fallback for unknown/disabled types — worker config
-  const worker = agents.get("worker");
-  if (worker && worker.enabled !== false) {
-    return {
-      displayName: worker.displayName ?? worker.name,
-      color: worker.color,
-      description: worker.description,
-      builtinToolNames: worker.builtinToolNames ?? BUILTIN_TOOL_NAMES,
-      extensions: worker.extensions,
-      excludeExtensions: worker.excludeExtensions,
-      skills: worker.skills,
-      promptMode: worker.promptMode,
-    };
-  }
-
-  // Absolute fallback (should never happen)
+  // Display defaults when the registry has no enabled worker.
   return {
     displayName: "Worker",
     description: "Implementation agent for bounded coding tasks",

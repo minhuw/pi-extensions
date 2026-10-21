@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const commitRoot = path.join(repositoryRoot, "extensions/commit");
 const promptEntry = "./extensions/commit/prompts/commit.md";
 
 test("package loads /commit as a native prompt with no Commit runtime", async () => {
@@ -16,9 +15,6 @@ test("package loads /commit as a native prompt with no Commit runtime", async ()
 	);
 	assert.ok(manifest.pi.prompts.includes(promptEntry));
 	assert.ok(!manifest.pi.extensions.some((entry) => entry.includes("extensions/commit/")));
-	for (const removed of ["index.ts", "preflight.ts", "COMMIT.md"]) {
-		await assert.rejects(access(path.join(commitRoot, removed)), { code: "ENOENT" });
-	}
 
 	const temporary = await mkdtemp(path.join(os.tmpdir(), "pi-commit-prompt-"));
 	try {
@@ -48,11 +44,6 @@ test("package loads /commit as a native prompt with no Commit runtime", async ()
 		assert.equal(prompt.argumentHint, "[instructions]");
 		assert.match(prompt.content, /^Commit the existing changes/);
 		assert.match(prompt.content, /Additional user instructions:\n\$ARGUMENTS\s*$/);
-		assert.deepEqual(loader.getExtensions().extensions, []);
-		assert.deepEqual(loader.getExtensions().errors, []);
-		assert.deepEqual(loader.getSkills().skills, []);
-		assert.deepEqual(loader.getThemes().themes, []);
-		assert.deepEqual(loader.getAgentsFiles().agentsFiles, []);
 	} finally {
 		await rm(temporary, { recursive: true, force: true });
 	}

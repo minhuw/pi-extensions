@@ -897,30 +897,15 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
-        // Capture now, while the session object exists: after eviction this
-        // path is the only thing that can reopen the conversation, and an
-        // in-memory session reports undefined, which correctly means
-        // "nothing to come back to".
-        // Optional chaining, not defensiveness for its own sake: this is the
-        // only field read off the session at creation, so an older pi or a
-        // stubbed session must degrade to "not resumable" rather than throw
-        // and take the whole spawn down with it.
+        // Save the path before session eviction; in-memory sessions have none.
         record.sessionFile = session.sessionManager?.getSessionFile?.();
-        // Same reason, different field: the model and thinking level are only
-        // knowable once pi has resolved its defaults and clamped the level to
-        // what the model supports. Writing them back here makes the record
-        // authoritative, so every surface reads one place instead of each
-        // re-deriving "session, else the request" for itself.
+        // Record the effective model and thinking level after Pi applies defaults
+        // and clamps the request. Older sessions may omit these fields.
         if (session.model) {
           record.invocation ??= {};
-          // Read the kept request first: a caller's level survives being clamped
-          // AND, one line later, being replaced by the effective one.
+          // Preserve a requested level when Pi clamps it.
           const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
           Object.assign(record.invocation, describeModel(session.model));
-          // Guarded for the reason above: a session that reports no level keeps
-          // the request rather than losing it. Overwriting unconditionally would
-          // turn an older or stubbed session into a blank `thinking:` tag, which
-          // is worse than the stale-but-true value it replaced.
           if (session.thinkingLevel) {
             record.invocation.thinking = session.thinkingLevel;
             if (requested && requested !== session.thinkingLevel) {

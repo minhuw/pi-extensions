@@ -1,11 +1,4 @@
-// `/agents → Agent types` badges each row with where the agent came from, and
-// prints a legend explaining the badges. Those two had drifted apart: the `▪`
-// package badge shipped without a legend key, so a package agent rendered a
-// glyph nothing on screen explained.
-//
-// These helpers live in src/agent-source-badge.ts rather than inside the
-// `/agents` command closure because `registerCommand` is mocked in every wiring
-// test, which is why the list rendering had no coverage at all.
+/** `/agents` source badges, legend membership, and package provenance. */
 
 import { describe, expect, it } from "vitest";
 import { rowDescription, sourceIndicator, sourceLegend } from "../src/agent-source-badge.js";
@@ -21,8 +14,7 @@ describe("sourceIndicator", () => {
     expect(sourceIndicator(cfg({ source: "project" }))).toBe("•  ");
     expect(sourceIndicator(cfg({ source: "global" }))).toBe("◦  ");
     expect(sourceIndicator(cfg({ source: "package" }))).toBe("▪  ");
-    // A default leaves `source` undefined — the "default" member of the union is
-    // never assigned — so it must fall through to blank, not to some badge.
+    // Built-in defaults have no source.
     expect(sourceIndicator(cfg({ isDefault: true }))).toBe("   ");
     expect(sourceIndicator(undefined)).toBe("   ");
   });
@@ -37,13 +29,10 @@ describe("sourceIndicator", () => {
 
 describe("sourceLegend", () => {
   it("explains the package badge", () => {
-    // The regression this module exists for: `▪` used to render with no key.
     expect(sourceLegend([cfg({ source: "package" })])).toBe("▪ = package");
   });
 
   it("names only the badges actually on screen", () => {
-    // Previously project and global were emitted as one string, so a
-    // global-only roster advertised a `•` that appeared nowhere.
     expect(sourceLegend([cfg({ source: "global" })])).toBe("◦ = global");
     expect(sourceLegend([cfg({ source: "project" })])).toBe("• = project");
   });
