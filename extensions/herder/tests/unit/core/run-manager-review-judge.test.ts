@@ -366,7 +366,7 @@ test("Reviewer APPROVE awaits Judge DONE; nonapproval never silently normalizes 
 	});
 });
 
-test("blocking Reviewer outcomes await Judge repair or blocking decisions in every round", { timeout: 45_000 }, async () => {
+test("blocking Reviewer outcomes: Judge-authorized repair advances to round two", { timeout: 45_000 }, async () => {
 	await withFixture("review-rounds", async (service, fixture) => {
 		let reply = await startRun(service, fixture, "direct-repair");
 		let implementer = action(reply, "plan-implementer");
@@ -409,7 +409,9 @@ test("blocking Reviewer outcomes await Judge repair or blocking decisions in eve
 			inspected.store.close();
 		}
 	});
+});
 
+test("blocking Reviewer outcomes: Judge blocking survives resume without approval", { timeout: 45_000 }, async () => {
 	await withFixture("review-block", async (service, fixture) => {
 		const blockedRationale = "Fresh review children exhausted their budgets.\nIndependent validation | could not complete.";
 		const projectedDetail = "Fresh review children exhausted their budgets. Independent validation ; could not complete.";
@@ -465,7 +467,9 @@ test("blocking Reviewer outcomes await Judge repair or blocking decisions in eve
 			inspected.store.close();
 		}
 	});
+});
 
+test("blocking Reviewer outcomes: round-two findings await independent Judge adjudication", { timeout: 45_000 }, async () => {
 	await withFixture("review-judge", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "review-judge");
 		assert.equal(state.reply.status, "running");
@@ -921,17 +925,17 @@ test("exhaustion preserves independent sibling evidence and never unlocks blocke
 	});
 });
 
-test("malformed obligations and incidental FOLLOWUP cannot authorize repair", { timeout: 60_000 }, async () => {
-	const scenarios: Array<{ name: string; result: ReviewerEnvelope; approved?: boolean }> = [
-		{ name: "unknown-id", result: { ...blocker(1), findings: [REMAINING_FINDING.replace("obligation=A1", "obligation=A99")] } },
-		{ name: "missing-evidence", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; evidence=[^;]+/, "")] } },
-		{ name: "missing-cause", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; violation=[^;]+/, "")] } },
-		{ name: "followup-revise", result: { verdict: "REVISE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] } },
-		{ name: "approve-scope-fail", result: { verdict: "APPROVE", scope: "FAIL" } },
-		{ name: "approve-with-blocker", result: { ...blocker(1), verdict: "APPROVE" } },
-		{ name: "followup-approve", result: { verdict: "APPROVE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] }, approved: true },
-	];
-	for (const scenario of scenarios) await withFixture(scenario.name, async (service, fixture) => {
+const malformedReviewScenarios: Array<{ name: string; result: ReviewerEnvelope; approved?: boolean }> = [
+	{ name: "unknown-id", result: { ...blocker(1), findings: [REMAINING_FINDING.replace("obligation=A1", "obligation=A99")] } },
+	{ name: "missing-evidence", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; evidence=[^;]+/, "")] } },
+	{ name: "missing-cause", result: { ...blocker(1), findings: [REMAINING_FINDING.replace(/; violation=[^;]+/, "")] } },
+	{ name: "followup-revise", result: { verdict: "REVISE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] } },
+	{ name: "approve-scope-fail", result: { verdict: "APPROVE", scope: "FAIL" } },
+	{ name: "approve-with-blocker", result: { ...blocker(1), verdict: "APPROVE" } },
+	{ name: "followup-approve", result: { verdict: "APPROVE", findings: ["[NEW][P2][ADVISORY][FOLLOWUP] incidental formatting"] }, approved: true },
+];
+for (const scenario of malformedReviewScenarios) test(`malformed obligations and incidental FOLLOWUP cannot authorize repair: ${scenario.name}`, { timeout: 60_000 }, async () => {
+	await withFixture(scenario.name, async (service, fixture) => {
 		let reply = await startRun(service, fixture, scenario.name);
 		reply = await finishImplementer(service, action(reply, "plan-implementer"), scenario.name);
 		const reviewer = action(reply, "plan-reviewer");
@@ -1089,8 +1093,8 @@ test("NEW Reviewer identities persist into Judge prompts, replay and approval ha
 	});
 });
 
-test("excluded NEW advisory cannot authorize repeated repair but changed introduced regression reopens", { timeout: 60_000 }, async () => {
-	for (const variant of ["advisory", "unchanged", "introduced"] as const) await withFixture(`new-${variant}`, async (service, fixture) => {
+for (const variant of ["advisory", "unchanged", "introduced"] as const) test(`excluded NEW advisory cannot authorize repeated repair but changed introduced regression reopens: ${variant}`, { timeout: 60_000 }, async () => {
+	await withFixture(`new-${variant}`, async (service, fixture) => {
 		let reply = await startRun(service, fixture, variant);
 		reply = await finishImplementer(service, action(reply, "plan-implementer"), variant);
 		const reviewer = action(reply, "plan-reviewer");
