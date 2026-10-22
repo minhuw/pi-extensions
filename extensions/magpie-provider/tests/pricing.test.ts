@@ -1,4 +1,5 @@
 import { calculateCost, createAssistantMessageEventStream, type AssistantMessage, type Model, type ModelCost, type Provider, type Usage } from "@earendil-works/pi-ai";
+import { createExtensionRuntime } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import { parseModels } from "../index.ts";
 import { createMagpiePricingResolver, withMagpiePricing } from "../pricing.ts";
@@ -81,6 +82,35 @@ it.each(["estimate", "unavailable"] as const)("preserves %s provenance in stream
 	const nativeUsage = usageFromResponse(model, { input_tokens: 300000, output_tokens: 100 });
 	expect(nativeUsage?.cost).toMatchObject({ magpiePricing: pricing });
 	expect(nativeUsage?.cost.total).toBeCloseTo(usage.cost.total);
+});
+
+it.each(["done", "error", "aborted"] as const)("preserves a delegated %s response after the pricing recorder's extension is invalidated", async terminal => {
+	const [model] = parseModels({ data: [{ id: "unpriced" }] }, "https://gateway.example");
+	const runtime = createExtensionRuntime();
+	runtime.appendEntry = vi.fn();
+	const recordPricing = vi.fn(() => {
+		runtime.assertActive();
+		runtime.appendEntry("magpie-pricing", { pricing: "unavailable" });
+	});
+	// Shared model runtimes can retain a provider registered by a disposed child.
+	runtime.invalidate();
+	const message: AssistantMessage = { role: "assistant", provider: "magpie", model: model.id, api: model.api,
+		content: [{ type: "text", text: "The release monitor completed." }], timestamp: 0,
+		stopReason: terminal === "done" ? "stop" : terminal,
+		...(terminal === "done" ? {} : { errorMessage: "original delegated failure" }),
+		usage: { ...emptyUsage(), input: 10, output: 2, totalTokens: 12 } };
+	const source = createAssistantMessageEventStream();
+	source.push({ type: "start", partial: message });
+	if (terminal === "done") source.push({ type: "done", reason: "stop", message });
+	else source.push({ type: "error", reason: terminal, error: message });
+	const stream = withMagpiePricing(source, model, recordPricing);
+	const result = await stream.result();
+	expect(recordPricing).toHaveBeenCalledExactlyOnceWith("unavailable");
+	expect(runtime.appendEntry).not.toHaveBeenCalled();
+	expect(result).toMatchObject({ ...message, usage: { ...message.usage, cost: { ...message.usage.cost, magpiePricing: "unavailable" } } });
+	const events = [];
+	for await (const event of stream) events.push(event);
+	expect(events.map(event => event.type)).toEqual(["start", terminal === "done" ? "done" : "error"]);
 });
 
 it("preserves error and cancellation messages with unavailable pricing", async () => {

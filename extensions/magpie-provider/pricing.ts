@@ -48,7 +48,15 @@ export function withMagpiePricing(source: AssistantMessageEventStream, model: Mo
 	const mark = (message: AssistantMessage): AssistantMessage => ({ ...message, usage: markMagpieUsage(message.usage, pricing) });
 	const record = (message: AssistantMessage) => {
 		const usage = message.usage;
-		if (usage.input || usage.output || usage.cacheRead || usage.cacheWrite) recordPricing?.(pricing);
+		if (usage.input || usage.output || usage.cacheRead || usage.cacheWrite) {
+			try {
+				recordPricing?.(pricing);
+			} catch {
+				// A shared model runtime can outlive the extension session that
+				// registered this recorder. Optional provenance must not replace a
+				// delegated response, its usage, or its original error/cancellation.
+			}
+		}
 	};
 	const stream = createAssistantMessageEventStream();
 	void (async () => {
