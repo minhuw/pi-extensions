@@ -55,7 +55,7 @@ Magpie Provider connects to a separately running Magpie gateway (default `http:/
 
 ## Development
 
-Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution.
+Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution. Development dependencies and the lockfile target Pi SDK 1.4.0; the supported runtime minimum remains Pi 1.3.0. Run the offline suite after upgrading the host to check its extension loader, provider delegates, and session/tool lifecycle.
 
 ```bash
 npm ci

@@ -28,7 +28,7 @@ No changes to user configuration, provider credentials, runtime databases, or ex
 | Workflow primitives | `src/workflow/`, `src/structured-output.ts` | Runtime, metadata, journal, progress, JSON Schema, and worker-source primitives live under `src/workflow/`; structured output lives at `src/structured-output.ts`. Keep attribution/license with the code. Subagents owns the only scripted-workflow frontend (`SubagentWorkflow`) and retains its isolation and resume support; Herder authority remains separate. |
 | Agent frontmatter | `src/agent-definitions.ts`, `src/custom-agents.ts` | Subagents owns the zero-dependency frontmatter parser and normalizer; `custom-agents.ts` preserves its parser export. Keep aliases, inline lists, block scalars, names, disabled entries, tool selectors, and model/thinking/tier fields compatible. The parser enforces no capability boundary by itself. |
 | Model selection | Agent/nested tool schemas, invocation boundaries, `src/workflow/`, guidance/tests | LLMs select an existing agent type: its user-configured model is authoritative, otherwise inherit the current parent model. Reject raw `model` fields before spawning, scheduling or resuming, including old workflow script requests. No discovery tool or LLM model override. Preserve trusted host bindings, central resolution APIs, provider configuration, and actual session/journal model metadata. |
-| Pi SDK baseline | root manifest, runner/entry and regression fixtures | Pi >=1.3.0, checked against the same SDK version used by the host. |
+| Pi SDK baseline | root manifest, runner/entry and regression fixtures | Pi >=1.3.0; development dependencies and compatibility checks target Pi SDK 1.4.0. |
 
 ## Selective post-release backports
 
@@ -51,7 +51,9 @@ The dedicated TypeScript configuration checks the source and is invoked by root 
 
 ## Upgrade verification
 
-Checked with Pi SDK 1.3.0 and Vitest 4.1.12:
+The current development baseline is Pi SDK 1.4.0. The 1.4 update retains the tool-scope activation and call gates: native resumed-tool restoration does not replace an agent's explicit tool restrictions. Native codemode now queues at worker capacity; no extension-owned worker-pool workaround is needed.
+
+The original vendor-upgrade results below were checked with Pi SDK 1.3.0 and Vitest 4.1.12:
 
 - Collection and Subagents strict typechecks passed.
 - Subagents: **123 files, 2,459 passing tests**; seven real-provider cases intentionally skipped. An ambient `PI_E2E_LIVE=1` still selected faux providers, and explicit live harness requests were rejected before credential discovery.

@@ -228,4 +228,5 @@ it("loads and registers compaction from the Magpie directory alone", () => {
 		cwd: root, env: { ...process.env, PI_OFFLINE: "1", MAGPIE_BASE_URL: "http://127.0.0.1:3425", MAGPIE_API_KEY: "", PI_CODING_AGENT_DIR: agentDir }, timeout: 15000,
 		stdio: "pipe",
 	})).not.toThrow();
-});
+	// The outer deadline must exceed the child process's 15-second SDK-loading bound.
+}, 20_000);

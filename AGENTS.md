@@ -21,7 +21,7 @@ The published extension table and installation details live in the root [README]
 
 ## Verification commands
 
-Run commands from the repository root with Node `>=22.19.0`.
+Run commands from the repository root with Node `>=22.19.0`. The development SDK baseline is Pi 1.4.0; runtime peer dependencies retain Pi >=1.3.0 compatibility.
 
 
 | Command                             | Coverage                                                                                                                                |

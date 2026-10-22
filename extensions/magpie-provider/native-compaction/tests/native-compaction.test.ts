@@ -187,6 +187,28 @@ describe.each(["compaction", "custom"] as const)("%s checkpoint context edits", 
 		expect(branch).toEqual(original);
 	});
 
+	it.each([false, true])("does not replay an omitted length-recovery tool call or result (exclude error: %s)", (excludeLastAssistantError) => {
+		const { session, replacementHistory } = sessionWithCheckpoint();
+		session.appendMessage({ role: "user", content: "retry this request", timestamp: 1 });
+		const assistantId = session.appendMessage(fauxAssistantMessage({
+			type: "toolCall", id: "truncated-call", name: "read", arguments: { path: "abandoned.txt" },
+		}, { stopReason: "length" }));
+		const resultId = session.appendMessage({
+			role: "toolResult", toolCallId: "truncated-call", toolName: "read",
+			content: [{ type: "text", text: "abandoned result" }], isError: true, timestamp: 2,
+		});
+		// Pi 1.4 recovery omits both sides of the abandoned attempt from model context.
+		session.appendContextEdit(assistantId, null);
+		session.appendContextEdit(resultId, null);
+		const branch = session.getBranch();
+		const original = structuredClone(branch);
+		expect(effectiveInputForBranch({ branch, model, tools: [], excludeLastAssistantError })).toEqual([
+			...replacementHistory,
+			{ role: "user", content: [{ type: "input_text", text: "retry this request" }] },
+		]);
+		expect(branch).toEqual(original);
+	});
+
 	it("uses the latest tail replacement without resurrecting edited pre-checkpoint entries", () => {
 		const { session, beforeId, replacementHistory } = sessionWithCheckpoint();
 		const targetId = session.appendMessage({ role: "user", content: "original tail", timestamp: 1 });
