@@ -35,6 +35,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { PROCESS_STATUS_KEY, watchProcesses } from "./processes.ts";
 
 type Mode = "full" | "compact" | "off";
 
@@ -731,8 +732,9 @@ function renderCompact(
 	state: SessionState,
 	footerData: ReadonlyFooterDataProvider,
 ): string {
+	const statuses = footerData.getExtensionStatuses();
 	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true,
-		footerData.getExtensionStatuses().get("autoresearch") ?? footerData.getExtensionStatuses().get("loop"));
+		cluster([statuses.get("autoresearch") ?? statuses.get("loop"), statuses.get(PROCESS_STATUS_KEY)], "  "));
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -814,9 +816,9 @@ function renderFull(
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
 	const extensionStatuses = footerData.getExtensionStatuses();
-	const workflowStatuses = [extensionStatuses.get("autoresearch"), extensionStatuses.get("loop")].filter(Boolean);
+	const workflowStatuses = [extensionStatuses.get("autoresearch"), extensionStatuses.get("loop"), extensionStatuses.get(PROCESS_STATUS_KEY)].filter(Boolean);
 	const statuses = [...extensionStatuses.entries()]
-		.filter(([key, status]) => key !== "autoresearch" && key !== "loop" && Boolean(status))
+		.filter(([key, status]) => key !== "autoresearch" && key !== "loop" && key !== PROCESS_STATUS_KEY && Boolean(status))
 		.map(([, status]) => theme.fg("accent", status));
 	const gitBase = cluster([
 		branch
@@ -846,6 +848,7 @@ function renderFull(
 export default function (pi: ExtensionAPI) {
 	let mode: Mode = "full";
 	let installedCtx: ExtensionContext | undefined;
+	let stopWatchingProcesses: (() => void) | undefined;
 
 	function install(ctx: ExtensionContext, state: SessionState) {
 		if (ctx.mode !== "tui" || installedCtx === ctx) return;
@@ -887,6 +890,8 @@ export default function (pi: ExtensionAPI) {
 			: undefined;
 		const state = freshSessionState(entry?.type === "custom" ? restoreSnapshot(entry.data) : undefined);
 		sessionStates.set(sessionId, state);
+		stopWatchingProcesses?.();
+		stopWatchingProcesses = watchProcesses(pi.events, (status) => ctx.ui.setStatus(PROCESS_STATUS_KEY, status));
 		if (mode !== "off") install(ctx, state);
 	});
 
@@ -984,6 +989,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		stopWatchingProcesses?.();
+		stopWatchingProcesses = undefined;
+		ctx.ui.setStatus(PROCESS_STATUS_KEY, undefined);
 		installedCtx = undefined;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const state = sessionStates.get(sessionId);

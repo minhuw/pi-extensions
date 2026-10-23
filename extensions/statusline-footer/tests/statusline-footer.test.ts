@@ -2,6 +2,8 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { PROCESS_STATUS_KEY, summarizeProcesses } from "../processes.ts";
 import { execFile } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import statuslineFooter, {
@@ -43,10 +45,12 @@ type HarnessOptions = {
 	keyedExtensionStatuses?: Record<string, string>;
 	isIdle?: boolean;
 	hasPendingMessages?: boolean;
+	events?: ExtensionAPI["events"];
 };
 
 function createHarness(sessionId: string, mode: "tui" | "print", options: HarnessOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
+	const events = options.events ?? createEventBus();
 	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => unknown }>();
 	const notifications: string[] = [];
 	const entries = options.entries ?? [];
@@ -74,6 +78,10 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	};
 
 	const ui = {
+		setStatus: vi.fn((key: string, status?: string) => {
+			if (status) extensionStatuses.set(key, status);
+			else extensionStatuses.delete(key);
+		}),
 		setFooter: vi.fn((factory: unknown) => {
 			if (footer) {
 				footer.dispose?.();
@@ -114,6 +122,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	} as unknown as ExtensionContext;
 
 	const pi = {
+		events,
 		on(name: string, handler: Handler) {
 			const list = handlers.get(name) ?? [];
 			list.push(handler);
@@ -130,6 +139,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	return {
 		pi,
 		ctx,
+		events,
 		entries,
 		notifications,
 		requestRender,
@@ -632,6 +642,197 @@ describe("statusline footer rendering", () => {
 		expect(lines[0]).toContain("no-model");
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(24);
 		harness.getFooter()?.dispose?.();
+	});
+});
+
+describe("statusline footer pi-processes compatibility", () => {
+	// @aliou/pi-processes 0.13.2: extensions/shared/protocol/{channels,requests}.ts.
+	// List replies are synchronous; changed broadcasts carry only a reason.
+	function manager(events: ExtensionAPI["events"], initial: unknown = []) {
+		let processes = initial;
+		const list = vi.fn((payload: unknown) => {
+			(payload as { reply: (value: unknown) => void }).reply(processes);
+		});
+		const dispose = events.on("processes:request:list", list);
+		return {
+			list, dispose,
+			update(value: unknown, broadcast = true) {
+				processes = value;
+				if (broadcast) events.emit("processes:changed", { reason: "ended" });
+			},
+		};
+	}
+
+	it("summarizes upstream states without including command or process text", () => {
+		expect(summarizeProcesses([
+			{ status: "running", name: "\x1b[2Junsafe" },
+			{ status: "running" }, { status: "terminating" }, { status: "terminate_timeout" },
+			{ status: "exited", success: false }, { status: "exited", success: true },
+			{ status: "killed" }, null, { status: "unknown" },
+		])).toBe("bg 2 running · 1 stopping · 1 stuck · 1 failed · 1 done · 1 killed");
+		for (const value of [undefined, null, {}, [], [null, { status: "unknown" }]]) {
+			expect(summarizeProcesses(value)).toBeUndefined();
+		}
+	});
+
+	it("stays empty when pi-processes is absent", async () => {
+		const harness = createHarness("processes-absent", "tui");
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			for (const mode of ["full", "compact"]) {
+				await harness.runCommand("footer", mode);
+				expect(harness.getFooter()!.render(240).join("\n")).not.toContain("bg ");
+			}
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+		}
+	});
+
+	it("loads an initial snapshot, reacts to completion and clears removed tasks", async () => {
+		const harness = createHarness("processes-events", "tui");
+		const core = manager(harness.events, [{ status: "running" }]);
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running");
+			core.update([{ status: "exited", success: false }, { status: "running" }]);
+			expect(harness.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, "bg 1 running · 1 failed");
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 running · 1 failed");
+			core.update([{ status: "exited", success: true }]);
+			expect(harness.getFooter()!.render(240)[3]).toContain("bg 1 done");
+			core.update([]);
+			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
+			core.update({ invalid: true });
+			expect(harness.getFooter()!.render(240)[3]).not.toContain("bg ");
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			core.dispose();
+		}
+	});
+
+	it("reconciles silent termination transitions and releases its timer", async () => {
+		vi.useFakeTimers();
+		const harness = createHarness("processes-silent-transitions", "tui");
+		const core = manager(harness.events, [{ status: "running" }]);
+		try {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+			expect(vi.getTimerCount()).toBe(2); // Footer duration + live process metadata.
+			const publications = vi.mocked(harness.ctx.ui.setStatus).mock.calls.length;
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(harness.ctx.ui.setStatus).toHaveBeenCalledTimes(publications);
+			core.update([{ status: "terminating" }], false);
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stopping");
+			core.update([{ status: "terminate_timeout" }], false);
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(harness.getFooter()!.render(120)[3]).toContain("bg 1 stuck");
+			core.update([{ status: "killed" }]);
+			expect(vi.getTimerCount()).toBe(1);
+			core.update([{ status: "running" }]);
+			expect(vi.getTimerCount()).toBe(2);
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			expect(vi.getTimerCount()).toBe(0);
+			const calls = core.list.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(4_000);
+			core.update([]);
+			expect(core.list).toHaveBeenCalledTimes(calls);
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			core.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("reserves full-mode status space before a long path and bounds compact mode", async () => {
+		const harness = createHarness("processes-layout", "tui", {
+			cwd: `/tmp/${"very-long/".repeat(30)}project`,
+		});
+		const core = manager(harness.events, [{ status: "running" }]);
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			const full = harness.getFooter()!.render(55);
+			expect(full[3]).toContain("bg 1 running");
+			expect(full[3]!.split("bg 1 running")).toHaveLength(2);
+			await harness.runCommand("footer", "compact");
+			for (const width of [0, 1, 12, 24, 40, 80, 120]) {
+				const line = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				if (width >= 24) {
+					expect(line).toContain("k3");
+					expect(line).toContain("42.5%");
+				}
+				if (width >= 40) expect(line).toContain("bg 1 running");
+				if (width === 24) expect(line).not.toContain("bg ");
+			}
+			harness.setStatus("autoresearch", "research 2/5");
+			harness.setStatus("loop", "loop build");
+			const wide = harness.getFooter()!.render(160)[0]!;
+			expect(wide).toContain("research 2/5");
+			expect(wide).toContain("bg 1 running");
+			expect(wide).not.toContain("loop build");
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			core.dispose();
+		}
+	});
+
+	it("keeps updating while the custom footer is off", async () => {
+		const harness = createHarness("processes-footer-off", "tui");
+		const core = manager(harness.events);
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			await harness.runCommand("footer", "off");
+			core.update([{ status: "running" }]);
+			expect(harness.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, "bg 1 running");
+			expect(harness.getFooter()).toBeUndefined();
+			await harness.runCommand("footer", "compact");
+			expect(harness.getFooter()!.render(120)[0]).toContain("bg 1 running");
+		} finally {
+			harness.disposeFooter();
+			await harness.emit("session_shutdown", { reason: "quit" });
+			core.dispose();
+		}
+	});
+
+	it("ignores child sessions and removes subscriptions on shutdown and reload", async () => {
+		const root = createHarness("processes-isolation", "tui");
+		const child = createHarness("processes-isolation", "print", { events: root.events });
+		const core = manager(root.events, [{ status: "running" }]);
+		for (const harness of [root, child]) {
+			statuslineFooter(harness.pi);
+			await harness.emit("session_start", { reason: "startup" });
+		}
+		try {
+			expect(core.list).toHaveBeenCalledTimes(1);
+			await child.emit("session_shutdown", { reason: "quit" });
+			expect(child.ctx.ui.setStatus).not.toHaveBeenCalled();
+			core.update([{ status: "exited", success: true }]);
+			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 done");
+			root.disposeFooter();
+			await root.emit("session_shutdown", { reason: "reload" });
+			expect(root.ctx.ui.setStatus).toHaveBeenLastCalledWith(PROCESS_STATUS_KEY, undefined);
+			const calls = core.list.mock.calls.length;
+			core.update([]);
+			expect(core.list).toHaveBeenCalledTimes(calls);
+			await root.emit("session_start", { reason: "reload" });
+			core.list.mockClear();
+			core.update([{ status: "running" }]);
+			expect(core.list).toHaveBeenCalledTimes(1);
+			expect(root.getFooter()!.render(120)[3]).toContain("bg 1 running");
+		} finally {
+			root.disposeFooter();
+			await root.emit("session_shutdown", { reason: "quit" });
+			core.dispose();
+		}
 	});
 });
 

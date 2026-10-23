@@ -39,6 +39,22 @@ Thinking levels are colored: dim off, amber low, green medium, lilac high, and a
 
 Compact mode keeps identity on the left and the bar, cost, and elapsed time on the right. When another extension publishes `ctx.ui.setStatus("autoresearch", ...)` or `ctx.ui.setStatus("loop", ...)`, compact mode also shows a workflow summary when there is room. Research reports take priority over Loop; clearing the research report restores the Loop summary. Full mode shows both once on the Git row alongside other extension statuses, with research first. A long directory path yields space to workflow statuses. At narrow widths, both layouts prioritize the model and context percentage: workflow summaries and other secondary details drop out and the bar shrinks or disappears before the model is truncated. Clearing a status removes it from the footer. See [Autoresearch](../autoresearch/README.md) for baseline review, approved iterations, and the reporting tool.
 
+## Background processes
+
+The footer optionally integrates with [`@aliou/pi-processes`](https://github.com/aliou/pi-processes). Install it separately:
+
+```bash
+pi install npm:@aliou/pi-processes
+```
+
+Restart Pi, or use `/reload` to load both extensions. No fork or additional footer dependency is required. Compatibility is based on the package's in-process request/event protocol, verified against version 0.13.2.
+
+The footer shows a summary such as `bg 2 running · 1 failed · 3 done`. Full mode places it on the Git/status row after research and Loop, reserving space before a long directory path. Compact mode includes it alongside the selected workflow summary when the model and context percentage still fit. Stopping, stuck (termination timed out), and killed processes have separate counts. Finished counts remain until pi-processes clears or expires those entries; `/ps:clear` clears finished entries.
+
+Process changes update the summary through Pi's event bus. While jobs are live, a lightweight metadata refresh every two seconds also catches termination states that upstream does not broadcast; this does not invoke the model. Without pi-processes, nothing is displayed and no refresh timer runs. The adapter only reads process metadata; process execution, completion notifications, cancellation, and logs remain owned by pi-processes. `/ps` and `/ps:logs` continue to work. `/footer off` leaves the summary available through Pi's default footer.
+
+For a single status display, leave pi-processes' **status widget** disabled in `/ps:settings` (its default), and use `/ps:dock close` if its log dock is open. Set its dock default to closed in `/ps:settings` to keep it closed on subsequent sessions. The footer does not change upstream UI settings or hide its panels.
+
 ## Commands
 
 | Command | Effect |
