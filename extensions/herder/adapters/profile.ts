@@ -35,10 +35,21 @@ export function modelSupportsServiceTier(model: AvailableModel): boolean {
 	return Boolean(model.api && SERVICE_TIER_APIS.has(model.api));
 }
 
+function modelReference(candidate: AvailableModel): string {
+	return candidate.fullId || (candidate.provider && candidate.id ? `${candidate.provider}/${candidate.id}` : "");
+}
+
 export function modelMatches(requested: string, candidate: AvailableModel): boolean {
 	const id = candidate.id || "";
-	const fullId = candidate.fullId || (candidate.provider && id ? `${candidate.provider}/${id}` : "");
+	const fullId = modelReference(candidate);
 	return requested === id || requested === fullId || fullId.endsWith(`/${requested}`);
+}
+
+/** Resolve direct IDs before legacy suffix matches such as auto/<model>. */
+export function findProfileModel<T extends AvailableModel>(requested: string, available: readonly T[]): T | undefined {
+	return available.find(candidate => modelReference(candidate) === requested)
+		?? available.find(candidate => candidate.id === requested)
+		?? available.find(candidate => modelMatches(requested, candidate));
 }
 
 export const HERDER_RECON_MODEL = "deepseek/deepseek-flash";

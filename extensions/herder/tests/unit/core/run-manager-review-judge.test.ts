@@ -256,7 +256,7 @@ async function reachJudge(service: Service, fixture: Fixture, prefix: string, pr
 	for (let round = 1; round <= 2; round += 1) {
 		assert.equal(Number(implementer.round), round);
 		if (profile === "universe" || profile === "epic") {
-			assert.equal(implementer.model, profile === "epic" ? "claude-opus-5.5" : "gpt-6-astra");
+			assert.equal(implementer.model, profile === "epic" ? "claude-opus-5-5" : "gpt-6-astra");
 			assert.equal(implementer.effort, profile === "epic" ? "high" : "medium");
 			assert.equal(implementer.serviceTier, undefined);
 			assert.deepEqual(implementer.searcherBinding, { model: "gpt-6.1-sol", effort: "xhigh" });
@@ -595,7 +595,7 @@ test("Judge DONE creates exact Reviewer/Judge approval evidence and integrates",
 for (const profile of ["epic", "universe"]) test(`${profile}: Judge REPAIR supplies immutable bindings and PASS_DOCUMENT to round-3 RESCUE after restart`, { timeout: 45_000 }, async (t) => {
 	await withFixture("judge-repair", async (service, fixture) => {
 		const state = await reachJudge(service, fixture, "judge-repair", profile);
-		assert.equal(state.judge.model, profile === "epic" ? "claude-fable-5.1" : "gpt-6-astra");
+		assert.equal(state.judge.model, profile === "epic" ? "claude-fable-5-1" : "gpt-6-astra");
 		assert.equal(state.judge.effort, profile === "epic" ? "high" : "xhigh");
 		assert.equal(state.judge.serviceTier, undefined);
 		assert.deepEqual(state.judge.searcherBinding, { model: "gpt-6.1-sol", effort: "xhigh" });

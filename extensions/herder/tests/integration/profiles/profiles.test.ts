@@ -34,9 +34,9 @@ test("profile registry exposes the supported Pi profiles", () => {
 		epic: {
 			orchestrator: { model: "gpt-6-astra", effort: "high" },
 			roles: {
-				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5.5", effort: "high" },
+				"plan-implementer": { agent_type: "herder.plan-implementer", model: "claude-opus-5-5", effort: "high" },
 				"plan-reviewer": { agent_type: "herder.plan-reviewer", model: "gpt-6.1-sol", effort: "xhigh" },
-				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5.1", effort: "high" },
+				"plan-judge": { agent_type: "herder.plan-judge", model: "claude-fable-5-1", effort: "high" },
 			},
 		},
 		lightspeed: {
@@ -59,12 +59,12 @@ test("profile registry exposes the supported Pi profiles", () => {
 		},
 	};
 
-	const existingHashes = {
+	const expectedHashes = {
 		poorman: "97a6d2505bff72f466494a7050ebf5f3187262b2b242f536143eb5189eef2023",
-		epic: "3c59916ef39bd45fcdda62a73ab1511e1111a35e06ece089a0c3946550f67626",
+		epic: "fe6d2f6999d8fc4598e670af46146eeca8c88df3d86b2d4a7d20a8fa56b71e12",
 		lightspeed: "cb67146ee26d31ed0e6aba3e5982bc3fb1f20a9eee648ae4bd69d72c06465c6e",
 	};
-	for (const [name, hash] of Object.entries(existingHashes)) {
+	for (const [name, hash] of Object.entries(expectedHashes)) {
 		const profile = resolvePiProfile(name);
 		assert.equal(profile.profile_sha256, hash);
 		if (name !== "epic") {

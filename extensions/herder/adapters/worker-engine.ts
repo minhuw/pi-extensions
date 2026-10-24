@@ -18,7 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { WORKER_ROLES, type ManagerAction, type UsageEvidence, type WorkerRole } from "../src/shared/protocol.ts";
 import {
-	modelMatches,
+	findProfileModel,
 	modelSupportsEffort,
 	modelSupportsServiceTier,
 	serviceTierRequestValue,
@@ -281,7 +281,7 @@ export class DefaultPiWorkerSessionFactory implements PiWorkerSessionFactory {
 		serviceTier: string | undefined,
 		label: "worker" | "nested agent",
 	): Model<any> {
-		const model = available.find((candidate) => modelMatches(requestedModel, candidate));
+		const model = findProfileModel(requestedModel, available);
 		if (!model) throw new Error(`Pi ${label} model ${requestedModel} is unavailable.`);
 		if (!modelSupportsEffort(model, effort)) {
 			throw new Error(`Pi ${label} model ${requestedModel} does not support thinking ${effort}.`);

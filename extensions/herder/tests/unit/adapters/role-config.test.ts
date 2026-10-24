@@ -98,6 +98,19 @@ test("universe keeps DeepSeek on Recon and validates rescue and Searcher overrid
 	}, models), /nested agent searcher .* does not support service tier fast/);
 });
 
+test("Epic validates exact short aliases before auto-group suffix matches", async () => {
+	const profile = resolvePiProfile("epic", catalog);
+	const ids = ["claude-opus-5-5", "claude-fable-5-1", "gpt-6-astra", "gpt-6.1-sol"];
+	const direct = ids.map(id => ({ provider: "magpie", id, api: "openai-responses", reasoning: true,
+		thinkingLevelMap: { high: "high", xhigh: "xhigh", max: null },
+	}));
+	const groups = direct.map(model => ({ ...model, id: `auto/${model.id}`, api: "openai-completions", reasoning: false }));
+	await assert.doesNotReject(() => validateHerderRoleAgents(agentRoot, profile, [...groups, ...direct, reconModel]));
+	await assert.rejects(() => validateHerderRoleAgents(agentRoot, profile, [
+		...groups, ...direct.filter(model => model.id !== "claude-opus-5-5"), reconModel,
+	]), /claude-opus-5-5 does not support thinking high/);
+});
+
 test("roles encourage bounded Recon exploration without delegating judgment", async () => {
 	for (const role of ["plan-implementer", "plan-reviewer", "plan-judge"] as const) {
 		let { systemPrompt } = await loadHerderPiRole(agentRoot, role);

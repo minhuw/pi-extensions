@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import {
-	modelMatches,
+	findProfileModel,
 	modelSupportsEffort,
 	modelSupportsServiceTier,
 	type AvailableModel,
@@ -126,7 +126,7 @@ function validateOwnBinding(definition: HerderNestedAgentDefinition, availableMo
 	const mapping = override
 		? { model: override.model, effort: override.effort, ...(override.service_tier ? { serviceTier: override.service_tier } : {}) }
 		: definition.modelBinding!;
-	const candidate = availableModels.find((model) => modelMatches(mapping.model, model));
+	const candidate = findProfileModel(mapping.model, availableModels);
 	if (!candidate || !modelSupportsEffort(candidate, mapping.effort)) {
 		throw new Error(`Herder nested agent ${definition.name} cannot start because ${mapping.model} does not support thinking ${mapping.effort}.`);
 	}
@@ -230,7 +230,7 @@ export async function validateHerderRoleAgents(
 		if (mapping.agent_type !== definition.agentType) {
 			throw new Error(`Herder role ${role} must use package agent ${definition.agentType}, not ${mapping.agent_type}.`);
 		}
-		const candidate = availableModels.find((model) => modelMatches(mapping.model, model));
+		const candidate = findProfileModel(mapping.model, availableModels);
 		if (!candidate || !modelSupportsEffort(candidate, mapping.effort)) {
 			throw new Error(`Herder role ${definition.agentType} cannot start because ${mapping.model} does not support thinking ${mapping.effort}.`);
 		}

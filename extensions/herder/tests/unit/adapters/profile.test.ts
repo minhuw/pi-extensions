@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	activeModelMatches,
+	findProfileModel,
 	modelMatches,
 	modelSupportsEffort,
 	modelSupportsServiceTier,
@@ -108,6 +109,24 @@ test("model checks accept provider-qualified catalog entries without substitutio
 	assert.equal(activeModelMatches(profile, available[1]), true);
 	assert.equal(modelMatches("other/kimi-k3", available[0]), false);
 	assert.deepEqual(unavailableProfileModels(profile, available.slice(0, 2)), ["deepseek/deepseek-flash"]);
+});
+
+test("direct model IDs take precedence over routing groups and legacy suffixes", () => {
+	const group = { provider: "magpie", id: "auto/claude-opus-5-5" };
+	const legacy = { provider: "magpie", id: "claude1/claude-opus-5-5" };
+	const direct = { provider: "magpie", id: "claude-opus-5-5" };
+	assert.equal(findProfileModel("claude-opus-5-5", [group, legacy, direct]), direct);
+	assert.equal(findProfileModel("magpie/claude-opus-5-5", [group, direct]), direct);
+	assert.equal(findProfileModel("auto/claude-opus-5-5", [direct, group]), group);
+	assert.equal(findProfileModel("claude-opus-5-5", [legacy]), legacy);
+	assert.equal(findProfileModel("missing", [group, direct]), undefined);
+});
+
+test("a full Pi provider reference wins over an identical gateway model ID", () => {
+	const gateway = { provider: "magpie", id: "deepseek/deepseek-flash" };
+	const native = { provider: "deepseek", id: "deepseek-flash" };
+	assert.equal(findProfileModel("deepseek/deepseek-flash", [gateway, native]), native);
+	assert.equal(findProfileModel("deepseek/deepseek-flash", [gateway]), gateway);
 });
 
 test("model availability includes optional rescue and Searcher bindings", () => {

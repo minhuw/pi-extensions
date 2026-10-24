@@ -53,7 +53,7 @@ herder.plan-judge
 
 Round-3 rescue specializes `herder.plan-implementer` in fresh context with unchanged tools, using the profile's optional `rescue` binding or otherwise its normal Implementer binding; it adds no worker role. SQLite schema version **21** additively stores immutable run `yolo`, defaulting existing runs to `false`; schema 20 introduced the append-only execution-budget ledger, which remains intact. Schema 19 migrates conservatively using the currently applied persisted contract and historical reservations, then pauses ambiguous recovery for an explicit host decision. Older unsupported schemas are retained and refused, never deleted or silently restarted.
 
-The profile supplies each exact model and Pi thinking level at launch. Before repository mutation, Herder validates the root model, requested child-model efforts, and package-owned definitions against the same Pi model runtime used for children. It never substitutes another model after failure.
+The profile supplies each exact model and Pi thinking level at launch. Resolution prefers a full Pi provider reference, then an exact model ID, before accepting a legacy provider-route suffix. A direct alias such as `claude-opus-5-5` therefore wins over `auto/claude-opus-5-5`; an explicit `auto/…` binding still selects the group. Epic uses the direct dashed Claude IDs `claude-opus-5-5` and `claude-fable-5-1`. Before repository mutation, Herder validates the root model, requested child-model efforts, and package-owned definitions against the same Pi model runtime used for children. It never substitutes another model after failure.
 
 ## Orchestration workflow
 

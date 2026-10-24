@@ -40,7 +40,7 @@ export const availableModels = [
 		reasoning: true,
 		thinkingLevelMap: { medium: "medium", high: "high", xhigh: "xhigh", max: null },
 	},
-	...(["claude-opus-5.5", "claude-fable-5.1"] as const).map((id) => ({
+	...(["claude-opus-5-5", "claude-fable-5-1"] as const).map((id) => ({
 		provider: "fake",
 		id,
 		api: "anthropic-messages",
