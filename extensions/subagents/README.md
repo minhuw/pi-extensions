@@ -59,7 +59,7 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 | `recon` | Read-only reconnaissance; compressed handoff | read-only | `deepseek/deepseek-flash`, thinking `high`, normal tier (no override) |
 | `worker` | Bounded implementation and verification | coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
-| `expert` | Read-only advice on plans, designs, tradeoffs, and complicated technical questions; selected by user/parent for difficult judgment, not routine questions | read-only | `magpie/codex/gpt-6-astra`, thinking `xhigh`, no tier override |
+| `expert` | Read-only advice on plans, designs, tradeoffs, and complicated technical questions; selected by user/parent for difficult judgment, not routine questions | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
 
 A custom `expert.md` overrides the embedded Expert through normal agent discovery. `disableDefaultAgents: true` hides Expert along with the other built-ins; custom agents remain available.
 

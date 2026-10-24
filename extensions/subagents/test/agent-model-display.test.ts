@@ -66,7 +66,9 @@ function session(provider: string, id: string, thinkingLevel: string, name?: str
 const MODELS = [
   { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus 4.6" },
   { provider: "anthropic", id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
-  { provider: "magpie", id: "codex/gpt-6-astra", name: "GPT-6 Astra" },
+  { provider: "magpie", id: "gpt-6-astra", name: "GPT-6 Astra" },
+  { provider: "magpie", id: "auto/gpt-6-astra", name: "GPT-6 Astra Auto" },
+  { provider: "openai", id: "gpt-6-astra", name: "GPT-6 Astra" },
 ];
 
 const MODEL_NAMES: Record<string, string> = Object.fromEntries(MODELS.map(m => [m.id, m.name]));
@@ -261,11 +263,12 @@ describe("Agent tool result — effective model", () => {
     expect(runAgent).toHaveBeenCalledOnce();
     expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toBe("expert");
     expect(options?.model).toBe(MODELS[2]);
+    expect(options?.model).toMatchObject({ provider: "magpie", id: "gpt-6-astra" });
     expect(options?.model).not.toBe(context.model);
     expect(options?.thinkingLevel).toBe("xhigh");
     expect(options?.serviceTier).toBeUndefined();
     expect(result.isError).not.toBe(true);
-    expect(result.details.modelName).toBe("magpie/codex/gpt-6-astra");
+    expect(result.details.modelName).toBe("magpie/gpt-6-astra");
     expect(result.details.identity).toContain("xhigh (asked low)");
   });
 

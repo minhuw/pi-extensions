@@ -102,7 +102,7 @@ describe("agent type registry", () => {
       const cfg = getAgentConfig("expert");
       expect(cfg).toMatchObject({
         displayName: "Expert",
-        model: "magpie/codex/gpt-6-astra",
+        model: "magpie/gpt-6-astra",
         thinking: "xhigh",
         builtinToolNames: ["read", "bash", "grep", "find", "ls"],
         extensions: true,

@@ -234,7 +234,7 @@ No emojis. No file modifications.`,
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
-      model: "magpie/codex/gpt-6-astra",
+      model: "magpie/gpt-6-astra",
       thinking: "xhigh",
       systemPrompt: `# READ-ONLY EXPERT
 
