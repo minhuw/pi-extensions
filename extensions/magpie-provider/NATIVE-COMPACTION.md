@@ -2,11 +2,11 @@
 
 Magpie Provider includes its own native-compaction integration. Its protocol and replay engine lives in `extensions/magpie-provider/native-compaction/`, alongside its configuration and lifecycle integration. The legacy CLIProxyAPI extensions are no longer included in this collection.
 
-**Enabled by default, experimental and unverified live:** the Magpie protocol assessment inspected commit `1755713`; no live gateway/upstream compaction has been run. Automatic eligibility uses known OpenAI/Codex namespaces as an identification heuristic, not runtime proof of native capability. The remote Magpie provider still requires `compaction=native`.
+**Enabled by default, experimental and unverified live:** the Magpie protocol assessment inspected commit `1755713`; no live gateway/upstream compaction has been run. Automatic eligibility uses the model name as an identification heuristic; matching names do not prove that gateway providers serve equivalent models or compaction protocols. The remote Magpie provider still requires `compaction=native`.
 
 ## Automatic eligibility and setup
 
-With no configuration file, defaults are `enabled: true` and `fallbackToBuiltin: true`. When `models` is omitted, the integration derives a deduplicated exact allowlist from the synchronous Pi model registry: provider `magpie`, API `openai-responses`, and concrete `openai/<model>` or `codex/<model>` IDs. The remaining ID must be nonempty, without whitespace or wildcard patterns. There is no model-version gate: `codex/gpt-6.1-sol`, future GPT names, and OpenAI o-series names qualify if advertised on Responses. Groups, other providers/APIs, and other namespaces (including the usual DeepSeek and Claude routes) are not automatically enabled. An alias under `openai/` or `codex/` is treated as belonging to that namespace; the client cannot prove its actual upstream from the name.
+With no configuration file, defaults are `enabled: true` and `fallbackToBuiltin: true`. When `models` is omitted, the integration derives a deduplicated exact allowlist from the synchronous Pi model registry: provider `magpie`, API `openai-responses`, and a final model name matching `gpt-*`, `chatgpt-*`, or an o-series name such as `o3`, `o3-mini`, or `o99`. The name is the segment after the last `/`; gateway prefixes and `owned_by` do not affect eligibility. For example, `gpt-6-astra`, `codex/gpt-6-astra`, and `my-relay/gpt-6-astra` qualify equally when selected on Responses. Names must be nonempty, without whitespace, control characters, empty path segments, or wildcard patterns. There is no model-version gate. Other names, other Pi providers, and other APIs are not automatically enabled. Arbitrary names such as `codex/future-model` require an explicit list even when their prefix names OpenAI/Codex.
 
 The registry alone is used; a stale selected model absent from it does not enable new native compactions. No extra network request or remote-settings lookup is made. An OpenAI-looking name or Responses endpoint is not proof that the backend supports native compaction.
 
@@ -26,7 +26,7 @@ Only try this with a disposable session and a **concrete Responses model whose u
 
 ### Explicit configuration and optouts
 
-Other custom provider namespaces/aliases require an explicit exact `models` list after verifying the actual backend; their names do not prove capability:
+Other model names require an explicit `models` list after verifying the actual backend:
 
 ```json
 {
@@ -36,7 +36,7 @@ Other custom provider namespaces/aliases require an explicit exact `models` list
 }
 ```
 
-Use exact IDs from `/v1/models`, without Pi's outer `magpie/` prefix. An explicit `models` array **replaces**, rather than extends, automatic discovery. `models: []` intentionally disables all new native compactions; `enabled: false` is also honored. Remove the `models` key from an old config to restore automatic discovery, and remove or change `enabled: false` if you want to enable it. Groups, wildcard patterns, unknown configuration fields, and malformed values are rejected.
+Use exact qualified or bare IDs from the Pi model catalog, without Pi's outer `magpie/` prefix. This includes unambiguous local Claude aliases; those aliases resolve to their physical source before compaction. Entries match by their final model name: `"models": ["gpt-6-astra"]` and `"models": ["codex/gpt-6-astra"]` both include discovered Responses routes named `gpt-6-astra`, including `my-relay/gpt-6-astra`. The runtime allowlist retains full advertised IDs so requests and checkpoint bindings remain exact. An explicit `models` array **replaces**, rather than extends, automatic name selection. `models: []` intentionally disables all new native compactions; `enabled: false` is also honored. Remove the `models` key from an old config to restore automatic discovery, and remove or change `enabled: false` if you want to enable it. Wildcard patterns, empty path segments, whitespace/control characters, unknown configuration fields, and malformed values are rejected. Case and model suffixes remain significant.
 
 A trusted project's `.pi/magpie-native-compaction.json` overrides individual global fields; untrusted project files are ignored. A global explicit list stays in effect unless a trusted project replaces it. The provider/API are fixed to `magpie`/`openai-responses`; there is no endpoint override or separate credential store. Configuration is read when needed; no files are changed or migrated automatically. Invalid configuration cancels compaction rather than silently falling through.
 
@@ -48,7 +48,7 @@ The engine sends Codex remote-compaction-v2 to the effective gateway's ordinary 
 
 ```text
 POST http://127.0.0.1:3425/v1/responses
-{"model":"<provider>/<model>","stream":true,"instructions":"","input":[...,{"type":"compaction_trigger"}]}
+{"model":"<exact advertised model ID>","stream":true,"instructions":"","input":[...,{"type":"compaction_trigger"}]}
 ```
 
 The request accepts SSE (`text/event-stream`) and JSON. For SSE, only the terminal `response.completed` response is validated and stored; partial output items, failed/incomplete/error events, and streams ending without completion cannot create a checkpoint. JSON responses remain supported.
@@ -59,7 +59,7 @@ The returned opaque item is stored in the Pi session. On later turns, the `befor
 
 Magpie rejects the legacy `/responses/compact` route for Magpie-qualified models. The integration uses `/v1/responses`, not that legacy route.
 
-The engine deliberately retains the historical checkpoint kind `cliproxyapi-openai-native-compaction` and reads version-1 and version-2 checkpoints. This is a persisted format identifier, **not a runtime dependency**. Existing Magpie checkpoints produced with the old experimental bridge remain readable, including their exact provider/API/model binding. CLIProxyAPI-bound checkpoints are not silently migrated to Magpie and cannot be replayed under a different model identity.
+The engine deliberately retains the historical checkpoint kind `cliproxyapi-openai-native-compaction` and reads version-1 and version-2 checkpoints. This is a persisted format identifier, **not a runtime dependency**. Existing Magpie checkpoints produced with the old experimental bridge remain readable, including their exact provider/API/model binding. A gateway-advertised bare ID and its qualified counterpart have distinct checkpoint identities; start a new session when changing between them. A local Claude alias resolves to its exact physical source for requests and checkpoint binding, so the alias and that source share a checkpoint identity. Selecting another provider's equally named model remains blocked. CLIProxyAPI-bound checkpoints are not silently migrated to Magpie and cannot be replayed under a different model identity.
 
 ## Migrating from the experimental CLIProxyAPI recipe
 
@@ -75,7 +75,7 @@ These tests do **not** prove compatibility with a running gateway or upstream. O
 
 A sealed checkpoint is bound to its writer. Magpie records that affinity and refuses incompatible rerouting; losing or disabling the account, hitting its quota, or losing the checkpoint-affinity record can prevent continuation. Magpie currently retains at most 1,024 writer records for 30 days. Do not delete its `compactions.json` to troubleshoot an active compacted session. Switching to another provider/model is blocked after an opaque checkpoint; use a new session instead. Changing `/login magpie` to a different gateway or account does not make old checkpoints portable either; start a new session when changing their backend.
 
-Magpie allows native compaction for groups only when every member qualifies, but that is not a portability guarantee. This initial integration rejects groups in its allowlist.
+Magpie allows native compaction for groups only when every member qualifies, but that is not a portability guarantee. The extension still requires a Responses model. Magpie's group catalog rows omit native endpoints and therefore select Chat Completions, so they use ordinary compaction even if their name matches a GPT model or appears in the explicit list.
 
 ## Source evidence
 

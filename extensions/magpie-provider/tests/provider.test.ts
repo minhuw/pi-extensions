@@ -74,6 +74,24 @@ describe("metadata", () => {
 		expect(older.compat).toEqual({ sendSessionAffinityHeaders: true });
 		expect(older.thinkingLevelMap).toBeUndefined();
 	});
+	it("retains mixed bare and qualified rows without fabricating aliases or rewriting routing IDs", () => {
+		const metadata = { display_name: "Direct model", owned_by: "codex", native_endpoints: ["/v1/responses"],
+			context_window: 123456, max_output_tokens: 12345, modalities: { input: ["text", "image"] },
+			supported_reasoning_levels: [{ effort: "none" }, { effort: "high" }] };
+		const models = parseModels({ data: [
+			{ ...metadata, id: "gpt-5.4" }, { ...metadata, id: "codex/gpt-5.4", owned_by: "anthropic" },
+			{ id: "routing-choice", owned_by: "codex" },
+		] }, config.origin);
+		expect(models.map(model => model.id)).toEqual(["gpt-5.4", "codex/gpt-5.4", "routing-choice"]);
+		const { magpieRoute: bareRoute, ...bare } = models[0];
+		const { magpieRoute: qualifiedRoute, ...qualifiedModel } = models[1];
+		expect(bare).toEqual({ ...qualifiedModel, id: "gpt-5.4" });
+		expect(bareRoute).toEqual({ canonicalId: "gpt-5.4", owner: "codex", group: false });
+		expect(qualifiedRoute).toEqual({ canonicalId: "codex/gpt-5.4", owner: "anthropic", group: false });
+		const [qualified] = parseModels({ data: [{ ...metadata, id: "codex/gpt-5.4" }] }, config.origin);
+		const { magpieRoute: _route, ...publicQualified } = qualified;
+		expect(qualifiedModel).toEqual(publicQualified);
+	});
 	it.each([null, [], {}, { data: {} }, { data: [] }, { data: [null] }])("rejects malformed or unusable catalog %j", body => {
 		expect(() => parseModels(body, config.origin)).toThrow();
 	});
@@ -132,6 +150,20 @@ describe("discovery and lifecycle", () => {
 		http(catalog("new"));
 		await provider.refreshModels!(refresh({ publish: async () => false }));
 		expect(provider.getModels()).toBe(previous);
+	});
+	it("refreshes bare model API metadata through the native model registry", async () => {
+		const models = createModels();
+		models.setProvider(createMagpieProvider({}));
+		http({ data: [{ id: "gpt-6-astra", owned_by: "codex", native_endpoints: ["/v1/responses"] }] });
+		expect((await models.refresh()).errors.size).toBe(0);
+		expect(models.getModel("magpie", "gpt-6-astra")).toMatchObject({
+			id: "gpt-6-astra", api: "openai-responses",
+		});
+		// A bare route can become a group and lose its Responses advertisement.
+		http({ data: [{ id: "gpt-6-astra", owned_by: "codex" }] });
+		expect((await models.refresh({ force: true })).errors.size).toBe(0);
+		const group = models.getModel("magpie", "gpt-6-astra");
+		expect(group?.api).toBe("openai-completions");
 	});
 	it("reports refresh errors through native Models and preserves existing catalog", async () => {
 		const models = createModels();
@@ -208,10 +240,10 @@ it("records session pricing provenance for usage that Pi may merge into a summar
 	expect(appendEntry).toHaveBeenCalledExactlyOnceWith("magpie-pricing", { pricing: "unavailable" });
 });
 
-it.each([
-	["/v1/chat/completions", "chat"], ["/v1/responses", "responses"], ["/v1/messages", "messages"],
-] as const)("delegates both stream methods unchanged for %s", async (endpoint, key) => {
-	const model = parseModels({ data: [{ id: "group/foo", native_endpoints: [endpoint] }] }, config.origin)[0];
+it.each((["/v1/chat/completions", "/v1/responses", "/v1/messages"] as const).flatMap((endpoint, index) =>
+	(["group/foo", "bare-model"] as const).map(id => ({ endpoint, key: (["chat", "responses", "messages"] as const)[index], id })),
+))("delegates both stream methods unchanged for $endpoint with $id", async ({ endpoint, key, id }) => {
+	const model = parseModels({ data: [{ id, owned_by: "codex", native_endpoints: [endpoint] }] }, config.origin)[0];
 	const provider = createMagpieProvider({});
 	const context = normalizeContext({ messages: [] });
 	const options = { apiKey: "secret", signal: new AbortController().signal, onPayload: vi.fn(), onResponse: vi.fn(), onProviderStreamEvent: vi.fn() };
@@ -222,5 +254,93 @@ it.each([
 		for await (const item of provider[method](model, context, options)) received.push(item);
 		expect(received).toEqual([event]);
 		expect(delegates[key][method]).toHaveBeenCalledWith(model, context, options);
+		const delegatedModel = delegates[key][method].mock.lastCall![0];
+		expect(delegatedModel.id).toBe(id);
 	}
+});
+
+it.each(["stream", "streamSimple"] as const)("dispatches local Claude aliases through %s with recoverable selection IDs and physical provenance", async method => {
+	const name = "claude-opus-5-5";
+	const id = `claude1/${name}`;
+	http({ data: [{ id, owned_by: "claude1", native_endpoints: ["/v1/messages"] }] });
+	const provider = createMagpieProvider({});
+	await provider.refreshModels!(refresh());
+	const alias = provider.getModels().find(model => model.id === name)!;
+	expect(alias).toBeDefined();
+	// Exercise normalization after alias resolution for saved endpoint metadata as well.
+	const selected = { ...alias, baseUrl: `${config.origin}/v1`, cost: { ...alias.cost, input: 7, output: 9 } };
+	const context = normalizeContext({ messages: [] });
+	const options = { apiKey: "secret" };
+	const message: AssistantMessage = { role: "assistant", provider: "magpie", model: id, api: "anthropic-messages",
+		content: [{ type: "thinking", thinking: "fixture reasoning", thinkingSignature: "signed-fixture" }, { type: "text", text: "Physical route response" }], stopReason: "stop", timestamp: 0,
+		usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100,
+			cost: { input: 0.007, output: 0.0009, cacheRead: 0, cacheWrite: 0, total: 0.0079 } } };
+	const source = createAssistantMessageEventStream();
+	source.push({ type: "start", partial: message });
+	source.push({ type: "done", reason: "stop", message });
+	delegates.messages[method].mockReturnValue(source);
+	const stream = provider[method](selected, context, options);
+	const result = await stream.result();
+	expect(delegates.messages[method]).toHaveBeenLastCalledWith({ ...selected, id, baseUrl: config.origin }, context, options);
+	expect(result).toMatchObject({ model: name, magpiePhysicalModel: id });
+	expect(result.usage.cost).toMatchObject({ total: 0.0079, magpiePricing: "unavailable" });
+	const events = [];
+	for await (const event of stream) events.push(event);
+	expect(events[0]).toMatchObject({ partial: { model: name, magpiePhysicalModel: id } });
+	expect(events[1]).toMatchObject({ message: { model: name, magpiePhysicalModel: id } });
+	expect(selected.id).toBe(name);
+	const persisted = JSON.parse(JSON.stringify(result)) as AssistantMessage;
+	const replay = normalizeContext({ messages: [persisted] });
+	const nextSource = createAssistantMessageEventStream();
+	nextSource.push({ type: "done", reason: "stop", message });
+	delegates.messages[method].mockReturnValue(nextSource);
+	await provider[method](selected, replay, options).result();
+	const replayed = delegates.messages[method].mock.lastCall![1].messages.find((row: { role: string }) => row.role === "assistant");
+	expect(replayed.model).toBe(id);
+	expect(replayed.content).toEqual(message.content);
+	expect(persisted.model).toBe(name);
+});
+
+it.each(["stream", "streamSimple"] as const)("rejects disappeared, changed-owner, ambiguous, and historically rebound aliases before %s", async method => {
+	const name = "claude-opus-5-5";
+	const original = { id: `claude1/${name}`, owned_by: "claude1", native_endpoints: ["/v1/messages"] };
+	http({ data: [original] });
+	const provider = createMagpieProvider({});
+	await provider.refreshModels!(refresh());
+	const saved = provider.getModels().find(model => model.id === name)!;
+	for (const rows of [
+		[{ ...original, id: `claude2/${name}`, owned_by: "claude2" }],
+		[{ ...original, owned_by: "claude2" }],
+		[original, { ...original, id: `claude2/${name}`, owned_by: "claude2" }],
+	]) {
+		http({ data: rows });
+		await provider.refreshModels!(refresh());
+		delegates.messages[method].mockClear();
+		expect(() => provider[method](saved, normalizeContext({ messages: [] }))).toThrow(/Start a new session or select an explicit provider route/);
+		expect(delegates.messages[method]).not.toHaveBeenCalled();
+	}
+	// Reloading can select the new short alias; normalized history still proves its previous source.
+	http({ data: [{ ...original, id: `claude2/${name}`, owned_by: "claude2" }] });
+	await provider.refreshModels!(refresh());
+	const rebound = provider.getModels().find(model => model.id === name)!;
+	const prior: AssistantMessage = { role: "assistant", provider: "magpie", model: original.id, api: "anthropic-messages",
+		content: [], stopReason: "stop", timestamp: 0,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+	expect(() => provider[method](rebound, normalizeContext({ messages: [prior] }))).toThrow(/Start a new session/);
+	expect(delegates.messages[method]).not.toHaveBeenCalled();
+});
+
+it.each(["stream", "streamSimple"] as const)("keeps an actual advertised bare Claude wire ID unchanged through %s", async method => {
+	const name = "claude-opus-5-5";
+	const metadata = { owned_by: "claude1", native_endpoints: ["/v1/messages"] };
+	http({ data: [{ ...metadata, id: `claude1/${name}` }, { ...metadata, id: name }] });
+	const provider = createMagpieProvider({});
+	await provider.refreshModels!(refresh());
+	const bare = provider.getModels().find(model => model.id === name)!;
+	delegates.messages[method].mockReturnValue((async function* () {})());
+	const context = normalizeContext({ messages: [] });
+	for await (const _event of provider[method](bare, context)) { /* Drain the wrapper. */ }
+	expect(delegates.messages[method]).toHaveBeenLastCalledWith(bare, context, undefined);
+	expect(delegates.messages[method].mock.lastCall![0].id).toBe(name);
 });

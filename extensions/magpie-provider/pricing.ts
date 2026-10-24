@@ -1,13 +1,12 @@
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Model, type ModelCost, type Provider, type Usage } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { magpieModelName } from "./model-identity.ts";
+import { markMagpieAliasMessage } from "./model-aliases.ts";
 
 export type MagpiePricing = "estimate" | "unavailable";
 export type MagpieCost = ModelCost & { magpiePricing: MagpiePricing };
 
-const upstreamProviders: Readonly<Record<string, string>> = {
-	auto: "anthropic", mercerrouter: "anthropic", anthropic: "anthropic",
-	codex: "openai", openai: "openai", deepseek: "deepseek", grok: "xai", xai: "xai",
-};
+const upstreamProviders = new Set(["anthropic", "openai", "deepseek", "xai"]);
 
 function validRates(cost: ModelCost): boolean {
 	return [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every(rate => Number.isFinite(rate) && rate >= 0)
@@ -15,20 +14,38 @@ function validRates(cost: ModelCost): boolean {
 			&& [tier.input, tier.output, tier.cacheRead, tier.cacheWrite].every(rate => Number.isFinite(rate) && rate >= 0));
 }
 
-/** Exact upstream model IDs only: aliases, context suffixes, and routing groups stay unpriced. */
+function equalRates(left: ModelCost, right: ModelCost): boolean {
+	return left.input === right.input && left.output === right.output
+		&& left.cacheRead === right.cacheRead && left.cacheWrite === right.cacheWrite;
+}
+
+function equalCosts(left: ModelCost, right: ModelCost): boolean {
+	const leftTiers = left.tiers ?? [];
+	const rightTiers = right.tiers ?? [];
+	return equalRates(left, right) && leftTiers.length === rightTiers.length
+		&& leftTiers.every((tier, index) => tier.inputTokensAbove === rightTiers[index].inputTokensAbove
+			&& equalRates(tier, rightTiers[index]));
+}
+
+/** Exact model names across canonical catalogs; conflicting valid prices stay unavailable. */
 export function createMagpiePricingResolver(providers: readonly Pick<Provider, "id" | "getModels">[] = builtinProviders()) {
 	const prices = new Map<string, ModelCost>();
-	const supported = new Set(Object.values(upstreamProviders));
+	const ambiguous = new Set<string>();
 	for (const provider of providers) {
-		if (!supported.has(provider.id)) continue;
+		if (!upstreamProviders.has(provider.id)) continue;
 		for (const model of provider.getModels()) {
-			if (validRates(model.cost)) prices.set(`${provider.id}/${model.id}`, model.cost);
+			const name = magpieModelName(model.id);
+			if (!name || !validRates(model.cost) || ambiguous.has(name)) continue;
+			const previous = prices.get(name);
+			if (previous && !equalCosts(previous, model.cost)) {
+				prices.delete(name);
+				ambiguous.add(name);
+			} else if (!previous) prices.set(name, model.cost);
 		}
 	}
 	return (id: string): MagpieCost => {
-		const slash = id.indexOf("/");
-		const upstream = upstreamProviders[id.slice(0, slash)];
-		const cost = slash > 0 && upstream ? prices.get(`${upstream}/${id.slice(slash + 1)}`) : undefined;
+		const name = magpieModelName(id);
+		const cost = name ? prices.get(name) : undefined;
 		return cost
 			? { ...structuredClone(cost), magpiePricing: "estimate" }
 			: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, magpiePricing: "unavailable" };
@@ -45,7 +62,7 @@ export function withMagpiePricing(source: AssistantMessageEventStream, model: Mo
 	const recorded = (model.cost as Partial<MagpieCost>).magpiePricing;
 	const pricing = recorded ?? ([model.cost.input, model.cost.output, model.cost.cacheRead, model.cost.cacheWrite]
 		.some(rate => rate > 0) ? "estimate" : "unavailable");
-	const mark = (message: AssistantMessage): AssistantMessage => ({ ...message, usage: markMagpieUsage(message.usage, pricing) });
+	const mark = (message: AssistantMessage): AssistantMessage => ({ ...markMagpieAliasMessage(message, model), usage: markMagpieUsage(message.usage, pricing) });
 	const record = (message: AssistantMessage) => {
 		const usage = message.usage;
 		if (usage.input || usage.output || usage.cacheRead || usage.cacheWrite) {
@@ -72,12 +89,12 @@ export function withMagpiePricing(source: AssistantMessageEventStream, model: Mo
 				else stream.push(event.partial ? { ...event, partial: mark(event.partial) } : event);
 			}
 		} catch {
-			stream.push({ type: "error", reason: "error", error: {
+			stream.push({ type: "error", reason: "error", error: mark({
 				role: "assistant", provider: "magpie", model: model.id, api: model.api, content: [],
 				stopReason: "error", errorMessage: "Magpie response stream failed.", timestamp: Date.now(),
-				usage: markMagpieUsage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, pricing),
-			} });
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			}) });
 		} finally {
 			stream.end();
 		}

@@ -41,19 +41,50 @@ describe("Magpie-owned compaction configuration", () => {
 		expect(loadMagpieCompactionConfig(project, false)).toMatchObject({ enabled: true, models: [model.id], fallbackToBuiltin: true });
 		expect(loadMagpieCompactionConfig(project, true)).toMatchObject({ enabled: true, models: ["openai/another-model"], fallbackToBuiltin: false });
 	});
-	it("automatically selects exact known namespace Responses IDs without a version gate", () => {
-		const ids = [model.id, "openai/gpt-future", "openai/o99", "codex/future-model"];
+	it("automatically selects GPT, ChatGPT and o-series Responses names across arbitrary providers", () => {
+		const ids = [model.id, "gpt-6.1-sol", "relay/gpt-future", "another/nested/o99", "o3-mini", "custom/chatgpt-future", "group/gpt-6-astra"];
 		const catalog = [
 			...ids.map(id => ({ ...model, id })), model,
 			...[
 				"group/fast", "deepseek/chat", "anthropic/claude", "alias/gpt", "openai/", "codex/",
-				"openai/*", "codex/?", "openai/[model]", "openai/has space", "codex/line\n", "gpt-6.1-sol",
+				"openai/*", "codex/?", "openai/[model]", "openai/has space", "codex/line\n",
+				"codex/future-model", "openai/claude-opus-4-6", "gpt-", "chatgpt-", "other/oops", "gpt4",
+				"/gpt-6-astra", "relay//gpt-6-astra", "relay/gpt-6-astra*", "gpt-6\u0000-astra",
 			].map(id => ({ ...model, id })),
 			{ ...model, provider: "other" }, { ...model, api: "openai-completions" },
 		];
 		expect(loadMagpieCompactionConfig(project, false, catalog)).toMatchObject({
 			enabled: true, models: ids, fallbackToBuiltin: true,
 		});
+	});
+	it("uses the model name independently of owner while retaining the Responses requirement", () => {
+		const catalog = parseModels({ data: [
+			{ id: "gpt-6-astra", owned_by: "unrelated", native_endpoints: ["/v1/responses"] },
+			{ id: "any-provider/gpt-6-astra", owned_by: null, native_endpoints: ["/v1/responses"] },
+			{ id: "misleading/claude-opus-4-6", owned_by: "openai", native_endpoints: ["/v1/responses"] },
+			{ id: "gpt-chat-only", native_endpoints: ["/v1/chat/completions"] },
+			{ id: "gpt-messages-only", native_endpoints: ["/v1/messages"] },
+			{ id: "gpt-group", owned_by: "codex" },
+		] }, "http://127.0.0.1:3425");
+		expect(loadMagpieCompactionConfig(project, false, [...catalog, catalog[0]]).models)
+			.toEqual(["gpt-6-astra", "any-provider/gpt-6-astra"]);
+	});
+	it("accepts explicitly verified exact bare IDs and replaces automatic discovery", () => {
+		saveConfig({ models: ["verified-bare", "verified-bare", "custom/verified"] });
+		expect(loadMagpieCompactionConfig(project, false, [model]).models).toEqual(["verified-bare", "custom/verified"]);
+	});
+	it.each(["verified-bare", "old-provider/verified-bare"])("matches explicit %s by model name across gateway providers", configured => {
+		saveConfig({ models: [configured] });
+		const ids = ["verified-bare", "relay/verified-bare", "nested/provider/verified-bare"];
+		const catalog = [
+			...ids.map(id => ({ ...model, id })),
+			{ ...model, id: "relay/unlisted" },
+			{ ...model, id: "chat/verified-bare", api: "openai-completions" },
+			{ ...model, id: "foreign/verified-bare", provider: "other" },
+		];
+		expect(loadMagpieCompactionConfig(project, false, catalog).models).toEqual([...new Set([configured, ...ids])]);
+		saveConfig({ models: [] });
+		expect(loadMagpieCompactionConfig(project, false, catalog).models).toEqual([]);
 	});
 	it("honors explicit optouts and lists instead of adding automatic IDs", () => {
 		saveConfig({ models: [] });
@@ -73,8 +104,10 @@ describe("Magpie-owned compaction configuration", () => {
 	});
 
 	it.each([
-		null, [], { enabled: "true" }, { fallbackToBuiltin: 1 }, { models: ["group/fast"] },
-		{ models: ["openai/*"] }, { models: ["gpt-6-luna"] }, { models: [" openai/gpt"] },
+		null, [], { enabled: "true" }, { fallbackToBuiltin: 1 }, { models: ["gpt-{a,b}"] },
+		{ models: ["openai/*"] }, { models: ["gpt-*"] }, { models: ["gpt-?"] }, { models: ["gpt-[6]"] },
+		{ models: ["gpt-6\n"] }, { models: ["gpt-6\u0000"] }, { models: ["relay//gpt-6"] },
+		{ models: ["has space"] }, { models: ["/gpt"] }, { models: ["codex/"] }, { models: [" openai/gpt"] },
 		{ models: [""] }, { models: [12] }, { models: "openai/gpt" },
 		{ providerId: "other" }, { apiId: "openai-completions" }, { endpoint: "https://elsewhere.example/responses" },
 	])("rejects invalid or unsafe configuration %j", value => {
@@ -88,7 +121,7 @@ describe("Magpie-owned compaction configuration", () => {
 	});
 });
 
-function harness() {
+function harness(selectedModel = model, catalog = [selectedModel]) {
 	const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
 	const commands = new Map<string, any>();
 	registerMagpieCompaction({
@@ -99,9 +132,9 @@ function harness() {
 	const session = SessionManager.inMemory();
 	const firstId = session.appendMessage({ role: "user", content: "remember this", timestamp: 0 });
 	const ctx = {
-		cwd: project, model, hasUI: true, isProjectTrusted: () => false,
+		cwd: project, model: selectedModel, hasUI: true, isProjectTrusted: () => false,
 		sessionManager: session,
-		modelRegistry: { getAll: () => [model], getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "magpie-pi", headers: {} }) },
+		modelRegistry: { getAll: () => catalog, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "magpie-pi", headers: {} }) },
 		ui: { notify: vi.fn() }, abort: vi.fn(),
 	} as unknown as ExtensionContext;
 	const event = () => ({
@@ -131,6 +164,49 @@ it("compacts and replays through the Magpie-only registration, including after d
 	expect(payload).not.toHaveProperty("previous_response_id");
 	expect(await handlers.get("session_before_compact")!(event(), ctx)).toEqual({ cancel: true });
 	expect(fetch).toHaveBeenCalledOnce();
+});
+
+it.each(["gpt-6-astra", "custom-relay/gpt-6-astra"])("compacts and replays %s while retaining exact checkpoint identity", async id => {
+	const [bare] = parseModels({ data: [{ id, native_endpoints: ["/v1/responses"] }] }, "http://127.0.0.1:3425");
+	const { handlers, session, ctx, event } = harness(bare);
+	const fetch = vi.fn().mockResolvedValue(Response.json({ output: [{ type: "compaction", encrypted_content: "sealed-bare" }] }));
+	vi.stubGlobal("fetch", fetch);
+	const { compaction } = await handlers.get("session_before_compact")!(event(), ctx);
+	expect(JSON.parse(fetch.mock.calls[0][1].body).model).toBe(bare.id);
+	expect(compaction.details.modelKey).toBe(`magpie:openai-responses:${bare.id}`);
+	session.appendCompaction(compaction.summary, compaction.firstKeptEntryId, compaction.tokensBefore, compaction.details);
+	session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
+	const payload = await handlers.get("before_provider_request")!({ payload: { model: bare.id, input: [] } }, ctx);
+	expect(payload.model).toBe(bare.id);
+	expect(payload.input).toContainEqual({ type: "compaction", encrypted_content: "sealed-bare" });
+	ctx.model = { ...bare, id: "codex/gpt-6-astra" };
+	expect(await handlers.get("before_provider_request")!({ payload: { input: [] } }, ctx)).toEqual({ input: [] });
+	expect(ctx.abort).toHaveBeenCalledOnce();
+	expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("request blocked"), "error");
+});
+
+it("binds a local Claude alias's compaction and replay to its physical source", async () => {
+	const catalog = parseModels({ data: [{ id: "claude1/claude-opus-5-5", owned_by: "claude1", native_endpoints: ["/v1/responses"] }] }, "http://127.0.0.1:3425");
+	const source = catalog[0];
+	const alias = catalog.find(model => model.magpieAliasTarget)!;
+	saveConfig({ models: [alias.id], fallbackToBuiltin: false });
+	const { handlers, session, ctx, event } = harness(alias, catalog);
+	const fetch = vi.fn().mockResolvedValue(Response.json({ output: [{ type: "compaction", encrypted_content: "claude-sealed" }] }));
+	vi.stubGlobal("fetch", fetch);
+	const { compaction } = await handlers.get("session_before_compact")!(event(), ctx);
+	expect(JSON.parse(fetch.mock.calls[0][1].body).model).toBe(source.id);
+	expect(compaction.details.modelKey).toBe(`magpie:openai-responses:${source.id}`);
+	session.appendCompaction(compaction.summary, compaction.firstKeptEntryId, compaction.tokensBefore, compaction.details);
+	session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
+	const replay = () => handlers.get("before_provider_request")!({ payload: { model: source.id, input: [] } }, ctx);
+	expect((await replay()).input).toContainEqual({ type: "compaction", encrypted_content: "claude-sealed" });
+	ctx.model = source;
+	expect((await replay()).input).toContainEqual({ type: "compaction", encrypted_content: "claude-sealed" });
+	expect(ctx.abort).not.toHaveBeenCalled();
+	const changed = parseModels({ data: [{ id: "claude2/claude-opus-5-5", owned_by: "claude2", native_endpoints: ["/v1/responses"] }] }, "http://127.0.0.1:3425");
+	ctx.model = changed.find(model => model.magpieAliasTarget)!;
+	expect((await replay()).input).toEqual([]);
+	expect(ctx.abort).toHaveBeenCalledOnce();
 });
 
 it("shows the automatic exact allowlist without a config file or network", async () => {

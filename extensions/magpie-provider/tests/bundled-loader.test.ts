@@ -32,18 +32,30 @@ const { createJiti } = createRequire(join(piDist, "index.js"))("jiti");
 const filename = join(root, "extensions/magpie-provider/index.ts");
 const jiti = createJiti(filename, { moduleCache: false, tryNative: false, virtualModules: VIRTUAL_MODULES });
 const { createMagpieProvider, parseModels } = await jiti.import(filename);
-const provider = createMagpieProvider({});
+const provider = createMagpieProvider({ MAGPIE_BASE_URL: "https://gateway.example", MAGPIE_API_KEY: "magpie-fixture" });
 const context = VIRTUAL_MODULES["@earendil-works/pi-ai"].normalizeContext({
  messages: [{ role: "user", content: "hello", timestamp: 0 }],
 });
 let calls = [];
-// Reject every request locally: no gateway, provider credits, or credentials.
+let discoveryData = [];
+// Reject inference locally: no gateway, provider credits, or credentials.
 globalThis.fetch = async (url, init) => {
- calls.push({ url: new URL(String(url)), headers: new Headers(init.headers) });
+ if (new URL(String(url)).pathname === "/v1/models") return Response.json({ data: discoveryData });
+ calls.push({ url: new URL(String(url)), headers: new Headers(init.headers), body: JSON.parse(init.body) });
  return Response.json({ error: { message: "bundled fixture rejection" } }, { status: 400 });
 };
 for (const endpoint of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
- const [model] = parseModels({ data: [{ id: "fixture-model", native_endpoints: [endpoint] }] }, "https://gateway.example");
+ const catalog = parseModels({ data: [
+  { id: "gateway/fixture-model", owned_by: "gateway", native_endpoints: [endpoint] },
+  { id: "fixture-model", owned_by: "gateway", native_endpoints: [endpoint] },
+ ] }, "https://gateway.example");
+ const available = provider.filterModels(catalog, undefined);
+ assert.equal(catalog.length, 2);
+ assert.equal(available.length, 1);
+ assert.deepEqual(provider.filterAllModels(catalog, undefined), available);
+ const [model] = available;
+ assert.equal(model.id, "fixture-model");
+ assert.equal(model.name, "fixture-model");
  for (const method of ["stream", "streamSimple"]) {
   calls = [];
   const response = await provider[method](model, context, { apiKey: "magpie-fixture" }).result();
@@ -53,14 +65,34 @@ for (const endpoint of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url.origin, "https://gateway.example");
   assert.equal(calls[0].url.pathname, endpoint);
+  assert.equal(calls[0].body.model, "fixture-model");
   const anthropic = endpoint === "/v1/messages";
   assert.equal(calls[0].headers.get(anthropic ? "x-api-key" : "authorization"),
    anthropic ? "magpie-fixture" : "Bearer magpie-fixture");
  }
 }
-console.log("All six bundled streaming routes passed");
+for (const endpoint of ["/v1/chat/completions", "/v1/responses", "/v1/messages"]) {
+ discoveryData = [{ id: "gateway/claude-fixture", owned_by: "gateway", native_endpoints: [endpoint] }];
+ await provider.refreshModels({ allowNetwork: true, signal: new AbortController().signal,
+  publish: async ({ update }) => { update?.(); return true; },
+ });
+ const [alias] = provider.filterModels(provider.getModels(), undefined);
+ assert.equal(alias.id, "claude-fixture");
+ assert.equal(alias.magpieAliasTarget, "gateway/claude-fixture");
+ for (const method of ["stream", "streamSimple"]) {
+  calls = [];
+  const response = await provider[method](alias, context, { apiKey: "magpie-fixture" }).result();
+  assert.equal(response.stopReason, "error");
+  assert.equal(response.model, "claude-fixture");
+  assert.equal(response.magpiePhysicalModel, "gateway/claude-fixture");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url.pathname, endpoint);
+  assert.equal(calls[0].body.model, "gateway/claude-fixture");
+ }
+}
+console.log("All six bundled streaming routes and six local-alias routes passed");
 `, root, piDist], { cwd: root, timeout: 30_000, maxBuffer: 1024 * 1024 });
-		expect(result.stdout).toContain("All six bundled streaming routes passed");
+		expect(result.stdout).toContain("All six bundled streaming routes and six local-alias routes passed");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

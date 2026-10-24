@@ -35,16 +35,22 @@ export interface NativeCompactionOptions {
 	ownsProvider: (providerId: string, config: NativeCompactionConfig) => boolean;
 	command: string;
 	label: string;
+	/** Resolve a local selection alias to its physical request/checkpoint identity. */
+	resolveModel?: (model: Model<any>) => Model<any>;
 }
 
 export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompactionOptions): void {
-	const inScope = (ctx: ExtensionContext, checkpoint: CheckpointLookup, config: NativeCompactionConfig): boolean =>
+	const activeModel = (ctx: ExtensionContext): Model<any> | undefined =>
+		ctx.model ? (options.resolveModel?.(ctx.model) ?? ctx.model) : undefined;
+	const inScope = (ctx: ExtensionContext, checkpoint: CheckpointLookup, config: NativeCompactionConfig): boolean => {
+		const model = activeModel(ctx);
 		// Guard corrupt/foreign history even when its original provider extension is no longer loaded.
-		checkpoint.status === "invalid" ||
-		(checkpoint.status === "valid" && (!ctx.model || checkpoint.checkpoint.details.modelKey !== modelKey(ctx.model))) ||
-		Boolean(ctx.model && options.ownsProvider(ctx.model.provider, config)) ||
-		(checkpoint.status === "valid" &&
-			options.ownsProvider(checkpoint.checkpoint.details.modelKey.split(":")[0]!, config));
+		return checkpoint.status === "invalid" ||
+			(checkpoint.status === "valid" && (!model || checkpoint.checkpoint.details.modelKey !== modelKey(model))) ||
+			Boolean(model && options.ownsProvider(model.provider, config)) ||
+			(checkpoint.status === "valid" &&
+				options.ownsProvider(checkpoint.checkpoint.details.modelKey.split(":")[0]!, config));
+	};
 
 	const createNativeCheckpoint = async (params: {
 		ctx: ExtensionContext;
@@ -92,7 +98,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 		const checkpoint = findNativeCheckpoint(branch);
 		if (checkpoint.status === "none") return undefined;
 
-		const model = ctx.model;
+		const model = activeModel(ctx);
 		try {
 			if (!inScope(ctx, checkpoint, options.loadConfig(ctx))) return undefined;
 			if (!model) throw new Error("No active model is selected.");
@@ -116,7 +122,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		const model = ctx.model;
+		const model = activeModel(ctx);
 		let config: NativeCompactionConfig;
 		try {
 			config = options.loadConfig(ctx);
@@ -189,7 +195,8 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 			}
 			const config = options.loadConfig(ctx);
 			const selected = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
-			const enabled = Boolean(ctx.model && options.ownsProvider(ctx.model.provider, config) && isEligibleModel(ctx.model, config));
+			const model = activeModel(ctx);
+			const enabled = Boolean(model && options.ownsProvider(model.provider, config) && isEligibleModel(model, config));
 			ctx.ui.notify(
 				`${enabled ? "Enabled" : "Disabled"} for ${selected}. Fallback to built-in: ${config.fallbackToBuiltin ? "on" : "off"}. Allowlist: ${config.models.join(", ") || "(empty)"}.`,
 				enabled ? "info" : "warning",

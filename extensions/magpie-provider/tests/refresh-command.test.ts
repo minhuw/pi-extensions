@@ -23,7 +23,7 @@ afterEach(() => {
 	rmSync(directory, { recursive: true, force: true });
 });
 
-async function setup(credentials = new InMemoryCredentialStore()) {
+async function setup(credentials = new InMemoryCredentialStore(), getSettings = () => ({} as { enabledModels?: string[] })) {
 	const runtime = await ModelRuntime.create({ credentials, modelsPath: null,
 		modelsStorePath: join(directory, "models-cache.json"), refreshOnCreate: false });
 	const commands = new Map<string, Command>();
@@ -31,7 +31,7 @@ async function setup(credentials = new InMemoryCredentialStore()) {
 	await magpie({
 		registerProvider: (provider: Provider) => runtime.registerNativeProvider(provider),
 		registerCommand: (name: string, command: Command) => { commands.set(name, command); },
-		registerMcpServer: vi.fn(), unregisterMcpServer: vi.fn(), on: vi.fn(),
+		registerMcpServer: vi.fn(), unregisterMcpServer: vi.fn(), on: vi.fn(), getSettings,
 	} as unknown as ExtensionAPI);
 	// Native registration schedules an offline refresh; finish it before invoking the command.
 	await refresh.mock.results[0].value;
@@ -61,6 +61,55 @@ it("refreshes only Magpie over the network in an offline session and updates the
 	expect(registry.find("magpie", "second")).toBeDefined();
 	expect(registry.find("magpie", "third")).toBeDefined();
 	expect(notify).toHaveBeenLastCalledWith("Magpie model list refreshed: 2 models.", "info");
+});
+
+it("counts visible selections while retaining duplicate routes in the full registry across refreshes", async () => {
+	vi.mocked(fetch).mockResolvedValue(Response.json({ data: [
+		{ id: "codex/gpt-6-astra", owned_by: "codex", native_endpoints: ["/v1/responses"] },
+		{ id: "gpt-6-astra", owned_by: "codex", native_endpoints: ["/v1/responses"] },
+		{ id: "contabo/claude/claude-opus-5-5", owned_by: "contabo", native_endpoints: ["/v1/messages"] },
+		{ id: "claude/claude-opus-5-5", owned_by: "contabo", native_endpoints: ["/v1/messages"] },
+	] }));
+	const { runtime, registry, notify, run } = await setup();
+	await run();
+	const rawMagpie = () => registry.getAll().filter(model => model.provider === "magpie");
+	const visibleMagpie = () => runtime.getAvailableSnapshot().filter(model => model.provider === "magpie");
+	expect(rawMagpie()).toHaveLength(5);
+	expect(registry.find("magpie", "codex/gpt-6-astra")).toBeDefined();
+	expect(registry.find("magpie", "contabo/claude/claude-opus-5-5")).toBeDefined();
+	expect(visibleMagpie().map(model => model.id)).toEqual(["gpt-6-astra", "claude-opus-5-5"]);
+	expect(notify).toHaveBeenLastCalledWith("Magpie model list refreshed: 2 models.", "info");
+
+	vi.mocked(fetch).mockResolvedValue(Response.json({ data: [{ id: "vendor/next", owned_by: "vendor" }, { id: "next", owned_by: "vendor" }] }));
+	await run();
+	expect(rawMagpie()).toHaveLength(2);
+	expect(registry.find("magpie", "vendor/next")).toBeDefined();
+	expect(registry.find("magpie", "codex/gpt-6-astra")).toBeUndefined();
+	expect(visibleMagpie().map(model => model.id)).toEqual(["next"]);
+	expect(notify).toHaveBeenLastCalledWith("Magpie model list refreshed: 1 model.", "info");
+
+	vi.mocked(fetch).mockRejectedValue(new Error("fixture offline"));
+	await run();
+	expect(rawMagpie()).toHaveLength(2);
+	expect(registry.find("magpie", "vendor/next")).toBeDefined();
+	expect(visibleMagpie().map(model => model.id)).toEqual(["next"]);
+	expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("Magpie model refresh failed"), "error");
+});
+
+it("keeps scoped qualified routes available and restores short choices when the scope is cleared", async () => {
+	vi.mocked(fetch).mockImplementation(async () => Response.json({ data: [
+		{ id: "codex/gpt-6-astra", owned_by: "codex", native_endpoints: ["/v1/responses"] },
+		{ id: "gpt-6-astra", owned_by: "codex", native_endpoints: ["/v1/responses"] },
+	] }));
+	let enabledModels = ["magpie/codex/gpt-6-astra:high"];
+	const { runtime, notify, run } = await setup(new InMemoryCredentialStore(), () => ({ enabledModels }));
+	await run();
+	expect(runtime.getAvailableSnapshot().map(model => model.id)).toEqual(["codex/gpt-6-astra", "gpt-6-astra"]);
+	expect(notify).toHaveBeenLastCalledWith("Magpie model list refreshed: 2 models.", "info");
+	enabledModels = [];
+	await run();
+	expect(runtime.getAvailableSnapshot().map(model => model.id)).toEqual(["gpt-6-astra"]);
+	expect(notify).toHaveBeenLastCalledWith("Magpie model list refreshed: 1 model.", "info");
 });
 
 it("uses Pi's current credentials and gateway instead of ambient configuration", async () => {

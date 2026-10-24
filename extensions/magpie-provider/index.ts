@@ -6,7 +6,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerMagpieCompaction } from "./compaction.ts";
+import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
 import { assertNativeCatalog } from "./models-config.ts";
+import { selectMagpiePickerModels } from "./model-picker.ts";
+import { hasConfiguredModelScope } from "./picker-scope.ts";
 import { MAGPIE_SEARCH_SERVER, magpieSearchConfig, type MagpieSearchConnection } from "./mcp.ts";
 import { createMagpieStreams, type MagpieApi } from "./streams.ts";
 import { createMagpiePricingResolver, withMagpiePricing, type MagpiePricing } from "./pricing.ts";
@@ -37,7 +40,7 @@ function limit(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-export function parseModels(value: unknown, origin: string): Model<MagpieApi>[] {
+export function parseModels(value: unknown, origin: string): MagpieModel[] {
 	if (!object(value) || !Array.isArray(value.data)) throw new Error("Magpie returned an invalid model catalog.");
 	const models: Model<MagpieApi>[] = [];
 	const resolvePricing = createMagpiePricingResolver();
@@ -87,7 +90,7 @@ export function parseModels(value: unknown, origin: string): Model<MagpieApi>[] 
 		seen.add(entry.id);
 	}
 	if (!models.length) throw new Error("Magpie returned no usable chat models; keeping the previous catalog.");
-	return models;
+	return addMagpieModelAliases(models, value.data);
 }
 
 export async function discoverModels(config: Config, signal?: AbortSignal, allowEmpty = false): Promise<Model<MagpieApi>[]> {
@@ -117,6 +120,7 @@ export function createMagpieProvider(
 	env: NodeJS.ProcessEnv = process.env,
 	publishConnection?: (connection: MagpieSearchConnection | undefined) => void,
 	recordPricing?: (pricing: MagpiePricing) => void,
+	preserveScope: () => boolean = () => false,
 ): Provider<MagpieApi> {
 	// Keep raw ambient values separate from saved credentials and loopback defaults.
 	const ambient = { MAGPIE_BASE_URL: env.MAGPIE_BASE_URL, MAGPIE_API_KEY: env.MAGPIE_API_KEY };
@@ -127,8 +131,11 @@ export function createMagpieProvider(
 	let current = connection();
 	let storedIdentity: string | undefined;
 	let models: Model<MagpieApi>[] = [];
-	const requestModel = (model: Model<MagpieApi>) => model.api === "anthropic-messages"
-		? { ...model, baseUrl: model.baseUrl.replace(/\/v1\/?$/, "") } : model;
+	const requestModel = (selected: Model<MagpieApi>) => {
+		const model = resolveMagpieAlias(selected);
+		return model.api === "anthropic-messages"
+			? { ...model, baseUrl: model.baseUrl.replace(/\/v1\/?$/, "") } : model;
+	};
 	const apis = createMagpieStreams();
 	return {
 		id: "magpie", name: "Magpie",
@@ -164,6 +171,8 @@ export function createMagpieProvider(
 			},
 		} },
 		getModels: () => models,
+		filterModels: models => selectMagpiePickerModels(models, preserveScope()),
+		filterAllModels: models => selectMagpiePickerModels(models, preserveScope()),
 		async refreshModels(context) {
 			assertNativeCatalog();
 			const config = connection(context.credential?.type === "api_key" ? context.credential : undefined);
@@ -197,13 +206,20 @@ export function createMagpieProvider(
 			context.signal.throwIfAborted();
 			await context.publish({ update: () => { current = config; models = next; } });
 		},
-		stream: (model, context, options) => withMagpiePricing(apis[model.api].stream(requestModel(model), context, options), model, recordPricing),
-		streamSimple: (model, context, options) => withMagpiePricing(apis[model.api].streamSimple(requestModel(model), context, options), model, recordPricing),
+		stream: (model, context, options) => {
+			assertMagpieAliasRoute(model, models, context.messages);
+			return withMagpiePricing(apis[model.api].stream(requestModel(model), magpieRequestContext(context), options), model, recordPricing);
+		},
+		streamSimple: (model, context, options) => {
+			assertMagpieAliasRoute(model, models, context.messages);
+			return withMagpiePricing(apis[model.api].streamSimple(requestModel(model), magpieRequestContext(context), options), model, recordPricing);
+		},
 	};
 }
 
 export default async function magpie(pi: ExtensionAPI): Promise<void> {
 	assertNativeCatalog();
+	const preserveScope = () => hasConfiguredModelScope(() => pi.getSettings());
 	const provider = createMagpieProvider(process.env, connection => {
 		if (connection) pi.registerMcpServer(MAGPIE_SEARCH_SERVER, magpieSearchConfig(connection));
 		else pi.unregisterMcpServer(MAGPIE_SEARCH_SERVER);
@@ -211,7 +227,7 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 		// Pi's split-summary usage merger drops extension fields. Keep provenance
 		// on the session branch as well, without counting the usage twice.
 		pi.appendEntry("magpie-pricing", { pricing });
-	});
+	}, preserveScope);
 	const credential = readStoredCredential("magpie");
 	// Validate saved configuration outside the best-effort network refresh.
 	if (credential?.type === "api_key") readConfig({ ...process.env, ...credential.env, MAGPIE_API_KEY: credential.key ?? process.env.MAGPIE_API_KEY });
@@ -238,7 +254,7 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 					return;
 				}
 				if (result.errors.has("magpie")) throw new Error("Magpie refresh failed");
-				const count = ctx.modelRegistry.getAll().filter(model => model.provider === "magpie").length;
+				const count = selectMagpiePickerModels(ctx.modelRegistry.getAll().filter(model => model.provider === "magpie"), preserveScope()).length;
 				ctx.ui.notify(count
 					? `Magpie model list refreshed: ${count} model${count === 1 ? "" : "s"}.`
 					: "No Magpie models available. Configure the gateway with /login magpie, then retry /magpie-refresh.",

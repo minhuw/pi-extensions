@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNativeCompaction } from "./native-compaction/lifecycle.ts";
 import type { NativeCompactionConfig } from "./native-compaction/types.ts";
+import { magpieModelName } from "./model-identity.ts";
+import { resolveMagpieAlias } from "./model-aliases.ts";
 
 export const COMPACTION_CONFIG_FILE = "magpie-native-compaction.json";
 
@@ -33,12 +35,14 @@ export function loadMagpieCompactionConfig(
 		enabled: true,
 		providerId: "magpie",
 		apiId: "openai-responses",
-		models: [...new Set(catalog.filter(model =>
-			model.provider === "magpie" && model.api === "openai-responses" &&
-			/^(openai|codex)\/[^\s*?\[\]]+$/.test(model.id),
-		).map(model => model.id))],
+		models: [...new Set(catalog.filter(model => {
+			if (model.provider !== "magpie" || model.api !== "openai-responses") return false;
+			const name = magpieModelName(model.id);
+			return name !== undefined && /^(?:(?:gpt|chatgpt)-.+|o\d+(?:[-.].+)?)$/.test(name);
+		}).map(model => model.id))],
 		fallbackToBuiltin: true,
 	};
+	let explicitModels = false;
 	const paths = [join(getAgentDir(), COMPACTION_CONFIG_FILE)];
 	if (projectTrusted) paths.push(join(cwd, ".pi", COMPACTION_CONFIG_FILE));
 	for (const path of paths) {
@@ -56,12 +60,20 @@ export function loadMagpieCompactionConfig(
 		}
 		if (value.models !== undefined) {
 			if (!Array.isArray(value.models) || value.models.some(id =>
-				typeof id !== "string" || !/^[^/\s]+\/\S+$/.test(id) || /[*?\[\]]/.test(id) || /^group\//i.test(id),
+				typeof id !== "string" || magpieModelName(id) === undefined,
 			)) {
-				throw new Error(`${path}: models must contain exact provider/model IDs, not groups or wildcard patterns.`);
+				throw new Error(`${path}: models must contain exact bare or qualified model IDs, not wildcard patterns.`);
 			}
 			config.models = [...new Set(value.models as string[])];
+			explicitModels = true;
 		}
+	}
+	if (explicitModels) {
+		const names = new Set(config.models.map(magpieModelName));
+		config.models = [...new Set([...config.models, ...catalog.filter(model =>
+			model.provider === "magpie" && model.api === "openai-responses" &&
+			names.has(magpieModelName(model.id)),
+		).map(model => model.id)])];
 	}
 	return config;
 }
@@ -72,5 +84,6 @@ export function registerMagpieCompaction(pi: ExtensionAPI): void {
 		ownsProvider: providerId => providerId === "magpie",
 		command: "magpie-native-compaction",
 		label: "Magpie",
+		resolveModel: resolveMagpieAlias,
 	});
 }
