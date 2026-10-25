@@ -2217,23 +2217,6 @@ export class RunStore {
 		return this.getPlanEdit(input.runId)!;
 	}
 
-	putPlanEditBarrier(runId: string, editToken: string, proposedGraphSha256: string, proposedPlanFingerprint: string): StoredPlanEdit {
-		const edit = this.getPlanEdit(runId);
-		if (!edit || edit.editToken !== editToken) throw new Error("Plan edit token does not match the active reservation");
-		if (edit.state === "barrier") {
-			if (edit.proposedGraphSha256 !== proposedGraphSha256 || edit.proposedPlanFingerprint !== proposedPlanFingerprint) {
-				throw new Error(`Prepared plan ${edit.planId} changed after its revision barrier was requested`);
-			}
-			return edit;
-		}
-		this.database.prepare(`
-			UPDATE manager_plan_edits
-			SET state = 'barrier', proposed_graph_sha256 = ?, proposed_plan_fingerprint = ?, updated_at = ?
-			WHERE run_id = ? AND edit_token = ? AND state = 'reserved'
-		`).run(proposedGraphSha256, proposedPlanFingerprint, new Date().toISOString(), runId, editToken);
-		return this.getPlanEdit(runId)!;
-	}
-
 	deletePlanEdit(runId: string): void {
 		this.database.prepare("DELETE FROM manager_plan_edits WHERE run_id = ?").run(runId);
 	}

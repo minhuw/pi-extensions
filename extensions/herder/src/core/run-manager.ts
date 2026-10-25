@@ -11,24 +11,15 @@ import { buildGraph, projectStatuses } from "./plans.ts";
 import { compileGraphIdentity, compilePlanSpecs } from "./plan-identity.ts";
 import { normalizeReviewerFindings, reviewFindingContractsFromSpecs, validateReviewerResult, validateJudgeFindings } from "./review-findings.ts";
 import {
-	captureReworkSnapshot,
-	crashReworkForTest,
 	deleteReworkSnapshotBestEffort,
 	graphInputSha256,
-	pruneReworkSnapshots,
-	readReworkSnapshot,
-	readReworkSnapshotFile,
 	restoreReworkSnapshot,
-	reworkSnapshotPath,
-	validateReworkGraphFiles,
-	type ReworkGraphSnapshot,
 } from "./plan-edit.ts";
 import { recordRunConfiguration } from "../daemon/execution-store.ts";
 import {
 	GitDriver,
 	git,
 	gitValue,
-	runCommand,
 	type CompletionApprovalProof,
 	type GateResult,
 } from "../daemon/git-driver.ts";
@@ -285,57 +276,6 @@ function normalizeAttentionAction(value: string): AttentionResolutionAction {
 	const action = aliases[normalized];
 	if (!action) throw new Error(`Unsupported attention resolution action: ${value}`);
 	return action;
-}
-
-function sameStringArray(left: string[], right: string[]): boolean {
-	return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function sameRecoveryGraphIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
-	return left.planId === right.planId
-		&& left.ordinal === right.ordinal
-		&& left.planFile === right.planFile
-		&& sameStringArray(left.dependencies, right.dependencies)
-		&& left.assignment.plan.id === right.assignment.plan.id
-		&& sameStringArray(left.assignment.plan.dependencies, right.assignment.plan.dependencies);
-}
-
-function sameRecoverySpecIdentity(left: StoredPlanSpec, right: StoredPlanSpec): boolean {
-	return sameRecoveryGraphIdentity(left, right)
-		&& left.planFingerprint === right.planFingerprint
-		&& left.fingerprintVersion === right.fingerprintVersion
-		&& stableJson(left.assignment) === stableJson(right.assignment);
-}
-
-function validateTargetOnlyGraph(
-	priorSpecs: StoredPlanSpec[],
-	nextSpecs: StoredPlanSpec[],
-	targetPlanId: string,
-	graphLabel: string,
-	targetLabel: string,
-): { prior: StoredPlanSpec; target: StoredPlanSpec } {
-	const prior = priorSpecs.find((spec) => spec.planId === targetPlanId);
-	if (!prior) throw new Error(`${targetLabel} ${targetPlanId} has no recorded specification`);
-	const current = new Map(priorSpecs.map((spec) => [spec.planId, spec]));
-	const next = new Map(nextSpecs.map((spec) => [spec.planId, spec]));
-	if (current.size !== next.size || [...current.keys()].some((planId) => !next.has(planId))) {
-		throw new Error(`${graphLabel} cannot change the plan graph topology`);
-	}
-	const target = next.get(targetPlanId);
-	if (!target) throw new Error(`${targetLabel} ${targetPlanId} is missing from the revised graph`);
-	for (const oldSpec of priorSpecs) {
-		const newSpec = next.get(oldSpec.planId)!;
-		if (oldSpec.planId === targetPlanId) {
-			if (!sameRecoveryGraphIdentity(oldSpec, newSpec)) {
-				throw new Error(`${targetLabel} ${targetPlanId} cannot change its identity, filename, or dependencies`);
-			}
-			continue;
-		}
-		if (!sameRecoveryGraphIdentity(oldSpec, newSpec) || oldSpec.planFingerprint !== newSpec.planFingerprint) {
-			throw new Error(`${graphLabel} changed sibling plan ${oldSpec.planId}`);
-		}
-	}
-	return { prior, target };
 }
 
 function recoveryIdentityFromRequest(request: ManagerAttentionRequest): AttentionGitIdentity | null {
@@ -1284,32 +1224,6 @@ export class HerderRunManager {
 		return this.reconcile(profile);
 	}
 
-	private validateRevisionChanges(
-		run: StoredRun,
-		compiled: { graph: ReturnType<typeof buildGraph>; specs: StoredPlanSpec[]; graphSha256: string },
-		reservedPlanId?: string,
-	): void {
-		const previous = new Map(this.specs(run).map((spec) => [spec.planId, spec]));
-		const next = new Map(compiled.specs.map((spec) => [spec.planId, spec]));
-		const removed = [...previous.keys()].filter((planId) => !next.has(planId));
-		if (removed.length > 0) throw new Error(`Graph revision cannot remove plans from an existing namespace: ${removed.join(", ")}`);
-		for (const spec of compiled.specs) {
-			const prior = previous.get(spec.planId);
-			if (!prior) {
-				if (reservedPlanId) throw new Error(`Active Grill may refine only reserved plan ${reservedPlanId}; it cannot add plan ${spec.planId}`);
-				const graphPlan = compiled.graph.plans.find((plan) => plan.id === spec.planId)!;
-				if (["DONE", "IN PROGRESS"].includes(graphPlan.status)) throw new Error(`New plan ${spec.planId} cannot adopt lifecycle state ${graphPlan.status}`);
-				continue;
-			}
-			if (prior.planFingerprint === spec.planFingerprint) continue;
-			if (reservedPlanId && spec.planId !== reservedPlanId) {
-				throw new Error(`Active Grill reserved ${reservedPlanId} but also changed ${spec.planId}`);
-			}
-			const runtime = this.store.getPlan(run.runId, spec.planId);
-			if (runtime) throw new Error(`Graph revision changed ${spec.planId} after execution started; create a trusted-base recovery namespace instead`);
-		}
-	}
-
 	private adoptCompiledRevision(
 		run: StoredRun,
 		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
@@ -1381,207 +1295,12 @@ export class HerderRunManager {
 		throw new Error("Raw graph adoption is not authorized. Use the user-invoked /herder-revise scope amendment and exact host confirmation.");
 	}
 
-	private compiledReservedEdit(run: StoredRun, edit: StoredPlanEdit) {
-		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
-		this.validateRevisionChanges(run, compiled, edit.planId);
-		const target = compiled.specs.find((spec) => spec.planId === edit.planId);
-		if (!target) throw new Error(`Reserved plan ${edit.planId} is missing from the revised graph`);
-		if (target.planFingerprint === edit.basePlanFingerprint || compiled.graphSha256 === edit.baseGraphSha256) {
-			throw new Error(`Reserved plan ${edit.planId} has not changed; cancel the edit instead`);
-		}
-		return { compiled, target };
-	}
-
 	private adoptReservedEdit(_run: StoredRun, _edit: StoredPlanEdit): void {
 		throw new Error("Legacy plan edits cannot adopt semantic changes without an exact host scope grant; cancel and use /herder-revise");
 	}
 
 	private reservedEditIsRework(run: StoredRun, planId: string): boolean {
 		return Boolean(this.store.getPlan(run.runId, planId) || this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) > 0);
-	}
-
-	private reworkGitHeads(driver: GitDriver, plan: StoredPlan): { expectedHead: string; expectedTree: string } {
-		return { expectedHead: driver.worktreeHead(plan.worktree), expectedTree: driver.worktreeTree(plan.worktree) };
-	}
-
-	private planCommitIsIntegrated(run: StoredRun, driver: GitDriver, plan: StoredPlan): boolean {
-		const integrationHead = driver.branchHead(run.integrationBranch);
-		let branchHead: string | null = null;
-		try { branchHead = driver.branchHead(plan.branch); } catch { /* A missing branch is handled by exact cleanup validation. */ }
-		return [plan.approvedHead, branchHead]
-			.some((candidate) => Boolean(candidate && candidate !== plan.generationBase && driver.isAncestor(candidate, integrationHead)));
-	}
-
-	private assertNoNewActivePathOverlap(run: StoredRun, priorSpecs: StoredPlanSpec[], prior: StoredPlanSpec, target: StoredPlanSpec, label: string): void {
-		const activePaths = this.store.getActions(run.runId, ["proposed", "dispatched"])
-			.filter((candidate) => candidate.planId !== prior.planId)
-			.flatMap((candidate) => priorSpecs.find((spec) => spec.planId === candidate.planId)?.assignment.plan.inScopePaths ?? []);
-		if (activePaths.length === 0) return;
-		const activePathSet = new Set(activePaths);
-		const oldTargetPaths = new Set(prior.assignment.plan.inScopePaths);
-		const newOverlap = target.assignment.plan.inScopePaths.filter((candidate) => activePathSet.has(candidate));
-		const priorOverlap = [...oldTargetPaths].filter((candidate) => activePathSet.has(candidate));
-		if (newOverlap.some((candidate) => !oldTargetPaths.has(candidate)) || (prior.planFingerprint !== target.planFingerprint && priorOverlap.length === 0 && newOverlap.length > 0)) {
-			throw new Error(`${label} target ${prior.planId} introduces an unordered overlap with active work: ${newOverlap.join(", ")}`);
-		}
-	}
-
-	private assertReworkEligible(run: StoredRun, planId: string): StoredPlan {
-		if (planId === "RUN") throw new Error("The final RUN audit cannot be reworked");
-		if (!["running", "failed", "needs_input"].includes(run.status)) {
-			throw new Error(`Cannot rework a plan while Herder is ${run.status}`);
-		}
-		this.spec(run, planId);
-		const plan = this.store.getPlan(run.runId, planId);
-		if (!plan && this.store.countActions(run.runId, { planId, generation: run.currentGeneration }) === 0) {
-			throw new Error(`Plan ${planId} has not started; use /herder-grill --plan`);
-		}
-		if (!plan) throw new Error(`Plan ${planId} has no runtime record to rework`);
-		const driver = this.driver(run);
-		if (plan.phase === "DONE" || plan.phase === "FINAL_APPROVED" || driver.hasPlanCompletionProof(planId) || this.planCommitIsIntegrated(run, driver, plan)) {
-			throw new Error(`Plan ${planId} is already integrated; create a corrective plan instead of reworking it.`);
-		}
-		if (!["BLOCKED", "NEEDS_INPUT"].includes(plan.phase)) {
-			throw new Error(`Plan ${planId} is ${plan.phase}, not a blocked or exhausted plan`);
-		}
-		const specs = this.specs(run);
-		const downstream = new Set([planId]);
-		for (let changed = true; changed;) {
-			changed = false;
-			for (const candidate of specs) {
-				if (downstream.has(candidate.planId)) continue;
-				if (candidate.dependencies.some((dependency) => downstream.has(dependency))
-					|| candidate.assignment.plan.dependencies.some((dependency) => downstream.has(dependency))) {
-					downstream.add(candidate.planId);
-					changed = true;
-				}
-			}
-		}
-		for (const other of specs) {
-			if (other.planId === planId || !downstream.has(other.planId)) continue;
-			const runtime = this.store.getPlan(run.runId, other.planId);
-			const lifecycle = lifecycleStatus(other, runtime);
-			if (lifecycle === "DONE" || driver.hasPlanCompletionProof(other.planId) || (runtime && this.planCommitIsIntegrated(run, driver, runtime))) {
-				throw new Error(`Plan ${planId} cannot be reworked because integrated downstream plan ${other.planId} depends on it. Create a corrective plan instead.`);
-			}
-			if (this.store.countActions(run.runId, { planId: other.planId, states: ["proposed", "dispatched"] }) > 0
-				|| (runtime && runtime.phase !== "BLOCKED" && runtime.phase !== "NEEDS_INPUT")) {
-				throw new Error(`Plan ${planId} cannot be reworked because active downstream plan ${other.planId} depends on it. Create a corrective plan instead.`);
-			}
-		}
-		return plan;
-	}
-
-	private validateReworkGraph(
-		run: StoredRun,
-		planId: string,
-		compiled: { specs: StoredPlanSpec[]; graphSha256: string },
-	): { compiled: { specs: StoredPlanSpec[]; graphSha256: string }; nextSpecs: StoredPlanSpec[] } {
-		const priorSpecs = this.specs(run);
-		const { prior, target } = validateTargetOnlyGraph(priorSpecs, compiled.specs, planId, "Rework", "Rework target");
-		if (target.planFingerprint === prior.planFingerprint) throw new Error(`Reserved plan ${planId} has not changed; cancel the edit instead`);
-		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Rework");
-		return {
-			compiled,
-			nextSpecs: compiled.specs.map((spec) => spec.planId === planId
-				? { ...spec, initialStatus: "TODO" as StoredPlanSpec["initialStatus"], initialStatusDetail: "" }
-				: spec),
-		};
-	}
-
-	private reworkCleanupIdentity(run: StoredRun, plan: StoredPlan, edit: StoredPlanEdit, snapshot: ReworkGraphSnapshot) {
-		const expectedHead = snapshot.expectedHead;
-		const expectedTree = snapshot.expectedTree;
-		return {
-			runId: run.runId,
-			requestId: edit.editToken,
-			requestSha256: sha256(stableJson({
-				kind: "plan_rework",
-				editToken: edit.editToken,
-				planId: edit.planId,
-				generation: plan.generation,
-				round: plan.round,
-				assignmentPath: plan.assignmentPath,
-				assignmentSha256: plan.assignmentSha256,
-				snapshotSha256: plan.snapshotSha256,
-				generationBase: plan.generationBase,
-				branch: plan.branch,
-				worktree: plan.worktree,
-				expectedHead,
-				expectedTree,
-				transientRefs: snapshot.transientRefs,
-			})),
-			planId: edit.planId,
-			generation: plan.generation,
-			round: plan.round,
-			assignmentPath: plan.assignmentPath,
-			assignmentSha256: plan.assignmentSha256,
-			snapshotSha256: plan.snapshotSha256,
-			generationBase: plan.generationBase,
-			branch: plan.branch,
-			worktree: plan.worktree,
-			expectedHead,
-			expectedTree,
-		};
-	}
-
-	private async validatePreparedRework(run: StoredRun, edit: StoredPlanEdit): Promise<{
-		plan: StoredPlan;
-		driver: GitDriver;
-		snapshot: ReworkGraphSnapshot;
-		validation: ReturnType<HerderRunManager["validateReworkGraph"]>;
-		cleanupIdentity: ReturnType<HerderRunManager["reworkCleanupIdentity"]>;
-	}> {
-		if (this.store.countActions(run.runId, { planId: edit.planId, states: ["proposed", "dispatched"] }) > 0) {
-			throw new Error(`Plan ${edit.planId} still owns active worker actions; settle them before preparing rework`);
-		}
-		const plan = this.assertReworkEligible(run, edit.planId);
-		const driver = this.driver(run);
-		await driver.verifyCheckout(run.checkoutStateToken);
-		const snapshot = readReworkSnapshot(run, edit, this.store);
-		validateReworkGraphFiles(run, snapshot, snapshot.targetPlanFile);
-		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
-		const currentTarget = compiled.graph.plans.find((candidate) => candidate.id === edit.planId);
-		if (!currentTarget || path.relative(run.planDirectory, currentTarget.file) !== snapshot.targetPlanFile) {
-			throw new Error(`Rework target ${edit.planId} cannot change its linked plan file`);
-		}
-		const validation = this.validateReworkGraph(run, edit.planId, compiled);
-		if (edit.state === "barrier" && (edit.proposedGraphSha256 !== validation.compiled.graphSha256
-			|| edit.proposedPlanFingerprint !== validation.nextSpecs.find((spec) => spec.planId === edit.planId)?.planFingerprint)) {
-			throw new Error(`Prepared plan ${edit.planId} changed after its revision barrier was requested`);
-		}
-		const cleanupIdentity = this.reworkCleanupIdentity(run, plan, edit, snapshot);
-		const cleanupEvidence = this.store.getAttentionCleanupEvidence(cleanupIdentity);
-		if (!cleanupEvidence) {
-			driver.assertPlanTransientRefs(edit.planId, snapshot.transientRefs);
-			const current = this.reworkGitHeads(driver, plan);
-			if (current.expectedHead !== snapshot.expectedHead || current.expectedTree !== snapshot.expectedTree) {
-				throw new Error(`Plan ${edit.planId} Git identity changed after rework began`);
-			}
-		} else {
-			const currentRefs = driver.planTransientRefs(edit.planId);
-			if (stableJson(currentRefs) !== stableJson(snapshot.transientRefs) && currentRefs.length !== 0) {
-				throw new Error(`Plan ${edit.planId} transient refs changed during rework replay`);
-			}
-		}
-		return { plan, driver, snapshot, validation, cleanupIdentity };
-	}
-
-	private async prepareRework(run: StoredRun, edit: StoredPlanEdit): Promise<StoredPlanEdit> {
-		const { validation } = await this.validatePreparedRework(run, edit);
-		const target = validation.nextSpecs.find((spec) => spec.planId === edit.planId)!;
-		return this.store.putPlanEditBarrier(run.runId, edit.editToken, validation.compiled.graphSha256, target.planFingerprint);
-	}
-
-	private generationBase(run: StoredRun): string {
-		const generation = this.store.getGeneration(run.runId, run.currentGeneration);
-		if (!generation) throw new Error(`Run generation ${run.currentGeneration} has no assignment evidence`);
-		const bytes = fs.readFileSync(generation.runAssignmentPath);
-		if (sha256(bytes) !== generation.runAssignmentSha256) throw new Error(`Run assignment changed for generation ${run.currentGeneration}`);
-		const parsed = JSON.parse(bytes.toString("utf8")) as { assignment?: { generationBase?: unknown } };
-		const base = typeof parsed.assignment?.generationBase === "string" ? parsed.assignment.generationBase : "";
-		if (!/^[0-9a-f]{40,64}$/i.test(base)) throw new Error(`Run generation ${run.currentGeneration} assignment has no valid base`);
-		return base;
 	}
 
 	private ensureFreshPlanRuntime(run: StoredRun, spec: StoredPlanSpec, expectedHead?: string): StoredPlan {
@@ -1607,19 +1326,6 @@ export class HerderRunManager {
 			approvedTree: null,
 			rebase: null,
 		});
-	}
-
-	private ensureReworkedPlanRuntime(run: StoredRun, planId: string, expectedHead = this.generationBase(run)): StoredPlan {
-		const existing = this.store.getPlan(run.runId, planId);
-		if (existing) {
-			if (existing.generation !== run.currentGeneration || existing.round !== 1) throw new Error(`Reworked plan ${planId} runtime identity changed`);
-			return existing;
-		}
-		return this.ensureFreshPlanRuntime(run, this.spec(run, planId), expectedHead);
-	}
-
-	private async applyRework(_run: StoredRun, _edit: StoredPlanEdit): Promise<ManagerReply> {
-		throw new Error("Legacy rework cannot reset execution without an exact host scope grant; cancel and use /herder-revise");
 	}
 
 	async edit(input: PlanEditInput): Promise<PlanEditReply> {
@@ -2649,114 +2355,6 @@ export class HerderRunManager {
 			status: nextInput ? "needs_input" : "running",
 			terminalDetail: nextInput?.detail ?? next?.detail ?? null,
 		});
-	}
-
-	private validateRecoveryTarget(
-		run: StoredRun,
-		attention: Extract<ManagerAttentionRequest, { kind: "plan_recovery" }>,
-		action: AttentionResolutionAction,
-		resolution: AttentionResolutionInput,
-	): {
-		plan: StoredPlan | null;
-		prior: StoredPlanSpec;
-		compiled: { specs: StoredPlanSpec[]; graphSha256: string };
-		nextSpecs: StoredPlanSpec[];
-		targetChanged: boolean;
-	} {
-		const recordedSpecs = this.store.getPlanSpecs(run.runId, attention.generation);
-		const recorded = recordedSpecs.find((spec) => spec.planId === attention.planId);
-		if (!recorded) throw new Error(`Recovery request ${attention.requestId} has no recorded target specification`);
-		if (attention.recovery.planFingerprint !== recorded.planFingerprint
-			|| attention.recovery.fingerprintVersion !== recorded.fingerprintVersion
-			|| attention.recovery.planFile !== recorded.planFile) {
-			throw new Error(`Recovery request ${attention.requestId} does not match its recorded target evidence`);
-		}
-		const currentSpecs = this.store.getPlanSpecs(run.runId, run.currentGeneration);
-		if (recordedSpecs.length !== currentSpecs.length) {
-			throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
-		}
-		for (const recordedSpec of recordedSpecs) {
-			const currentSpec = currentSpecs.find((spec) => spec.planId === recordedSpec.planId);
-			if (!currentSpec || !sameRecoveryGraphIdentity(recordedSpec, currentSpec)) {
-				throw new Error(`Recovery request ${attention.requestId} no longer matches the recorded plan graph`);
-			}
-		}
-		const currentTarget = currentSpecs.find((spec) => spec.planId === attention.planId);
-		if (!currentTarget) throw new Error(`Recovery request ${attention.requestId} has no current target specification`);
-		if (!sameRecoverySpecIdentity(recorded, currentTarget)) {
-			throw new Error(`Recovery request ${attention.requestId} no longer matches its immutable target specification`);
-		}
-		const priorSpecs = run.currentGeneration === attention.generation ? recordedSpecs : currentSpecs;
-		const plan = this.store.getPlan(run.runId, attention.planId);
-		if (plan && (plan.generation !== attention.generation || plan.round !== attention.round)) {
-			throw new Error(`Recovery request ${attention.requestId} does not match the target runtime generation and round`);
-		}
-		if (plan && plan.phase !== "BLOCKED" && plan.phase !== "NEEDS_INPUT") {
-			throw new Error(`Recovery target ${attention.planId} is no longer blocked`);
-		}
-		if (!plan && attention.cause !== "initial_decision_blocked") {
-			throw new Error(`Recovery target ${attention.planId} has no blocked runtime record`);
-		}
-		const expected = recoveryIdentityFromRequest(attention);
-		const supplied = resolution.git;
-		if (!expected || !supplied || !sameRecoveryIdentity(expected, supplied)) {
-			throw new Error(`Recovery request ${attention.requestId} is not bound to its recorded Git identity`);
-		}
-		if (plan) {
-			if (plan.branch !== expected.branch || plan.worktree !== expected.worktree
-				|| plan.assignmentPath !== expected.assignmentPath || plan.assignmentSha256 !== expected.assignmentSha256
-				|| plan.snapshotSha256 !== expected.snapshotSha256 || plan.generationBase !== expected.generationBase) {
-				throw new Error(`Recovery target ${attention.planId} runtime evidence changed`);
-			}
-			const driver = this.driver(run);
-			try {
-				driver.verifyAssignment(plan.worktree, plan.assignmentPath, plan.assignmentSha256);
-			} catch (error) {
-				if (attention.state !== "editing" || !/not a regular file|missing|cannot change (?:directory|to)|no such file/i.test(error instanceof Error ? error.message : String(error))) throw error;
-			}
-			if (expected.worktreeHead !== null) {
-				try {
-					if (driver.worktreeHead(plan.worktree) !== expected.worktreeHead) throw new Error(`Recovery target ${attention.planId} worktree HEAD changed`);
-					if (expected.worktreeTree !== null && driver.worktreeTree(plan.worktree) !== expected.worktreeTree) {
-						throw new Error(`Recovery target ${attention.planId} worktree tree changed`);
-					}
-				} catch (error) {
-					if (attention.state !== "editing" || !/not a git repository|no such file|does not exist|cannot change (?:directory|to)/i.test(error instanceof Error ? error.message : String(error))) throw error;
-				}
-			}
-			try {
-				const lease = driver.leaseReason(plan.worktree);
-				if (lease) throw new Error(`Recovery target ${attention.planId} is still leased`);
-			} catch (error) {
-				if (!/not registered/i.test(error instanceof Error ? error.message : String(error)) || attention.state !== "editing") throw error;
-			}
-		} else {
-			this.driver(run).verifyAssignment(run.integrationWorktree, expected.assignmentPath, expected.assignmentSha256);
-		}
-		const activeTargetActions = this.store.getActions(run.runId, ["proposed", "dispatched"])
-			.filter((candidate) => candidate.planId === attention.planId);
-		if (activeTargetActions.length > 0) throw new Error(`Recovery target ${attention.planId} still owns active worker actions`);
-
-		const compiled = this.compileCurrentGraph(run, run.currentGeneration + 1);
-		const { prior, target } = validateTargetOnlyGraph(priorSpecs, compiled.specs, attention.planId, "Recovery revision", "Recovery target");
-		const targetChanged = target.planFingerprint !== prior.planFingerprint;
-		if (["unchanged_retry", "accept", "stop"].includes(action) && targetChanged) throw new Error("Unchanged recovery requires graph-equivalent target content");
-		if (action === "revise" && !targetChanged) throw new Error("Target revision did not change the compiled target content");
-		if (["unchanged_retry", "reject", "accept", "stop"].includes(action) && !(resolution.rationale || "").trim()) {
-			throw new Error(`${action === "reject" ? "Recovery rejection" : "Unchanged recovery"} requires a non-empty rationale`);
-		}
-		this.assertNoNewActivePathOverlap(run, priorSpecs, prior, target, "Recovery");
-		const rejected = action === "reject" || action === "cancel";
-		const nextSpecs: StoredPlanSpec[] = compiled.specs.map((spec) => spec.planId === attention.planId
-			? {
-				...spec,
-				initialStatus: (rejected ? "REJECTED" : "TODO") as StoredPlanSpec["initialStatus"],
-				initialStatusDetail: rejected
-					? (resolution.rationale?.trim() || "Recovery was rejected by the main session.")
-					: "",
-			}
-			: spec);
-		return { plan, prior, compiled, nextSpecs, targetChanged };
 	}
 
 	private async applyAttentionResolution(resolution: AttentionResolutionInput): Promise<void> {

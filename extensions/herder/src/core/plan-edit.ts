@@ -215,22 +215,6 @@ export function deleteReworkSnapshotBestEffort(planDirectory: string, editToken:
 	} catch {}
 }
 
-export function pruneReworkSnapshots(planDirectory: string, retainedEditToken?: string): void {
-	const directory = path.join(planDirectory, ".herder", "plan-edits");
-	try {
-		for (const name of fs.readdirSync(directory)) {
-			if (!/^[0-9a-f-]{36}\.json$/i.test(name) || name === `${retainedEditToken?.toLowerCase()}.json`) continue;
-			const candidate = path.join(directory, name);
-			const stat = fs.lstatSync(candidate);
-			if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Plan edit snapshot path is unsafe: ${candidate}`);
-			fs.unlinkSync(candidate);
-		}
-		fsyncDirectory(directory);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-	}
-}
-
 function reworkIndexLayout(markdown: string): { lines: string[]; newline: "\n" | "\r\n"; rows: Array<{ lineIndex: number; planId: string; statusStart: number; statusEnd: number }> } {
 	const parsed = planIndexReworkLayout(markdown, "Herder plan index");
 	return {
@@ -284,9 +268,4 @@ export function validateReworkGraphFiles(run: StoredRun, snapshot: ReworkGraphSn
 			throw new Error(`Rework changed sibling graph file ${entry.name}`);
 		}
 	}
-}
-
-export function crashReworkForTest(point: "after_snapshot" | "after_git_cleanup" | "after_adoption"): void {
-	if (process.env.HERDER_TEST_REWORK_CRASH_AT !== point) return;
-	process.kill(process.pid, "SIGKILL");
 }

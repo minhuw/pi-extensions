@@ -574,10 +574,6 @@ export class GitDriver {
 		});
 	}
 
-	hasPlanCompletionProof(planId: string): boolean {
-		return git(this.repoRoot, ["show-ref", "--verify", "--quiet", `refs/plan-herder/${this.planName}/completed/${planId}`], true).status === 0;
-	}
-
 	isAncestor(ancestor: string, descendant: string): boolean {
 		return isAncestorProbe(this.repoRoot, ancestor, descendant);
 	}

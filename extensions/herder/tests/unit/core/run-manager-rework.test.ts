@@ -1,22 +1,17 @@
 import { revisionDriver } from "../../../src/core/run-revision.ts";
-import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { getExecutionReport } from "../../../src/core/plan-report.ts";
 import { captureReworkSnapshot, reworkSnapshotPath } from "../../../src/core/plan-edit.ts";
 import { buildGraph, initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { HerderRunManager } from "../../../src/core/run-manager.ts";
-import { recordUsageRecord } from "../../../src/daemon/execution-store.ts";
-import { ensureService, requestManagerOperation, stopService, submitManagerOperation, waitManagerOperation } from "../../../src/client/index.ts";
-import { fileURLToPath } from "node:url";
-import { GitDriver, git } from "../../../src/daemon/git-driver.ts";
+import { ensureService, requestManagerOperation, stopService } from "../../../src/client/index.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { sha256, stableJson, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
+import { stableJson, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
 import { fixturePlan } from "../../support/plan-v2.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -106,7 +101,6 @@ async function managerReply(service: Service, kind: ManagerOperationKind, input:
 }
 
 async function withFixture<T>(prefix: string, callback: (service: Service, value: Fixture) => Promise<T>): Promise<T> {
-	const previousCrashAt = process.env.HERDER_TEST_REWORK_CRASH_AT;
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `herder-rework-${prefix}-`));
 	let value: Fixture | undefined;
 	try {
@@ -114,16 +108,11 @@ async function withFixture<T>(prefix: string, callback: (service: Service, value
 		const service = await ensureService(value.planDirectory);
 		return await callback(service, value);
 	} finally {
-		try {
-			if (value) {
-				await stopService(value.planDirectory).catch(() => {});
-				fs.rmSync(`${value.repo}-herder-worktrees`, { recursive: true, force: true });
-			}
-			fs.rmSync(root, { recursive: true, force: true });
-		} finally {
-			if (previousCrashAt === undefined) delete process.env.HERDER_TEST_REWORK_CRASH_AT;
-			else process.env.HERDER_TEST_REWORK_CRASH_AT = previousCrashAt;
+		if (value) {
+			await stopService(value.planDirectory).catch(() => {});
+			fs.rmSync(`${value.repo}-herder-worktrees`, { recursive: true, force: true });
 		}
+		fs.rmSync(root, { recursive: true, force: true });
 	}
 }
 
@@ -166,15 +155,6 @@ async function failTargetRounds(service: Service, started: JsonRecord, prefix: s
 		if (round < rounds) target = object((reply.actions as unknown[]).map(object).find((action) => action.planId === "001"));
 	}
 	return { reply, worktree };
-}
-
-function markSiblingDoneDownstream(value: Fixture): void {
-	const readme = path.join(value.planDirectory, "README.md");
-	fs.writeFileSync(readme, fs.readFileSync(readme, "utf8")
-		.replace("| [002](002-sibling.md) | Unrelated sibling | P1 | S | — | TODO |", "| [002](002-sibling.md) | Unrelated sibling | P1 | S | 001 | DONE |"));
-	const sibling = path.join(value.planDirectory, "002-sibling.md");
-	fs.writeFileSync(sibling, fs.readFileSync(sibling, "utf8")
-		.replace("- **Depends on**: none", "- **Depends on**: 001").replace("Dependencies: none.", fixtureDependencies("001")));
 }
 
 function rewriteTarget(value: Fixture, scope = "src/value.mjs"): void {
