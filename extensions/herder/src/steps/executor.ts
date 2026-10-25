@@ -1,4 +1,5 @@
 // The host side of agent(): identity, cache, adoption, and the step transaction (§6, §8).
+import { existsSync } from "node:fs";
 import { runChecks } from "../checks/runner.ts";
 import { INLINE_TEXT_LIMIT, LIMITS } from "../config.ts";
 import { stepKey, type Occurrences } from "../journal/keys.ts";
@@ -279,6 +280,11 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		const ref = stepRef(runId, key);
 		const found = lookupStep(store.state(), vcs, ref, key, identity, opts.fresh === true);
 		const stats = ctx.stats;
+		// A process that died after journaling (or committing) never ran the attempt's cleanup; drop its slot now.
+		if (found.kind === "hit" || found.kind === "adopt") {
+			const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
+			if (existsSync(path)) removeWorktree(path);
+		}
 		if (found.kind === "hit") {
 			if (stats) stats.reused++;
 			return fromCompletion(found.completion, true);

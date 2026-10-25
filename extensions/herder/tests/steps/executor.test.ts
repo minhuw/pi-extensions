@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { INLINE_TEXT_LIMIT } from "../../src/config.ts";
 import { Occurrences, stepId, stepKey } from "../../src/journal/keys.ts";
-import { stepRef } from "../../src/run/paths.ts";
+import { stepRef, worktreePath } from "../../src/run/paths.ts";
 import { AgentError } from "../../src/types.ts";
 import type { AgentRunRequest, FaultPoint, StepCompletedEvent, StepFailedEvent } from "../../src/types.ts";
 import { CHECKS, deferred, until, withRun } from "./harness.ts";
@@ -392,6 +392,27 @@ describe("crash recovery", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	}));
+
+	it("removes a leftover slot worktree when reusing a journaled step", () => withRun(async (h) => {
+		h.runner.add(FEATURE);
+		const first = await h.executor().run("add the feature");
+		// A process that died at after-journal leaves the slot behind.
+		h.vcs.addWorktree(worktreePath(h.vcs.commonDir(), h.store.runId, `step-${first.key}`), first.commit!);
+		const again = await h.executor({ store: h.reopen() }).run("add the feature");
+		expect(again).toEqual({ ...first, reused: true });
+		h.assertClean();
+	}));
+
+	it("removes a leftover slot worktree when adopting a pinned ref", () => withRun(async (h) => {
+		h.runner.add(FEATURE);
+		await expect(h.executor({ faults: crashAt("after-ref") }).run("add the feature")).rejects.toThrow("crash at after-ref");
+		const key = stepKey(stepId("agent", "worker", "add the feature"), 0);
+		h.vcs.addWorktree(worktreePath(h.vcs.commonDir(), h.store.runId, `step-${key}`), h.vcs.readRef(stepRef(h.store.runId, key))!);
+		const adopted = await h.executor({ store: h.reopen() }).run("add the feature");
+		expect(adopted).toMatchObject({ status: "ok", reused: true });
+		expect(h.runner.calls).toHaveLength(1);
+		h.assertClean();
 	}));
 
 	it("reruns a step with a schema instead of adopting it when its reply is unreadable", () => withRun(async (h) => {

@@ -1,7 +1,7 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../src/journal/keys.ts";
-import { integrationRef } from "../../src/run/paths.ts";
+import { integrationRef, worktreePath } from "../../src/run/paths.ts";
 import { launchScript } from "../../src/steps/launch.ts";
 import type { ScriptLaunchedEvent, ScriptSettledEvent, StepCompletedEvent } from "../../src/types.ts";
 import { deferred, fakeIntegrator, TEST_LIMITS, until, withRun } from "./harness.ts";
@@ -157,6 +157,23 @@ return [flaky.status, flaky.error && flaky.error.class, gated.status];
 		const plans = h.events().filter((event) => event.t === "plan.updated");
 		expect(plans).toHaveLength(1);
 		expect(h.events().find((event) => event.t === "script.launched" && event.launch === 2)).toBeDefined();
+	}));
+
+	it("removes leftover step worktrees when a launch starts and keeps other slots", () => withRun(async (h) => {
+		h.runner.add({ match: "write a.txt", files: { "a.txt": "a\n", "feature.txt": "f\n" } }, { match: "write b.txt", files: { "b.txt": "b\n" } });
+		const first = await launchScript(h.launchDeps(), { source: SEQUENTIAL }).done;
+		const completed = h.events().filter((event): event is StepCompletedEvent => event.t === "step.completed");
+		const slot = (name: string) => worktreePath(h.vcs.commonDir(), h.store.runId, name);
+		// Leftovers of a process that died after journaling, plus a stale slot of a step this script no longer calls.
+		for (const event of completed) h.vcs.addWorktree(slot(`step-${event.key}`), event.commit!);
+		h.vcs.addWorktree(slot("step-gone"), h.head);
+		h.vcs.addWorktree(slot("integration"), h.head);
+		const second = await launchScript(h.launchDeps({ store: h.reopen() }), { source: "return 1;" }).done;
+		expect(second).toMatchObject({ status: "completed", value: 1 });
+		expect(first.status).toBe("completed");
+		expect(existsSync(slot("integration"))).toBe(true);
+		h.vcs.removeWorktree(slot("integration"));
+		h.assertClean();
 	}));
 
 	it("rejects an unknown resume launch and a second concurrent launch", () => withRun(async (h) => {
