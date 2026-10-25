@@ -217,7 +217,8 @@ describe("script runtime", () => {
 		expect(escaped).toMatchObject({ status: "failed", error: expect.stringMatching(/^SyntaxError/) });
 		expect(bridge.events).toEqual([]);
 		expect(syntaxProblem(`return 1;\n}\n(async () => {\nreturn 2;`)).toMatchObject({ severity: "error" });
-		expect(syntaxProblem(`if (true) {\nlog(1);`)).toMatchObject({ line: 2 });
+		expect(syntaxProblem(`if (true) {\nlog(1);`)).toMatchObject({ line: 2, message: "SyntaxError: Unexpected end of input" });
+		expect(syntaxProblem(`log(1);\n}`)).toMatchObject({ message: "SyntaxError: Unexpected token '}'" });
 		expect(await outcome(`if (true) {\nlog(1);`)).toMatchObject({ status: "failed", line: 2 });
 		expect(syntaxProblem(`return 1;\n// trailing comment`)).toBeUndefined();
 	});

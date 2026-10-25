@@ -63,7 +63,9 @@ export function syntaxProblem(source: string, filename = SCRIPT_FILENAME): Scrip
 		const header = /:(\d+)$/.exec(stack[0] ?? "");
 		const line = header ? Number(header[1]) : undefined;
 		const caret = stack[2]?.indexOf("^") ?? -1;
-		return { message: `SyntaxError: ${message}`, severity: "error", ...within(source, line !== undefined && line >= 1 ? line : undefined, caret >= 0 ? caret + 1 : undefined) };
+		// On the wrapper's closing line, "Unexpected token ')'" means a block the body left open.
+		const ended = line !== undefined && line > source.split("\n").length && message === "Unexpected token ')'";
+		return { message: `SyntaxError: ${ended ? "Unexpected end of input" : message}`, severity: "error", ...within(source, line !== undefined && line >= 1 ? line : undefined, caret >= 0 ? caret + 1 : undefined) };
 	}
 	// The wrapper parses a body that closes it early and reopens it (`}); x; (async () => {`). The AsyncFunction
 	// constructor parses the body on its own; it compiles without running and gives no position.
