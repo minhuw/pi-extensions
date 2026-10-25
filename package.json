@@ -19,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
@@ -31,6 +31,7 @@
 		"test:molt": "vitest run extensions/molt",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
+		"test:pika": "vitest run extensions/pika",
 		"test:herder": "vitest run --config extensions/herder/vitest.config.ts",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"
@@ -83,7 +84,8 @@
 			"./extensions/molt/index.ts",
 			"./extensions/autoresearch/index.ts",
 			"./extensions/subagents/src/index.ts",
-			"./extensions/herder/index.ts"
+			"./extensions/herder/index.ts",
+			"./extensions/pika/index.ts"
 		]
 	}
 }
