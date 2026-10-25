@@ -87,6 +87,18 @@ describe("validateScript", () => {
 		}
 	});
 
+	it("warns when integrate() runs beside a parallel() or pipeline() branch", async () => {
+		const inside = await validateScript([
+			`await parallel([async () => integrate(await agent("a", { id: "a" }), { message: "a" }), () => agent("b", { id: "b" })]);`,
+			`await pipeline([1], async (n) => integrate(await agent("c" + n, { id: "c" + n }), { message: "c" }));`,
+		].join("\n"), context);
+		expect(inside.ok).toBe(true);
+		expect(inside.problems.map(problem => [problem.severity, problem.line])).toEqual([["warning", 1], ["warning", 2]]);
+		expect(inside.problems[0]!.message).toMatch(/integrate from the top level/);
+		const after = await validateScript(`const [a] = await parallel([() => agent("a", { id: "a" })]);\nawait integrate(a, { message: "a" });`, context);
+		expect(after).toMatchObject({ ok: true, problems: [] });
+	});
+
 	it("only warns about a reused id whose calls differ in an explicit base alone", async () => {
 		const report = await validateScript(`await agent("x", { id: "x", base: args.head });\nawait agent("x", { id: "x" });`, { ...context, args: { head: "abc123" } });
 		expect(report).toMatchObject({ ok: true, problems: [{ severity: "warning", line: 2, message: expect.stringMatching(/Only the base differs/) }] });

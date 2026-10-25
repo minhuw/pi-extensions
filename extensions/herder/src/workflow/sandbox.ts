@@ -49,7 +49,7 @@ type WorkerMessage =
 	| { type: "call"; callId: number; method: string; payload: Record<string, unknown>; site?: CallSite }
 	| { type: "log"; message: string }
 	| { type: "phase"; title: string }
-	| { type: "problem"; message: string; line?: number; column?: number }
+	| { type: "problem"; message: string; line?: number; column?: number; severity?: string }
 	| { type: "complete"; resultJson?: string }
 	| { type: "error"; message: string; line?: number; column?: number; exception?: { name?: unknown; fatal?: unknown } };
 
@@ -158,7 +158,7 @@ export function startSandbox(options: SandboxOptions): ScriptHandle {
 			case "log": return host.log(String(message.message));
 			case "phase": return host.phase(String(message.title));
 			case "problem":
-				return host.problem?.({ message: String(message.message), severity: "error", ...(message.line !== undefined ? { line: message.line } : {}), ...(message.column !== undefined ? { column: message.column } : {}) });
+				return host.problem?.({ message: String(message.message), severity: message.severity === "warning" ? "warning" : "error", ...(message.line !== undefined ? { line: message.line } : {}), ...(message.column !== undefined ? { column: message.column } : {}) });
 			case "complete": {
 				let value: unknown;
 				try { value = message.resultJson === undefined ? undefined : JSON.parse(message.resultJson); }

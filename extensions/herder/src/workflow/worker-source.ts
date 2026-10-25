@@ -12,8 +12,8 @@
 // wrappers around worker closures, and worker errors are rebuilt as realm errors before they cross.
 //
 // Protocol (worker → host): call { callId, method: "agent" | "integrate", payload, site }, log { message },
-// phase { title }, problem { message, line?, column? } (dry runs only), complete { resultJson }, error { message,
-// line?, column?, exception? }; `exception` { name?, fatal } is set for a value thrown out of the script.
+// phase { title }, problem { message, line?, column?, severity? } (dry runs only), complete { resultJson }, error {
+// message, line?, column?, exception? }; `exception` { name?, fatal } is set for a value thrown out of the script.
 // Host → worker: response { callId, ok, valueJson?, error? }.
 
 export const SCRIPT_FILENAME = "herder-script.js";
@@ -136,6 +136,10 @@ function problem(message, site) {
 	port.postMessage({ type: "problem", message: message, line: site && site.line, column: site && site.column });
 }
 
+function warning(message, site) {
+	if (COLLECT) port.postMessage({ type: "problem", message: message, line: site && site.line, column: site && site.column, severity: "warning" });
+}
+
 function isText(value) { return typeof value === "string" && value.trim() !== ""; }
 function isPlainObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 
@@ -174,6 +178,8 @@ function readOptions(what, opts, keys, checks, site) {
 /* Script globals */
 
 let agentCount = 0;
+// parallel() and pipeline() calls not yet settled; an integrate() meanwhile depends on timing.
+let branches = 0;
 
 async function agent(prompt, opts) {
 	const site = callSite();
@@ -197,6 +203,7 @@ async function integrate(source, opts) {
 	if (!isPlainObject(opts) || !isText(opts.message)) problem("integrate() opts.message is required and must be a non-empty string.", site);
 	const options = readOptions("integrate()", opts, INTEGRATE_KEYS, INTEGRATE_CHECKS, site);
 	if (options.message === undefined) options.message = "(missing message)";
+	if (branches > 0) warning("integrate() was called while a parallel() or pipeline() call was still running. On a resumed launch concurrent branches can integrate in a different order, so later steps rerun; integrate from the top level, one task after another.", site);
 	return callHost("integrate", { source: from, opts: options }, site);
 }
 
@@ -232,26 +239,32 @@ async function parallel(thunks) {
 	const site = callSite();
 	const list = toList(thunks, "parallel(thunks)", site);
 	for (let i = 0; i < list.length; i++) if (typeof list[i] !== "function") throw fail("parallel(thunks) expects an array of functions; item " + i + " is not one.", site);
-	const settled = await Promise.all(list.map(async function (thunk, index) {
-		try { return await thunk(); }
-		catch (error) { if (fatal.has(error)) throw error; return itemFailed("parallel()", index, error); }
-	}));
-	return toRealmArray(settled);
+	branches++;
+	try {
+		const settled = await Promise.all(list.map(async function (thunk, index) {
+			try { return await thunk(); }
+			catch (error) { if (fatal.has(error)) throw error; return itemFailed("parallel()", index, error); }
+		}));
+		return toRealmArray(settled);
+	} finally { branches--; }
 }
 
 async function pipeline(items, ...stages) {
 	const site = callSite();
 	const list = toList(items, "pipeline(items, ...stages)", site);
 	for (let i = 0; i < stages.length; i++) if (typeof stages[i] !== "function") throw fail("pipeline(items, ...stages) expects functions; stage " + i + " is not one.", site);
-	const settled = await Promise.all(list.map(async function (item, index) {
-		let value = item;
-		for (let s = 0; s < stages.length; s++) {
-			try { value = await stages[s](value, item, index); }
-			catch (error) { if (fatal.has(error)) throw error; return itemFailed("pipeline()", index, error); }
-		}
-		return value;
-	}));
-	return toRealmArray(settled);
+	branches++;
+	try {
+		const settled = await Promise.all(list.map(async function (item, index) {
+			let value = item;
+			for (let s = 0; s < stages.length; s++) {
+				try { value = await stages[s](value, item, index); }
+				catch (error) { if (fatal.has(error)) throw error; return itemFailed("pipeline()", index, error); }
+			}
+			return value;
+		}));
+		return toRealmArray(settled);
+	} finally { branches--; }
 }
 
 function phase(title) {
