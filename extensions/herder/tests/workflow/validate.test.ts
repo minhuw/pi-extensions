@@ -75,6 +75,18 @@ describe("validateScript", () => {
 		]);
 	});
 
+	it("warns instead of failing when the script throws on synthetic results", async () => {
+		const script = `const r = await agent("x", { schema: { type: "object", properties: { items: { type: "array" } } } });\nreturn r.data.items[0].name;`;
+		const report = await validateScript(script, context);
+		expect(report).toMatchObject({ ok: true, agentCalls: 1 });
+		expect(report.problems).toEqual([{ message: expect.stringMatching(/threw after receiving synthetic results: Cannot read properties of undefined/), line: 2, column: expect.any(Number), severity: "warning" }]);
+		expect((await validateScript(`throw new Error("bad args");`, context)).problems).toMatchObject([{ severity: "error", message: expect.stringMatching(/dry run failed: bad args/) }]);
+		for (const read of ["Date.now()", "Math.random()"]) {
+			const late = await validateScript(`await agent("x");\nreturn ${read};`, context);
+			expect(late, read).toMatchObject({ ok: false, problems: [{ severity: "error", line: 2, message: expect.stringMatching(/is unavailable in Herder scripts/) }] });
+		}
+	});
+
 	it("only warns about a reused id whose calls differ in an explicit base alone", async () => {
 		const report = await validateScript(`await agent("x", { id: "x", base: args.head });\nawait agent("x", { id: "x" });`, { ...context, args: { head: "abc123" } });
 		expect(report).toMatchObject({ ok: true, problems: [{ severity: "warning", line: 2, message: expect.stringMatching(/Only the base differs/) }] });

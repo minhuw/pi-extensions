@@ -97,7 +97,14 @@ export async function validateScript(source: string, context: ValidationContext)
 	clearTimeout(timer);
 	if (timedOut) add({ message: `The dry run did not finish within ${budgetMs} ms and was stopped; the rest of the script was not exercised.`, severity: "warning" });
 	else if (outcome.status === "failed") {
-		add({ message: `The dry run failed: ${outcome.error ?? "unknown error"}`, severity: "error", ...(outcome.line !== undefined ? { line: outcome.line } : {}), ...(outcome.column !== undefined ? { column: outcome.column } : {}) });
+		const site = { ...(outcome.line !== undefined ? { line: outcome.line } : {}), ...(outcome.column !== undefined ? { column: outcome.column } : {}) };
+		// Once the script holds synthetic results, its own throw may only reflect them (an empty string or array). Before
+		// that it depends on the code and args alone; fatal runtime errors, undefined names, and reads of the clock or
+		// randomness (DeterminismError) fail every live run, so they are errors either way.
+		const thrown = outcome.exception;
+		if (thrown && !thrown.fatal && thrown.name !== "ReferenceError" && thrown.name !== "DeterminismError" && agentCalls + integrateCalls > 0) {
+			add({ message: `The dry run stopped where the script threw after receiving synthetic results: ${outcome.error ?? "unknown error"}. Real results may not take this path; check that line.`, severity: "warning", ...site });
+		} else add({ message: `The dry run failed: ${outcome.error ?? "unknown error"}`, severity: "error", ...site });
 	}
 	return report(agentCalls, integrateCalls);
 }

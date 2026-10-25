@@ -254,6 +254,16 @@ describe("script runtime", () => {
 		expect(reference).toMatchObject({ status: "failed", line: 2 });
 	});
 
+	it("tells thrown values apart from runtime failures", async () => {
+		expect(await outcome(`throw new TypeError("x");`)).toMatchObject({ status: "failed", exception: { name: "TypeError", fatal: false } });
+		expect(await outcome(`throw "plain";`)).toMatchObject({ status: "failed", exception: { fatal: false } });
+		expect(await outcome(`await agent("");`)).toMatchObject({ status: "failed", exception: { name: "Error", fatal: true } });
+		expect((await outcome(`agent("x"); return 1;`)).exception).toBeUndefined();
+		for (const read of ["Date.now()", "Math.random()", "new Date()"]) {
+			expect(await outcome(`return ${read};`), read).toMatchObject({ status: "failed", exception: { name: "DeterminismError", fatal: false } });
+		}
+	});
+
 	it("terminates a runaway loop on stop and ignores late bridge results", async () => {
 		const spinning = new FakeBridge();
 		const handle = run(`log("spinning"); while (true) {}`, spinning);

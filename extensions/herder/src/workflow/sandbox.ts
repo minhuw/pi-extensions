@@ -6,7 +6,9 @@ import { AGENT_OPTION_KEYS, INTEGRATE_OPTION_KEYS } from "../types.ts";
 import type { AgentOptions, IntegrateOptions, Limits, StepResult, WorkflowBridge } from "../types.ts";
 import { SCRIPT_FILENAME, WORKER_SOURCE } from "./worker-source.ts";
 
-export interface ScriptOutcome { status: "completed" | "failed" | "stopped"; value?: unknown; error?: string; line?: number; column?: number }
+/** A value thrown out of the script: its error name, and whether it is a fatal runtime error (cap, invalid options, host). */
+export interface ScriptException { name?: string; fatal: boolean }
+export interface ScriptOutcome { status: "completed" | "failed" | "stopped"; value?: unknown; error?: string; line?: number; column?: number; exception?: ScriptException }
 export interface ScriptHandle { readonly done: Promise<ScriptOutcome>; stop(reason?: string): void }
 export interface ScriptOptions {
 	source: string; args: unknown; bridge: WorkflowBridge; limits: Limits;
@@ -49,7 +51,7 @@ type WorkerMessage =
 	| { type: "phase"; title: string }
 	| { type: "problem"; message: string; line?: number; column?: number }
 	| { type: "complete"; resultJson?: string }
-	| { type: "error"; message: string; line?: number; column?: number };
+	| { type: "error"; message: string; line?: number; column?: number; exception?: { name?: unknown; fatal?: unknown } };
 
 /** Compiles the script as the worker would, without running it; returns the syntax error, if any. */
 export function syntaxProblem(source: string, filename = SCRIPT_FILENAME): ScriptProblem | undefined {
@@ -106,9 +108,9 @@ export function startSandbox(options: SandboxOptions): ScriptHandle {
 		if (worker) void worker.terminate().then(settle, settle);
 		else settle();
 	};
-	const failed = (message: string, line?: number, column?: number) => {
+	const failed = (message: string, line?: number, column?: number, exception?: ScriptException) => {
 		const site = within(options.source, line, column);
-		finish({ status: "failed", error: message + at(site.line, site.column), ...site });
+		finish({ status: "failed", error: message + at(site.line, site.column), ...site, ...(exception ? { exception } : {}) });
 	};
 
 	const syntax = syntaxProblem(options.source, filename);
@@ -163,7 +165,11 @@ export function startSandbox(options: SandboxOptions): ScriptHandle {
 				catch { return failed("The script result is not JSON."); }
 				return finish({ status: "completed", ...(value !== undefined ? { value } : {}) });
 			}
-			case "error": return failed(String(message.message), message.line, message.column);
+			case "error": {
+				const thrown = message.exception;
+				const exception = thrown && typeof thrown === "object" ? { ...(typeof thrown.name === "string" ? { name: thrown.name } : {}), fatal: thrown.fatal === true } : undefined;
+				return failed(String(message.message), message.line, message.column, exception);
+			}
 		}
 	};
 

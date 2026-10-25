@@ -13,7 +13,8 @@
 //
 // Protocol (worker → host): call { callId, method: "agent" | "integrate", payload, site }, log { message },
 // phase { title }, problem { message, line?, column? } (dry runs only), complete { resultJson }, error { message,
-// line?, column? }. Host → worker: response { callId, ok, valueJson?, error? }.
+// line?, column?, exception? }; `exception` { name?, fatal } is set for a value thrown out of the script.
+// Host → worker: response { callId, ok, valueJson?, error? }.
 
 export const SCRIPT_FILENAME = "herder-script.js";
 
@@ -276,11 +277,18 @@ function observe(promise) { unawaited.delete(promise); }
 // WeakRef and FinalizationRegistry go because garbage-collection timing is not reproducible. Memory outside the
 // worker's heap limit goes too: binary buffers (typed arrays, WebAssembly.Memory; Atomics.waitAsync is also a timer),
 // and Intl and Temporal, whose objects wrap native ICU data (they also read the clock: Temporal.Now, format()).
+// die() names its errors DeterminismError, so a dry run can tell them from errors that depend on synthetic results.
 const PRELUDE = [
 	"(function () {",
 	"  const RealDate = globalThis.Date;",
-	"  const die = function (what) { throw new Error(what + ' is unavailable in Herder scripts (it breaks resume). Pass timestamps or seeds through args.'); };",
-	"  const define = function (target, key, value) { Object.defineProperty(target, key, { value: value, writable: false, configurable: false }); };",
+	"  const RealError = Error;",
+	"  const defineProperty = Object.defineProperty;",
+	"  const die = function (what) {",
+	"    const error = new RealError(what + ' is unavailable in Herder scripts (it breaks resume). Pass timestamps or seeds through args.');",
+	"    defineProperty(error, 'name', { value: 'DeterminismError', writable: true, configurable: true });",
+	"    throw error;",
+	"  };",
+	"  const define = function (target, key, value) { defineProperty(target, key, { value: value, writable: false, configurable: false }); };",
 	"  const Date = function Date(...rest) {",
 	"    if (new.target === undefined) return die('Date()');",
 	"    if (rest.length === 0) return die('new Date()');",
@@ -301,7 +309,9 @@ const PRELUDE = [
 
 function report(type, error) {
 	const site = (error !== null && typeof error === "object" && sites.get(error)) || siteOf(error && error.stack);
-	port.postMessage({ type: type, message: describe(error), line: site && site.line, column: site && site.column });
+	let name;
+	try { if (error !== null && typeof error === "object" && typeof error.name === "string") name = error.name; } catch (ignored) { /* a throwing getter */ }
+	port.postMessage({ type: type, message: describe(error), line: site && site.line, column: site && site.column, exception: { name: name, fatal: fatal.has(error) } });
 }
 
 // Realm-native wrappers: the script can only reach these functions and the realm promises they return. Async globals
