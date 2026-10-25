@@ -7,7 +7,7 @@
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type OverlayOptions, ScrollView, type ScrollViewScrollbar, stripTerminalSequences, type TUI, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { renderAgentName } from "../agent-color.js";
+import { renderAgentName, renderAgentNameLabel } from "../agent-color.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -220,6 +220,11 @@ export class ConversationViewer implements Component, Focusable {
      * affordance (history views).
      */
     private onBackground?: ViewerBackgroundAction,
+    /**
+     * Shown in place of the record type's display name — an external agent's
+     * own name (`external-agents.ts`), which no Subagents type describes.
+     */
+    private nameLabel?: string,
   ) {
     this.fullscreen = tui.mode === "fullscreen";
     this.markdownTheme = resolveMarkdownTheme(theme);
@@ -439,8 +444,9 @@ export class ConversationViewer implements Component, Focusable {
 
     // Header
     if (!this.fullscreen) lines.push(hrTop);
-    const modeLabel = getPromptModeLabel(this.record.type);
+    const modeLabel = this.nameLabel ? undefined : getPromptModeLabel(this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
+    const name = this.nameLabel ? renderAgentNameLabel(this.nameLabel, undefined, th, { bold: true }) : renderAgentName(this.record.type, th, { bold: true });
     const statusIcon = this.record.status === "running"
       ? th.fg("accent", "●")
       : this.record.status === "completed"
@@ -463,7 +469,7 @@ export class ConversationViewer implements Component, Focusable {
 
     const identityTag = formatAgentNameIdentity(th, buildRecordInvocation(this.record));
     lines.push(row(
-      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}${identityTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${name}${modeTag}${identityTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));

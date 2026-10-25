@@ -6,9 +6,10 @@
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { renderAgentName } from "../agent-color.js";
+import { renderAgentName, renderAgentNameLabel } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
+import { type ExternalAgentView, externalStatus } from "../external-agents.js";
 import type { AgentInvocation, AgentRecord, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type SessionLike } from "../usage.js";
 
@@ -393,6 +394,12 @@ export class AgentWidget {
      * conversation viewer unconditionally.
      */
     private showModel: () => boolean = () => false,
+    /**
+     * Agents other extensions run (`external-agents.ts`), already narrowed to
+     * this session. Listed under their own group headings below Subagents'
+     * agents, in the same row format; read-only.
+     */
+    private external: () => readonly ExternalAgentView[] = () => [],
   ) {}
 
   /**
@@ -520,6 +527,115 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
+    const own = this.renderOwn(tui, theme);
+    const external = this.visibleExternal();
+    if (external.length === 0) return own;
+    const truncate = (line: string) => truncateToWidth(line, tui.terminal.columns);
+    return [...own, ...this.renderExternal(external, theme, truncate, SPINNER[this.widgetFrame % SPINNER.length])];
+  }
+
+  /**
+   * External agents the widget shows, per the current `WidgetMode` (`off` hides
+   * them too): running ones, and finished ones for the same number of turns
+   * Subagents' own linger.
+   */
+  private visibleExternal(): ExternalAgentView[] {
+    if (this.mode() === "off") return [];
+    return this.external().filter(view => {
+      const { id, status } = view.agent;
+      if (status === "running") return true;
+      this.markFinished(id);
+      return this.shouldShowFinished(id, externalStatus(status));
+    });
+  }
+
+  /**
+   * One heading per group, then its finished and running agents. All groups
+   * share one `MAX_WIDGET_LINES` budget; on overflow, running agents come
+   * first and one `+N more` line counts the rest.
+   */
+  private renderExternal(views: readonly ExternalAgentView[], theme: Theme, truncate: (line: string) => string, frame: string): string[] {
+    const groups = new Map<string, ExternalAgentView[]>();
+    for (const view of views) {
+      const group = view.agent.group ?? view.agent.source;
+      groups.set(group, [...(groups.get(group) ?? []), view]);
+    }
+    const size = (rows: string[][]) => rows.reduce((sum, row) => sum + row.length, 0);
+    const sections = [...groups].map(([group, members]) => {
+      const running = members.filter(view => view.agent.status === "running");
+      const color = running.length > 0 ? "accent" : "dim";
+      return {
+        heading: truncate(theme.fg(color, running.length > 0 ? "●" : "○") + " " + theme.fg(color, group)),
+        running: running.map(view => this.renderExternalRunning(view, theme, truncate, frame)),
+        finished: members.filter(view => view.agent.status !== "running").map(view => [truncate(theme.fg("dim", "├─") + " " + this.renderExternalFinished(view, theme))]),
+      };
+    });
+    const fits = sections.reduce((sum, section) => sum + 1 + size(section.running) + size(section.finished), 0) <= MAX_WIDGET_LINES;
+    let budget = fits ? MAX_WIDGET_LINES : MAX_WIDGET_LINES - 1;
+    let hidden = 0;
+    const lines: string[] = [];
+    for (const section of sections) {
+      const rows: string[][] = [];
+      // A heading is only worth its line with at least one row under it.
+      if (budget >= 2) {
+        budget--;
+        for (const row of fits ? [...section.finished, ...section.running] : [...section.running, ...section.finished]) {
+          if (row.length <= budget) { rows.push(row); budget -= row.length; }
+          else hidden++;
+        }
+      } else hidden += section.running.length + section.finished.length;
+      if (rows.length === 0) continue;
+      const last = rows.at(-1)!;
+      last[0] = last[0].replace("├─", "└─");
+      if (last[1]) last[1] = last[1].replace("│  ", "   ");
+      lines.push(section.heading);
+      for (const row of rows) lines.push(...row);
+    }
+    if (hidden > 0) lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hidden} more`)}`));
+    return lines;
+  }
+
+  /** The name, then the role and (with `showModel`) the model and thinking level. */
+  private externalName(view: ExternalAgentView, theme: Theme, running: boolean): string {
+    const { agent } = view;
+    const identity = this.showModel() ? formatAgentIdentity({ modelName: agent.model, thinking: agent.thinking }) : undefined;
+    const name = renderAgentNameLabel(agent.name, undefined, theme, running ? { bold: true } : { fallbackColor: "dim" });
+    return `${name} ${theme.fg("dim", `· ${[agent.role, identity].filter(Boolean).join(" · ")}`)}`;
+  }
+
+  private externalStats(view: ExternalAgentView, theme: Theme, running: boolean): string[] {
+    const { agent, activity, usage, compactions } = view;
+    const parts: string[] = [];
+    if (activity.turnCount > 0) parts.push(formatTurns(activity.turnCount));
+    if (activity.toolUses > 0) parts.push(formatToolUses(activity.toolUses));
+    const tokens = getLifetimeTotal(usage);
+    if (running && tokens > 0) parts.push(formatSessionTokens(tokens, getSessionContextPercent(activity.session), theme, compactions));
+    const costText = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
+    if (costText) parts.push(costText);
+    parts.push(formatMs((agent.completedAt ?? Date.now()) - agent.startedAt));
+    return parts;
+  }
+
+  private renderExternalRunning(view: ExternalAgentView, theme: Theme, truncate: (line: string) => string, frame: string): string[] {
+    const { agent, activity } = view;
+    const description = agent.description ? `  ${theme.fg("muted", agent.description)} ${theme.fg("dim", "·")}` : "  ";
+    return [
+      truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${this.externalName(view, theme, true)}${description} ${fgPreservingNestedStyles(theme, "dim", this.externalStats(view, theme, true).join(" · "))}`),
+      truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${describeActivity(activity.activeTools, activity.responseText)}`)),
+    ];
+  }
+
+  private renderExternalFinished(view: ExternalAgentView, theme: Theme): string {
+    const { agent } = view;
+    const [icon, statusText] = agent.status === "completed" ? [theme.fg("success", "✓"), ""]
+      : agent.status === "stopped" ? [theme.fg("dim", "■"), theme.fg("dim", " stopped")]
+      : [theme.fg("error", "✗"), theme.fg("error", " failed")];
+    const description = agent.description ? `  ${theme.fg("dim", agent.description)} ${theme.fg("dim", "·")}` : "  ";
+    return `${icon} ${this.externalName(view, theme, false)}${description} ${theme.fg("dim", this.externalStats(view, theme, false).join(" · "))}${statusText}`;
+  }
+
+  /** Subagents' own agents: the heading, then finished, running, and queued rows. */
+  private renderOwn(tui: any, theme: Theme): string[] {
     const allAgents = this.widgetAgents();
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
@@ -687,9 +803,10 @@ export class AgentWidget {
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
+    const hasExternal = this.visibleExternal().length > 0;
 
     // Nothing to show — clear widget
-    if (!hasActive && !hasFinished) {
+    if (!hasActive && !hasFinished && !hasExternal) {
       if (this.widgetRegistered) {
         this.uiCtx.setWidget("agents", undefined);
         this.widgetRegistered = false;
@@ -700,9 +817,10 @@ export class AgentWidget {
         this.lastStatusText = undefined;
       }
       if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
-      // Clean up stale entries
+      // Clean up stale entries; an external agent keeps its age while its source lists it, so it cannot reappear.
+      const externalIds = new Set(this.external().map(view => view.agent.id));
       for (const [id] of this.finishedTurnAge) {
-        if (!allAgents.some(a => a.id === id)) this.finishedTurnAge.delete(id);
+        if (!allAgents.some(a => a.id === id) && !externalIds.has(id)) this.finishedTurnAge.delete(id);
       }
       return;
     }

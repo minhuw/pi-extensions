@@ -35,6 +35,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 - **Scripted workflows are disabled by default pending reliability fixes:** `SubagentWorkflow`, the workflow inspector menu entry, and startup workflow execution are off unless `workflowsEnabled: true` is explicitly configured. Existing explicit opt-ins remain supported; set `workflowsEnabled: false` to disable them. Reload while no agents are running to apply changes to tool registration. When enabled, orchestration still requires an explicit user request.
 - **Background completion delivery changed:** upstream now batches completions at the parent's turn boundary, with an idle-parent delivery path, rather than relying only on a short notification timer.
 - **Local integrations remain:** service tiers, scoped host/telemetry ownership, Orca busy-state coordination, and compact invocation/model metadata.
+- **External agents:** agents other extensions publish in the shared `pi-extensions.external-agents` registry, such as [Herder](../herder/README.md)'s steps, appear in the widget under their own group heading, in the fleet list, and in `/agents → Running agents`. Their live conversation opens read-only: Subagents cannot stop, steer, or background them. Each Pi session sees only the agents it started. The contract is documented in `src/external-agents.ts`.
 
 Settings live in the global or project `subagents.json`; see [upstream configuration](UPSTREAM.md) for locations and precedence. For example:
 

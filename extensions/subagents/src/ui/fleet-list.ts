@@ -12,11 +12,12 @@
  */
 
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { hasAgentBadge, renderAgentName } from "../agent-color.js";
+import { hasAgentBadge, renderAgentName, renderAgentNameLabel } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { type ExternalAgentView, externalRecord } from "../external-agents.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { buildInvocationTags, buildRecordInvocation, formatAgentNameIdentity, formatTokenUsage, type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
+import { buildInvocationTags, buildRecordInvocation, formatAgentIdentity, formatAgentNameIdentity, formatTokenUsage, type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -67,7 +68,8 @@ export interface FleetWorkflow {
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
-type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
+type ExternalEntry = { kind: "external"; view: ExternalAgentView };
+type FleetEntry = MainEntry | WorkflowEntry | AgentEntry | ExternalEntry;
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
@@ -118,6 +120,8 @@ export class FleetList {
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
+  /** Injected by the extension: other extensions' agents (`external-agents.ts`), narrowed to this session. */
+  private externalSource: (() => readonly ExternalAgentView[]) | undefined;
 
   constructor(
     private manager: AgentManager,
@@ -273,6 +277,25 @@ export class FleetList {
     this.openWorkflow = open;
   }
 
+  /** Wire other extensions' agents into the list, below Subagents' own. */
+  setExternalSource(source: () => readonly ExternalAgentView[]): void {
+    this.externalSource = source;
+  }
+
+  /**
+   * External agents with a live session — the viewer needs one — plus the one
+   * being viewed and, like Subagents' own, recently finished ones that kept it.
+   */
+  private externals(): ExternalAgentView[] {
+    if (!this.externalSource) return [];
+    const now = Date.now();
+    return this.externalSource().filter(({ agent }) =>
+      agent.id === this.viewingAgentId
+      || (agent.session !== undefined && (
+        agent.status === "running" || (agent.completedAt != null && now - agent.completedAt < FINISHED_LINGER_MS)
+      )));
+  }
+
   /** Live runs, plus recently settled ones — the same linger the agents get. */
   private workflows(): FleetWorkflow[] {
     if (!this.workflowSource) return [];
@@ -296,6 +319,7 @@ export class FleetList {
       { kind: "main" },
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
       ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
+      ...this.externals().map(view => ({ kind: "external" as const, view })),
     ];
   }
 
@@ -403,6 +427,10 @@ export class FleetList {
       );
       return;
     }
+    if (entry.kind === "external") {
+      this.openExternal(entry.view);
+      return;
+    }
     const record = entry.record;
     if (!this.ui) return;
     if (!record.session) {
@@ -444,6 +472,34 @@ export class FleetList {
     ).then(() => this.clearViewer(), () => this.clearViewer());
   }
 
+  /** A read-only conversation overlay: Subagents cannot stop, steer, or background another extension's agent. */
+  private openExternal(view: ExternalAgentView): void {
+    if (!this.ui) return;
+    const { id, name, role, status } = view.agent;
+    const session = view.agent.session;
+    if (!session) {
+      this.ui.notify(`${name} is ${status} — no session available.`, "info");
+      return;
+    }
+    this.viewingAgentId = id;
+    let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
+    const record = externalRecord(() => this.externalSource?.().find(other => other.agent.id === id), view);
+    void this.ui.custom<undefined>(
+      (tui, theme, keybindings, done) => {
+        overlayOptions = getConversationOverlayOptions(tui);
+        this.viewerClose = () => done(undefined);
+        return new ConversationViewer(
+          tui, session, record, view.activity, theme, done, undefined, keybindings, undefined, this.showCost(),
+          this.viewerMarkdown, this.onViewerMarkdown, this.scrollbarMode(), undefined, `${name} · ${role}`,
+        );
+      },
+      {
+        overlay: true,
+        overlayOptions: () => overlayOptions,
+      },
+    ).then(() => this.clearViewer(), () => this.clearViewer());
+  }
+
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
   private clearViewer(): void {
     // Keep the cursor on the agent we were viewing — re-resolve by id so it
@@ -455,6 +511,7 @@ export class FleetList {
       const idx = this.roster().findIndex(e =>
         e.kind === "agent" ? e.record.id === viewed
         : e.kind === "workflow" ? e.workflow.id === viewed
+        : e.kind === "external" ? e.view.agent.id === viewed
         : false,
       );
       if (idx >= 0) this.selectedIndex = idx;
@@ -468,7 +525,7 @@ export class FleetList {
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
+    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry | ExternalEntry)[];
     if (rows.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
@@ -494,6 +551,8 @@ export class FleetList {
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
+        : row.kind === "external" ?
+          this.renderExternalRow(a + 1, sel, row.view, width, theme)
         : this.renderAgentRow(a + 1, sel, row.record, width, theme),
       );
     }
@@ -555,5 +614,19 @@ export class FleetList {
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
+  }
+
+  /** An external agent's row, shaped like an agent's: its own name, role and identity, then the same stats. */
+  private renderExternalRow(rosterIndex: number, sel: number, view: ExternalAgentView, width: number, theme: Theme): string {
+    const selected = rosterIndex === sel;
+    const { agent } = view;
+    const name = renderAgentNameLabel(agent.name, undefined, theme, { fallbackColor: selected ? "text" : "muted" });
+    const identity = [agent.role, formatAgentIdentity({ modelName: agent.model, thinking: agent.thinking })].filter(Boolean).join(" · ");
+    const description = agent.description ? (selected ? theme.fg("text", agent.description) : agent.description) : "";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name} ${theme.fg("dim", `· ${identity}`)}  ${description}`;
+    const elapsedMs = (agent.completedAt ?? Date.now()) - agent.startedAt;
+    const cost = this.showCost() ? formatCost(getLifetimeCost(view.usage)) : "";
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(getLifetimeTotal(view.usage))}${cost ? ` · ${cost}` : ""}`;
+    return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 }

@@ -68,6 +68,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./ui/conversation-viewer.js";
+import { ExternalAgentTracker, type ExternalAgentView, externalRecord } from "./external-agents.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
@@ -1004,6 +1005,7 @@ export default function (pi: ExtensionAPI) {
       fleet.setUICtx(ctx.ui as any);
       watchHandoffKey(ctx.ui);
     }
+    externalAgentTracker.start();
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
@@ -1338,6 +1340,7 @@ export default function (pi: ExtensionAPI) {
     // `session_before_switch` deliberately keeps both: a vetoed switch continues
     // this session, where the live UI and group state must survive.
     groupJoin.dispose();
+    externalAgentTracker.dispose();
     widget.dispose();
     outbox.dispose();
     fleet.dispose();
@@ -1365,7 +1368,18 @@ export default function (pi: ExtensionAPI) {
   // everything else; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
+  // Agents other extensions run (Herder's steps), read from the process-wide
+  // registry and listed read-only beside Subagents' own — see external-agents.ts.
+  // Started on session_start, which is also when the widget and fleet get a UI.
+  const externalAgentTracker = new ExternalAgentTracker({
+    ownerSessionId: () => currentCtx?.sessionManager?.getSessionId?.(),
+    onChange: () => {
+      if (currentCtx?.hasUI && externalAgentTracker.list().some(view => view.agent.status === "running")) widget.ensureTimer();
+      widget.update();
+      fleet.update();
+    },
+  });
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled, () => externalAgentTracker.list());
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   /**
@@ -1457,6 +1471,7 @@ export default function (pi: ExtensionAPI) {
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
     getFullscreenScrollbar, backgroundActionFor);
+  fleet.setExternalSource(() => externalAgentTracker.list());
   let fleetViewEnabled = false;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -3339,10 +3354,13 @@ Terse command-style prompts produce shallow, generic work.
 
     // Running agents entry (only if there are active agents)
     const agents = manager.listAgents().filter(record => !record.owner && isTopLevelAgent(record));
-    if (agents.length > 0) {
-      const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
-      const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
-      options.push(`Running agents (${agents.length}) — ${running} running, ${done} done`);
+    const external = externalAgentTracker.list();
+    if (agents.length + external.length > 0) {
+      const running = agents.filter(a => a.status === "running" || a.status === "queued").length
+        + external.filter(view => view.agent.status === "running").length;
+      const done = agents.filter(a => a.status === "completed" || a.status === "steered").length
+        + external.filter(view => view.agent.status === "completed").length;
+      options.push(`Running agents (${agents.length + external.length}) — ${running} running, ${done} done`);
     }
 
     // Agent types list
@@ -3473,7 +3491,12 @@ Terse command-style prompts produce shallow, generic work.
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
     const agents = manager.listAgents().filter(record => !record.owner && isTopLevelAgent(record));
-    if (agents.length === 0) {
+    // Other extensions' agents follow Subagents' own, read-only.
+    const items: ({ record: AgentRecord } | { view: ExternalAgentView })[] = [
+      ...agents.map(record => ({ record })),
+      ...externalAgentTracker.list().map(view => ({ view })),
+    ];
+    if (items.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
     }
@@ -3481,7 +3504,9 @@ Terse command-style prompts produce shallow, generic work.
     // Numbered + item-paired. Two same-type agents spawned together with the
     // same description render identically here, and resolving the choice by
     // string match would open whichever came first.
-    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
+    const item = await selectItem(ctx.ui, "Running agents", items, entry => {
+      if ("view" in entry) return externalAgentLabel(entry.view);
+      const a = entry.record;
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
       const { identity, tags } = buildInvocationTags(buildRecordInvocation(a));
@@ -3489,11 +3514,42 @@ Terse command-style prompts produce shallow, generic work.
       const invocationText = metadata.length > 0 ? ` · ${metadata.join(" · ")}` : "";
       return `${dn} (${a.description})${invocationText} · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-    if (!record) return;
+    if (!item) return;
 
-    await viewAgentConversation(ctx, record);
+    if ("view" in item) await viewExternalConversation(ctx, item.view);
+    else await viewAgentConversation(ctx, item.record);
     // Back-navigation: re-show the list
     await showRunningAgents(ctx);
+  }
+
+  function externalAgentLabel(view: ExternalAgentView): string {
+    const { agent } = view;
+    const identity = formatAgentIdentity({ modelName: agent.model, thinking: agent.thinking });
+    const metadata = [agent.role, identity, agent.group].filter(Boolean).join(" · ");
+    return `${agent.name}${agent.description ? ` (${agent.description})` : ""} · ${metadata} · ${view.activity.toolUses} tools · ${agent.status} · ${formatDuration(agent.startedAt, agent.completedAt)}`;
+  }
+
+  /** The live conversation of another extension's agent, read-only: no stop, steer, or background. */
+  async function viewExternalConversation(ctx: ExtensionCommandContext, view: ExternalAgentView) {
+    const { id, name, role, status, sessionFile } = view.agent;
+    const session = view.agent.session;
+    if (!session) {
+      ctx.ui.notify(sessionFile ? `${name} is ${status}; its transcript is at ${sessionFile}.` : `${name} is ${status} — no session available.`, "info");
+      return;
+    }
+    const record = externalRecord(() => externalAgentTracker.get(id), view);
+    let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
+    await ctx.ui.custom<undefined>(
+      (tui, theme, keybindings, done) => {
+        overlayOptions = getConversationOverlayOptions(tui);
+        return new ConversationViewer(tui, session, record, view.activity, theme, done, undefined, keybindings, undefined, showCost,
+          getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar(), undefined, `${name} · ${role}`);
+      },
+      {
+        overlay: true,
+        overlayOptions: () => overlayOptions,
+      },
+    );
   }
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
