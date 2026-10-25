@@ -14,6 +14,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Orca Bridge](extensions/orca-bridge/README.md) | Orca pane activity, prompt-aware titles, background-work tracking, file/diff navigation, and `/orca-status` diagnostics. |
 | [Autoresearch](extensions/autoresearch/README.md) | Main-session baseline design and measurement, explicit user approval, bounded optimization passes, and integrated metric reporting. |
 | [Loop](extensions/loop/README.md) | Session-owned recurring prompts with fixed, cron, or model-paced scheduling, bounded execution, and footer status. |
+| [Molt](extensions/molt/README.md) | `/molt` starts a new session that keeps the current model and thinking level. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 

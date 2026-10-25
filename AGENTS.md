@@ -14,6 +14,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/orca-bridge/` — Orca hook delivery, background activity aggregation in terminal panes, prompt-aware titles, file/diff navigation, and stock Orca compatibility checks; Herder and Subagents publish snapshots through Pi's event bus. Integrations must use released Orca interfaces without modifying Orca.
 - `extensions/autoresearch/` — native main-session optimization: baseline harness design and repeated measurement, explicit user approval before bounded iterations, pinned methodology/harness files, session-owned continuation, durable reports, and footer integration. It owns `/autoresearch`; do not also load `npm:pi-autoresearch`.
 - `extensions/loop/` — session-owned recurring prompts, fixed/cron/model-paced scheduling, completion and lifetime limits, and footer integration.
+- `extensions/molt/` — `/molt`, which starts a new session that keeps the current model and thinking level.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
 - `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), a local fleet (`recon`, `worker`, `reviewer`, `expert`), integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
@@ -28,7 +29,7 @@ Run commands from the repository root with Node `>=22.19.0`. The development SDK
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm ci`                            | Install the locked dependencies.                                                                                                        |
 | `npm run typecheck`                 | Run strict, no-emit TypeScript checking for the collection and Subagents' dedicated source configuration.                              |
-| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Quality, Statusline Footer, Autoresearch, Loop, Subagents, native compaction, Herder, and Writer tests. |
+| `npm test`                          | Run the safe collection suite: Orca Bridge, Magpie Provider, Commit, Quality, Statusline Footer, Autoresearch, Loop, Molt, Subagents, native compaction, Herder, and Writer tests. |
 | `npm run test:orca-bridge` | Run Orca Bridge's offline activity, lifecycle, navigation, release compatibility, real Pi RPC, title, and transport tests. |
 | `npm run test:magpie-provider` | Run Magpie's offline provider/lifecycle tests and its native-compaction suite. |
 | `npm run test:commit`               | Run Commit's strict TypeScript `node --test` suite.                                                                                     |
@@ -38,6 +39,7 @@ Run commands from the repository root with Node `>=22.19.0`. The development SDK
 | `npm run test:statusline`           | Run Statusline Footer's Vitest suite.                                                                                                   |
 | `npm run test:autoresearch` | Run Autoresearch's offline approval, measurement, scheduling, persistence, footer, and real Pi/bash integration tests. |
 | `npm run test:loop` | Run Loop's offline scheduling, command, lifecycle, persistence, and Pi integration tests. |
+| `npm run test:molt` | Run Molt's offline session-replacement tests against a real Pi runtime. |
 | `npm run test:subagents`            | Run Subagents' offline upstream and local compatibility Vitest suites, including scripted workflows; live provider tests are not enabled.                            |
 | `npm run test:herder`               | Run Herder's deterministic smoke suite; its first phase already runs `npm run typecheck`.                                               |
 
