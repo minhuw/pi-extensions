@@ -1,0 +1,87 @@
+import type { Tokens } from "./types";
+
+export function formatDuration(ms: number | null | undefined): string {
+	if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return "—";
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	const totalSeconds = Math.round(ms / 1000);
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+	return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+export function formatCount(n: number | null | undefined): string {
+	if (n === null || n === undefined || !Number.isFinite(n)) return "0";
+	const abs = Math.abs(n);
+	if (abs < 1000) return String(Math.round(n));
+	if (abs < 1_000_000) return `${trim(n / 1000)}k`;
+	if (abs < 1_000_000_000) return `${trim(n / 1_000_000)}M`;
+	return `${trim(n / 1_000_000_000)}B`;
+}
+
+function trim(value: number): string {
+	return value >= 100 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
+}
+
+export function totalTokens(tokens: Tokens | null | undefined): number {
+	if (!tokens) return 0;
+	return (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.cacheRead ?? 0) + (tokens.cacheWrite ?? 0);
+}
+
+export function formatCost(cost: number | null | undefined): string {
+	if (cost === null || cost === undefined || !Number.isFinite(cost) || cost <= 0) return "$0";
+	if (cost < 0.01) return "<$0.01";
+	if (cost < 100) return `$${cost.toFixed(2)}`;
+	return `$${Math.round(cost).toLocaleString("en-US")}`;
+}
+
+const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
+	["year", 365 * 24 * 3600],
+	["month", 30 * 24 * 3600],
+	["week", 7 * 24 * 3600],
+	["day", 24 * 3600],
+	["hour", 3600],
+	["minute", 60],
+];
+
+export function formatRelative(iso: string | null | undefined, now: number = Date.now()): string {
+	if (!iso) return "—";
+	const time = Date.parse(iso);
+	if (Number.isNaN(time)) return "—";
+	const seconds = Math.round((time - now) / 1000);
+	const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+	for (const [unit, size] of UNITS) {
+		if (Math.abs(seconds) >= size) return rtf.format(Math.round(seconds / size), unit);
+	}
+	return "just now";
+}
+
+export function formatDateTime(iso: string | number | null | undefined): string {
+	if (iso === null || iso === undefined) return "—";
+	const date = new Date(iso);
+	if (Number.isNaN(date.getTime())) return "—";
+	return date.toLocaleString("en-US", {
+		year: "numeric",
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
+export function formatTime(iso: string | number | null | undefined): string {
+	if (iso === null || iso === undefined) return "";
+	const date = new Date(iso);
+	if (Number.isNaN(date.getTime())) return "";
+	return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+export function plural(n: number, word: string, pluralWord = `${word}s`): string {
+	return `${formatCount(n)} ${n === 1 ? word : pluralWord}`;
+}
+
+export function truncateText(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
