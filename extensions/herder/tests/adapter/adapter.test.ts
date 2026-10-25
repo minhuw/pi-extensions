@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import herderExtension from "../../index.ts";
 import { parseCommand, UsageError } from "../../src/adapter/commands.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
-import { ACTIVITY_REQUEST_EVENT, FOLLOWUP_RESULT_LIMIT, LOCK_STALE_MS, MAX_CLARIFYING_QUESTIONS, STATUS_KEY } from "../../src/config.ts";
+import { ACTIVITY_REQUEST_EVENT, FOLLOWUP_RESULT_LIMIT, LOCK_STALE_MS, MAX_CLARIFYING_QUESTIONS, RUN_EVENT, STATUS_KEY } from "../../src/config.ts";
 import { readLock } from "../../src/run/lock.ts";
 import { activeRun, listRuns, openRun } from "../../src/run/store.ts";
 import { createGitFixture, type GitFixture } from "../support/git-fixture.ts";
@@ -456,6 +457,19 @@ describe("resume, abort, clean", () => {
 		expect(fixture.git("for-each-ref", "refs/herder")).toBe("");
 	});
 
+	it("clean removes the run's step sessions with the run; abort keeps them", async () => {
+		const { h, runId, run } = await approved();
+		mkdirSync(run.paths.sessions, { recursive: true });
+		writeFileSync(join(run.paths.sessions, "step.jsonl"), "{}\n");
+		await h.command("abort");
+		expect(run.state().status).toBe("abandoned");
+		expect(existsSync(join(run.paths.sessions, "step.jsonl"))).toBe(true);
+		await h.command(`clean ${runId}`);
+		expect(h.lastNotice()!.text).toContain(runId);
+		expect(existsSync(run.paths.sessions)).toBe(false);
+		expect(existsSync(run.paths.dir)).toBe(false);
+	});
+
 	it("/herder status describes the latest run", async () => {
 		const { h, runId } = await started();
 		await h.command("status");
@@ -644,5 +658,40 @@ describe("tracked tool calls", () => {
 		expect(run.journal.read().filter((event) => event.t === "goal.approved")).toHaveLength(0);
 		expect(run.state().status).toBe("abandoned");
 		expect(readLock(run.paths.lock)).toBeNull();
+	});
+});
+
+describe("herder:run events", () => {
+	it("announce the run on start, after journal appends, and on resume, and journal the orchestrating session", async () => {
+		const events = createEventBus();
+		const announced: unknown[] = [];
+		events.on(RUN_EVENT, (payload) => announced.push(payload));
+		const { fixture, h, runId, run } = await started({ events, options: { runEventDelayMs: 20 } });
+		const expected = {
+			runId, runDir: run.paths.dir, journalPath: run.paths.journal, goalPath: run.paths.goal, planPath: run.paths.plan,
+			repo: basename(fixture.dir), title: "add a greeting to the CLI",
+		};
+		expect(announced).toEqual([expected]);
+		expect(run.journal.read()[0]).toMatchObject({ t: "run.started", sessionId: "session-a" });
+		expect(run.state().sessionId).toBe("session-a");
+		const journal = h.runtime().env.run.journal;
+		journal.append({ t: "decision.recorded", question: "q1", answer: "a1" });
+		journal.append({ t: "decision.recorded", question: "q2", answer: "a2" });
+		expect(announced).toHaveLength(1);
+		await vi.waitFor(() => expect(announced).toHaveLength(2));
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(announced).toHaveLength(2);
+		// A pending announcement is sent when the session gives the run up.
+		journal.append({ t: "decision.recorded", question: "q3", answer: "a3" });
+		await h.shutdown();
+		expect(announced).toHaveLength(3);
+		journal.append({ t: "decision.recorded", question: "q4", answer: "a4" });
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(announced).toHaveLength(3);
+		const b = harness({ cwd: fixture.dir, sessionId: "session-b", events });
+		cleanups.push(b.shutdown);
+		await b.command(`resume ${runId}`);
+		expect(announced).toHaveLength(4);
+		expect(announced.every((payload) => JSON.stringify(payload) === JSON.stringify(expected))).toBe(true);
 	});
 });

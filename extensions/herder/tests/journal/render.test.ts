@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fold } from "../../src/journal/fold.ts";
 import { renderProgress } from "../../src/journal/render.ts";
-import { sampleJournal } from "./sample.ts";
+import { journalOf, sampleJournal } from "./sample.ts";
 
 describe("renderProgress", () => {
 	it("is byte-stable for the same journal", () => {
@@ -21,6 +21,15 @@ describe("renderProgress", () => {
 		expect(text).toContain("step `impl2-0` gate_failed at c2; checks failed: unit");
 		expect(text).toContain("integration of c2 for T3 failed: conflict (a.txt)");
 		expect(text.endsWith("verification not_met at h1\n")).toBe(true);
+	});
+
+	it("names the step session in history when journaled", () => {
+		const text = renderProgress(fold(journalOf([
+			{ t: "step.failed", key: "s-0", fingerprint: "f1", attempt: 1, errorClass: "stall", message: "quiet", final: false, sessionId: "a1", sessionFile: "/s/a1.jsonl" },
+			{ t: "step.completed", key: "s-0", fingerprint: "f1", status: "ok", commit: "c1", sessionId: "a2", sessionFile: "/s/a2.jsonl" },
+		])));
+		expect(text).toContain("step `s-0` attempt 1 failed (will retry): stall: quiet; session a1\n");
+		expect(text).toContain("step `s-0` ok at c1; session a2\n");
 	});
 
 	it("renders an empty run", () => {

@@ -2,9 +2,9 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
 	createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession, type CreateAgentSessionOptions,
+	type AgentSession, type CreateAgentSessionOptions, type ExtensionFactory, type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
-import { STRUCTURED_OUTPUT_REJECTIONS, STRUCTURED_OUTPUT_TOOL } from "../config.ts";
+import { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, STRUCTURED_OUTPUT_REJECTIONS, STRUCTURED_OUTPUT_TOOL } from "../config.ts";
 import { AgentError, type AgentRunner, type AgentRunRequest, type AgentRunResult, type OutputStore, type Usage } from "../types.ts";
 import { classifyMessage, toAgentError } from "./classify.ts";
 import { allowedTools, THINKING_LEVELS } from "./roles.ts";
@@ -28,7 +28,27 @@ export interface PiRunnerOptions {
 	settings?: (cwd: string, agentDir: string) => SettingsManager;
 	/** How long a stopped run waits for the session to go idle before rejecting. */
 	abortGraceMs?: number;
+	/**
+	 * The run the sessions belong to. When given, each session is a Pi session file in `dir` that starts with a
+	 * `pi-extensions.session-link` entry; otherwise sessions stay in memory.
+	 */
+	sessions?: { dir: string; runId: string; repo: string; parentSessionId?: string };
 }
+
+/** An entry of the shared child-session hook Set; extensions register these without importing each other. */
+interface ChildSessionHook { name: string; extensionFactory: ExtensionFactory }
+
+/** Hooks registered in `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`; the Set may not exist. */
+export function childSessionHooks(): InlineExtension[] {
+	const hooks = (globalThis as Record<symbol, unknown>)[Symbol.for(CHILD_SESSION_HOOKS)];
+	if (!(hooks instanceof Set)) return [];
+	return [...hooks as Set<Partial<ChildSessionHook>>]
+		.filter((hook): hook is ChildSessionHook => typeof hook?.name === "string" && typeof hook.extensionFactory === "function")
+		.map((hook) => ({ name: hook.name, factory: hook.extensionFactory }));
+}
+
+/** How long a step session's `session_shutdown` handlers may run before it is disposed anyway. */
+const SHUTDOWN_TIMEOUT_MS = 3_000;
 
 // No packages, extensions, or resource paths: the loader would resolve and install them on every step.
 const STEP_SETTINGS: (keyof Settings)[] = [
@@ -81,6 +101,7 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 	const watch = watchdog(request);
 	let session: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
+	const hooks = childSessionHooks();
 	try {
 		session = await watch.race((async () => {
 			const runtime = await context.modelRuntime();
@@ -88,6 +109,7 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 			const settingsManager = (context.settings ?? stepSettings)(request.cwd, context.agentDir);
 			const loader = new DefaultResourceLoader({
 				cwd: request.cwd, agentDir: context.agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+				extensionFactories: hooks,
 				agentsFilesOverride: ({ agentsFiles }) => ({ agentsFiles: agentsFiles.filter((file) => within(file.path, [request.cwd, context.agentDir])) }),
 				appendSystemPromptOverride: (base) => [...base, role.prompt],
 			});
@@ -95,14 +117,18 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 			const tools = allowedTools(role.write, role.tools);
 			const created = await createAgentSession({
 				cwd: request.cwd, agentDir: context.agentDir, modelRuntime: runtime, resourceLoader: loader,
-				sessionManager: SessionManager.inMemory(request.cwd), settingsManager,
+				sessionManager: context.sessions ? SessionManager.create(request.cwd, context.sessions.dir) : SessionManager.inMemory(request.cwd), settingsManager,
 				tools: capture ? [...tools, STRUCTURED_OUTPUT_TOOL] : tools,
 				customTools: schema && capture ? [createStructuredOutputTool(schema, capture)] : [],
 				...(model && { model }), ...(thinkingLevel && { thinkingLevel }),
 			});
+			if (context.sessions) created.session.sessionManager.appendCustomEntry(SESSION_LINK_TYPE, sessionLink(request, context.sessions));
 			return created.session;
-		})(), (created) => created.dispose());
+		})(), (created) => void shutdown(created));
 		const live = session;
+		request.onSession?.({ id: live.sessionId, ...(live.sessionFile !== undefined && { file: live.sessionFile }) });
+		// Hooked extensions see `session_start` like in a main session; without hooks there is nothing to bind.
+		if (hooks.length) await watch.race(live.bindExtensions({}));
 		unsubscribe = live.subscribe((event) => {
 			watch.touch();
 			request.onEvent?.(event.type);
@@ -128,9 +154,38 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 	} finally {
 		watch.clear();
 		unsubscribe?.();
-		session?.dispose();
+		if (session) await shutdown(session);
 		if (session) request.onLiveSession?.(undefined);
 	}
+}
+
+/** The step's `pi-extensions.session-link` data (`kind: "herder-step"`). */
+function sessionLink(request: AgentRunRequest, run: NonNullable<PiRunnerOptions["sessions"]>): object {
+	const step = request.step;
+	return {
+		kind: "herder-step",
+		...(run.parentSessionId !== undefined && { parentSessionId: run.parentSessionId }),
+		agentType: request.role.name,
+		...(step?.task !== undefined && { description: step.task }),
+		herder: {
+			runId: run.runId, stepKey: step?.key ?? request.role.name, stepId: step?.id ?? request.role.name,
+			...(step?.task !== undefined && { task: step.task }),
+			role: request.role.name, attempt: step?.attempt ?? 1,
+			...(step?.launch !== undefined && { launch: step.launch }),
+			repo: run.repo,
+		},
+	};
+}
+
+/** Emits `session_shutdown` to hooked extensions (bounded), then disposes the session. */
+async function shutdown(session: AgentSession): Promise<void> {
+	try {
+		const runner = session.extensionRunner;
+		if (runner.hasHandlers("session_shutdown")) {
+			await settle(runner.emit({ type: "session_shutdown", reason: "quit" }), SHUTDOWN_TIMEOUT_MS);
+		}
+	} catch {}
+	session.dispose();
 }
 
 /** A prompt that ends without an accepted payload is one rejection, unless a rejected call during it already counted. */

@@ -52,3 +52,9 @@ export const ACTIVITY_EVENT = "pi-extensions:activity";
 export const ACTIVITY_REQUEST_EVENT = "pi-extensions:activity-request";
 /** How long a finished step stays in the external-agent registry (Subagents' widget, `/agents`). */
 export const EXTERNAL_AGENT_TTL_MS = 10 * 60_000;
+/** `pi.events` channel announcing a run's files on start, resume, and journal appends. */
+export const RUN_EVENT = "herder:run";
+export const RUN_EVENT_DEBOUNCE_MS = 250;
+/** `globalThis[Symbol.for(...)]`: a Set of `{ name, extensionFactory }` loaded into every step session. */
+export const CHILD_SESSION_HOOKS = "pi-extensions.child-session-hooks";
+export const SESSION_LINK_TYPE = "pi-extensions.session-link";

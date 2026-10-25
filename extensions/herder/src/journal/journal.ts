@@ -57,7 +57,14 @@ export function readJournal(path: string): JournalEvent[] {
 export class Journal {
 	readonly path: string;
 	#repaired = false;
+	readonly #listeners = new Set<(event: JournalEvent) => void>();
 	constructor(path: string) { this.path = path; }
+
+	/** Calls `listener` after each durable append; returns the unsubscribe function. Listener errors are ignored. */
+	onAppend(listener: (event: JournalEvent) => void): () => void {
+		this.#listeners.add(listener);
+		return () => { this.#listeners.delete(listener); };
+	}
 
 	append<I extends JournalInput>(input: I): Extract<JournalEvent, { t: I["t"] }> {
 		const event = makeEvent(input);
@@ -75,6 +82,7 @@ export class Journal {
 			journalFs.closeSync(fd);
 		}
 		if (created) syncDir(dirname(this.path));
+		for (const listener of this.#listeners) try { listener(event); } catch {}
 		return event;
 	}
 

@@ -10,8 +10,11 @@ export type StepState = "running" | "ok" | "no_changes" | "gate_failed" | "faile
 export type TaskState = "pending" | "running" | "ready" | "failed" | "integrated";
 
 export interface LaunchRecord { launch: number; launched: ScriptLaunchedEvent; settled?: ScriptSettledEvent }
-/** The latest attempt of a step. `started` is absent when a completion was adopted from an existing ref. */
-export interface StepRecord { key: string; status: StepState; started?: StepStartedEvent; completed?: StepCompletedEvent; failed?: StepFailedEvent; task?: string }
+/**
+ * The latest attempt of a step. `started` is absent when a completion was adopted from an existing ref. `sessionId` and
+ * `sessionFile` come from the attempt's latest event that names its Pi session; journals before they existed have none.
+ */
+export interface StepRecord { key: string; status: StepState; started?: StepStartedEvent; completed?: StepCompletedEvent; failed?: StepFailedEvent; task?: string; sessionId?: string; sessionFile?: string }
 export interface TaskRecord { id: string; status: TaskState; lastStep?: string; integratedCommit?: string; steps: string[] }
 export type HistoryEvent =
 	| ScriptSettledEvent | StepCompletedEvent | StepFailedEvent | CheckCompletedEvent | IntegrateCompletedEvent
@@ -19,6 +22,8 @@ export type HistoryEvent =
 
 export interface RunState {
 	runId?: string; title?: string; base?: string; repo?: string; runtime?: string;
+	/** The orchestrating Pi session, when the run was started from one. */
+	sessionId?: string;
 	status: RunOverallStatus;
 	goal?: { sha256: string; checks: CheckSpec[]; event: GoalApprovedEvent };
 	planSha256?: string;
@@ -45,6 +50,13 @@ export interface RunState {
 }
 
 const completionId = (key: string, fingerprint: string) => JSON.stringify([key, fingerprint]);
+
+/** The session fields of the first event that has them. */
+function sessionOf(...events: Array<StepStartedEvent | StepCompletedEvent | StepFailedEvent | undefined>): Pick<StepRecord, "sessionId" | "sessionFile"> {
+	const event = events.find((candidate) => candidate?.sessionId !== undefined);
+	if (!event) return {};
+	return event.sessionFile !== undefined ? { sessionId: event.sessionId, sessionFile: event.sessionFile } : { sessionId: event.sessionId };
+}
 
 export function findCompletion(state: RunState, key: string, fingerprint: string): StepCompletedEvent | undefined {
 	return state.completions.get(completionId(key, fingerprint));
@@ -74,7 +86,10 @@ export function fold(events: readonly JournalEvent[]): RunState {
 	for (const event of events) {
 		switch (event.t) {
 			case "run.started":
-				if (state.runId === undefined) Object.assign(state, { runId: event.runId, title: event.title, base: event.base, repo: event.repo, runtime: event.runtime });
+				if (state.runId === undefined) {
+					Object.assign(state, { runId: event.runId, title: event.title, base: event.base, repo: event.repo, runtime: event.runtime });
+					if (event.sessionId !== undefined) state.sessionId = event.sessionId;
+				}
 				break;
 			case "goal.approved": state.goal = { sha256: event.sha256, checks: event.checks, event }; break;
 			case "plan.updated": state.planSha256 = event.sha256; break;
@@ -88,7 +103,7 @@ export function fold(events: readonly JournalEvent[]): RunState {
 			case "step.started": {
 				if (event.attempt === 1) state.liveAgentStarts++;
 				const previous = state.steps.get(event.key);
-				state.steps.set(event.key, { key: event.key, status: "running", started: event, task: event.task ?? previous?.task });
+				state.steps.set(event.key, { key: event.key, status: "running", started: event, task: event.task ?? previous?.task, ...sessionOf(event) });
 				if (event.task !== undefined) {
 					const record = task(event.task);
 					record.lastStep = event.key;
@@ -99,7 +114,7 @@ export function fold(events: readonly JournalEvent[]): RunState {
 			case "step.completed": {
 				const previous = state.steps.get(event.key);
 				const started = previous?.started?.fingerprint === event.fingerprint ? previous.started : undefined;
-				state.steps.set(event.key, { key: event.key, status: event.status, started, completed: event, task: previous?.task });
+				state.steps.set(event.key, { key: event.key, status: event.status, started, completed: event, task: previous?.task, ...sessionOf(event, started) });
 				state.completions.set(completionId(event.key, event.fingerprint), event);
 				settle(event.key, event.status !== "gate_failed");
 				state.history.push(event);
@@ -108,7 +123,7 @@ export function fold(events: readonly JournalEvent[]): RunState {
 			case "step.failed": {
 				const previous = state.steps.get(event.key);
 				const started = previous?.started?.fingerprint === event.fingerprint ? previous.started : undefined;
-				state.steps.set(event.key, { key: event.key, status: event.errorClass === "stopped" ? "stopped" : "failed", started, failed: event, task: previous?.task });
+				state.steps.set(event.key, { key: event.key, status: event.errorClass === "stopped" ? "stopped" : "failed", started, failed: event, task: previous?.task, ...sessionOf(event, started) });
 				if (event.final || event.errorClass === "stopped") settle(event.key, false);
 				state.history.push(event);
 				break;

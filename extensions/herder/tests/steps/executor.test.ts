@@ -230,6 +230,29 @@ describe("failures, continued", () => {
 		expect(completions(h.events())).toMatchObject([{ transcriptRef: "outputs/done.txt" }]);
 	}));
 
+	it("passes the step identity and journals each attempt's session on its outcome", () => withRun(async (h) => {
+		const steps: AgentRunRequest["step"][] = [];
+		h.runner.add(
+			{ match: "add the feature", fail: "transient", times: 1, session: { id: "s1", file: "/sessions/s1.jsonl" } },
+			{ ...FEATURE, session: { id: "s2", file: "/sessions/s2.jsonl" }, edit: (_cwd, request) => { steps.push(request.step); } },
+		);
+		const result = await h.executor().run("add the feature", { id: "impl", task: "T1" }, { launch: 3 });
+		expect(result.status).toBe("ok");
+		expect(h.types()).toEqual(["run.started", "step.started", "step.failed", "step.started", "step.completed"]);
+		for (const event of h.events().filter((event) => event.t === "step.started")) expect(event).not.toHaveProperty("sessionId");
+		expect(failures(h.events())).toMatchObject([{ attempt: 1, sessionId: "s1", sessionFile: "/sessions/s1.jsonl" }]);
+		expect(completions(h.events())).toMatchObject([{ sessionId: "s2", sessionFile: "/sessions/s2.jsonl" }]);
+		expect(h.store.state().steps.get(result.key)).toMatchObject({ sessionId: "s2", sessionFile: "/sessions/s2.jsonl" });
+		expect(steps).toEqual([{ key: result.key, id: "impl", task: "T1", attempt: 2, launch: 3 }]);
+		steps.length = 0;
+		const runner = { async run(request: AgentRunRequest) { steps.push(request.step); request.onSession?.({ id: "mem" }); return { text: "seen" }; } };
+		const read = await h.executor({ runner }).run("look", { role: "explorer" });
+		expect(steps).toEqual([{ key: read.key, id: stepId("agent", "explorer", "look"), task: undefined, attempt: 1, launch: undefined }]);
+		const completion = completions(h.events()).at(-1)!;
+		expect(completion.sessionId).toBe("mem");
+		expect(completion).not.toHaveProperty("sessionFile");
+	}));
+
 	it("does not retry a step after a sibling hits a usage limit in the launch", () => withRun(async (h) => {
 		const limited = deferred();
 		h.runner.add({ match: "flaky", fail: "transient", times: 1 }, { match: "flaky" }, { match: "limited", fail: "usage_limit" });

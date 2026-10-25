@@ -184,6 +184,7 @@ All state lives under the repository's git common directory (`git rev-parse --gi
     scripts/<n>.js   each launched script, immutable
     journal.jsonl    the source of truth, append-only
     outputs/         large step outputs, transcripts, and check logs
+    sessions/        each agent session as a Pi session file
     lock             the holding session and its heartbeat
   worktrees/<runId>/ disposable worktrees for steps, integration, checks, and delivery
 refs/herder/<runId>/base             the commit the run started from
@@ -273,6 +274,14 @@ Each step attempt is also published as an external agent, which [Subagents](../s
 - **Entries:** one per attempt, with id `herder:<runId>:<stepKey>:<attempt>@<attempt start, ms>`, so a rerun never replaces a finished entry; source `herder`, and `ownerSessionId` set to the Pi session holding the run (other sessions do not show it). The group is `Herder <runId> · launch <n>`, the name is the task and label, and the description is the first line of the step's prompt.
 - **Lifecycle:** an entry appears once the attempt's agent session exists and carries that `AgentSession` while it is live; the session is removed when the runner disposes it. A settled step becomes `completed`, `failed` (also a failed gate, an error, or an attempt that is retried), or `stopped`. Finished entries stay 10 minutes. Abort, a lost lock, and session shutdown remove them at once.
 - **Updates:** a publisher replaces an entry's object on every change, then calls each listener with its id after every add, update, or remove.
+
+## Step sessions and run events
+
+Every agent session of a run is saved as a Pi session file in `runs/<runId>/sessions/`. Before its first prompt, the session gets a `pi-extensions.session-link` custom entry with `kind: "herder-step"`, the orchestrating session id, and the run id, step key and id, task, role, attempt, launch, and repository name. Verifier and curator sessions use their role name as the step key. `run.started` records the orchestrating session id; `step.completed` and `step.failed` record the attempt's `sessionId` and `sessionFile`.
+
+Another extension can load itself into step sessions without Herder importing it. It adds `{ name, extensionFactory }` to the Set at `globalThis[Symbol.for("pi-extensions.child-session-hooks")]`, creating the Set if it is missing. Herder appends each registered factory to the step session's extensions, binds them so they see `session_start`, and emits `session_shutdown` before it disposes the session. Steps load no other extensions.
+
+While a session holds a run, Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }`, where `repo` is the repository directory's name. It emits when the run starts or is resumed, and within 250 ms after journal appends.
 
 ## Development
 

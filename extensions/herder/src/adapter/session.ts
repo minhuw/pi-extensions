@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPiAgentRunner, modelRuntimeOf } from "../agents/session.ts";
 import { hashGoal } from "../artifacts/goal.ts";
 import { killAllChecks } from "../checks/runner.ts";
-import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_MS, STATUS_KEY } from "../config.ts";
+import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_MS, RUN_EVENT, RUN_EVENT_DEBOUNCE_MS, STATUS_KEY } from "../config.ts";
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
 import { activeRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { AgentRunner, Vcs } from "../types.ts";
@@ -28,7 +29,12 @@ export interface HerderOptions {
 	heartbeatMs?: number;
 	/** How long a stop waits for the launch (or a tool call) to settle before reporting "stopping". */
 	stopWaitMs?: number;
+	/** How long `herder:run` waits after a journal append to coalesce further appends. */
+	runEventDelayMs?: number;
 }
+
+/** The `herder:run` payload; `repo` is the basename of the repository's top-level directory. */
+export interface RunAnnouncement { runId: string; runDir: string; journalPath: string; goalPath: string; planPath: string; repo: string; title: string }
 
 /**
  * A run this session holds the lock for. `controller` aborts all of its work (abort, shutdown, lost lock); `ops` are the
@@ -40,6 +46,8 @@ export interface Held {
 	controller: AbortController; ops: Set<Promise<unknown>>; exclusive: Set<Promise<unknown>>; closing?: boolean;
 	runtime?: HerderRuntime; runner?: AgentRunner;
 	launch?: BackgroundLaunch; launching?: boolean;
+	/** Stops announcing journal appends, first sending one that is still pending. */
+	unannounce?: () => void;
 }
 
 export interface Session {
@@ -63,6 +71,11 @@ export function requireApproved(held: Held): RunState {
 	try { text = readFileSync(held.run.paths.goal, "utf8"); } catch {}
 	if (hashGoal(text) !== state.goal.sha256) throw new Error(`goal.md (${held.run.paths.goal}) changed after approval. Restore the approved text; a different goal needs a new run.`);
 	return state;
+}
+
+/** Basename of the repository's top level; that of the journaled path when git cannot answer. */
+function repoName(vcs: Vcs, run: RunStore): string {
+	try { return basename(vcs.topLevel()); } catch { return basename(run.state().repo ?? ""); }
 }
 
 export const busy = (held: Held) => Boolean(held.launch || held.launching || held.ops.size);
@@ -135,6 +148,7 @@ export class Herder {
 		}
 		if (s.held) this.release(s);
 		s.held = { runId, run, lock, vcs, controller: new AbortController(), ops: new Set(), exclusive: new Set() };
+		s.held.unannounce = this.#announce(s.held);
 		this.#heartbeat(s);
 		this.refresh(s);
 		return s.held;
@@ -190,7 +204,38 @@ export class Herder {
 			this.#warned = true;
 			s.ctx.ui.notify("Herder could not reach this session's model runtime; steps use one built from the agent directory, whose models and logins may differ.", "warning");
 		}
-		return createPiAgentRunner({ modelRuntime, inheritModel: () => s.ctx.model, inheritThinking: () => this.pi.getThinkingLevel(), outputs: run.outputs });
+		return createPiAgentRunner({
+			modelRuntime, inheritModel: () => s.ctx.model, inheritThinking: () => this.pi.getThinkingLevel(), outputs: run.outputs,
+			sessions: { dir: run.paths.sessions, runId: run.runId, repo: repoName(this.vcs(s), run), parentSessionId: s.id },
+		});
+	}
+
+	/** Emits `herder:run` now and after journal appends (debounced); returns the function that stops it. */
+	#announce(held: Held): () => void {
+		let payload: RunAnnouncement | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const emit = () => {
+			clearTimeout(timer);
+			timer = undefined;
+			try {
+				const { paths } = held.run;
+				payload ??= {
+					runId: held.runId, runDir: paths.dir, journalPath: paths.journal, goalPath: paths.goal, planPath: paths.plan,
+					repo: repoName(held.vcs, held.run), title: held.run.state().title ?? "",
+				};
+				this.pi.events.emit(RUN_EVENT, payload);
+			} catch {}
+		};
+		emit();
+		const off = held.run.journal.onAppend(() => {
+			if (timer) return;
+			timer = setTimeout(emit, this.options.runEventDelayMs ?? RUN_EVENT_DEBOUNCE_MS);
+			timer.unref?.();
+		});
+		return () => {
+			off();
+			if (timer) emit();
+		};
 	}
 
 	/**
@@ -260,6 +305,7 @@ export class Herder {
 		s.timer = undefined;
 		s.held = undefined;
 		this.refresh(s);
+		held?.unannounce?.();
 		try { held?.lock.release(); } catch {}
 	}
 
@@ -380,7 +426,10 @@ export class Herder {
 		this.board.clear(true);
 		s?.agents?.clear();
 		if (s) s.held = undefined;
-		const release = () => { try { held?.lock.release(); } catch {} };
+		const release = () => {
+			held?.unannounce?.();
+			try { held?.lock.release(); } catch {}
+		};
 		if (settled) release();
 		else void work!.finally(release);
 	}

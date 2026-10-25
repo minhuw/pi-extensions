@@ -105,7 +105,7 @@ export function startRun(herder: Herder, s: Session, goal: string, fromTool = fa
 	if (s.held && busy(s.held)) throw new Error(`Run ${s.held.runId} still has a launch or tool call running in this session.`);
 	const skill = skillText();
 	const title = titleOf(goal);
-	const run = createRun(commonDir, { title, base: head, repo: herder.vcs(s).topLevel(), goal: goalDraft(title) });
+	const run = createRun(commonDir, { title, base: head, repo: herder.vcs(s).topLevel(), goal: goalDraft(title), sessionId: s.id });
 	let held: Held | undefined;
 	try {
 		held = herder.hold(s, run.runId, run);

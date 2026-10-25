@@ -18,9 +18,17 @@ export interface CheckSpec { id: string; command: string; timeoutMs: number; int
 export interface CheckResult { id: string; commit: string; exitCode: number | null; timedOut: boolean; durationMs: number; tail: string; logRef: string; passed: boolean }
 export interface RoleDefinition { name: string; description: string; write: boolean; tools: string[]; model: string; thinking: string; prompt: string; sha256: string }
 
-/** `effort` overrides the role's thinking level for one step (`agent()`'s `effort` option). */
+/** Which Herder step an agent session belongs to; recorded in the session's link entry. */
+export interface StepIdentityInfo { key: string; id: string; task?: string; attempt: number; launch?: number }
+/** A step's agent session; `file` is absent for in-memory sessions. */
+export interface StepSessionInfo { id: string; file?: string }
+/**
+ * `effort` overrides the role's thinking level for one step (`agent()`'s `effort` option). `onSession` is called once
+ * the agent's session exists.
+ */
 export interface AgentRunRequest {
 	role: RoleDefinition; prompt: string; cwd: string; schema?: object; signal: AbortSignal; timeoutMs: number; stallMs: number; onEvent?: (kind: string) => void; effort?: string;
+	step?: StepIdentityInfo; onSession?: (session: StepSessionInfo) => void;
 	/** The attempt's live agent session (Pi's `AgentSession`, opaque here) once it exists, then undefined once disposed. */
 	onLiveSession?: (session: object | undefined) => void;
 }
@@ -146,15 +154,17 @@ export interface CriterionResult { id: string; status: CriterionStatus; evidence
 export interface Gap { kind: "missing" | "partial" | "contradicts" | "unrequested"; criteria: string[]; text: string }
 
 interface EventBase { v: 1; at: string }
-export interface RunStartedEvent extends EventBase { t: "run.started"; runId: string; title: string; base: string; runtime: string; repo: string }
+/** `sessionId` is the orchestrating Pi session. */
+export interface RunStartedEvent extends EventBase { t: "run.started"; runId: string; title: string; base: string; runtime: string; repo: string; sessionId?: string }
 export interface GoalApprovedEvent extends EventBase { t: "goal.approved"; sha256: string; checks: CheckSpec[]; approvedBy: "user" }
 export interface PlanUpdatedEvent extends EventBase { t: "plan.updated"; sha256: string }
 /** `head` is the integration head the launch starts from; `resumes` names the launch it replays (§6, deviation). */
 export interface ScriptLaunchedEvent extends EventBase { t: "script.launched"; launch: number; scriptSha256: string; args: unknown; head: string; resumes?: number }
 export interface ScriptSettledEvent extends EventBase { t: "script.settled"; launch: number; status: LaunchStatus; reused: number; changed: number; new: number; resultRef?: string; error?: string }
-export interface StepStartedEvent extends EventBase { t: "step.started"; key: string; id: string; occurrence: number; fingerprint: string; attempt: number; role: string; write: boolean; base: string; task?: string; launch?: number; label?: string; phase?: string }
-export interface StepCompletedEvent extends EventBase { t: "step.completed"; key: string; fingerprint: string; status: StepCompletedStatus; text?: string; textRef?: string; data?: unknown; commit?: string; ref?: string; checks?: CheckResult[]; usage?: Usage; warning?: string; transcriptRef?: string }
-export interface StepFailedEvent extends EventBase { t: "step.failed"; key: string; fingerprint: string; attempt: number; errorClass: ErrorClass | "stopped"; message: string; final: boolean; transcriptRef?: string }
+export interface StepStartedEvent extends EventBase { t: "step.started"; key: string; id: string; occurrence: number; fingerprint: string; attempt: number; role: string; write: boolean; base: string; task?: string; launch?: number; label?: string; phase?: string; sessionId?: string; sessionFile?: string }
+/** `sessionId` and `sessionFile` name the attempt's Pi session once it exists. */
+export interface StepCompletedEvent extends EventBase { t: "step.completed"; key: string; fingerprint: string; status: StepCompletedStatus; text?: string; textRef?: string; data?: unknown; commit?: string; ref?: string; checks?: CheckResult[]; usage?: Usage; warning?: string; transcriptRef?: string; sessionId?: string; sessionFile?: string }
+export interface StepFailedEvent extends EventBase { t: "step.failed"; key: string; fingerprint: string; attempt: number; errorClass: ErrorClass | "stopped"; message: string; final: boolean; transcriptRef?: string; sessionId?: string; sessionFile?: string }
 /** `commit` replaces the spec's second `at` field, which would collide with the event timestamp (deviation). */
 export interface CheckCompletedEvent extends EventBase { t: "check.completed"; checkId: string; commit: string; exitCode: number | null; timedOut: boolean; durationMs: number; logRef: string; tail: string; purpose?: CheckPurpose; key?: string }
 export interface IntegrateCompletedEvent extends EventBase { t: "integrate.completed"; key: string; from: string; source: string; head: string; tree: string; message: string; task?: string; checks: CheckResult[] }

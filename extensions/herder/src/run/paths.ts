@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { HERDER_DIR, REF_ROOT } from "../config.ts";
 import { isStepKey } from "../journal/keys.ts";
 
-export interface RunPaths { root: string; dir: string; goal: string; plan: string; progress: string; notes: string; scripts: string; journal: string; outputs: string; lock: string; worktrees: string }
+export interface RunPaths { root: string; dir: string; goal: string; plan: string; progress: string; notes: string; scripts: string; journal: string; outputs: string; lock: string; sessions: string; worktrees: string }
 
 const RUN_ID = /^\d{8}-\d{6}-[0-9a-f]{4}$/;
 const SLOT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
@@ -26,6 +26,7 @@ export function runPaths(commonDir: string, runId: string): RunPaths {
 		root, dir,
 		goal: join(dir, "goal.md"), plan: join(dir, "plan.md"), progress: join(dir, "progress.md"), notes: join(dir, "notes.md"),
 		scripts: join(dir, "scripts"), journal: join(dir, "journal.jsonl"), outputs: join(dir, "outputs"), lock: join(dir, "lock"),
+		sessions: join(dir, "sessions"),
 		worktrees: join(root, "worktrees", runId),
 	};
 }

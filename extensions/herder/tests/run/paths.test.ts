@@ -22,7 +22,7 @@ describe("paths", () => {
 			root: "/repo/.git/herder", dir,
 			goal: join(dir, "goal.md"), plan: join(dir, "plan.md"), progress: join(dir, "progress.md"), notes: join(dir, "notes.md"),
 			scripts: join(dir, "scripts"), journal: join(dir, "journal.jsonl"), outputs: join(dir, "outputs"), lock: join(dir, "lock"),
-			worktrees: "/repo/.git/herder/worktrees/20260102-030405-0a1b",
+			sessions: join(dir, "sessions"), worktrees: "/repo/.git/herder/worktrees/20260102-030405-0a1b",
 		});
 		expect(worktreePath(common, runId, "integration")).toBe("/repo/.git/herder/worktrees/20260102-030405-0a1b/integration");
 		expect(worktreePath(common, runId, stepKey("../x", 0))).toMatch(/^\/repo\/\.git\/herder\/worktrees\/20260102-030405-0a1b\/[^/]+$/);

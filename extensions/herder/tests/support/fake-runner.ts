@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
-import { AgentError, type AgentRunner, type AgentRunRequest, type AgentRunResult, type ErrorClass, type RoleDefinition, type Usage } from "../../src/types.ts";
+import { AgentError, type AgentRunner, type AgentRunRequest, type AgentRunResult, type ErrorClass, type RoleDefinition, type StepSessionInfo, type Usage } from "../../src/types.ts";
 
 type Value<T> = T | ((request: AgentRunRequest, call: number) => T);
 
@@ -27,6 +27,8 @@ export interface FakeRule {
 	waitFor?: Promise<unknown>;
 	/** Uses before the rule is exhausted; unlimited by default. */
 	times?: number;
+	/** Reported through `request.onSession` before anything else, as a Pi session would be. */
+	session?: Value<StepSessionInfo>;
 }
 
 export interface FakeCall { prompt: string; role: string; cwd: string; schema?: object; rule: number }
@@ -60,6 +62,8 @@ export class FakeRunner implements AgentRunner {
 		this.live++;
 		this.maxConcurrent = Math.max(this.maxConcurrent, this.live);
 		try {
+			const session = resolve(rule.session, request, call);
+			if (session) request.onSession?.(session);
 			request.onEvent?.("agent_start");
 			if (rule.waitFor) await abortable(rule.waitFor, request.signal);
 			if (rule.delayMs) await abortable(sleep(rule.delayMs), request.signal);

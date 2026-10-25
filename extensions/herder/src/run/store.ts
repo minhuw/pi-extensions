@@ -75,8 +75,8 @@ function store(runId: string, paths: RunPaths): RunStore {
 	return self;
 }
 
-/** Creates the run layout, journals `run.started`, and renders progress.md. Does not touch git. */
-export function createRun(commonDir: string, init: { title: string; base: string; repo: string; goal?: string; runId?: string }): RunStore {
+/** Creates the run layout, journals `run.started`, and renders progress.md. Does not touch git. `sessionId` is the orchestrating Pi session. */
+export function createRun(commonDir: string, init: { title: string; base: string; repo: string; goal?: string; runId?: string; sessionId?: string }): RunStore {
 	const runId = init.runId ?? newRunId();
 	const paths = runPaths(commonDir, runId);
 	mkdirSync(join(paths.dir, ".."), { recursive: true });
@@ -88,7 +88,7 @@ export function createRun(commonDir: string, init: { title: string; base: string
 	writeSynced(paths.plan, "", "wx");
 	writeSynced(paths.notes, "", "wx");
 	const run = store(runId, paths);
-	run.journal.append({ t: "run.started", runId, title: init.title, base: init.base, runtime: HERDER_VERSION, repo: init.repo });
+	run.journal.append({ t: "run.started", runId, title: init.title, base: init.base, runtime: HERDER_VERSION, repo: init.repo, sessionId: init.sessionId });
 	run.renderProgress();
 	return run;
 }

@@ -9,12 +9,13 @@ const checksSummary = (checks: readonly CheckResult[] | undefined) => {
 	const failed = checks.filter((check) => !check.passed).map((check) => check.id);
 	return failed.length ? `; checks failed: ${failed.join(", ")}` : `; ${checks.length} check(s) passed`;
 };
+const sessionSummary = (sessionId: string | undefined) => (sessionId ? `; session ${sessionId}` : "");
 
 function describe(event: HistoryEvent): string {
 	switch (event.t) {
 		case "script.settled": return `launch ${event.launch} ${event.status} (reused ${event.reused}, changed ${event.changed}, new ${event.new})${event.error ? `: ${inline(event.error)}` : ""}`;
-		case "step.completed": return `step \`${event.key}\` ${event.status}${event.commit ? ` at ${short(event.commit)}` : ""}${checksSummary(event.checks)}${event.warning ? `; warning: ${inline(event.warning)}` : ""}`;
-		case "step.failed": return `step \`${event.key}\` attempt ${event.attempt} ${event.final ? "failed" : "failed (will retry)"}: ${event.errorClass}: ${inline(event.message)}`;
+		case "step.completed": return `step \`${event.key}\` ${event.status}${event.commit ? ` at ${short(event.commit)}` : ""}${checksSummary(event.checks)}${event.warning ? `; warning: ${inline(event.warning)}` : ""}${sessionSummary(event.sessionId)}`;
+		case "step.failed": return `step \`${event.key}\` attempt ${event.attempt} ${event.final ? "failed" : "failed (will retry)"}: ${event.errorClass}: ${inline(event.message)}${sessionSummary(event.sessionId)}`;
 		case "check.completed": return `check \`${event.checkId}\` ${event.exitCode === 0 && !event.timedOut ? "passed" : event.timedOut ? "timed out" : `failed (exit ${event.exitCode})`} at ${short(event.commit)}${event.purpose ? ` (${event.purpose})` : ""}`;
 		case "integrate.completed": return `integrated ${short(event.source)}${event.task ? ` for ${event.task}` : ""} → ${short(event.head)}: ${inline(event.message)}`;
 		case "integrate.failed": return `integration of ${short(event.source)}${event.task ? ` for ${event.task}` : ""} failed: ${event.reason}${event.conflicts?.length ? ` (${event.conflicts.join(", ")})` : ""}${checksSummary(event.checks)}`;

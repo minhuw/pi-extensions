@@ -8,7 +8,7 @@ import type { RunStore } from "../run/store.ts";
 import { AgentError, noFaults } from "../types.ts";
 import type {
 	AgentOptions, AgentRunner, AgentRunResult, CheckResult, CheckSpec, ErrorClass, FaultPoint, Faults, Limits, RoleDefinition,
-	StepCompletedEvent, StepResult, Vcs,
+	StepCompletedEvent, StepResult, StepSessionInfo, Vcs,
 } from "../types.ts";
 import { lookupStep, resolveIdentity, stepMessage, TRAILER_REPLY, type StepIdentity } from "./cache.ts";
 
@@ -64,7 +64,11 @@ class Crash {
 	constructor(error: unknown) { this.error = error; }
 }
 
-interface Failure { errorClass: ErrorClass | "stopped"; message: string; transcriptRef?: string }
+interface Failure { errorClass: ErrorClass | "stopped"; message: string; transcriptRef?: string; sessionId?: string; sessionFile?: string }
+
+/** Journal fields naming an attempt's Pi session; none before the session exists. */
+const sessionFields = (session: StepSessionInfo | undefined): { sessionId?: string; sessionFile?: string } =>
+	session ? { sessionId: session.id, ...(session.file !== undefined && { sessionFile: session.file }) } : {};
 
 const defaultSleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
 	if (signal?.aborted) return reject(signal.reason);
@@ -173,7 +177,7 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 			activity({ key, label, phase, task: opts.task, state: "running", role: role.name, prompt, attempt, startedAt, ...(session && { session }) });
 		};
 		const failed = (attempt: number, failure: Failure, final: boolean) => {
-			store.journal.append({ t: "step.failed", key, fingerprint, attempt, errorClass: failure.errorClass, message: failure.message, final, transcriptRef: failure.transcriptRef });
+			store.journal.append({ t: "step.failed", key, fingerprint, attempt, errorClass: failure.errorClass, message: failure.message, final, transcriptRef: failure.transcriptRef, sessionId: failure.sessionId, sessionFile: failure.sessionFile });
 			progress();
 		};
 		/** `attempt` is the attempt that will not start; journaled only when an earlier attempt was. */
@@ -190,6 +194,8 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 
 		/** One attempt in a fresh worktree at `base`; resolves to the step's result or the attempt's failure. */
 		async function attempt(number: number): Promise<StepResult | Failure> {
+			let session: StepSessionInfo | undefined;
+			const failure = (error: unknown): Failure => ({ ...classify(error), ...sessionFields(session) });
 			removeWorktree(path);
 			vcs.addWorktree(path, base);
 			try {
@@ -211,9 +217,11 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 						role, prompt, cwd: path, schema: opts.schema, signal, onEvent, effort: opts.effort,
 						onLiveSession: (session) => running(number, { session }),
 						timeoutMs: opts.timeoutMs ?? limits.timeoutMs, stallMs: opts.stallMs ?? limits.stallMs,
+						step: { key, id: identity.id, task: opts.task, attempt: number, launch: ctx.launch },
+						onSession: (info) => { session = info; },
 					});
 				} catch (error) {
-					return classify(error);
+					return failure(error);
 				}
 				hit("after-agent", key);
 				let commit: string | null = null;
@@ -240,20 +248,20 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 						checks = await runGates(gates, path, commit ?? base, key, signal);
 					} catch (error) {
 						if (error instanceof Crash) throw error;
-						return classify(error);
+						return failure(error);
 					}
 				}
 				const status = checks?.some((check) => !check.passed) ? "gate_failed" : write && !commit ? "no_changes" : "ok";
 				const event = store.journal.append({
 					t: "step.completed", key, fingerprint, status, ...storedText(reply.text), data: reply.data, commit: commit ?? undefined,
-					ref: commit ? ref : undefined, checks, usage: reply.usage, warning, transcriptRef: reply.transcriptRef,
+					ref: commit ? ref : undefined, checks, usage: reply.usage, warning, transcriptRef: reply.transcriptRef, ...sessionFields(session),
 				});
 				progress();
 				hit("after-journal", key);
 				return fromCompletion(event, false, reply.text);
 			} catch (error) {
 				if (error instanceof Crash) throw error;
-				return classify(error);
+				return failure(error);
 			} finally {
 				removeWorktree(path);
 			}

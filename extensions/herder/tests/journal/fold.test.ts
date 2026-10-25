@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { isKnownEvent } from "../../src/journal/events.ts";
 import { findCompletion, findIntegration, fold } from "../../src/journal/fold.ts";
+import { renderProgress } from "../../src/journal/render.ts";
 import type { JournalEvent, JournalInput } from "../../src/types.ts";
 import { journalOf, sampleJournal, started } from "./sample.ts";
 
@@ -57,6 +59,44 @@ describe("fold", () => {
 		expect(started.delivery).toBeUndefined();
 		expect(fold(journalOf([run, { t: "run.finished", status: "abandoned", reason: "user" }]))).toMatchObject({ status: "abandoned", finished: { reason: "user" } });
 		expect(fold([]).status).toBe("drafting");
+	});
+
+	it("records the orchestrating session and each step's latest session", () => {
+		const state = fold(journalOf([
+			{ t: "run.started", runId: "r", title: "t", base: "b0", runtime: "0.1.0", repo: "/r", sessionId: "main" },
+			started("s-0", "f1", 1),
+			{ t: "step.failed", key: "s-0", fingerprint: "f1", attempt: 1, errorClass: "transient", message: "net", final: false, sessionId: "a1", sessionFile: "/s/a1.jsonl" },
+			started("s-0", "f1", 2),
+			{ t: "step.completed", key: "s-0", fingerprint: "f1", status: "ok", sessionId: "a2", sessionFile: "/s/a2.jsonl" },
+			{ ...started("r-0", "f2", 1), sessionId: "b1", sessionFile: "/s/b1.jsonl" } as JournalInput,
+			{ t: "step.completed", key: "r-0", fingerprint: "f2", status: "ok" },
+		]));
+		expect(state.sessionId).toBe("main");
+		expect(state.steps.get("s-0")).toMatchObject({ status: "ok", sessionId: "a2", sessionFile: "/s/a2.jsonl" });
+		expect(state.steps.get("r-0")).toMatchObject({ status: "ok", sessionId: "b1", sessionFile: "/s/b1.jsonl" });
+	});
+
+	it("folds a journal written before session fields existed", () => {
+		const lines = [
+			'{"v":1,"t":"run.started","at":"2026-01-01T00:00:00.000Z","runId":"20260101-000000-abcd","title":"old","base":"b0","runtime":"0.1.0","repo":"/repo"}',
+			'{"v":1,"t":"step.started","at":"2026-01-01T00:00:01.000Z","key":"impl-0","id":"impl","occurrence":0,"fingerprint":"f1","attempt":1,"role":"worker","write":true,"base":"b0","task":"T1","launch":1}',
+			'{"v":1,"t":"step.failed","at":"2026-01-01T00:00:02.000Z","key":"impl-0","fingerprint":"f1","attempt":1,"errorClass":"transient","message":"net","final":false}',
+			'{"v":1,"t":"step.started","at":"2026-01-01T00:00:03.000Z","key":"impl-0","id":"impl","occurrence":0,"fingerprint":"f1","attempt":2,"role":"worker","write":true,"base":"b0","task":"T1","launch":1}',
+			'{"v":1,"t":"step.completed","at":"2026-01-01T00:00:04.000Z","key":"impl-0","fingerprint":"f1","status":"ok","text":"done","commit":"c1"}',
+		];
+		const events = lines.map((line) => JSON.parse(line) as JournalEvent);
+		expect(events.every(isKnownEvent)).toBe(true);
+		const state = fold(events);
+		expect(state).toMatchObject({ runId: "20260101-000000-abcd", title: "old", liveAgentStarts: 1 });
+		expect(state.sessionId).toBeUndefined();
+		const step = state.steps.get("impl-0")!;
+		expect(step).toMatchObject({ status: "ok", started: { attempt: 2 }, completed: { commit: "c1" } });
+		expect(step).not.toHaveProperty("sessionId");
+		expect(step).not.toHaveProperty("sessionFile");
+		const text = renderProgress(state);
+		expect(text).toContain("1. 2026-01-01T00:00:02.000Z step `impl-0` attempt 1 failed (will retry): transient: net\n");
+		expect(text).toContain("2. 2026-01-01T00:00:04.000Z step `impl-0` ok at c1\n");
+		expect(text).not.toContain("session");
 	});
 
 	it("ignores unknown event types and fields and is deterministic", () => {

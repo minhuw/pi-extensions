@@ -1,13 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxProviderHandle, type FauxResponseStep } from "@earendil-works/pi-ai/providers/faux";
-import { AgentSession, ModelRegistry, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { AgentSession, ModelRegistry, ModelRuntime, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPiAgentRunner, modelRuntimeOf, type PiRunnerOptions } from "../../src/agents/session.ts";
-import { AgentError, type AgentRunRequest, type ErrorClass, type OutputStore } from "../../src/types.ts";
+import { createRun } from "../../src/run/store.ts";
+import { AgentError, type AgentRunRequest, type ErrorClass, type OutputStore, type StepSessionInfo } from "../../src/types.ts";
 import { fakeRole } from "../support/fake-runner.ts";
 
 let dir: string;
@@ -303,6 +304,66 @@ describe("Pi agent runner", () => {
 			expect(dispose).toHaveBeenCalledTimes(3);
 		} finally {
 			dispose.mockRestore();
+		}
+	});
+
+	it("persists the session under the run's sessions directory with the link entry before the prompt", async () => {
+		const run = createRun(join(dir, "common"), { title: "t", base: "b0", repo: join(dir, "myrepo") });
+		const sessions = { dir: run.paths.sessions, runId: run.runId, repo: "myrepo", parentSessionId: "main-session" };
+		const seen: StepSessionInfo[] = [];
+		faux.setResponses([fauxAssistantMessage("ok")]);
+		await runner({ sessions }).run(request({ step: { key: "impl-0", id: "impl", task: "T1", attempt: 2, launch: 1 }, onSession: (info) => seen.push(info) }));
+		const files = readdirSync(run.paths.sessions);
+		expect(files).toHaveLength(1);
+		const file = join(run.paths.sessions, files[0]!);
+		expect(seen).toEqual([{ id: expect.any(String), file }]);
+		const entries = readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		expect(entries[0]).toMatchObject({ type: "session", id: seen[0]!.id });
+		const link = entries.findIndex((entry) => entry.type === "custom" && entry.customType === "pi-extensions.session-link");
+		const prompt = entries.findIndex((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(link).toBeGreaterThan(0);
+		expect(link).toBeLessThan(prompt);
+		expect(entries[link].data).toEqual({
+			kind: "herder-step", parentSessionId: "main-session", agentType: "worker", description: "T1",
+			herder: { runId: run.runId, stepKey: "impl-0", stepId: "impl", task: "T1", role: "worker", attempt: 2, launch: 1, repo: "myrepo" },
+		});
+		expect(entries.filter((entry) => entry.type === "message" && entry.message.role !== "system").map((entry) => entry.message.role)).toEqual(["user", "assistant"]);
+	});
+
+	it("keeps sessions in memory without a run and links agents without a step to their role", async () => {
+		const seen: StepSessionInfo[] = [];
+		faux.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok")]);
+		await runner().run(request({ onSession: (info) => seen.push(info) }));
+		expect(seen).toEqual([{ id: expect.any(String) }]);
+		const sessions = join(dir, "sessions");
+		await runner({ sessions: { dir: sessions, runId: "20260101-000000-abcd", repo: "r" } }).run(request({ role: fakeRole("verifier") }));
+		const [file] = readdirSync(sessions);
+		const link = readFileSync(join(sessions, file!), "utf8").trim().split("\n").map((line) => JSON.parse(line)).find((entry) => entry.customType === "pi-extensions.session-link");
+		expect(link.data).toEqual({ kind: "herder-step", agentType: "verifier", herder: { runId: "20260101-000000-abcd", stepKey: "verifier", stepId: "verifier", role: "verifier", attempt: 1, repo: "r" } });
+	});
+
+	it("loads registered child-session hooks last, binds them, and shuts them down", async () => {
+		const key = Symbol.for("pi-extensions.child-session-hooks");
+		const global = globalThis as Record<symbol, unknown>;
+		const previous = global[key];
+		const seen: string[] = [];
+		const hook = (pi: ExtensionAPI) => {
+			pi.on("session_start", (_event, ctx) => { seen.push(`start:${ctx.sessionManager.getSessionFile() ? "file" : "memory"}`); });
+			pi.on("before_provider_request", () => { seen.push("request"); });
+			pi.on("turn_end", () => { seen.push("turn"); });
+			pi.on("session_shutdown", () => { seen.push("shutdown"); });
+		};
+		global[key] = new Set<unknown>([{ name: "test-hook", extensionFactory: hook }, { name: "broken" }]);
+		try {
+			faux.setResponses([fauxAssistantMessage("ok")]);
+			const result = await runner({ sessions: { dir: join(dir, "sessions"), runId: "20260101-000000-abcd", repo: "r" } }).run(request());
+			expect(result.text).toBe("ok");
+			expect(seen[0]).toBe("start:file");
+			expect(seen).toContain("turn");
+			expect(seen.at(-1)).toBe("shutdown");
+		} finally {
+			if (previous === undefined) delete global[key];
+			else global[key] = previous;
 		}
 	});
 

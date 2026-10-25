@@ -27,6 +27,18 @@ describe("journal", () => {
 		expect(readFileSync(journal.path, "utf8").split("\n")).toHaveLength(3);
 	});
 
+	it("notifies append listeners after the line is durable until they unsubscribe", () => {
+		const journal = new Journal(journalPath());
+		const seen: string[] = [];
+		const off = journal.onAppend((event) => seen.push(`${event.t}:${readJournal(journal.path).length}`));
+		journal.onAppend(() => { throw new Error("listener failure"); });
+		journal.append({ t: "decision.recorded", question: "q", answer: "a" });
+		off();
+		journal.append({ t: "decision.recorded", question: "q2", answer: "a2" });
+		expect(seen).toEqual(["decision.recorded:1"]);
+		expect(journal.read()).toHaveLength(2);
+	});
+
 	it("reads a missing journal as empty", () => {
 		expect(readJournal(journalPath())).toEqual([]);
 	});
