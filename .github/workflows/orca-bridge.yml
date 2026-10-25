@@ -6,7 +6,6 @@ on:
       - .github/workflows/orca-bridge.yml
       - extensions/orca-bridge/**
       - extensions/subagents/**
-      - extensions/herder/adapters/index.ts
       - package.json
       - package-lock.json
       - tsconfig.json
@@ -17,7 +16,6 @@ on:
       - .github/workflows/orca-bridge.yml
       - extensions/orca-bridge/**
       - extensions/subagents/**
-      - extensions/herder/adapters/index.ts
       - package.json
       - package-lock.json
       - tsconfig.json

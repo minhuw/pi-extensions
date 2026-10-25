@@ -177,7 +177,7 @@ export function prompt(state: State, kind: "prepare" | "iterate"): string {
 		"Describe the exact workload (for compilation: cold vs incremental build, cache state, inputs and build command), warmup/setup, measurement units, repetitions/noise, editable implementation scope, and correctness checks. Prefer three repetitions unless the workload makes that impractical.",
 		"The harness must emit exactly one METRIC name=value line per declared metric per run. Call autoresearch_baseline with your methodology, command, harness files, metrics, repetition count, and optional checkCommand. That tool executes the baseline and records the measured samples.",
 		"Then explain the methodology and initial results to the user, ask whether they match what the user intends, and stop. The user must run /autoresearch approve before optimization starts. Never approve on their behalf or start optimization iterations during setup.",
-		"Use autoresearch_update for concise progress messages. Existing tool permissions apply. Do not touch manager-owned .herder directories or discard unrelated user changes.",
+		"Use autoresearch_update for concise progress messages. Existing tool permissions apply. Do not discard unrelated user changes.",
 		c.reason ? `User feedback: ${c.reason}` : "",
 	].filter(Boolean).join("\n\n");
 	return [

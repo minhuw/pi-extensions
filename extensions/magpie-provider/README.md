@@ -66,7 +66,7 @@ Pi's native MCP extension owns connection startup and cleanup. A same-name `mcp.
 
 `--no-mcp` disables MCP for a run. `/mcp` shows the session registration; `pi mcp list` does not, because shell MCP commands do not load extensions. No configuration files are created or edited by this extension.
 
-Herder's Searcher uses the host registration when no user-level entry exists, while other Herder roles remain isolated. New ordinary Subagents load it when both the Magpie provider and native MCP extensions are enabled; `isolated: true`, `extensions: false`, and extension/tool exclusions still apply. Already-running children retain their own connection until they finish; newly launched children use the current login.
+New ordinary Subagents load it when both the Magpie provider and native MCP extensions are enabled; `isolated: true`, `extensions: false`, and extension/tool exclusions still apply. Already-running children retain their own connection until they finish; newly launched children use the current login.
 
 ## Refresh and failures
 

@@ -18,7 +18,7 @@ If the target is already known, use a direct tool — `read` for a known path, `
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
 - Individual agents run in the foreground by default. Use `run_in_background: true` only when explicitly requested. Background agents notify on completion; do not sleep or poll while waiting.
-- Use SubagentWorkflow only when the user explicitly opts into a multi-agent workflow. It coexists with Herder; never substitute it for a Herder plan.
+- Use SubagentWorkflow only when the user explicitly opts into a multi-agent workflow.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.

@@ -45,7 +45,7 @@ Flags can appear before the prompt, beside the leading/trailing interval, or aft
 
 If there is exactly one live loop, its management target can be omitted. Otherwise supply its name, id, or `all`. At most 20 live loops and 100 total loop records are retained in the latest snapshot. Terminal history is pruned first.
 
-Three consecutive failed iterations stop a loop. Context usage at or above 90% pauses a loop before dispatch; compact and resume it. Completion text and convergence are convenience stop conditions, not independent verification that code or external state is correct. For acceptance criteria, include concrete checks in the task or use Herder's verification workflow.
+Three consecutive failed iterations stop a loop. Context usage at or above 90% pauses a loop before dispatch; compact and resume it. Completion text and convergence are convenience stop conditions, not independent verification that code or external state is correct. For acceptance criteria, include concrete checks in the task.
 
 Pause and stop leave an already-started response free to finish, while preventing further passes. Escape aborts and pauses the loop that owns the interrupted run. Aborting an unrelated human turn does not disable scheduled loops. Human input taking over an iteration pauses that loop and removes model control of it. A canceled dispatch still being prepared by Pi is aborted before it reaches the model. An iteration that fails to start within 30 seconds pauses for explicit recovery.
 
@@ -92,7 +92,7 @@ This is an independent implementation informed by the sources below.
 | [pi-autoresearch](https://www.npmjs.com/package/pi-autoresearch) | Installed source, `1.9.0` | Idle and pending-message checks, bounded continuation, and durable progress outside model context. Its experiment-specific commit/revert policy stays in autoresearch. |
 | [mikefreno/ralpi](https://github.com/mikefreno/ralpi) | `c1a65f68acdf8e18a15ee7bcf03e299c57ac22cf` | Per-run ownership and recoverable progress. |
 
-The Ralph implementations also offer fresh child sessions, DAGs, worktrees, review agents, and shell hooks. This extension focuses on recurring prompts in the current session; Herder, Subagents, and autoresearch already cover richer execution workflows in this collection. Fuzzy similarity, regex stop conditions, project-shared persistence, and shell hooks are outside this implementation.
+The Ralph implementations also offer fresh child sessions, DAGs, worktrees, review agents, and shell hooks. This extension focuses on recurring prompts in the current session; Subagents and autoresearch already cover richer execution workflows in this collection. Fuzzy similarity, regex stop conditions, project-shared persistence, and shell hooks are outside this implementation.
 
 ## Development
 

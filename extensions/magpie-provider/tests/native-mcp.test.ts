@@ -9,7 +9,7 @@ import {
 	type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import magpie from "../index.ts";
-import { magpieServer } from "../../herder/tests/unit/adapters/helpers/magpie-server.ts";
+import { magpieServer } from "./helpers/magpie-server.ts";
 
 it("saved login activates native search/fetch in the same session without an MCP file; logout withdraws them", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "magpie-native-mcp-"));

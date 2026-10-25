@@ -1830,7 +1830,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
 - Individual agents run in the foreground by default. Use \`run_in_background: true\` only when explicitly requested. Background agents notify on completion; do not sleep or poll while waiting.
-- Use SubagentWorkflow only when the user explicitly opts into a multi-agent workflow. It coexists with Herder; never substitute it for a Herder plan.
+- Use SubagentWorkflow only when the user explicitly opts into a multi-agent workflow.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
@@ -1907,7 +1907,7 @@ Terse command-style prompts produce shallow, generic work.
   const agentTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
-    description: "Individual agents run foreground unless background is explicitly requested. Scripted multi-agent workflows require explicit user opt-in; do not replace Herder orchestration.\n\n" + agentToolDescription,
+    description: "Individual agents run foreground unless background is explicitly requested. Scripted multi-agent workflows require explicit user opt-in.\n\n" + agentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
@@ -2835,7 +2835,7 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
-    description: "Use only when the user explicitly opts into a multi-agent workflow. For individual delegation use Agent in the foreground. Coexists with Herder: do not replace a Herder plan.\n\n" + renderToolDescriptionTemplate(fullWorkflowToolDescription),
+    description: "Use only when the user explicitly opts into a multi-agent workflow. For individual delegation use Agent in the foreground.\n\n" + renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
       "Only after explicit user opt-in to a multi-agent workflow: use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",

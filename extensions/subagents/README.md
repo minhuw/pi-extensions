@@ -52,7 +52,7 @@ Settings live in the global or project `subagents.json`; see [upstream configura
 
 Default tools: `Agent`, `get_subagent_result`, and `steer_subagent`. Use `/agents` for the fleet and settings. Custom agent definitions can override embedded names; upstream also supports mentions. `SubagentWorkflow` and its inspector are available only after explicit configuration opt-in.
 
-Select an existing agent type with `subagent_type` (`agentType` in workflows). Its user-configured frontmatter `model` is authoritative; without one, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type's model, edit its agent definition. Trusted external hosts such as Herder retain their own model bindings.
+Select an existing agent type with `subagent_type` (`agentType` in workflows). Its user-configured frontmatter `model` is authoritative; without one, the child inherits the current parent model. Agent tools and workflow scripts reject `model` overrides, including stale saved scripts. To change a type's model, edit its agent definition. Trusted external hosts retain their own model bindings.
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
@@ -77,11 +77,9 @@ service_tier: fast
 
 Otherwise the `Agent` tool can pass `service_tier`. `fast` maps to provider `priority`; `standard` maps to `default`. Raw `priority`, `default`, `flex`, and `auto` are also supported. Compatible APIs are `openai-responses`, `openai-codex-responses`, and `cliproxyapi-codex-responses`. An unsupported explicit tool override is rejected; an incompatible frontmatter default is warned about and not applied. See `src/service-tier.ts`.
 
-### Workflows versus Herder
+### Workflows
 
-Scripted workflows are disabled by default because validation errors can be swallowed as successful empty results, and reloads lose the in-memory run records required for resume. If explicitly enabled, `SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed while the run record remains available. Scripts are not Herder plans.
-
-Herder separately owns approved scope, persistent dispatch budgets, independent review, dependency-aware integration, and exact-tree final verification. Neither extension delegates authority to the other; installing Workflow does not change Herder's execution protocol.
+Scripted workflows are disabled by default because validation errors can be swallowed as successful empty results, and reloads lose the in-memory run records required for resume. If explicitly enabled, `SubagentWorkflow` executes JavaScript that composes agents with pipelines, parallel calls, structured results, and optional test gates. Saved scripts can be reused, and completed call prefixes can be replayed while the run record remains available.
 
 ## Verification
 

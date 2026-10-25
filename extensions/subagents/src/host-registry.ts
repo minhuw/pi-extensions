@@ -31,7 +31,7 @@ export interface SubagentHostSpawnRequest {
   maxTurns?: number;
   signal?: AbortSignal;
   metadata?: SubagentHostMetadata;
-  /** Herder sets this unconditionally; the host also fails closed if it is false. */
+  /** Callers must set this; the host fails closed if it is false. */
   isolated: true;
   /** Stable foreground working directory selected by the caller. */
   cwd: string;

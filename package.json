@@ -1,13 +1,12 @@
 {
 	"name": "pi-extensions",
 	"version": "0.2.0",
-	"description": "Maintained Pi extensions for deterministic multi-agent execution, academic writing, status telemetry, native compaction, and sub-agents",
+	"description": "Maintained Pi extensions for academic writing, status telemetry, native compaction, and sub-agents",
 	"type": "module",
 	"license": "MIT",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
-		"herder",
 		"multi-agent",
 		"subagents",
 		"magpie",
@@ -19,7 +18,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:writer",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
@@ -31,13 +30,10 @@
 		"test:molt": "vitest run extensions/molt",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
-		"test:herder": "node extensions/herder/tests/run-smoke.ts",
-		"test:e2e:herder": "HERDER_LIVE_E2E=1 node --experimental-strip-types --test extensions/herder/tests/e2e/live-hosts.test.ts",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"
 	},
 	"dependencies": {
-		"@ff-labs/pi-fff": "0.11.0",
 		"croner": "^10.0.1",
 		"nanoid": "^5.1.16"
 	},
@@ -83,7 +79,6 @@
 			"./extensions/loop/index.ts",
 			"./extensions/molt/index.ts",
 			"./extensions/autoresearch/index.ts",
-			"./extensions/herder/adapters/index.ts",
 			"./extensions/subagents/src/index.ts"
 		]
 	}

@@ -7,7 +7,7 @@
  *   priority | default | flex | auto
  *
  * Application: wrap the child session's streamFunction so every request gets
- * the exact tier (mirrors Herder's applyServiceTier). Only APIs that accept
+ * the exact tier. Only APIs that accept
  * serviceTier / service_tier are supported.
  */
 

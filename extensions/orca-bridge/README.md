@@ -1,6 +1,6 @@
 # Orca bridge
 
-A dedicated Pi ≥1.3 extension that keeps Orca busy while the main agent or background extension work remains active. It maintains Orca-compatible terminal titles, provides `/orca-status` diagnostics, and adds `/orca-open` and `/orca-diff` navigation commands. It has no runtime dependency on Herder or Subagents.
+A dedicated Pi ≥1.3 extension that keeps Orca busy while the main agent or background extension work remains active. It maintains Orca-compatible terminal titles, provides `/orca-status` diagnostics, and adds `/orca-open` and `/orca-diff` navigation commands. It has no runtime dependency on Subagents.
 
 The collection registers this extension automatically. It activates only inside an Orca pane. Load `extensions/orca-bridge/index.ts` through Pi's extension configuration when using it separately, or try it directly:
 
