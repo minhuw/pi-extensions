@@ -268,6 +268,12 @@ The `herder` skill holds the orchestration decision table, the `goal.md` and `pl
 
 While a session holds a run, the footer shows a status such as `herder: T2 integrate · 3/5 tasks`. Running steps are published as activity snapshots, which [Orca Bridge](../orca-bridge/README.md) shows in its pane activity. Both are cleared on shutdown.
 
+Each step attempt is also published as an external agent, which [Subagents](../subagents/README.md) lists in its widget and `/agents` list and opens in its live conversation viewer. Extensions do not import each other, so the registry lives on `globalThis[Symbol.for("pi-extensions.external-agents")]` as `{ agents: Map<id, ExternalAgent>, listeners: Set<(id) => void> }`; whoever needs it first creates it. Herder's copy of the contract is `src/adapter/external-agents.ts`; Subagents keeps an identical one.
+
+- **Entries:** one per attempt, with id `herder:<runId>:<stepKey>:<attempt>@<attempt start, ms>`, so a rerun never replaces a finished entry; source `herder`, and `ownerSessionId` set to the Pi session holding the run (other sessions do not show it). The group is `Herder <runId> · launch <n>`, the name is the task and label, and the description is the first line of the step's prompt.
+- **Lifecycle:** an entry appears once the attempt's agent session exists and carries that `AgentSession` while it is live; the session is removed when the runner disposes it. A settled step becomes `completed`, `failed` (also a failed gate, an error, or an attempt that is retried), or `stopped`. Finished entries stay 10 minutes. Abort, a lost lock, and session shutdown remove them at once.
+- **Updates:** a publisher replaces an entry's object on every change, then calls each listener with its id after every add, update, or remove.
+
 ## Development
 
 ```bash

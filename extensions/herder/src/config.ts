@@ -50,3 +50,5 @@ export const TRAILER_FINGERPRINT = "Herder-Fingerprint";
 export const STATUS_KEY = "herder";
 export const ACTIVITY_EVENT = "pi-extensions:activity";
 export const ACTIVITY_REQUEST_EVENT = "pi-extensions:activity-request";
+/** How long a finished step stays in the external-agent registry (Subagents' widget, `/agents`). */
+export const EXTERNAL_AGENT_TTL_MS = 10 * 60_000;

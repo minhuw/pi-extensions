@@ -19,7 +19,11 @@ export interface CheckResult { id: string; commit: string; exitCode: number | nu
 export interface RoleDefinition { name: string; description: string; write: boolean; tools: string[]; model: string; thinking: string; prompt: string; sha256: string }
 
 /** `effort` overrides the role's thinking level for one step (`agent()`'s `effort` option). */
-export interface AgentRunRequest { role: RoleDefinition; prompt: string; cwd: string; schema?: object; signal: AbortSignal; timeoutMs: number; stallMs: number; onEvent?: (kind: string) => void; effort?: string }
+export interface AgentRunRequest {
+	role: RoleDefinition; prompt: string; cwd: string; schema?: object; signal: AbortSignal; timeoutMs: number; stallMs: number; onEvent?: (kind: string) => void; effort?: string;
+	/** The attempt's live agent session (Pi's `AgentSession`, opaque here) once it exists, then undefined once disposed. */
+	onLiveSession?: (session: object | undefined) => void;
+}
 export interface AgentRunResult { text: string; data?: unknown; usage?: Usage; transcriptRef?: string }
 /** Throws `AgentError` with an `ErrorClass`. Enforces `timeoutMs` and `stallMs` itself; rejects once `signal` aborts. */
 export interface AgentRunner { run(request: AgentRunRequest): Promise<AgentRunResult> }

@@ -116,6 +116,7 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 				if (capture.rejections >= STRUCTURED_OUTPUT_REJECTIONS) watch.fail(invalidOutput(capture));
 			}
 		});
+		request.onLiveSession?.(live);
 		await watch.race(converse(live, request, capture, watch));
 		return result(live, capture, context.outputs);
 	} catch (error) {
@@ -128,6 +129,7 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 		watch.clear();
 		unsubscribe?.();
 		session?.dispose();
+		if (session) request.onLiveSession?.(undefined);
 	}
 }
 

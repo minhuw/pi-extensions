@@ -12,6 +12,7 @@ import { openVcs } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
 import { BackgroundLaunch, followUpText } from "./background.ts";
 import { confirmLong } from "./confirm.ts";
+import { StepAgents } from "./external-agents.ts";
 import type { RunState } from "../journal/fold.ts";
 import type { DeliveryOutcome, DeliveryRequest, HerderRuntime, LaunchRequest, RuntimeFactory } from "./runtime.ts";
 import { isFinished, planTasks, statusText } from "./status.ts";
@@ -47,6 +48,8 @@ export interface Session {
 	held?: Held;
 	timer?: ReturnType<typeof setInterval>;
 	status?: string;
+	/** The session's steps in the external-agent registry. */
+	agents?: StepAgents;
 }
 
 export const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -169,7 +172,13 @@ export class Herder {
 		return held.runtime ??= this.options.createRuntime({
 			cwd: s.ctx.cwd, sessionId: s.id, vcs: held.vcs, run: held.run, signal: held.controller.signal,
 			runner: () => held.runner ??= this.#runner(s, held.run),
-			onActivity: (activity) => { if (!s.closed) { this.board.update(activity); this.refresh(s); } },
+			onActivity: (activity) => {
+				if (s.closed) return;
+				this.board.update(activity);
+				// A stopping run's steps still report until they see the abort; their entries are already gone.
+				if (!held.closing && s.held === held) (s.agents ??= new StepAgents()).update(activity, { ownerSessionId: s.id, runId: held.runId, launch: held.launch?.launch });
+				this.refresh(s);
+			},
 			onProgress: () => this.refresh(s),
 		});
 	}
@@ -279,6 +288,7 @@ export class Herder {
 		const launch = held.launch;
 		void launch?.stop("run lock lost", 0, "always");
 		this.board.clear();
+		s.agents?.clear();
 		this.refresh(s);
 		if (s.closed) return;
 		s.ctx.ui.notify(`Herder lost run ${held.runId}: ${message(error)}`, "warning");
@@ -330,6 +340,7 @@ export class Herder {
 			return warning ? { runId: id, warning } : { runId: id };
 		} finally {
 			this.board.clear();
+			s.agents?.clear();
 			if (s.held === held) this.release(s);
 		}
 	}
@@ -367,6 +378,7 @@ export class Herder {
 		const settled = !work || await within(work, this.stopWaitMs);
 		try { ctx.ui.setStatus(STATUS_KEY, undefined); } catch {}
 		this.board.clear(true);
+		s?.agents?.clear();
 		if (s) s.held = undefined;
 		const release = () => { try { held?.lock.release(); } catch {} };
 		if (settled) release();

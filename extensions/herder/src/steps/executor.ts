@@ -12,7 +12,14 @@ import type {
 } from "../types.ts";
 import { lookupStep, resolveIdentity, stepMessage, TRAILER_REPLY, type StepIdentity } from "./cache.ts";
 
-export interface StepActivity { key: string; label: string; phase?: string; task?: string; state: "running" | "settled" }
+/**
+ * A live step for the activity board and the external-agent registry. A running attempt carries its live agent session
+ * once the runner has one; `status` is set on "settled" when the step returned one.
+ */
+export interface StepActivity {
+	key: string; label: string; phase?: string; task?: string; state: "running" | "settled";
+	role?: string; prompt?: string; attempt?: number; startedAt?: number; session?: object; status?: StepResult["status"];
+}
 
 export interface StepDeps {
 	runId: string; store: RunStore; vcs: Vcs; runner: AgentRunner;
@@ -157,6 +164,14 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		const path = worktreePath(vcs.commonDir(), runId, `step-${key}`);
 		const label = opts.label ?? key;
 		const phase = opts.phase ?? ctx.phase?.();
+		let current: { attempt: number; startedAt: number; session?: object } | undefined;
+		/** Reports `attempt` as running, with its live session; `update` replaces the session, a new attempt starts without one. */
+		const running = (attempt: number, update?: { session: object | undefined }) => {
+			if (current?.attempt !== attempt) current = { attempt, startedAt: Date.now() };
+			if (update) current = { attempt, startedAt: current.startedAt, ...(update.session && { session: update.session }) };
+			const { startedAt, session } = current;
+			activity({ key, label, phase, task: opts.task, state: "running", role: role.name, prompt, attempt, startedAt, ...(session && { session }) });
+		};
 		const failed = (attempt: number, failure: Failure, final: boolean) => {
 			store.journal.append({ t: "step.failed", key, fingerprint, attempt, errorClass: failure.errorClass, message: failure.message, final, transcriptRef: failure.transcriptRef });
 			progress();
@@ -182,18 +197,19 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 					t: "step.started", key, id: identity.id, occurrence, fingerprint, attempt: number, role: role.name, write, base,
 					task: opts.task, launch: ctx.launch, label: opts.label, phase,
 				});
-				activity({ key, label, phase, task: opts.task, state: "running" });
+				running(number);
 				let last = 0;
 				const onEvent = () => {
 					const now = Date.now();
 					if (now - last < ACTIVITY_INTERVAL_MS) return;
 					last = now;
-					activity({ key, label, phase, task: opts.task, state: "running" });
+					running(number);
 				};
 				let reply: AgentRunResult;
 				try {
 					reply = await runner.run({
 						role, prompt, cwd: path, schema: opts.schema, signal, onEvent, effort: opts.effort,
+						onLiveSession: (session) => running(number, { session }),
 						timeoutMs: opts.timeoutMs ?? limits.timeoutMs, stallMs: opts.stallMs ?? limits.stallMs,
 					});
 				} catch (error) {
@@ -301,10 +317,15 @@ export function createStepExecutor(deps: StepDeps): StepExecutor {
 		}
 		if (signal.aborted) return { status: "stopped", key, reused: false };
 		if (found.kind === "adopt" || found.staleRef) vcs.deleteRefs(ref);
+		let status: StepResult["status"] | undefined;
 		try {
-			return await live(prompt, opts, ctx, identity, key, occurrence, signal);
+			const result = await live(prompt, opts, ctx, identity, key, occurrence, signal);
+			status = result.status;
+			return result;
 		} finally {
-			activity({ key, label: opts.label ?? key, phase: opts.phase ?? ctx.phase?.(), task: opts.task, state: "settled" });
+			// A step that threw without being stopped failed.
+			status ??= signal.aborted ? "stopped" : "failed";
+			activity({ key, label: opts.label ?? key, phase: opts.phase ?? ctx.phase?.(), task: opts.task, state: "settled", role: identity.role.name, status });
 		}
 	}
 
