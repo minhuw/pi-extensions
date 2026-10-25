@@ -2,13 +2,15 @@
 
 export type ErrorClass = "transient" | "rate_limit" | "usage_limit" | "stall" | "timeout" | "auth" | "invalid_output" | "fatal";
 
-/** Thrown by `AgentRunner.run`; the step executor branches on `errorClass`. */
+/** Thrown by `AgentRunner.run`; the step executor branches on `errorClass`. `transcriptRef` keeps failed attempts debuggable. */
 export class AgentError extends Error {
 	readonly errorClass: ErrorClass;
-	constructor(errorClass: ErrorClass, message: string, options?: ErrorOptions) {
+	readonly transcriptRef?: string;
+	constructor(errorClass: ErrorClass, message: string, options?: ErrorOptions & { transcriptRef?: string }) {
 		super(message, options);
 		this.name = "AgentError";
 		this.errorClass = errorClass;
+		if (options?.transcriptRef) this.transcriptRef = options.transcriptRef;
 	}
 }
 
@@ -32,7 +34,11 @@ export interface Vcs {
 	/** Without `path`, the user's checkout; with it, that worktree. */
 	isClean(path?: string): boolean;
 	addWorktree(path: string, commit: string): void; removeWorktree(path: string): void;
-	snapshot(path: string, message: string): string | null;  // commit all changes; null when nothing changed
+	/**
+	 * Commits the worktree's complete state (all changes, including commits the agent made itself) as one commit whose
+	 * parent is `base` (default: the worktree's HEAD); null when the resulting tree equals the parent's tree.
+	 */
+	snapshot(path: string, message: string, base?: string): string | null;
 	readRef(ref: string): string | null;
 	/** `expectedOld`: undefined = unconditional, null = the ref must not exist, a SHA = compare-and-swap. */
 	updateRef(ref: string, value: string, expectedOld?: string | null): void;
