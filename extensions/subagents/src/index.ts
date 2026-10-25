@@ -1987,7 +1987,6 @@ Terse command-style prompts produce shallow, generic work.
         ? theme.getBgAnsi(context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg")
         : "";
       const subagentType = args.subagent_type as string | undefined;
-      const displayName = subagentType ? getDisplayName(subagentType) : "Agent";
       const config = subagentType ? getAgentConfig(subagentType) : undefined;
       const desc = args.description ?? "";
       const model = config?.model;

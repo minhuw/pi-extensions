@@ -543,7 +543,7 @@ function cacheEntryFor(cwd: string, kind: PackageResourceKind, opts: PackageDisc
   // `\u0000` written as an escape, not a raw byte: a literal NUL makes this
   // whole file read as binary to grep, ripgrep and git, which silently drops
   // it from search results.
-  const key = `${cwd}\u0000${projectTrusted ? 1 : 0}\u0000${JSON.stringify(gate ?? false)}`;
+  const key = `${cwd}\u0000${projectTrusted ? 1 : 0}\u0000${JSON.stringify(gate)}`;
   let hit = cache.get(key);
   if (!hit) {
     hit = scan(cwd, projectTrusted, gate);

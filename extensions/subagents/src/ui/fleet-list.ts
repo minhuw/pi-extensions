@@ -16,7 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { buildInvocationTags, buildRecordInvocation, formatAgentNameIdentity, formatTokenUsage, getDisplayName, type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
+import { buildInvocationTags, buildRecordInvocation, formatAgentNameIdentity, formatTokenUsage, type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */

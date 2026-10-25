@@ -3,8 +3,7 @@ import { createCodingTools, createReadOnlyTools, parseFrontmatter } from "@earen
 import { parseServiceTier } from "./service-tier.js";
 import type { AgentConfig, ServiceTierInput, IsolationMode, MemoryScope, ThinkingLevel } from "./types.js";
 
-export const AGENT_BUILTIN_TOOL_NAMES = [...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map(tool => tool.name))];
-const BUILTIN_TOOL_NAMES = AGENT_BUILTIN_TOOL_NAMES;
+const BUILTIN_TOOL_NAMES = [...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map(tool => tool.name))];
 const RESERVED_IN_TYPE = ":";
 
 /**
@@ -60,7 +59,7 @@ export function parseAgentDefinition(
 
   return {
     name,
-    // Only `display_name` now: `name` is the type, and `getConfig` already
+    // Only `display_name`: `name` is the type, and `getConfig` already
     // falls back to the type when no label is set — so a Claude Code file
     // with `name: code-reviewer` still badges as "code-reviewer".
     displayName: str(fm.display_name),
@@ -197,7 +196,7 @@ function parseMemory(val: unknown): MemoryScope | undefined {
  * pi's frontmatter parser is not YAML 1.1 — bare `off` and `no` arrive as
  * strings and only `false` becomes a boolean — so all three spellings are
  * accepted rather than leaving an author's intent silently dropped. Anything
- * else stays `undefined`, as before.
+ * else is `undefined`.
  */
 function parseIsolation(val: unknown): IsolationMode | undefined {
   if (val === "worktree") return "worktree";

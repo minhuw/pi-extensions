@@ -284,7 +284,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 });
 
 // Opt-in real-LLM smoke tests — exercise the SAME runner against a live model
-// (auto-resolved from the local `pi` login). Skipped unless PI_E2E_LIVE=1.
+// (auto-resolved from the local `pi` login). Always disabled here; see `LIVE` above.
 //
 // These are SMOKE tests, not strict assertions: a live model decides whether and
 // how to call the tool, so we cover the subset it can be reliably steered into
