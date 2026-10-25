@@ -287,6 +287,9 @@ it("validates the approval record and finite, complete metric output", async () 
 		expect(() => restoreState(changed)).toThrow("Approval");
 		const largerBudget = structuredClone(state); largerBudget.campaign!.maxIterations++;
 		expect(() => restoreState(largerBudget)).toThrow("Approval");
+		const unmeasured = structuredClone(state);
+		Object.assign(unmeasured.campaign!, { state: "paused", baseline: undefined, latest: undefined, approved: undefined, deadline: undefined });
+		expect(() => restoreState(unmeasured)).toThrow("Missing baseline proposal");
 		for (const text of ["", "METRIC compile_ms=NaN", "METRIC compile_ms=1\nMETRIC compile_ms=2"]) expect(() => parseMetrics(text, ["compile_ms"])).toThrow();
 	} finally { await h.cleanup(); }
 });

@@ -74,7 +74,7 @@ export function restoreState(data: unknown): State {
 	const names = report?.metrics.map(metric => metric.name) ?? [];
 	if (c.baseline !== undefined && (!names.length || !measurement(c.baseline, names))) throw new Error("Invalid baseline.");
 	if (c.latest !== undefined && (!names.length || !measurement(c.latest, names))) throw new Error("Invalid measurement.");
-	if (["awaiting_approval", "running"].includes(String(c.state)) && (!c.benchmark || !c.baseline || !report)) throw new Error("Missing baseline proposal.");
+	if ((c.benchmark !== undefined || ["awaiting_approval", "running"].includes(String(c.state))) && (!c.benchmark || !c.baseline || !report)) throw new Error("Missing baseline proposal.");
 	const state = structuredClone({ version: 2, report, campaign: c }) as unknown as State;
 	if (c.approved !== undefined && (typeof c.approved !== "string" || c.approved !== approvalKey(state))) throw new Error("Approval does not match the baseline.");
 	if (c.state === "running" && (!c.approved || c.deadline === undefined)) throw new Error("Missing research approval.");
