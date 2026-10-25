@@ -31,7 +31,7 @@
 		"test:molt": "vitest run extensions/molt",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
-		"test:herder": "vitest run extensions/herder",
+		"test:herder": "vitest run --config extensions/herder/vitest.config.ts",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"
 	},
