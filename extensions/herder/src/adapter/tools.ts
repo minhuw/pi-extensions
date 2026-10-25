@@ -156,7 +156,8 @@ export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 			const state = requireApproved(held);
 			const source = scriptSource(ctx, params);
 			if (params.mode === "validate") {
-				const report = await validateScript(source, { roles: herder.runtime(s, held).roles(), checks: state.goal!.checks.map((check) => check.id), args: params.args });
+				const runtime = herder.runtime(s, held);
+				const report = await validateScript(source, { roles: runtime.roles(), readOnlyRoles: runtime.readOnlyRoles(), checks: state.goal!.checks.map((check) => check.id), args: params.args });
 				const problems = report.problems.map((problem) => `- ${problem.severity}${problem.line ? ` at line ${problem.line}${problem.column ? `:${problem.column}` : ""}` : ""}: ${problem.message}`);
 				return reply([report.ok ? "Script is valid." : "Script has errors.", ...problems, `Dry run: ${report.agentCalls} agent() and ${report.integrateCalls} integrate() calls. ${report.note}`].join("\n"), report);
 			}

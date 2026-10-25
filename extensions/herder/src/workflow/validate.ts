@@ -1,4 +1,5 @@
 import { DEFAULT_ROLE, LIMITS } from "../config.ts";
+import { stableJson, stepId } from "../journal/keys.ts";
 import type { IntegrateResult, Limits, StepResult } from "../types.ts";
 import { startSandbox, syntaxProblem } from "./sandbox.ts";
 import type { CallSite, SandboxCall, ScriptProblem } from "./sandbox.ts";
@@ -6,6 +7,8 @@ import type { CallSite, SandboxCall, ScriptProblem } from "./sandbox.ts";
 export type { ScriptProblem } from "./sandbox.ts";
 export interface ValidationContext {
 	roles: readonly string[]; checks: readonly string[];
+	/** Roles that cannot run with `write: true`; the others write by default. */
+	readOnlyRoles?: readonly string[];
 	/** Launch args for the dry run. */
 	args?: unknown;
 	/** Wall-clock budget for the dry run (default 2 s); running out is a warning. */
@@ -16,6 +19,8 @@ export interface ValidationReport { ok: boolean; problems: ScriptProblem[]; agen
 
 export const DRY_RUN_NOTE = "The dry run follows only the path that synthetic results take (every agent() returns status \"ok\", every integrate() returns \"integrated\"); other branches were compiled but not exercised.";
 const ZERO_SHA = "0".repeat(40);
+/** Distinct synthetic commits ("c…") and heads ("d…"), so default bases differ across integrations as they do live. */
+const fakeSha = (prefix: string, n: number) => prefix + n.toString(16).padStart(39, "0");
 const SCHEMA_TYPES = ["object", "array", "string", "number", "integer", "boolean", "null"];
 
 /** Compiles and dry-runs a script against a stub bridge; never runs agents. */
@@ -40,6 +45,10 @@ export async function validateScript(source: string, context: ValidationContext)
 	let agentCalls = 0, integrateCalls = 0;
 	const checks = new Set(context.checks);
 	const roles = new Set(context.roles);
+	const readOnly = new Set(context.readOnlyRoles ?? []);
+	// The launch's logical head, and each step id's inputs: one id with two fingerprints in a launch throws live.
+	let head = ZERO_SHA;
+	const ids = new Map<string, { inputs: string; rest: string; explicitBase: boolean; site: CallSite | undefined }>();
 	const unknownChecks = (what: string, ids: readonly string[], site?: CallSite) => {
 		for (const id of ids) if (!checks.has(id)) add(problemAt(`${what} names unknown check "${id}". Known checks: ${known(context.checks)}.`, site));
 	};
@@ -47,16 +56,34 @@ export async function validateScript(source: string, context: ValidationContext)
 		if (call.method === "integrate") {
 			integrateCalls++;
 			if (call.opts.checks) unknownChecks("integrate() opts.checks", call.opts.checks, call.site);
-			return { status: "integrated", head: ZERO_SHA };
+			head = fakeSha("d", integrateCalls);
+			return { status: "integrated", head };
 		}
 		agentCalls++;
 		const { opts, site } = call;
 		const role = opts.role ?? DEFAULT_ROLE;
 		if (!roles.has(role)) add(problemAt(`agent() role "${role}" is not a known role. Known roles: ${known(context.roles)}.`, site));
-		if (opts.gate !== undefined) unknownChecks("agent() opts.gate", typeof opts.gate === "string" ? [opts.gate] : opts.gate, site);
+		if (opts.write === true && readOnly.has(role)) add(problemAt(`agent() role "${role}" is read-only; it cannot run with write: true.`, site));
+		const gates = opts.gate === undefined ? [] : typeof opts.gate === "string" ? [opts.gate] : opts.gate;
+		unknownChecks("agent() opts.gate", gates, site);
 		if (opts.schema !== undefined) for (const message of schemaProblems(opts.schema)) add(problemAt(`agent() opts.schema: ${message}`, site));
+		const id = opts.id ?? stepId("agent", role, call.prompt);
+		const material = { role, prompt: call.prompt, schema: opts.schema, write: opts.write ?? !readOnly.has(role), gates };
+		const inputs = stableJson({ ...material, base: opts.base ?? head }), rest = stableJson(material);
+		const first = ids.get(id);
+		if (!first) ids.set(id, { inputs, rest, explicitBase: opts.base !== undefined, site });
+		else if (first.inputs !== inputs) {
+			const where = first.site ? ` at line ${first.site.line}` : "";
+			// The dry run compares bases as written; live they resolve to commits, and an explicit one may equal the default.
+			const baseOnly = first.rest === rest && (first.explicitBase || opts.base !== undefined);
+			const problem = problemAt((opts.id !== undefined
+				? `agent() id "${id}" is already used${where} by a call with different inputs (prompt, role, base, gates, schema, or write mode); give each distinct call its own id.`
+				: `agent() has the same role and prompt as the call${where} but a different base, gates, schema, or write mode, so both get one implicit id; give them explicit ids.`)
+				+ (baseOnly ? " Only the base differs: this throws live unless both bases name the same commit." : ""), site);
+			add(baseOnly ? { ...problem, severity: "warning" } : problem);
+		}
 		const data = opts.schema !== undefined ? minimalValue(opts.schema) : undefined;
-		return { status: "ok", key: `${opts.id ?? `dry-run-${agentCalls}`}-0`, text: "", ...(data !== undefined ? { data } : {}), commit: ZERO_SHA, reused: false };
+		return { status: "ok", key: `${opts.id ?? `dry-run-${agentCalls}`}-0`, text: "", ...(data !== undefined ? { data } : {}), commit: fakeSha("c", agentCalls), reused: false };
 	};
 
 	const handle = startSandbox({

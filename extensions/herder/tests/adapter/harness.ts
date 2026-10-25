@@ -38,6 +38,7 @@ export class FakeRuntime implements HerderRuntime {
 	constructor(env: RuntimeEnv) { this.env = env; }
 
 	roles() { return ["worker", "reviewer"]; }
+	readOnlyRoles() { return ["reviewer"]; }
 	start() { this.calls.push(["start"]); }
 	async step(prompt: string, opts: AgentOptions, signal?: AbortSignal) {
 		this.calls.push(["step", prompt, opts]);

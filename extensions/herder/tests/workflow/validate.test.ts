@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { minimalValue, schemaProblems, validateScript } from "../../src/workflow/validate.ts";
 
-const context = { roles: ["worker", "reviewer"], checks: ["unit", "typecheck"] };
+const context = { roles: ["worker", "reviewer"], readOnlyRoles: ["reviewer"], checks: ["unit", "typecheck"] };
 
 describe("validateScript", () => {
 	it("accepts a valid script and counts the calls it reached", async () => {
@@ -53,6 +53,31 @@ describe("validateScript", () => {
 		const report = await validateScript(`await agent("x");\nundefinedThing();`, context);
 		expect(report.ok).toBe(false);
 		expect(report.problems).toEqual([{ message: expect.stringMatching(/dry run failed: undefinedThing is not defined/), line: 2, column: 1, severity: "error" }]);
+	});
+
+	it("reports invalid options the runtime throws on, without stopping", async () => {
+		const report = await validateScript([
+			`for (const p of ["a", "b"]) await agent(p, { id: "impl" });`,
+			`await agent("same", { id: "again" }); await agent("same", { id: "again" });`,
+			`await agent("lint");`,
+			`await integrate("abc", { message: "m" });`,
+			`await agent("lint");`,
+			`await agent("look", { role: "reviewer", write: true });`,
+			`await agent("x", { effort: "huge" });`,
+			`return 1;`,
+		].join("\n"), context);
+		expect(report).toMatchObject({ ok: false, agentCalls: 8 });
+		expect(report.problems.map(problem => [problem.line, problem.message])).toEqual([
+			[1, expect.stringMatching(/^agent\(\) id "impl" is already used at line 1 by a call with different inputs/)],
+			[5, expect.stringMatching(/same role and prompt as the call at line 3 but a different base/)],
+			[6, 'agent() role "reviewer" is read-only; it cannot run with write: true.'],
+			[7, expect.stringMatching(/opts\.effort must be one of off, minimal/)],
+		]);
+	});
+
+	it("only warns about a reused id whose calls differ in an explicit base alone", async () => {
+		const report = await validateScript(`await agent("x", { id: "x", base: args.head });\nawait agent("x", { id: "x" });`, { ...context, args: { head: "abc123" } });
+		expect(report).toMatchObject({ ok: true, problems: [{ severity: "warning", line: 2, message: expect.stringMatching(/Only the base differs/) }] });
 	});
 
 	it("passes args to the dry run", async () => {

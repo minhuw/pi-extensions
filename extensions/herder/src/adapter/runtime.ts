@@ -32,6 +32,8 @@ export interface CheckRequest { checks?: string[]; commit?: string }
 export interface HerderRuntime {
 	/** Role names available to `agent()`. */
 	roles(): string[];
+	/** The roles among them that cannot write. */
+	readOnlyRoles(): string[];
 	/** Pins `refs/herder/<runId>/base` and `integration` at the run's base commit. */
 	start(): void;
 	/** One direct `agent()` step; `base` defaults to the real integration head. */
@@ -94,6 +96,7 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 
 		return {
 			roles: () => [...roles().keys()],
+			readOnlyRoles: () => [...roles()].filter(([, role]) => !role.write).map(([name]) => name),
 			start() {
 				const base = run.state().base;
 				if (!base) throw new Error(`Herder run ${runId} has no base commit.`);
