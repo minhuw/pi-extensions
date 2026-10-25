@@ -22,6 +22,7 @@ import type { AgentManager } from "./agent-manager.js";
 import { getAgentConfig } from "./agent-types.js";
 import { normalizeMaxTurns } from "./agent-runner.js";
 import { resolveSpawnType } from "./agent-types.js";
+import { MODEL_OVERRIDE_ERROR } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelSupportsServiceTier } from "./service-tier.js";
 import type { ScheduleStore } from "./schedule-store.js";
@@ -243,11 +244,13 @@ export class SubagentScheduler {
       // fire-time failure.
       const dispatch = resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) throw new Error(dispatch.message);
+      // Jobs stored before model overrides were removed may still name one.
+      if (job.model !== undefined) throw new Error(MODEL_OVERRIDE_ERROR);
       // Resolve model at fire time — registry contents may have changed since the
       // job was created (auth added/removed). Fall back silently to spawn-default
       // if resolution fails; the spawn path handles undefined model gracefully.
       const config = getAgentConfig(dispatch.type);
-      const configuredModel = config?.model ?? job.model;
+      const configuredModel = config?.model;
       let resolvedModel: any | undefined;
       if (configuredModel) {
         const r = resolveModel(configuredModel, ctx.modelRegistry);

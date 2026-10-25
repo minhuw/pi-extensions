@@ -397,6 +397,20 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("rejects a stored job that still names a raw model instead of spawning with it", () => {
+    const job = scheduler.addJob({
+      name: "legacy-model", description: "x", schedule: "+1s",
+      subagent_type: "worker", prompt: "x", model: "openai/gpt-legacy",
+    });
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id, error: expect.stringContaining("Model overrides are unavailable"),
+    }));
+  });
+
   it("records lastStatus error when the agent fails to start after spawn returns", async () => {
     // Under isolation: "worktree" the agent is not running when spawn() returns
     // — the repo copy is awaited. A failure there must be recorded as a failed
