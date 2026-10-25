@@ -3,13 +3,15 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { THINKING_LEVELS } from "../config.ts";
 import type { RoleDefinition } from "../types.ts";
+
+export { THINKING_LEVELS };
 
 export interface RoleSources { builtinDir?: string; overrideDir?: string }
 
 export const BUILTIN_ROLE_DIR = fileURLToPath(new URL("../../agents/", import.meta.url));
 export const defaultOverrideDir = () => join(getAgentDir(), "herder", "agents");
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 const FIELDS = ["name", "description", "write", "tools", "model", "thinking"];
 /** Pi also accepts `*` patterns and `+name`/`-name` modifiers, which could re-enable writers on a read-only role. */

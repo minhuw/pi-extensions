@@ -288,6 +288,7 @@ describe("script runtime", () => {
 			[`await agent("x", { schema: "x" })`, /opts\.schema must be a JSON Schema object/],
 			[`await agent("x", { timeoutMs: -1 })`, /opts\.timeoutMs must be a positive number/],
 			[`await agent("x", { write: "yes" })`, /opts\.write must be a boolean/],
+			[`await agent("x", { effort: "huge" })`, /opts\.effort must be one of off, minimal, low, medium, high, xhigh, max/],
 			[`await agent("x", [])`, /expects opts to be an object/],
 			[`await integrate({ status: "ok" }, { message: "m" })`, /step result \(with a key\) or a commit/],
 			[`await integrate("abc", {})`, /opts\.message is required/],

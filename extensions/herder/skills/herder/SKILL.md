@@ -122,7 +122,7 @@ Globals:
   - `base` — commit to start from (default: the launch's integration head). Use a previous step's `commit` to build on it.
   - `gate` — check id or ids from `goal.md`, run in the step's worktree afterwards.
   - `schema` — a JSON Schema; the agent must return matching data in `result.data`.
-  - `label`, `phase` — display only. `fresh: true` — resample instead of reusing. `timeoutMs`, `stallMs`, `effort` — per-step limits and thinking effort.
+  - `label`, `phase` — display only. `fresh: true` — resample instead of reusing. `timeoutMs`, `stallMs` — per-step limits. `effort` — thinking level for this step: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 - `integrate(source, { message, task?, checks? })` merges a step result (or a commit SHA) onto the integration head as one commit with `message`, runs the integration checks (default: those marked `integrate: yes`), and advances the head only if they pass.
 - `parallel([() => …, …])` runs thunks concurrently and waits for all; a thunk whose own code throws yields `null`.
 - `pipeline(items, stage1, stage2, …)` runs each item through the stages; a stage receives `(previous, item, index)` and the first stage's `previous` is the item. Items do not wait for each other between stages. A stage whose own code throws makes that item `null`.

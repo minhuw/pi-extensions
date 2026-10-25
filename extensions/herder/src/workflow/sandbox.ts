@@ -1,6 +1,7 @@
 import { Script } from "node:vm";
 import { Worker } from "node:worker_threads";
 import type { ResourceLimits } from "node:worker_threads";
+import { THINKING_LEVELS } from "../config.ts";
 import { AGENT_OPTION_KEYS, INTEGRATE_OPTION_KEYS } from "../types.ts";
 import type { AgentOptions, IntegrateOptions, Limits, StepResult, WorkflowBridge } from "../types.ts";
 import { SCRIPT_FILENAME, WORKER_SOURCE } from "./worker-source.ts";
@@ -172,7 +173,7 @@ export function startSandbox(options: SandboxOptions): ScriptHandle {
 		workerData: {
 			source: options.source, argsJson, filename, collect: options.collect === true,
 			limits: { agentsPerLaunch: options.limits.agentsPerLaunch, itemsPerCall: options.limits.itemsPerCall },
-			agentKeys: [...AGENT_OPTION_KEYS], integrateKeys: [...INTEGRATE_OPTION_KEYS],
+			agentKeys: [...AGENT_OPTION_KEYS], integrateKeys: [...INTEGRATE_OPTION_KEYS], efforts: [...THINKING_LEVELS],
 		},
 	});
 	worker.on("message", (message: WorkerMessage) => {

@@ -27,6 +27,7 @@ const COLLECT = workerData.collect === true;
 const FILENAME = workerData.filename;
 const AGENT_KEYS = workerData.agentKeys;
 const INTEGRATE_KEYS = workerData.integrateKeys;
+const EFFORTS = workerData.efforts;
 
 // Fatal errors (cap breaches, invalid options, host rejections) belong to the launch, not to one item: parallel() and
 // pipeline() rethrow them instead of folding them into null.
@@ -140,7 +141,7 @@ function isPlainObject(value) { return value !== null && typeof value === "objec
 const AGENT_CHECKS = {
 	id: [isText, "a non-empty string"], label: [isText, "a non-empty string"], phase: [isText, "a non-empty string"],
 	task: [isText, "a non-empty string"], role: [isText, "a non-empty string"], base: [isText, "a non-empty string"],
-	effort: [isText, "a non-empty string"],
+	effort: [function (v) { return EFFORTS.indexOf(v) !== -1; }, "one of " + EFFORTS.join(", ")],
 	write: [function (v) { return typeof v === "boolean"; }, "a boolean"],
 	fresh: [function (v) { return typeof v === "boolean"; }, "a boolean"],
 	schema: [isPlainObject, "a JSON Schema object"],
