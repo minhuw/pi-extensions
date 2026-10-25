@@ -68,8 +68,8 @@ Never run parallel writers on overlapping files. If ownership is unclear, run th
 ## Checks
 | id | command | timeout | integrate |
 | --- | --- | --- | --- |
-| unit-tests | npm test | 10m | yes |
-| typecheck | npm run typecheck | 5m | yes |
+| unit-tests | npm ci && npm test | 10m | yes |
+| typecheck | npm ci && npm run typecheck | 5m | yes |
 
 ## Constraints
 - <must not change …>
@@ -90,7 +90,7 @@ max_fix_attempts: 3
 
 **Checks**
 - `id`: lowercase letters, digits, and hyphens (`/^[a-z0-9][a-z0-9-]*$/`), unique. Every `check:<id>` in the criteria must exist here.
-- `command`: a shell command run from the repository root; exit code 0 means pass. Make it non-interactive and deterministic; scope it when the full suite is slow.
+- `command`: a shell command; exit code 0 means pass. Checks and agents run in fresh worktrees of a commit, without ignored files such as node_modules: the command runs at the top level of a fresh checkout of the commit being checked, with no installed dependencies, virtualenvs, build output, or local config. Make each check self-contained, e.g. `npm ci && npm test` or `uv run pytest`. Keep it non-interactive and deterministic, and prefer fast, scoped commands when the full suite is slow.
 - `timeout`: `30s`, `10m`, `1h`.
 - `integrate`: `yes` runs the check before each integration advances the head (default integration checks); keep these fast. `no` runs it only for gates you name and at verification.
 - Every check runs at verification, whatever its `integrate` value.
@@ -157,7 +157,7 @@ A step sees only its prompt and its worktree, not this conversation. Make every 
 - the task and the acceptance criteria it serves, quoted from `goal.md`;
 - the relevant constraints and out-of-scope items;
 - the files and interfaces to start from, and for fan-out the exact paths the step may edit;
-- which checks matter and how to run them;
+- which checks matter and how to run them, including installing dependencies first (the worktree has none);
 - for fixes, the failing check output or the review findings verbatim.
 
 Use the reviewer for a clean second look at risky changes; give it the contract and the diff range, not the author's summary.

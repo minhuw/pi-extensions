@@ -107,7 +107,9 @@ Rules:
 
 ## Checks
 <!--
-Shell commands run at the repository root; exit code 0 means pass.
+Shell commands run at the top level of a fresh checkout of the commit being checked; exit code 0 means pass.
+Ignored files such as node_modules, virtualenvs, and build output are absent: make each check self-contained
+(e.g. npm ci && npm test, uv run pytest), non-interactive, and as fast and scoped as it can be.
 id: lowercase letters, digits, and hyphens. timeout: 30s, 10m, 1h, or 1h30m (empty means ${DEFAULT_CHECK_TIMEOUT_MS / 60_000}m).
 integrate: yes runs the check before every integration; no runs it at verification only.
 -->
