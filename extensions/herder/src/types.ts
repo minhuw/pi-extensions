@@ -101,6 +101,8 @@ export interface StepResult {
 	checks?: CheckResult[];        // gate results; a failing gate makes status "gate_failed"
 	error?: { class: ErrorClass; message: string };
 	reused: boolean;
+	/** A read-only step changed files; the changes were discarded. */
+	warning?: string;
 }
 export interface IntegrateResult {
 	status: "integrated" | "conflict" | "checks_failed";
@@ -139,8 +141,8 @@ export interface PlanUpdatedEvent extends EventBase { t: "plan.updated"; sha256:
 export interface ScriptLaunchedEvent extends EventBase { t: "script.launched"; launch: number; scriptSha256: string; args: unknown; head: string; resumes?: number }
 export interface ScriptSettledEvent extends EventBase { t: "script.settled"; launch: number; status: LaunchStatus; reused: number; changed: number; new: number; resultRef?: string; error?: string }
 export interface StepStartedEvent extends EventBase { t: "step.started"; key: string; id: string; occurrence: number; fingerprint: string; attempt: number; role: string; write: boolean; base: string; task?: string; launch?: number; label?: string; phase?: string }
-export interface StepCompletedEvent extends EventBase { t: "step.completed"; key: string; fingerprint: string; status: StepCompletedStatus; text?: string; textRef?: string; data?: unknown; commit?: string; ref?: string; checks?: CheckResult[]; usage?: Usage; warning?: string }
-export interface StepFailedEvent extends EventBase { t: "step.failed"; key: string; fingerprint: string; attempt: number; errorClass: ErrorClass | "stopped"; message: string; final: boolean }
+export interface StepCompletedEvent extends EventBase { t: "step.completed"; key: string; fingerprint: string; status: StepCompletedStatus; text?: string; textRef?: string; data?: unknown; commit?: string; ref?: string; checks?: CheckResult[]; usage?: Usage; warning?: string; transcriptRef?: string }
+export interface StepFailedEvent extends EventBase { t: "step.failed"; key: string; fingerprint: string; attempt: number; errorClass: ErrorClass | "stopped"; message: string; final: boolean; transcriptRef?: string }
 /** `commit` replaces the spec's second `at` field, which would collide with the event timestamp (deviation). */
 export interface CheckCompletedEvent extends EventBase { t: "check.completed"; checkId: string; commit: string; exitCode: number | null; timedOut: boolean; durationMs: number; logRef: string; tail: string; purpose?: CheckPurpose; key?: string }
 export interface IntegrateCompletedEvent extends EventBase { t: "integrate.completed"; key: string; from: string; source: string; head: string; tree: string; message: string; task?: string; checks: CheckResult[] }
