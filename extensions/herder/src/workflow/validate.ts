@@ -1,5 +1,149 @@
-export interface ScriptProblem { message: string; line?: number; column?: number }
-export interface ValidationContext { roles: readonly string[]; checks: readonly string[] }
+import { DEFAULT_ROLE, LIMITS } from "../config.ts";
+import type { IntegrateResult, Limits, StepResult } from "../types.ts";
+import { startSandbox, syntaxProblem } from "./sandbox.ts";
+import type { CallSite, SandboxCall, ScriptProblem } from "./sandbox.ts";
 
-/** Compiles and checks a script without running agents. */
-export async function validateScript(source: string, context: ValidationContext): Promise<ScriptProblem[]> { throw new Error("not implemented"); }
+export type { ScriptProblem } from "./sandbox.ts";
+export interface ValidationContext {
+	roles: readonly string[]; checks: readonly string[];
+	/** Launch args for the dry run. */
+	args?: unknown;
+	/** Wall-clock budget for the dry run (default 2 s); running out is a warning. */
+	budgetMs?: number;
+	limits?: Limits;
+}
+export interface ValidationReport { ok: boolean; problems: ScriptProblem[]; agentCalls: number; integrateCalls: number; note: string }
+
+export const DRY_RUN_NOTE = "The dry run follows only the path that synthetic results take (every agent() returns status \"ok\", every integrate() returns \"integrated\"); other branches were compiled but not exercised.";
+const ZERO_SHA = "0".repeat(40);
+const SCHEMA_TYPES = ["object", "array", "string", "number", "integer", "boolean", "null"];
+
+/** Compiles and dry-runs a script against a stub bridge; never runs agents. */
+export async function validateScript(source: string, context: ValidationContext): Promise<ValidationReport> {
+	const problems: ScriptProblem[] = [];
+	const seen = new Set<string>();
+	const add = (problem: ScriptProblem) => {
+		const id = `${problem.severity}\0${problem.message}\0${problem.line}\0${problem.column}`;
+		if (seen.has(id)) return;
+		seen.add(id);
+		problems.push(problem);
+	};
+	const report = (agentCalls = 0, integrateCalls = 0): ValidationReport =>
+		({ ok: !problems.some(problem => problem.severity === "error"), problems, agentCalls, integrateCalls, note: DRY_RUN_NOTE });
+
+	const syntax = syntaxProblem(source);
+	if (syntax) {
+		add(syntax);
+		return report();
+	}
+
+	let agentCalls = 0, integrateCalls = 0;
+	const checks = new Set(context.checks);
+	const roles = new Set(context.roles);
+	const unknownChecks = (what: string, ids: readonly string[], site?: CallSite) => {
+		for (const id of ids) if (!checks.has(id)) add(problemAt(`${what} names unknown check "${id}". Known checks: ${known(context.checks)}.`, site));
+	};
+	const call = async (call: SandboxCall): Promise<StepResult | IntegrateResult> => {
+		if (call.method === "integrate") {
+			integrateCalls++;
+			if (call.opts.checks) unknownChecks("integrate() opts.checks", call.opts.checks, call.site);
+			return { status: "integrated", head: ZERO_SHA };
+		}
+		agentCalls++;
+		const { opts, site } = call;
+		const role = opts.role ?? DEFAULT_ROLE;
+		if (!roles.has(role)) add(problemAt(`agent() role "${role}" is not a known role. Known roles: ${known(context.roles)}.`, site));
+		if (opts.gate !== undefined) unknownChecks("agent() opts.gate", typeof opts.gate === "string" ? [opts.gate] : opts.gate, site);
+		if (opts.schema !== undefined) for (const message of schemaProblems(opts.schema)) add(problemAt(`agent() opts.schema: ${message}`, site));
+		const data = opts.schema !== undefined ? minimalValue(opts.schema) : undefined;
+		return { status: "ok", key: `${opts.id ?? `dry-run-${agentCalls}`}-0`, text: "", ...(data !== undefined ? { data } : {}), commit: ZERO_SHA, reused: false };
+	};
+
+	const handle = startSandbox({
+		source, args: context.args, limits: context.limits ?? LIMITS, collect: true,
+		host: { call, log() {}, phase() {}, problem: add },
+	});
+	const budgetMs = context.budgetMs ?? 2_000;
+	let timedOut = false;
+	const timer = setTimeout(() => { timedOut = true; handle.stop(); }, budgetMs);
+	const outcome = await handle.done;
+	clearTimeout(timer);
+	if (timedOut) add({ message: `The dry run did not finish within ${budgetMs} ms and was stopped; the rest of the script was not exercised.`, severity: "warning" });
+	else if (outcome.status === "failed") {
+		add({ message: `The dry run failed: ${outcome.error ?? "unknown error"}`, severity: "error", ...(outcome.line !== undefined ? { line: outcome.line } : {}), ...(outcome.column !== undefined ? { column: outcome.column } : {}) });
+	}
+	return report(agentCalls, integrateCalls);
+}
+
+function problemAt(message: string, site: CallSite | undefined): ScriptProblem {
+	return { message, severity: "error", ...(site ? { line: site.line, column: site.column } : {}) };
+}
+
+function known(names: readonly string[]): string { return names.length > 0 ? names.join(", ") : "(none)"; }
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Structural sanity of a JSON Schema used for structured output; not a full meta-schema check. */
+export function schemaProblems(schema: unknown, where = "schema", root = true): string[] {
+	if (!isObject(schema)) return [`${where} must be a JSON Schema object.`];
+	const problems: string[] = [];
+	const { type } = schema;
+	if (root && type !== "object") problems.push('schema must have type "object" at its root.');
+	if (type !== undefined) {
+		const types = Array.isArray(type) ? type : [type];
+		if (types.length === 0 || !types.every(t => typeof t === "string" && SCHEMA_TYPES.includes(t))) {
+			problems.push(`${where} has unknown type ${JSON.stringify(type)}; use one of ${SCHEMA_TYPES.join(", ")}.`);
+		}
+	}
+	if (schema.properties !== undefined) {
+		if (!isObject(schema.properties)) problems.push(`${where}.properties must be an object.`);
+		else for (const [name, child] of Object.entries(schema.properties)) problems.push(...schemaProblems(child, `${where}.properties.${name}`, false));
+	}
+	if (schema.required !== undefined && !(Array.isArray(schema.required) && schema.required.every(name => typeof name === "string"))) {
+		problems.push(`${where}.required must be an array of property names.`);
+	}
+	if (schema.items !== undefined) {
+		if (Array.isArray(schema.items)) schema.items.forEach((child, index) => problems.push(...schemaProblems(child, `${where}.items[${index}]`, false)));
+		else problems.push(...schemaProblems(schema.items, `${where}.items`, false));
+	}
+	if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== "boolean") {
+		problems.push(...schemaProblems(schema.additionalProperties, `${where}.additionalProperties`, false));
+	}
+	if (schema.enum !== undefined && !(Array.isArray(schema.enum) && schema.enum.length > 0)) problems.push(`${where}.enum must be a non-empty array.`);
+	for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+		const list = schema[keyword];
+		if (list === undefined) continue;
+		if (!Array.isArray(list) || list.length === 0) problems.push(`${where}.${keyword} must be a non-empty array of schemas.`);
+		else list.forEach((child, index) => problems.push(...schemaProblems(child, `${where}.${keyword}[${index}]`, false)));
+	}
+	return problems;
+}
+
+/** The smallest value a script could receive for `schema`: every property present, arrays at their minimum length. */
+export function minimalValue(schema: unknown): unknown {
+	if (!isObject(schema)) return null;
+	if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
+	if ("const" in schema) return schema.const;
+	for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+		const list = schema[keyword];
+		if (schema.type === undefined && Array.isArray(list) && list.length > 0) return minimalValue(list[0]);
+	}
+	const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+	switch (type) {
+		case "object": {
+			const value: Record<string, unknown> = {};
+			if (isObject(schema.properties)) for (const [name, child] of Object.entries(schema.properties)) value[name] = minimalValue(child);
+			return value;
+		}
+		case "array": {
+			const count = typeof schema.minItems === "number" ? Math.min(schema.minItems, 16) : 0;
+			return Array.from({ length: count }, () => minimalValue(schema.items));
+		}
+		case "string": return "";
+		case "number": case "integer": return typeof schema.minimum === "number" ? schema.minimum : 0;
+		case "boolean": return false;
+		default: return null;
+	}
+}
