@@ -196,8 +196,9 @@ export function runScript(options: ScriptOptions): ScriptHandle {
 		host: {
 			async call(call) {
 				if (call.method === "integrate") return bridge.integrate(call.source, call.opts);
+				const prepared = bridge.prepare?.(call.prompt, call.opts);
 				const release = await slots.acquire(options.writes(call.opts.role, call.opts.write));
-				try { return await bridge.agent(call.prompt, call.opts); }
+				try { return await bridge.agent(call.prompt, call.opts, prepared); }
 				finally { release(); }
 			},
 			log: message => bridge.log(message),

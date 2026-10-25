@@ -439,6 +439,30 @@ describe("caps", () => {
 		expect(bridge.maxWriters).toBe(2);
 	});
 
+	it("prepares each agent call when it arrives, before it waits for a slot", async () => {
+		const gate = deferred<void>();
+		const prepared: string[] = [];
+		const received: unknown[] = [];
+		let state = "before";
+		const bridge = new FakeBridge(async (prompt) => {
+			if (prompt === "a") { await gate.promise; state = "after"; }
+			return ok(prompt);
+		});
+		const withPrepare: WorkflowBridge = {
+			prepare: (prompt) => { prepared.push(`${prompt}:${state}`); return `${prompt}@${state}`; },
+			agent: (prompt, opts, token) => { received.push(token); return bridge.agent(prompt, opts); },
+			integrate: (source, opts) => bridge.integrate(source, opts),
+			log: (message) => bridge.log(message), phase: (title) => bridge.phase(title),
+		};
+		const handle = run(`return await parallel([() => agent("a"), () => agent("b")]).then((r) => r.map((x) => x.key));`, withPrepare, { limits: { concurrentAgents: 1 } });
+		for (let waited = 0; prepared.length < 2 && waited < 5_000; waited += 5) await tick(5);
+		expect(prepared).toEqual(["a:before", "b:before"]);
+		expect(bridge.agents.map((call) => call.prompt)).toEqual(["a"]);
+		gate.resolve();
+		expect(await handle.done).toEqual({ status: "completed", value: ["a", "b"] });
+		expect(received).toEqual(["a@before", "b@before"]);
+	});
+
 	it("does not start queued agents after a stop", async () => {
 		const gate = deferred<StepResult>();
 		const bridge = new FakeBridge(() => gate.promise);

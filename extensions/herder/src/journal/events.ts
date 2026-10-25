@@ -5,7 +5,7 @@ export const EVENT_TYPES: ReadonlySet<string> = new Set<JournalEventType>([
 	"run.started", "goal.approved", "plan.updated", "script.launched", "script.settled",
 	"step.started", "step.completed", "step.failed", "check.completed",
 	"integrate.completed", "integrate.failed", "verify.completed",
-	"decision.recorded", "delivery.completed", "run.finished",
+	"decision.recorded", "delivery.started", "delivery.completed", "run.finished",
 ]);
 
 /** Adds the envelope: `v` and an informational ISO `at`. */

@@ -115,7 +115,13 @@ export interface IntegrateResult {
  * site; every domain outcome is a resolved value.
  */
 export interface WorkflowBridge {
-	agent(prompt: string, opts: AgentOptions): Promise<StepResult>;
+	/**
+	 * Called synchronously when an `agent()` call arrives, before it waits for a concurrency slot; its return value is
+	 * passed to `agent`. Call-time state (such as a launch's logical head) must be read here: when a slot frees depends
+	 * on timing, which differs between a live run and a replay.
+	 */
+	prepare?(prompt: string, opts: AgentOptions): unknown;
+	agent(prompt: string, opts: AgentOptions, prepared?: unknown): Promise<StepResult>;
 	integrate(source: StepResult | string, opts: IntegrateOptions): Promise<IntegrateResult>;
 	log(message: string): void;
 	phase(title: string): void;
@@ -150,6 +156,8 @@ export interface IntegrateFailedEvent extends EventBase { t: "integrate.failed";
 export interface VerifyCompletedEvent extends EventBase { t: "verify.completed"; head: string; checks: CheckResult[]; verdict: Verdict; criteria: CriterionResult[]; verifierRan: boolean; gaps?: Gap[] }
 export interface DecisionRecordedEvent extends EventBase { t: "decision.recorded"; question: string; answer: string }
 /** `rebasedOnto` records a replay onto a moved branch; `checks` are the checks rerun at the delivered tip. */
+/** Journaled immediately before delivery writes to the user's checkout or branches, so a retry after a crash can reconcile. */
+export interface DeliveryStartedEvent extends EventBase { t: "delivery.started"; mode: DeliveryMode; target: string; tip: string; onto: string; commits: string[]; rebasedOnto?: string; curated?: boolean }
 export interface DeliveryCompletedEvent extends EventBase { t: "delivery.completed"; mode: DeliveryMode; target: string; tip: string; commits: string[]; rebasedOnto?: string; checks?: CheckResult[]; curated?: boolean }
 export interface RunFinishedEvent extends EventBase { t: "run.finished"; status: RunStatus; reason: string }
 
@@ -157,7 +165,7 @@ export type JournalEvent =
 	| RunStartedEvent | GoalApprovedEvent | PlanUpdatedEvent | ScriptLaunchedEvent | ScriptSettledEvent
 	| StepStartedEvent | StepCompletedEvent | StepFailedEvent | CheckCompletedEvent
 	| IntegrateCompletedEvent | IntegrateFailedEvent | VerifyCompletedEvent
-	| DecisionRecordedEvent | DeliveryCompletedEvent | RunFinishedEvent;
+	| DecisionRecordedEvent | DeliveryStartedEvent | DeliveryCompletedEvent | RunFinishedEvent;
 export type JournalEventType = JournalEvent["t"];
 export type EventOf<T extends JournalEventType> = Extract<JournalEvent, { t: T }>;
 /** An event as callers write it; the journal adds `v` and `at`. */

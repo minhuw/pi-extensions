@@ -52,6 +52,9 @@ describe("fold", () => {
 		const run: JournalInput = { t: "run.started", runId: "r", title: "t", base: "b0", runtime: "0.1.0", repo: "/r" };
 		expect(fold(journalOf([run]))).toMatchObject({ status: "drafting", integrationHead: "b0" });
 		expect(fold(journalOf([run, { t: "delivery.completed", mode: "series", target: "main", tip: "x", commits: ["x"] }])).status).toBe("delivered");
+		const started = fold(journalOf([run, { t: "delivery.started", mode: "branch", target: "herder/r", tip: "x", onto: "y", commits: ["x"] }]));
+		expect(started.deliveryStarted).toMatchObject({ mode: "branch", tip: "x", onto: "y" });
+		expect(started.delivery).toBeUndefined();
 		expect(fold(journalOf([run, { t: "run.finished", status: "abandoned", reason: "user" }]))).toMatchObject({ status: "abandoned", finished: { reason: "user" } });
 		expect(fold([]).status).toBe("drafting");
 	});

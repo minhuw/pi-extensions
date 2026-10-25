@@ -1,5 +1,5 @@
 import type {
-	CheckCompletedEvent, CheckSpec, DecisionRecordedEvent, DeliveryCompletedEvent, GoalApprovedEvent, IntegrateCompletedEvent,
+	CheckCompletedEvent, CheckSpec, DecisionRecordedEvent, DeliveryCompletedEvent, DeliveryStartedEvent, GoalApprovedEvent, IntegrateCompletedEvent,
 	IntegrateFailedEvent, JournalEvent, RunFinishedEvent, ScriptLaunchedEvent, ScriptSettledEvent, StepCompletedEvent,
 	StepFailedEvent, StepStartedEvent, VerifyCompletedEvent,
 } from "../types.ts";
@@ -35,6 +35,8 @@ export interface RunState {
 	checks: CheckCompletedEvent[];
 	verification?: VerifyCompletedEvent;
 	decisions: DecisionRecordedEvent[];
+	/** The latest `delivery.started`; a delivery that started but has no later `delivery.completed` was interrupted. */
+	deliveryStarted?: DeliveryStartedEvent;
 	delivery?: DeliveryCompletedEvent;
 	finished?: RunFinishedEvent;
 	tasks: Map<string, TaskRecord>;
@@ -129,6 +131,7 @@ export function fold(events: readonly JournalEvent[]): RunState {
 				break;
 			case "verify.completed": state.verification = event; state.history.push(event); break;
 			case "decision.recorded": state.decisions.push(event); state.history.push(event); break;
+			case "delivery.started": state.deliveryStarted = event; break;
 			case "delivery.completed": state.delivery = event; state.history.push(event); break;
 			case "run.finished": state.finished = event; state.history.push(event); break;
 		}
