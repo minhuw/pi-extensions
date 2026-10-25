@@ -18,6 +18,7 @@ const task = args?.task ?? "T1";
 if (!args?.prompt) throw new Error("args.prompt is required");
 const message = args.message ?? `${task}: ${args.prompt.split("\n")[0].slice(0, 60)}`;
 const maxAttempts = args.maxAttempts ?? 3;
+if (!Number.isInteger(maxAttempts) || maxAttempts < 0) throw new Error("args.maxAttempts must be a non-negative integer");
 const gateOpts = args.gate ? { gate: args.gate } : {};
 const findingsSchema = {
 	type: "object",

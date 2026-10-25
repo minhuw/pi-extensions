@@ -18,6 +18,32 @@
 
 if (!Array.isArray(args?.tasks) || args.tasks.length === 0) throw new Error("args.tasks must be a non-empty array");
 const maxAttempts = args.maxAttempts ?? 3;
+if (!Number.isInteger(maxAttempts) || maxAttempts < 0) throw new Error("args.maxAttempts must be a non-negative integer");
+
+// Ownership is compared by each path's literal directory part: a glob counts as owning its whole directory,
+// so this may refuse tasks that a finer matcher would allow. Run such tasks sequentially instead.
+const ownedRoot = (path) => {
+	const parts = path.replace(/^\.\//, "").split("/").filter((part) => part !== "" && part !== ".");
+	const glob = parts.findIndex((part) => /[*?[{]/.test(part));
+	return glob === -1 ? parts : parts.slice(0, glob);
+};
+const nested = (a, b) => a.length <= b.length && a.every((part, i) => part === b[i]);
+const seen = new Map();
+for (const t of args.tasks) {
+	if (typeof t?.id !== "string" || t.id === "") throw new Error("every task needs a string id");
+	if (seen.has(t.id)) throw new Error(`duplicate task id "${t.id}"`);
+	if (typeof t.prompt !== "string" || t.prompt === "") throw new Error(`task ${t.id}: prompt must be a non-empty string`);
+	if (!Array.isArray(t.owns) || t.owns.length === 0 || !t.owns.every((p) => typeof p === "string" && p !== "")) throw new Error(`task ${t.id}: owns must be a non-empty array of paths`);
+	const escaping = t.owns.find((p) => p.split("/").includes(".."));
+	if (escaping) throw new Error(`task ${t.id}: owns path "${escaping}" contains "..", which defeats the overlap check; use paths relative to the repository root`);
+	for (const [other, owns] of seen) {
+		for (const a of t.owns) for (const b of owns) {
+			const [ra, rb] = [ownedRoot(a), ownedRoot(b)];
+			if (nested(ra, rb) || nested(rb, ra)) throw new Error(`tasks ${other} and ${t.id} own overlapping paths (${b} and ${a}); parallel writers must not share files. Make ownership disjoint or run them sequentially.`);
+		}
+	}
+	seen.set(t.id, t.owns);
+}
 
 // Durations, clock times, and hashes change between runs; strip them so a repeated failure is recognized.
 // file:line:col locations are kept so different failures stay distinct.
@@ -31,10 +57,14 @@ const describeChecks = (checks) => checks.map((c) => `### ${c.id} (exit ${c.time
 const contract = (t) => `${t.prompt}\n\nFile ownership: edit only these paths: ${t.owns.join(", ")}. Other workers are changing other paths in parallel; do not touch anything else, even to fix something you notice.`;
 const gateOpts = (t) => (t.gate ? { gate: t.gate } : {});
 
+// Each fix commit sits on the previous attempt, so a task's whole change runs from its first commit's parent.
+const firstCommit = new Map();
+
 // Implements one task and fixes failed gates; resolves to the last step result.
 async function build(t) {
 	phase(`${t.id}: implement`);
 	let step = await agent(contract(t), { id: `impl-${t.id}`, task: t.id, ...gateOpts(t) });
+	firstCommit.set(t.id, step.commit);
 	let lastFailure = null;
 	for (let attempt = 1; step.status === "gate_failed" && attempt <= maxAttempts; attempt++) {
 		const failed = failedChecks(step.checks);
@@ -70,8 +100,9 @@ for (const [i, t] of args.tasks.entries()) {
 	if (result.status === "conflict") {
 		log(`${t.id}: conflict in ${(result.conflicts ?? []).join(", ")}; running the resolver`);
 		phase(`${t.id}: resolve`);
+		const range = `${firstCommit.get(t.id)}^ ${step.commit}`;
 		const resolved = await agent(
-			`Integrate task ${t.id} onto the current integration head (your worktree). Its change is commit ${step.commit}; read it with \`git show ${step.commit}\`.\n\nConflicting paths:\n${(result.conflicts ?? []).map((p) => `- ${p}`).join("\n")}\n\nKeep both sides completely. If you cannot, change nothing and explain why; the task is then reported as failed.\n\nTask contract:\n${contract(t)}`,
+			`Integrate task ${t.id} onto the current integration head (your worktree). Its change is \`git diff ${range}\` (the implementation and any fixes on top). Apply all of it first with \`git diff --binary ${range} | git apply --3way\`, then resolve the conflicts; every other change in that diff must stay in your worktree.\n\nConflicting paths:\n${(result.conflicts ?? []).map((p) => `- ${p}`).join("\n")}\n\nKeep both sides completely. If you cannot, change nothing and explain why; the task is then reported as failed.\n\nTask contract:\n${contract(t)}`,
 			{ id: `resolve-${t.id}`, role: "resolver", task: t.id, ...(head ? { base: head } : {}), ...gateOpts(t) },
 		);
 		// no_changes means the resolver could not keep both sides; its text says why.

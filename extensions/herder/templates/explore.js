@@ -18,6 +18,7 @@
 const task = args?.task ?? "T1";
 if (!args?.prompt) throw new Error("args.prompt is required");
 const count = args.variants ?? 3;
+if (!Number.isInteger(count) || count < 1) throw new Error("args.variants must be a positive integer");
 const approaches = args.approaches ?? [];
 const gateOpts = args.gate ? { gate: args.gate } : {};
 
