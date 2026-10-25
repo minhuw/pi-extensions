@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { isEligibleModel, type NativeCompactionConfig } from "./types.ts";
 import {
@@ -85,7 +85,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 	};
 
 	pi.on("context", (event, ctx) => {
-		const checkpoint = findNativeCheckpoint(ctx.sessionManager.getBranch() as SessionEntry[]);
+		const checkpoint = findNativeCheckpoint(ctx.sessionManager.getBranch());
 		if (checkpoint.status === "none") return undefined;
 		if (!inScope(ctx, checkpoint, options.loadConfig(ctx))) return undefined;
 		return {
@@ -94,7 +94,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const branch = ctx.sessionManager.getBranch() as SessionEntry[];
+		const branch = ctx.sessionManager.getBranch();
 		const checkpoint = findNativeCheckpoint(branch);
 		if (checkpoint.status === "none") return undefined;
 
@@ -131,7 +131,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 			notify(ctx, `${options.label} native compaction configuration failed: ${errorMessage(error)}`, "error");
 			return { cancel: true };
 		}
-		const checkpoint = findNativeCheckpoint(event.branchEntries as SessionEntry[]);
+		const checkpoint = findNativeCheckpoint(event.branchEntries);
 		if (!inScope(ctx, checkpoint, config)) return undefined;
 
 		if (!model || !options.ownsProvider(model.provider, config) || !isEligibleModel(model, config)) {
@@ -149,7 +149,7 @@ export function registerNativeCompaction(pi: ExtensionAPI, options: NativeCompac
 				notify(ctx, "Custom summary instructions are ignored by the native Responses compaction protocol.", "warning");
 			}
 			const input = effectiveInputForBranch({
-				branch: event.branchEntries as SessionEntry[],
+				branch: event.branchEntries,
 				model,
 				tools: pi.getAllTools(),
 				excludeLastAssistantError: event.reason === "overflow" && event.willRetry,

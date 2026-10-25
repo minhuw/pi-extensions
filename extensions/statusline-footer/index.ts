@@ -551,7 +551,7 @@ const NERD_ICONS: IconSet = {
 	branch: "\u{F062C}", // md-source-branch
 	file: "\u{F0224}", // md-file-outline
 	cwd: "\u{F0770}", // md-folder-open
-} as const;
+};
 
 const ASCII_ICONS: IconSet = {
 	compact: "×",
@@ -571,7 +571,7 @@ const ASCII_ICONS: IconSet = {
 	branch: "⎇",
 	file: "▤",
 	cwd: "⌂",
-} as const;
+};
 
 export function hasNerdFonts(): boolean {
 	const override = process.env.STATUSLINE_NERD_FONTS ?? process.env.FOOTER_NERD_FONTS;
@@ -1026,7 +1026,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (next === "full" || next === "compact" || next === "off") {
-				mode = next as Mode;
+				mode = next;
 			} else if (next === "") {
 				mode = mode === "off" ? "full" : "off";
 			} else {

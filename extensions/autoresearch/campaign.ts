@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import { Parameters, renderReport, restoreReport, updateReport, type Report } from "./report.ts";
 
 export const ITERATION = "autoresearch:iteration";
@@ -15,7 +15,6 @@ export const BaselineParameters = Type.Object({
 	repetitions: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
 	timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 1800 })),
 });
-export type BaselineInput = Static<typeof BaselineParameters>;
 export interface Benchmark {
 	root: string;
 	methodology: string;
