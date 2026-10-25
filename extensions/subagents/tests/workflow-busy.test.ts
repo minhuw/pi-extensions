@@ -24,7 +24,7 @@ let activations: ReturnType<typeof makePi>[];
 let runs: { signal: AbortSignal; finish(status?: "completed" | "failed" | "killed"): void; fail(): void }[];
 let snapshots: { source: string; activities: { id: string; label: string }[] }[];
 const context = () => ctx({ mode: "print", isIdle: () => true });
-const busy = () => snapshots.at(-1)?.activities.length !== 0;
+const busy = () => snapshots.at(-1)!.activities.length !== 0;
 
 beforeEach(() => {
   env = hermeticDir({ settings: { workflowsEnabled: true, schedulingEnabled: false, widgetMode: "off", fleetView: false } });

@@ -71,7 +71,7 @@ describe("the StructuredOutput tool", () => {
     expect(result.content[0].text).toContain("file");
     expect(capture.json).toBeUndefined();
     expect(capture.called).toBe(true);
-    expect(capture.lastError).toBeDefined();
+    expect(capture.lastError).toContain("file");
   });
 
   it("lets a corrected second call win", async () => {

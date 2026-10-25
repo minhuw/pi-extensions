@@ -19,7 +19,7 @@ describe("local service tiers", () => {
   });
 
   it("rejects malformed values and only supports tier-aware APIs", () => {
-    for (const value of [42, {}, "invalid"]) expect(() => parseServiceTier(value)).toThrow();
+    for (const value of [42, {}, "invalid"]) expect(() => parseServiceTier(value)).toThrow("Invalid service_tier");
     expect(parseServiceTier(undefined)).toBeUndefined();
     for (const api of ["openai-responses", "openai-codex-responses", "cliproxyapi-codex-responses"]) {
       expect(modelSupportsServiceTier({ api })).toBe(true);

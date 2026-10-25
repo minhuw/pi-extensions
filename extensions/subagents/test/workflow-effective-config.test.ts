@@ -104,8 +104,7 @@ describe("the workflow host reports a child's effective configuration", () => {
     await host.spawnAgent(spawnRequest({ agentType: "pinned", onResolved: configCollector(reported) }));
 
     expect(reported).toHaveLength(1);
-    expect(reported[0]).toMatchObject({ modelId: "anthropic/claude-haiku-4-5" });
-    expect((reported[0] as { modelName?: string }).modelName).toBeTruthy();
+    expect(reported[0]).toMatchObject({ modelId: "anthropic/claude-haiku-4-5", modelName: "haiku 4.5" });
   });
 
   it("reports for an agent that named no model — the inherited case", async () => {
