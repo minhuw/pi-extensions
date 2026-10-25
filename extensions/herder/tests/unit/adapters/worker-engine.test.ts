@@ -409,6 +409,7 @@ export default function (pi) {
 					return fauxAssistantMessage("Implementer result");
 				}]);
 				await session.prompt("Implement the bounded task");
+				assert.deepEqual(finalAssistantResult(session.messages), { text: "Implementer result", failed: false });
 			}
 			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			session.dispose();
@@ -726,6 +727,7 @@ test("Searcher uses current host Magpie registration without writing config and 
 		setRegisteredConfig({ url: magpie.url, headers: { Authorization: "Bearer rotated-fixture" } });
 		const rotated = await nested.run({ type: "searcher", prompt: "Search", description: "use rotated registration" });
 		assert.equal(rotated.status, "completed", rotated.error);
+		assert.ok(magpie.requests.length > beforeRotation);
 		assert.ok(magpie.requests.slice(beforeRotation).every((request) => request.headers.authorization === "Bearer rotated-fixture"));
 		setRegisteredConfig(undefined);
 		const beforeLogout = magpie.requests.length;

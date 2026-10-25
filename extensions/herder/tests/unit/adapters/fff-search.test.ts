@@ -7,6 +7,7 @@ import test from "node:test";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type Extension, type LoadExtensionsResult, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { getCurrentTools } from "@earendil-works/pi-ai";
+import { finalAssistantResult } from "../../../adapters/assistant-message.ts";
 import { configureHerderFff, FFF_EXTENSION_PATH, FFF_TOOL_NAMES } from "../../../adapters/fff-search.ts";
 
 async function loaded(root: string) {
@@ -123,6 +124,7 @@ test("native FFF tools reach the first request, search source and resume real pa
 		};
 		faux.setResponses(Array.from({ length: 4 }, () => respond));
 		await session.prompt("Search the source fixture");
+		assert.deepEqual(finalAssistantResult(session.messages), { text: "native source search complete", failed: false });
 	} finally {
 		try {
 			await session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

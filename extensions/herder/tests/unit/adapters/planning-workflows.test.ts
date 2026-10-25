@@ -36,7 +36,7 @@ test("active Fire rejects explicit Grill splitting before target reservation", (
 	assert.doesNotThrow(() => assertActiveFireGrillTarget(parseGrillPlanTarget("--plan 7")));
 	assert.throws(
 		() => assertActiveFireGrillTarget(parseGrillPlanTarget("--plan 7 --split")),
-		/error|split cannot run during active Herder Fire|target-local/i,
+		/--split cannot run during active Herder Fire because the manager reservation is target-local/,
 	);
 });
 

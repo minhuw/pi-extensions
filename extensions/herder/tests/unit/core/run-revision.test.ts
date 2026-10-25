@@ -332,7 +332,8 @@ for (const point of ["after_restarting", "after_restart"]) {
 				await assert.rejects(manager.start({ mode: point === "after_restart" ? "resume" : "fire", repositoryRoot: record.run.repositoryRoot, planDirectory: value.directory, profile: "epic", maxParallel: 2 }), /Markdown changed after host confirmation|Finish the whole-run revision/);
 				const run = manager.store.getRun();
 				if (point === "after_restarting") assert.equal(run?.currentGeneration, 1, "original generation remains until adoption");
-				if (run) assert.equal(manager.store.countActions(run.runId, { generation: 2 }), 0, "no skipped or partial execution may start");
+				assert.ok(run);
+				assert.equal(manager.store.countActions(run.runId, { generation: 2 }), 0, "no skipped or partial execution may start");
 			} finally { manager.close(); }
 			assert.equal(readRunRevision(value.directory)?.state, "restarting");
 			fs.writeFileSync(index, approved);

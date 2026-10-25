@@ -623,9 +623,10 @@ test("reset accepts the legacy sibling worktree location", { timeout: 30_000 }, 
 test("applyHerderReset stops an active service before resetting", async () => {
 	const value = await initializedFixture();
 	try {
-		await ensureService(value.planDir);
+		const before = await ensureService(value.planDir);
 		const result = await applyHerderReset({ repoRoot: value.repo, planDirectory: value.planDir });
 		assert.equal(result.planName, "herder-plans");
+		await assert.rejects(requestService(before, "/v1/status", undefined, 2_000));
 		assert.equal((await requestService(await ensureService(value.planDir), "/v1/status", undefined)).reply !== undefined, true);
 	} finally { await stopService(value.planDir).catch(() => {}); remove(value); }
 });

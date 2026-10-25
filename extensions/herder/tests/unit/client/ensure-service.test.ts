@@ -72,8 +72,10 @@ test("detached daemon startup does not invoke Orca host integration", async () =
 	chmodSync(command, 0o755);
 	const previousOwned = process.env.ORCA_PI_STATUS_OWNED;
 	const previousCommand = process.env.ORCA_CLI_COMMAND;
+	const previousTestDashboardOpen = process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN;
 	process.env.ORCA_PI_STATUS_OWNED = "test-owned";
 	process.env.ORCA_CLI_COMMAND = command;
+	process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN = "1";
 	try {
 		await ensureService(planDirectory);
 		assert.equal(existsSync(calls), false, "daemon startup opened an Orca tab");
@@ -82,6 +84,8 @@ test("detached daemon startup does not invoke Orca host integration", async () =
 		else process.env.ORCA_PI_STATUS_OWNED = previousOwned;
 		if (previousCommand === undefined) delete process.env.ORCA_CLI_COMMAND;
 		else process.env.ORCA_CLI_COMMAND = previousCommand;
+		if (previousTestDashboardOpen === undefined) delete process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN;
+		else process.env.HERDER_ALLOW_TEST_DASHBOARD_OPEN = previousTestDashboardOpen;
 		await stopService(planDirectory).catch(() => {});
 		rmSync(root, { recursive: true, force: true });
 	}

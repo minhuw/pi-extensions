@@ -90,6 +90,8 @@ test("shutdown reset removes request capabilities", () => {
 	const value = reply({ verificationRequest: verification, attention });
 	h.requests.observeReply(value);
 	h.requests.deliverReply(value);
+	assert.equal(h.requests.getVerificationRequest(verification.requestId)?.requestId, verification.requestId);
+	assert.equal(h.requests.attention?.requestId, attention.requestId);
 	h.requests.reset("shutdown");
 	assert.equal(h.requests.getVerificationRequest(verification.requestId), undefined);
 	assert.equal(h.requests.getIntegrationRepairRequest("repair-request"), undefined);

@@ -169,7 +169,8 @@ test("universe dispatches Searcher on Sol and Recon on DeepSeek", async () => {
 		}
 		assert.deepEqual(created[0]!.binding, { model: "gpt-6.1-sol", effort: "xhigh" });
 		assert.deepEqual(created[1]!.binding, { model: "deepseek/deepseek-flash", effort: "high" });
-		if (created[2]) assert.deepEqual(created[2].binding, { model: mapping.model, effort: mapping.effort });
+		assert.equal(created.length, types.length);
+		if (types.length === 3) assert.deepEqual(created[2]!.binding, { model: mapping.model, effort: mapping.effort });
 		assert.deepEqual(value.snapshots().filter((child) => child.model === "deepseek/deepseek-flash").map((child) => child.type), ["recon"]);
 		await value.stop("test complete");
 	}

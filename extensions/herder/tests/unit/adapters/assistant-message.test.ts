@@ -3,10 +3,9 @@ import test from "node:test";
 import {
 	assistantText,
 	decodeAssistantResult,
-	finalAssistantResult as sharedFinalAssistantResult,
+	finalAssistantResult,
 	responseActivity,
 } from "../../../adapters/assistant-message.ts";
-import { finalAssistantResult as workerFinalAssistantResult } from "../../../adapters/worker-engine.ts";
 
 function assistant(content: unknown, extras: Record<string, unknown> = {}) {
 	return { role: "assistant", content, stopReason: "stop", ...extras };
@@ -49,10 +48,10 @@ test("activity uses the first nonblank line and caps it at 80 characters", () =>
 	assert.equal(responseActivity("   \n\t"), undefined);
 });
 
-test("worker compatibility adapter shares the core and keeps its no-result diagnostic", () => {
+test("final result decodes the assistant and keeps its no-result diagnostic", () => {
 	const messages = [assistant([{ type: "text", text: "  padded  " }])];
-	assert.deepEqual(workerFinalAssistantResult(messages), sharedFinalAssistantResult(messages));
-	assert.deepEqual(workerFinalAssistantResult([]), {
+	assert.deepEqual(finalAssistantResult(messages), { text: "  padded  ", failed: false });
+	assert.deepEqual(finalAssistantResult([]), {
 		failed: true,
 		error: "Pi worker returned no assistant result.",
 	});

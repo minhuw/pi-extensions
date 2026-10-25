@@ -53,6 +53,9 @@ test("RPC progress, successful commands and non-error notifications remain healt
 test("RPC invalid stdout produces a diagnostic without exposing its raw content", () => {
 	const monitor = createPiRpcMonitor();
 	monitor.consume(Buffer.from("PRIVATE_RAW_DIAGNOSTIC\n"));
-	assert.throws(() => monitor.assertHealthy(), /invalid JSON.*pi.log/);
-	try { monitor.assertHealthy(); } catch (error) { assert.doesNotMatch(String(error), /PRIVATE_RAW_DIAGNOSTIC/); }
+	assert.throws(() => monitor.assertHealthy(), (error) => {
+		assert.match(String(error), /invalid JSON.*pi.log/);
+		assert.doesNotMatch(String(error), /PRIVATE_RAW_DIAGNOSTIC/);
+		return true;
+	});
 });

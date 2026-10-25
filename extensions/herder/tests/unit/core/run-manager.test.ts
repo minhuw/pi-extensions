@@ -1376,7 +1376,6 @@ test("nonzero final verification failure is durable and replay-safe", { timeout:
 			const gate = payload(gates[0]);
 			assert.equal(gate.ok, false);
 			assert.equal(gate.exitCode, 7);
-			assert.ok(String(gate.logPath));
 			assert.equal(fs.existsSync(String(gate.logPath)), true);
 			assert.equal(store.getPlan(run.runId, "RUN"), null);
 			assert.equal(store.getActions(run.runId).some((action) => action.planId === "RUN" || action.workerMode === "FINAL_AUDIT"), false);
@@ -1477,7 +1476,6 @@ test("minimum-timeout final verification failure preserves timeout and log evide
 			assert.equal(gate.timeoutMs, 1_000);
 			assert.ok(Number(gate.durationMs) >= 900);
 			assert.notEqual(gate.exitCode, 0);
-			assert.ok(String(gate.logPath));
 			assert.equal(fs.existsSync(String(gate.logPath)), true);
 			assert.equal(gate.timedOut, true);
 			assert.equal(gate.outcome, "timed_out");
@@ -2253,7 +2251,6 @@ test("status snapshots revalidate live complete state before exposing a reignite
 			if (concurrentReply.status === "complete") {
 				assert.ok(Array.isArray(concurrent.operations) && (concurrent.operations as unknown[]).length > 0);
 			} else {
-				assert.notEqual(concurrentReply.status, "complete");
 				assert.equal(concurrentReply.reigniteRequest, undefined);
 			}
 		}
@@ -3350,9 +3347,9 @@ test("integration repair begin is atomic, request-bound, and terminal-safe", { t
 			assert.equal(operationRows[0]!.result_json.includes(token), false);
 			assert.equal(snapshotRow.reply_json.includes(token), false);
 			assert.ok(Array.isArray(payload(begun.integrationRepair).beginRefSnapshot));
-			assert.ok(String(payload(begun.integrationRepair).beginRefSnapshotSha256));
+			assert.equal(payload(begun.integrationRepair).beginRefSnapshotSha256, row.beginRefSnapshotSha256);
 			assert.equal(row.beginRefSnapshot !== null, true);
-			assert.equal(row.beginRefSnapshotSha256 !== null, true);
+			assert.match(String(row.beginRefSnapshotSha256), /^[0-9a-f]{64}$/);
 		} finally {
 			store.close();
 		}

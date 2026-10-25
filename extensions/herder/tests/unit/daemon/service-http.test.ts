@@ -133,7 +133,7 @@ test("idempotent operation replay preserves receipt identity", async () => {
 		}
 		assert.equal(firstReceipt.operationId, payload.operationId);
 		assert.equal(firstReceipt.kind, payload.kind);
-		assert.equal(typeof firstReceipt.payloadSha256, "string");
+		assert.match(String(firstReceipt.payloadSha256), /^[0-9a-f]{64}$/);
 	});
 });
 

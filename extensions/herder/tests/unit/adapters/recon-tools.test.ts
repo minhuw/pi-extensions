@@ -236,6 +236,7 @@ test("missing ripgrep never downloads; existing Pi bin fallback supports errors 
 		try { await access(path.join(root, "started")); break; }
 		catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
 	}
+	await access(path.join(root, "started"));
 	scope.abort();
 	await rejected;
 });
