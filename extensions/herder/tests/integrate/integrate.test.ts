@@ -202,4 +202,45 @@ describe("integrate", () => {
 			}));
 		}
 	});
+
+	describe("cancellation", () => {
+		const nothingJournaled = (run: Run) => expect([...events(run.store, "integrate.completed"), ...events(run.store, "integrate.failed")]).toEqual([]);
+
+		it("stops the checks and keeps the head when the call's signal aborts", () => withGitFixture(async (fixture) => {
+			const run = setupRun(fixture, [check("slow", "sleep 20")]);
+			const controller = new AbortController();
+			const started = Date.now();
+			const pending = integrator(run).integrate(step(stepCommit(run, run.base, { "a.txt": "a\n" })), { message: "a" }, { signal: controller.signal });
+			setTimeout(() => controller.abort("launch settled"), 200);
+			await expect(pending).rejects.toBe("launch settled");
+			expect(Date.now() - started).toBeLessThan(10_000);
+			expect(head(run)).toBe(run.base);
+			nothingJournaled(run);
+			expect(worktreesGone(run)).toBe(true);
+		}));
+
+		it("does nothing for a call aborted while it waits behind another integration", () => withGitFixture(async (fixture) => {
+			const run = setupRun(fixture, [check("brief", "sleep 1")]);
+			const controller = new AbortController();
+			const first = integrator(run).integrate(step(stepCommit(run, run.base, { "a.txt": "a\n" })), { message: "a" });
+			const second = integrator(run).integrate(step(stepCommit(run, run.base, { "b.txt": "b\n" }), "s-1"), { message: "b" }, { signal: controller.signal });
+			controller.abort("stopped");
+			await expect(second).rejects.toBe("stopped");
+			const done = await first;
+			expect(done.status).toBe("integrated");
+			expect(head(run)).toBe(done.head);
+			expect(events(run.store, "integrate.completed")).toHaveLength(1);
+		}));
+
+		it("still follows the integrator's own signal when the call has one", () => withGitFixture(async (fixture) => {
+			const run = setupRun(fixture, [check("slow", "sleep 20")]);
+			const own = new AbortController();
+			const pending = createIntegrator({ runId: run.runId, store: run.store, vcs: run.vcs, checks: run.checks, signal: own.signal })
+				.integrate(step(stepCommit(run, run.base, { "a.txt": "a\n" })), { message: "a" }, { signal: new AbortController().signal });
+			setTimeout(() => own.abort("session shutdown"), 200);
+			await expect(pending).rejects.toBe("session shutdown");
+			expect(head(run)).toBe(run.base);
+			nothingJournaled(run);
+		}));
+	});
 });

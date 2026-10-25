@@ -3,12 +3,13 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { DEFAULT_ROLE, LIMITS } from "../config.ts";
 import { Occurrences, sha256Hex } from "../journal/keys.ts";
 import { integrationRef, worktreePath } from "../run/paths.ts";
+import type { IntegrateContext } from "../integrate/integrate.ts";
 import type { IntegrateOptions, IntegrateResult, LaunchStatus, StepResult, WorkflowBridge } from "../types.ts";
 import { runScript } from "../workflow/sandbox.ts";
 import { createStepExecutor, type LaunchStats, type StepDeps } from "./executor.ts";
 
 export interface LaunchDeps extends StepDeps {
-	integrator: { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: { from?: string }): Promise<IntegrateResult> };
+	integrator: { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult> };
 	onLog?: (message: string) => void;
 	onPhase?: (title: string) => void;
 }
@@ -78,7 +79,7 @@ export function launchScript(deps: LaunchDeps, request: LaunchRequest): LaunchHa
 			return track(executor.run(prompt, opts, { launch, occurrences, base: () => at.base, phase: () => at.phase, stats, signal: controller.signal }));
 		},
 		async integrate(source, opts) {
-			const result = await track(deps.integrator.integrate(source, opts, { from: logicalHead }));
+			const result = await track(deps.integrator.integrate(source, opts, { from: logicalHead, signal: controller.signal }));
 			if (result.status === "integrated" && result.head) logicalHead = result.head;
 			return result;
 		},
@@ -91,10 +92,14 @@ export function launchScript(deps: LaunchDeps, request: LaunchRequest): LaunchHa
 	const script = runScript({
 		source: request.source, args: request.args, bridge, limits: deps.limits ?? LIMITS,
 		writes: (role, write) => write ?? deps.roles.get(role ?? DEFAULT_ROLE)?.write ?? false,
+		// Calls the script left running (not awaited, or siblings of a failure) stop the moment the outcome is decided; an
+		// integration among them stops its checks and leaves the head where it was.
+		onSettle: () => controller.abort("the script settled"),
 	});
 	const stop = (reason?: string) => {
-		script.stop(reason);
+		// First, so the stop's reason, not "the script settled", reaches the steps.
 		controller.abort(reason ?? "stopped");
+		script.stop(reason);
 	};
 	const onAbort = () => stop("the run was stopped");
 	if (deps.signal?.aborted) onAbort();
@@ -103,8 +108,6 @@ export function launchScript(deps: LaunchDeps, request: LaunchRequest): LaunchHa
 	const done = (async (): Promise<LaunchOutcome> => {
 		try {
 			const outcome = await script.done;
-			// Calls the script left running (not awaited, or siblings of a failure) settle as stopped before the launch does.
-			controller.abort("the script settled");
 			await Promise.allSettled([...pending]);
 			const resultRef = outcome.value === undefined ? undefined : store.outputs.put(JSON.stringify(outcome.value));
 			store.journal.append({ t: "script.settled", launch, status: outcome.status, ...stats, resultRef, error: outcome.error });

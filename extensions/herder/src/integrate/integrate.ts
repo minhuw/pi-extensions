@@ -8,8 +8,11 @@ import { type CheckResult, type CheckSpec, type Faults, INTEGRATE_OPTION_KEYS, t
 import { hasHerderTrailer } from "../vcs/git.ts";
 
 export interface IntegrateDeps { runId: string; store: RunStore; vcs: Vcs; checks: readonly CheckSpec[]; faults?: Faults; signal?: AbortSignal; onProgress?: () => void }
-/** `from`: a launch's logical head (it keys replayed integrations); default: the real integration head. */
-export interface IntegrateContext { from?: string }
+/**
+ * `from`: a launch's logical head (it keys replayed integrations); default: the real integration head.
+ * `signal`: cancels this call as well as `deps.signal` (a launch that settles or stops cancels its integrations).
+ */
+export interface IntegrateContext { from?: string; signal?: AbortSignal }
 export interface Integrator { integrate(source: StepResult | string, opts: IntegrateOptions, ctx?: IntegrateContext): Promise<IntegrateResult>; head(): string }
 
 export const INTEGRATION_SLOT = "integration";
@@ -57,13 +60,13 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 	};
 	const append = (event: JournalInput) => { store.journal.append(event); deps.onProgress?.(); };
 
-	async function runIntegrationChecks(specs: readonly CheckSpec[], commit: string, key: string): Promise<CheckResult[]> {
+	async function runIntegrationChecks(specs: readonly CheckSpec[], commit: string, key: string, signal: AbortSignal | undefined): Promise<CheckResult[]> {
 		if (!specs.length) return [];
 		const path = worktreePath(vcs.commonDir(), runId, INTEGRATION_SLOT);
 		vcs.removeWorktree(path);
 		try {
 			vcs.addWorktree(path, commit);
-			const results = await runChecks(specs, { cwd: path, commit, outputs: store.outputs, signal: deps.signal });
+			const results = await runChecks(specs, { cwd: path, commit, outputs: store.outputs, signal });
 			for (const r of results) append({ t: "check.completed", checkId: r.id, commit, exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs, logRef: r.logRef, tail: r.tail, purpose: "integrate", key });
 			return results;
 		} finally {
@@ -71,7 +74,7 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 	}
 
-	async function integrateLocked(source: string, opts: IntegrateOptions, specs: CheckSpec[], logicalFrom: string): Promise<IntegrateResult> {
+	async function integrateLocked(source: string, opts: IntegrateOptions, specs: CheckSpec[], logicalFrom: string, signal: AbortSignal | undefined): Promise<IntegrateResult> {
 		const { message, task } = opts;
 		const key = integrationKey(logicalFrom, source, message);
 		const recorded = findIntegration(store.state(), key);
@@ -90,6 +93,7 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 
 		// Live: always onto the real head, so the line never rewinds.
+		signal?.throwIfAborted();
 		const from = current;
 		const merged = vcs.mergeTree(from, source);
 		if (!merged.clean) {
@@ -102,11 +106,13 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 		}
 		const commit = vcs.commitTree(merged.tree, [from], message);
 		faults.hit("after-merge-commit", key);
-		const checks = await runIntegrationChecks(specs, commit, key);
+		const checks = await runIntegrationChecks(specs, commit, key, signal);
 		if (checks.some((check) => !check.passed)) {
 			append({ t: "integrate.failed", key, from, source, reason: "checks_failed", checks, message, task });
 			return { status: "checks_failed", checks };
 		}
+		// A launch that failed or stopped while the checks ran must not move the head afterwards.
+		signal?.throwIfAborted();
 		faults.hit("before-ref-advance", key);
 		vcs.updateRef(ref, commit, from);
 		faults.hit("after-ref-advance", key);
@@ -126,7 +132,8 @@ export function createIntegrator(deps: IntegrateDeps): Integrator {
 			else if (source.commit !== undefined) commit = vcs.resolve(source.commit);
 			else if (source.status === "no_changes") return { status: "integrated", head: ctx.from ?? realHead() };
 			else throw new Error(`integrate: step ${source.key} has no commit (read-only steps cannot be integrated)`);
-			return serialize(store.paths.dir, () => integrateLocked(commit, opts, specs, ctx.from ?? realHead()));
+			const signal = deps.signal && ctx.signal ? AbortSignal.any([deps.signal, ctx.signal]) : ctx.signal ?? deps.signal;
+			return serialize(store.paths.dir, () => integrateLocked(commit, opts, specs, ctx.from ?? realHead(), signal));
 		},
 	};
 }

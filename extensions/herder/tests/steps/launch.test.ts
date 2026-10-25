@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { createIntegrator } from "../../src/integrate/integrate.ts";
 import { sha256Hex } from "../../src/journal/keys.ts";
 import { integrationRef, worktreePath } from "../../src/run/paths.ts";
 import { launchScript } from "../../src/steps/launch.ts";
@@ -140,6 +141,37 @@ return [flaky.status, flaky.error && flaky.error.class, gated.status];
 		expect(outcome).toMatchObject({ status: "failed", error: expect.stringMatching(/never awaited/) });
 		expect(h.types().slice(-2)).toEqual(["step.failed", "script.settled"]);
 		expect(h.events().find((event) => event.t === "step.failed")).toMatchObject({ errorClass: "stopped", final: true });
+		h.assertClean();
+	}));
+
+	it("stops an integration the script left running and keeps the head when the launch fails", () => withRun(async (h) => {
+		h.runner.add({ match: "write a.txt", files: { "a.txt": "a\n" } });
+		const checks = [{ id: "slow", command: "sleep 20", timeoutMs: 60_000, integrate: true }];
+		const integrator = createIntegrator({ runId: h.store.runId, store: h.store, vcs: h.vcs, checks });
+		const started = Date.now();
+		const source = `const a = await agent("write a.txt", { id: "a" }); integrate(a, { message: "add a" }); return 1;`;
+		const outcome = await launchScript(h.launchDeps({ integrator }), { source }).done;
+		expect(outcome).toMatchObject({ status: "failed", error: expect.stringMatching(/never awaited/) });
+		expect(Date.now() - started).toBeLessThan(10_000);
+		expect(h.vcs.readRef(integrationRef(h.store.runId))).toBe(h.head);
+		expect(h.types()).not.toContain("integrate.completed");
+		expect(h.types().at(-1)).toBe("script.settled");
+		h.assertClean();
+	}));
+
+	it("stops an awaited integration's checks on stop and keeps the head", () => withRun(async (h) => {
+		h.runner.add({ match: "write a.txt", files: { "a.txt": "a\n" } });
+		const checks = [{ id: "slow", command: "sleep 20", timeoutMs: 60_000, integrate: true }];
+		const integrator = createIntegrator({ runId: h.store.runId, store: h.store, vcs: h.vcs, checks });
+		const source = `const a = await agent("write a.txt", { id: "a" }); return await integrate(a, { message: "add a" });`;
+		const handle = launchScript(h.launchDeps({ integrator }), { source });
+		await until(() => existsSync(worktreePath(h.vcs.commonDir(), h.store.runId, "integration")));
+		handle.stop("user stop");
+		const outcome = await handle.done;
+		expect(outcome).toMatchObject({ status: "stopped", error: "user stop" });
+		expect(h.vcs.readRef(integrationRef(h.store.runId))).toBe(h.head);
+		expect(h.types()).not.toContain("integrate.completed");
+		expect(h.types().at(-1)).toBe("script.settled");
 		h.assertClean();
 	}));
 

@@ -132,19 +132,8 @@ export function createRuntimeFactory(options: RuntimeOptions = {}): RuntimeFacto
 				const { checks, title } = goal();
 				return deliver({ runId, store: run, vcs, runner: env.runner(), roles: roles(), checks, title, faults: options.faults, signal: combine(signal), onProgress: progress, confirm }, request);
 			},
-			launch(request) {
-				// Its own controller, so a stop also cancels integration checks, which do not see the script's signal.
-				const controller = new AbortController();
-				const signal = combine(controller.signal);
-				const handle = launchScript({ ...stepDeps(signal), integrator: integrator(signal) }, request);
-				return {
-					launch: handle.launch, done: handle.done,
-					stop(reason) {
-						handle.stop(reason);
-						controller.abort(reason ?? "stopped");
-					},
-				};
-			},
+			// The launch cancels its own steps and integrations when it stops or settles.
+			launch: (request) => launchScript({ ...stepDeps(env.signal), integrator: integrator(env.signal) }, request),
 			abandon(reason) {
 				run.journal.append({ t: "run.finished", status: "abandoned", reason });
 				try {

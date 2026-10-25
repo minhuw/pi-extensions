@@ -12,6 +12,8 @@ export interface ScriptOptions {
 	/** Resolves whether a call writes (role default unless `write` is given); used for the writer cap. */
 	writes(role: string | undefined, write: boolean | undefined): boolean;
 	filename?: string;
+	/** Runs synchronously when the outcome is decided, before the worker is down. */
+	onSettle?(): void;
 }
 export interface ScriptProblem { message: string; line?: number; column?: number; severity: "error" | "warning" }
 
@@ -192,7 +194,10 @@ export function runScript(options: ScriptOptions): ScriptHandle {
 	const slots = agentSlots(limits);
 	return startSandbox({
 		source: options.source, args: options.args, limits, ...(options.filename !== undefined ? { filename: options.filename } : {}),
-		onSettle: () => slots.close(),
+		onSettle: () => {
+			slots.close();
+			options.onSettle?.();
+		},
 		host: {
 			async call(call) {
 				if (call.method === "integrate") return bridge.integrate(call.source, call.opts);
