@@ -150,7 +150,6 @@ describe("local alias resolution and dispatch guards", () => {
 	it("does not expose route values or transcript text in errors", () => {
 		const models = single();
 		expect(() => assertMagpieAliasRoute(aliasOf(models), models, [{ role: "assistant", provider: "magpie", model: `SECRET/${name}`, content: "SECRET" }]))
-			.toThrow(/^Magpie's short Claude alias no longer has the same unambiguous source\./);
-		try { assertMagpieAliasRoute(aliasOf(models), [], []); } catch (error) { expect(String(error)).not.toContain("SECRET"); }
+			.toThrow(/^Magpie's short Claude alias no longer has the same unambiguous source\. Start a new session or select an explicit provider route\.$/);
 	});
 });

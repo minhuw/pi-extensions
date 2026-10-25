@@ -278,7 +278,7 @@ describe("loop tools and completion", () => {
 	});
 	it("refuses tool calls outside the owning iteration or against fixed schedules", async () => {
 		const h = harness(); await h.start(); await h.command("1m watch CI");
-		await expect(h.tool("loop_stop", { reason: "done" })).rejects.toThrow();
+		await expect(h.tool("loop_stop", { reason: "done" })).rejects.toThrow("owns the current iteration");
 		await h.advance(1); await h.begin();
 		await expect(h.tool("loop_schedule", { delaySeconds: 60, reason: "wait" })).rejects.toThrow("fixed");
 		await h.tool("loop_stop", { reason: "CI succeeded" }); await h.settle(); await h.advance(600_000);

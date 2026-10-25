@@ -17,7 +17,7 @@ import statuslineFooter, {
 	parseGitShortstat,
 	parseGitStatus,
 	rainbow,
-	thinkingCaps,
+	renderThinking,
 } from "../index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -198,10 +198,10 @@ describe("statusline footer visual language", () => {
 	});
 
 	it("washes max thinking labels across a rainbow", () => {
-		expect(thinkingCaps("minimal")).toBe("MINIMAL");
-		expect(thinkingCaps("medium")).toBe("MEDIUM");
-		expect(thinkingCaps("xhigh")).toBe("XHIGH");
-		expect(thinkingCaps("max")).toBe("MAX");
+		const theme = { fg: (_token: string, text: string) => text } as unknown as Parameters<typeof renderThinking>[0];
+		expect(renderThinking(theme, "max")).toBe(rainbow("MAX"));
+		expect(renderThinking(theme, "xhigh")).toBe(rainbow("XHIGH"));
+		expect(renderThinking(theme, "medium")).toBe("MEDIUM");
 		const painted = rainbow("MAX");
 		expect(painted).toContain("\x1b[38;2;");
 		expect(painted.endsWith("\x1b[0m")).toBe(true);

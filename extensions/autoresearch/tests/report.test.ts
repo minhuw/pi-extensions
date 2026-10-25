@@ -202,6 +202,7 @@ it.each(["tui", "rpc", "print"] as const)("registers native commands and reports
 	await h.update(baseline);
 	expect(h.ctx.ui.setStatus).toHaveBeenCalledTimes(mode === "print" ? 0 : 2);
 	await h.command("help");
+	expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("/autoresearch <target>"), "info");
 	await expect(h.command("surprise")).rejects.toThrow("Usage");
 });
 
