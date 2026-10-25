@@ -219,6 +219,14 @@ describe("Pi agent runner", () => {
 		expect(events.filter((kind) => kind === "message_update").length).toBeGreaterThan(3);
 	});
 
+	it("treats limits beyond the timer range as that long instead of firing at once", async () => {
+		const slow = fauxProvider({ api: "herder-long-api", provider: "herder-long", models: [{ id: "long" }], tokensPerSecond: 40 });
+		runtime.registerNativeProvider(slow.provider);
+		slow.setResponses([fauxAssistantMessage("word ".repeat(10))]);
+		const result = await runner({ inheritModel: () => slow.getModel("long") }).run(request({ timeoutMs: 2 ** 40, stallMs: 2 ** 40 }));
+		expect(result.text).toBe("word ".repeat(10).trim());
+	});
+
 	it("stops the session promptly when the signal aborts", async () => {
 		let providerSignal: AbortSignal | undefined;
 		faux.setResponses([(context, options) => { providerSignal = options?.signal; return (hang as Extract<FauxResponseStep, Function>)(context, options, faux.state, faux.getModel()); }]);

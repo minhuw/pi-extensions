@@ -214,6 +214,9 @@ function resultText(result: unknown): string {
 
 type Watchdog = ReturnType<typeof watchdog>;
 
+/** setTimeout fires at once for delays above 2^31 - 1 ms (about 24.8 days); longer limits mean "that long". */
+const timerMs = (ms: number) => Math.min(ms, 2 ** 31 - 1);
+
 /** Stall window, wall-clock timeout, and abort, as one failure promise that every awaited step races against. */
 function watchdog(request: AgentRunRequest) {
 	let reject!: (error: AgentError) => void;
@@ -221,9 +224,9 @@ function watchdog(request: AgentRunRequest) {
 	failure.catch(() => {});
 	let failed: AgentError | undefined;
 	const fail = (error: AgentError) => { if (!failed) { failed = error; reject(error); } };
-	const startStall = () => setTimeout(() => fail(new AgentError("stall", `no agent events for ${request.stallMs} ms`)), request.stallMs);
+	const startStall = () => setTimeout(() => fail(new AgentError("stall", `no agent events for ${request.stallMs} ms`)), timerMs(request.stallMs));
 	let stall = startStall();
-	const timeout = setTimeout(() => fail(new AgentError("timeout", `attempt exceeded ${request.timeoutMs} ms`)), request.timeoutMs);
+	const timeout = setTimeout(() => fail(new AgentError("timeout", `attempt exceeded ${request.timeoutMs} ms`)), timerMs(request.timeoutMs));
 	const onAbort = () => fail(new AgentError("fatal", "aborted"));
 	request.signal.addEventListener("abort", onAbort, { once: true });
 	return {
