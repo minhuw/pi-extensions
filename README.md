@@ -7,7 +7,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | Extension | Description |
 | --- | --- |
 | [Commit](extensions/commit/README.md) | A lightweight native prompt for committing current changes as a self-contained patch series. |
-| [Quality](extensions/quality/README.md) | Native `/simplify`, `/review`, and `/verify` prompts for cleanup, bug review, and evidence-based verification. |
+| [Quality](extensions/quality/README.md) | Native `/simplify`, `/review`, `/verify`, and `/deslop` prompts for cleanup, bug review, evidence-based verification, and AI-slop removal. |
 | [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
 | [Herder](extensions/herder/README.md) | Deterministic multi-agent implementation and independent review over isolated Git worktrees. |
 | [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; scripted workflows are disabled by default pending reliability fixes. |
@@ -43,7 +43,7 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
-Installing the collection loads all registered extensions, `/commit`, the Quality prompts (`/simplify`, `/review`, `/verify`), the eight Writer prompts, and themes. Quality commands run independently: `/simplify` applies bounded cleanup, `/review` reports bugs without fixes, and `/verify` executes checks without repairs. Herder’s `/herder-simplify` remains a planning workflow. Subagents exposes its `Agent` tools; scripted workflows (`SubagentWorkflow`) are disabled by default pending reliability fixes. An existing explicit `workflowsEnabled: true` setting still enables them; set it to `false` and reload to disable that opt-in. Herder retains its own execution policy and loads its command-owned planning instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
+Installing the collection loads all registered extensions, `/commit`, the Quality prompts (`/simplify`, `/review`, `/verify`, `/deslop`), the eight Writer prompts, and themes. Quality commands run independently: `/simplify` applies bounded cleanup, `/review` reports bugs without fixes, `/verify` executes checks without repairs, and `/deslop` removes AI code slop with evidence-gated fixes. Herder’s `/herder-simplify` remains a planning workflow. Subagents exposes its `Agent` tools; scripted workflows (`SubagentWorkflow`) are disabled by default pending reliability fixes. An existing explicit `workflowsEnabled: true` setting still enables them; set it to `false` and reload to disable that opt-in. Herder retains its own execution policy and loads its command-owned planning instructions on demand. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
 
 The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
 

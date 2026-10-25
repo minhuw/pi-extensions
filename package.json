@@ -65,6 +65,7 @@
 			"./extensions/quality/prompts/simplify.md",
 			"./extensions/quality/prompts/review.md",
 			"./extensions/quality/prompts/verify.md",
+			"./extensions/quality/prompts/deslop.md",
 			"./extensions/writer/prompts/conference-reviewer.md",
 			"./extensions/writer/prompts/evaluate.md",
 			"./extensions/writer/prompts/grammar-checker.md",

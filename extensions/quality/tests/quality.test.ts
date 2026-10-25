@@ -24,6 +24,11 @@ const definitions = {
 		argumentHint: "[scope or acceptance criteria]",
 		argumentLabel: "Optional scope or acceptance criteria:",
 	},
+	deslop: {
+		description: "Find and fix AI code slop such as needless guards, narration comments, and hollow tests",
+		argumentHint: "[scope or focus]",
+		argumentLabel: "Optional scope or focus:",
+	},
 };
 const names = Object.keys(definitions);
 
@@ -32,7 +37,7 @@ const { expandPromptTemplate } = await import(
 	new URL("./core/prompt-templates.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
 ) as { expandPromptTemplate: (text: string, templates: PromptTemplate[]) => string };
 
-test("package loads three native Quality prompts without runtime and expands arguments", async () => {
+test("package loads four native Quality prompts without runtime and expands arguments", async () => {
 	const manifest: { pi: { extensions: string[]; prompts: string[] }; scripts: Record<string, string> } = JSON.parse(
 		await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
 	);
@@ -162,6 +167,32 @@ const newCommandContracts = {
 	],
 };
 
+test("deslop retains its bounded scope, slop catalog, and evidence-gated fixes", async () => {
+	const prompt = await readFile(path.join(qualityRoot, "prompts/deslop.md"), "utf8");
+	for (const pattern of [
+		/Default to staged and unstaged changes versus HEAD plus relevant nonignored untracked source files/,
+		/A focus alone does not widen the default scope.*targets are only the lines the scoped change added or modified; preexisting code is evidence of local convention/,
+		/no changes and no explicit target.*current session.*report no target and stop.*Never invent scope/,
+		/Preserve preexisting work and the index; do not stage, commit, reset, or stash/,
+		/Slop is relative to this codebase.*matches established local convention is not slop/,
+		/Noise and residue:.*restate the next line.*task or edit history.*debug output.*unused imports/,
+		/Defensive and type slop:.*guards.*excluded by the types, every caller, or upstream validation.*returns an empty\/default value.*`as any`.*compatibility shims.*speculative abstraction/,
+		/Test slop:.*cannot fail.*mock returns its configured value.*conditional assertions.*what plausible product regression would make it fail/,
+		/one read-only `reviewer` agent per applicable catalog lens via `Agent` in ONE message.*skip the test lens when no tests are in scope/,
+		/Reviewers must not edit files or the index or launch more agents.*or explicitly reports no findings/,
+		/`Agent` is unavailable.*serially.*Wait for all reviewers before editing.*incomplete coverage.*disclose/,
+		/main session alone edits/,
+		/Remove a guard or check only with evidence.*Keep validation at trust boundaries.*security and authorization checks/,
+		/swallowed error or hidden fallback only when the scoped change introduced it.*Report it instead/,
+		/Never weaken assertions, change expectations to force a pass, or delete the only test of a changed behavior without a stronger replacement/,
+		/Report correctness bugs found along the way separately/,
+		/Stop once justified fixes are verified; do not run an arbitrary repeated cleanup loop/,
+		/fixes grouped by catalog category with counts.*items deliberately left with reasons/,
+		/Do not start `\/simplify`, `\/review`, `\/verify`, or `\/commit` automatically/,
+		/do not launch scripted workflows or Herder/,
+	]) assert.match(prompt, pattern);
+});
+
 for (const [name, patterns] of Object.entries(newCommandContracts)) {
 	test(`${name} retains its scope, evidence, and no-repair contract`, async () => {
 		const prompt = await readFile(path.join(qualityRoot, "prompts", `${name}.md`), "utf8");
@@ -190,5 +221,6 @@ test("documentation distinguishes the commands and explains Simplify migration",
 	]) assert.match(readme, pattern);
 	const rootReadme = await readFile(path.join(repositoryRoot, "README.md"), "utf8");
 	assert.match(rootReadme, /\[Quality\]\(extensions\/quality\/README\.md\)/);
+	for (const name of names) assert.ok(rootReadme.includes(`\`/${name}\``), `root README lists /${name}`);
 	assert.ok(!rootReadme.includes("extensions/simplify/"));
 });

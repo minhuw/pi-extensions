@@ -9,7 +9,7 @@ The published extension table and installation details live in the root [README]
 
 - `extensions/magpie-provider/` — live Magpie gateway model discovery, built-in Pi API delegation, and automatic native compaction for OpenAI/Codex Responses models with configurable opt-out and exact overrides. Its protocol/replay engine and tests live in `native-compaction/`.
 - `extensions/commit/` — a native `/commit` prompt template for self-contained patch series, with loading/contract tests.
-- `extensions/quality/` — native `/simplify`, `/review`, and `/verify` prompt templates for bounded cleanup, read-only bug review, and evidence-based verification, with shared loading/contract tests.
+- `extensions/quality/` — native `/simplify`, `/review`, `/verify`, and `/deslop` prompt templates for bounded cleanup, read-only bug review, evidence-based verification, and AI-slop removal, with shared loading/contract tests.
 - `extensions/herder/` — the deterministic multi-agent plan runner, Pi adapter, runtime source, tests, and documentation.
 - `extensions/orca-bridge/` — Orca hook delivery, background activity aggregation in terminal panes, prompt-aware titles, file/diff navigation, and stock Orca compatibility checks; Herder and Subagents publish snapshots through Pi's event bus. Integrations must use released Orca interfaces without modifying Orca.
 - `extensions/autoresearch/` — native main-session optimization: baseline harness design and repeated measurement, explicit user approval before bounded iterations, pinned methodology/harness files, session-owned continuation, durable reports, and footer integration. It owns `/autoresearch`; do not also load `npm:pi-autoresearch`.
