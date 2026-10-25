@@ -223,6 +223,7 @@ export function openVcs(cwd: string): Vcs {
 			return found.status === 0 ? found.stdout.toString("utf8").trim() : null;
 		},
 		isClean: (path) => text(path === undefined ? top : requireWorktree(path), ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]) === "",
+		worktreeHead: (path) => text(requireWorktree(path), ["rev-parse", "--verify", "HEAD"]),
 
 		addWorktree(path, commit) {
 			const target = requireHerderPath(path);

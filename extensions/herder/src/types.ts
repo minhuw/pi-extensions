@@ -34,6 +34,8 @@ export interface Vcs {
 	/** Without `path`, the user's checkout; with it, that worktree. */
 	isClean(path?: string): boolean;
 	addWorktree(path: string, commit: string): void; removeWorktree(path: string): void;
+	/** HEAD commit of a Herder worktree (e.g. the tip a curator committed on its detached HEAD). */
+	worktreeHead(path: string): string;
 	/**
 	 * Commits the worktree's complete state (all changes, including commits the agent made itself) as one commit whose
 	 * parent is `base` (default: the worktree's HEAD); null when the resulting tree equals the parent's tree.
@@ -145,7 +147,8 @@ export interface IntegrateCompletedEvent extends EventBase { t: "integrate.compl
 export interface IntegrateFailedEvent extends EventBase { t: "integrate.failed"; key: string; from: string; source: string; reason: "conflict" | "checks_failed" | "error"; conflicts?: string[]; checks?: CheckResult[]; message?: string; task?: string; error?: string }
 export interface VerifyCompletedEvent extends EventBase { t: "verify.completed"; head: string; checks: CheckResult[]; verdict: Verdict; criteria: CriterionResult[]; verifierRan: boolean; gaps?: Gap[] }
 export interface DecisionRecordedEvent extends EventBase { t: "decision.recorded"; question: string; answer: string }
-export interface DeliveryCompletedEvent extends EventBase { t: "delivery.completed"; mode: DeliveryMode; target: string; tip: string; commits: string[] }
+/** `rebasedOnto` records a replay onto a moved branch; `checks` are the checks rerun at the delivered tip. */
+export interface DeliveryCompletedEvent extends EventBase { t: "delivery.completed"; mode: DeliveryMode; target: string; tip: string; commits: string[]; rebasedOnto?: string; checks?: CheckResult[]; curated?: boolean }
 export interface RunFinishedEvent extends EventBase { t: "run.finished"; status: RunStatus; reason: string }
 
 export type JournalEvent =

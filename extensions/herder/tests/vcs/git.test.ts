@@ -137,6 +137,20 @@ describe("isClean", () => {
 		}));
 });
 
+describe("worktreeHead", () => {
+	it("reads a Herder worktree's HEAD, including commits made inside it, and refuses other paths", () =>
+		untouched((fixture, vcs) => {
+			const path = slot(fixture);
+			vcs.addWorktree(path, fixture.head());
+			expect(vcs.worktreeHead(path)).toBe(fixture.head());
+			writeFileSync(join(path, "curated.txt"), "x\n");
+			const commit = vcs.snapshot(path, "curated\n");
+			expect(vcs.worktreeHead(path)).toBe(commit);
+			expect(() => vcs.worktreeHead(fixture.dir)).toThrow(/refusing/);
+			vcs.removeWorktree(path);
+		}));
+});
+
 describe("worktrees", () => {
 	it("adds a detached worktree under <common>/herder/worktrees/<runId>/<slot>", () =>
 		untouched((fixture, vcs) => {
