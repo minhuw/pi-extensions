@@ -245,7 +245,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		bg: (_color: string, text: string) => text,
 		bold: (text: string) => text,
 	} as unknown as Theme;
-	const collapsed = attentionMessageDisplay(prompt, details, false, theme, "ctrl+o for full dossier");
+	const collapsed = attentionMessageDisplay(prompt, details, false, theme);
 	assert.match(collapsed, /Herder attention  Plan 017 · Judge · round 2/);
 	assert.match(collapsed, /Should the optional compatibility alias remain in scope\?/);
 	assert.match(collapsed, /No direct continuation until a decision or correction/);
@@ -295,7 +295,7 @@ test("attention messages render a compact card while preserving the full prompt"
 		planId: details.planId,
 		generation: details.generation,
 		round: details.round,
-	}, false, theme, "ctrl+o for full dossier");
+	}, false, theme);
 	assert.match(legacy, /Plan 017 · round 2/);
 	assert.doesNotMatch(legacy, /HERDER_MAIN_SESSION/);
 	assert.ok(attentionMessageDisplay(prompt, undefined, true, theme).endsWith(prompt));

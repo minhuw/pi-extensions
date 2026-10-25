@@ -4,7 +4,6 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import process from "node:process"
 import { spawnSync } from "node:child_process"
 import test from "node:test"
 import { buildCompletionProofPayload, writeCompletionProof } from "../../../src/daemon/git/completion-proof.ts"
@@ -228,8 +227,6 @@ try {
   const conflictingFresh = inspectNamespace({ repo, planDir, mode: "fire" })
   assert.equal(conflictingFresh.ok, false)
   assert.equal(conflictingFresh.reason, "namespace-conflict")
-
-  console.log("herder Fire single-branch lifecycle tests passed")
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }

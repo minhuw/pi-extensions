@@ -37,7 +37,7 @@ function fixture(upstreamStatus = "DONE") {
 	return { root, repo, directory, originalHead, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
-function completeFixturePlan(value: ReturnType<typeof fixture>, store: RunStore, id: string, file: string, content: string, reviewBase?: string, companion?: { file: string; content: string }) {
+function completeFixturePlan(store: RunStore, id: string, file: string, content: string, reviewBase?: string, companion?: { file: string; content: string }) {
 	const run = store.getRun()!;
 	const driver = revisionDriver(run);
 	const spec = store.getPlanSpecs(run.runId).find(spec => spec.planId === id)!;
@@ -81,11 +81,11 @@ async function begin(value: ReturnType<typeof fixture>, conflict = false, restac
 		const store = new RunStore(value.directory);
 		let worktree: string;
 		try {
-			if (store.getPlanSpecs(store.getRun()!.runId).some(spec => spec.planId === "003")) completeFixturePlan(value, store, "003", "src/before.mjs", "export const before = 3;\n");
+			if (store.getPlanSpecs(store.getRun()!.runId).some(spec => spec.planId === "003")) completeFixturePlan(store, "003", "src/before.mjs", "export const before = 3;\n");
 			const companion = duplicate ? { file: "tests/shared.test.mjs", content: "export const sharedTest = true;\n" } : undefined;
-			worktree = completeFixturePlan(value, store, "001", "src/value.mjs", "export const value = 2;\n", restack ? value.originalHead : undefined, companion);
-			if (completeDownstream) completeFixturePlan(value, store, "002", "src/other.mjs", "export const other = 2;\n");
-			if (store.getPlanSpecs(store.getRun()!.runId).some(spec => spec.planId === "004")) completeFixturePlan(value, store, "004", conflict ? "src/value.mjs" : "src/after.mjs", conflict ? "export const value = 4;\n" : "export const after = 4;\n", duplicate ? value.originalHead : undefined, companion);
+			worktree = completeFixturePlan(store, "001", "src/value.mjs", "export const value = 2;\n", restack ? value.originalHead : undefined, companion);
+			if (completeDownstream) completeFixturePlan(store, "002", "src/other.mjs", "export const other = 2;\n");
+			if (store.getPlanSpecs(store.getRun()!.runId).some(spec => spec.planId === "004")) completeFixturePlan(store, "004", conflict ? "src/value.mjs" : "src/after.mjs", conflict ? "export const value = 4;\n" : "export const after = 4;\n", duplicate ? value.originalHead : undefined, companion);
 		} finally { store.close(); }
 		const request = reply.attention!;
 		assert.equal(request.planId, "002");
@@ -406,7 +406,7 @@ test("ordinary reset requeues TODO-origin completion retained from an earlier se
 					store.markTerminal(action.actionId, { workerResult, usage: normalizeUsage(workerResult, { actionId: action.actionId, response: "" }), outcome: "complete", terminal: { interrupted: false, error: null, hostHandle: "fixture" } });
 					revisionDriver(store.getRun()!).release(action.worktree, action.leaseReason);
 				}
-				completeFixturePlan(value, store, "001", "src/value.mjs", "export const value = 2;\n");
+				completeFixturePlan(store, "001", "src/value.mjs", "export const value = 2;\n");
 				retained = store.getPlan(reply.runId!, "001")!;
 				approval = store.getApproval(reply.runId!, "001", 1);
 				ref = git(value.repo, ["rev-parse", "refs/plan-herder/herder-plans/completed/001"]).stdout.trim();
@@ -896,7 +896,7 @@ test("independent amendment preserves blocked runtime, dirty/unreviewed work, op
 		try {
 			await manager.start({ mode: "fire", repositoryRoot: value.repo, planDirectory: value.directory, profile: "epic", maxParallel: 2 });
 			const run = manager.store.getRun()!;
-			completeFixturePlan(value, manager.store, "001", "src/value.mjs", "export const value = 2;\n");
+			completeFixturePlan(manager.store, "001", "src/value.mjs", "export const value = 2;\n");
 			savedPlan = unfinishedPlan(value, run);
 			fs.writeFileSync(path.join(savedPlan.worktree, "src/other.mjs"), "// unreviewed committed work\n");
 			git(savedPlan.worktree, ["add", "src/other.mjs"]); git(savedPlan.worktree, ["commit", "-qm", "unreviewed"]);

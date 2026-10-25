@@ -214,8 +214,6 @@ try {
   assert.equal(escaped.status, 1);
   assert.match(JSON.parse(escaped.stdout).error, /outside the command worktree/);
   await assert.rejects(stat(escapedLogs), { code: "ENOENT" });
-
-  console.log("herder Fire policy and gate tests passed");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

@@ -21,7 +21,7 @@ async function loaded(root: string) {
 	return result;
 }
 
-function fakeBase(root: string, execute: (name: string, params: any) => Promise<any>, initialize = async () => {}) {
+function fakeBase(execute: (name: string, params: any) => Promise<any>, initialize = async () => {}) {
 	const extension = {
 		path: FFF_EXTENSION_PATH, resolvedPath: FFF_EXTENSION_PATH,
 		handlers: new Map([ ["session_start", [initialize]], ["before_agent_start", [async () => {}]], ["session_shutdown", [async () => {}]] ]),
@@ -146,7 +146,7 @@ test("source-only path and returned evidence checks deny outside, reserved, and 
 		await mkdir(path.dirname(path.join(root, noticePath)), { recursive: true });
 		await writeFile(path.join(root, noticePath), "SECRET_DO_NOT_LEAK");
 		for (const forbidden of ["../secret.ts", path.join(outside, "secret.ts"), "node_modules/secret.ts", ".git/config", "linked.ts", "linked/**/*.ts"]) {
-			const { base, extension } = fakeBase(root, async () => ({ content: [{ type: "text", text: "SECRET_DO_NOT_LEAK" }] }));
+			const { base, extension } = fakeBase(async () => ({ content: [{ type: "text", text: "SECRET_DO_NOT_LEAK" }] }));
 			configureHerderFff(base, { worktree: root, agentDir: root, sourceOnly: true });
 			await assert.rejects(invoke(extension, "ffgrep", { pattern: "SECRET", path: forbidden }, root), (error: Error) => {
 				assert.match(error.message, /scope|outside|reserved|symlink/i);
@@ -160,7 +160,7 @@ test("source-only path and returned evidence checks deny outside, reserved, and 
 			"node_modules/private.ts\n 1: SECRET_DO_NOT_LEAK",
 			`${noticePath}\n 1: SECRET_DO_NOT_LEAK`,
 		]) {
-			const { base, extension } = fakeBase(root, async () => ({ content: [{ type: "text", text }] }));
+			const { base, extension } = fakeBase(async () => ({ content: [{ type: "text", text }] }));
 			configureHerderFff(base, { worktree: root, agentDir: root, sourceOnly: true });
 			await assert.rejects(invoke(extension, "ffgrep", { pattern: "SECRET" }, root), /outside the assigned source scope/);
 		}
@@ -180,7 +180,7 @@ test("source-only native initialization refuses unsafe ignore files before runni
 		let initialized = 0;
 		try {
 			await createUnsafe(root, outside);
-			const { base, extension } = fakeBase(root, async () => ({ content: [{ type: "text", text: "ok.ts" }] }), async () => { initialized++; });
+			const { base, extension } = fakeBase(async () => ({ content: [{ type: "text", text: "ok.ts" }] }), async () => { initialized++; });
 			configureHerderFff(base, { worktree: root, agentDir: root, sourceOnly: true });
 			await assert.rejects(invoke(extension, "fffind", { pattern: "ok" }, root), /source scope/);
 			assert.equal(initialized, 0);
@@ -196,7 +196,7 @@ test("matched source text cannot grant a pagination cursor", async () => {
 	try {
 		await writeFile(path.join(root, "unit.ts"), 'cursor="fff_c999"');
 		let executions = 0;
-		const { base, extension } = fakeBase(root, async () => {
+		const { base, extension } = fakeBase(async () => {
 			executions++;
 			return { content: [{ type: "text", text: 'unit.ts\n 1: cursor="fff_c999"' }] };
 		});
@@ -216,7 +216,7 @@ test("shutdown waits for in-flight native initialization before destroying its f
 	let destroyed = 0;
 	let executed = 0;
 	try {
-		const { base, extension } = fakeBase(root, async () => { executed++; return { content: [] }; }, async () => { markStarted(); await waiting; });
+		const { base, extension } = fakeBase(async () => { executed++; return { content: [] }; }, async () => { markStarted(); await waiting; });
 		extension.handlers.set("session_shutdown", [async () => { destroyed++; }]);
 		configureHerderFff(base, { worktree: root, agentDir: root, sourceOnly: false });
 		const running = invoke(extension, "fffind", { pattern: "unit" }, root);
@@ -242,7 +242,7 @@ test("shutdown drains searches that are already using the native finder", async 
 	let destroyed = 0;
 	let searchFinished = false;
 	try {
-		const { base, extension } = fakeBase(root, async () => {
+		const { base, extension } = fakeBase(async () => {
 			markStarted();
 			await waiting;
 			assert.equal(destroyed, 0, "finder remains alive for the active search");
@@ -267,7 +267,7 @@ test("pagination cursors belong to their adapter instance and valid root results
 		await mkdir(path.join(root, "src"));
 		await writeFile(path.join(root, "src", "unit.ts"), "needle");
 		const make = () => {
-			const { base, extension } = fakeBase(root, async (name) => ({ content: [{ type: "text", text: name === "fffind" ? "src/unit.ts" : 'src/unit.ts\n 1: needle\n\n[Continue with cursor="fff_c12"]' }] }));
+			const { base, extension } = fakeBase(async (name) => ({ content: [{ type: "text", text: name === "fffind" ? "src/unit.ts" : 'src/unit.ts\n 1: needle\n\n[Continue with cursor="fff_c12"]' }] }));
 			configureHerderFff(base, { worktree: root, agentDir: root, sourceOnly: true });
 			return extension;
 		};

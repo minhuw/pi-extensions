@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
 import { git, runCommand } from "../../../src/daemon/git-driver.ts";
 import { resetPlanExecution, type ResetPlanCleanupStep } from "../../../src/daemon/git/reset-plan.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";

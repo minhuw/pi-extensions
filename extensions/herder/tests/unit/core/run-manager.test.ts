@@ -296,11 +296,6 @@ function implementerEnvelope(commit: string, changedPath = "src/value.mjs"): str
 	return `STATUS: COMPLETE\nCOMMITS: ${commit}\nADDRESSED: none\nCHECKS: fixture test — passed\nFILES CHANGED: ${changedPath}\nDISCOVERED_PATHS: none\nNOTES: committed the fixture change\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
 }
 
-function reviewerBlockEnvelope(round: number): string {
-	const finding = `[atomic-blocker-${round}][P1][BLOCKING][PLAN_REQUIREMENT] round ${round} blocker; obligation=A1; evidence=synthetic round ${round} assertion fails; violation=required fixture value is missing`;
-	return `VERDICT: REVISE\nFINDINGS: ${finding}\nFIX_GUIDANCE: resolve round ${round} blocker\nDISCOVERED_PATHS: none\nSCOPE: PASS\nCHECKS: fixture test — passed\nRATIONALE: continue the bounded review round\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
-}
-
 function judgeDoneEnvelope(leak: string): string {
 	return `DECISION: DONE\nFINDINGS: none\nAUTHORIZED_BLOCKERS: none\nREPAIR_CONTRACTS: none\nDISCOVERED_PATHS: none\nLEAKS: ${leak}\nQUESTION: none\nCHECKS: fixture test — passed\nRATIONALE: approve the exact reviewed patch\nUSAGE: input_tokens=10; cached_input_tokens=2; output_tokens=8; reasoning_tokens=3; source=test-host`;
 }
@@ -1504,7 +1499,7 @@ test("unchanged-tree verification replacement proceeds through final review", { 
 	try {
 		const service = await ensureService(fixture.planDirectory);
 		const awaiting = await prepareSinglePlan(service, fixture, "verification-replacement");
-		const failed = await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-replacement", [{
+		await submitFinalVerification(service, fixture.planDirectory, awaiting, "verification-replacement", [{
 			gateId: "replacement-failure",
 			label: "replacement failure gate",
 			cwd: ".",

@@ -1,5 +1,4 @@
 import { grantHostAttention } from "../../../src/core/run-revision.ts";
-import { fixtureDependencies } from "../../support/plan-v2.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,7 +9,7 @@ import { initPlanDir } from "../../../src/core/plans.ts";
 import { initFixtureRepo } from "../../support/fixture-repo.ts";
 import { fixturePlan } from "../../support/plan-v2.ts";
 import { RunStore } from "../../../src/daemon/run-store.ts";
-import { sha256, stableJson, type AttentionResolutionInput, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
+import { type AttentionResolutionInput, type ManagerOperationKind } from "../../../src/shared/protocol.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Fixture = { repo: string; planDirectory: string };

@@ -4,8 +4,6 @@ import path from "node:path";
 import process from "node:process";
 import { openExecutionDatabase, withExecutionTransaction } from "../src/daemon/execution-store.ts";
 
-export { adapterProcessAlive, adapterProcessIdentity };
-
 const LOCK_NAME = "pi-session-owner.lock";
 const MAX_LOCK_BYTES = 4_096;
 const RETIREMENT_REGISTRY = Symbol.for("pi-extensions.herder.adapter-ownership-retirements.v1");

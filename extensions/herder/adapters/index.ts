@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, realpathSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import {
@@ -26,7 +26,6 @@ import {
 	invokeHerderTool,
 	prepareHerderVerificationManifest,
 	submitHerderEvent,
-	readLiveRunFreshness,
 	submitHerderIntegrationRepair,
 	submitHerderReignite,
 	submitHerderVerification,
@@ -61,7 +60,7 @@ import {
 import { registerRoundProgressRenderer } from "./round-progress.ts";
 import { HERDER_STATE_ENTRY, restoreLastRun, sameHerderRunState, type HerderRunState } from "./state.ts";
 import { resolvePlanDirectory, resolvePlanDirectoryTarget } from "./paths.ts";
-import { launchPlanningWorkflow, registerPiPlanningWorkflows } from "./planning-workflows.ts";
+import { registerPiPlanningWorkflows } from "./planning-workflows.ts";
 import { validateHerderRoleAgents } from "./role-config.ts";
 import { interruptedPiWorkers } from "./recovery.ts";
 import { MainSessionRequests, type IntegrationRepairBinding } from "./main-session-requests.ts";

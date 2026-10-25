@@ -45,30 +45,6 @@ function withCompiledGraphIdentity<T extends object>(graph: ReturnType<typeof bu
 	return { ...value, graphSha256: compileGraphIdentity(graph) };
 }
 
-export interface LiveRunFreshness {
-	runId: string;
-	status: string;
-	pendingOperations: number;
-}
-
-export function readLiveRunFreshness(planDirectoryInput: string): LiveRunFreshness | null {
-	let store: RunStore | undefined;
-	try {
-		store = new RunStore(path.resolve(planDirectoryInput), { readOnly: true });
-		const run = store.getRun();
-		if (!run) return null;
-		return {
-			runId: run.runId,
-			status: run.status,
-			pendingOperations: store.countPendingOperations(),
-		};
-	} catch {
-		return null;
-	} finally {
-		store?.close();
-	}
-}
-
 async function planTool(args: JsonObject): Promise<unknown> {
 	const operation = requiredString(args, "operation");
 	const directory = planDirectory(args);

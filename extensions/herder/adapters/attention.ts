@@ -1,4 +1,4 @@
-import { keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	MAX_PLAN_ROUNDS,
@@ -179,7 +179,6 @@ export function attentionMessageDisplay(
 	details: HerderAttentionMessageDetails | undefined,
 	expanded: boolean,
 	theme: Theme,
-	expandHint = "Open for full dossier",
 ): string {
 	const title = `${theme.fg("warning", "⚠")} ${theme.fg("customMessageLabel", theme.bold("Herder attention"))}`;
 	const identity = [
@@ -227,7 +226,6 @@ export function registerAttentionMessageRenderer(pi: ExtensionAPI): void {
 			message.details,
 			expanded,
 			theme,
-			keyHint("app.tools.expand", "for full dossier"),
 		);
 		box.addChild(new Text(display, 0, 0));
 		return {

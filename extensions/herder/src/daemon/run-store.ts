@@ -39,7 +39,6 @@ import {
 	type VerificationRequest,
 	type IntegrationRepairClassification,
 	type IntegrationRepairEpisode,
-	type IntegrationRepairRequest,
 	type IntegrationRepairState,
 } from "../shared/protocol.ts";
 

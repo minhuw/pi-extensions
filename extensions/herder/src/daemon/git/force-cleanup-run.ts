@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { listCoordinationRefs, validatePlanName } from "./coordination-ref.ts";
 import type { CleanupInput, CleanupResult } from "./cleanup-run.ts";
-import { listHerderBranches, listWorktreeInventory, type BranchRecord, type WorktreeRecord } from "./namespace-inventory.ts";
+import { listHerderBranches, listWorktreeInventory, type WorktreeRecord } from "./namespace-inventory.ts";
 import { allowedWorktreeRoots, canonicalWorktreeRoot, legacyWorktreeContainer, legacyWorktreeRoot } from "./worktree-locations.ts";
 import { currentCheckout, fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 

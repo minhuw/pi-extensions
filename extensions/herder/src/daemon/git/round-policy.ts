@@ -20,7 +20,7 @@ function parseInteger(value: string | undefined, name: string, { min = 0, max = 
 }
 
 export function decideReview({ round, verdict, scope, openBlockers }: { round: number | string; verdict: ReviewVerdict; scope: ReviewScope; openBlockers: number | string }): { action: PolicyAction; judgeRequired: boolean; nextRound: number | null } {
-  const normalizedRound = parseInteger(String(round), "round", { min: 1, max: MAX_PLAN_ROUNDS })
+  parseInteger(String(round), "round", { min: 1, max: MAX_PLAN_ROUNDS })
   const normalizedBlockers = parseInteger(String(openBlockers), "open-blockers")
   if (!REVIEW_VERDICTS.has(verdict)) fail("verdict must be APPROVE, REVISE, or BLOCK")
   if (!REVIEW_SCOPES.has(scope)) fail("scope must be PASS or FAIL")

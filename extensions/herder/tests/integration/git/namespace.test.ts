@@ -4,7 +4,6 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import process from "node:process"
 import test from "node:test"
 import { spawnSync } from "node:child_process"
 import { inspectNamespace } from "../../../src/daemon/git/namespace-run.ts"
@@ -22,7 +21,6 @@ function git(repo: string, ...args: string[]): string {
 }
 
 function withGitShim<T>(output: string, callback: () => T): T {
-  const originalPath = process.env.PATH ?? ""
   const realGitLink = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
   assert.ok(realGitLink)
   const realGit = fs.realpathSync(realGitLink)
@@ -273,8 +271,6 @@ try {
   const direct = inspectNamespace({ repo, planDir, mode: "fire" })
   assert.equal(direct.ok, false)
   assert.equal(direct.reason, "namespace-conflict")
-
-  console.log("herder Fire namespace tests passed")
 } finally {
   fs.rmSync(root, { recursive: true, force: true })
 }

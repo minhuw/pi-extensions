@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { listWorktreeInventory, type WorktreeRecord } from "./namespace-inventory.ts";
+import { listWorktreeInventory } from "./namespace-inventory.ts";
 import { fail, isInside, realpathIfPresent, runGit } from "./primitives.ts";
 
 export type ResetPlanCleanupStep = "worktree_removed" | "branch_deleted";

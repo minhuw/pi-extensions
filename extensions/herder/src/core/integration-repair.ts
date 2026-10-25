@@ -874,7 +874,7 @@ export async function runIntegrationRepair(
 			});
 			deps.updateRun({ status: "paused", terminalDetail: "Executing the authoritative verification program after integration repair." });
 		});
-		const result = await deps.verification(gateManifest.manifest);
+		await deps.verification(gateManifest.manifest);
 		const successor = deps.store.getVerificationByRequestId(gateManifest.request.requestId);
 		if (successor?.state === "passed") {
 			deps.store.updateIntegrationRepair(repair.repairId, { state: "passed", detail: "Successor verification passed." });

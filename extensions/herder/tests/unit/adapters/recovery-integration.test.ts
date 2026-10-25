@@ -1980,7 +1980,7 @@ for (const action of ["herder-revise", "herder-stop"] as const) {
 			fs.writeFileSync(path.join(value.planDirectory, "002-active.md"), fixturePlan({ id: "002", title: "Active sibling", writePaths: ["src/other.mjs"] }));
 			await api.invoke("session_start", ctx);
 			await api.command("herder-fire").handler("herder-plans --profile epic --max-parallel 2", ctx);
-			const message = await withDeadline(api.waitForAttentionMessage(), "queued attention delivery");
+			await withDeadline(api.waitForAttentionMessage(), "queued attention delivery");
 			assert.equal(factory.sessions.length, 1);
 			const session = factory.sessions[0]!;
 			await withDeadline(session.started, "active sibling started");
