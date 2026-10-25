@@ -734,7 +734,7 @@ function renderCompact(
 ): string {
 	const statuses = footerData.getExtensionStatuses();
 	return renderIdentityRow(ctx, theme, width, state, collectStats(ctx, state), true,
-		cluster([statuses.get("autoresearch") ?? statuses.get("loop"), statuses.get(PROCESS_STATUS_KEY)], "  "));
+		cluster([statuses.get("autoresearch") ?? statuses.get("herder") ?? statuses.get("loop"), statuses.get(PROCESS_STATUS_KEY)], "  "));
 }
 
 function ttftColor(ms: number): "success" | "warning" | "error" {
@@ -816,9 +816,10 @@ function renderFull(
 				? theme.fg("error", "git ?")
 				: theme.fg("dim", "git …");
 	const extensionStatuses = footerData.getExtensionStatuses();
-	const workflowStatuses = [extensionStatuses.get("autoresearch"), extensionStatuses.get("loop"), extensionStatuses.get(PROCESS_STATUS_KEY)].filter(Boolean);
+	const workflowKeys = ["autoresearch", "herder", "loop", PROCESS_STATUS_KEY];
+	const workflowStatuses = workflowKeys.map(key => extensionStatuses.get(key)).filter(Boolean);
 	const statuses = [...extensionStatuses.entries()]
-		.filter(([key, status]) => key !== "autoresearch" && key !== "loop" && key !== PROCESS_STATUS_KEY && Boolean(status))
+		.filter(([key, status]) => !workflowKeys.includes(key) && Boolean(status))
 		.map(([, status]) => theme.fg("accent", status));
 	const gitBase = cluster([
 		branch

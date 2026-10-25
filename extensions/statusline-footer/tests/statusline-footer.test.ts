@@ -628,6 +628,78 @@ describe("statusline footer rendering", () => {
 		}
 	});
 
+	it("shows Herder as a workflow status between research and loop in full mode", async () => {
+		const harness = createHarness("full-herder-status", "tui", {
+			keyedExtensionStatuses: { other: "SYNC", loop: "loop build", herder: "herder: T2 integrate · 3/5 tasks", autoresearch: "research 2/5" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			const line = harness.getFooter()!.render(200)[3]!;
+			expect(line.split("herder: T2 integrate · 3/5 tasks")).toHaveLength(2);
+			const order = ["research 2/5", "herder: T2", "loop build", "SYNC"].map(text => line.indexOf(text));
+			expect(order.every(index => index >= 0)).toBe(true);
+			expect(order).toEqual([...order].sort((a, b) => a - b));
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("keeps Herder visible ahead of a long cwd in full mode", async () => {
+		const harness = createHarness("full-herder-cwd", "tui", {
+			cwd: `/tmp/${"深い階層/".repeat(30)}project`,
+			keyedExtensionStatuses: { herder: "herder: T2 integrate · 3/5 tasks" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		try {
+			for (const width of [60, 80, 120]) {
+				const lines = harness.getFooter()!.render(width);
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				expect(lines[3]).toContain("herder: T2 integrate · 3/5 tasks");
+				expect(lines[3]).toContain("main");
+				expect(lines[3]).not.toContain("project");
+			}
+			harness.setStatus("herder");
+			expect(harness.getFooter()!.render(120)[3]).not.toContain("herder:");
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
+	it("ranks Herder below research and above loop in compact mode", async () => {
+		const harness = createHarness("compact-herder-status", "tui", {
+			keyedExtensionStatuses: { loop: "loop build", herder: "herder: T2 integrate · 3/5 tasks" },
+		});
+		statuslineFooter(harness.pi);
+		await harness.emit("session_start", { reason: "startup" });
+		await harness.runCommand("footer", "compact");
+		try {
+			let line = harness.getFooter()!.render(160)[0]!;
+			expect(line).toContain("herder: T2 integrate · 3/5 tasks");
+			expect(line).not.toContain("loop build");
+			harness.setStatus("autoresearch", "research 2/5");
+			line = harness.getFooter()!.render(160)[0]!;
+			expect(line).toContain("research 2/5");
+			expect(line).not.toContain("herder:");
+			harness.setStatus("autoresearch");
+			harness.setStatus("herder");
+			line = harness.getFooter()!.render(160)[0]!;
+			expect(line).toContain("loop build");
+			expect(line).not.toContain("herder:");
+			for (const width of [24, 30]) {
+				harness.setStatus("herder", "herder: T2 integrate · 3/5 tasks");
+				const narrow = harness.getFooter()!.render(width)[0]!;
+				expect(visibleWidth(narrow)).toBeLessThanOrEqual(width);
+				expect(narrow).toContain("k3");
+				expect(narrow).toContain("42.5%");
+				expect(narrow).not.toContain("herder:");
+			}
+		} finally {
+			harness.disposeFooter();
+		}
+	});
+
 	it("does not throw or overflow at narrow width with missing model and context", async () => {
 		const harness = createHarness("render-boundary-session", "tui", {
 			model: null,
