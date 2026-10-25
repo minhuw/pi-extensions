@@ -1,12 +1,13 @@
 {
 	"name": "pi-extensions",
 	"version": "0.2.0",
-	"description": "Maintained Pi extensions for academic writing, status telemetry, native compaction, and sub-agents",
+	"description": "Maintained Pi extensions for durable verified orchestration, academic writing, status telemetry, native compaction, and sub-agents",
 	"type": "module",
 	"license": "MIT",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
+		"herder",
 		"multi-agent",
 		"subagents",
 		"magpie",
@@ -18,7 +19,7 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:writer",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
@@ -30,6 +31,7 @@
 		"test:molt": "vitest run extensions/molt",
 		"test:autoresearch": "vitest run extensions/autoresearch",
 		"test:subagents": "vitest run --config extensions/subagents/vitest.config.ts",
+		"test:herder": "vitest run extensions/herder",
 		"typecheck": "tsc -p tsconfig.json && npm run typecheck:subagents",
 		"typecheck:subagents": "tsc -p extensions/subagents/tsconfig.json"
 	},
@@ -57,6 +59,7 @@
 	},
 	"pi": {
 		"themes": ["./themes"],
+		"skills": ["./extensions/herder/skills"],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
 			"./extensions/quality/prompts/simplify.md",
@@ -79,7 +82,8 @@
 			"./extensions/loop/index.ts",
 			"./extensions/molt/index.ts",
 			"./extensions/autoresearch/index.ts",
-			"./extensions/subagents/src/index.ts"
+			"./extensions/subagents/src/index.ts",
+			"./extensions/herder/index.ts"
 		]
 	}
 }
