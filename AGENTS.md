@@ -16,7 +16,7 @@ The published extension table and installation details live in the root [README]
 - `extensions/molt/` — `/molt`, which starts a new session that keeps the current model and thinking level.
 - `extensions/statusline-footer/` — a theme-aware Pi statusline footer and its tests.
 - `extensions/subagents/` — vendored pi-subagents v0.22.0, explicit scriptable workflows (`SubagentWorkflow`), a local fleet (`recon`, `worker`, `reviewer`, `expert`), integrations, and offline upstream/compatibility tests. Workflow primitives live in `src/workflow/`, structured output in `src/structured-output.ts`, and frontmatter parsing in `src/agent-definitions.ts`. See its `LOCAL-PATCHES.md` before resyncing.
-- `extensions/herder/` — durable, verified orchestration of coding runs: an append-only journal per run under `<git-common-dir>/herder/`, model-written workflow scripts in a sandbox, writing steps as git transactions in disposable worktrees, serial integration on hidden `refs/herder/` refs, runtime-computed verification, and delivery to the user's branch only after confirmation. Shared contracts live in `src/types.ts` and limits in `src/config.ts`.
+- `extensions/herder/` — durable, verified orchestration of coding runs: an append-only journal per run under `<git-common-dir>/herder/`, model-written workflow scripts in a sandbox, writing steps as git transactions in disposable worktrees, serial integration on hidden `refs/herder/` refs, runtime-computed verification, and delivery to the user's branch only after confirmation. Shared contracts live in `src/types.ts` and limits and defaults in `src/config.ts`; the Pi commands and tools live in `src/adapter/`, built-in roles in `agents/`, script templates in `templates/`, and the skill in `skills/herder/SKILL.md` (registered under `pi.skills`). Herder requires git >=2.38.
 - `extensions/writer/` — eight explicit native academic writing prompt templates for conference papers, with loading/contract tests.
 - `themes/` — Pi themes; the repository currently contains the `material-bloom` theme.
 
@@ -50,8 +50,11 @@ Run commands from the repository root with Node `>=22.19.0`. The development SDK
 - Workflow scripts run only on an explicit orchestration request. Subagents workflow children share the run cwd and current files, including existing edits and dependencies; `isolation: "worktree"` gives a single child its own worktree when parallel writers would conflict. Await relevant writers before verification.
 - TypeScript is strict and configured with `noEmit`.
 - Commit, Quality, and Writer tests use strict TypeScript with Node's `node --test`; Statusline Footer, Subagents, Herder, and native compaction tests use Vitest.
+- `npm run test:herder` uses `extensions/herder/vitest.config.ts` (30 s test and hook timeouts). Herder tests create real git repositories with `tests/support/git-fixture.ts` and remove them in `finally`; agents are the scripted fake runner (`tests/support/fake-runner.ts`) or, in `tests/agents/`, Pi's faux provider. No live provider tests.
 
 ## Do not touch
 
 - `node_modules/` — generated dependency state.
+- `<git-common-dir>/herder/` — Herder run state (journals, run files, worktrees); change it only through `/herder` commands.
+- `refs/herder/` — Herder run refs; never create, move, or delete them by hand.
 
