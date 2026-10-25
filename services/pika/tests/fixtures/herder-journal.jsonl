@@ -1,0 +1,15 @@
+{"v":1,"t":"run.started","at":"2026-10-21T10:00:00.000Z","runId":"20261021-100000-abcd","title":"Add pagination","base":"abc123","runtime":"1.0.0","repo":"/home/me/code/widgets","sessionId":"orch-1"}
+{"v":1,"t":"goal.approved","at":"2026-10-21T10:01:00.000Z","sha256":"9a1f","checks":[{"id":"test","command":"npm test","timeoutMs":600000,"integrate":true}],"approvedBy":"user"}
+{"v":1,"t":"plan.updated","at":"2026-10-21T10:02:00.000Z","sha256":"7c2e"}
+{"v":1,"t":"script.launched","at":"2026-10-21T10:03:00.000Z","launch":1,"scriptSha256":"5d5d","args":null,"head":"abc123"}
+{"v":1,"t":"step.started","at":"2026-10-21T10:03:01.000Z","key":"impl-T1","id":"impl-T1","occurrence":0,"fingerprint":"f1","attempt":1,"role":"worker","write":true,"base":"abc123","task":"T1","launch":1,"label":"Implement T1","phase":"build","sessionId":"step-s1","sessionFile":"/runs/r1/sessions/2026-10-21T10-03-01-000Z_step-s1.jsonl"}
+{"v":1,"t":"step.failed","at":"2026-10-21T10:05:00.000Z","key":"impl-T1","fingerprint":"f1","attempt":1,"errorClass":"transient","message":"rate limited","final":false,"sessionId":"step-s1"}
+{"v":1,"t":"step.started","at":"2026-10-21T10:05:30.000Z","key":"impl-T1","id":"impl-T1","occurrence":0,"fingerprint":"f1","attempt":2,"role":"worker","write":true,"base":"abc123","task":"T1","launch":1,"label":"Implement T1","phase":"build","sessionId":"step-s2","sessionFile":"/runs/r1/sessions/2026-10-21T10-05-30-000Z_step-s2.jsonl"}
+{"v":1,"t":"step.completed","at":"2026-10-21T10:09:00.000Z","key":"impl-T1","fingerprint":"f1","status":"ok","commit":"c0ffee","sessionId":"step-s2","sessionFile":"/runs/r1/sessions/2026-10-21T10-05-30-000Z_step-s2.jsonl"}
+{"v":1,"t":"step.started","at":"2026-10-21T10:09:10.000Z","key":"review-T1","id":"review-T1","occurrence":0,"fingerprint":"f2","attempt":1,"role":"reviewer","write":false,"base":"c0ffee","task":"T1","launch":1}
+{"v":1,"t":"step.failed","at":"2026-10-21T10:10:00.000Z","key":"review-T1","fingerprint":"f2","attempt":1,"errorClass":"stopped","message":"stopped by user","final":true}
+{"v":1,"t":"integrate.completed","at":"2026-10-21T10:11:00.000Z","key":"impl-T1","from":"c0ffee","source":"impl-T1","head":"d00d","tree":"t1","message":"feat: T1","task":"T1","checks":[]}
+{"v":1,"t":"verify.completed","at":"2026-10-21T10:12:00.000Z","head":"d00d","checks":[],"verdict":"met","criteria":[],"verifierRan":true}
+{"v":1,"t":"custom.future","at":"2026-10-21T10:12:30.000Z","x":1}
+{"v":1,"t":"delivery.completed","at":"2026-10-21T10:13:00.000Z","mode":"series","target":"main","tip":"d00d","commits":["d00d"]}
+{"v":1,"t":"run.finished","at":"2026-10-21T10:14:00.000Z","status":"delivered","reason":"done"}

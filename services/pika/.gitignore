@@ -1,0 +1,5 @@
+/target/
+/pika-data/
+*.db
+*.db-shm
+*.db-wal
