@@ -100,11 +100,6 @@ describe("script runtime", () => {
 		["new (new Date(0).constructor)()", "new Date()"],
 		["Date()", "Date()"],
 		["new (class extends Date {})()", "new Date()"],
-		["new Intl.DateTimeFormat().format()", "Intl.DateTimeFormat format() without a date"],
-		["new Intl.DateTimeFormat().format(undefined)", "Intl.DateTimeFormat format() without a date"],
-		["new Intl.DateTimeFormat().formatToParts()", "Intl.DateTimeFormat formatToParts() without a date"],
-		["Temporal.Now.instant()", "Temporal.Now.instant()"],
-		["Temporal.Now.plainDateTimeISO()", "Temporal.Now.plainDateTimeISO()"],
 	])("makes %s throw", async (expression, name) => {
 		const result = await outcome(`return ${expression};`);
 		expect(result.status).toBe("failed");
@@ -115,18 +110,22 @@ describe("script runtime", () => {
 	it("keeps Date with explicit arguments", async () => {
 		const result = await outcome(`
 			class Day extends Date {}
-			const fmt = new Intl.DateTimeFormat("en-US", { timeZone: "UTC" });
 			return [new Date(0).toISOString(), Date.UTC(2020, 0, 1), new Date("2020-01-02").getTime(), Date.parse("2020-01-02"),
 				new Date(0) instanceof Date, new Date(0).constructor === Date, Date.name, new Day(5).getTime(), new Day(5) instanceof Date,
-				fmt.format(0), fmt.formatToParts(0).length > 0, typeof Temporal.PlainDate.from("2020-01-02").day,
+				new Date(0).toLocaleDateString("en-US", { timeZone: "UTC" }),
 				Object.getPrototypeOf(Date) === Function.prototype, Object.getPrototypeOf(Date.prototype) === Object.prototype];
 		`);
-		expect(result).toEqual({ status: "completed", value: ["1970-01-01T00:00:00.000Z", 1577836800000, 1577923200000, 1577923200000, true, true, "Date", 5, true, "1/1/1970", true, "number", true, true] });
+		expect(result).toEqual({ status: "completed", value: ["1970-01-01T00:00:00.000Z", 1577836800000, 1577923200000, 1577923200000, true, true, "Date", 5, true, "1/1/1970", true, true] });
 	});
 
 	it("exposes no clock, randomness, or garbage-collection timing", async () => {
-		const result = await outcome(`return ["performance", "crypto", "WeakRef", "FinalizationRegistry", "setInterval", "queueMicrotask"].filter(name => typeof globalThis[name] !== "undefined");`);
+		const result = await outcome(`return ["performance", "crypto", "WeakRef", "FinalizationRegistry", "setInterval", "queueMicrotask", "Atomics", "SharedArrayBuffer"].filter(name => typeof globalThis[name] !== "undefined");`);
 		expect(result).toEqual({ status: "completed", value: [] });
+	});
+
+	it("exposes nothing that allocates memory outside the heap limit", async () => {
+		const result = await outcome(`return Object.getOwnPropertyNames(globalThis).filter(name => /Array|Buffer|DataView|Atomics|WebAssembly|Intl|Temporal/.test(name));`);
+		expect(result).toEqual({ status: "completed", value: ["Array"] });
 	});
 
 	it.each([

@@ -272,7 +272,9 @@ function observe(promise) { unawaited.delete(promise); }
 // Runs inside the realm before the script. Determinism matters because a relaunch replays steps by identity: a script
 // that reads the clock or randomness computes different prompts the second time and reuses nothing.
 // The replacement Date is a plain function, not a subclass: Object.getPrototypeOf of a subclass is the real Date.
-// WeakRef and FinalizationRegistry go because garbage-collection timing is not reproducible.
+// WeakRef and FinalizationRegistry go because garbage-collection timing is not reproducible. Memory outside the
+// worker's heap limit goes too: binary buffers (typed arrays, WebAssembly.Memory; Atomics.waitAsync is also a timer),
+// and Intl and Temporal, whose objects wrap native ICU data (they also read the clock: Temporal.Now, format()).
 const PRELUDE = [
 	"(function () {",
 	"  const RealDate = globalThis.Date;",
@@ -290,19 +292,9 @@ const PRELUDE = [
 	"  define(RealDate.prototype, 'constructor', Date);",
 	"  define(globalThis, 'Date', Date);",
 	"  define(Math, 'random', function random() { return die('Math.random()'); });",
-	"  const formats = Intl.DateTimeFormat.prototype;",
-	"  const getFormat = Object.getOwnPropertyDescriptor(formats, 'format').get;",
-	"  Object.defineProperty(formats, 'format', { get: function () {",
-	"    const bound = getFormat.call(this);",
-	"    return function (date) { if (date === undefined) die('Intl.DateTimeFormat format() without a date'); return bound(date); };",
-	"  }, configurable: false });",
-	"  const formatToParts = formats.formatToParts;",
-	"  define(formats, 'formatToParts', function (date) { if (date === undefined) die('Intl.DateTimeFormat formatToParts() without a date'); return formatToParts.call(this, date); });",
-	"  if (typeof Temporal === 'object') for (const name of Object.getOwnPropertyNames(Temporal.Now)) {",
-	"    if (typeof Temporal.Now[name] === 'function') define(Temporal.Now, name, function () { return die('Temporal.Now.' + name + '()'); });",
-	"  }",
-	"  delete globalThis.WeakRef;",
-	"  delete globalThis.FinalizationRegistry;",
+	"  for (const name of ['WeakRef', 'FinalizationRegistry', 'Intl', 'Temporal', 'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Atomics', 'WebAssembly',",
+	"    'Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float16Array', 'Float32Array',",
+	"    'Float64Array', 'BigInt64Array', 'BigUint64Array']) delete globalThis[name];",
 	"})();",
 ].join("\n");
 

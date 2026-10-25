@@ -110,7 +110,7 @@ Give each task its file ownership and dependencies in prose under it when you pl
 
 ## Scripts
 
-A script is the body of an async function: top-level `await` and `return` work. There is no `import`, `export`, or `require`, and no file system, network, timers, `eval`, or `Function`. `Date.now()`, `Math.random()`, and `new Date()` without arguments throw, because replay must be deterministic. Pass inputs through `args`; the return value must be JSON-serializable and should be a compact summary.
+A script is the body of an async function: top-level `await` and `return` work. There is no `import`, `export`, or `require`, and no file system, network, timers, `eval`, or `Function`. `Date.now()`, `Math.random()`, and `new Date()` without arguments throw, because replay must be deterministic. Binary buffers (`ArrayBuffer`, typed arrays, `DataView`, `Atomics`, `WebAssembly`), `Intl`, and `Temporal` are not available either: they hold memory outside the script's heap limit. Pass inputs through `args`; the return value must be JSON-serializable and should be a compact summary.
 
 Globals:
 
