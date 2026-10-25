@@ -9,6 +9,7 @@ import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
 import { validateScript } from "../workflow/validate.ts";
 import { DELIVERY_MODES, startRun } from "./commands.ts";
+import { confirmLong } from "./confirm.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isFinished, planTasks, runDetails } from "./status.ts";
@@ -101,10 +102,11 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 		if (state.goal.sha256 === sha256) return reply("The goal is already approved.", { approved: true, sha256 });
 		throw new Error("The goal is already approved and frozen, but goal.md changed since. Restore the approved text; a different goal needs a new run.");
 	}
-	const yes = await ctx.ui.confirm(`Approve Herder goal: ${goal.title}`, `${source.trim()}\n\nThe goal is frozen once approved.`, { signal });
+	const answer = await confirmLong(ctx, `Approve Herder goal: ${goal.title}`, `${source.trim()}\n\nThe goal is frozen once approved.`, signal);
 	// An abort may have begun while the dialog was open; it must not end with an approved goal.
 	if (held.closing || isFinished(held.run.state())) throw new Error(`Herder run ${held.runId} is being stopped.`);
-	if (!yes) return reply("The user did not approve the goal. Ask what to change, revise goal.md, and call approve_goal again.", { approved: false });
+	if (answer === undefined) return reply("The approval dialog was closed without an answer; goal.md is unchanged. Do not revise it: ask the user to confirm again, then call approve_goal again.", { approved: false, dismissed: true });
+	if (!answer) return reply("The user did not approve the goal. Ask what to change, revise goal.md, and call approve_goal again.", { approved: false });
 	if (hashGoal(readFileSync(held.run.paths.goal, "utf8")) !== sha256) throw new Error("goal.md changed while the user was reviewing it; call approve_goal again.");
 	held.run.journal.append({ t: "goal.approved", sha256, checks: goal.checks, approvedBy: "user" });
 	held.run.renderProgress(planTasks(held.run));

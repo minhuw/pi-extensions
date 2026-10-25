@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import herderExtension from "../../index.ts";
 import { parseCommand, UsageError } from "../../src/adapter/commands.ts";
 import { FOLLOW_UP_TYPE } from "../../src/adapter/session.ts";
@@ -169,6 +169,27 @@ describe("herder_run", () => {
 		expect(h.confirm).toHaveBeenCalledTimes(2);
 		writeFileSync(run.paths.goal, `${VALID_GOAL}\n## Notes\nchanged\n`);
 		await expect(h.tool("herder_run", { action: "approve_goal" })).rejects.toThrow(/frozen/);
+	});
+
+	it("tells a dismissed TUI approval dialog from a deliberate no", async () => {
+		const { h, run } = await started();
+		writeFileSync(run.paths.goal, VALID_GOAL);
+		const keys: string[] = [];
+		const keybindings = { matches: (data: string, binding: string) => (binding === "tui.select.cancel" && data === "\x1b") || (binding === "tui.select.confirm" && data === "\r") };
+		Object.assign(h.ctx, { mode: "tui" });
+		Object.assign(h.ctx.ui, { custom: vi.fn((factory: (...args: unknown[]) => { handleInput(data: string): void }) => new Promise((resolve) => {
+			factory({ requestRender() {}, terminal: { rows: 24 } }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, keybindings, resolve).handleInput(keys.shift()!);
+		})) });
+		keys.push("\x1b", "n", "y");
+		const dismissed = await h.tool("herder_run", { action: "approve_goal" });
+		expect(dismissed.details).toEqual({ approved: false, dismissed: true });
+		expect(dismissed.content[0].text).toMatch(/closed without an answer.*Do not revise it/);
+		const declined = await h.tool("herder_run", { action: "approve_goal" });
+		expect(declined.details).toEqual({ approved: false });
+		expect(declined.content[0].text).toMatch(/did not approve/);
+		expect(run.journal.read().filter((event) => event.t === "goal.approved")).toHaveLength(0);
+		await expect(h.tool("herder_run", { action: "approve_goal" })).resolves.toMatchObject({ details: { approved: true } });
+		expect(h.confirm).not.toHaveBeenCalled();
 	});
 
 	it("refuses approval non-interactively", async () => {

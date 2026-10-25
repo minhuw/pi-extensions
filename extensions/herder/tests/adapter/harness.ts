@@ -109,7 +109,8 @@ export function harness({ cwd, sessionId = "session-a", hasUI = true, options = 
 	const createRuntime: RuntimeFactory = (env) => { const runtime = new FakeRuntime(env); runtimes.push(runtime); return runtime; };
 	const confirm = vi.fn(async (_title: string, _body: string, _opts?: { signal?: AbortSignal }) => true);
 	const ctx = {
-		mode: hasUI ? "tui" : "print", hasUI, cwd,
+		// RPC keeps dialogs on `ui.confirm`; the TUI's scrollable confirm has its own tests.
+		mode: hasUI ? "rpc" : "print", hasUI, cwd,
 		ui: {
 			notify: vi.fn((text: string, level?: string) => notices.push({ text, level })),
 			setStatus: vi.fn((key: string, value?: string) => { if (value) statuses.set(key, value); else statuses.delete(key); }),
