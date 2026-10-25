@@ -43,6 +43,8 @@ export interface WorkflowHostOptions {
    * reports for them, and it has its own concurrency cap.
    */
   workflowId?: string;
+  /** The workflow tool call that started the run, recorded as each child's spawning call. */
+  toolCallId?: string;
   gateTimeoutMs?: number;
 }
 
@@ -289,6 +291,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
             ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),
+            ...(deps.toolCallId !== undefined ? { parentToolCallId: deps.toolCallId } : {}),
             ...(onBeforeWorktreeCleanup !== undefined ? { onBeforeWorktreeCleanup } : {}),
           },
           id => {

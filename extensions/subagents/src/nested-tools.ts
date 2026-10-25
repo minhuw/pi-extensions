@@ -69,6 +69,7 @@ interface NestedSpawnOptions {
   maxSubagentDepth: number;
   configCwd?: string;
   rootSessionId?: string;
+  parentToolCallId?: string;
 }
 
 export interface NestedAgentManager {
@@ -181,7 +182,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       inherit_context: Type.Optional(Type.Boolean()),
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+    execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
       if ("model" in params) return textResult(MODEL_OVERRIDE_ERROR, true);
 
       if (params.resume) {
@@ -302,6 +303,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
         rootSessionId,
+        parentToolCallId: toolCallId,
       };
 
       // Transcript wiring, same gate as the top-level path: the child's

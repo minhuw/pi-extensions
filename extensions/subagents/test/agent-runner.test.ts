@@ -1049,6 +1049,110 @@ describe("agent-runner session persistence", () => {
   });
 });
 
+describe("agent-runner child-session hooks", () => {
+  const HOOKS_KEY = Symbol.for("pi-extensions.child-session-hooks");
+  const hookFactory = vi.fn();
+
+  function registerHook(): void {
+    (globalThis as Record<symbol, unknown>)[HOOKS_KEY] = new Set([{ name: "test-hook", extensionFactory: hookFactory }]);
+  }
+
+  function persistentManagerWithLink() {
+    const manager = { kind: "persistent-session-manager", appendCustomEntry: vi.fn() };
+    sessionManagerCreate.mockReturnValueOnce(manager);
+    return manager;
+  }
+
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[HOOKS_KEY];
+  });
+
+  it.each([
+    ["all", { extensions: true }],
+    ["allowlist", { extensions: ["some-ext"] }],
+    ["none", { extensions: false }],
+    ["isolated", { extensions: true, isolated: true }],
+  ])("appends each hook's factory last, named, in extension mode %s", async (_mode, overrides) => {
+    registerHook();
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig(overrides));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(overrides));
+    persistentManagerWithLink();
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "recon", "go", { pi });
+
+    const factories = lastLoaderOpts().extensionFactories as Array<{ name: string; factory: unknown }>;
+    expect(factories.at(-1)).toEqual({ name: "test-hook", factory: hookFactory });
+  });
+
+  it("persists nested and persist_session: false children, with the parent header and a link entry", async () => {
+    registerHook();
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const parentCtx = {
+      ...ctx,
+      sessionManager: { ...ctx.sessionManager, getSessionId: vi.fn(() => "parent-session") },
+    };
+
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: false }));
+    const nested = persistentManagerWithLink();
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(parentCtx, "recon", "go", {
+      pi,
+      nested: true,
+      agentId: "child-1",
+      parentAgentId: "parent-agent",
+      parentToolCallId: "call-1",
+      description: "look around",
+    });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions", {
+      parentSession: "/sessions/parent.jsonl",
+    });
+    expect(nested.appendCustomEntry).toHaveBeenCalledWith("pi-extensions.session-link", {
+      kind: "subagent",
+      parentSessionId: "parent-session",
+      parentSessionFile: "/sessions/parent.jsonl",
+      parentToolCallId: "call-1",
+      agentId: "child-1",
+      parentAgentId: "parent-agent",
+      agentType: "recon",
+      description: "look around",
+    });
+    // Before the first prompt.
+    expect(nested.appendCustomEntry.mock.invocationCallOrder[0])
+      .toBeLessThan(lastSession!.prompt.mock.invocationCallOrder[0]);
+  });
+
+  it("adds no link entry to a reopened session file", async () => {
+    registerHook();
+    const reopened = { kind: "reopened-session-manager", appendCustomEntry: vi.fn() };
+    sessionManagerOpen.mockReturnValueOnce(reopened);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "recon", "carry on", { pi, resumeSessionFile: "/sessions/recon.jsonl" });
+
+    expect(reopened.appendCustomEntry).not.toHaveBeenCalled();
+  });
+
+  it("without a hook, nested and persist_session: false children stay in memory with no extra factory", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: false }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "recon", "go", { pi });
+
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(ctx, "recon", "go", { pi, nested: true });
+
+    expect(sessionManagerInMemory).toHaveBeenCalledTimes(2);
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    for (const [opts] of defaultResourceLoaderCtor.mock.calls) {
+      expect((opts.extensionFactories as Array<{ name: string }>).map((f) => f.name))
+        .not.toContain("test-hook");
+    }
+  });
+});
+
 describe("agent-runner master tool allowlist", () => {
   it("extensions: true with extension tools — all 7 built-ins plus extension tools land in the allowlist", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));

@@ -246,6 +246,11 @@ export interface AgentRecord {
   worktreeResult?: { hasChanges: boolean; branch?: string };
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
+  /**
+   * The spawner's tool call, set at spawn: the Agent call, a nested Agent call,
+   * or the workflow call. Unlike `toolCallId`, it never drives notifications.
+   */
+  parentToolCallId?: string;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
   /**

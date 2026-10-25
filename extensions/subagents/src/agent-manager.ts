@@ -316,6 +316,8 @@ interface SpawnOptions {
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
   rootSessionId?: string;
+  /** The spawner's tool call: the Agent call, a nested Agent call, or the workflow call. */
+  parentToolCallId?: string;
 }
 
 interface ResumeOptions {
@@ -581,6 +583,7 @@ export class AgentManager {
       workflowId: options.workflowId,
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
+      parentToolCallId: options.parentToolCallId,
     };
     this.agents.set(id, record);
     // After the insert, so `takenHandles()` already counts this record's own
@@ -895,6 +898,10 @@ export class AgentManager {
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
       },
+      parentToolCallId: record.parentToolCallId,
+      parentAgentId: record.parentAgentId,
+      workflowId: record.workflowId,
+      description: record.description,
       onSessionCreated: (session) => {
         record.session = session;
         // Save the path before session eviction; in-memory sessions have none.

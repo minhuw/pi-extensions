@@ -130,6 +130,8 @@ export interface RunPrintModeOptions {
   signal?: AbortSignal;
   /** Additional extension paths loaded only for this test run. */
   extensionPaths?: string[];
+  /** Parent session manager. Default: an in-memory one for the run's cwd. */
+  sessionManager?: SessionManager;
   /** Called once after the real parent session is created and extensions are bound. */
   onParentSession?: (session: AgentSession, manager: ManagerHandle | undefined) => void;
   /** Retained for upstream compatibility; explicit live requests are rejected locally. */
@@ -350,7 +352,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     modelRegistry: modelRegistry as any,
     modelRuntime: modelRuntime as any,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
     // (settingsManager.getDefaultModel) and retries/compaction match your config.
     // Faux: in-memory, deterministic, no disk.

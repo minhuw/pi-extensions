@@ -25,6 +25,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { forwardAbortSignal } from "./abort-signal.js";
 import { runInChildSessionContext } from "./child-context.js";
+import { buildSubagentSessionLink, getChildSessionHooks, SESSION_LINK_CUSTOM_TYPE } from "./child-session-hooks.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
@@ -551,6 +552,15 @@ export interface RunOptions {
     depth: number;
     maxSubagentDepth?: number;
   };
+  /**
+   * Link-entry metadata for child-session hooks: the spawner's tool call (the
+   * Agent call, or the workflow call for a workflow child), the owning agent
+   * and workflow, and the spawn description.
+   */
+  parentToolCallId?: string;
+  parentAgentId?: string;
+  workflowId?: string;
+  description?: string;
 }
 
 export interface RunResult {
@@ -830,6 +840,9 @@ export async function runAgent(
     isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
+  // Loaded into every child whatever its extension mode, after everything else.
+  const childSessionHooks = getChildSessionHooks();
+  const hookExtensionPaths = new Set(childSessionHooks.map((hook) => `<inline:${hook.name}>`));
 
   const extensionsSpec = Array.isArray(extensions)
     ? parseExtensionsSpec(extensions, configCwd)
@@ -859,6 +872,7 @@ export async function runAgent(
             ...base,
             extensions: base.extensions.filter((e) => {
               if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
+              if (hookExtensionPaths.has(e.path)) return true; // child-session hooks, not the agent's
               const canons = extensionCanonicalNames(e.path);
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
@@ -898,6 +912,7 @@ export async function runAgent(
       { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
       // Under `noExtensions` the static allowlist gates the registry itself.
       ...(noExtensions ? [] : [scopeGateExtension(nestedCallGate)]),
+      ...childSessionHooks.map((hook) => ({ name: hook.name, factory: hook.extensionFactory })),
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.
@@ -1119,8 +1134,10 @@ export async function runAgent(
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   // Frontmatter wins when it says anything; otherwise the project default,
   // which `rememberAgents` supplies for top-level agents only. Same precedence
-  // as `outputTranscript`.
-  const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  // as `outputTranscript`. A registered child-session hook needs every child
+  // on disk, nested and `persist_session: false` ones included.
+  const persistSession = childSessionHooks.length > 0
+    || (agentConfig?.persistSession ?? (options.nested ? false : rememberAgents));
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
@@ -1159,6 +1176,20 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+
+  // A reopened file already carries the link written when it was created.
+  if (childSessionHooks.length > 0 && !options.resumeSessionFile) {
+    sessionManager.appendCustomEntry(SESSION_LINK_CUSTOM_TYPE, buildSubagentSessionLink({
+      parentSessionId: ctx.sessionManager?.getSessionId?.(),
+      parentSessionFile: ctx.sessionManager?.getSessionFile?.(),
+      parentToolCallId: options.parentToolCallId,
+      agentId: options.agentId,
+      parentAgentId: options.parentAgentId,
+      workflowId: options.workflowId,
+      agentType: type,
+      description: options.description,
+    }));
+  }
 
   // Pin service tier after session construction (streamFunction is live).
   // Skip silently when the model API cannot honor it (e.g. scheduled fire with a

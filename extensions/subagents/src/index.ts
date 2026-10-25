@@ -669,11 +669,19 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:completed", eventData);
     }
 
-    // Persist final record for cross-extension history reconstruction
+    // Persist final record for cross-extension history reconstruction. Fields
+    // after `completedAt` are optional; older records omit them.
+    const spawningToolCallId = record.parentToolCallId ?? record.toolCallId;
     pi.appendEntry("subagents:record", {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
+      ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
+      ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
+      ...(record.outputFile !== undefined ? { outputFile: record.outputFile } : {}),
+      ...(spawningToolCallId !== undefined ? { toolCallId: spawningToolCallId } : {}),
+      ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
+      ...(record.workflowId !== undefined ? { workflowId: record.workflowId } : {}),
     });
 
     // Skip notification if result was already consumed via get_subagent_result
@@ -917,6 +925,8 @@ export default function (pi: ExtensionAPI) {
     // Internal too: a forged value would hide an RPC-spawned agent inside
     // someone else's workflow, and take it out of the concurrency pool with it.
     delete safeOptions.workflowId;
+    // Names a tool call in the parent session; only the tool paths know it.
+    delete safeOptions.parentToolCallId;
     delete safeOptions.depth;
     delete safeOptions.maxSubagentDepth;
     delete safeOptions.configCwd;
@@ -2493,6 +2503,7 @@ Terse command-style prompts produce shallow, generic work.
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          parentToolCallId: toolCallId,
           ...bgCallbacks,
         });
 
@@ -2646,6 +2657,7 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          parentToolCallId: toolCallId,
           // Deliberately does NOT set fgId: that drives agentActivity, the
           // widget and the `finally` cleanup below, none of which should see an
           // agent that has no session and may never get one.
@@ -2794,6 +2806,7 @@ Terse command-style prompts produce shallow, generic work.
           signal: task.abortController.signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
+          ...(task.toolCallId !== undefined ? { toolCallId: task.toolCallId } : {}),
         }),
         onProgress: entries => updateWorkflowProgressBatch(task, entries),
         // The dialog's pause / skip / retry keys run through this; it is dropped
