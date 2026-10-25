@@ -2770,6 +2770,29 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
   });
 });
 
+describe("AgentManager — the agent file's service tier wins over the spawn option", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    registerAgents(new Map());
+  });
+
+  it.each([
+    ["standard", "fast", "standard"],
+    [undefined, "fast", "fast"],
+  ] as const)("file tier %s with spawn tier %s runs at %s", async (fileTier, spawnTier, expected) => {
+    registerAgents(new Map([["tiered", { name: "tiered", serviceTier: fileTier } as any]]));
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "tiered", "go", { description: "go", isBackground: true, serviceTier: spawnTier });
+    await manager.awaitStartup(id);
+
+    expect(manager.getRecord(id)!.serviceTier).toBe(expected);
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ serviceTier: expected });
+  });
+});
+
 // Local host-owned records are observable, but only the host cancellation signal controls them.
 describe("host-owned foreground controls", () => {
   it("rejects interactive controls while honoring host cancellation", async () => {
