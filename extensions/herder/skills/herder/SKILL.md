@@ -95,7 +95,7 @@ max_fix_attempts: 3
 - `integrate`: `yes` runs the check before each integration advances the head (default integration checks); keep these fast. `no` runs it only for gates you name and at verification.
 - Every check runs at verification, whatever its `integrate` value.
 
-**Budget**: `max_agents` caps live agent starts for the run; `max_fix_attempts` is the fix-loop cap your scripts should honor (default 3).
+**Budget**: `max_agents` caps live step agent starts for the run (`agent()` calls and `herder_step`; the verifier and curator do not count, so a spent budget never blocks verification or delivery); `max_fix_attempts` is the fix-loop cap your scripts should honor (default 3).
 
 ## plan.md
 

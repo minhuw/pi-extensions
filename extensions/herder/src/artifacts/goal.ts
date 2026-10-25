@@ -123,7 +123,7 @@ integrate: yes runs the check before every integration; no runs it at verificati
 <!-- One bullet per related change that must not be made. -->
 
 ## Budget
-<!-- Optional. max_agents: <n> caps agent starts for the run; max_fix_attempts caps fix loops per task. -->
+<!-- Optional. max_agents: <n> caps step agent starts for the run; max_fix_attempts caps fix loops per task. -->
 max_fix_attempts: ${DEFAULT_FIX_ATTEMPTS}
 `;
 }

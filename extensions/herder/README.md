@@ -109,7 +109,7 @@ max_fix_attempts: 3
   - `timeout` takes values such as `30s`, `10m`, `1h`, or `1h30m`. The default is 10 minutes, and the process group is killed when it runs out.
   - `integrate: yes` runs the check before every integration. Every check runs at verification.
 - **Budget:**
-  - `max_agents` caps agent starts for the run, at most 400.
+  - `max_agents` caps step agent starts for the run (`agent()` and `herder_step`), at most 400. The verifier and curator do not count, so a spent budget never blocks verification or delivery.
   - `max_fix_attempts` is the fix-loop cap that scripts honor (default 3).
 
 Checks and agents run in fresh Herder worktrees checked out at a commit. Ignored files such as installed dependencies and build output are not there, so a check must prepare what it needs.
@@ -188,7 +188,7 @@ For an exact replay, scripts must call `integrate()` serially, from the top leve
 | Concurrent agents per launch | `min(6, max(1, CPUs - 2))` |
 | Concurrent writing agents | 4 |
 | `agent()` calls per launch | 100 |
-| Agent starts per run | 400, or `max_agents` if lower |
+| Step agent starts per run | 400, or `max_agents` if lower |
 | Items per `parallel` / `pipeline` call | 1024 |
 | Wall clock per step attempt | 60 minutes (`timeoutMs`) |
 | Stall window (no agent events) | 10 minutes (`stallMs`) |
