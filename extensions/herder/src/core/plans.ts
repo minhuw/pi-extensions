@@ -179,7 +179,7 @@ function readRegularFile(
     if (options.allowMissing && isMissingFile(error)) return null
     fail(options.missingMessage ?? `${file} must be a regular file`)
   }
-  if (!before!.isFile()) fail(`${file} must be a regular file`)
+  if (!before.isFile()) fail(`${file} must be a regular file`)
   const noFollow = fs.constants.O_NOFOLLOW
   if (typeof noFollow !== "number") fail(`${file} cannot be read safely on this platform`)
 
@@ -190,23 +190,23 @@ function readRegularFile(
     fail(`${file} cannot be read safely as a regular file`)
   }
   try {
-    const opened = fs.fstatSync(descriptor!)
-    if (!opened.isFile() || !sameFileIdentity(fileIdentity(before!), fileIdentity(opened))) {
+    const opened = fs.fstatSync(descriptor)
+    if (!opened.isFile() || !sameFileIdentity(fileIdentity(before), fileIdentity(opened))) {
       fail(`${file} changed while being read`)
     }
     let text: string
     try {
-      text = fs.readFileSync(descriptor!, "utf8")
+      text = fs.readFileSync(descriptor, "utf8")
     } catch {
       fail(`${file} could not be read safely`)
     }
     return {
-      text: text!,
+      text,
       identity: fileIdentity(opened),
       mode: opened.mode & 0o7777,
     }
   } finally {
-    fs.closeSync(descriptor!)
+    fs.closeSync(descriptor)
   }
 }
 

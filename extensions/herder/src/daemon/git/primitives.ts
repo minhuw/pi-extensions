@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
-import type { SpawnSyncReturns } from "node:child_process"
+import type { SpawnSyncOptions, SpawnSyncReturns } from "node:child_process"
 
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024
 
@@ -41,11 +41,12 @@ export function runGit(
     input,
   } = options
   const encoding = options.encoding === undefined ? "utf8" : options.encoding
-  const result = spawnSync("git", ["-C", repoRoot, ...args], {
+  const spawnOptions: SpawnSyncOptions = {
     encoding,
     maxBuffer,
     ...(input === undefined ? {} : { input }),
-  } as any) as SpawnSyncReturns<string> | SpawnSyncReturns<Buffer>
+  }
+  const result = spawnSync("git", ["-C", repoRoot, ...args], spawnOptions) as SpawnSyncReturns<string> | SpawnSyncReturns<Buffer>
 
   if (result.error) {
     fail(options.spawnErrorFormatter?.(result.error) ?? `Cannot run git: ${result.error.message}`)

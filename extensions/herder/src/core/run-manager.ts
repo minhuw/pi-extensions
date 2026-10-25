@@ -534,7 +534,7 @@ function tryReserveReigniteDirectory(directory: string, token: string): boolean 
 export function allocateUnusedReigniteDirectory(repositoryRoot: string, sourcePlanDirectory: string, reservationToken: string): string {
 	const root = path.resolve(repositoryRoot);
 	const source = path.resolve(sourcePlanDirectory);
-	const token = String(reservationToken || "").trim();
+	const token = reservationToken.trim();
 	if (!token || token.length > 400 || /[\0\r\n]/.test(token)) {
 		throw new Error("Reignite allocation requires a bounded reservation token");
 	}

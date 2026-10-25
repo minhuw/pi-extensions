@@ -69,7 +69,7 @@ function validateSpecs(graph: ReturnType<typeof buildGraph> | null, specs: Store
 
 function projectedResetStatuses(specs: StoredPlanSpec[], executedPlanIds: Set<string>): Array<{ id: string; status: string; detail: string }> {
   return specs.map((spec) => {
-    const detail = String(spec.initialStatusDetail ?? "").trim();
+    const detail = spec.initialStatusDetail.trim();
     if (spec.initialStatus === "BLOCKED" || spec.initialStatus === "REJECTED") {
       if (!detail) fail(`Herder reset refused: ${spec.initialStatus} plan ${spec.planId} is missing its status detail.`);
       if (/[\r\n|]/.test(detail)) fail(`Herder reset refused: status detail for plan ${spec.planId} is not a single table-safe line.`);

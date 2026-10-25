@@ -1534,7 +1534,7 @@ export function registerHerderPiWithWorkerFactory(pi: ExtensionAPI, sessionFacto
 			await resolveProfile(ctx, currentState?.profile || "unknown");
 			assertSessionActive(epoch);
 			const checkout = await assertRepairCheckout(binding, params.operation, params.observedCommit);
-			const operationId = String(params.operationId || `integration-repair:${params.operation}:${request.requestId}:${randomUUID()}`);
+			const operationId = params.operationId || `integration-repair:${params.operation}:${request.requestId}:${randomUUID()}`;
 			const pending = await enqueueManager(planDirectory, async () => {
 				assertSessionActive(epoch);
 				assertOwnership(planDirectory, request.runId);

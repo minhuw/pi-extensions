@@ -11,7 +11,7 @@ function fail(message: string): never {
 
 export function getExecutionReport(inputDir = DEFAULT_PLAN_DIR, inputPlan = "RUN") {
   const graph = buildGraph(inputDir)
-  const requested = String(inputPlan ?? "RUN").trim()
+  const requested = inputPlan.trim()
   const plan = requested.toUpperCase() === "RUN" ? "RUN" : canonicalId(requested)
   const planRecord = plan === "RUN" ? null : graph.plans.find((candidate) => candidate.id === plan)
   if (plan !== "RUN" && !planRecord) fail(`Plan ${plan} is not indexed in ${graph.readme}`)

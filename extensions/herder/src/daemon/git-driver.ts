@@ -179,9 +179,7 @@ function completionPayload(approval: CompletionApprovalProof, integratedHead: st
 function parseCompletionTag(repoRoot: string, ref: string): { object: string; payload: CompletionTagPayload } {
 	const proof = inspectCompletionProof(repoRoot, ref);
 	if (!proof.ok) throw new Error(`Completion evidence ${ref} is invalid: ${proof.error}`);
-	const object = String(proof.object || "");
-	if (!object) throw new Error(`Completion evidence ${ref} has no commit object`);
-	return { object, payload: proof.payload as CompletionTagPayload };
+	return { object: proof.object, payload: proof.payload as CompletionTagPayload };
 }
 
 function createCompletionTag(repoRoot: string, ref: string, tagName: string, payload: CompletionTagPayload): void {

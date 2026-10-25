@@ -301,7 +301,7 @@ export function registerPiPlanningWorkflows(
 					}
 					if (params.operation === "attention") {
 						await runtime.handleManagerReply?.(reply, {
-							attentionAction: typeof params.action === "string" ? params.action : undefined,
+							attentionAction: params.action,
 						});
 					}
 				}

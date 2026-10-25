@@ -26,7 +26,6 @@ import {
 	type AttentionResolutionInput,
 	type AttentionState,
 	type ManagerAction,
-	type ManagerAttentionRequest,
 	type ManagerOperationKind,
 	type ManagerOperationReceipt,
 	type StoredManagerOperationKind,
@@ -1011,7 +1010,7 @@ function rowToAttention(row: Record<string, unknown>): StoredAttentionRequest {
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 		...(row.resolved_at === null ? {} : { resolvedAt: String(row.resolved_at) }),
-	} as unknown as ManagerAttentionRequest;
+	};
 	validateAttentionRequest(request);
 	return { ...request, sequence: Number(row.sequence) };
 }
