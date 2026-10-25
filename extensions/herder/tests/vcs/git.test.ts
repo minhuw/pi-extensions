@@ -137,6 +137,23 @@ describe("isClean", () => {
 		}));
 });
 
+describe("checkoutTree", () => {
+	it("hashes the dirty checkout, untracked files included and ignored ones excluded, without touching its index", () =>
+		withGitFixture((fixture) => {
+			const vcs = openVcs(fixture.dir);
+			expect(vcs.checkoutTree()).toBe(vcs.treeOf(fixture.head()));
+			fixture.write("README.md", "changed\n");
+			fixture.write("src/new.txt", "new\n");
+			fixture.write("debug.log", "ignored\n");
+			const index = () => createHash("sha256").update(readFileSync(join(fixture.commonDir, "index"))).digest("hex");
+			const [indexBefore, statusBefore] = [index(), fixture.status()];
+			const tree = vcs.checkoutTree();
+			expect([index(), fixture.status()]).toEqual([indexBefore, statusBefore]);
+			fixture.git("add", "-A");
+			expect(tree).toBe(fixture.git("write-tree"));
+		}, { "README.md": "# r\n", ".gitignore": "*.log\n" }));
+});
+
 describe("worktreeHead", () => {
 	it("reads a Herder worktree's HEAD, including commits made inside it, and refuses other paths", () =>
 		untouched((fixture, vcs) => {

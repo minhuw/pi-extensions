@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { HERDER_DIR, MIN_GIT_VERSION, REF_ROOT } from "../config.ts";
@@ -224,6 +224,17 @@ export function openVcs(cwd: string): Vcs {
 		},
 		isClean: (path) => text(path === undefined ? top : requireWorktree(path), ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]) === "",
 		worktreeHead: (path) => text(requireWorktree(path), ["rev-parse", "--verify", "HEAD"]),
+		checkoutTree() {
+			const dir = mkdtempSync(join(tmpdir(), "herder-index-"));
+			try {
+				const env = { ...gitEnv(), GIT_INDEX_FILE: join(dir, "index") };
+				text(top, ["read-tree", "HEAD"], { env });
+				text(top, ["add", "-A"], { env });
+				return text(top, ["write-tree"], { env });
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
 
 		addWorktree(path, commit) {
 			const target = requireHerderPath(path);

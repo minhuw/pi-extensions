@@ -33,6 +33,8 @@ export interface Vcs {
 	commonDir(): string; topLevel(): string; head(): string; currentBranch(): string | null;
 	/** Without `path`, the user's checkout; with it, that worktree. */
 	isClean(path?: string): boolean;
+	/** Tree of the user's working tree (tracked and untracked files, honouring .gitignore), built through a temporary index; leaves the checkout and its index untouched. */
+	checkoutTree(): string;
 	addWorktree(path: string, commit: string): void; removeWorktree(path: string): void;
 	/** HEAD commit of a Herder worktree (e.g. the tip a curator committed on its detached HEAD). */
 	worktreeHead(path: string): string;
