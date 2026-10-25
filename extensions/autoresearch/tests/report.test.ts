@@ -1,4 +1,4 @@
-import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
 import footerExtension from "../../statusline-footer/index.ts";
@@ -91,6 +91,7 @@ function harness(mode: "tui" | "rpc" | "print" = "tui") {
 		registerMessageRenderer: vi.fn(),
 		appendEntry: vi.fn((customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) })),
 		sendMessage: vi.fn((message: any) => displays.push(message)),
+		events: createEventBus(),
 	} as unknown as ExtensionAPI;
 	const ctx = {
 		mode, hasUI: mode !== "print", cwd: process.cwd(), model: { id: "test-model", provider: "test", reasoning: false },

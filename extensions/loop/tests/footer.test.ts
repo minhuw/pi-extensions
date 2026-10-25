@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { expect, it, vi } from "vitest";
 import footerExtension from "../../statusline-footer/index.ts";
@@ -20,6 +20,7 @@ it("publishes real loop state to both footer layouts without overflow or stale s
 		registerCommand: (name: string, command: any) => commands.set(name, command), registerTool() {},
 		appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) }),
 		sendMessage: vi.fn(() => { idle = false; }),
+		events: createEventBus(),
 	} as unknown as ExtensionAPI;
 	const ctx = {
 		mode: "tui", hasUI: true, cwd: process.cwd(), model: { id: "test-model", provider: "test", reasoning: false },
