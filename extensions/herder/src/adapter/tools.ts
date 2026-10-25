@@ -8,7 +8,7 @@ import type { RunState } from "../journal/fold.ts";
 import { readLock } from "../run/lock.ts";
 import { AGENT_OPTION_KEYS, type AgentOptions, type DeliveryMode } from "../types.ts";
 import { validateScript } from "../workflow/validate.ts";
-import { DELIVERY_MODES } from "./commands.ts";
+import { DELIVERY_MODES, startRun } from "./commands.ts";
 import { describeChecks, describeDelivery, describeIntegration, describeStep, describeVerification } from "./format.ts";
 import { requireApproved, requireIdle, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isFinished, planTasks, runDetails } from "./status.ts";
@@ -20,8 +20,9 @@ const RUN_ID = Type.String({ pattern: "^\\d{8}-\\d{6}-[0-9a-f]{4}$", description
 const CHECK_IDS = (description: string) => Type.Array(Type.String({ minLength: 1 }), { description });
 
 export const RunParameters = Type.Object({
-	action: literals(["status", "approve_goal", "record_decision"] as const),
+	action: literals(["start", "status", "approve_goal", "record_decision"] as const),
 	runId: Type.Optional(RUN_ID),
+	goal: Type.Optional(text("start: the goal text, as for /herder <goal>; its first line becomes the run title")),
 	question: Type.Optional(text("record_decision: the question put to the user")),
 	answer: Type.Optional(text("record_decision: the user's answer")),
 });
@@ -114,10 +115,16 @@ async function approveGoal(herder: Herder, s: Session, held: Held, ctx: Extensio
 export function registerTools(pi: ExtensionAPI, herder: Herder): void {
 	pi.registerTool({
 		name: "herder_run", label: "Herder Run", executionMode: "sequential",
-		description: "Herder run control. status: show the active run. approve_goal: validate goal.md and ask the user to approve it (interactive only). record_decision: journal a user decision (question, answer) made between launches.",
+		description: "Herder run control. start: create a run for goal at HEAD, as /herder <goal> does, and return its instructions. status: show the active run. approve_goal: validate goal.md and ask the user to approve it (interactive only). record_decision: journal a user decision (question, answer) made between launches.",
 		parameters: RunParameters,
 		async execute(_id, params, signal, _update, ctx) {
 			const s = herder.session(ctx);
+			if (params.action === "start") {
+				const goal = params.goal?.trim();
+				if (!goal) throw new Error("start needs the goal text.");
+				const { runId, prompt } = startRun(herder, s, goal, true);
+				return reply(prompt, { runId, action: "start" });
+			}
 			if (params.action === "status") {
 				const run = herder.peek(s, params.runId);
 				if (!run) return reply("No Herder runs in this repository.", { runId: undefined });

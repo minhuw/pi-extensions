@@ -6,7 +6,7 @@ import { isRunId, refPrefix } from "../run/paths.ts";
 import { activeRun, createRun, listRuns, openRun } from "../run/store.ts";
 import type { DeliveryMode } from "../types.ts";
 import { describeDelivery } from "./format.ts";
-import { resumePrompt, skillText, startPrompt } from "./prompts.ts";
+import { auditPrompt, auditSkillDir, resumePrompt, skillText, startPrompt, type AuditInvocation, type AuditKind } from "./prompts.ts";
 import { busy, message, type Herder, type Held, type Session } from "./session.ts";
 import { describeRun, isFinished, planTasks } from "./status.ts";
 
@@ -84,7 +84,8 @@ export function titleOf(goal: string): string {
 	return line.length <= 100 ? line : `${line.slice(0, 99)}…`;
 }
 
-function start(herder: Herder, s: Session, goal: string): string {
+/** The repository's head and common directory, refusing without a commit or while a run is unfinished. */
+function startable(herder: Herder, s: Session): { head: string; commonDir: string } {
 	const vcs = herder.vcs(s);
 	let head: string;
 	try {
@@ -95,10 +96,16 @@ function start(herder: Herder, s: Session, goal: string): string {
 	const commonDir = vcs.commonDir();
 	const unfinished = activeRun(commonDir);
 	if (unfinished) throw new Error(`Herder run ${unfinished} is unfinished. Continue it with /herder resume ${unfinished}, or abandon it with /herder abort ${unfinished}.`);
+	return { head, commonDir };
+}
+
+/** Creates a run at HEAD for `goal`, as `/herder <goal>` and `herder_run { action: "start" }` (`fromTool`) do; returns the start prompt. */
+export function startRun(herder: Herder, s: Session, goal: string, fromTool = false): { runId: string; prompt: string } {
+	const { head, commonDir } = startable(herder, s);
 	if (s.held && busy(s.held)) throw new Error(`Run ${s.held.runId} still has a launch or tool call running in this session.`);
 	const skill = skillText();
 	const title = titleOf(goal);
-	const run = createRun(commonDir, { title, base: head, repo: vcs.topLevel(), goal: goalDraft(title) });
+	const run = createRun(commonDir, { title, base: head, repo: herder.vcs(s).topLevel(), goal: goalDraft(title) });
 	let held: Held | undefined;
 	try {
 		held = herder.hold(s, run.runId, run);
@@ -109,8 +116,47 @@ function start(herder: Herder, s: Session, goal: string): string {
 		if (held) herder.release(s);
 		throw error;
 	}
-	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: startPrompt(run, goal, skill), details: { runId: run.runId, action: "start" } }, { triggerTurn: true, deliverAs: "followUp" });
-	return `Started Herder run ${run.runId}.`;
+	return { runId: run.runId, prompt: startPrompt(run, goal, skill, fromTool) };
+}
+
+function start(herder: Herder, s: Session, goal: string): string {
+	const { runId, prompt } = startRun(herder, s, goal);
+	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: prompt, details: { runId, action: "start" } }, { triggerTurn: true, deliverAs: "followUp" });
+	return `Started Herder run ${runId}.`;
+}
+
+const AUDIT_EFFORTS = ["quick", "standard", "deep"] as const;
+const AUDIT_WORDS: Record<AuditKind, readonly string[]> = {
+	improve: [...AUDIT_EFFORTS, "branch", "next", "features", "roadmap", "correctness", "security", "perf", "tests", "docs", "--lang", "--auto"],
+	simplify: [...AUDIT_EFFORTS, "branch", "deletion", "duplication", "abstractions", "flow", "state", "dependencies", "compat", "tooling", "--lang", "--auto"],
+};
+
+/** Words of `args`, keeping quoted phrases (`--lang "Traditional Chinese"`) together. */
+const words = (args: string) => [...args.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3]!);
+
+/** Lenient `/herder-improve` and `/herder-simplify` arguments: nothing is rejected; the skill asks about what is unclear. */
+export function parseAudit(args: string): AuditInvocation {
+	const invocation: AuditInvocation = { args: args.trim(), auto: false };
+	const focus: string[] = [];
+	const list = words(args);
+	for (let i = 0; i < list.length; i++) {
+		const word = list[i]!;
+		if ((AUDIT_EFFORTS as readonly string[]).includes(word) && !invocation.effort) invocation.effort = word as AuditInvocation["effort"];
+		else if (word === "--auto") invocation.auto = true;
+		else if (word === "--lang") invocation.lang = list[i + 1]?.startsWith("--") ? "" : (list[++i] ?? "");
+		else if (word.startsWith("--lang=")) invocation.lang = word.slice(7);
+		else focus.push(word);
+	}
+	if (focus.length) invocation.focus = focus.join(" ");
+	return invocation;
+}
+
+function audit(herder: Herder, s: Session, kind: AuditKind, args: string): string {
+	startable(herder, s);
+	const invocation = parseAudit(args);
+	const repo = herder.vcs(s).topLevel();
+	herder.pi.sendMessage({ customType: PROMPT_TYPE, display: true, content: auditPrompt(kind, invocation, repo), details: { action: kind, invocation, skillDir: auditSkillDir(kind) } }, { triggerTurn: true, deliverAs: "followUp" });
+	return `Started the read-only /herder-${kind} audit.`;
 }
 
 function resume(herder: Herder, s: Session, runId: string | undefined): string {
@@ -198,4 +244,27 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 			}
 		},
 	});
+	const audits: Record<AuditKind, string> = {
+		improve: "Read-only audit for vetted improvements; pick findings to run with Herder: /herder-improve [quick|standard|deep] [focus|path|branch|next] [--lang <language>] [--auto]",
+		simplify: "Read-only audit for vetted simplifications; pick findings to run with Herder: /herder-simplify [quick|standard|deep] [focus|path|branch] [--lang <language>] [--auto]",
+	};
+	for (const kind of ["improve", "simplify"] as const) {
+		pi.registerCommand(`herder-${kind}`, {
+			description: audits[kind],
+			getArgumentCompletions: (prefix) => {
+				const typed = prefix.trimStart().split(/\s+/);
+				const last = typed.pop() ?? "";
+				const items = AUDIT_WORDS[kind].filter((word) => word.startsWith(last) && !typed.includes(word));
+				return items.length ? items.map((word) => ({ value: [...typed, word].join(" "), label: word })) : null;
+			},
+			handler: async (args: string, ctx: ExtensionCommandContext) => {
+				try {
+					if (!ctx.hasUI) throw new Error(`/herder-${kind} needs an interactive session (TUI or RPC): the audit ends in a run you approve.`);
+					ctx.ui.notify(audit(herder, herder.session(ctx), kind, args), "info");
+				} catch (error) {
+					ctx.ui.notify(message(error), "error");
+				}
+			},
+		});
+	}
 }

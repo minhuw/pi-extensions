@@ -11,8 +11,9 @@ Success is computed by the runtime from real check results and its own verificat
 
 ## Run lifecycle
 
-1. **Start.** The user runs `/herder <goal>`. Herder creates the run and a draft `goal.md`; the command message gives you its path. Run files live in the run directory under the repository's git directory, never in the working tree.
-2. **Clarify.** Read the relevant code first, then ask at most 5 questions, only ones whose answers change the work. Give each a recommended answer so the user can reply "yes". Skip questions you can answer from the code.
+1. **Start.** The user runs `/herder <goal>`, or you call `herder_run { action: "start", goal }` when the user asked for a run (as the audits do); the tool result then carries these instructions. Herder creates the run and a draft `goal.md`; the command message or tool result gives you its path. Run files live in the run directory under the repository's git directory, never in the working tree.
+   A run started from a `/herder-improve` or `/herder-simplify` audit implements the findings the user picked: one acceptance criterion and one task per finding, the unpicked findings out of scope. The audit already did the clarifying.
+2. **Clarify.** Read the relevant code first, then ask at most 5 questions, only ones whose answers change the work. For a run you started with `herder_run`, ask only what is still open: the conversation or audit that led to it usually answered them. Give each a recommended answer so the user can reply "yes". Skip questions you can answer from the code.
 3. **Write `goal.md`** in the format below. Prefer acceptance criteria that a check can decide.
 4. **Approve.** Call `herder_run { action: "approve_goal" }`. Herder validates the file and asks the user to confirm. If validation fails, fix the file and call it again. After approval the goal is frozen; to change it, tell the user.
 5. **Write `plan.md`** next to `goal.md`: tasks with IDs mapped to criteria.

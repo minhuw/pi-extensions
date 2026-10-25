@@ -16,6 +16,8 @@ Agents work in disposable git worktrees. Their results are commits on hidden ref
 /herder deliver branch --curate
 /herder abort
 /herder clean
+/herder-improve deep security
+/herder-simplify quick --lang zh-CN
 ```
 
 ## Requirements
@@ -56,22 +58,49 @@ Agents work in disposable git worktrees. Their results are commits on hidden ref
 | `/herder deliver [series\|branch\|squash\|uncommitted] [--curate]` | Deliver the verified run. The mode defaults to `series`. |
 | `/herder abort [runId]` | Stop the run's launch and tool calls, journal it as abandoned, and remove its refs and worktrees. The run directory stays. |
 | `/herder clean [runId\|--finished]` | Delete the directories, refs, and worktrees of finished runs (delivered, abandoned, or failed). The default is `--finished`. A named run must be finished; abort it first. |
+| `/herder-improve [quick\|standard\|deep] [focus\|path\|branch\|next\|features\|roadmap] [--lang <language>] [--auto]` | Audit the repository for vetted improvements and start a run for the findings you pick. See [Audits](#audits). |
+| `/herder-simplify [quick\|standard\|deep] [focus\|path\|branch] [--lang <language>] [--auto]` | Audit the repository for vetted simplifications and start a run for the findings you pick. See [Audits](#audits). |
 
 ## Tools
 
-The main model drives a run with these tools. All except `herder_run` and `herder_workflow { mode: "stop" }` require an approved goal.
+The main model drives a run with these tools. All except `herder_run`, `herder_pick_findings`, and `herder_workflow { mode: "stop" }` require an approved goal.
 
 | Tool | Purpose |
 | --- | --- |
-| `herder_run` | `action: "status"` shows the run. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only). `"record_decision"` journals a question and your answer, given between launches. |
+| `herder_run` | `action: "start"` creates a run for `goal` as `/herder <goal>` does and returns the instructions as its result. `"status"` shows the run. `"approve_goal"` validates `goal.md` and asks you to approve it (interactive only). `"record_decision"` journals a question and your answer, given between launches. |
 | `herder_workflow` | `mode: "validate"` compiles a script and dry-runs it without agents. `"run"` launches `script` or `scriptPath` with `args` in the background and returns the launch number; a follow-up message reports the result. `resume: n` replays launch `n`. `"stop"` stops the running launch. |
 | `herder_step` | Run one agent step directly. It takes the same options as a script's `agent()`. |
 | `herder_integrate` | Integrate a step key or commit with a commit `message`, an optional `task`, and optional `checks`. |
 | `herder_check` | Run checks (default: all) at the integration head or at a given commit. |
 | `herder_verify` | Verify the run and compute the verdict. |
 | `herder_deliver` | Deliver after your confirmation (interactive only). It takes `mode` and `curate`. |
+| `herder_pick_findings` | Show an audit's findings as a checklist (interactive only). Recommended findings start checked, checking a finding also checks the findings it depends on, and you can add a note. It returns the selected ids. |
 
-The model gets the full rules and the script API from the bundled `herder` skill (`skills/herder/SKILL.md`). The `/herder` and `/herder resume` commands also send it to the model.
+The model gets the full rules and the script API from the bundled `herder` skill (`skills/herder/SKILL.md`). The `/herder` and `/herder resume` commands also send it to the model, and `herder_run { action: "start" }` returns it.
+
+## Audits
+
+`/herder-improve` and `/herder-simplify` audit the repository before a run exists:
+
+- `/herder-improve` looks for bugs, security, performance, test, architecture, dependency, tooling, and documentation problems, plus evidence-backed directions for the project.
+- `/herder-simplify` looks for code to delete or consolidate, obsolete paths and abstractions, and needless state or control flow, while preserving the behavior that callers rely on.
+
+The audit is read-only. It changes no files, installs nothing, and holds no run or lock. It needs an interactive session, a commit, and no unfinished run. The flow is:
+
+1. The model recons the repository, audits it (with read-only `recon` subagents when Subagents is loaded), and vets every finding against the code.
+2. It posts a table of the vetted findings, followed by a short explanation of each.
+3. `herder_pick_findings` shows the findings as a checklist with the recommended ones checked. Cancelling or selecting nothing ends the audit without a run. A note you add becomes a constraint of the goal.
+4. The model starts a run with `herder_run { action: "start" }` and writes `goal.md`: one acceptance criterion per selected finding, mapped to the repository's checks, with the unselected findings out of scope. A check that proves one finding gates only its task (`integrate: no`), and `max_agents` allows about 5 agents per finding. With more than about 15 findings selected, the model recommends narrowing the selection first: the approved goal and its budget are frozen.
+5. You approve the goal, the run implements one task per finding, and you confirm delivery as for any run.
+
+Arguments:
+
+- `quick`, `standard` (default), or `deep` sets the effort.
+- A focus (such as `security` or `deletion`), a path, or `branch` (the changes since the merge base) narrows the scope. `/herder-improve next` (or `features`, `roadmap`) reports directions only. Findings that need product intent are not selectable; start `/herder <goal>` for them.
+- `--auto` takes the recommended findings, and every finding they depend on, without the checklist. You still approve the goal and confirm delivery.
+- `--lang <language>` sets the language of the findings and the discussion, for example `--lang zh-CN` or `--lang "Traditional Chinese"`. The goal, plan, and agent prompts stay in English.
+
+The skills live in `skills/improve/` and `skills/simplify/`, each with its playbook under `references/`. Improve derives from [shadcn/improve](https://github.com/shadcn/improve) (MIT); see `skills/improve/UPSTREAM.md`.
 
 ## goal.md
 
@@ -233,7 +262,7 @@ Agents with `bash` share the repository's refs. The built-in roles forbid comman
 - `disjoint.js`: independent tasks with disjoint file ownership run in a pipeline and are integrated serially in task order. A `resolver` handles conflicts.
 - `explore.js`: several variants of one task. The variants that pass their gates are judged, and exactly one is integrated.
 
-The `herder` skill holds the orchestration decision table, the `goal.md` and `plan.md` formats, the script API, and the rules. Pi loads it through the package's `pi.skills` entry.
+The `herder` skill holds the orchestration decision table, the `goal.md` and `plan.md` formats, the script API, and the rules. The `herder-improve` and `herder-simplify` skills hold the audits. Pi loads all three through the package's `pi.skills` entry.
 
 ## Footer and activity
 

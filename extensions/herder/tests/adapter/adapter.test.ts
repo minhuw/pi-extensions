@@ -44,14 +44,14 @@ async function approved(options: Parameters<typeof setup>[0] = {}) {
 const props = (tool: any) => Object.keys(tool.parameters.properties).sort();
 
 describe("registration", () => {
-	it("registers the command and every tool with the documented parameters", () => {
+	it("registers the commands and every tool with the documented parameters", () => {
 		const { h } = setup();
-		expect([...h.commands.keys()]).toEqual(["herder"]);
-		expect([...h.tools.keys()].sort()).toEqual(["herder_check", "herder_deliver", "herder_integrate", "herder_run", "herder_step", "herder_verify", "herder_workflow"]);
+		expect([...h.commands.keys()]).toEqual(["herder", "herder-improve", "herder-simplify"]);
+		expect([...h.tools.keys()].sort()).toEqual(["herder_check", "herder_deliver", "herder_integrate", "herder_pick_findings", "herder_run", "herder_step", "herder_verify", "herder_workflow"]);
 		const tool = (name: string) => h.tools.get(name);
-		expect(props(tool("herder_run"))).toEqual(["action", "answer", "question", "runId"]);
+		expect(props(tool("herder_run"))).toEqual(["action", "answer", "goal", "question", "runId"]);
 		expect(tool("herder_run").parameters.required).toEqual(["action"]);
-		expect(tool("herder_run").parameters.properties.action.anyOf.map((item: any) => item.const)).toEqual(["status", "approve_goal", "record_decision"]);
+		expect(tool("herder_run").parameters.properties.action.anyOf.map((item: any) => item.const)).toEqual(["start", "status", "approve_goal", "record_decision"]);
 		expect(props(tool("herder_workflow"))).toEqual(["args", "mode", "resume", "script", "scriptPath"]);
 		expect(tool("herder_workflow").parameters.properties.mode.anyOf.map((item: any) => item.const)).toEqual(["validate", "run", "stop"]);
 		expect(props(tool("herder_step"))).toEqual(["base", "effort", "fresh", "gate", "id", "label", "phase", "prompt", "role", "schema", "stallMs", "task", "timeoutMs", "write"]);
@@ -61,6 +61,7 @@ describe("registration", () => {
 		expect(props(tool("herder_check"))).toEqual(["checks", "commit"]);
 		expect(props(tool("herder_verify"))).toEqual([]);
 		expect(props(tool("herder_deliver"))).toEqual(["curate", "mode"]);
+		expect(props(tool("herder_pick_findings"))).toEqual(["findings", "title"]);
 		for (const item of h.tools.values()) expect(item.description.length).toBeLessThan(400);
 	});
 
@@ -68,8 +69,8 @@ describe("registration", () => {
 		const registered: string[] = [];
 		const pi = { on() {}, registerCommand: (name: string) => registered.push(`/${name}`), registerTool: (tool: { name: string }) => registered.push(tool.name), events: { on() { return () => {}; }, emit() {} } };
 		expect(() => herderExtension(pi as never)).not.toThrow();
-		expect(registered).toContain("/herder");
-		expect(registered).toHaveLength(8);
+		expect(registered).toEqual(expect.arrayContaining(["/herder", "/herder-improve", "/herder-simplify"]));
+		expect(registered).toHaveLength(11);
 	});
 });
 

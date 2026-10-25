@@ -6,7 +6,13 @@ import { MAX_CLARIFYING_QUESTIONS } from "../config.ts";
 import type { RunState } from "../journal/fold.ts";
 import type { RunStore } from "../run/store.ts";
 
-export const SKILL_PATH = fileURLToPath(new URL("../../skills/herder/SKILL.md", import.meta.url));
+const SKILLS_DIR = fileURLToPath(new URL("../../skills/", import.meta.url));
+export const SKILL_PATH = join(SKILLS_DIR, "herder", "SKILL.md");
+
+export type AuditKind = "improve" | "simplify";
+export interface AuditInvocation { args: string; effort?: "quick" | "standard" | "deep"; focus?: string; lang?: string; auto: boolean }
+
+export const auditSkillDir = (kind: AuditKind) => join(SKILLS_DIR, kind);
 
 /** SKILL.md without its frontmatter; read at use so edits apply without a reload. */
 export function skillText(path = SKILL_PATH): string {
@@ -32,14 +38,18 @@ function files(run: RunStore): string {
 	].join("\n");
 }
 
-export function startPrompt(run: RunStore, goal: string, skill: string): string {
+/** `asked`: the conversation or audit that led to the start (herder_run start) usually settled the questions already. */
+export function startPrompt(run: RunStore, goal: string, skill: string, asked = false): string {
+	const clarify = asked
+		? "Ask the user only what is still open, each with a recommended answer: the conversation or audit that led to this start usually answered the clarifying questions."
+		: `Then ask the user at most ${MAX_CLARIFYING_QUESTIONS} clarifying questions, only ones whose answers change the work, each with a recommended answer. Skip questions the code answers.`;
 	return [
 		`/herder: run ${run.runId} started for this goal:`,
 		goal,
 		files(run),
 		[
 			"Next:",
-			`1. Read the relevant code. Then ask the user at most ${MAX_CLARIFYING_QUESTIONS} clarifying questions, only ones whose answers change the work, each with a recommended answer. Skip questions the code answers.`,
+			`1. Read the relevant code. ${clarify}`,
 			"2. Complete goal.md (a draft skeleton is there): acceptance criteria mapped to checks, constraints, out of scope.",
 			'3. Call herder_run { action: "approve_goal" }. The user confirms the goal; if validation fails, fix goal.md and call it again.',
 		].join("\n"),
@@ -65,5 +75,28 @@ export function resumePrompt(run: RunStore, state: RunState, tasks: readonly Pla
 		block("progress.md", run.paths.progress, read(run.paths.progress)),
 		...(decisions ? [`## Recorded decisions\n\n${decisions}`] : []),
 		`Herder instructions:\n\n${skill}`,
+	].join("\n\n");
+}
+
+const PLAYBOOKS: Record<AuditKind, string> = { improve: "audit-playbook.md", simplify: "simplification-playbook.md" };
+
+export function auditPrompt(kind: AuditKind, invocation: AuditInvocation, repo: string): string {
+	const dir = auditSkillDir(kind);
+	const { effort, focus, lang, auto } = invocation;
+	const language = lang === undefined ? "the user's conversation language (English by default)"
+		: lang ? `${lang} for the findings table, explanations, recommendation, and selection discussion`
+		: "--lang was given without a language: ask the user which language before auditing";
+	return [
+		`/herder-${kind}: audit this repository read-only, then let the user pick findings to run with Herder.`,
+		[
+			`Repository: ${repo}`,
+			`Invocation: /herder-${kind}${invocation.args ? ` ${invocation.args}` : ""}`,
+			`- effort: ${effort ?? "standard (default)"}`,
+			`- focus: ${focus ?? "the whole repository"}`,
+			`- language: ${language}`,
+			`- auto: ${auto ? "yes: take the recommended findings and every finding they depend on, transitively, without calling herder_pick_findings" : "no: the user picks findings with herder_pick_findings"}`,
+			`Skill directory: ${dir} (read references/${PLAYBOOKS[kind]} there before auditing)`,
+		].join("\n"),
+		`herder-${kind} instructions:\n\n${skillText(join(dir, "SKILL.md"))}`,
 	].join("\n\n");
 }
