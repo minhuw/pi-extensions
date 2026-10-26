@@ -1,5 +1,6 @@
 // Fixtures shaped like pi session JSONL lines (session-format.md, message-types.md).
-import type { Entry, RawEntry, SessionDetail, Turn } from "../../src/lib/types";
+import type { BrowserSession, Device, Entry, RawEntry, SessionDetail, Turn } from "../../src/lib/types";
+import type { FakePairing } from "./server";
 
 const T0 = Date.parse("2026-10-20T09:00:00.000Z");
 
@@ -130,6 +131,42 @@ export function turn(index: number, startSeq: number, endSeq: number, extra: Par
 		cost: 0.31,
 		tokens: { input: 1000, output: 200, cacheRead: 5000, cacheWrite: 0 },
 		finalText: `Final answer ${index + 1}`,
+		...extra,
+	};
+}
+
+export function device(name: string, extra: Partial<Device> = {}): Device {
+	return { name, createdAt: iso(0), createdVia: "cli", lastSeenAt: iso(3_600_000), lastHost: `${name}.lan`, ...extra };
+}
+
+/** A pending pairing requested `agoMs` before now; it expires ten minutes after that. */
+export function pairing(code: string, deviceName: string, agoMs = 30_000, extra: Partial<FakePairing> = {}): FakePairing {
+	const requested = Date.now() - agoMs;
+	return {
+		code,
+		device: deviceName,
+		host: `${deviceName}.local`,
+		ip: "192.168.1.20",
+		pikaVersion: "0.2.0",
+		requestedAt: new Date(requested).toISOString(),
+		expiresAt: new Date(requested + 600_000).toISOString(),
+		...extra,
+	};
+}
+
+export const FIREFOX_LINUX = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0";
+export const SAFARI_MAC =
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15";
+
+export function browserSession(id: string, extra: Partial<BrowserSession> = {}): BrowserSession {
+	return {
+		id,
+		createdAt: iso(0),
+		lastSeenAt: iso(60_000),
+		expiresAt: iso(30 * 24 * 3_600_000),
+		userAgent: FIREFOX_LINUX,
+		ip: "192.168.1.10",
+		current: false,
 		...extra,
 	};
 }

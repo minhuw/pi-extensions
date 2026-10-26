@@ -1,12 +1,24 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { useNavigate, useSearchParams } from "react-router";
-import { ApiError, useApi } from "../lib/api";
+import { Navigate, useNavigate, useSearchParams } from "react-router";
+import { useMe } from "../components/AuthGate";
+import { ApiError, authModeOf, useApi } from "../lib/api";
+import { formatWait } from "../lib/format";
 
 /** Only same-app paths are followed after signing in. */
 export function safeNext(value: string | null): string {
 	if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/login")) return "/";
 	return value;
+}
+
+export function loginErrorMessage(cause: unknown): string {
+	if (cause instanceof ApiError && cause.status === 401) return "Wrong password";
+	if (cause instanceof ApiError && cause.status === 429) {
+		return cause.retryAfter === undefined
+			? "Too many attempts. Try again later."
+			: `Too many attempts. Try again in ${formatWait(cause.retryAfter)}.`;
+	}
+	return cause instanceof Error ? cause.message : String(cause);
 }
 
 export function LoginPage() {
@@ -17,6 +29,7 @@ export function LoginPage() {
 	const [password, setPassword] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	const me = useMe();
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
@@ -27,10 +40,14 @@ export function LoginPage() {
 			queryClient.removeQueries();
 			navigate(safeNext(params.get("next")), { replace: true });
 		} catch (cause) {
-			setError(cause instanceof ApiError && cause.status === 401 ? "Wrong password" : cause instanceof Error ? cause.message : String(cause));
+			setError(loginErrorMessage(cause));
 			setBusy(false);
 		}
 	};
+
+	// A reverse proxy or no authentication has nothing to sign in to.
+	const mode = authModeOf(me.data);
+	if (mode === "proxy" || mode === "none") return <Navigate to={safeNext(params.get("next"))} replace />;
 
 	return (
 		<div className="flex h-full items-center justify-center bg-page px-6 text-ink">

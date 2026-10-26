@@ -1,11 +1,15 @@
 import { createContext, useContext } from "react";
 import { withBase } from "./base";
 import type {
+	AuthMode,
+	BrowserSession,
+	Device,
 	Entry,
 	Facets,
 	Me,
 	ModelRequest,
 	Page,
+	Pairing,
 	RunDetail,
 	RunSummary,
 	SearchHit,
@@ -20,11 +24,31 @@ export class ApiError extends Error {
 		readonly status: number,
 		message: string,
 		readonly body?: unknown,
+		/** Seconds to wait, from a 429's `retryAfter` or its `Retry-After` header. */
+		readonly retryAfter?: number,
 	) {
 		super(message);
 		this.name = "ApiError";
 	}
 }
+
+/** The server's auth mode; servers older than 0.2 report only whether a password is required. */
+export function authModeOf(me: Me | undefined): AuthMode | undefined {
+	if (!me) return undefined;
+	return me.authMode ?? (me.passwordRequired ? "password" : "none");
+}
+
+function retryAfterOf(body: unknown, header: string | null): number | undefined {
+	const fromBody = body && typeof body === "object" && "retryAfter" in body ? (body as { retryAfter: unknown }).retryAfter : undefined;
+	const value = Number(fromBody ?? header ?? Number.NaN);
+	return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * Where the browser-session routes live. The contract's `GET sessions` is already the pi session
+ * list, so they sit under `auth/`.
+ */
+const BROWSER_SESSIONS = "auth/sessions";
 
 type Params = Record<string, string | number | boolean | null | undefined>;
 
@@ -82,10 +106,21 @@ export class PikaApi {
 			const detail =
 				body && typeof body === "object" && "error" in body ? String((body as { error: unknown }).error) : response.statusText;
 			if (response.status === 401 && path !== "login") for (const listener of this.unauthorizedListeners) listener();
-			throw new ApiError(response.status, detail || `HTTP ${response.status}`, body);
+			const retryAfter = response.status === 429 ? retryAfterOf(body, response.headers.get("Retry-After")) : undefined;
+			throw new ApiError(response.status, detail || `HTTP ${response.status}`, body, retryAfter);
 		}
 		const text = await response.text();
 		return (text ? JSON.parse(text) : undefined) as T;
+	}
+
+	/** A state-changing call: DELETE, or POST with a JSON body (the server rejects form posts). */
+	private send<T>(path: string, method: "POST" | "DELETE", body?: unknown): Promise<T> {
+		if (method === "DELETE") return this.request(path, {}, { method });
+		return this.request(path, {}, {
+			method,
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body ?? {}),
+		});
 	}
 
 	facets(): Promise<Facets> {
@@ -141,15 +176,45 @@ export class PikaApi {
 	}
 
 	login(password: string): Promise<unknown> {
-		return this.request("login", {}, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ password }),
-		});
+		return this.send("login", "POST", { password });
 	}
 
 	logout(): Promise<unknown> {
-		return this.request("logout", {}, { method: "POST" });
+		return this.send("logout", "POST");
+	}
+
+	browserSessions(): Promise<{ items: BrowserSession[] }> {
+		return this.request(BROWSER_SESSIONS);
+	}
+
+	deleteBrowserSession(id: string): Promise<void> {
+		return this.send(`${BROWSER_SESSIONS}/${encodeURIComponent(id)}`, "DELETE");
+	}
+
+	/** Signs out every browser, this one included. */
+	revokeAllBrowserSessions(): Promise<unknown> {
+		return this.send(`${BROWSER_SESSIONS}/revoke-all`, "POST");
+	}
+
+	devices(): Promise<{ items: Device[] }> {
+		return this.request("devices");
+	}
+
+	revokeDevice(name: string): Promise<void> {
+		return this.send(`devices/${encodeURIComponent(name)}`, "DELETE");
+	}
+
+	pairings(): Promise<{ items: Pairing[] }> {
+		return this.request("pairings");
+	}
+
+	/** Approves a pending pairing; `replace` revokes an existing device of that name. */
+	approvePairing(code: string, body: { name?: string; replace?: boolean }): Promise<{ device: string }> {
+		return this.send(`pairings/${encodeURIComponent(code)}/approve`, "POST", body);
+	}
+
+	denyPairing(code: string): Promise<void> {
+		return this.send(`pairings/${encodeURIComponent(code)}/deny`, "POST");
 	}
 }
 

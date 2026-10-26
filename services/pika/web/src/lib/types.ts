@@ -172,9 +172,44 @@ export interface SessionUpdates {
 	truncated?: boolean;
 }
 
+export type AuthMode = "password" | "proxy" | "none";
+
 export interface Me {
 	authenticated: boolean;
 	passwordRequired: boolean;
+	/** Missing from servers older than 0.2. */
+	authMode?: AuthMode;
+}
+
+/** A signed-in browser, from `GET auth/sessions`. `id` is the first 12 hex characters of the id hash. */
+export interface BrowserSession {
+	id: string;
+	createdAt: string;
+	lastSeenAt: string;
+	expiresAt: string;
+	userAgent?: string;
+	ip?: string;
+	current: boolean;
+}
+
+export interface Device {
+	name: string;
+	createdAt: string;
+	createdVia: "cli" | "pairing" | (string & {});
+	lastSeenAt?: string | null;
+	lastHost?: string | null;
+}
+
+/** A pending pairing request, from `GET pairings`. */
+export interface Pairing {
+	code: string;
+	device: string;
+	host?: string | null;
+	ip?: string | null;
+	pikaVersion?: string | null;
+	requestedAt: string;
+	expiresAt: string;
+	deviceExists: boolean;
 }
 
 // pi session entry and message shapes (session-format.md, message-types.md).

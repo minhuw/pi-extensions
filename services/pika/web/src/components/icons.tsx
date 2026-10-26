@@ -47,6 +47,12 @@ export const Icons = {
 			<path d="M6 13.5h4M8 11v2.5" />
 		</Svg>
 	),
+	key: (p: IconProps) => (
+		<Svg {...p}>
+			<circle cx="5.5" cy="10.5" r="3" />
+			<path d="m7.6 8.4 5.9-5.9M11.5 4.5l1.5 1.5M9.8 6.2l1.3 1.3" />
+		</Svg>
+	),
 	folder: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M2 4.5c0-.6.4-1 1-1h3l1.4 1.5H13c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z" />

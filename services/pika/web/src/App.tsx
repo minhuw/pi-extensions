@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router"
 import { AuthGate } from "./components/AuthGate";
 import { Layout } from "./components/Layout";
 import { ApiContext, ApiError, PikaApi } from "./lib/api";
+import { DevicesPage } from "./pages/Devices";
 import { NotFoundPage } from "./pages/NotFound";
 import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
 import { LoginPage } from "./pages/Login";
@@ -40,6 +41,7 @@ export function AppRoutes() {
 					<Route path="runs/:id" element={<HerderRunPage />} />
 					<Route path="herder" element={<Navigate to="/runs" replace />} />
 					<Route path="herder/:id" element={<LegacyRunRedirect />} />
+					<Route path="devices" element={<DevicesPage />} />
 					<Route path="search" element={<SearchPage />} />
 					<Route path="*" element={<NotFoundPage />} />
 				</Route>

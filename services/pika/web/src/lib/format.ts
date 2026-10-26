@@ -78,6 +78,14 @@ export function formatTime(iso: string | number | null | undefined): string {
 	return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+/** A wait as "N seconds" under a minute, otherwise "N minutes" rounded up. */
+export function formatWait(seconds: number): string {
+	const s = Math.max(1, Math.ceil(seconds));
+	if (s < 60) return s === 1 ? "1 second" : `${s} seconds`;
+	const minutes = Math.ceil(s / 60);
+	return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
 export function plural(n: number, word: string, pluralWord = `${word}s`): string {
 	return `${formatCount(n)} ${n === 1 ? word : pluralWord}`;
 }

@@ -1,6 +1,19 @@
 // An in-memory implementation of the read API for tests, served through a mocked fetch.
 import { withBase } from "../../src/lib/base";
-import type { Entry, Facets, ModelRequest, RunDetail, SearchHit, SessionDetail, Turn } from "../../src/lib/types";
+import { normalizePairingCode } from "../../src/lib/devices";
+import type {
+	AuthMode,
+	BrowserSession,
+	Device,
+	Entry,
+	Facets,
+	ModelRequest,
+	Pairing,
+	RunDetail,
+	SearchHit,
+	SessionDetail,
+	Turn,
+} from "../../src/lib/types";
 
 export interface FakeSession {
 	detail: SessionDetail;
@@ -8,9 +21,28 @@ export interface FakeSession {
 	entries: Entry[];
 }
 
-function json(status: number, body: unknown): Response {
-	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
+
+function noContent(): Response {
+	return new Response(null, { status: 204 });
+}
+
+/** A pending pairing; the fake derives `deviceExists` from its devices. */
+export type FakePairing = Omit<Pairing, "deviceExists">;
+
+/** A state-changing request as the fake received it. */
+export interface Mutation {
+	method: string;
+	path: string;
+	body?: unknown;
+	/** Whether it was sent with `Content-Type: application/json`. */
+	json: boolean;
+}
+
+/** Failed logins from one IP before the server answers 429 (contract section 3). */
+const LOGIN_FAILURES = 5;
 
 function page<T>(items: T[], params: URLSearchParams, defaultLimit: number) {
 	const start = Number(params.get("cursor") ?? 0);
@@ -35,6 +67,13 @@ export function createFakeServer({
 	hits = [],
 	password,
 	updates = true,
+	authMode,
+	authenticated = false,
+	devices = [],
+	pairings = [],
+	browserSessions = [],
+	loginRetryAfter = 840,
+	legacyMe = false,
 }: {
 	base?: string;
 	sessions?: FakeSession[];
@@ -47,13 +86,37 @@ export function createFakeServer({
 	password?: string;
 	/** Serves `sessions/:id/updates`; older servers answer 404. */
 	updates?: boolean;
+	/** Defaults to `password` with a password and `none` without one. */
+	authMode?: AuthMode;
+	/** Starts signed in, in password mode. */
+	authenticated?: boolean;
+	devices?: Device[];
+	pairings?: FakePairing[];
+	browserSessions?: BrowserSession[];
+	/** Seconds the login rate limit reports. */
+	loginRetryAfter?: number;
+	/** Answers `me` without `authMode`, as servers older than 0.2 do. */
+	legacyMe?: boolean;
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
 	const requestsById = new Map(requests.map((request) => [request.id, request]));
 	const runsById = new Map(runs.map((run) => [run.run.runId, run]));
 	const prefix = withBase(base, "api/v1/");
-	const state = { authenticated: false };
+	const mode: AuthMode = authMode ?? (password !== undefined ? "password" : "none");
+	const state = {
+		authenticated,
+		failedLogins: 0,
+		devices: [...devices],
+		pairings: [...pairings],
+		browserSessions: [...browserSessions],
+	};
+	const mutations: Mutation[] = [];
+	const findPairing = (code: string) => state.pairings.findIndex((item) => normalizePairingCode(item.code) === normalizePairingCode(code));
+	const signOutBrowser = () => {
+		state.authenticated = false;
+		state.browserSessions = state.browserSessions.filter((item) => !item.current);
+	};
 
 	const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = new URL(String(input), "http://localhost");
@@ -61,19 +124,88 @@ export function createFakeServer({
 		if (!url.pathname.startsWith(prefix)) return json(404, { error: "not found" });
 		const parts = url.pathname.slice(prefix.length).split("/").map(decodeURIComponent);
 		const params = url.searchParams;
+		const method = init?.method ?? "GET";
+		let body: unknown;
+		if (method !== "GET") {
+			const headers = new Headers(init?.headers);
+			body = init?.body ? JSON.parse(String(init.body)) : undefined;
+			mutations.push({ method, path: url.pathname, body, json: headers.get("Content-Type") === "application/json" });
+		}
 
-		if (parts[0] === "me") return json(200, { authenticated: password === undefined || state.authenticated, passwordRequired: password !== undefined });
-		if (parts[0] === "login" && init?.method === "POST") {
-			const body = JSON.parse(String(init.body ?? "{}")) as { password?: string };
-			if (password !== undefined && body.password !== password) return json(401, { error: "unauthorized" });
+		if (parts[0] === "me") {
+			const me = { authenticated: mode !== "password" || state.authenticated, passwordRequired: mode === "password" };
+			return json(200, legacyMe ? me : { ...me, authMode: mode });
+		}
+		if (parts[0] === "login" && method === "POST") {
+			if (state.failedLogins >= LOGIN_FAILURES) {
+				return json(429, { error: "too_many_attempts", retryAfter: loginRetryAfter }, { "Retry-After": String(loginRetryAfter) });
+			}
+			if (password !== undefined && (body as { password?: string }).password !== password) {
+				state.failedLogins += 1;
+				return json(401, { error: "invalid_password" });
+			}
+			state.failedLogins = 0;
 			state.authenticated = true;
-			return new Response(null, { status: 204 });
+			return noContent();
 		}
 		if (parts[0] === "logout") {
-			state.authenticated = false;
-			return new Response(null, { status: 204 });
+			signOutBrowser();
+			return noContent();
 		}
-		if (password !== undefined && !state.authenticated) return json(401, { error: "unauthorized" });
+		if (mode === "password" && !state.authenticated) return json(401, { error: "unauthorized" });
+
+		if (parts[0] === "auth" && parts[1] === "sessions") {
+			if (parts.length === 2 && method === "GET") return json(200, { items: state.browserSessions });
+			if (parts[2] === "revoke-all" && method === "POST") {
+				state.browserSessions = [];
+				state.authenticated = false;
+				return json(200, {});
+			}
+			if (parts.length === 3 && method === "DELETE") {
+				const session = state.browserSessions.find((item) => item.id === parts[2]);
+				if (!session) return json(404, { error: "not found" });
+				state.browserSessions = state.browserSessions.filter((item) => item !== session);
+				if (session.current) state.authenticated = false;
+				return noContent();
+			}
+			return json(405, { error: "method not allowed" });
+		}
+		if (parts[0] === "devices") {
+			if (parts.length === 1 && method === "GET") return json(200, { items: [...state.devices].sort((a, b) => a.name.localeCompare(b.name)) });
+			if (parts.length === 2 && method === "DELETE") {
+				const before = state.devices.length;
+				state.devices = state.devices.filter((item) => item.name !== parts[1]);
+				return state.devices.length < before ? noContent() : json(404, { error: "not found" });
+			}
+			return json(405, { error: "method not allowed" });
+		}
+		if (parts[0] === "pairings") {
+			if (parts.length === 1 && method === "GET") {
+				const now = Date.now();
+				const pending = state.pairings.filter((item) => Date.parse(item.expiresAt) > now);
+				return json(200, {
+					items: pending.map((item) => ({ ...item, deviceExists: state.devices.some((d) => d.name === item.device) })),
+				});
+			}
+			if (parts.length !== 3 || method !== "POST") return json(405, { error: "method not allowed" });
+			const index = findPairing(parts[1]);
+			if (index < 0 || Date.parse(state.pairings[index].expiresAt) <= Date.now()) return json(404, { error: "unknown_pairing" });
+			const pairing = state.pairings[index];
+			if (parts[2] === "deny") {
+				state.pairings.splice(index, 1);
+				return noContent();
+			}
+			if (parts[2] === "approve") {
+				const request = (body ?? {}) as { name?: string; replace?: boolean };
+				const name = request.name ?? pairing.device;
+				if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) return json(400, { error: "invalid_device" });
+				if (state.devices.some((d) => d.name === name) && request.replace !== true) return json(409, { error: "device_exists" });
+				state.devices = state.devices.filter((d) => d.name !== name);
+				state.devices.push({ name, createdAt: new Date().toISOString(), createdVia: "pairing", lastSeenAt: null, lastHost: null });
+				state.pairings.splice(index, 1);
+				return json(200, { device: name });
+			}
+		}
 
 		if (parts[0] === "facets") {
 			return json(
@@ -150,5 +282,5 @@ export function createFakeServer({
 		return json(404, { error: "not found" });
 	};
 
-	return { fetch: fetchImpl as typeof fetch, calls, state };
+	return { fetch: fetchImpl as typeof fetch, calls, mutations, state };
 }

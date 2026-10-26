@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { useApi } from "../lib/api";
+import { authModeOf, useApi } from "../lib/api";
 import { useShortcuts } from "../lib/keyboard";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
@@ -13,6 +13,18 @@ const ScrollRootContext = createContext<HTMLElement | null>(null);
 /** The main pane's scroll element; page virtualizers scroll with it. */
 export function useScrollRoot(): HTMLElement | null {
 	return useContext(ScrollRootContext);
+}
+
+interface SigningOut {
+	/** True from the moment this browser starts signing out; pages stop polling so no request races the sign-out. */
+	signingOut: boolean;
+	setSigningOut: (value: boolean) => void;
+}
+
+const SigningOutContext = createContext<SigningOut>({ signingOut: false, setSigningOut: () => {} });
+
+export function useSigningOut(): SigningOut {
+	return useContext(SigningOutContext);
 }
 
 const SIDEBAR_KEY = "pika-sidebar";
@@ -69,7 +81,9 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 	const me = useMe();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
+	const { setSigningOut } = useSigningOut();
 	const signOut = async () => {
+		setSigningOut(true);
 		try {
 			await api.logout();
 		} finally {
@@ -101,6 +115,9 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 				<NavItem to="/runs" icon="herder">
 					Herder runs
 				</NavItem>
+				<NavItem to="/devices" icon="key">
+					Devices
+				</NavItem>
 				<NavItem to="/search" icon="search">
 					Search
 				</NavItem>
@@ -118,7 +135,7 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 					<Icon name={theme === "dark" ? "sun" : "moon"} />
 					{theme === "dark" ? "Light theme" : "Dark theme"}
 				</button>
-				{me.data?.passwordRequired && me.data.authenticated && (
+				{authModeOf(me.data) === "password" && me.data?.authenticated && (
 					<button
 						type="button"
 						onClick={() => void signOut()}
@@ -137,6 +154,8 @@ export function Layout({ children }: { children?: ReactNode }) {
 	const [open, setOpen] = useState(initialSidebarOpen);
 	const { theme, toggle } = useTheme();
 	const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
+	const [signingOut, setSigningOut] = useState(false);
+	const signingOutValue = useMemo(() => ({ signingOut, setSigningOut }), [signingOut]);
 	const navigate = useNavigate();
 	const { pathname } = useLocation();
 	// The search page handles `/` itself by focusing its input.
@@ -152,22 +171,24 @@ export function Layout({ children }: { children?: ReactNode }) {
 	};
 
 	return (
-		<div className="flex h-full bg-page text-ink">
-			{open && <Sidebar onClose={() => setSidebar(false)} theme={theme} onToggleTheme={toggle} />}
-			<main ref={setScrollRoot} className="relative h-full min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
-				{!open && (
-					<button
-						type="button"
-						onClick={() => setSidebar(true)}
-						className="fixed top-3 left-3 z-10 rounded-sm bg-page p-1 text-muted hover:bg-hover"
-						aria-label="Open sidebar"
-						title="Open sidebar"
-					>
-						<Icon name="sidebar" />
-					</button>
-				)}
-				<ScrollRootContext.Provider value={scrollRoot}>{children ?? <Outlet />}</ScrollRootContext.Provider>
-			</main>
-		</div>
+		<SigningOutContext.Provider value={signingOutValue}>
+			<div className="flex h-full bg-page text-ink">
+				{open && <Sidebar onClose={() => setSidebar(false)} theme={theme} onToggleTheme={toggle} />}
+				<main ref={setScrollRoot} className="relative h-full min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
+					{!open && (
+						<button
+							type="button"
+							onClick={() => setSidebar(true)}
+							className="fixed top-3 left-3 z-10 rounded-sm bg-page p-1 text-muted hover:bg-hover"
+							aria-label="Open sidebar"
+							title="Open sidebar"
+						>
+							<Icon name="sidebar" />
+						</button>
+					)}
+					<ScrollRootContext.Provider value={scrollRoot}>{children ?? <Outlet />}</ScrollRootContext.Provider>
+				</main>
+			</div>
+		</SigningOutContext.Provider>
 	);
 }
