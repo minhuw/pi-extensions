@@ -1,7 +1,6 @@
 # pika at https://homelab.example/pika/
 # Server: PIKA_TRUST_PROXY=1 pika serve --bind 127.0.0.1:7171 --base-path /pika
 # Devices: "url": "https://homelab.example/pika"
-
 {
 	servers {
 		timeouts {

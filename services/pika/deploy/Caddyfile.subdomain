@@ -1,7 +1,6 @@
 # pika at https://pika.example.com
 # Server: PIKA_TRUST_PROXY=1 pika serve --bind 127.0.0.1:7171   (base path /)
 # Devices: "url": "https://pika.example.com"
-
 {
 	servers {
 		timeouts {
