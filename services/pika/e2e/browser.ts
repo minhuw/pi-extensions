@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import puppeteer, { type Browser, type ElementHandle, type Page } from "puppeteer-core";
 import { LARGE_ENTRIES, LARGE_TURNS } from "./large.ts";
 import { check, checkEqual, log, sleep, waitFor } from "./util.ts";
 
@@ -8,11 +8,7 @@ import { check, checkEqual, log, sleep, waitFor } from "./util.ts";
 const MAX_ENTRY_NODES = 300;
 
 export interface BrowserTargets {
-	url: string;
 	password: string;
-	chrome: string;
-	artifacts: string;
-	profile: string;
 	mainId: string;
 	childId: string;
 	stepId: string;
@@ -25,52 +21,137 @@ export interface BrowserTargets {
 	herderPrompt: string;
 }
 
-/** Drives the embedded UI in the locally installed Chrome and fails on any console error, page error, or failed request. */
-export async function runBrowser(targets: BrowserTargets): Promise<void> {
-	mkdirSync(targets.artifacts, { recursive: true });
+/** A failing response a step provokes on purpose: `count` answers with `status` to `method` on a URL ending in `path`. */
+export interface Expected {
+	status: number;
+	method: string;
+	path: string;
+	count: number;
+	/** Up to `count` may arrive, none included: a race the step tolerates rather than provokes. */
+	atMost?: boolean;
+}
+
+/**
+ * The locally installed Chrome on the embedded UI. Any console error, page error, failed request, or HTTP error fails
+ * `noProblems`, except the responses a step declared with `expect` (and Chrome's console line for each of them).
+ */
+export interface Ui {
+	browser: Browser;
+	page: Page;
+	theme: "light" | "dark";
+	shots: string[];
+	shot(name: string): Promise<void>;
+	go(path: string): Promise<void>;
+	count(selector: string): Promise<number>;
+	textOf(selector: string): Promise<string>;
+	visible(selector: string, timeout?: number): Promise<ElementHandle<Element> | null>;
+	click(selector: string): Promise<void>;
+	/** Switches the theme with the sidebar's toggle. */
+	setTheme(theme: "light" | "dark"): Promise<void>;
+	/**
+	 * Allows exactly these failing responses until `done` checks that each arrived as often as declared; with `atMost`,
+	 * `done` waits for the network to go idle and allows fewer.
+	 */
+	expect(expected: Omit<Expected, "count"> & { count?: number }): { done(): Promise<void> };
+	noProblems(where: string): void;
+	close(): Promise<void>;
+}
+
+export async function openBrowser(options: { url: string; chrome: string; artifacts: string; profile: string }): Promise<Ui> {
+	mkdirSync(options.artifacts, { recursive: true });
 	const browser = await puppeteer.launch({
-		executablePath: targets.chrome,
+		executablePath: options.chrome,
 		headless: true,
-		userDataDir: targets.profile,
+		userDataDir: options.profile,
 		// Chrome's sandbox refuses to run as root, as in some CI containers.
 		args: [...(process.getuid?.() === 0 ? ["--no-sandbox"] : []), "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic", "--disable-extensions", "--disable-background-networking", "--disable-component-update", "--disable-sync"],
 	});
 	try {
-		await flow(browser, targets);
-	} finally {
+		const page = await browser.newPage();
+		await page.setViewport({ width: 1440, height: 960 });
+		return browserUi(browser, page, options);
+	} catch (error) {
 		await browser.close();
+		throw error;
 	}
 }
 
-async function flow(browser: Browser, t: BrowserTargets): Promise<void> {
-	const page = await browser.newPage();
-	await page.setViewport({ width: 1440, height: 960 });
+function browserUi(browser: Browser, page: Page, options: { url: string; artifacts: string }): Ui {
 	const problems: string[] = [];
-	page.on("console", (message) => { if (message.type() === "error") problems.push(`console error: ${message.text()} (${message.location().url ?? ""})`); });
+	const expected: (Expected & { seen: number; logged: number })[] = [];
+	const matching = (status: number, method: string | undefined, url: string) =>
+		expected.find((item) => item.status === status && (method === undefined || item.method === method) && new URL(url).pathname.endsWith(item.path));
+	page.on("console", (message) => {
+		if (message.type() !== "error") return;
+		const url = message.location().url ?? "";
+		// Chrome logs one "Failed to load resource" line for every HTTP error a fetch receives.
+		const status = /^Failed to load resource: the server responded with a status of (\d+)/.exec(message.text())?.[1];
+		const item = status && url ? matching(Number(status), undefined, url) : undefined;
+		if (item && item.logged < item.count) { item.logged++; return; }
+		problems.push(`console error: ${message.text()} (${url})`);
+	});
 	page.on("pageerror", (error) => problems.push(`page error: ${error instanceof Error ? error.message : String(error)}`));
 	page.on("requestfailed", (request) => problems.push(`request failed: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? ""}`));
-	page.on("response", (response) => { if (response.status() >= 400) problems.push(`HTTP ${response.status()}: ${response.request().method()} ${response.url()}`); });
-	const noProblems = (where: string) => check(problems.length === 0, `browser problems ${where}:\n  ${problems.join("\n  ")}`);
+	page.on("response", (response) => {
+		if (response.status() < 400) return;
+		const item = matching(response.status(), response.request().method(), response.url());
+		if (item && item.seen < item.count) { item.seen++; return; }
+		problems.push(`HTTP ${response.status()}: ${response.request().method()} ${response.url()}`);
+	});
 
-	const shots: string[] = [];
-	let theme = "light";
-	const shot = async (name: string) => {
-		await sleep(250);
-		const path = join(t.artifacts, `${name}-${theme}.png`);
-		await page.screenshot({ path, fullPage: false });
-		shots.push(path);
-	};
-	const go = async (path: string) => {
-		await page.goto(`${t.url}${path}`, { waitUntil: "networkidle0" });
-	};
-	const count = (selector: string) => page.$$eval(selector, (nodes) => nodes.length);
-	const textOf = (selector: string) => page.$eval(selector, (node) => (node as HTMLElement).innerText);
 	const visible = (selector: string, timeout = 15_000) => page.waitForSelector(selector, { visible: true, timeout });
-	// Virtualized lists render rows a frame after they scroll into view.
-	const click = async (selector: string) => {
-		await visible(selector);
-		await page.click(selector);
+	const ui: Ui = {
+		browser, page, theme: "light", shots: [],
+		async shot(name) {
+			await sleep(250);
+			const path = join(options.artifacts, `${name}-${ui.theme}.png`);
+			await page.screenshot({ path, fullPage: false });
+			ui.shots.push(path);
+		},
+		async go(path) {
+			await page.goto(`${options.url}${path}`, { waitUntil: "networkidle0" });
+		},
+		count: (selector) => page.$$eval(selector, (nodes) => nodes.length),
+		textOf: (selector) => page.$eval(selector, (node) => (node as HTMLElement).innerText),
+		visible,
+		// Virtualized lists render rows a frame after they scroll into view.
+		async click(selector) {
+			await visible(selector);
+			await page.click(selector);
+		},
+		async setTheme(theme) {
+			ui.theme = theme;
+			if (await page.evaluate(() => document.documentElement.dataset.theme) === theme) return;
+			await ui.click("[data-theme-toggle]");
+			await waitFor(() => page.evaluate((want) => document.documentElement.dataset.theme === want, theme), 5_000, `the ${theme} theme`);
+		},
+		expect({ count = 1, ...rest }) {
+			const item = { ...rest, count, seen: 0, logged: 0 };
+			expected.push(item);
+			return {
+				async done() {
+					try {
+						if (item.atMost) await page.waitForNetworkIdle({ idleTime: 250, timeout: 5_000 });
+						else await waitFor(() => item.seen === item.count, 5_000, `${count} HTTP ${item.status} answer(s) to ${item.method} ${item.path}`);
+						// Console lines may trail their responses.
+						await waitFor(() => item.logged === item.seen, 2_000, `Chrome's console line for each HTTP ${item.status} from ${item.path}`).catch(() => {});
+					} finally {
+						expected.splice(expected.indexOf(item), 1);
+					}
+				},
+			};
+		},
+		noProblems(where) {
+			check(problems.length === 0, `browser problems ${where}:\n  ${problems.join("\n  ")}`);
+		},
+		close: () => browser.close(),
 	};
+	return ui;
+}
+
+/** Drives the embedded UI's viewer pages and fails on any console error, page error, or failed request. */
+export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
+	const { page, shot, go, count, textOf, visible, click, noProblems } = ui;
 
 	// 1. Login: the UI sends a signed-out browser to the login page.
 	await go("/");
@@ -217,7 +298,7 @@ async function flow(browser: Browser, t: BrowserTargets): Promise<void> {
 	await waitFor(() => page.evaluate(() => document.documentElement.dataset.theme === "dark"), 5_000, "the dark theme");
 	const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
 	checkEqual(background !== "rgb(255, 255, 255)", true, `the dark theme keeps a white background (${background})`);
-	theme = "dark";
+	ui.theme = "dark";
 	await visible(`[data-session-row="${t.mainId}"]`);
 	await shot("02-sessions");
 	await go(`/s/${encodeURIComponent(t.mainId)}`);
@@ -252,5 +333,5 @@ async function flow(browser: Browser, t: BrowserTargets): Promise<void> {
 	await visible("#pika-password");
 	await shot("01-login");
 	noProblems("in the dark theme");
-	log(`browser: ${shots.length} screenshots`);
+	log(`browser: ${ui.shots.length} screenshots of the viewer`);
 }

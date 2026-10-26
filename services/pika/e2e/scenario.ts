@@ -33,6 +33,10 @@ export const PROMPTS = {
 	resumed: "Run the resumed check.",
 	online: "Run the online check.",
 	local: "Answer from the local model.",
+	/** The first prompt of the machine that joins by pairing. */
+	paired: "Run the paired check.",
+	/** A prompt after that machine's device was revoked. */
+	revoked: "Run the revoked check.",
 };
 const CHILD_PROMPT = "Read README.md and summarize it in one sentence.";
 const STEP_PROMPT = "Survey README.md and report what it says.";
@@ -149,6 +153,8 @@ export function responder(body: Record<string, unknown>): ScriptedReply | undefi
 		case "offline":
 		case "resumed":
 		case "online":
+		case "paired":
+		case "revoked":
 			return script([
 				{ toolCalls: [call(`call_${name}`, "bash", { command: `echo ${name} check` })] },
 				`The ${name} check passed.`,
@@ -157,11 +163,18 @@ export function responder(body: Record<string, unknown>): ScriptedReply | undefi
 	return "This prompt has no script.";
 }
 
-/** A UI that answers every confirmation with yes, as the user approving Herder's goal; everything else is a no-op. */
-function approvingUi(session: AgentSession, approvals: string[]): ExtensionUIContext {
+/** The dialogs a test may script; pi's UI-less context provides everything else. */
+export type ScriptedDialogs = Pick<ExtensionUIContext, "notify" | "input" | "select">;
+
+/**
+ * A UI that answers every confirmation with yes, as the user approving Herder's goal, and `dialogs` when given;
+ * everything else is a no-op.
+ */
+function approvingUi(session: AgentSession, approvals: string[], dialogs?: ScriptedDialogs): ExtensionUIContext {
 	const base = session.extensionRunner.getUIContext();
 	const ui = Object.defineProperties({}, Object.getOwnPropertyDescriptors(base)) as ExtensionUIContext;
 	ui.confirm = async (title: string) => { approvals.push(title); return true; };
+	if (dialogs) Object.assign(ui, { notify: dialogs.notify, input: dialogs.input, select: dialogs.select });
 	return ui;
 }
 
@@ -181,7 +194,11 @@ export interface Pi {
  * Subagents does for a background child that finishes while the parent works, steers a displayed notice into the run
  * at the `turn_end` after the tool batch of `NOTICE_AFTER_CALL_ID`.
  */
-export async function startPi(options: { cwd: string; agentDir: string; sessionDir: string; provider: MockProvider; local: FauxProviderHandle; sessionFile?: string }): Promise<Pi> {
+export async function startPi(options: {
+	cwd: string; agentDir: string; sessionDir: string; provider: MockProvider; local: FauxProviderHandle; sessionFile?: string;
+	/** Answers to pika's prompts, for `/pika login`. */
+	dialogs?: ScriptedDialogs;
+}): Promise<Pi> {
 	const { cwd, agentDir, sessionDir, provider } = options;
 	const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 	runtime.registerProvider(PROVIDER, { baseUrl: provider.baseUrl, apiKey: "e2e-key", api: "openai-completions", models: [{ ...model(provider.baseUrl) }] });
@@ -208,7 +225,7 @@ export async function startPi(options: { cwd: string; agentDir: string; sessionD
 	});
 	const errors: unknown[] = [];
 	const approvals: string[] = [];
-	await session.bindExtensions({ mode: "rpc", uiContext: approvingUi(session, approvals), onError: (error) => { errors.push(error); } });
+	await session.bindExtensions({ mode: "rpc", uiContext: approvingUi(session, approvals, options.dialogs), onError: (error) => { errors.push(error); } });
 	let closed = false;
 	return {
 		session, errors, approvals, contexts,

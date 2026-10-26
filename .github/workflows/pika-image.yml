@@ -91,15 +91,25 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name pika-root -p 127.0.0.1:7171:7171 pika:smoke
+          password="smoke-$(openssl rand -hex 12)"
+          docker run -d --name pika-root -p 127.0.0.1:7171:7171 -e PIKA_PASSWORD="$password" pika:smoke
           # A base path without slashes exercises the HEALTHCHECK's normalization.
-          docker run -d --name pika-path -e PIKA_BASE_PATH=pika pika:smoke
+          docker run -d --name pika-path -e PIKA_BASE_PATH=pika -e PIKA_AUTH=none pika:smoke
           cleanup() {
             local status=$?
-            if [[ $status -ne 0 ]]; then docker logs pika-root; docker logs pika-path; fi
-            docker rm -f pika-root pika-path >/dev/null
+            if [[ $status -ne 0 ]]; then docker logs pika-root; docker logs pika-path; docker logs pika-open 2>/dev/null || true; fi
+            docker rm -f pika-root pika-path pika-open >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+
+          # Without a password or PIKA_AUTH the server refuses to start.
+          status=0
+          output=$(timeout 60 docker run --rm --name pika-open pika:smoke 2>&1) || status=$?
+          echo "$output"
+          if [[ $status -ne 2 ]] || ! grep -q '^pika: no password configured' <<<"$output"; then
+            echo "::error::a container without a password exited with status $status instead of refusing to start with status 2"
+            exit 1
+          fi
 
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:7171/api/health >/dev/null 2>&1 && break; sleep 1; done
           curl -fsS http://127.0.0.1:7171/api/health
@@ -107,6 +117,11 @@ jobs:
           grep -q '<meta name="pika-base" content="/">' <<<"$page"
           if grep -q 'does not include the web UI' <<<"$page"; then
             echo "::error::the image serves the placeholder page instead of the embedded web UI"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7171/api/v1/facets)
+          if [[ "$code" != 401 ]]; then
+            echo "::error::GET /api/v1/facets without a cookie answered $code instead of 401"
             exit 1
           fi
           docker exec pika-root pika token create smoke | grep -q '^pika_'

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# pika's end-to-end check (AC-1, AC-2, AC-8): installs and builds everything from a fresh checkout, serves the release
-# binary with its embedded UI under /pika with a password, then runs services/pika/e2e/driver.ts: a real pi runtime
-# with Subagents, Herder, and pika against a mock provider, read API and fidelity assertions across a server outage and
-# a pi restart, a 5,000-entry session, and the UI in the locally installed Chrome. Screenshots go to a temporary
-# artifacts directory whose path is printed at the end.
+# pika's end-to-end check (AC-1, AC-2, AC-8): installs and builds everything from a fresh checkout, checks that the
+# release binary refuses to start without a password, serves it with its embedded UI under /pika with a password, then
+# runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read
+# API and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, and the UI in the locally
+# installed Chrome; then a second machine pairing through `/pika login` while the browser denies and approves it, device
+# revocation, browser sign-out, and the login rate limit. Screenshots go to a temporary artifacts directory whose path
+# is printed at the end.
 #
 # PIKA_CHROME selects the Chrome or Chromium binary; no browser is ever downloaded. PIKA_E2E_SKIP_BUILD=1 reuses
 # installed dependencies and earlier builds; PIKA_E2E_KEEP=1 keeps the temporary pi workspace and server data.
@@ -102,6 +104,25 @@ fi
 echo "e2e: type-checking the driver"
 step "$repo/node_modules/.bin/tsc" -p "$service/e2e/tsconfig.json"
 pika="$CARGO_TARGET_DIR/release/pika"
+
+# Without a password and without PIKA_AUTH the server refuses to start, with status 2.
+env -u PIKA_PASSWORD -u PIKA_PASSWORD_FILE -u PIKA_AUTH PIKA_DATA_DIR="$work/fail-closed" \
+  "$pika" serve --bind 127.0.0.1:0 >"$work/fail-closed.log" 2>&1 &
+step_pid=$!
+for _ in $(seq 1 200); do kill -0 "$step_pid" 2>/dev/null || break; sleep 0.05; done
+if kill -0 "$step_pid" 2>/dev/null; then
+  echo "e2e: the server started without a password" >&2
+  exit 1
+fi
+status=0
+wait "$step_pid" || status=$?
+step_pid=""
+if [[ $status -ne 2 ]] || ! grep -qF "pika: no password configured. Run 'pika password set'" "$work/fail-closed.log"; then
+  echo "e2e: without a password the server exited with status $status instead of 2 and the no-password message:" >&2
+  cat "$work/fail-closed.log" >&2
+  exit 1
+fi
+echo "e2e: without a password the server refuses to start (status 2)"
 
 port="$(node -e 'const s = require("net").createServer(); s.listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });')"
 base_path="/pika"

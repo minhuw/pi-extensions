@@ -1,13 +1,17 @@
 // pika end to end: a real pi runtime with Subagents, Herder, and pika uploads to the real server through a mock
 // provider; the read API must return every entry and request verbatim, across a server outage and a pi restart, and
-// the embedded UI must render it in the locally installed Chrome. Run by services/pika/scripts/e2e.sh.
+// the embedded UI must render it in the locally installed Chrome. Then a new machine pairs through `/pika login` while
+// the browser denies and approves it, the browser revokes it, signs out, and finally hits the login rate limit.
+// Run by services/pika/scripts/e2e.sh.
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MockProvider } from "../../../extensions/pika/tests/support/provider-server.ts";
+import { ScriptedUI } from "../../../extensions/pika/tests/support/ui.ts";
 import { allEntries, ReadApi, type Entry, type ModelRequest, type RunDetail, type SessionDetail, type Turn } from "./api.ts";
-import { runBrowser } from "./browser.ts";
+import { checkApprovedPairing, checkBrowserSessions, checkDeniedPairing, checkDevices, checkLoginRateLimit, type NewMachine } from "./auth.ts";
+import { checkViewer, openBrowser, type Ui } from "./browser.ts";
 import { ingestSession, largeSession } from "./large.ts";
 import { AGENT_CALL_ID, createProject, LOCAL_PROVIDER, NOTICE_AFTER_CALL_ID, NOTICE_TYPE, PROMPTS, responder, SEARCH_WORD, startPi, type Pi } from "./scenario.ts";
 import { PikaServer } from "./server.ts";
@@ -29,6 +33,9 @@ const server = new PikaServer({
 });
 
 const root = join(work, "pi");
+/** The machine that joins by pairing keeps its pi state outside `root`, which the session watcher scans. */
+const machineRoot = join(work, "machine");
+const PAIRED_DEVICE = "e2e-paired";
 const agentDir = join(root, "agent");
 const sessionDir = join(root, "sessions");
 const cwd = join(root, "demo");
@@ -117,17 +124,54 @@ async function main(): Promise<void> {
 		check(await api.text(`sessions/${large.id}/export`) === large.text, "the 5,000-entry session does not export byte for byte");
 		log(`loaded the 5,000-entry session ${large.id}`);
 
-		await runBrowser({
-			url: server.url, password, chrome: env("PIKA_E2E_CHROME"), artifacts: env("PIKA_E2E_ARTIFACTS"), profile: join(work, "chrome-profile"),
-			mainId, childId: child.sessionId, stepId: step.sessionId, runId: herderRun, largeId: large.id, searchWord: SEARCH_WORD,
-			prompts: [PROMPTS.inspect, PROMPTS.delegate, PROMPTS.herder, PROMPTS.offline, PROMPTS.resumed, PROMPTS.online, PROMPTS.local],
-			herderPrompt: PROMPTS.herder,
-		});
+		const browser = await openBrowser({ url: server.url, chrome: env("PIKA_E2E_CHROME"), artifacts: env("PIKA_E2E_ARTIFACTS"), profile: join(work, "chrome-profile") });
+		try {
+			await checkViewer(browser, {
+				password, mainId, childId: child.sessionId, stepId: step.sessionId, runId: herderRun, largeId: large.id, searchWord: SEARCH_WORD,
+				prompts: [PROMPTS.inspect, PROMPTS.delegate, PROMPTS.herder, PROMPTS.offline, PROMPTS.resumed, PROMPTS.online, PROMPTS.local],
+				herderPrompt: PROMPTS.herder,
+			});
+			await checkAuth(browser, { api, provider, local });
+			log(`browser: ${browser.shots.length} screenshots`);
+		} finally {
+			await browser.close();
+		}
 	} finally {
 		watcher.stop();
 		await pi?.shutdown();
 		await provider.stop();
 	}
+}
+
+/**
+ * A second machine, with its own agent dir and no `pika.json`, pairs while the browser denies and then approves it;
+ * the browser revokes it and signs out; the login rate limit comes last, since every client here is 127.0.0.1.
+ */
+async function checkAuth(browser: Ui, options: { api: ReadApi; provider: MockProvider; local: ReturnType<typeof fauxProvider> }): Promise<void> {
+	const agent = join(machineRoot, "agent");
+	const sessions = join(machineRoot, "sessions");
+	for (const dir of [agent, sessions]) mkdirSync(dir, { recursive: true });
+	// pika reads its agent dir from the environment when a command runs.
+	process.env.PI_CODING_AGENT_DIR = agent;
+	const ui = new ScriptedUI();
+	const { notify, input, select } = ui.context();
+	const machine: NewMachine = {
+		agentDir: agent, ui, secrets: [env("PIKA_E2E_TOKEN_LAPTOP"), env("PIKA_E2E_TOKEN_DESKTOP")],
+		pi: await startPi({ cwd, agentDir: agent, sessionDir: sessions, provider: options.provider, local: options.local, dialogs: { notify, input, select } }),
+	};
+	const t = { url: server.url, password, api: options.api, device: PAIRED_DEVICE };
+	try {
+		await checkDeniedPairing(browser, machine, t);
+		await browser.setTheme("light");
+		const token = await checkApprovedPairing(browser, machine, t);
+		await checkDevices(browser, machine, t, token);
+		checkEqual(machine.pi.errors, [], "extension errors on the paired machine");
+	} finally {
+		await machine.pi.shutdown();
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+	}
+	await checkBrowserSessions(browser, t);
+	await checkLoginRateLimit(browser, t);
 }
 
 function herderRunId(): string {
