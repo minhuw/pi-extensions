@@ -29,14 +29,21 @@ function carryEntries(queryClient: QueryClient, sessionId: string, before: Turn,
 	}
 }
 
-/** Applies an updates response: replaces the turns that changed, appends new ones, and refreshes the summary. */
+/**
+ * Applies an updates response: refreshes the summary, replaces the turns that changed, and appends
+ * new ones. A truncated response refetches the turns list instead.
+ */
 export function applySessionUpdates(queryClient: QueryClient, sessionId: string, update: SessionUpdates) {
 	const detail = queryClient.getQueryData<SessionDetail>(["session", sessionId]);
-	if (detail) {
+	if (detail && update.session) {
 		queryClient.setQueryData<SessionDetail>(["session", sessionId], { ...detail, ...update.session, children: detail.children });
 		if (update.session.childCount !== detail.childCount) void queryClient.invalidateQueries({ queryKey: ["session", sessionId], exact: true });
 	}
-	if (update.turns.length === 0) return;
+	if (update.truncated) {
+		void queryClient.invalidateQueries({ queryKey: ["turns", sessionId], exact: true });
+		return;
+	}
+	if (!update.turns?.length) return;
 	const changed = new Map(update.turns.map((turn) => [turn.index, turn]));
 	queryClient.setQueryData<InfiniteData<Page<Turn>>>(["turns", sessionId], (data) => {
 		if (!data) return data;
@@ -64,7 +71,7 @@ export function applySessionUpdates(queryClient: QueryClient, sessionId: string,
 
 /**
  * Polls `sessions/:id/updates` every few seconds while the session saw activity in the last two
- * minutes. Servers without that route fall back to polling the summary and refreshing the turns.
+ * minutes. Polling stops when the route answers 404, as older servers do.
  */
 export function useLiveUpdates(sessionId: string, session: SessionDetail | undefined) {
 	const api = useApi();
@@ -79,29 +86,19 @@ export function useLiveUpdates(sessionId: string, session: SessionDetail | undef
 		let cancelled = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let since = knownLastSeq(queryClient, initial);
-		let fallback = false;
 		let lastAt = initial.lastAt;
 
 		const tick = async () => {
 			try {
-				if (!fallback) {
-					const update = await api.updates(sessionId, since);
-					if (cancelled) return;
-					since = Math.max(since, update.lastSeq);
-					lastAt = update.session.lastAt;
+				const update = await api.updates(sessionId, since);
+				if (cancelled) return;
+				lastAt = update.lastAt ?? update.session?.lastAt ?? lastAt;
+				if (update.lastSeq > since) {
 					applySessionUpdates(queryClient, sessionId, update);
-				} else {
-					const detail = await api.session(sessionId);
-					if (cancelled) return;
-					const previous = sessionRef.current;
-					lastAt = detail.lastAt;
-					queryClient.setQueryData(["session", sessionId], detail);
-					if (!previous || detail.entryCount !== previous.entryCount) {
-						await queryClient.invalidateQueries({ queryKey: ["turns", sessionId], exact: true });
-					}
+					since = update.lastSeq;
 				}
 			} catch (error) {
-				if (error instanceof ApiError && (error.status === 404 || error.status === 405)) fallback = true;
+				if (error instanceof ApiError && error.status === 404) return;
 			}
 			if (!cancelled && isLive(lastAt)) timer = setTimeout(() => void tick(), LIVE_POLL_MS);
 		};

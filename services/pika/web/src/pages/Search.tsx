@@ -119,6 +119,12 @@ export function SearchPage() {
 	const device = params.get("device") ?? undefined;
 	const project = params.get("project") ?? undefined;
 	const [input, setInput] = useState(q);
+	const [syncedQ, setSyncedQ] = useState(q);
+	// Follow `q` when it changes from outside the input, e.g. history navigation.
+	if (q !== syncedQ) {
+		setSyncedQ(q);
+		setInput(q);
+	}
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	useShortcuts({ "/": () => inputRef.current?.focus() });

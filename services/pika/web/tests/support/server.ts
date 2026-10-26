@@ -20,6 +20,8 @@ function page<T>(items: T[], params: URLSearchParams, defaultLimit: number) {
 	return { items: slice, nextCursor: next };
 }
 
+const UPDATES_TURN_LIMIT = 50;
+
 function withoutChildren({ children: _children, ...rest }: SessionDetail) {
 	return rest;
 }
@@ -100,9 +102,16 @@ export function createFakeServer({
 			if (parts.length === 2) return json(200, session.detail);
 			if (parts[2] === "turns") return json(200, page(session.turns, params, 100));
 			if (parts[2] === "updates" && updates) {
-				const since = Number(params.get("since") ?? -1);
+				const raw = params.get("since");
+				const since = raw !== null && /^-?\d+$/.test(raw) ? Number(raw) : -1;
 				const lastSeq = session.entries.reduce((max, item) => Math.max(max, item.seq), -1);
-				return json(200, { lastSeq, session: withoutChildren(session.detail), turns: session.turns.filter((turn) => turn.endSeq > since) });
+				const lastAt = lastSeq >= 0 ? session.detail.lastAt : null;
+				if (lastSeq <= since) return json(200, { lastSeq, lastAt });
+				// The newest turns, as a descending scan of the turns index finds them.
+				const grown = session.turns.filter((turn) => turn.endSeq > since).sort((a, b) => a.index - b.index);
+				const body: Record<string, unknown> = { lastSeq, lastAt, session: withoutChildren(session.detail), turns: grown.slice(-UPDATES_TURN_LIMIT) };
+				if (grown.length > UPDATES_TURN_LIMIT) body.truncated = true;
+				return json(200, body);
 			}
 			if (parts[2] === "entries" && parts.length === 3) {
 				const from = Number(params.get("from") ?? 0);

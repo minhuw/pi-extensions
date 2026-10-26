@@ -6,6 +6,7 @@ import type { Entry, ModelRequest } from "../src/lib/types";
 import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp, renderWithApi } from "./support/render";
 import {
+	anthropicCachedPayloads,
 	anthropicPayload,
 	googlePayload,
 	modelRequest,
@@ -147,6 +148,64 @@ describe("what the model saw", () => {
 		expect(panel.querySelector("[data-block='missing']")?.textContent).toContain("abababababab");
 	});
 
+	it("shows placeholders for a missing system prompt and tool declarations", async () => {
+		const hash = (c: string) => c.repeat(64);
+		const payload = { ...anthropicPayload, system: [{ $pika: hash("a") }], tools: [anthropicPayload.tools[0], { $pika: hash("b") }] };
+		renderDrawer(modelRequest("rs", payload, { complete: false }));
+		const panel = drawer();
+		expect(await within(panel).findByText("Incomplete request")).toBeTruthy();
+		const system = within(panel).getByRole("heading", { name: /System prompt/ }).closest("section")!;
+		expect(system.querySelector("[data-block='missing']")?.textContent).toContain("aaaaaaaaaaaa");
+		expect(within(system).queryByText("None")).toBeNull();
+		fireEvent.click(within(panel).getByRole("button", { name: "2 tool declarations" }));
+		expect(panel.querySelector("[data-tool-decl='read']")).toBeTruthy();
+		const tools = within(panel).getByRole("heading", { name: /Tools/ }).closest("section")!;
+		expect(tools.querySelector("[data-block='missing']")?.textContent).toContain("bbbbbbbbbbbb");
+		expect(tools.querySelectorAll("[data-tool-decl]")).toHaveLength(1);
+	});
+
+	it("shows a placeholder for long OpenAI instructions that are not uploaded yet", () => {
+		const hash = "c".repeat(64);
+		const normal = normalizeRequest({ ...openAiResponsesPayload, instructions: { $pika: hash, $type: "string" } }, { api: "openai-responses" });
+		expect(normal.system).toBeNull();
+		expect(normal.systemMissing).toEqual([hash]);
+		expect(normal.settings).not.toHaveProperty("instructions");
+		const pi = normalizeRequest({ ...piContextPayload, systemPrompt: { $pika: hash, $type: "string" } }, { fidelity: "context" });
+		expect(pi.systemMissing).toEqual([hash]);
+		expect(pi.system).toContain("expert coding assistant");
+	});
+
+	it("refetches an incomplete request when the drawer opens again", async () => {
+		const r1 = modelRequest("r1", { ...anthropicPayload, messages: anthropicPayload.messages.slice(0, 1) });
+		const r2 = modelRequest("r2", { ...anthropicPayload, messages: [anthropicPayload.messages[0], { $pika: "ab".repeat(32) }] }, { complete: false });
+		const server = createFakeServer({ sessions: [sessionWithRequests()], requests: [r1, r2] });
+		renderApp("/s/s1", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }));
+		const open = async () => {
+			fireEvent.click((await screen.findAllByRole("button", { name: "Show what the model saw" }))[1]);
+			return screen.findByRole("dialog", { name: "What the model saw" });
+		};
+		const close = async () => {
+			fireEvent.keyDown(window, { key: "Escape" });
+			await waitFor(() => expect(document.querySelector("[data-context-drawer]")).toBeNull());
+		};
+		expect(await within(await open()).findByText("Incomplete request")).toBeTruthy();
+		await close();
+
+		// The device uploads the missing block; the server now reconstructs the full request.
+		Object.assign(r2, { payload: anthropicPayload, complete: true });
+		let panel = await open();
+		await waitFor(() => expect(within(panel).queryByText("Incomplete request")).toBeNull());
+		expect(panel.querySelector("[data-block='missing']")).toBeNull();
+		expect(server.calls.filter((call) => call === "/api/v1/requests/r2")).toHaveLength(2);
+		await close();
+
+		// Complete requests are not fetched again.
+		panel = await open();
+		expect(await within(panel).findByText("Anthropic messages")).toBeTruthy();
+		expect(server.calls.filter((call) => call === "/api/v1/requests/r2")).toHaveLength(2);
+	});
+
 	it("falls back to a JSON tree for unknown payloads", async () => {
 		renderDrawer(modelRequest("rx", { prompt: "hello", options: { n: 1 } }, { api: "mystery" }));
 		const panel = drawer();
@@ -205,5 +264,15 @@ describe("payload normalization", () => {
 		expect(newMessageStart(a, a.slice(0, 1))).toBe(1);
 		expect(newMessageStart(a, a)).toBe(3);
 		expect(newMessageStart(a, undefined)).toBeUndefined();
+	});
+
+	it("ignores moved Anthropic cache_control markers when counting new messages", () => {
+		const { first, second, third } = anthropicCachedPayloads;
+		const messages = (payload: unknown) => normalizeRequest(payload, { api: "anthropic-messages" }).messages;
+		expect(newMessageStart(messages(second), messages(first))).toBe(1);
+		expect(newMessageStart(messages(third), messages(second))).toBe(3);
+		// A changed message still ends the common prefix.
+		const edited = { ...third, messages: [{ role: "user", content: "Fix the other test" }, ...third.messages.slice(1)] };
+		expect(newMessageStart(messages(edited), messages(second))).toBe(0);
 	});
 });

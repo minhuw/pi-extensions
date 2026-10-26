@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type Query, type QueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../components/icons";
@@ -278,22 +278,26 @@ function SystemPrompt({ text }: { text: string }) {
 function ToolList({ tools }: { tools: ToolDeclaration[] }) {
 	return (
 		<div className="space-y-1">
-			{tools.map((tool, index) => (
-				<div key={`${tool.name}:${index}`} data-tool-decl={tool.name}>
-					<Toggle
-						className="text-[14px]"
-						label={
-							<span className="flex min-w-0 items-center gap-2">
-								<span className="mono shrink-0">{tool.name}</span>
-								{tool.description && <span className="truncate text-[13px] text-muted">{tool.description.split("\n")[0]}</span>}
-							</span>
-						}
-					>
-						{tool.description && <LongText text={tool.description} />}
-						{tool.parameters !== undefined && <JsonTree value={tool.parameters} className="mt-2" />}
-					</Toggle>
-				</div>
-			))}
+			{tools.map((tool, index) =>
+				tool.missing ? (
+					<BlockView key={`missing:${index}`} block={{ kind: "missing", hash: tool.missing }} />
+				) : (
+					<div key={`${tool.name}:${index}`} data-tool-decl={tool.name}>
+						<Toggle
+							className="text-[14px]"
+							label={
+								<span className="flex min-w-0 items-center gap-2">
+									<span className="mono shrink-0">{tool.name}</span>
+									{tool.description && <span className="truncate text-[13px] text-muted">{tool.description.split("\n")[0]}</span>}
+								</span>
+							}
+						>
+							{tool.description && <LongText text={tool.description} />}
+							{tool.parameters !== undefined && <JsonTree value={tool.parameters} className="mt-2" />}
+						</Toggle>
+					</div>
+				),
+			)}
 		</div>
 	);
 }
@@ -402,7 +406,14 @@ function RequestBody({
 			) : (
 				<>
 					<Section title="System prompt" meta={normal.system ? <span className="font-normal">· {formatCount(normal.system.length)} chars</span> : undefined}>
-						{normal.system ? <SystemPrompt text={normal.system} /> : <div className="text-[14px] text-muted italic">None</div>}
+						{normal.systemMissing.map((hash, index) => (
+							<BlockView key={`missing:${index}`} block={{ kind: "missing", hash }} />
+						))}
+						{normal.system ? (
+							<SystemPrompt text={normal.system} />
+						) : (
+							normal.systemMissing.length === 0 && <div className="text-[14px] text-muted italic">None</div>
+						)}
 					</Section>
 					<Section title="Tools">
 						{normal.tools.length ? (
@@ -439,11 +450,16 @@ function RequestBody({
 	);
 }
 
+/** Complete requests never change; incomplete ones are refetched whenever the drawer opens again. */
+function requestStaleTime(query: Query<ModelRequest>): number {
+	return query.state.data?.complete ? Infinity : 0;
+}
+
 export function ContextDrawer({ target, onClose }: { target: ContextTarget; onClose: () => void }) {
 	const api = useApi();
 	const queryClient = useQueryClient();
 	const [scrollPane, setScrollPane] = useState<HTMLElement | null>(null);
-	const request = useQuery({ queryKey: ["request", target.requestId], queryFn: () => api.modelRequest(target.requestId), staleTime: Infinity });
+	const request = useQuery({ queryKey: ["request", target.requestId], queryFn: () => api.modelRequest(target.requestId), staleTime: requestStaleTime });
 	const previousId = useQuery({
 		queryKey: ["previous-request", target.sessionId, target.seq],
 		queryFn: () => previousRequestId(api, queryClient, target.sessionId, target.seq),
@@ -453,7 +469,7 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 		queryKey: ["request", previousId.data],
 		queryFn: () => api.modelRequest(previousId.data!),
 		enabled: Boolean(previousId.data),
-		staleTime: Infinity,
+		staleTime: requestStaleTime,
 	});
 
 	const normal = useMemo(
@@ -464,7 +480,10 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 		() => (previous.data ? normalizeRequest(previous.data.payload, { fidelity: previous.data.fidelity, api: previous.data.api }) : undefined),
 		[previous.data],
 	);
-	const newFrom = normal && previousNormal ? newMessageStart(normal.messages, previousNormal.messages) : undefined;
+	const newFrom = useMemo(
+		() => (normal && previousNormal ? newMessageStart(normal.messages, previousNormal.messages) : undefined),
+		[normal, previousNormal],
+	);
 
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {

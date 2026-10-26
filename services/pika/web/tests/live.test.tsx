@@ -80,20 +80,62 @@ describe("live updates", () => {
 		await waitFor(() => expect(server.calls).toContain("/api/v1/sessions/live/updates?since=5"));
 	});
 
-	it("falls back to the summary when the server has no updates route", async () => {
+	it("stops polling when the server has no updates route", async () => {
 		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
 		const server = createFakeServer({ sessions: [fixture], updates: false });
 		renderApp("/s/live", server.fetch);
 		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
 		grow(fixture);
 		await act(async () => {
-			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
+			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS * 3);
 		});
-		await waitFor(() => expect(server.calls.filter((call) => call.endsWith("/updates?since=4"))).toHaveLength(1));
+		expect(server.calls.filter((call) => call.includes("/updates"))).toEqual(["/api/v1/sessions/live/updates?since=4"]);
+		// No fallback refetches the turns or the summary.
+		expect(server.calls.filter((call) => call.includes("/turns"))).toHaveLength(1);
+		expect(server.calls.filter((call) => call === "/api/v1/sessions/live")).toHaveLength(1);
+	});
+
+	it("refetches the turns list when the update is truncated", async () => {
+		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
+		const server = createFakeServer({ sessions: [fixture] });
+		renderApp("/s/live", server.fetch);
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		expect(server.calls).toContain("/api/v1/sessions/live/turns?limit=100");
+
+		// 60 new turns: more than one updates response carries.
+		for (let i = 2; i < 62; i++) {
+			const seq = 1 + i * 2;
+			fixture.entries.push(entry(seq, userMessage(`Prompt ${i}`)), entry(seq + 1, assistantMessage([{ type: "text", text: `Answer ${i}` }])));
+			fixture.turns.push(turn(i, seq, seq + 1, { userText: `Prompt ${i}`, finalText: `Answer ${i}`, modelCalls: 1, toolCalls: 0 }));
+		}
+		fixture.detail = { ...fixture.detail, entryCount: fixture.entries.length, lastAt: new Date().toISOString() };
 		await act(async () => {
 			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
 		});
-		expect(await screen.findByText("Finished the second prompt", { selector: "[data-final-answer] p" })).toBeTruthy();
+		await waitFor(() => expect(server.calls.filter((call) => call.includes("/turns"))).toHaveLength(2));
+		const indices = () => [...document.querySelectorAll("[data-turn]")].map((node) => Number(node.getAttribute("data-turn")));
+		await waitFor(() => expect(indices()).toEqual(Array.from({ length: 62 }, (_, i) => i)));
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
+		});
+		await waitFor(() => expect(server.calls).toContain(`/api/v1/sessions/live/updates?since=${fixture.entries.length - 1}`));
+	});
+
+	it("refetches the session detail when its child count changes", async () => {
+		const fixture = liveSession(new Date(Date.now() - 10_000).toISOString());
+		const server = createFakeServer({ sessions: [fixture] });
+		renderApp("/s/live", server.fetch);
+		await screen.findByText("Working on it", { selector: "[data-final-answer] p" });
+		expect(document.querySelector("[data-subagents]")).toBeNull();
+
+		grow(fixture);
+		const child = summary("child", { title: "Scout the repo", parentSessionId: "live", lastAt: new Date().toISOString() });
+		fixture.detail = { ...fixture.detail, childCount: 1, children: [child] };
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(LIVE_POLL_MS);
+		});
+		await waitFor(() => expect(server.calls.filter((call) => call === "/api/v1/sessions/live")).toHaveLength(2));
+		await waitFor(() => expect(document.querySelector("[data-subagents] a")?.getAttribute("href")).toBe("/s/child"));
 	});
 
 	it("does not poll sessions idle for more than two minutes", async () => {

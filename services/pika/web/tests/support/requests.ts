@@ -92,3 +92,23 @@ export const piContextPayload = {
 		{ role: "toolResult", toolCallId: "call_1", toolName: "read", content: [{ type: "text", text: "export const base = '/';" }], isError: false, timestamp: 3 },
 	],
 };
+
+/**
+ * Two consecutive Anthropic requests as pi-ai sends them with prompt caching on: only the last user
+ * message carries `cache_control`, and a string prompt becomes a single text block to hold it.
+ */
+export const anthropicCachedPayloads = (() => {
+	const cache = { type: "ephemeral" };
+	const call = { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "read", input: { path: "src/api.ts" } }] };
+	const result = (marked: boolean) => ({
+		role: "user",
+		content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "export const base = '/';", ...(marked ? { cache_control: cache } : {}) }],
+	});
+	const answer = { role: "assistant", content: [{ type: "text", text: "The base path is fine." }] };
+	const { messages: _messages, ...rest } = anthropicPayload;
+	return {
+		first: { ...rest, messages: [{ role: "user", content: [{ type: "text", text: "Fix the failing test", cache_control: cache }] }] },
+		second: { ...rest, messages: [{ role: "user", content: "Fix the failing test" }, call, result(true)] },
+		third: { ...rest, messages: [{ role: "user", content: "Fix the failing test" }, call, result(false), answer, { role: "user", content: [{ type: "text", text: "Thanks", cache_control: cache }] }] },
+	};
+})();

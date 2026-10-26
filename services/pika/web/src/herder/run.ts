@@ -132,12 +132,27 @@ function durationBetween(start?: string, end?: string): number | undefined {
 	return Number.isFinite(ms) && ms >= 0 ? ms : undefined;
 }
 
+/** What one launch did to a step; attempts restart at 1 in every launch. */
+interface LaunchRun {
+	launch: number;
+	status: string;
+	attempts: number;
+	sessionId?: string;
+	commit?: string;
+	error?: string;
+	checks: CheckRun[];
+	startedAt?: string;
+	endedAt?: string;
+}
+
 export function buildRunView(detail: RunDetail): RunView {
 	const view: RunView = { launches: [], checkRuns: [], integrations: [], decisions: [] };
 	const launches = new Map<number, LaunchGroup>();
-	const stepLaunch = new Map<string, number>();
+	/** Per step key, the launches that started it, in journal order. */
+	const stepRuns = new Map<string, LaunchRun[]>();
 	const stepChecks = new Map<string, CheckRun[]>();
 	const stepErrors = new Map<string, string>();
+	const currentRun = (key: string | undefined) => (key ? stepRuns.get(key)?.at(-1) : undefined);
 	const launchFor = (launch: number) => {
 		let group = launches.get(launch);
 		if (!group) {
@@ -168,18 +183,38 @@ export function buildRunView(detail: RunDetail): RunView {
 			}
 			case "step.started": {
 				const launch = num(e.launch);
-				if (key && launch !== undefined && !stepLaunch.has(key)) stepLaunch.set(key, launch);
+				if (!key || launch === undefined) break;
+				const runs = stepRuns.get(key) ?? [];
+				stepRuns.set(key, runs);
+				let run = runs.at(-1);
+				if (run?.launch !== launch) {
+					run = { launch, status: "running", attempts: 0, checks: [], startedAt: event.at };
+					runs.push(run);
+				}
+				Object.assign(run, { status: "running", attempts: Math.max(run.attempts, num(e.attempt) ?? 1), error: undefined, endedAt: undefined });
+				run.sessionId = str(e.sessionId) ?? run.sessionId;
 				break;
 			}
-			case "step.completed":
-				if (key) {
-					stepChecks.set(key, checks(e.checks));
-					stepErrors.delete(key);
-				}
+			case "step.completed": {
+				if (!key) break;
+				stepChecks.set(key, checks(e.checks));
+				stepErrors.delete(key);
+				const run = currentRun(key);
+				if (!run) break;
+				Object.assign(run, { status: str(e.status) ?? "ok", checks: checks(e.checks), error: undefined, endedAt: event.at });
+				run.commit = str(e.commit) ?? run.commit;
+				run.sessionId = str(e.sessionId) ?? run.sessionId;
 				break;
-			case "step.failed":
-				if (key) stepErrors.set(key, str(e.message) ?? "failed");
+			}
+			case "step.failed": {
+				if (!key) break;
+				stepErrors.set(key, str(e.message) ?? "failed");
+				const run = currentRun(key);
+				if (!run) break;
+				Object.assign(run, { status: e.errorClass === "stopped" ? "stopped" : "failed", error: str(e.message) ?? "failed", endedAt: event.at });
+				run.sessionId = str(e.sessionId) ?? run.sessionId;
 				break;
+			}
 			case "check.completed": {
 				const check = toCheck(e, event.at);
 				if (check) view.checkRuns.push(check);
@@ -242,15 +277,33 @@ export function buildRunView(detail: RunDetail): RunView {
 
 	const loose: LaunchGroup = { launch: null, steps: [] };
 	for (const step of detail.steps) {
-		const launch = stepLaunch.get(step.key);
-		const item: StepView = {
-			...step,
-			launch,
-			checks: stepChecks.get(step.key) ?? [],
-			error: stepErrors.get(step.key),
-			durationMs: durationBetween(step.startedAt, step.endedAt),
-		};
-		(launch === undefined ? loose : launchFor(launch)).steps.push(item);
+		const runs = stepRuns.get(step.key);
+		if (!runs?.length) {
+			loose.steps.push({
+				...step,
+				checks: stepChecks.get(step.key) ?? [],
+				error: stepErrors.get(step.key),
+				durationMs: durationBetween(step.startedAt, step.endedAt),
+			});
+			continue;
+		}
+		// A resumed launch re-runs failed or changed steps under the same key; list the step under each.
+		// `step.started` and adopted commits carry no session id; the server's link-derived id covers the latest run.
+		for (const run of runs) {
+			launchFor(run.launch).steps.push({
+				...step,
+				launch: run.launch,
+				status: run.status,
+				attempts: run.attempts,
+				sessionId: run.sessionId ?? (run === runs.at(-1) ? step.sessionId : undefined),
+				commit: run.commit,
+				startedAt: run.startedAt,
+				endedAt: run.endedAt,
+				checks: run.checks,
+				error: run.error,
+				durationMs: durationBetween(run.startedAt, run.endedAt),
+			});
+		}
 	}
 	view.launches = [...launches.values()].sort((a, b) => (a.launch ?? 0) - (b.launch ?? 0));
 	if (loose.steps.length) view.launches.push(loose);

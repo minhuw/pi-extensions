@@ -30,11 +30,15 @@ export interface ToolDeclaration {
 	name: string;
 	description?: string;
 	parameters?: unknown;
+	/** Hash of a tool declaration block that is not uploaded yet. */
+	missing?: string;
 }
 
 export interface NormalRequest {
 	shape: PayloadShape;
 	system: string | null;
+	/** Hashes of system prompt blocks that are not uploaded yet. */
+	systemMissing: string[];
 	tools: ToolDeclaration[];
 	messages: NormalMessage[];
 	/** Remaining top-level fields, e.g. model, max_tokens, temperature. */
@@ -101,6 +105,32 @@ function missingMessage(hash: string): NormalMessage {
 	return { role: "missing", blocks: [{ kind: "missing", hash }], raw: { $pika: hash } };
 }
 
+function missingTool(hash: string): ToolDeclaration {
+	return { name: "tool", missing: hash };
+}
+
+interface SystemParts {
+	system: string[];
+	systemMissing: string[];
+}
+
+/** Adds a system prompt value: a string, a list of text parts, or a block reference. */
+function addSystem(parts: SystemParts, value: unknown) {
+	const items = Array.isArray(value) ? value : [value];
+	const refs = items.flatMap((item) => missingRef(item) ?? []);
+	parts.systemMissing.push(...refs);
+	if (!Array.isArray(value)) {
+		if (!refs.length) parts.system.push(textOf(value));
+		return;
+	}
+	const text = textOf(items.filter((item) => !missingRef(item)));
+	if (text) parts.system.push(text);
+}
+
+function systemFields({ system, systemMissing }: SystemParts): Pick<NormalRequest, "system" | "systemMissing"> {
+	return { system: system.length ? system.join("\n\n") : null, systemMissing };
+}
+
 // Anthropic messages ---------------------------------------------------------------------------
 
 function anthropicBlocks(content: unknown): Block[] {
@@ -140,12 +170,15 @@ function normalizeAnthropic(payload: Rec): Omit<NormalRequest, "shape" | "settin
 	});
 	const tools = Array.isArray(payload.tools)
 		? payload.tools.map((tool): ToolDeclaration => {
+				const hash = missingRef(tool);
+				if (hash) return missingTool(hash);
 				const t = isRecord(tool) ? tool : {};
 				return { name: str(t.name) ?? str(t.type) ?? "tool", description: str(t.description), parameters: t.input_schema };
 			})
 		: [];
-	const system = payload.system === undefined ? null : textOf(payload.system);
-	return { system, tools, messages };
+	const system: SystemParts = { system: [], systemMissing: [] };
+	if (payload.system !== undefined) addSystem(system, payload.system);
+	return { ...systemFields(system), tools, messages };
 }
 
 // OpenAI chat completions ----------------------------------------------------------------------
@@ -176,6 +209,8 @@ function openAiParts(content: unknown): Block[] {
 function chatTools(tools: unknown): ToolDeclaration[] {
 	if (!Array.isArray(tools)) return [];
 	return tools.map((tool): ToolDeclaration => {
+		const hash = missingRef(tool);
+		if (hash) return missingTool(hash);
 		const t = isRecord(tool) ? tool : {};
 		const fn = isRecord(t.function) ? t.function : t;
 		return { name: str(fn.name) ?? str(t.type) ?? "tool", description: str(fn.description), parameters: fn.parameters };
@@ -187,20 +222,20 @@ function isSystemRole(role: unknown): boolean {
 }
 
 /** Splits leading system/developer messages off into the system prompt. */
-function leadingSystem(items: unknown[], textFor: (item: Rec) => string): { system: string[]; rest: unknown[] } {
+function leadingSystem(items: unknown[], textFor: (item: Rec) => string): { parts: SystemParts; rest: unknown[] } {
 	let index = 0;
-	const system: string[] = [];
+	const parts: SystemParts = { system: [], systemMissing: [] };
 	while (index < items.length) {
 		const item = items[index];
 		if (!isRecord(item) || !isSystemRole(item.role)) break;
-		system.push(textFor(item));
+		parts.system.push(textFor(item));
 		index++;
 	}
-	return { system, rest: items.slice(index) };
+	return { parts, rest: items.slice(index) };
 }
 
 function normalizeOpenAiChat(payload: Rec): Omit<NormalRequest, "shape" | "settings"> {
-	const { system, rest } = leadingSystem(payload.messages as unknown[], (item) => textOf(item.content));
+	const { parts, rest } = leadingSystem(payload.messages as unknown[], (item) => textOf(item.content));
 	const messages = rest.map((message): NormalMessage => {
 		const hash = missingRef(message);
 		if (hash) return missingMessage(hash);
@@ -220,14 +255,19 @@ function normalizeOpenAiChat(payload: Rec): Omit<NormalRequest, "shape" | "setti
 		}
 		return { role, blocks, raw: message };
 	});
-	return { system: system.length ? system.join("\n\n") : null, tools: chatTools(payload.tools), messages };
+	return { ...systemFields(parts), tools: chatTools(payload.tools), messages };
 }
 
 // OpenAI responses -----------------------------------------------------------------------------
 
 function normalizeOpenAiResponses(payload: Rec): Omit<NormalRequest, "shape" | "settings"> {
-	const { system, rest } = leadingSystem(payload.input as unknown[], (item) => textOf(item.content));
-	if (typeof payload.instructions === "string") system.unshift(payload.instructions);
+	const { parts, rest } = leadingSystem(payload.input as unknown[], (item) => textOf(item.content));
+	if (payload.instructions !== undefined && payload.instructions !== null) {
+		const instructions: SystemParts = { system: [], systemMissing: [] };
+		addSystem(instructions, payload.instructions);
+		parts.system.unshift(...instructions.system);
+		parts.systemMissing.unshift(...instructions.systemMissing);
+	}
 	const messages = rest.map((item): NormalMessage => {
 		const hash = missingRef(item);
 		if (hash) return missingMessage(hash);
@@ -254,7 +294,7 @@ function normalizeOpenAiResponses(payload: Rec): Omit<NormalRequest, "shape" | "
 				return { role: str(i.role) ?? type, blocks: [{ kind: "json", label: type, value: item }], raw: item };
 		}
 	});
-	return { system: system.length ? system.join("\n\n") : null, tools: chatTools(payload.tools), messages };
+	return { ...systemFields(parts), tools: chatTools(payload.tools), messages };
 }
 
 // Google contents ------------------------------------------------------------------------------
@@ -282,6 +322,8 @@ function googleBlocks(parts: unknown): Block[] {
 function googleTools(tools: unknown): ToolDeclaration[] {
 	if (!Array.isArray(tools)) return [];
 	return tools.flatMap((tool): ToolDeclaration[] => {
+		const hash = missingRef(tool);
+		if (hash) return [missingTool(hash)];
 		if (!isRecord(tool)) return [];
 		if (Array.isArray(tool.functionDeclarations)) {
 			return tool.functionDeclarations.map((fn) => {
@@ -302,8 +344,10 @@ function normalizeGoogle(payload: Rec): Omit<NormalRequest, "shape" | "settings"
 		const c = isRecord(content) ? content : {};
 		return { role: str(c.role) ?? "user", blocks: googleBlocks(c.parts), raw: content };
 	});
+	const system: SystemParts = { system: [], systemMissing: [] };
+	if (instruction !== undefined) addSystem(system, instruction);
 	return {
-		system: instruction === undefined ? null : textOf(instruction),
+		...systemFields(system),
 		tools: googleTools(payload.tools ?? config.tools),
 		messages,
 	};
@@ -339,8 +383,13 @@ function piBlocks(message: Rec): Block[] {
 }
 
 function normalizePiContext(payload: Rec): Omit<NormalRequest, "shape" | "settings"> {
-	const { system, rest } = leadingSystem(payload.messages as unknown[], (item) => textOf(item.content));
-	if (typeof payload.systemPrompt === "string") system.unshift(payload.systemPrompt);
+	const { parts, rest } = leadingSystem(payload.messages as unknown[], (item) => textOf(item.content));
+	if (payload.systemPrompt !== undefined && payload.systemPrompt !== null) {
+		const prompt: SystemParts = { system: [], systemMissing: [] };
+		addSystem(prompt, payload.systemPrompt);
+		parts.system.unshift(...prompt.system);
+		parts.systemMissing.unshift(...prompt.systemMissing);
+	}
 	const messages = rest.map((message): NormalMessage => {
 		const hash = missingRef(message);
 		if (hash) return missingMessage(hash);
@@ -348,7 +397,7 @@ function normalizePiContext(payload: Rec): Omit<NormalRequest, "shape" | "settin
 		return { role: str(m.role) ?? "unknown", blocks: piBlocks(m), raw: message };
 	});
 	const tools = Array.isArray(payload.tools) ? chatTools(payload.tools) : [];
-	return { system: system.length ? system.join("\n\n") : null, tools, messages };
+	return { ...systemFields(parts), tools, messages };
 }
 
 // Detection ------------------------------------------------------------------------------------
@@ -386,7 +435,7 @@ const SHAPE_FIELDS: Record<PayloadShape, string[]> = {
 
 export function normalizeRequest(payload: unknown, hints: { fidelity?: string; api?: string } = {}): NormalRequest {
 	const shape = detectShape(payload, hints);
-	if (shape === "generic" || !isRecord(payload)) return { shape: "generic", system: null, tools: [], messages: [], settings: {} };
+	if (shape === "generic" || !isRecord(payload)) return { shape: "generic", system: null, systemMissing: [], tools: [], messages: [], settings: {} };
 	const parts =
 		shape === "anthropic-messages"
 			? normalizeAnthropic(payload)
@@ -412,13 +461,31 @@ export function normalizeRequest(payload: unknown, hints: { fidelity?: string; a
 }
 
 /**
+ * A message without prompt-caching markers. Providers mark only the last user message with
+ * `cache_control`, turning string content into a single text block to do so, so the same message
+ * differs between consecutive requests.
+ */
+function comparable(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(comparable);
+	if (!isRecord(value)) return value;
+	const out: Rec = {};
+	for (const [key, item] of Object.entries(value)) if (key !== "cache_control") out[key] = comparable(item);
+	if (Array.isArray(out.content) && out.content.length === 1) {
+		const [block] = out.content;
+		if (isRecord(block) && block.type === "text" && typeof block.text === "string" && Object.keys(block).length === 2) out.content = block.text;
+	}
+	return out;
+}
+
+/**
  * Indices of messages that are new since `previous`: everything after the longest common prefix.
  * Returns undefined when there is no previous request to compare with.
  */
 export function newMessageStart(current: NormalMessage[], previous: NormalMessage[] | undefined): number | undefined {
 	if (!previous) return undefined;
+	const same = (a: NormalMessage, b: NormalMessage) => a.raw === b.raw || stringify(comparable(a.raw)) === stringify(comparable(b.raw));
 	let index = 0;
-	while (index < current.length && index < previous.length && stringify(current[index].raw) === stringify(previous[index].raw)) index++;
+	while (index < current.length && index < previous.length && same(current[index], previous[index])) index++;
 	return index;
 }
 

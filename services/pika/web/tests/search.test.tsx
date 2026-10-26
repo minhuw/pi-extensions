@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSnippet } from "../src/lib/snippet";
 import type { Entry, SearchHit, Turn } from "../src/lib/types";
-import { groupHits, Snippet } from "../src/pages/Search";
+import { groupHits, SEARCH_DEBOUNCE_MS, Snippet } from "../src/pages/Search";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
@@ -103,6 +103,36 @@ describe("search page", () => {
 		expect(document.activeElement).not.toBe(input);
 		fireEvent.keyDown(window, { key: "/" });
 		expect(document.activeElement).toBe(input);
+	});
+
+	it("focuses the input with / after opening search from the sidebar, keeping the filters", async () => {
+		const server = createFakeServer({ sessions: sessions(), hits: HITS });
+		renderApp("/", server.fetch);
+		await screen.findByText("Fix the base path");
+		fireEvent.click(screen.getByRole("link", { name: "Search" }));
+		const input = await screen.findByRole("searchbox", { name: "Search" });
+		fireEvent.change(input, { target: { value: "base" } });
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&limit=50"));
+		fireEvent.click(screen.getByRole("button", { name: /Device/ }));
+		fireEvent.click(await screen.findByRole("menuitemradio", { name: "laptop" }));
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&limit=50"));
+		const searches = () => server.calls.filter((call) => call.includes("/search?"));
+		const before = searches().length;
+
+		input.blur();
+		fireEvent.keyDown(window, { key: "/" });
+		expect(document.activeElement).toBe(input);
+		await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS * 2));
+		expect(searches()).toHaveLength(before);
+		expect(screen.getByRole("button", { name: /Device/ }).textContent).toContain("laptop");
+		expect(input).toHaveProperty("value", "base");
+
+		// Opening search again from the sidebar starts over instead of restoring the old query.
+		fireEvent.click(screen.getByRole("link", { name: "Search" }));
+		await waitFor(() => expect(input).toHaveProperty("value", ""));
+		await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS * 2));
+		expect(searches()).toHaveLength(before);
+		expect(await screen.findByText("Search every session")).toBeTruthy();
 	});
 
 	it("filters by device and project", async () => {

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useState, type ReactNode } from "react";
-import { Link, NavLink, Outlet, useNavigate } from "react-router";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useShortcuts } from "../lib/keyboard";
 import { useTheme, type Theme } from "../lib/theme";
@@ -138,7 +138,9 @@ export function Layout({ children }: { children?: ReactNode }) {
 	const { theme, toggle } = useTheme();
 	const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
 	const navigate = useNavigate();
-	useShortcuts({ "/": () => navigate("/search") });
+	const { pathname } = useLocation();
+	// The search page handles `/` itself by focusing its input.
+	useShortcuts(pathname === "/search" ? {} : { "/": () => navigate("/search") });
 
 	const setSidebar = (value: boolean) => {
 		setOpen(value);

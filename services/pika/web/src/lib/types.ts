@@ -160,13 +160,16 @@ export interface SearchHit {
 }
 
 /**
- * `GET sessions/:id/updates?since=<seq>`: the session's summary and every turn that holds an entry
- * after `since` (the turn that grew and any new ones). Not in spec v1; the UI falls back when absent.
+ * `GET sessions/:id/updates?since=<seq>`. `session`, `turns`, and `truncated` are present only when
+ * `lastSeq > since`; `turns` holds every turn with `endSeq > since` (at most 50, ascending), and
+ * `truncated` is set when more qualified.
  */
 export interface SessionUpdates {
 	lastSeq: number;
-	session: SessionSummary;
-	turns: Turn[];
+	lastAt?: string | null;
+	session?: SessionSummary;
+	turns?: Turn[];
+	truncated?: boolean;
 }
 
 export interface Me {
