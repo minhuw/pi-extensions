@@ -134,6 +134,8 @@ interface Batch {
 }
 
 type Outcome = "progress" | "retry" | "stop";
+/** What can be told from here about the process holding a request; `unverified` holds are capped by age. */
+type Holder = "alive" | "dead" | "unverified";
 
 /** The complete lines between `offset` and `end`, or none when the file ends before a newline. */
 export async function readLines(path: string, offset: number, end: number, maxBytes: number): Promise<string[]> {
@@ -245,7 +247,7 @@ export class Uploader {
 	private readonly herderRuns = new Set<string>();
 	private self: OwnerProcess = { pid: process.pid };
 	/** Whether the processes holding requests read from the spool were alive when last checked, and when. */
-	private readonly owners = new Map<string, { alive: boolean; at: number }>();
+	private readonly owners = new Map<string, { verdict: Holder; at: number }>();
 	private heldElsewhere = false;
 	private heldCheckedAt = 0;
 	private spool: Promise<void> = Promise.resolve();
@@ -539,33 +541,37 @@ export class Uploader {
 		return awaiting.owner === this.id || (!this.options.owner && awaiting.pid === process.pid && localOwners().has(awaiting.owner));
 	}
 
-	/** Whether the process holding a request may still complete it; a verdict stands for `HELD_CHECK_MS`. */
+	/**
+	 * Whether the process holding a request may still complete it. The verdict on its process stands
+	 * for `HELD_CHECK_MS`; the cap on unverified holds applies to each request's own age.
+	 */
 	private async holderAlive(record: SpooledRequest): Promise<boolean> {
 		const awaiting = record.awaiting!;
 		const known = this.owners.get(awaiting.owner);
-		if (known && Date.now() - known.at < HELD_CHECK_MS) return known.alive;
-		const result = await this.checkHolder(record);
-		this.owners.set(awaiting.owner, { alive: result, at: Date.now() });
-		return result;
+		let verdict = known && Date.now() - known.at < HELD_CHECK_MS ? known.verdict : undefined;
+		if (!verdict) {
+			verdict = await this.checkHolder(awaiting);
+			this.owners.set(awaiting.owner, { verdict, at: Date.now() });
+		}
+		if (verdict === "unverified") return Date.now() - Date.parse(record.at) < MAX_UNVERIFIED_HOLD_MS;
+		return verdict === "alive";
 	}
 
-	private async checkHolder(record: SpooledRequest): Promise<boolean> {
-		const awaiting = record.awaiting!;
-		const unverified = () => Date.now() - Date.parse(record.at) < MAX_UNVERIFIED_HOLD_MS;
+	private async checkHolder(awaiting: NonNullable<SpooledRequest["awaiting"]>): Promise<Holder> {
 		const comparable = awaiting.started !== undefined && COMPARABLE_START.test(awaiting.started);
 		const sameStart = async () => comparable && alive(awaiting.pid) && await processStart(awaiting.pid) === awaiting.started;
 		const local = awaiting.machine !== undefined ? awaiting.machine === this.self.machine
 			// Earlier versions recorded the hostname, which can change while the process runs.
 			: awaiting.host === undefined || awaiting.host === hostname() || await sameStart();
-		if (!local) return unverified();
-		if (!alive(awaiting.pid)) return false;
+		if (!local) return "unverified";
+		if (!alive(awaiting.pid)) return "dead";
 		// Uploaders in this process are known; another one with this pid has exited.
-		if (awaiting.pid === process.pid) return localOwners().has(awaiting.owner);
+		if (awaiting.pid === process.pid) return localOwners().has(awaiting.owner) ? "alive" : "dead";
 		if (comparable) {
 			const started = await processStart(awaiting.pid);
-			if (started !== undefined) return started === awaiting.started;
+			if (started !== undefined) return started === awaiting.started ? "alive" : "dead";
 		}
-		return unverified();
+		return "unverified";
 	}
 
 	/**

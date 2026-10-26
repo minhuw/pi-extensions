@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { readdir } from "node:fs/promises";
+import { readdir, utimes } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -183,6 +183,31 @@ it("never takes a record left with this process's pid by another process for its
 	await b.ready;
 	await b.flush();
 	expect([...ingest.requests.keys()].sort()).toEqual([samePid, stale].sort());
+	expect(await spooled()).toEqual([`${recent}.json`]);
+}, 20_000);
+
+it.each(["stale first", "recent first"])("caps each request of one unverifiable holder by its own age, %s", async (order) => {
+	const { owner: live } = await liveProcess();
+	// No start time, as on Windows: the holder is alive but cannot be told from a reused pid.
+	const unverifiable = { pid: live.pid, machine: await machineId() };
+	const offline = await new MockIngest().reserve();
+	const a = uploader(offline.url, unverifiable);
+	const stale = randomUUID();
+	const recent = randomUUID();
+	await a.enqueueRequest(input(stale, new Date(Date.now() - 7 * HOURS)), { value: payload }, { awaiting: true });
+	await a.enqueueRequest(input(recent), { value: payload }, { awaiting: true });
+	await a.stop();
+	// Requests are checked in spool order, oldest file first.
+	const first = order === "stale first" ? [stale, recent] : [recent, stale];
+	for (const [index, id] of first.entries()) {
+		const time = new Date(Date.now() - (2 - index) * 60_000);
+		await utimes(join(workspace.pikaDir, "spool", "requests", `${id}.json`), time, time);
+	}
+
+	const b = uploader(ingest.url);
+	await b.ready;
+	await b.flush();
+	expect([...ingest.requests.keys()]).toEqual([stale]);
 	expect(await spooled()).toEqual([`${recent}.json`]);
 }, 20_000);
 

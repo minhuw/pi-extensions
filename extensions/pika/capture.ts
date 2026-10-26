@@ -36,8 +36,8 @@ const modelFields = (model: ModelInfo): ModelInfo => ({
 /**
  * Pairs model calls with their assistant messages for one session. A call starts at
  * `context_with_system`. `before_provider_request` spools its payload at once, held until the
- * next assistant `message_end` adds `assistant`; a call that never gets one (an abort before
- * the response, a compaction or other side request) is released without it. A call without a
+ * next assistant `message_end` adds `assistant`, also an aborted or error one; a call that never
+ * gets one (a compaction or other side request) is released without it. A call without a
  * payload is spooled with its context, held the same way, when its response starts; a payload
  * that still arrives for it replaces that record. A call that ends before either is dropped.
  */
