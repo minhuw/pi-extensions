@@ -145,7 +145,7 @@ To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the
 git tag pika-v0.1.0 && git push origin pika-v0.1.0
 ```
 
-A package that GitHub creates on its first publish is private. Make it public once under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
+Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
 
 ### Running it
 
