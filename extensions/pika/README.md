@@ -10,7 +10,7 @@ pika uploads every Pi trajectory to a self-hosted pika server. The server ([`ser
 - **Sessions.** Every line of the Pi session file, verbatim, including compactions, branches, and custom entries.
 - **Model requests.** For each model call, the `before_provider_request` payload after every other extension has changed it, which is the body the provider received. Providers that expose no payload (for example custom `streamSimple` implementations) are recorded as `fidelity: "context"` with the full Pi context, system messages included. Each request is linked to its assistant message by timestamp and response id.
 - **Child sessions.** Subagents (top-level, nested, and workflow children) and Herder step sessions, through the [child-session hook](#child-session-hook). Each is uploaded as its own session and linked to its parent session, tool call, agent, workflow, or Herder run and step.
-- **Herder runs.** Each run's journal, and its `goal.md` and `plan.md` whenever their content changes.
+- **Herder runs.** Each run's journal, and its `goal.md` and `plan.md` whenever their content changes and again after a switch to another server.
 
 pika never records request headers, API keys or other credentials, or Pi's auth and settings files. It reads only session files, Herder run files, and the payload and context that Pi hands to extensions.
 
@@ -18,14 +18,9 @@ pika never records request headers, API keys or other credentials, or Pi's auth 
 
 pika is part of this collection. Installing the collection loads it as the last entry in `pi.extensions`, so its `before_provider_request` handler sees the payload after every other extension's changes. It does nothing until it is configured.
 
-1. Run the server and create one token per machine. See the [server README](../../services/pika/README.md) for building, Docker, and the reverse proxy.
-
-   ```bash
-   pika token create laptop     # prints the token once
-   ```
-
+1. Run the server. See the [server README](../../services/pika/README.md) for building, Docker, and the reverse proxy.
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
-3. In pi, run `/pika login` and enter the server URL and the token (see [Log in](#log-in)). The current session starts uploading at once, and `/pika` confirms that it is captured. Writing `~/.pi/agent/pika.json` by hand (below) works too.
+3. In pi, run `/pika login`, enter the server URL, and pair the machine: approve the code pika shows on the server's Devices page (see [Log in](#log-in)). The current session starts uploading at once, and `/pika` confirms that it is captured. A token from `pika token create <device>` and writing `~/.pi/agent/pika.json` by hand (below) work too.
 
 To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension is the only thing the package loads:
 
@@ -50,11 +45,27 @@ For one invocation, `pi --extension /path/to/pi-extensions/extensions/pika/index
 `/pika login [url]` configures pika from inside pi, in the TUI or an RPC client:
 
 1. It asks for the server URL, including its base path (`https://homelab.example/pika`), unless you pass it as the argument. A blank answer keeps the current URL. The URL must be `http://` or `https://` without credentials, a query, or a fragment; trailing `/` are dropped. A plain `http://` URL to another host works, but the token then travels unencrypted, and the success message says so.
-2. It asks for the token from `pika token create <device>`. In the TUI, the input shows one `•` per character, never the token; typing, editing, and pasting work as usual. RPC clients show pika's prompt as a plain text input, which pika cannot mask. The token must be entered every time: pika never reuses the saved token or `PIKA_TOKEN`.
-3. It sends the server an empty batch with the token and saves nothing unless the server accepts it. If the server rejects the token, has no pika ingest API at the URL (404), answers with another status or a redirect, or cannot be reached within 5 s, pika says so and leaves `pika.json` as it was. Messages never contain the token.
-4. It saves `url` and `token` to `pika.json`, written atomically with mode `0600` (readable only by you), and keeps every other field. `"enabled": false` is removed, since logging in turns uploads on. If `pika.json` is a symbolic link, for example into a dotfiles repository, the link stays and the file it points to is replaced, also with mode `0600`; a link to a missing file is refused. If `pika.json` is not a JSON object, pika refuses to touch it until you fix or remove it.
+2. It asks how the machine should log in: **Pair with the pika web UI (recommended)** or **Paste a token**.
+3. It gets a token by [pairing](#pairing) or from the [token prompt](#pasting-a-token).
+4. It sends the server an empty batch with the token and saves nothing unless the server accepts it. If the server rejects the token, has no pika ingest API at the URL (404), answers with another status or a redirect, or cannot be reached within 5 s, pika says so and leaves `pika.json` as it was. Messages never contain the token.
+5. It saves `url` and `token` to `pika.json`, written atomically with mode `0600` (readable only by you), and keeps every other field. `"enabled": false` is removed, since logging in turns uploads on. If `pika.json` is a symbolic link, for example into a dotfiles repository, the link stays and the file it points to is replaced, also with mode `0600`; a link to a missing file is refused. If `pika.json` is not a JSON object, pika refuses to touch it until you fix or remove it.
 
-The login applies at once: the current session starts uploading from its first line, or the process moves to the new server if it was already uploading. Every successful login starts uploading anew, even with the same server and token, so it also resumes uploads a 401 stopped. Child sessions in the same process follow, including those still open from before a `/pika logout`, and other pi processes pick the login up at their next session start. Cancelling either prompt changes nothing.
+The login applies at once: the current session starts uploading from its first line, or the process moves to the new server if it was already uploading. Every successful login starts uploading anew, even with the same server and token, so it also resumes uploads a 401 stopped. Child sessions in the same process follow, including those still open from before a `/pika logout`, and other pi processes pick the login up at their next session start. Cancelling any prompt changes nothing.
+
+#### Pairing
+
+Pairing needs no copying of tokens: you approve the machine in the web UI, where you are already logged in, and the server hands pika a new device token.
+
+1. pika asks for a device name. A blank answer takes the hostname, with every character other than letters, digits, `.`, `_`, and `-` replaced by `-`, cut to 64 characters. A name must be 1 to 64 of those characters.
+2. pika shows an 8-character code such as `K7QM-3XRP` and the page to approve it on, `<url>/devices?pair=<code>`. In the TUI, a panel shows both with the time left and "Esc cancels"; in an RPC client, a notification shows them and the command waits.
+3. Open the page, log in if asked, check that it shows the same code, and approve it on the Devices page. If a device of that name already exists, approving can replace it, which revokes its old token. Denying ends the pairing.
+4. pika asks the server for the decision every 2 s, or as often as the server says. Once you approve, it validates and saves the token exactly like a pasted one, and the login applies at once.
+
+Codes expire after 10 minutes, and pika stops waiting after 10 minutes. A denied, expired, or cancelled pairing (Esc in the TUI) changes nothing, nor does one the server no longer knows or one that cannot reach the server; pika says which happened. One login runs per pi process: a new `/pika login` or a `/pika logout` cancels a pairing that is still waiting and says so, and so does the end of the session that started it; approving its code afterwards saves nothing. Once the server has approved a pairing, it has created the device, so when pika cannot keep the token (the token fails validation, for example because a proxy blocks `/api/ingest/`, or the login was cancelled as the approval arrived), the message names that device to revoke on the Devices page. The token and the pairing's secret id never appear in a message. A server older than pika 0.2 has no pairing (it answers 404); pika says so and asks for a token instead.
+
+#### Pasting a token
+
+pika asks for a token from `pika token create <device>` on the server. In the TUI, the input shows one `•` per character, never the token; typing, editing, and pasting work as usual. RPC clients show pika's prompt as a plain text input, which pika cannot mask. The token must be entered every time: pika never reuses the saved token or `PIKA_TOKEN`.
 
 `/pika logout` removes `url` and `token` from `pika.json` and keeps the other fields. This pi process stops uploading at once, for its child sessions too; whatever is still queued stays in `<agentDir>/pika/` and is sent after the next login, which also resumes the sessions that are still open. With a symbolic link, the file it points to is rewritten, as for `/pika login`.
 
@@ -76,7 +87,7 @@ The login applies at once: the current session starts uploading from its first l
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `url` | none | The server's address, including its base path (`https://pika.example.com` or `https://homelab.example/pika`). It must be `http://` or `https://`; a trailing `/` is ignored. Plain `http://` works on a trusted network. |
-| `token` | none | The device token from `pika token create <device>`. The server maps it to the device name, so it is never sent as data. |
+| `token` | none | The device token from pairing or `pika token create <device>`. The server maps it to the device name, so it is never sent as data. |
 | `enabled` | `true` | `false` turns pika off without removing the file. |
 | `exclude` | `[]` | Working directories pika skips (below). |
 
@@ -187,27 +198,29 @@ Every field except `kind` is optional, and `herder` is present only for Herder s
 
 ### Herder runs
 
-Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }` when a run starts or resumes and after journal appends. pika tails `journalPath` as stream `herder:<runId>` and uploads `goal.md` and `plan.md` as documents whenever their sha256 changes. Only runs started from a captured session are uploaded.
+Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }` when a run starts or resumes and after journal appends. pika tails `journalPath` as stream `herder:<runId>` and uploads `goal.md` and `plan.md` as documents whenever their sha256 changes. The uploaded versions are recorded with the server URL, like the acknowledged hashes, so after `/pika login` switches to another server the new server gets each run's goal and plan again without waiting for them to change. Versions recorded by pika 0.1, without a URL, count as the server's that the acknowledged hashes were recorded for. Only runs started from a captured session are uploaded.
 
 ## Deployment
 
 The server is one Rust binary with the web UI embedded, published as the multi-arch image `ghcr.io/minhuw/pika` (amd64 and arm64). Its [README](../../services/pika/README.md) is the reference for image tags, building, the CLI, backups, and the [deployment examples](../../services/pika/deploy/). The short version:
 
 ```bash
+docker run --rm -it -v pika-data:/data ghcr.io/minhuw/pika:latest password set
 docker run -d --name pika --restart unless-stopped -p 127.0.0.1:7171:7171 -v pika-data:/data \
-  -e PIKA_BASE_PATH=/pika -e PIKA_PASSWORD='choose-one' ghcr.io/minhuw/pika:latest
-docker exec pika pika token create laptop
+  -e PIKA_BASE_PATH=/pika -e PIKA_TRUST_PROXY=1 ghcr.io/minhuw/pika:latest
 ```
 
-The image runs as a non-root user with `/data` as its volume and a health check on `/api/health`. To build it yourself, run `docker build -t pika services/pika` and use `pika` as the image.
+The first command stores the web UI's password (at least 12 characters) in the volume. Since 0.2 the server refuses to start without a password, unless `PIKA_AUTH=proxy` says the reverse proxy authenticates. The image runs as a non-root user with `/data` as its volume and a health check on `/api/health`. To build it yourself, run `docker build -t pika services/pika` and use `pika` as the image.
 
-Behind nginx under a path prefix, forward the path unchanged and allow bodies up to the server's `--max-body`:
+Behind nginx under a path prefix, forward the path unchanged, allow bodies up to the server's `--max-body`, and pass the client's address and scheme, which pika trusts with `PIKA_TRUST_PROXY=1`:
 
 ```nginx
 location = /pika { return 301 /pika/; }
 location /pika/ {
     proxy_pass http://127.0.0.1:7171;
     proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     client_max_body_size 32m;
     client_body_timeout 120s;
     proxy_send_timeout 120s;
@@ -215,7 +228,7 @@ location /pika/ {
 }
 ```
 
-Then run `/pika login https://homelab.example/pika` on each machine, or set that `url` in its `pika.json`. Caddy examples, subdomain variants, and putting authentication in the proxy are covered in the server README; if the proxy adds authentication, leave `/api/ingest/` to pika's bearer tokens.
+Then run `/pika login https://homelab.example/pika` on each machine and pair it, or create a token with `docker exec pika pika token create laptop` and set it with the `url` in the machine's `pika.json`. Caddy examples, subdomain variants, and putting authentication in the proxy are covered in the server README; if the proxy adds authentication, leave `/api/ingest/` to pika's bearer tokens and `/api/pair/` open for pairing.
 
 ## Tests
 
@@ -224,4 +237,4 @@ npm ci
 npm run test:pika
 ```
 
-`npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. `/pika login` and `/pika logout` run through a scripted UI, in both RPC and TUI mode. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.
+`npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. `/pika login` and `/pika logout` run through a scripted UI, in both RPC and TUI mode, with pairing against the mock server's pairing API. One test runs a real pi TUI in `tmux` (skipped when `tmux` is not installed): it types and pastes a token, checks the captured screen never shows it, and pairs. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.

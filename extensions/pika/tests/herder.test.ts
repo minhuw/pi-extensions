@@ -2,7 +2,9 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sha256 } from "../blocks.ts";
 import pikaExtension from "../index.ts";
+import { acquireUploader, currentUploader } from "../uploader.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
@@ -85,4 +87,77 @@ it("ignores Herder runs from an excluded session or with an excluded run directo
 		expect(excluded.errors).toEqual([]);
 		expect(main.errors).toEqual([]);
 	} finally { await main.shutdown(); await excluded.shutdown(); }
+}, 20_000);
+
+/** A Herder run under the workspace, with a journal, goal, and plan. */
+async function herderRun(runId: string) {
+	const runDir = join(workspace.root, "herder", runId);
+	await mkdir(runDir, { recursive: true });
+	const run = { runId, runDir, journalPath: join(runDir, "journal.jsonl"), goalPath: join(runDir, "goal.md"), planPath: join(runDir, "plan.md"), repo: "project", title: "Again" };
+	await writeFile(run.journalPath, `${JSON.stringify({ seq: 1, t: "run.started" })}\n`);
+	await writeFile(run.goalPath, "# Goal\n");
+	await writeFile(run.planPath, "# Plan\n");
+	return run;
+}
+
+const streamFile = (key: string) => join(workspace.pikaDir, "streams", `${encodeURIComponent(key)}.json`);
+
+it("does not upload an acknowledged goal and plan again from a fresh uploader or a new session for the same server", async () => {
+	await workspace.enable(ingest.url);
+	const run = await herderRun("20261026-130000-a11c");
+	const key = `herder:${run.runId}`;
+	let api: ExtensionAPI | undefined;
+	const first = await startSession({ workspace, extensions: [(pi) => { api = pi; }, pikaExtension] });
+	try {
+		api!.events.emit("herder:run", run);
+		await waitFor(async () => ingest.data(key) === await readText(run.journalPath) && ingest.documents.size === 2, 5_000, "the run");
+		await waitFor(async () => Object.keys(JSON.parse(await readText(streamFile(key))).docs ?? {}).length === 2, 5_000, "the acknowledged documents on disk");
+		expect(JSON.parse(await readText(streamFile(key))).docsUrl).toBe(ingest.url);
+
+		// A login with the same server and token starts a fresh uploader.
+		const fresh = acquireUploader(currentUploader()!.options, true);
+		await fresh.ready;
+		api!.events.emit("herder:run", run);
+		await appendFile(run.journalPath, `${JSON.stringify({ seq: 2, t: "step.started" })}\n`);
+		await waitFor(async () => ingest.data(key) === await readText(run.journalPath), 5_000, "the journal from the fresh uploader");
+	} finally { await first.shutdown(); }
+
+	const second = await startSession({ workspace, faux: first.faux, extensions: [(pi) => { api = pi; }, pikaExtension] });
+	try {
+		api!.events.emit("herder:run", run);
+		await appendFile(run.journalPath, `${JSON.stringify({ seq: 3, t: "run.completed" })}\n`);
+		await waitFor(async () => ingest.data(key) === await readText(run.journalPath), 5_000, "the journal from the new session");
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(ingest.documentUploads.map((document) => document.key).sort()).toEqual([`${key}:goal.md`, `${key}:plan.md`]);
+		expect(second.errors).toEqual([]);
+	} finally { await second.shutdown(); }
+}, 20_000);
+
+it("counts documents acknowledged before docsUrl existed as the server's that recorded the acknowledged hashes", async () => {
+	const other = "http://127.0.0.1:9/pika";
+	const cases = [{ ackedBy: ingest.url, uploads: 0 }, { ackedBy: other, uploads: 2 }];
+	for (const [index, { ackedBy, uploads }] of cases.entries()) {
+		await workspace.enable(ingest.url);
+		const run = await herderRun(`20261026-14000${index}-0ld${index}`);
+		const key = `herder:${run.runId}`;
+		// State as pika 0.1 wrote it: the documents' hashes with no server of their own.
+		await mkdir(join(workspace.pikaDir, "streams"), { recursive: true });
+		await writeFile(join(workspace.pikaDir, "acked.log"), `# ${ackedBy}\n`);
+		await writeFile(streamFile(key), JSON.stringify({
+			key, kind: "herder-journal", path: run.journalPath, length: 0, meta: { runId: run.runId, goalPath: run.goalPath, planPath: run.planPath },
+			docs: { [`${key}:goal.md`]: sha256("# Goal\n"), [`${key}:plan.md`]: sha256("# Plan\n") }, updatedAt: new Date().toISOString(),
+		}));
+		const before = ingest.documentUploads.length;
+		let api: ExtensionAPI | undefined;
+		const h = await startSession({ workspace, extensions: [(pi) => { api = pi; }, pikaExtension] });
+		try {
+			api!.events.emit("herder:run", run);
+			await waitFor(async () => ingest.data(key) === await readText(run.journalPath), 5_000, "the journal");
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			expect(ingest.documentUploads.length - before).toBe(uploads);
+			// The upgraded state names the server that acknowledged its documents.
+			expect(JSON.parse(await readText(streamFile(key))).docsUrl).toBe(ingest.url);
+			expect(h.errors).toEqual([]);
+		} finally { await h.shutdown(); }
+	}
 }, 20_000);

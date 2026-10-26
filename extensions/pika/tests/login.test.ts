@@ -7,7 +7,7 @@ import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from 
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { loadConfig } from "../config.ts";
 import pikaExtension, { CHILD_SESSION_HOOKS, statusText, type ChildSessionHook } from "../index.ts";
-import { isPlainRemote, login, MaskedInput, normalizeUrl } from "../login.ts";
+import { isPlainRemote, login, MaskedInput, normalizeUrl, PASTE } from "../login.ts";
 import { currentUploader } from "../uploader.ts";
 import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
@@ -62,6 +62,7 @@ describe("/pika login", () => {
 		await workspace.configure({ exclude: ["/nowhere"], enabled: false, custom: { keep: true } });
 		const ui = new ScriptedUI();
 		ui.inputs = [`${ingest.url}//`, ` ${TOKEN} `];
+		ui.choices = [PASTE];
 		await command(ui, "/pika login");
 
 		expect(JSON.parse((await fileText())!)).toEqual({ exclude: ["/nowhere"], custom: { keep: true }, url: ingest.url, token: TOKEN });
@@ -70,6 +71,7 @@ describe("/pika login", () => {
 		expect((await readdir(workspace.agentDir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 		// The URL prompt, then the token prompt, which says it cannot be masked over RPC.
 		expect(ui.prompts[0]!.title).toMatch(/server URL/);
+		expect(ui.selects).toEqual([{ title: "How should this machine log in?", options: ["Pair with the pika web UI (recommended)", "Paste a token"] }]);
 		expect(ui.prompts[1]!.title).toBe(`pika token for ${ingest.url} (pika cannot mask it in this client)`);
 		expect(ui.last).toMatchObject({ type: "info", message: expect.stringContaining(`Logged in to ${ingest.url}`) });
 		expect(ui.last!.message).toMatch(/"enabled": false/);
@@ -85,6 +87,7 @@ describe("/pika login", () => {
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const ui = new ScriptedUI();
 		ui.inputs = [TOKEN];
+		ui.choices = [PASTE];
 		const h = await startSession({ workspace, extensions: [pikaExtension], ui: ui.context() });
 		try {
 			await h.session.prompt(`/pika login ${ingest.url}`);
@@ -107,6 +110,7 @@ describe("/pika login", () => {
 			await setup?.();
 			const ui = new ScriptedUI();
 			ui.inputs = [token];
+			ui.choices = [PASTE];
 			await command(ui, `/pika login ${target}`);
 			expect(await fileText()).toBe(existing);
 			expect(ui.last).toEqual({ type: "error", message: `pika login failed: ${message(target)}. Nothing changed.` });
@@ -115,16 +119,18 @@ describe("/pika login", () => {
 		}, 20_000);
 	}
 
-	it("changes nothing when the URL or token prompt is cancelled or the token is blank, and never reuses the stored token", async () => {
+	it("changes nothing when the URL prompt, method choice, or token prompt is cancelled or the token is blank, and never reuses the stored token", async () => {
 		const existing = JSON.stringify({ url: ingest.url, token: TOKEN });
 		await writeFile(configFile(), existing);
-		for (const [inputs, outcome] of [
-			[[undefined], "pika login cancelled. Nothing changed."],
-			[["", undefined], "pika login cancelled. Nothing changed."],
-			[["", "   "], "pika login failed: no token entered. Nothing changed."],
+		for (const [inputs, choice, outcome] of [
+			[[undefined], PASTE, "pika login cancelled. Nothing changed."],
+			[[""], undefined, "pika login cancelled. Nothing changed."],
+			[["", undefined], PASTE, "pika login cancelled. Nothing changed."],
+			[["", "   "], PASTE, "pika login failed: no token entered. Nothing changed."],
 		] as const) {
 			const ui = new ScriptedUI();
 			ui.inputs = [...inputs];
+			ui.choices = [choice];
 			await command(ui, "/pika login");
 			expect(ui.last?.message).toBe(outcome);
 			expect(ui.prompts[0]).toEqual({ title: `pika server URL (blank keeps ${ingest.url})`, placeholder: ingest.url });
@@ -138,12 +144,14 @@ describe("/pika login", () => {
 		await workspace.configure({ url: `${ingest.url}/`, token: "stored" });
 		const ui = new ScriptedUI();
 		ui.inputs = ["  ", TOKEN];
+		ui.choices = [PASTE];
 		await command(ui, "/pika login");
 		expect(JSON.parse((await fileText())!)).toEqual({ url: ingest.url, token: TOKEN });
 
 		await workspace.configure(undefined);
 		const blank = new ScriptedUI();
 		blank.inputs = [""];
+		blank.choices = [PASTE];
 		await command(blank, "/pika login");
 		expect(blank.prompts[0]).toEqual({ title: "pika server URL", placeholder: undefined });
 		expect(blank.last?.message).toBe("pika login failed: no server URL entered. Nothing changed.");
@@ -178,6 +186,7 @@ describe("/pika login", () => {
 	it("masks the token in the TUI and saves what was typed and pasted", async () => {
 		const ui = new ScriptedUI();
 		ui.inputs = [ingest.url];
+		ui.choices = [PASTE];
 		ui.keys = [["t", "e", "s", "x", "\x7f", paste("t-tok"), "e", "n", ENTER]];
 		await command(ui, "/pika login", "tui");
 		expect(JSON.parse((await fileText())!)).toMatchObject({ url: ingest.url, token: TOKEN });
@@ -189,6 +198,7 @@ describe("/pika login", () => {
 
 		const cancelled = new ScriptedUI();
 		cancelled.inputs = [ingest.url];
+		cancelled.choices = [PASTE];
 		cancelled.keys = [[paste(WRONG), ESC]];
 		const before = await fileText();
 		await command(cancelled, "/pika login", "tui");
@@ -218,6 +228,7 @@ describe("/pika login", () => {
 			expect(registered()).toEqual([]);
 
 			ui.inputs = [ingest.url, TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt("/pika login");
 			// The whole file, from before the login too.
 			await waitFor(async () => ingest.data(key) === await readText(file), 5_000, "upload after login");
@@ -228,6 +239,7 @@ describe("/pika login", () => {
 			const other = await new MockIngest().start();
 			servers.push(other);
 			ui.inputs = [TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt(`/pika login ${other.url}`);
 			expect(currentUploader()?.options.url).toBe(other.url);
 			const sent = ingest.bodies.length;
@@ -261,6 +273,7 @@ describe("/pika login", () => {
 				const other = await new MockIngest().start();
 				servers.push(other);
 				ui.inputs = [TOKEN];
+				ui.choices = [PASTE];
 				await main.session.prompt(`/pika login ${other.url}`);
 				const sent = ingest.bodies.length;
 				await new Promise((resolve) => setTimeout(resolve, 1_200));
@@ -271,7 +284,7 @@ describe("/pika login", () => {
 		} finally { await main.shutdown(); }
 	}, 30_000);
 
-	it("keeps uploading a Herder run's journal after a switch to another server", async () => {
+	it("keeps uploading a Herder run's journal, and uploads its unchanged goal and plan again, after a switch to another server", async () => {
 		await workspace.enable(ingest.url);
 		const runId = "20261026-120000-5ca1";
 		const runDir = join(workspace.root, "herder", runId);
@@ -290,6 +303,7 @@ describe("/pika login", () => {
 			const other = await new MockIngest().start();
 			servers.push(other);
 			ui.inputs = [TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt(`/pika login ${other.url}`);
 			// The new uploader has caught up with the file and would archive a stream it did not take over as open.
 			await new Promise((resolve) => setTimeout(resolve, 1_200));
@@ -297,6 +311,11 @@ describe("/pika login", () => {
 			await appendFile(run.journalPath, `${JSON.stringify({ seq: 2, t: "step.started" })}\n`);
 			await waitFor(async () => other.data(key) === await readText(run.journalPath), 5_000, "journal lines after the switch");
 			expect(other.gaps).toContain(key);
+			// The documents the first server acknowledged are not the second server's.
+			await waitFor(() => other.documents.size === 2, 5_000, "the goal and plan on the second server");
+			expect(other.documents.get(`herder:${runId}:goal.md`)).toMatchObject({ kind: "herder-goal", runId, content: "# Goal\n" });
+			expect(other.documents.get(`herder:${runId}:plan.md`)).toMatchObject({ kind: "herder-plan", runId, content: "# Plan\n" });
+			expect(ingest.documentUploads).toHaveLength(2);
 			// A repeated event for the run does not open its stream a second time.
 			api!.events.emit("herder:run", run);
 			await appendFile(run.journalPath, `${JSON.stringify({ seq: 3, t: "run.completed" })}\n`);
@@ -327,6 +346,7 @@ describe("/pika login", () => {
 			// The server accepts the same token again, for example after its device was restored.
 			ingest.mode = "ok";
 			ui.inputs = [TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt(`/pika login ${ingest.url}`);
 			expect(ui.last).toMatchObject({ type: "info", message: expect.stringContaining(`Logged in to ${ingest.url}`) });
 			expect(currentUploader()).not.toBe(halted);
@@ -338,6 +358,7 @@ describe("/pika login", () => {
 			// A healthy uploader is replaced too, so a login also ends a long backoff.
 			const healthy = currentUploader();
 			ui.inputs = [TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt(`/pika login ${ingest.url}`);
 			expect(currentUploader()).not.toBe(healthy);
 			await h.session.prompt("three");
@@ -352,6 +373,7 @@ describe("/pika login", () => {
 		process.env.PIKA_TOKEN = TOKEN;
 		const ui = new ScriptedUI();
 		ui.inputs = [TOKEN];
+		ui.choices = [PASTE];
 		await command(ui, `/pika login ${ingest.url}`);
 		expect(ui.last).toMatchObject({ type: "warning", message: expect.stringContaining("PIKA_URL and PIKA_TOKEN in the environment override the saved values.") });
 		await expectNoSecret(ui, [TOKEN]);
@@ -361,6 +383,7 @@ describe("/pika login", () => {
 		process.env.PIKA_DISABLED = "1";
 		const disabled = new ScriptedUI();
 		disabled.inputs = [TOKEN];
+		disabled.choices = [PASTE];
 		const h = await session(disabled);
 		try {
 			h.faux.setResponses([fauxAssistantMessage("quiet")]);
@@ -411,6 +434,7 @@ describe("/pika logout", () => {
 			await h.session.prompt("/pika");
 			expect(ui.last?.message).toMatch(/Run \/pika login/);
 			ui.inputs = [TOKEN];
+			ui.choices = [PASTE];
 			await h.session.prompt(`/pika login ${ingest.url}`);
 			await waitFor(async () => ingest.data(key) === await readText(file) && ingest.sessionRequests(h.session.sessionId).length === 2, 5_000, "upload after logging in again");
 			expect(h.errors).toEqual([]);
@@ -435,6 +459,7 @@ describe("/pika logout", () => {
 				await main.session.prompt("/pika logout");
 				await child.session.prompt("child two");
 				ui.inputs = [TOKEN];
+				ui.choices = [PASTE];
 				await main.session.prompt(`/pika login ${ingest.url}`);
 				await waitFor(async () => ingest.data(key) === await readText(file()), 5_000, "child lines from while logged out");
 				// Long enough for the uploader to archive the child's stream if nothing had it open.
@@ -460,6 +485,7 @@ describe("/pika logout", () => {
 
 		const ui = new ScriptedUI();
 		ui.inputs = [TOKEN];
+		ui.choices = [PASTE];
 		await command(ui, `/pika login ${ingest.url}`);
 		expect(ui.last).toMatchObject({ type: "info", message: expect.stringContaining(`Logged in to ${ingest.url}`) });
 		expect(await isLink()).toBe(true);

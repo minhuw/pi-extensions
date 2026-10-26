@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
-import { isPlainRemote, login, readConfigFile, writeConfigFile } from "./login.ts";
+import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
@@ -26,9 +26,19 @@ interface Shared {
 	captures: Map<string, SessionCapture>;
 	/** Session ids and files of open excluded sessions; their children are excluded too. */
 	excluded: Set<string>;
+	/** The process's one unfinished `/pika login`; a newer login, a logout, or the end of its session cancels it. */
+	login?: LoginTicket;
+	/** Counts logins, so a replaced one can tell it is no longer current. */
+	logins: number;
+}
+interface LoginTicket extends LoginControl {
+	generation: number;
+	/** The pika instance whose session started it. */
+	owner: object;
+	cancel(reason: string): void;
 }
 const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook> };
-const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: new Map(), captures: new Map(), excluded: new Set() };
+const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: new Map(), captures: new Map(), excluded: new Set(), logins: 0 };
 const hooks = (): Set<ChildSessionHook> => global[CHILD_SESSION_HOOKS] ??= new Set();
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -50,6 +60,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	let excludedKeys: string[] = [];
 	/** The context this instance last attached with; valid until its session shuts down. */
 	let attachedCtx: ExtensionContext | undefined;
+	/** The session shut down, so contexts from it must not be used. */
+	let ended = false;
 
 	// Capture errors are recorded for /pika and never reach the turn.
 	const guard = (fn: () => void) => {
@@ -166,7 +178,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		start(ctx, enroll());
 	}
 
-	pi.on("session_start", (_event, ctx) => { guard(() => attach(ctx)); });
+	pi.on("session_start", (_event, ctx) => { ended = false; guard(() => attach(ctx)); });
 
 	pi.on("context_with_system", (event, ctx) => {
 		guard(() => owned(ctx)?.onContext(event.messages, modelInfo(ctx)));
@@ -199,6 +211,9 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	pi.on("session_info_changed", poke);
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		ended = true;
+		const pending = shared().login;
+		if (pending?.owner === self) pending.cancel("the session ended");
 		guard(() => {
 			for (const key of excludedKeys) shared().excluded.delete(key);
 			excludedKeys = [];
@@ -226,9 +241,45 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		});
 	});
 
+	/** Cancels the process's unfinished login, if any; the line for the cancelling command's message. */
+	function cancelLogin(reason: string): string | undefined {
+		const pending = shared().login;
+		if (!pending) return undefined;
+		const waiting = pending.waiting;
+		pending.cancel(reason);
+		return waiting ? "Cancelled the earlier /pika login, which was waiting for its pairing code to be approved." : "Cancelled the earlier /pika login, which had not finished.";
+	}
+
+	/** Makes this login the process's current one, cancelling the one before. */
+	function startLogin(ctx: ExtensionCommandContext): LoginTicket {
+		const state = shared();
+		const controller = new AbortController();
+		const generation = ++state.logins;
+		const ticket: LoginTicket = {
+			generation, owner: self,
+			signal: ctx.signal ? AbortSignal.any([controller.signal, ctx.signal]) : controller.signal,
+			isCurrent: () => shared().login?.generation === generation && !ended,
+			isOpen: () => !ended,
+			cancel: (reason) => {
+				if (shared().login === ticket) shared().login = undefined;
+				controller.abort(reason);
+			},
+		};
+		state.login = ticket;
+		return ticket;
+	}
+
 	async function loginCommand(ctx: ExtensionCommandContext, arg: string | undefined): Promise<void> {
+		const note = cancelLogin("a newer /pika login started");
+		if (note) ctx.ui.notify(`pika: ${note}`, "info");
+		const ticket = startLogin(ctx);
 		const before = loadConfig(getAgentDir());
-		const saved = await login(ctx, before.file, arg, before.enabled ? before.config.url : before.url, VERSION);
+		let saved: Awaited<ReturnType<typeof login>>;
+		try {
+			saved = await login(ctx, before.file, arg, before.enabled ? before.config.url : before.url, VERSION, ticket);
+		} finally {
+			if (shared().login === ticket) shared().login = undefined;
+		}
 		if (!saved) return;
 		// The token was just accepted, so the process starts a new uploader even with the same login,
 		// one a 401 or a long backoff stopped included. A session that had not joined joins now, and so
@@ -237,14 +288,16 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 			config = loadConfig(getAgentDir());
 			if (!config.enabled) return;
 			if (currentUploader()) acquireUploader(uploaderOptions(), true);
-			if (!joined) attach(ctx);
+			// A session that shut down while the file was written keeps its old context out of the process.
+			if (!joined && !ended) attach(ctx);
 			const detached = shared().detached;
 			for (const [member, reattach] of [...detached]) {
 				detached.delete(member);
 				reattach();
 			}
 		});
-		const lines = [`Logged in to ${saved.url}; saved to ${saved.file}.${saved.reenabled ? ' Removed "enabled": false, so uploads are on again.' : ""}`];
+		if (ended) return;
+		const lines = [`Logged in to ${saved.url}${saved.device ? ` as ${saved.device}` : ""}; saved to ${saved.file}.${saved.reenabled ? ' Removed "enabled": false, so uploads are on again.' : ""}`];
 		const warnings: string[] = [];
 		if (isPlainRemote(saved.url)) warnings.push("The URL is plain http to another host, so the token travels unencrypted.");
 		const overridden = ["PIKA_URL", "PIKA_TOKEN"].filter((name) => process.env[name]);
@@ -262,16 +315,17 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		const file = loadConfig(getAgentDir()).file;
 		const env = ["PIKA_URL", "PIKA_TOKEN"].filter((name) => process.env[name]);
 		const envWarning = env.length ? `${env.join(" and ")} ${env.length === 1 ? "is" : "are"} set in the environment, so new sessions still use ${env.length === 1 ? "it" : "them"}.` : undefined;
+		const note = cancelLogin("/pika logout ran");
 		try {
 			const fields = await readConfigFile(file);
 			if (!fields || (!("url" in fields) && !("token" in fields))) {
-				ctx.ui.notify([`pika: nothing to log out; ${file} has no url or token.`, ...(envWarning ? [envWarning] : [])].join("\n"), "info");
+				ctx.ui.notify([`pika: nothing to log out; ${file} has no url or token.`, ...(note ? [note] : []), ...(envWarning ? [envWarning] : [])].join("\n"), "info");
 				return;
 			}
 			const { url: _url, token: _token, ...rest } = fields;
 			await writeConfigFile(file, rest);
 		} catch (error) {
-			ctx.ui.notify(`pika logout failed: ${errorText(error)}. Nothing changed.`, "error");
+			ctx.ui.notify([`pika logout failed: ${errorText(error)}. Nothing changed.`, ...(note ? [note] : [])].join("\n"), "error");
 			return;
 		}
 		await stopProcess();
@@ -280,7 +334,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 			`Logged out of pika: removed the url and token from ${file}. This process stopped uploading.`,
 			`Queued data stays in ${join(getAgentDir(), "pika")} and uploads after the next login.`,
 		];
-		ctx.ui.notify([...lines, ...(envWarning ? [envWarning] : [])].join("\n"), envWarning ? "warning" : "info");
+		ctx.ui.notify([...lines, ...(note ? [note] : []), ...(envWarning ? [envWarning] : [])].join("\n"), envWarning ? "warning" : "info");
 	}
 
 	pi.registerCommand("pika", {

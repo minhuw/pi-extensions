@@ -55,7 +55,7 @@ Herder keeps run state under the repository's git directory (`<git-common-dir>/h
 
 Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
 
-pika does nothing until `~/.pi/agent/pika.json` names a server URL and device token. The server is a separate Rust binary in `services/pika/`, with an embedded web UI, a Dockerfile, and reverse-proxy examples; see its [README](services/pika/README.md). Trajectories include file contents and command output, so point pika only at a server you control. See [pika](extensions/pika/README.md).
+pika does nothing until `~/.pi/agent/pika.json` names a server URL and device token; `/pika login` writes both, after you approve the machine on the server's web UI. The server is a separate Rust binary in `services/pika/`, with an embedded web UI, a Dockerfile, and reverse-proxy examples; see its [README](services/pika/README.md). Trajectories include file contents and command output, so point pika only at a server you control. See [pika](extensions/pika/README.md).
 
 ## Development
 

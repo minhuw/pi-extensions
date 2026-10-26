@@ -15,6 +15,8 @@ export interface StreamState {
 	stopped?: string;
 	/** Acknowledged document sha256 by key, for Herder runs. */
 	docs?: Record<string, string>;
+	/** The server URL that acknowledged `docs`; another server gets every document again. */
+	docsUrl?: string;
 	updatedAt: string;
 }
 

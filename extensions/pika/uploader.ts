@@ -9,7 +9,7 @@ import { gzip } from "node:zlib";
 import { sha256, splitPayload } from "./blocks.ts";
 import { MAX_ACKED, Store, type RequestRecord, type SpooledRequest, type StreamKind, type StreamState } from "./store.ts";
 
-export const PIKA_VERSION = "0.1.0";
+export const PIKA_VERSION = "0.2.0";
 /** Uncompressed batch body limit; the server accepts 32 MiB by default. */
 export const MAX_BATCH_BYTES = 8 * 1024 * 1024 - 64 * 1024;
 const MIN_BATCH_BYTES = 256 * 1024;
@@ -248,6 +248,8 @@ export class Uploader {
 	private readonly strikes = new Map<string, number>();
 	private readonly documents = new Map<string, PendingDocument>();
 	private readonly herderRuns = new Set<string>();
+	/** The server of the acknowledged hashes as loaded, which also acknowledged documents saved without `docsUrl`. */
+	private ackedUrl?: string;
 	private self: OwnerProcess = { pid: process.pid };
 	/** Whether the processes holding requests read from the spool were alive when last checked, and when. */
 	private readonly owners = new Map<string, { verdict: Holder; at: number }>();
@@ -305,10 +307,13 @@ export class Uploader {
 		await this.store.init();
 		// Acknowledgements hold only for the server that gave them.
 		const acked = await this.store.loadAcked();
+		this.ackedUrl = acked.url;
 		if (acked.url === this.options.url) for (const hash of acked.hashes) this.acked.add(hash);
 		else if (!this.closed) await this.store.rewriteAcked(this.options.url, []);
 		for (const state of await this.store.loadActiveStreams()) {
 			if (this.streams.has(state.key)) continue;
+			// The log now names this uploader's server, so the state records the server its documents came from.
+			if (this.adoptDocsUrl(state) && !this.closed) await this.store.saveStream(state);
 			this.streams.set(state.key, { state, open: 0, gapRetries: 0 });
 			if (state.kind === "herder-journal") this.queueDocuments(state);
 		}
@@ -349,6 +354,7 @@ export class Uploader {
 			if (!stream) {
 				const state = await this.store.findStream(descriptor.key)
 					?? { key: descriptor.key, kind: descriptor.kind, path: descriptor.path, length: 0, updatedAt: new Date().toISOString() };
+				this.adoptDocsUrl(state);
 				stream = { state, open: 0, gapRetries: 0 };
 				this.streams.set(descriptor.key, stream);
 			}
@@ -445,11 +451,31 @@ export class Uploader {
 				try { content = await readFile(path, "utf8"); } catch { continue; }
 				const key = `herder:${runId}:${name}`;
 				const hash = sha256(content);
-				if (hash === (this.documents.get(key)?.sha256 ?? state.docs?.[key])) continue;
+				if (hash === (this.documents.get(key)?.sha256 ?? this.ackedDocs(state)[key])) continue;
 				this.documents.set(key, { key, kind, runId, content, sha256: hash, streamKey: state.key });
 			}
 			this.poke();
 		});
+	}
+
+	/**
+	 * Gives documents acknowledged before `docsUrl` existed the server of the acknowledged hashes,
+	 * which was the only server then; true when `state` changed.
+	 */
+	private adoptDocsUrl(state: StreamState): boolean {
+		if (!state.docs || state.docsUrl !== undefined || this.ackedUrl === undefined) return false;
+		state.docsUrl = this.ackedUrl;
+		return true;
+	}
+
+	/** The documents of a stream that this uploader's server acknowledged; those another server acknowledged do not count. */
+	private ackedDocs(state: StreamState): Record<string, string> {
+		return state.docsUrl === this.options.url ? state.docs ?? {} : {};
+	}
+
+	private ackDocument(state: StreamState, key: string, hash: string): void {
+		state.docs = { ...this.ackedDocs(state), [key]: hash };
+		state.docsUrl = this.options.url;
 	}
 
 	poke(delay = POKE_DELAY_MS): void {
@@ -849,7 +875,7 @@ export class Uploader {
 				this.documents.delete(item.key);
 				const stream = this.streams.get(document.streamKey);
 				if (stream) {
-					stream.state.docs = { ...stream.state.docs, [document.key]: document.sha256 };
+					this.ackDocument(stream.state, document.key, document.sha256);
 					await this.store.saveStream(stream.state);
 				}
 			}
@@ -902,7 +928,7 @@ export class Uploader {
 			const stream = this.streams.get(document.streamKey);
 			if (this.documents.get(document.key)?.sha256 === document.sha256) this.documents.delete(document.key);
 			if (stream) {
-				stream.state.docs = { ...stream.state.docs, [document.key]: document.sha256 };
+				this.ackDocument(stream.state, document.key, document.sha256);
 				await this.store.saveStream(stream.state);
 			}
 		}
