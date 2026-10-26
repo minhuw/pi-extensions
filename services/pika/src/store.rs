@@ -7,7 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::blobs::BlobStore;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql")];
+/// The first schema version whose derived tables an older database lacks; opening such a database reindexes it.
+const REINDEX_BELOW: usize = 2;
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -22,7 +24,14 @@ pub const DERIVED_TABLES: &[&str] = &[
     "herder_runs",
     "herder_events",
     "herder_steps",
+    "search_docs",
 ];
+
+/// Empties the full-text index; its content table `search_docs` is cleared with the other derived tables.
+pub fn clear_search_index(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute("INSERT INTO search_fts (search_fts) VALUES ('delete-all')", [])?;
+    Ok(())
+}
 
 /// The SQLite database and blob store. Writes go through one connection; reads use a pool of query-only connections.
 pub struct Store {
@@ -42,7 +51,8 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Applies pending migrations and returns the version the database had.
+fn migrate(conn: &mut Connection) -> Result<usize> {
     let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? as usize;
     if version > MIGRATIONS.len() {
         bail!("database schema version {version} is newer than this pika ({})", MIGRATIONS.len());
@@ -53,7 +63,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
         tx.commit()?;
     }
-    Ok(())
+    Ok(version)
 }
 
 impl Store {
@@ -63,14 +73,19 @@ impl Store {
         let db_path = data_dir.join("pika.db");
         let mut writer = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
         configure(&writer)?;
-        migrate(&mut writer)?;
-        Ok(Arc::new(Store {
+        let previous = migrate(&mut writer)?;
+        let store = Arc::new(Store {
             blobs: BlobStore::new(data_dir.join("blobs")),
             data_dir,
             db_path,
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
-        }))
+        });
+        if (1..REINDEX_BELOW).contains(&previous) {
+            let stats = crate::reindex::reindex(&store).context("reindexing after the schema upgrade")?;
+            tracing::info!("reindexed {} streams after upgrading the schema from version {previous}", stats.streams);
+        }
+        Ok(store)
     }
 
     pub fn data_dir(&self) -> &Path {

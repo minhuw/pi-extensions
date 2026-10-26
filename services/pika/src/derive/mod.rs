@@ -2,6 +2,7 @@
 //! through the same code, so both paths produce identical tables. All per-stream state lives in the derived rows.
 
 mod herder;
+pub mod search;
 mod session;
 
 use anyhow::Result;

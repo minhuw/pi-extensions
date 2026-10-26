@@ -52,6 +52,93 @@ pub fn cut_chars(s: &str, max: usize) -> &str {
     }
 }
 
+/// Cuts `s` to at most `max` bytes at a character boundary.
+pub fn cut_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters, for one URL path segment.
+pub fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+const BASE64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// URL-safe base64 without padding.
+pub fn base64url_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..chunk.len() + 1 {
+            out.push(BASE64_URL[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Decodes standard or URL-safe base64, with or without padding; ASCII whitespace is skipped.
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    let mut padding = false;
+    for b in s.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => {
+                padding = true;
+                continue;
+            }
+            b if b.is_ascii_whitespace() => continue,
+            _ => return None,
+        };
+        if padding {
+            return None;
+        }
+        acc = acc << 6 | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    (bits < 6).then_some(out)
+}
+
 /// The last path component, for both `/` and `\` separators.
 pub fn basename(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['/', '\\']);
@@ -165,5 +252,21 @@ mod tests {
         assert_eq!(cut_chars("héllo", 2), "hé");
         assert_eq!(basename("/a/b/repo/"), "repo");
         assert_eq!(basename("C:\\x\\y"), "y");
+        assert_eq!(cut_bytes("héllo", 2), "h");
+        assert_eq!(escape_html("<a href='x'>&\""), "&lt;a href=&#39;x&#39;&gt;&amp;&quot;");
+        assert_eq!(encode_path_segment("a b/ü-1"), "a%20b%2F%C3%BC-1");
+    }
+
+    #[test]
+    fn base64() {
+        for (plain, encoded) in [("", ""), ("f", "Zg"), ("fo", "Zm8"), ("foo", "Zm9v"), ("foob", "Zm9vYg"), ("\u{ff}\u{fe}?", "w7_Dvj8")] {
+            assert_eq!(base64url_encode(plain.as_bytes()), encoded);
+            assert_eq!(base64_decode(encoded).unwrap(), plain.as_bytes());
+        }
+        assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("w7/Dvj8=").unwrap(), "\u{ff}\u{fe}?".as_bytes());
+        assert!(base64_decode("a").is_none());
+        assert!(base64_decode("ab=c").is_none());
+        assert!(base64_decode("a*b").is_none());
     }
 }

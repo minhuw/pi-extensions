@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::params;
 
 use crate::derive::{self, Line, StreamInfo, StreamKind};
-use crate::store::{DERIVED_TABLES, Store};
+use crate::store::{self, DERIVED_TABLES, Store};
 
 const CHUNK_LINES: i64 = 2_000;
 
@@ -18,6 +18,7 @@ pub fn reindex(store: &Store) -> Result<ReindexStats> {
         for table in DERIVED_TABLES {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
+        store::clear_search_index(tx)?;
         let streams: Vec<(i64, String, String, String)> = tx
             .prepare("SELECT id, key, kind, device FROM streams ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?

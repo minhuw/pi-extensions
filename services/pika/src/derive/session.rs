@@ -2,6 +2,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde_json::Value;
 
+use super::search::{self, Kind};
 use super::{Line, StreamInfo, Usage, int_field, str_field, string_field, time_field};
 use crate::util::{basename, cut_chars};
 
@@ -212,6 +213,30 @@ fn content_text(content: Option<&Value>) -> String {
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// A tool call's searchable text: its name, then each argument as `key: value`, strings unquoted.
+fn tool_call_text(block: &Value) -> String {
+    let mut text = str_field(block, "name").unwrap_or("").to_owned();
+    match block.get("arguments") {
+        Some(Value::Object(args)) => {
+            for (key, value) in args {
+                text.push('\n');
+                text.push_str(key);
+                text.push_str(": ");
+                match value {
+                    Value::String(s) => text.push_str(s),
+                    other => text.push_str(&other.to_string()),
+                }
+            }
+        }
+        Some(Value::Null) | None => {}
+        Some(other) => {
+            text.push('\n');
+            text.push_str(&other.to_string());
+        }
+    }
+    text
 }
 
 fn content_size(content: Option<&Value>) -> i64 {
@@ -462,6 +487,37 @@ impl Deriver<'_> {
         Ok(vec![call_id])
     }
 
+    fn index_search(&self, seq: i64, ty: &str, v: &Value, at: i64) -> Result<()> {
+        let sid = self.s.sid;
+        match ty {
+            "session_info" => {
+                if let Some(name) = str_field(v, "name") {
+                    search::index(self.tx, sid, seq, 0, at, Kind::Title, name)?;
+                }
+            }
+            "message" => {
+                let Some(message) = v.get("message") else { return Ok(()) };
+                let content = message.get("content");
+                match str_field(message, "role") {
+                    Some("user") => search::index(self.tx, sid, seq, 0, at, Kind::User, &content_text(content))?,
+                    Some("assistant") => {
+                        search::index(self.tx, sid, seq, 0, at, Kind::Assistant, &content_text(content))?;
+                        let blocks = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+                        for (part, block) in blocks.iter().filter(|b| str_field(b, "type") == Some("toolCall")).enumerate() {
+                            search::index(self.tx, sid, seq, part as i64 + 1, at, Kind::ToolCall, &tool_call_text(block))?;
+                        }
+                    }
+                    Some("toolResult") => {
+                        search::index(self.tx, sid, seq, 0, at, Kind::ToolResult, &content_text(content))?
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn line(&mut self, line: &Line) -> Result<()> {
         let parsed: Option<Value> = serde_json::from_str(line.text).ok().filter(Value::is_object);
         let empty = Value::Null;
@@ -502,6 +558,7 @@ impl Deriver<'_> {
             }
             _ => {}
         }
+        self.index_search(line.seq, ty, v, ts.unwrap_or(self.s.last_at))?;
         let turn_idx = match &mut self.turn {
             Some(turn) => {
                 turn.end_seq = line.seq;

@@ -114,10 +114,10 @@ Additions to the Herder journal (all optional fields, so old journals stay valid
 - `step.started`, `step.completed`, and `step.failed` gain `sessionId` and `sessionFile` for the step's session.
 
 ## Read API (JSON; used by the web UI)
-Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` defaults to 50.
+Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` defaults to 50. Times in responses are ISO 8601 strings in UTC; time parameters accept ISO 8601, `YYYY-MM-DD`, or Unix milliseconds.
 
 - **`GET facets`** returns `{ devices: string[], projects: string[], models: string[] }`.
-- **`GET sessions`** accepts `device`, `project`, `model`, `from`, `to`, `root` (`true` lists only sessions without a parent), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest first. `SessionSummary` is:
+- **`GET sessions`** accepts `device`, `project`, `model`, `from`, `to` (inclusive bounds on `lastAt`), `root` (`true` lists only sessions without a parent), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest `lastAt` first. `SessionSummary` is:
   ```
   { id, device, project, cwd, title, startedAt, lastAt, durationMs, entryCount,
     models: string[],
@@ -141,13 +141,16 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - Strings longer than 65,536 characters are cut to that length and the entry is marked `truncated: true`.
   - Each image block's `data` becomes `""` and the block gains `src`: the URL of `GET sessions/:id/entries/:seq/image/:index`.
   - `GET sessions/:id/entries/:seq/raw` returns the verbatim line.
+- **`GET sessions/:id/updates`** accepts `since` (the caller's last seq) and returns `{ lastSeq, lastAt }`: the session's newest entry, so the UI can poll an active session cheaply and fetch `entries?from=<since + 1>` when `lastSeq` grew. `lastSeq` is `-1` for a session without entries.
 - **`GET sessions/:id/export`** returns the verbatim JSONL, byte-identical to the original file.
 - **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request.
 - **Herder runs:**
   - `GET herder/runs` accepts `cursor` and `limit`, and returns `{ items: RunSummary[], nextCursor }`. `RunSummary` is `{ runId, device, repo, title, status, verdict?, startedAt, lastAt, stepCount }`.
   - `GET herder/runs/:id` returns `{ run: RunSummary, goal?, plan?, events: [{ seq, t, at, data }], steps: [{ key, id, task?, role, label?, phase?, status, attempts, sessionId?, commit?, startedAt?, endedAt? }] }`.
-- **`GET search`** accepts `q`, `device`, `project`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
-  - `kind` is one of `user`, `assistant`, `tool-call`, `tool-result`, or `title`.
+- **`GET search`** accepts `q`, `device`, `project`, `sort`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
+  - Every word of `q`, or `"quoted phrase"`, must match; operators and special characters are plain text.
+  - `sort` is `newest` (default, by entry time) or `relevance` (bm25 over the 20,000 newest matches).
+  - `kind` is one of `user`, `assistant`, `tool-call`, `tool-result`, or `title` (a `session_info` name).
   - `snippet` is HTML-escaped text with `<mark>` around matches.
 - **Auth:**
   - `POST login {password}` sets an HttpOnly cookie scoped to the base path.
