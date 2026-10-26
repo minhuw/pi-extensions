@@ -34,6 +34,8 @@ export function AuthGate() {
 		[api, queryClient, navigate],
 	);
 
+	// Pages query the read API as they mount; before `me` first answers, a signed-out browser would get 401s.
+	if (!me.isFetched) return null;
 	if (me.data?.passwordRequired && !me.data.authenticated) return <Navigate to={loginPath(location)} replace />;
 	return <Outlet />;
 }

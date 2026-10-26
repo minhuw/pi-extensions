@@ -197,7 +197,7 @@ describe("tool renderers", () => {
 						description: "Map the ingest code",
 						subagentType: "recon",
 						toolUses: 12,
-						tokens: "48.2k",
+						tokens: "48.2k token",
 						durationMs: 95_000,
 						status: "completed",
 						modelName: "anthropic/claude-haiku-4-5",

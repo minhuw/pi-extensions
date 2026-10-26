@@ -181,4 +181,11 @@ describe("buildTimeline", () => {
 		const bash = items.find((item) => item.kind === "tool");
 		expect(bash?.kind === "tool" && bash.result?.isError).toBe(true);
 	});
+
+	it("skips a displayed extension message that is the turn's prompt", () => {
+		const prompt = { type: "custom_message", id: "c1", parentId: null, timestamp: iso(1000), customType: "herder:prompt", content: "/herder: run started", display: true };
+		const later = { ...prompt, id: "c2", content: "follow-up" };
+		const items = buildTimeline([entry(1, prompt), entry(2, later)], 1);
+		expect(items.map((item) => `${item.kind}:${item.seq}`)).toEqual(["custom-message:2"]);
+	});
 });

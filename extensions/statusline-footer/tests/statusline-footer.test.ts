@@ -381,7 +381,7 @@ describe("statusline footer rendering", () => {
 	];
 
 	it("renders four width-bounded full-mode lines with representative facts", async () => {
-		const harness = createHarness("render-full-session", "tui", { branch });
+		const harness = createHarness("render-full-session", "tui", { branch, cwd: "/tmp/project" });
 		statuslineFooter(harness.pi);
 		await harness.emit("session_start", { type: "session_start", reason: "startup" });
 

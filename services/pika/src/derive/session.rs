@@ -354,6 +354,11 @@ impl Deriver<'_> {
                 self.s.first_prompt = Some(cut_chars(trimmed, TITLE_CHARS).to_owned());
             }
         }
+        self.start_turn(seq, ts, &text)
+    }
+
+    /// Starts the turn whose prompt is the entry at `seq`.
+    fn start_turn(&mut self, seq: i64, ts: Option<i64>, text: &str) -> Result<()> {
         if let Some(previous) = self.turn.take() {
             save_turn(self.tx, self.s.sid, &previous)?;
         }
@@ -361,7 +366,7 @@ impl Deriver<'_> {
             idx: self.s.turn_count,
             start_seq: seq,
             end_seq: seq,
-            user_text: cut_chars(&text, USER_TEXT_CHARS).to_owned(),
+            user_text: cut_chars(text, USER_TEXT_CHARS).to_owned(),
             at: ts,
             duration_ms: 0,
             model_calls: 0,
@@ -554,6 +559,10 @@ impl Deriver<'_> {
                 custom_type = str_field(v, "customType");
                 if ty == "custom" && custom_type == Some(LINK_CUSTOM_TYPE) {
                     self.link(line.seq, v.get("data").unwrap_or(&empty))?;
+                }
+                // A displayed extension message, such as the prompt of `/herder <goal>`, is the prompt of its turn.
+                if ty == "custom_message" && v.get("display").and_then(Value::as_bool) == Some(true) {
+                    self.start_turn(line.seq, ts, &content_text(v.get("content")))?;
                 }
             }
             _ => {}

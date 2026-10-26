@@ -1,0 +1,15 @@
+{
+	"compilerOptions": {
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"target": "es2023",
+		"allowImportingTsExtensions": true,
+		"erasableSyntaxOnly": true,
+		"types": ["node"],
+		"typeRoots": ["../../../node_modules/@types"]
+	},
+	"include": ["*.ts"]
+}

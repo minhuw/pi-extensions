@@ -43,7 +43,8 @@ export function AgentTool({ call, result }: ToolRenderProps) {
 	const prompt = argString(call, "prompt");
 	const model = details.modelName ?? argString(call, "model") ?? child?.models[0];
 	const status = details.status ?? (result ? (result.isError ? "error" : "completed") : "unknown");
-	const tokens = details.tokens || (child ? formatCount(totalTokens(child.tokens)) : undefined);
+	// Subagents formats the count with its unit, such as "48.2k token".
+	const tokens = details.tokens?.replace(/\s*tokens?$/i, "") || (child ? formatCount(totalTokens(child.tokens)) : undefined);
 	const durationMs = details.durationMs ?? child?.durationMs;
 	const ok = okResult(result);
 	const report = resultText(ok);

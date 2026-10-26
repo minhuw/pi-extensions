@@ -39,6 +39,13 @@ describe("login", () => {
 		expect(await screen.findByRole("button", { name: "Sign out" })).toBeTruthy();
 	});
 
+	it("queries nothing but `me` before a signed-out browser reaches the login page", async () => {
+		const server = createFakeServer({ sessions: [session()], password: "hunter2" });
+		renderApp("/", server.fetch);
+		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(server.calls).toEqual(["/api/v1/me"]);
+	});
+
 	it("sends any 401 to the login page", async () => {
 		// A server that reports no password from `me` but rejects the read API, e.g. after a restart with one.
 		const base = createFakeServer({ sessions: [session()], password: "hunter2" });

@@ -178,7 +178,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
   - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them.
-  - A schema migration that adds derived tables records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
+  - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 
 ## Extension configuration

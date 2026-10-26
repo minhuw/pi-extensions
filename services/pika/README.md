@@ -237,4 +237,6 @@ bash services/pika/scripts/perf.sh    # one year of generated data from five mac
 
 Neither calls a live provider or downloads a browser; the UI checks use a locally installed Chrome.
 
+`e2e.sh` installs and builds everything (`npm ci` at the root, in `web/`, and in `e2e/`, the web build, and the release binary), serves the binary under `/pika` with a password, and runs [`e2e/driver.ts`](e2e/driver.ts): a real pi runtime with Subagents, Herder, and pika, pika last, against a mock OpenAI-compatible provider. It checks that every entry of the main, subagent, and Herder step sessions reaches the read API within 5 s and exports byte for byte, that every stored request equals the body the provider received (or the pi context, for a provider without a payload), the links to the Agent call and the Herder step, delivery after a server outage and a pi restart with no duplicate requests, and then drives the UI in Chrome, including a 5,000-entry session, in the light and dark themes. It prints the directory with the screenshots. `PIKA_CHROME` selects the browser binary, `PIKA_E2E_SKIP_BUILD=1` reuses earlier installs and builds, and `PIKA_E2E_KEEP=1` keeps the temporary workspace and server data.
+
 The ingest protocol, request blocks, link entries, child-session hook, read API, and configuration are specified in [`docs/SPEC.md`](docs/SPEC.md).

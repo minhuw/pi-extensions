@@ -232,3 +232,33 @@ fn lines_with_lone_surrogate_escapes_derive() {
     assert_eq!((&step["key"], &step["status"], &step["label"]), (&json!("impl-T1"), &json!("running"), &json!("Cut \u{fffd}")));
     assert_eq!(one(&env.store, "SELECT step_count FROM herder_runs")["step_count"], 1);
 }
+
+/// A displayed extension message, such as `/herder <goal>`'s prompt, starts a turn; a hidden one does not.
+#[test]
+fn displayed_custom_messages_start_turns() {
+    let env = env();
+    let entry = |id: &str, seq: i64, fields: Value| {
+        let mut v = json!({ "id": id, "parentId": null, "timestamp": format!("2026-10-20T09:00:{seq:02}.000Z") });
+        v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        v.to_string()
+    };
+    let assistant = |text: &str| json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": text }], "stopReason": "stop", "timestamp": 1 } });
+    let session = vec![
+        json!({ "type": "session", "version": 3, "id": "custom-1", "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/w/x" }).to_string(),
+        entry("u1", 1, json!({ "type": "message", "message": { "role": "user", "content": "first", "timestamp": 1 } })),
+        entry("a1", 2, assistant("one")),
+        entry("c1", 3, json!({ "type": "custom_message", "customType": "herder:prompt", "content": "/herder: run started", "display": true })),
+        entry("a2", 4, assistant("two")),
+        entry("c2", 5, json!({ "type": "custom_message", "customType": "note", "content": "hidden context", "display": false })),
+        entry("a3", 6, assistant("three")),
+    ];
+    upload(&env.store, "session:custom-1", "session", &session, 3);
+    let turns = query(&env.store, "SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'custom-1' ORDER BY idx");
+    let got: Vec<_> = turns.iter().map(|t| (t["start_seq"].clone(), t["end_seq"].clone(), t["user_text"].clone(), t["final_text"].clone())).collect();
+    assert_eq!(got, vec![
+        (json!(1), json!(2), json!("first"), json!("one")),
+        (json!(3), json!(6), json!("/herder: run started"), json!("three")),
+    ]);
+    let session = one(&env.store, "SELECT first_prompt, turn_count FROM sessions WHERE id = 'custom-1'");
+    assert_eq!((&session["first_prompt"], &session["turn_count"]), (&json!("first"), &json!(2)));
+}

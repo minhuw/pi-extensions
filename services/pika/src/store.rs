@@ -7,9 +7,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::blobs::BlobStore;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql")];
-/// The first schema version whose derived tables an older database lacks; opening such a database reindexes it.
-const REINDEX_BELOW: usize = 2;
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql")];
+/// The first schema version whose derived tables an older database lacks or derives differently; opening such a
+/// database reindexes it.
+const REINDEX_BELOW: usize = 3;
 /// Set in the transaction of a migration that needs a reindex, and cleared by the reindex that follows, so an
 /// interrupted or failed reindex runs again on the next open.
 pub const NEEDS_REINDEX: &str = "needs_reindex";

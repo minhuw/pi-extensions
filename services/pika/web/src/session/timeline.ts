@@ -194,6 +194,8 @@ export function buildTimeline(entries: Entry[], promptSeq?: number): TimelineIte
 				items.push({ kind: "note", key, seq, entry, icon: "pencil", text: `Renamed session to “${str(raw.name) ?? ""}”` });
 				break;
 			case "custom_message":
+				// A displayed extension message can be the turn's prompt, such as `/herder <goal>`'s.
+				if (seq === promptSeq) break;
 				items.push({
 					kind: "custom-message",
 					key,
