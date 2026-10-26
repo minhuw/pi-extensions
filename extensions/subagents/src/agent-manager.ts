@@ -366,7 +366,7 @@ const CHILD_SHUTDOWN_TIMEOUT_MS = 3_000;
  * extension armed in `session_start` leaks once per spawn, and its next tick throws
  * `assertActive()` from a bare timer callback — an uncaughtException that kills pi (#242).
  */
-async function shutdownChildSession(session: AgentSession | undefined): Promise<void> {
+export async function shutdownChildSession(session: AgentSession | undefined): Promise<void> {
   try {
     const runner = session?.extensionRunner;
     // Optional all the way down: on a pi without the getter, or a stubbed session from a

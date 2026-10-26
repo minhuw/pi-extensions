@@ -680,8 +680,6 @@ export default function (pi: ExtensionAPI) {
       ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
       ...(record.outputFile !== undefined ? { outputFile: record.outputFile } : {}),
       ...(spawningToolCallId !== undefined ? { toolCallId: spawningToolCallId } : {}),
-      ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
-      ...(record.workflowId !== undefined ? { workflowId: record.workflowId } : {}),
     });
 
     // Skip notification if result was already consumed via get_subagent_result

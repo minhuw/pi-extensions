@@ -28,6 +28,11 @@ export function getChildSessionHooks(): ChildSessionHook[] {
   );
 }
 
+/** Hooks as named loader factories, appended last to a child's `extensionFactories`. */
+export function childSessionHookFactories(hooks: ChildSessionHook[]): { name: string; factory: ExtensionFactory }[] {
+  return hooks.map((hook) => ({ name: hook.name, factory: hook.extensionFactory }));
+}
+
 export const SESSION_LINK_CUSTOM_TYPE = "pi-extensions.session-link";
 
 export interface SubagentSessionLink {

@@ -51,8 +51,15 @@
  *
  * The clone gets one tool and one job. It cannot read, write or run anything —
  * an invisible turn with the full toolset could do invisible work.
+ *
+ * While a child-session hook is registered the clone is a child like any other:
+ * it loads the hook factories, and instead of living in memory it is persisted
+ * in the child session directory — the parent's branch copied verbatim behind
+ * a fresh header naming the parent — with a session-link entry ahead of its
+ * prompt. Without hooks it stays in memory.
  */
 
+import { writeFileSync } from "node:fs";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -61,9 +68,19 @@ import {
   type ExtensionToolContext,
   getAgentDir,
   SessionManager,
+  SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { shutdownChildSession } from "./agent-manager.js";
+import { resolveChildSessionDir } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
+import {
+  buildSubagentSessionLink,
+  childSessionHookFactories,
+  getChildSessionHooks,
+  SESSION_LINK_CUSTOM_TYPE,
+} from "./child-session-hooks.js";
 import { agentMentionReminder } from "./mention.js";
 import type { SubagentType } from "./types.js";
 
@@ -84,6 +101,31 @@ export interface MentionCloneResult {
   spawned: boolean;
   /** Why not, when it didn't. Absent on success. */
   error?: string;
+}
+
+/**
+ * The clone's session file: SDK-built header and file name, then the parent's
+ * root-to-leaf entries verbatim, so reopening it leaves the leaf on the parent's
+ * leaf. Written directly because `SessionManager` cannot seed a persisted
+ * session with existing entries.
+ */
+function persistedCloneSession(ctx: ExtensionContext, type: SubagentType): SessionManager {
+  const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+  const sessionDir = resolveChildSessionDir(getAgentConfig(type)?.sessionDir, ctx.cwd, settingsManager);
+  const parentSessionFile = ctx.sessionManager.getSessionFile();
+  const fresh = SessionManager.create(ctx.cwd, sessionDir, { parentSession: parentSessionFile });
+  const file = fresh.getSessionFile();
+  if (!file) throw new Error("the clone session has no file");
+  const entries = [fresh.getHeader(), ...ctx.sessionManager.getBranch()];
+  writeFileSync(file, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { flag: "wx" });
+  const sessionManager = SessionManager.open(file, fresh.getSessionDir());
+  sessionManager.appendCustomEntry(SESSION_LINK_CUSTOM_TYPE, buildSubagentSessionLink({
+    parentSessionId: ctx.sessionManager.getSessionId(),
+    parentSessionFile,
+    agentType: type,
+    description: "@mention clone",
+  }));
+  return sessionManager;
 }
 
 /**
@@ -126,6 +168,7 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     },
   };
 
+  const childSessionHooks = getChildSessionHooks();
   let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
     // Pi 0.80.8 moved createAgentSession from modelRegistry to modelRuntime;
@@ -148,6 +191,8 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
+      // Loaded even under `noExtensions`.
+      extensionFactories: childSessionHookFactories(childSessionHooks),
       systemPromptOverride: (base: string | undefined) => systemPrompt || base,
       appendSystemPromptOverride: () => [],
     });
@@ -159,8 +204,10 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
         // compaction applied, branch summaries substituted. Not `getEntries()`,
         // whose last entry is not the leaf after `/tree` navigation. In memory,
         // so nothing about the copy is persisted and the real session stays
-        // untouched.
-        sessionManager: SessionManager.inMemory(ctx.cwd, undefined, ctx.sessionManager.getBranch()),
+        // untouched — unless a hook needs every child on disk.
+        sessionManager: childSessionHooks.length > 0
+          ? persistedCloneSession(ctx, type)
+          : SessionManager.inMemory(ctx.cwd, undefined, ctx.sessionManager.getBranch()),
         resourceLoader: loader,
         model: ctx.model as Model<never> | undefined,
         ...(thinkingLevel && { thinkingLevel }),
@@ -179,6 +226,11 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
       } as Parameters<typeof createAgentSession>[0]),
     );
     session = created.session;
+    if (childSessionHooks.length > 0) {
+      // The copied branch may carry the parent's name; the clone is not the parent.
+      session.setSessionName(`@${type} mention clone`);
+      await session.bindExtensions({});
+    }
 
     // User text first, reminder after — the order Claude Code's attachment
     // renderer produces, where the reminder trails the message it is about.
@@ -186,7 +238,8 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
   } catch (err) {
     return { spawned, error: err instanceof Error ? err.message : String(err) };
   } finally {
-    session?.dispose?.();
+    if (childSessionHooks.length > 0) await shutdownChildSession(session);
+    else session?.dispose?.();
   }
 
   return spawned

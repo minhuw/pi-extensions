@@ -199,9 +199,14 @@ describe("child-session hooks (real pi, faux model)", () => {
       expect(linkIndex).toBeLessThan(promptIndex);
     }
 
-    const record = run.parentSession.sessionManager.getEntries().find(
+    // Records cover top-level agents only; the nested worker's parentage lives in its link entry.
+    const records = run.parentSession.sessionManager.getEntries().filter(
       (entry) => entry.type === "custom" && entry.customType === "subagents:record",
     );
+    expect(records).toHaveLength(1);
+    const record = records[0];
+    expect(record?.type === "custom" ? record.data : undefined).not.toHaveProperty("parentAgentId");
+    expect(record?.type === "custom" ? record.data : undefined).not.toHaveProperty("workflowId");
     const orchestratorRecord = getRecord(run, orchestratorId);
     expect(orchestratorRecord?.outputFile).toEqual(expect.any(String));
     expect(record?.type === "custom" ? record.data : undefined).toMatchObject({

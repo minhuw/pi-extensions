@@ -25,7 +25,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { forwardAbortSignal } from "./abort-signal.js";
 import { runInChildSessionContext } from "./child-context.js";
-import { buildSubagentSessionLink, getChildSessionHooks, SESSION_LINK_CUSTOM_TYPE } from "./child-session-hooks.js";
+import { buildSubagentSessionLink, childSessionHookFactories, getChildSessionHooks, SESSION_LINK_CUSTOM_TYPE } from "./child-session-hooks.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
@@ -734,6 +734,17 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+/** Where a child's session file goes: agent frontmatter, then the environment, then settings. */
+export function resolveChildSessionDir(
+  agentSessionDir: string | undefined,
+  cwd: string,
+  settingsManager: SettingsManager,
+): string | undefined {
+  return resolveConfiguredSessionDir(agentSessionDir, cwd)
+    ?? process.env.PI_CODING_AGENT_SESSION_DIR
+    ?? settingsManager.getSessionDir?.();
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -912,7 +923,7 @@ export async function runAgent(
       { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
       // Under `noExtensions` the static allowlist gates the registry itself.
       ...(noExtensions ? [] : [scopeGateExtension(nestedCallGate)]),
-      ...childSessionHooks.map((hook) => ({ name: hook.name, factory: hook.extensionFactory })),
+      ...childSessionHookFactories(childSessionHooks),
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.
@@ -1130,8 +1141,7 @@ export async function runAgent(
     sessionExcludeTools = [...denyTools];
   }
 
-  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
-  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
+  const childSessionDir = resolveChildSessionDir(agentConfig?.sessionDir, effectiveCwd, settingsManager);
   // Frontmatter wins when it says anything; otherwise the project default,
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`. A registered child-session hook needs every child
@@ -1142,9 +1152,9 @@ export async function runAgent(
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    ? SessionManager.open(options.resumeSessionFile, childSessionDir)
     : persistSession
-      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+      ? SessionManager.create(effectiveCwd, childSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
           // `/resume`. Until `rememberAgents` this ran solely for the rare
           // `persist_session: true` agent; now it runs for every spawn, so a
