@@ -1,17 +1,21 @@
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import pikaExtension from "../index.ts";
-import { currentUploader } from "../uploader.ts";
-import { MockIngest } from "./support/ingest-server.ts";
+import { currentUploader, readLines, Uploader } from "../uploader.ts";
+import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let ingest: MockIngest;
 beforeEach(async () => { workspace = await Workspace.create(); ingest = await new MockIngest().start(); });
-afterEach(async () => { await ingest.stop(); await workspace.cleanup(); });
+afterEach(async () => { vi.restoreAllMocks(); await ingest.stop(); await workspace.cleanup(); });
+
+const within = <T>(promise: Promise<T>, ms: number) =>
+	Promise.race([promise, new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), ms).unref())]);
 
 it("uploads every entry verbatim within 5 s, with offsets that rebuild the session file byte for byte", async () => {
 	await workspace.enable(ingest.url);
@@ -143,3 +147,23 @@ it("takes the server URL and token from the environment", async () => {
 		await waitFor(async () => ingest.data(`session:${h.session.sessionId}`) === await readText(h.session.sessionFile!), 5_000, "upload");
 	} finally { await h.shutdown(); delete process.env.PIKA_URL; delete process.env.PIKA_TOKEN; }
 }, 20_000);
+
+it("reads no lines when the file ends before the expected end without a newline", async () => {
+	// The file was truncated or replaced after its size was taken.
+	const file = join(workspace.root, "short.jsonl");
+	await writeFile(file, '{"type":"message"}\npartial');
+	expect(await within(readLines(file, 0, 4096, 1024), 2_000)).toEqual(['{"type":"message"}']);
+	expect(await within(readLines(file, 19, 4096, 1024), 2_000)).toEqual([]);
+	expect(await within(readLines(file, 100, 4096, 1024), 2_000)).toEqual([]);
+});
+
+it("stops within a bounded time when a flush is stuck", async () => {
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	await uploader.ready;
+	const build = vi.spyOn(uploader as unknown as { build: () => Promise<unknown> }, "build").mockImplementation(() => new Promise(() => {}));
+	void uploader.flush();
+	await waitFor(() => build.mock.calls.length > 0, 2_000, "a stuck flush");
+	const started = Date.now();
+	expect(await within(uploader.stop(), 5_000)).toBeUndefined();
+	expect(Date.now() - started).toBeLessThan(2_000);
+}, 10_000);

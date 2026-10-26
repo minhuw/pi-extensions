@@ -29,11 +29,15 @@ export class MockIngest {
 	/** How often each request id arrived. */
 	readonly requestReceipts = new Map<string, number>();
 	readonly bodies: BatchBody[] = [];
+	/** The uncompressed size of each body in `bodies`. */
+	readonly sizes: number[] = [];
 	readonly responses: number[] = [];
 	readonly gaps: string[] = [];
 	readonly conflicts: string[] = [];
 	readonly headers: IncomingMessage["headers"][] = [];
 	mode: Mode = "ok";
+	/** Like the server's `--max-body`: a larger compressed or uncompressed body gets 413. */
+	maxBody = 32 * 1024 * 1024;
 	private server?: Server;
 	private readonly sockets = new Set<Socket>();
 	port = 0;
@@ -90,9 +94,12 @@ export class MockIngest {
 		if (request.headers.authorization !== `Bearer ${TOKEN}`) return this.reply(response, 401, { error: "unauthorized" });
 		this.headers.push(request.headers);
 		let raw = Buffer.concat(chunks);
+		if (raw.length > this.maxBody) return this.reply(response, 413, { error: "too_large" });
 		if (request.headers["content-encoding"] === "gzip") raw = gunzipSync(raw);
+		if (raw.length > this.maxBody) return this.reply(response, 413, { error: "too_large" });
 		const body = JSON.parse(raw.toString("utf8")) as BatchBody;
 		this.bodies.push(body);
+		this.sizes.push(raw.length);
 
 		// Validate every stream before applying anything: one batch is one transaction.
 		const appends: { key: string; kind: string; tail: Buffer; item: StreamItem }[] = [];

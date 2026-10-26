@@ -6,6 +6,7 @@ import { acquireUploader, currentUploader, releaseUploader, type Uploader } from
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SHUTDOWN_FLUSH_MS = 2_000;
+export const SESSION_LINK_TYPE = "pi-extensions.session-link";
 
 export interface ChildSessionHook {
 	name: string;
@@ -20,7 +21,7 @@ interface Shared {
 	hook?: ChildSessionHook;
 	/** One capture per session id, owned by the last pika instance that started in it. */
 	captures: Map<string, SessionCapture>;
-	/** Session files of open excluded sessions; their children are excluded too. */
+	/** Session ids and files of open excluded sessions; their children are excluded too. */
 	excluded: Set<string>;
 }
 const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook> };
@@ -41,7 +42,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	let joined = false;
 	let sessionId: string | undefined;
 	let skipped: string | undefined;
-	let excludedFile: string | undefined;
+	let excludedKeys: string[] = [];
 
 	// Capture errors are recorded for /pika and never reach the turn.
 	const guard = (fn: () => void) => {
@@ -86,8 +87,15 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		const manager = ctx.sessionManager;
 		const cwd = manager.getCwd() || ctx.cwd;
 		if (isExcluded(cwd, enabledConfig()?.exclude ?? [])) return `${cwd} is excluded`;
+		const excluded = shared().excluded;
 		const parent = manager.getHeader()?.parentSession;
-		if (parent && shared().excluded.has(parent)) return "its parent session is excluded";
+		if (parent && excluded.has(parent)) return "its parent session is excluded";
+		for (const entry of manager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== SESSION_LINK_TYPE) continue;
+			const link = entry.data as { parentSessionId?: unknown; parentSessionFile?: unknown } | undefined;
+			if (typeof link?.parentSessionId === "string" && excluded.has(link.parentSessionId)) return "its parent session is excluded";
+			if (typeof link?.parentSessionFile === "string" && excluded.has(link.parentSessionFile)) return "its parent session is excluded";
+		}
 		return undefined;
 	}
 
@@ -101,7 +109,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		const existing = captures.get(sessionId);
 		if (existing) { existing.owner = self; return; }
 		const key = `session:${sessionId}`;
-		captures.set(sessionId, new SessionCapture(sessionId, key, uploader, self));
+		captures.set(sessionId, new SessionCapture(sessionId, key, currentUploader, self));
 		const parentSession = manager.getHeader()?.parentSession;
 		void uploader.openStream({ key, kind: "session", path: file, meta: { sessionId, cwd, ...(parentSession ? { parentSession } : {}) } });
 	}
@@ -113,8 +121,9 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 			sessionId = ctx.sessionManager.getSessionId();
 			skipped = exclusion(ctx);
 			if (skipped) {
-				excludedFile = ctx.sessionManager.getSessionFile();
-				if (excludedFile) shared().excluded.add(excludedFile);
+				const file = ctx.sessionManager.getSessionFile();
+				excludedKeys = file ? [sessionId, file] : [sessionId];
+				for (const key of excludedKeys) shared().excluded.add(key);
 				return;
 			}
 			start(ctx, enroll());
@@ -149,8 +158,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		guard(() => {
-			if (excludedFile) shared().excluded.delete(excludedFile);
-			excludedFile = undefined;
+			for (const key of excludedKeys) shared().excluded.delete(key);
+			excludedKeys = [];
 			const capture = owned(ctx);
 			if (!capture) return;
 			shared().captures.delete(capture.sessionId);
@@ -201,6 +210,7 @@ export function statusText(config: ConfigResult, joined: boolean, sessionId: str
 		lines.push(`Last successful upload: ${status.lastSuccess ?? "never"}`);
 		lines.push(`Last error: ${status.lastError ?? "none"}`);
 		if (status.halted) lines.push(`Stopped: ${status.halted}`);
+		if (status.parked.items) lines.push(`Parked, too large for the server: ${status.parked.items} item(s), ${bytes(status.parked.bytes)} in ${status.parked.dir}`);
 		for (const stream of status.stoppedStreams) lines.push(`Stream ${stream.key} stopped: ${stream.reason}`);
 	}
 	return lines.join("\n");

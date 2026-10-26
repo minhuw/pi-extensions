@@ -6,8 +6,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitPayload } from "../blocks.ts";
 import { SessionCapture } from "../capture.ts";
-import pikaExtension from "../index.ts";
-import { currentUploader, Uploader } from "../uploader.ts";
+import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../index.ts";
+import { currentUploader, releaseUploader, Uploader } from "../uploader.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { MockProvider } from "./support/provider-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
@@ -151,3 +151,117 @@ it("splits payloads by the spec's block rules", () => {
 	expect(split.blocks).toHaveLength(2);
 	expect(split.data.get(messages[0]!.$pika)).toBe(JSON.stringify(payload.messages[0]));
 });
+
+/** What a crash leaves: the spool on disk, and none of pika's process state. */
+async function simulateCrash(): Promise<void> {
+	const uploader = currentUploader();
+	if (uploader) await releaseUploader(uploader);
+	const global = globalThis as Record<symbol, unknown>;
+	delete global[Symbol.for("pi-extensions.pika")];
+	const hooks = global[CHILD_SESSION_HOOKS] as Set<ChildSessionHook> | undefined;
+	for (const hook of hooks ?? []) if (hook.name === "pika") hooks!.delete(hook);
+}
+
+it("spools a payload when the provider request starts, so a crash mid-stream still delivers it", async () => {
+	const provider = await new MockProvider().start();
+	provider.hold = true;
+	await workspace.enable(ingest.url);
+	const first = await startSession({ workspace, extensions: [pikaExtension], openAiBaseUrl: provider.baseUrl });
+	const id = first.session.sessionId;
+	const prompt = first.session.prompt("a long answer").catch(() => undefined);
+	try {
+		await waitFor(() => provider.bodies.length === 1, 5_000, "the provider request");
+		const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests"))).filter((name) => name.endsWith(".json"));
+		await waitFor(async () => (await spooled()).length === 1, 2_000, "the spooled request");
+		// Held for its assistant message while the stream is open.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(ingest.sessionRequests(id)).toEqual([]);
+
+		await simulateCrash();
+		const second = await startSession({ workspace, faux: first.faux, extensions: [pikaExtension] });
+		try {
+			await waitFor(() => ingest.sessionRequests(id).length === 1, 5_000, "the request after the restart");
+			const [request] = ingest.sessionRequests(id);
+			expect(request).toMatchObject({ fidelity: "payload", seq: 1, provider: "pika-mock-openai", model: "mock-model" });
+			expect(request!.assistant).toBeUndefined();
+			expect(ingest.payload(request!.id)).toEqual(JSON.parse(provider.bodies[0]!));
+			await waitFor(async () => (await spooled()).length === 0, 2_000, "an empty spool");
+		} finally { await second.shutdown(); }
+	} finally {
+		await provider.stop();
+		await prompt;
+		await first.shutdown();
+	}
+}, 20_000);
+
+it("rewrites the spooled payload with its assistant message before uploading it", async () => {
+	const provider = await new MockProvider().start();
+	provider.hold = true;
+	await workspace.enable(ingest.url);
+	const h = await startSession({ workspace, extensions: [pikaExtension], openAiBaseUrl: provider.baseUrl });
+	try {
+		const prompt = h.session.prompt("question");
+		await waitFor(() => provider.bodies.length === 1, 5_000, "the provider request");
+		const [name] = (await readdir(join(workspace.pikaDir, "spool", "requests"))).filter((file) => file.endsWith(".json"));
+		expect(name).toBeDefined();
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(ingest.sessionRequests(h.session.sessionId)).toEqual([]);
+		provider.hold = false;
+		await provider.stop();
+		await prompt.catch(() => undefined);
+		await waitFor(() => ingest.sessionRequests(h.session.sessionId).length === 1, 5_000, "the request");
+		const [message] = await assistants(h.session.sessionFile!);
+		expect(ingest.sessionRequests(h.session.sessionId)[0]).toMatchObject({ id: name!.replace(/\.json$/, ""), assistant: { timestamp: message.timestamp } });
+		expect(h.errors).toEqual([]);
+	} finally { await h.shutdown(); await provider.stop(); }
+}, 20_000);
+
+const reconstructs = (server: MockIngest, id: string) => { try { server.payload(id); return true; } catch { return false; } };
+const spooledBlobs = async () => (await readdir(join(workspace.pikaDir, "spool", "blobs"))).filter((name) => !name.endsWith(".tmp"));
+
+it("resends previously acknowledged blocks when the client points at a fresh server", async () => {
+	const provider = await new MockProvider().start();
+	await workspace.enable(ingest.url);
+	const first = await startSession({ workspace, extensions: [noop, pikaExtension], tools: ["noop"], openAiBaseUrl: provider.baseUrl });
+	try {
+		await first.session.prompt("same question");
+		await waitFor(() => ingest.sessionRequests(first.session.sessionId).length === 1, 5_000, "first request");
+	} finally { await first.shutdown(); }
+
+	const fresh = await new MockIngest().start();
+	try {
+		await workspace.enable(fresh.url);
+		const second = await startSession({ workspace, extensions: [noop, pikaExtension], tools: ["noop"], openAiBaseUrl: provider.baseUrl });
+		try {
+			await second.session.prompt("same question");
+			await waitFor(() => fresh.sessionRequests(second.session.sessionId).length === 1, 5_000, "request on the fresh server");
+			const [request] = fresh.sessionRequests(second.session.sessionId);
+			// The tool declaration, at least, was acknowledged by the first server.
+			expect(request!.blocks.filter((hash) => ingest.blobs.has(hash)).length).toBeGreaterThan(0);
+			await waitFor(() => reconstructs(fresh, request!.id), 5_000, "every block on the fresh server");
+			expect(fresh.payload(request!.id)).toEqual(JSON.parse(provider.bodies[1]!));
+			// Acknowledgements from the first server do not count: the blocks went out with the first send.
+			expect(fresh.requestReceipts.get(request!.id)).toBe(1);
+		} finally { await second.shutdown(); }
+	} finally { await fresh.stop(); await provider.stop(); }
+}, 20_000);
+
+it("answers missingBlobs when the server lost acknowledged blocks, and then deletes the spooled blocks", async () => {
+	await workspace.enable(ingest.url);
+	const h = await startSession({ workspace, extensions: [pikaExtension] });
+	try {
+		h.faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await h.session.prompt("first");
+		await waitFor(() => ingest.sessionRequests(h.session.sessionId).length === 1, 5_000, "first request");
+		await waitFor(async () => (await spooledBlobs()).length === 0, 2_000, "no spooled blocks once the request is complete");
+		ingest.blobs.clear();
+
+		await h.session.prompt("second");
+		await waitFor(() => ingest.sessionRequests(h.session.sessionId).length === 2, 5_000, "second request");
+		const second = ingest.sessionRequests(h.session.sessionId)[1]!;
+		await waitFor(() => reconstructs(ingest, second.id), 5_000, "the lost blocks resent");
+		expect(ingest.requestReceipts.get(second.id)).toBe(2);
+		await waitFor(async () => (await spooledBlobs()).length === 0, 2_000, "no spooled blocks");
+		expect(h.errors).toEqual([]);
+	} finally { await h.shutdown(); }
+}, 20_000);

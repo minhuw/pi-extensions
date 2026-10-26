@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../index.ts";
+import pikaExtension, { CHILD_SESSION_HOOKS, SESSION_LINK_TYPE, type ChildSessionHook } from "../index.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { MockProvider } from "./support/provider-server.ts";
 import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
@@ -123,5 +123,38 @@ it("registers no hook in an excluded session and skips its children while anothe
 		} finally { await main.shutdown(); }
 		expect(registered()).toEqual([]);
 		expect(ingest.streams.has(`session:${excluded.session.sessionId}`)).toBe(false);
+	} finally { await excluded.shutdown(); }
+}, 20_000);
+
+it.each([
+	{ name: "its link entry's parentSessionId", header: false },
+	{ name: "its parentSession header", header: true },
+])("skips a Herder step session whose parent session is excluded through $name", async ({ header }) => {
+	const secret = join(workspace.root, "secret");
+	await mkdir(secret, { recursive: true });
+	await workspace.enable(ingest.url, { exclude: [secret] });
+	const excluded = await startSession({ workspace, cwd: secret, extensions: [pikaExtension] });
+	try {
+		// Another session in the process keeps the hook registered.
+		const main = await startSession({ workspace, faux: excluded.faux, extensions: [pikaExtension] });
+		try {
+			const manager = SessionManager.create(workspace.cwd, join(workspace.root, "run", "sessions"), header ? { parentSession: excluded.session.sessionFile } : undefined);
+			// Herder appends the link before the step's extensions see session_start.
+			manager.appendCustomEntry(SESSION_LINK_TYPE, {
+				kind: "herder-step", ...(header ? {} : { parentSessionId: excluded.session.sessionId }),
+				herder: { runId: "run-1", stepKey: "T1", stepId: "T1", role: "worker", attempt: 1, repo: "secret" },
+			});
+			const step = await startSession({ workspace, sessionManager: manager, faux: excluded.faux, extensions: registered().map((hook) => hook.extensionFactory) });
+			try {
+				excluded.faux.setResponses([fauxAssistantMessage("main"), fauxAssistantMessage("step")]);
+				await main.session.prompt("main prompt");
+				await step.session.prompt("step prompt");
+				await waitFor(async () => ingest.data(`session:${main.session.sessionId}`) === await readText(main.session.sessionFile!), 5_000, "main upload");
+				await new Promise((resolve) => setTimeout(resolve, 1_200));
+				expect(ingest.streams.has(`session:${step.session.sessionId}`)).toBe(false);
+				expect(ingest.sessionRequests(step.session.sessionId)).toEqual([]);
+				expect(step.errors).toEqual([]);
+			} finally { await step.shutdown(); }
+		} finally { await main.shutdown(); }
 	} finally { await excluded.shutdown(); }
 }, 20_000);

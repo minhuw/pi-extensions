@@ -32,9 +32,18 @@ export interface RequestRecord {
 	blocks: string[];
 }
 
+/** A spooled request. `awaiting` is local: the capturing uploader still waits for the assistant message. */
+export interface SpooledRequest extends RequestRecord {
+	awaiting?: { pid: number; owner: string };
+}
+
 export const MAX_ACKED = 100_000;
 const HASH = /^[0-9a-f]{64}$/;
 const REQUEST_ID = /^[A-Za-z0-9-]{1,100}$/;
+const ACKED_URL = "# ";
+
+const validRequest = (record: SpooledRequest | undefined): record is SpooledRequest =>
+	!!record && typeof record.id === "string" && Array.isArray(record.blocks);
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === "ENOENT";
 
@@ -49,6 +58,10 @@ async function atomicWrite(file: string, data: string): Promise<void> {
 	}
 }
 
+async function move(from: string, to: string): Promise<void> {
+	try { await rename(from, to); } catch (error) { if (!missing(error)) throw error; }
+}
+
 async function readJson<T>(file: string): Promise<T | undefined> {
 	try { return JSON.parse(await readFile(file, "utf8")) as T; } catch (error) {
 		if (missing(error) || error instanceof SyntaxError) return undefined;
@@ -60,26 +73,28 @@ async function list(dir: string): Promise<string[]> {
 	try { return await readdir(dir); } catch (error) { if (missing(error)) return []; throw error; }
 }
 
-/** Local state under `<agentDir>/pika/`: stream cursors, the request and blob spool, and acknowledged hashes. */
+/** Local state under `<agentDir>/pika/`: stream cursors, the request and blob spool, parked items, and acknowledged hashes. */
 export class Store {
 	readonly streams: string;
 	readonly done: string;
 	readonly requests: string;
 	readonly blobs: string;
+	readonly parked: string;
 	readonly ackedLog: string;
 	constructor(readonly dir: string) {
 		this.streams = join(dir, "streams");
 		this.done = join(dir, "streams", "done");
 		this.requests = join(dir, "spool", "requests");
 		this.blobs = join(dir, "spool", "blobs");
+		this.parked = join(dir, "spool", "parked");
 		this.ackedLog = join(dir, "acked.log");
 	}
 
 	async init(): Promise<void> {
-		for (const dir of [this.done, this.requests, this.blobs]) await mkdir(dir, { recursive: true });
+		for (const dir of [this.done, this.requests, this.blobs, this.parked]) await mkdir(dir, { recursive: true });
 		// Temp files left by a crash before their rename hold nothing that is not also elsewhere.
 		const cutoff = Date.now() - 60_000;
-		for (const dir of [this.streams, this.done, this.requests, this.blobs]) {
+		for (const dir of [this.streams, this.done, this.requests, this.blobs, this.parked]) {
 			for (const name of await list(dir)) {
 				if (!name.endsWith(".tmp")) continue;
 				const file = join(dir, name);
@@ -121,19 +136,25 @@ export class Store {
 		await rm(this.streamFile(this.streams, key), { force: true });
 	}
 
-	async loadRequests(): Promise<RequestRecord[]> {
-		const records: { record: RequestRecord; mtime: number }[] = [];
+	async loadRequests(): Promise<SpooledRequest[]> {
+		const records: { record: SpooledRequest; mtime: number }[] = [];
 		for (const name of await list(this.requests)) {
 			if (!name.endsWith(".json")) continue;
 			const file = join(this.requests, name);
-			const record = await readJson<RequestRecord>(file);
+			const record = await readJson<SpooledRequest>(file);
 			const info = await stat(file).catch(() => undefined);
-			if (record && typeof record.id === "string" && Array.isArray(record.blocks)) records.push({ record, mtime: info?.mtimeMs ?? 0 });
+			if (validRequest(record)) records.push({ record, mtime: info?.mtimeMs ?? 0 });
 		}
 		return records.sort((a, b) => a.mtime - b.mtime).map(({ record }) => record);
 	}
 
-	async saveRequest(record: RequestRecord): Promise<number> {
+	async loadRequest(id: string): Promise<SpooledRequest | undefined> {
+		if (!REQUEST_ID.test(id)) return undefined;
+		const record = await readJson<SpooledRequest>(join(this.requests, `${id}.json`));
+		return validRequest(record) ? record : undefined;
+	}
+
+	async saveRequest(record: SpooledRequest): Promise<number> {
 		if (!REQUEST_ID.test(record.id)) throw new Error(`invalid request id ${record.id}`);
 		const text = JSON.stringify(record);
 		await atomicWrite(join(this.requests, `${record.id}.json`), text);
@@ -144,12 +165,12 @@ export class Store {
 		if (REQUEST_ID.test(id)) await rm(join(this.requests, `${id}.json`), { force: true });
 	}
 
-	async listBlobs(): Promise<{ hash: string; size: number }[]> {
-		const blobs: { hash: string; size: number }[] = [];
+	async listBlobs(): Promise<{ hash: string; size: number; mtimeMs: number }[]> {
+		const blobs: { hash: string; size: number; mtimeMs: number }[] = [];
 		for (const name of await list(this.blobs)) {
 			if (!HASH.test(name)) continue;
 			const info = await stat(join(this.blobs, name)).catch(() => undefined);
-			if (info) blobs.push({ hash: name, size: info.size });
+			if (info) blobs.push({ hash: name, size: info.size, mtimeMs: info.mtimeMs });
 		}
 		return blobs;
 	}
@@ -168,21 +189,46 @@ export class Store {
 		if (HASH.test(hash)) await rm(join(this.blobs, hash), { force: true });
 	}
 
-	/** The newest acknowledged hashes, oldest first. */
-	async loadAcked(): Promise<string[]> {
+	/** Items the server refused as too large, by file name, with their sizes. */
+	async listParked(): Promise<Map<string, number>> {
+		const parked = new Map<string, number>();
+		for (const name of await list(this.parked)) {
+			if (name.endsWith(".tmp")) continue;
+			const info = await stat(join(this.parked, name)).catch(() => undefined);
+			if (info) parked.set(name, info.size);
+		}
+		return parked;
+	}
+
+	async parkBlob(hash: string): Promise<void> {
+		if (HASH.test(hash)) await move(join(this.blobs, hash), join(this.parked, hash));
+	}
+
+	async parkRequest(id: string): Promise<void> {
+		if (REQUEST_ID.test(id)) await move(join(this.requests, `${id}.json`), join(this.parked, `${id}.json`));
+	}
+
+	async parkDocument(name: string, content: string): Promise<void> {
+		await atomicWrite(join(this.parked, name), content);
+	}
+
+	/** The acknowledged hashes, oldest first, and the server URL that acknowledged them. */
+	async loadAcked(): Promise<{ url?: string; hashes: string[] }> {
 		let text = "";
 		try { text = await readFile(this.ackedLog, "utf8"); } catch (error) { if (!missing(error)) throw error; }
-		const hashes = text.split("\n").filter((line) => HASH.test(line));
+		const lines = text.split("\n");
+		const url = lines[0]?.startsWith(ACKED_URL) ? lines[0].slice(ACKED_URL.length) : undefined;
+		const hashes = lines.filter((line) => HASH.test(line));
 		const kept = [...new Set(hashes.slice(-MAX_ACKED))];
-		if (hashes.length > 2 * MAX_ACKED) await this.rewriteAcked(kept);
-		return kept;
+		if (url !== undefined && hashes.length > 2 * MAX_ACKED) await this.rewriteAcked(url, kept);
+		return { url, hashes: kept };
 	}
 
 	async appendAcked(hashes: readonly string[]): Promise<void> {
 		if (hashes.length) await appendFile(this.ackedLog, hashes.map((hash) => `${hash}\n`).join(""));
 	}
 
-	async rewriteAcked(hashes: readonly string[]): Promise<void> {
-		await atomicWrite(this.ackedLog, hashes.map((hash) => `${hash}\n`).join(""));
+	async rewriteAcked(url: string, hashes: readonly string[]): Promise<void> {
+		await atomicWrite(this.ackedLog, `${ACKED_URL}${url}\n${hashes.map((hash) => `${hash}\n`).join("")}`);
 	}
 }

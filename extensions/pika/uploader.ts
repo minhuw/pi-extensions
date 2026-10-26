@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { open, readFile, stat } from "node:fs/promises";
 import { request as httpRequest, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -5,18 +6,28 @@ import { hostname } from "node:os";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { sha256, splitPayload } from "./blocks.ts";
-import { MAX_ACKED, Store, type RequestRecord, type StreamKind, type StreamState } from "./store.ts";
+import { MAX_ACKED, Store, type RequestRecord, type SpooledRequest, type StreamKind, type StreamState } from "./store.ts";
 
 export const PIKA_VERSION = "0.1.0";
 /** Uncompressed batch body limit; the server accepts 32 MiB by default. */
 export const MAX_BATCH_BYTES = 8 * 1024 * 1024 - 64 * 1024;
 const MIN_BATCH_BYTES = 256 * 1024;
+const BATCH_OVERHEAD = 512;
+const STREAM_OVERHEAD = 256;
+const BLOB_OVERHEAD = 90;
+/** 413s for a batch of one item before that item is parked. */
+export const MAX_TOO_LARGE = 3;
+/** Batches in which the server still reports a request's resent blocks missing before the client gives up on them. */
+const MAX_MISSING_ROUNDS = 3;
 const MAX_BACKOFF_MS = 60_000;
 const FIRST_BACKOFF_MS = 500;
 const REQUEST_TIMEOUT_MS = 30_000;
 const POKE_DELAY_MS = 200;
 const SCAN_INTERVAL_MS = 1_000;
 const MAX_GAP_RETRIES = 3;
+const STOP_WAIT_MS = 1_000;
+/** Unreferenced spooled blobs younger than this may belong to a request another process is spooling. */
+const ORPHAN_BLOB_AGE_MS = 60_000;
 
 const gzipAsync = promisify(gzip);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -33,6 +44,8 @@ export interface UploaderStatus {
 	url: string;
 	queuedItems: number;
 	queuedBytes: number;
+	/** Items the server refused as too large; they stay in `dir` and are not retried. */
+	parked: { items: number; bytes: number; dir: string };
 	lastSuccess?: string;
 	lastError?: string;
 	halted?: string;
@@ -47,6 +60,8 @@ export interface StreamDescriptor {
 }
 
 export type RequestInput = Omit<RequestRecord, "skeleton" | "blocks">;
+/** What the assistant message adds to a spooled request. */
+export type RequestCompletion = Pick<RequestRecord, "assistant" | "provider" | "api" | "model">;
 /** The payload as JSON text taken in the handler, or a value serialized later on the spool queue. */
 export type PayloadSource = { json: string } | { value: unknown };
 
@@ -66,17 +81,39 @@ interface PendingDocument {
 	streamKey: string;
 }
 
+interface PendingRequest {
+	record: SpooledRequest;
+	bytes: number;
+	missingRounds: number;
+}
+
+/** A spooled block text and how many pending requests reference it. */
+interface SpooledBlob {
+	size: number;
+	refs: number;
+}
+
+/** One unit of a batch; the unit that is parked after repeated 413s. */
+type Item =
+	| { kind: "line"; key: string; offset: number }
+	| { kind: "blob"; hash: string }
+	| { kind: "request"; id: string }
+	| { kind: "document"; key: string };
+
 interface Batch {
 	streams: { key: string; kind: StreamKind; offset: number; lines: string[]; path: string; meta?: Record<string, unknown> }[];
 	ends: Map<string, number>;
 	documents: PendingDocument[];
 	blobs: { hash: string; data: string }[];
-	requests: RequestRecord[];
+	requests: SpooledRequest[];
+	units: number;
+	first?: Item;
 }
 
 type Outcome = "progress" | "retry" | "stop";
 
-async function readLines(path: string, offset: number, end: number, maxBytes: number): Promise<string[]> {
+/** The complete lines between `offset` and `end`, or none when the file ends before a newline. */
+export async function readLines(path: string, offset: number, end: number, maxBytes: number): Promise<string[]> {
 	const handle = await open(path, "r");
 	try {
 		let want = Math.max(1, Math.min(end - offset, maxBytes));
@@ -86,8 +123,8 @@ async function readLines(path: string, offset: number, end: number, maxBytes: nu
 			const chunk = buffer.subarray(0, bytesRead);
 			const last = chunk.lastIndexOf(0x0a);
 			if (last >= 0) return chunk.subarray(0, last).toString("utf8").split("\n");
-			// Only a partial line so far, or one line longer than the budget.
-			if (offset + bytesRead >= end) return [];
+			// Only a partial line so far, or the file shrank after `end` was taken.
+			if (bytesRead < want || offset + bytesRead >= end) return [];
 			want = Math.min(end - offset, want * 2);
 		}
 	} finally {
@@ -96,20 +133,32 @@ async function readLines(path: string, offset: number, end: number, maxBytes: nu
 }
 
 const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+const wireRecord = ({ awaiting: _, ...record }: SpooledRequest): RequestRecord => record;
+const itemId = (item: Item) => item.kind === "line" ? `line:${item.key}:${item.offset}` : `${item.kind}:${"hash" in item ? item.hash : "id" in item ? item.id : item.key}`;
+
+function alive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
 
 /**
  * Process-wide uploader. Session entries are read from their source files between the
  * acknowledged cursor and the last complete line, so the file itself is the durable queue;
- * requests and blobs are spooled to disk before they are sent.
+ * requests and their block texts are spooled to disk before they are sent and kept until the
+ * server has every block.
  */
 export class Uploader {
 	readonly store: Store;
 	readonly ready: Promise<void>;
+	/** Owner of the requests this uploader spools while their call is still streaming. */
+	readonly id = randomUUID();
 	private readonly streams = new Map<string, Stream>();
-	private readonly requests = new Map<string, { record: RequestRecord; bytes: number }>();
-	private readonly blobs = new Map<string, number>();
+	private readonly requests = new Map<string, PendingRequest>();
+	private readonly blobs = new Map<string, SpooledBlob>();
 	private readonly acked = new Set<string>();
 	private ackedAppends = 0;
+	private readonly parked = new Map<string, number>();
+	private readonly strikes = new Map<string, number>();
 	private readonly documents = new Map<string, PendingDocument>();
 	private readonly herderRuns = new Set<string>();
 	private spool: Promise<void> = Promise.resolve();
@@ -121,6 +170,7 @@ export class Uploader {
 	private scanning = false;
 	private failures = 0;
 	private budget = MAX_BATCH_BYTES;
+	private oneItem = false;
 	private inflight?: ClientRequest;
 	private closed = false;
 	private lastSuccess?: number;
@@ -142,16 +192,27 @@ export class Uploader {
 
 	private async load(): Promise<void> {
 		await this.store.init();
-		for (const hash of await this.store.loadAcked()) this.acked.add(hash);
+		// Acknowledgements hold only for the server that gave them.
+		const acked = await this.store.loadAcked();
+		if (acked.url === this.options.url) for (const hash of acked.hashes) this.acked.add(hash);
+		else await this.store.rewriteAcked(this.options.url, []);
 		for (const state of await this.store.loadActiveStreams()) {
 			if (this.streams.has(state.key)) continue;
 			this.streams.set(state.key, { state, open: 0, gapRetries: 0 });
 			if (state.kind === "herder-journal") this.queueDocuments(state);
 		}
-		for (const record of await this.store.loadRequests()) this.requests.set(record.id, { record, bytes: jsonBytes(record) });
-		for (const { hash, size } of await this.store.listBlobs()) {
-			if (this.acked.has(hash)) await this.store.deleteBlob(hash);
-			else this.blobs.set(hash, size);
+		for (const [name, size] of await this.store.listParked()) this.parked.set(name, size);
+		const blobs = await this.store.listBlobs();
+		const refs = new Map<string, number>();
+		for (const record of await this.store.loadRequests()) {
+			this.requests.set(record.id, { record, bytes: jsonBytes(record), missingRounds: 0 });
+			for (const hash of record.blocks) refs.set(hash, (refs.get(hash) ?? 0) + 1);
+		}
+		const cutoff = Date.now() - ORPHAN_BLOB_AGE_MS;
+		for (const { hash, size, mtimeMs } of blobs) {
+			const count = refs.get(hash);
+			if (count) this.blobs.set(hash, { size, refs: count });
+			else if (mtimeMs < cutoff) await this.store.deleteBlob(hash);
 		}
 		this.poke(0);
 	}
@@ -191,21 +252,40 @@ export class Uploader {
 		});
 	}
 
-	enqueueRequest(input: RequestInput, payload: PayloadSource): Promise<void> {
+	/**
+	 * Spools a request and its block texts. With `awaiting`, it is held back until
+	 * `completeRequest`; if this uploader ends first, a later one uploads it as it is.
+	 */
+	enqueueRequest(input: RequestInput, payload: PayloadSource, options: { awaiting?: boolean } = {}): Promise<void> {
 		return this.task(async () => {
 			const value: unknown = "json" in payload ? JSON.parse(payload.json) : JSON.parse(JSON.stringify(payload.value) ?? "null");
 			const split = splitPayload(value);
-			const record: RequestRecord = { ...input, skeleton: split.skeleton, blocks: split.blocks };
-			let bytes = 0;
+			const record: SpooledRequest = {
+				...input, skeleton: split.skeleton, blocks: split.blocks,
+				...(options.awaiting ? { awaiting: { pid: process.pid, owner: this.id } } : {}),
+			};
 			for (const [hash, text] of split.data) {
-				if (this.acked.has(hash) || this.blobs.has(hash)) continue;
+				if (this.parked.has(hash)) continue;
+				const blob = this.blobs.get(hash);
+				if (blob) { blob.refs++; continue; }
 				await this.store.saveBlob(hash, text);
-				const size = Buffer.byteLength(text);
-				this.blobs.set(hash, size);
-				bytes += size;
+				this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1 });
 			}
-			bytes += await this.store.saveRequest(record);
-			this.requests.set(record.id, { record, bytes });
+			const bytes = await this.store.saveRequest(record);
+			this.requests.set(record.id, { record, bytes, missingRounds: 0 });
+			this.poke();
+		});
+	}
+
+	/** Rewrites a held request with what its assistant message adds, if anything, and releases it for upload. */
+	completeRequest(id: string, completion: RequestCompletion = {}): Promise<void> {
+		return this.task(async () => {
+			const pending = this.requests.get(id);
+			if (!pending || pending.record.awaiting?.owner !== this.id) return;
+			const { awaiting: _, ...record } = pending.record;
+			for (const [key, value] of Object.entries(completion)) if (value !== undefined) (record as Record<string, unknown>)[key] = value;
+			pending.bytes = await this.store.saveRequest(record);
+			pending.record = record;
 			this.poke();
 		});
 	}
@@ -306,23 +386,29 @@ export class Uploader {
 			if (this.retryTimer) clearTimeout(this.retryTimer);
 			this.inflight?.destroy(new Error("pika uploader stopped"));
 		}
-		await this.flushing;
+		// A flush stuck on local I/O must not hold up pi's shutdown; it stops at its next check.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([this.flushing, new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_WAIT_MS); })]);
+		clearTimeout(timer);
 		await this.spool;
 	}
 
 	status(): UploaderStatus {
-		let queuedItems = this.requests.size + this.blobs.size + this.documents.size;
+		let queuedItems = this.requests.size + this.documents.size;
 		let queuedBytes = 0;
 		for (const { bytes } of this.requests.values()) queuedBytes += bytes;
-		for (const size of this.blobs.values()) queuedBytes += size;
+		for (const [hash, { size }] of this.blobs) if (!this.acked.has(hash)) { queuedItems++; queuedBytes += size; }
 		for (const document of this.documents.values()) queuedBytes += Buffer.byteLength(document.content);
 		const stoppedStreams: UploaderStatus["stoppedStreams"] = [];
 		for (const stream of this.streams.values()) {
 			if (stream.state.stopped) { stoppedStreams.push({ key: stream.state.key, reason: stream.state.stopped }); continue; }
 			if (stream.size !== undefined && stream.size > stream.state.length) { queuedItems++; queuedBytes += stream.size - stream.state.length; }
 		}
+		let parkedBytes = 0;
+		for (const size of this.parked.values()) parkedBytes += size;
 		return {
 			url: this.options.url, queuedItems, queuedBytes, stoppedStreams, halted: this.halted,
+			parked: { items: this.parked.size, bytes: parkedBytes, dir: this.store.parked },
 			lastSuccess: this.lastSuccess === undefined ? undefined : new Date(this.lastSuccess).toISOString(),
 			lastError: this.lastError && `${new Date(this.lastError.at).toISOString()} ${this.lastError.message}`,
 		};
@@ -347,11 +433,27 @@ export class Uploader {
 		}
 	}
 
+	/** A held request is uploaded once its call completes, or as it is once the uploader that holds it is gone. */
+	private sendable(record: SpooledRequest): boolean {
+		const { awaiting } = record;
+		if (!awaiting) return true;
+		if (awaiting.owner === this.id) return false;
+		return awaiting.pid === process.pid || !alive(awaiting.pid);
+	}
+
+	/**
+	 * Fills a batch up to the budget: new stream lines, documents, then requests. A request goes
+	 * out once its new blocks are in this batch or acknowledged, so its blocks may span earlier
+	 * batches. An item larger than the budget is sent alone once nothing else is left.
+	 */
 	private async build(): Promise<Batch | undefined> {
-		const batch: Batch = { streams: [], ends: new Map(), documents: [], blobs: [], requests: [] };
-		let size = 512;
-		let items = 0;
-		const fits = (bytes: number) => items === 0 || size + bytes <= this.budget;
+		const batch: Batch = { streams: [], ends: new Map(), documents: [], blobs: [], requests: [], units: 0 };
+		let size = BATCH_OVERHEAD;
+		let solo: (() => Promise<void>) | undefined;
+		const oversized = (bytes: number) => BATCH_OVERHEAD + bytes > this.budget;
+		const room = (bytes: number) => !(this.oneItem && batch.units > 0) && size + bytes <= this.budget;
+		const add = (bytes: number, item: Item, units = 1) => { size += bytes; batch.units += units; batch.first ??= item; };
+
 		for (const stream of this.streams.values()) {
 			const { state } = stream;
 			if (state.stopped) continue;
@@ -363,65 +465,74 @@ export class Uploader {
 				await this.store.saveStream(state);
 				continue;
 			}
-			if (info.size === state.length || !fits(256)) continue;
-			const lines = await readLines(state.path, state.length, info.size, Math.max(1, this.budget - size));
+			const overhead = STREAM_OVERHEAD + jsonBytes(state.path) + (state.meta ? jsonBytes(state.meta) : 0);
+			if (info.size === state.length || !room(overhead)) continue;
+			const lines = await readLines(state.path, state.length, info.size, Math.max(1, this.budget - size - overhead));
 			const taken: string[] = [];
 			let end = state.length;
-			let streamSize = 256 + jsonBytes(state.path) + (state.meta ? jsonBytes(state.meta) : 0);
+			let bytes = overhead;
 			for (const line of lines) {
-				const bytes = jsonBytes(line) + 1;
-				// A line larger than the whole budget still goes out, alone.
-				if (size + streamSize + bytes > this.budget && !(items === 0 && taken.length === 0)) break;
+				const lineBytes = jsonBytes(line) + 1;
+				if (!room(bytes + lineBytes) || (this.oneItem && taken.length)) break;
 				taken.push(line);
-				streamSize += bytes;
+				bytes += lineBytes;
 				end += Buffer.byteLength(line) + 1;
 			}
-			if (!taken.length) continue;
-			batch.streams.push({ key: state.key, kind: state.kind, offset: state.length, lines: taken, path: state.path, ...(state.meta ? { meta: state.meta } : {}) });
-			batch.ends.set(state.key, end);
-			size += streamSize;
-			items++;
+			const push = (sent: string[], to: number, sentBytes: number) => {
+				batch.streams.push({ key: state.key, kind: state.kind, offset: state.length, lines: sent, path: state.path, ...(state.meta ? { meta: state.meta } : {}) });
+				batch.ends.set(state.key, to);
+				add(sentBytes, { kind: "line", key: state.key, offset: state.length }, sent.length);
+			};
+			if (taken.length) { push(taken, end, bytes); continue; }
+			const first = lines[0];
+			if (first !== undefined && oversized(overhead + jsonBytes(first) + 1)) {
+				solo ??= async () => push([first], state.length + Buffer.byteLength(first) + 1, overhead + jsonBytes(first) + 1);
+			}
 		}
+
 		for (const document of this.documents.values()) {
 			const bytes = jsonBytes(document);
-			if (!fits(bytes)) break;
+			if (oversized(bytes)) { solo ??= async () => { batch.documents.push(document); add(bytes, { kind: "document", key: document.key }); }; continue; }
+			if (!room(bytes)) continue;
 			batch.documents.push(document);
-			size += bytes;
-			items++;
+			add(bytes, { kind: "document", key: document.key });
 		}
-		const sent = new Set<string>();
-		const addBlobs = async (hashes: Iterable<string>) => {
-			const blobs: { hash: string; data: string }[] = [];
-			let bytes = 0;
-			for (const hash of hashes) {
-				if (sent.has(hash) || !this.blobs.has(hash)) continue;
-				const data = await this.store.readBlob(hash);
-				if (data === undefined) { this.blobs.delete(hash); continue; }
-				blobs.push({ hash, data });
-				bytes += jsonBytes(data) + 90;
-			}
-			return { blobs, bytes };
+
+		const inBatch = new Set<string>();
+		// Blocks not spooled here are not waited for; the server reports them missing if it lacks them.
+		const needed = (hash: string) => !this.acked.has(hash) && !inBatch.has(hash) && !this.parked.has(hash) && this.blobs.has(hash);
+		const soloBlob = (hash: string) => async () => {
+			const data = await this.store.readBlob(hash);
+			if (data === undefined) { this.blobs.delete(hash); return; }
+			batch.blobs.push({ hash, data });
+			add(jsonBytes(data) + BLOB_OVERHEAD, { kind: "blob", hash });
 		};
 		for (const { record } of this.requests.values()) {
-			const { blobs, bytes } = await addBlobs(record.blocks);
-			const total = bytes + jsonBytes(record);
-			if (!fits(total)) break;
-			for (const blob of blobs) { sent.add(blob.hash); batch.blobs.push(blob); }
+			if (!this.sendable(record)) continue;
+			for (const hash of record.blocks) {
+				if (!needed(hash)) continue;
+				const blob = this.blobs.get(hash)!;
+				if (oversized(blob.size + BLOB_OVERHEAD)) { solo ??= soloBlob(hash); continue; }
+				if (!room(blob.size + BLOB_OVERHEAD)) continue;
+				const data = await this.store.readBlob(hash);
+				if (data === undefined) { this.blobs.delete(hash); continue; }
+				const bytes = jsonBytes(data) + BLOB_OVERHEAD;
+				if (oversized(bytes)) { solo ??= soloBlob(hash); continue; }
+				if (!room(bytes)) continue;
+				batch.blobs.push({ hash, data });
+				inBatch.add(hash);
+				add(bytes, { kind: "blob", hash });
+			}
+			if (record.blocks.some(needed)) continue;
+			const bytes = jsonBytes(wireRecord(record)) + 2;
+			if (oversized(bytes)) { solo ??= async () => { batch.requests.push(record); add(bytes, { kind: "request", id: record.id }); }; continue; }
+			if (!room(bytes)) continue;
 			batch.requests.push(record);
-			size += total;
-			items++;
+			add(bytes, { kind: "request", id: record.id });
 		}
-		for (const hash of [...this.blobs.keys()]) {
-			if (sent.has(hash)) continue;
-			const { blobs, bytes } = await addBlobs([hash]);
-			if (!blobs.length) continue;
-			if (!fits(bytes)) break;
-			sent.add(hash);
-			batch.blobs.push(...blobs);
-			size += bytes;
-			items++;
-		}
-		return items ? batch : undefined;
+
+		if (!batch.units && solo) await solo();
+		return batch.units ? batch : undefined;
 	}
 
 	private post(body: Buffer): Promise<{ status: number; text: string }> {
@@ -458,7 +569,7 @@ export class Uploader {
 			...(batch.streams.length ? { streams: batch.streams } : {}),
 			...(batch.documents.length ? { documents: batch.documents.map(({ streamKey: _, ...document }) => document) } : {}),
 			...(batch.blobs.length ? { blobs: batch.blobs } : {}),
-			...(batch.requests.length ? { requests: batch.requests } : {}),
+			...(batch.requests.length ? { requests: batch.requests.map(wireRecord) } : {}),
 		});
 		let response: { status: number; text: string };
 		try {
@@ -496,22 +607,95 @@ export class Uploader {
 			await this.store.saveStream(stream.state);
 			return "progress";
 		}
-		if (response.status === 413 && this.budget > MIN_BATCH_BYTES) {
-			this.budget = Math.max(MIN_BATCH_BYTES, Math.floor(this.budget / 2));
-			return "progress";
-		}
+		if (response.status === 413) return await this.tooLarge(batch);
 		this.noteError(`server answered ${response.status}${response.text ? `: ${response.text.slice(0, 200)}` : ""}`);
 		return "retry";
 	}
 
+	/** Smaller batches first; a single item that keeps getting 413 is parked so the rest of the queue moves on. */
+	private async tooLarge(batch: Batch): Promise<Outcome> {
+		if (batch.units > 1) {
+			if (this.budget > MIN_BATCH_BYTES) this.budget = Math.max(MIN_BATCH_BYTES, Math.floor(this.budget / 2));
+			else this.oneItem = true;
+			return "progress";
+		}
+		const item = batch.first!;
+		const id = itemId(item);
+		const strikes = (this.strikes.get(id) ?? 0) + 1;
+		if (strikes < MAX_TOO_LARGE) {
+			this.strikes.set(id, strikes);
+			this.noteError(`the server refused ${id} as too large (413)`);
+			return "retry";
+		}
+		this.strikes.delete(id);
+		this.failures = 0;
+		await this.park(item);
+		return "progress";
+	}
+
+	private async park(item: Item): Promise<void> {
+		let what: string;
+		if (item.kind === "line") {
+			const stream = this.streams.get(item.key);
+			what = `the line at byte ${item.offset} of ${item.key}`;
+			if (stream) {
+				// Later lines of the stream depend on this one, so the stream stops here.
+				stream.state.stopped = `the line at byte ${item.offset} is larger than the server accepts (413)`;
+				stream.state.updatedAt = new Date().toISOString();
+				await this.store.saveStream(stream.state);
+			}
+		} else if (item.kind === "blob") {
+			what = `block ${item.hash}`;
+			await this.store.parkBlob(item.hash);
+			this.parked.set(item.hash, this.blobs.get(item.hash)?.size ?? 0);
+			this.blobs.delete(item.hash);
+		} else if (item.kind === "request") {
+			what = `request ${item.id}`;
+			const pending = this.requests.get(item.id);
+			await this.store.parkRequest(item.id);
+			this.parked.set(`${item.id}.json`, pending?.bytes ?? 0);
+			if (pending) await this.finish(pending.record, false);
+		} else {
+			what = `document ${item.key}`;
+			const document = this.documents.get(item.key);
+			if (document) {
+				const name = encodeURIComponent(item.key);
+				await this.store.parkDocument(name, document.content);
+				this.parked.set(name, Buffer.byteLength(document.content));
+				this.documents.delete(item.key);
+				const stream = this.streams.get(document.streamKey);
+				if (stream) {
+					stream.state.docs = { ...stream.state.docs, [document.key]: document.sha256 };
+					await this.store.saveStream(stream.state);
+				}
+			}
+		}
+		this.noteError(`parked ${what}: the server keeps refusing it as too large (413); it stays in ${this.store.parked}`);
+	}
+
+	/** Forgets a request and deletes the block texts no other pending request references. */
+	private async finish(record: SpooledRequest, deleteRecord = true): Promise<void> {
+		this.requests.delete(record.id);
+		this.strikes.delete(itemId({ kind: "request", id: record.id }));
+		if (deleteRecord) await this.store.deleteRequest(record.id);
+		for (const hash of record.blocks) {
+			const blob = this.blobs.get(hash);
+			if (!blob || --blob.refs > 0) continue;
+			this.blobs.delete(hash);
+			await this.store.deleteBlob(hash);
+		}
+	}
+
 	private async accepted(batch: Batch, body: Record<string, unknown>): Promise<Outcome> {
 		this.failures = 0;
+		this.oneItem = false;
 		this.lastSuccess = Date.now();
 		let progressed = batch.requests.length + batch.blobs.length > 0;
 		const lengths = body.streams && typeof body.streams === "object" ? body.streams as Record<string, { length?: unknown }> : {};
 		for (const item of batch.streams) {
 			const stream = this.streams.get(item.key);
 			if (!stream) continue;
+			this.strikes.delete(itemId({ kind: "line", key: item.key, offset: item.offset }));
 			const reported = lengths[item.key]?.length;
 			const length = typeof reported === "number" ? reported : batch.ends.get(item.key)!;
 			if (length !== stream.state.length) progressed = true;
@@ -522,6 +706,7 @@ export class Uploader {
 		}
 		for (const document of batch.documents) {
 			progressed = true;
+			this.strikes.delete(itemId({ kind: "document", key: document.key }));
 			const stream = this.streams.get(document.streamKey);
 			if (this.documents.get(document.key)?.sha256 === document.sha256) this.documents.delete(document.key);
 			if (stream) {
@@ -529,33 +714,33 @@ export class Uploader {
 				await this.store.saveStream(stream.state);
 			}
 		}
+		const missing = new Set(Array.isArray(body.missingBlobs) ? body.missingBlobs.filter((hash): hash is string => typeof hash === "string") : []);
 		const newlyAcked: string[] = [];
 		for (const { hash } of batch.blobs) {
-			this.blobs.delete(hash);
+			this.strikes.delete(itemId({ kind: "blob", hash }));
+			if (missing.has(hash)) continue;
 			this.acked.delete(hash);
 			this.acked.add(hash);
 			newlyAcked.push(hash);
-			await this.store.deleteBlob(hash);
 		}
-		for (const record of batch.requests) {
-			this.requests.delete(record.id);
-			await this.store.deleteRequest(record.id);
-		}
-		const missing = Array.isArray(body.missingBlobs) ? body.missingBlobs.filter((hash): hash is string => typeof hash === "string") : [];
+		// The server lost these, or never had them: send them again with the requests that need them.
+		for (const hash of missing) this.acked.delete(hash);
 		let unavailable = 0;
-		for (const hash of missing) {
-			// Blobs still on disk go out with the next batch; the rest were acknowledged by a server that lost them.
-			if (this.blobs.has(hash)) continue;
-			this.acked.delete(hash);
-			unavailable++;
+		for (const record of batch.requests) {
+			const pending = this.requests.get(record.id);
+			const lacking = record.blocks.filter((hash) => missing.has(hash) && !this.parked.has(hash));
+			const resend = lacking.filter((hash) => this.blobs.has(hash)).length;
+			if (resend && pending && ++pending.missingRounds <= MAX_MISSING_ROUNDS) continue;
+			unavailable += lacking.length;
+			await this.finish(record);
 		}
-		if (unavailable) this.noteError(`the server is missing ${unavailable} blob(s) that are no longer spooled; affected requests stay incomplete`);
+		if (unavailable) this.noteError(`the server is missing ${unavailable} block(s) that cannot be sent; affected requests stay incomplete`);
 		for (const hash of this.acked) {
 			if (this.acked.size <= MAX_ACKED) break;
 			this.acked.delete(hash);
 		}
 		this.ackedAppends += newlyAcked.length;
-		if (this.ackedAppends > MAX_ACKED) { this.ackedAppends = 0; await this.store.rewriteAcked([...this.acked]); }
+		if (this.ackedAppends > MAX_ACKED) { this.ackedAppends = 0; await this.store.rewriteAcked(this.options.url, [...this.acked]); }
 		else await this.store.appendAcked(newlyAcked);
 		if (!progressed) {
 			this.noteError("the server accepted a batch without advancing any stream");

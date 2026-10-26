@@ -4,6 +4,8 @@ import type { AddressInfo } from "node:net";
 /** An OpenAI chat-completions endpoint that records each raw request body and streams a text reply. */
 export class MockProvider {
 	readonly bodies: string[] = [];
+	/** Send the first chunk of each reply and keep the stream open. */
+	hold = false;
 	private server?: Server;
 	private count = 0;
 	port = 0;
@@ -21,6 +23,7 @@ export class MockProvider {
 					`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: 1, model: "mock-model", choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
 				response.writeHead(200, { "content-type": "text/event-stream" });
 				response.write(chunk({ role: "assistant", content: `reply ${this.count}` }, null));
+				if (this.hold) return;
 				response.write(chunk({}, "stop", { usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } }));
 				response.end("data: [DONE]\n\n");
 			});
