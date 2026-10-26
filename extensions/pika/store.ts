@@ -32,9 +32,13 @@ export interface RequestRecord {
 	blocks: string[];
 }
 
-/** A spooled request. `awaiting` is local: the capturing uploader still waits for the assistant message. */
+/**
+ * A spooled request. `awaiting` is local: the capturing uploader still waits for the assistant
+ * message. `host` and `started` (the process start time as the OS reports it) tell the process
+ * that holds it apart from a later one with the same pid.
+ */
 export interface SpooledRequest extends RequestRecord {
-	awaiting?: { pid: number; owner: string };
+	awaiting?: { pid: number; owner: string; host?: string; started?: string };
 }
 
 export const MAX_ACKED = 100_000;

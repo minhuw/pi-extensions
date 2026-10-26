@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Type } from "typebox";
@@ -10,7 +10,7 @@ import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../in
 import { currentUploader, releaseUploader, Uploader } from "../uploader.ts";
 import { MockIngest } from "./support/ingest-server.ts";
 import { MockProvider } from "./support/provider-server.ts";
-import { readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
+import { exitedPid, readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
 let workspace: Workspace;
 let ingest: MockIngest;
@@ -152,7 +152,7 @@ it("splits payloads by the spec's block rules", () => {
 	expect(split.data.get(messages[0]!.$pika)).toBe(JSON.stringify(payload.messages[0]));
 });
 
-/** What a crash leaves: the spool on disk, and none of pika's process state. */
+/** What a crash leaves: the spool on disk, held by a process that has exited, and none of pika's process state. */
 async function simulateCrash(): Promise<void> {
 	const uploader = currentUploader();
 	if (uploader) await releaseUploader(uploader);
@@ -160,6 +160,13 @@ async function simulateCrash(): Promise<void> {
 	delete global[Symbol.for("pi-extensions.pika")];
 	const hooks = global[CHILD_SESSION_HOOKS] as Set<ChildSessionHook> | undefined;
 	for (const hook of hooks ?? []) if (hook.name === "pika") hooks!.delete(hook);
+	const dir = join(workspace.pikaDir, "spool", "requests");
+	const pid = exitedPid();
+	for (const name of await readdir(dir)) {
+		if (!name.endsWith(".json")) continue;
+		const record = JSON.parse(await readFile(join(dir, name), "utf8")) as { awaiting?: object };
+		if (record.awaiting) await writeFile(join(dir, name), JSON.stringify({ ...record, awaiting: { ...record.awaiting, pid } }));
+	}
 }
 
 it("spools a payload when the provider request starts, so a crash mid-stream still delivers it", async () => {

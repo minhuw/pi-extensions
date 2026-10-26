@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { open, readFile, stat } from "node:fs/promises";
 import { request as httpRequest, type ClientRequest } from "node:http";
@@ -28,8 +29,13 @@ const MAX_GAP_RETRIES = 3;
 const STOP_WAIT_MS = 1_000;
 /** Unreferenced spooled blobs younger than this may belong to a request another process is spooling. */
 const ORPHAN_BLOB_AGE_MS = 60_000;
+/** How long another process counts as alive, while it holds a request, before it is checked again. */
+const HELD_CHECK_MS = 5_000;
+/** A request held by a process on another host, which cannot be checked from here, is uploaded as it is after this. */
+const FOREIGN_HOST_HOLD_MS = 6 * 60 * 60 * 1000;
 
 const gzipAsync = promisify(gzip);
+const execFileAsync = promisify(execFile);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export interface UploaderOptions {
@@ -38,6 +44,15 @@ export interface UploaderOptions {
 	/** `<agentDir>/pika` */
 	dir: string;
 	piVersion?: string;
+	/** This process as recorded in the requests it holds; tests substitute another one. */
+	owner?: OwnerProcess;
+}
+
+/** A process that holds requests: its pid, host, and start time as the OS reports it, when known. */
+export interface OwnerProcess {
+	pid: number;
+	host: string;
+	started?: string;
 }
 
 export interface UploaderStatus {
@@ -82,6 +97,7 @@ interface PendingDocument {
 }
 
 interface PendingRequest {
+	/** The version last read or written; other processes may since have completed or removed the file. */
 	record: SpooledRequest;
 	bytes: number;
 	missingRounds: number;
@@ -141,6 +157,31 @@ function alive(pid: number): boolean {
 	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
+let bootId: Promise<string> | undefined;
+
+/** When `pid` started, as the OS reports it, so a reused pid does not pass for an exited process; undefined if unknown. */
+export async function processStart(pid: number): Promise<string | undefined> {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+	try {
+		if (process.platform === "linux") {
+			const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+			// Field 22, counted after the command name, which may contain spaces and parentheses.
+			const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+			bootId ??= readFile("/proc/sys/kernel/random/boot_id", "utf8").then((text) => text.trim(), () => "");
+			return ticks ? `${await bootId}:${ticks}` : undefined;
+		}
+		if (process.platform === "win32") return undefined;
+		const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C" }, timeout: 5_000 });
+		return stdout.trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+let thisProcess: Promise<OwnerProcess> | undefined;
+const currentProcess = () => thisProcess ??= processStart(process.pid)
+	.then((started) => ({ pid: process.pid, host: hostname(), ...(started ? { started } : {}) }));
+
 /**
  * Process-wide uploader. Session entries are read from their source files between the
  * acknowledged cursor and the last complete line, so the file itself is the durable queue;
@@ -161,6 +202,11 @@ export class Uploader {
 	private readonly strikes = new Map<string, number>();
 	private readonly documents = new Map<string, PendingDocument>();
 	private readonly herderRuns = new Set<string>();
+	private self: OwnerProcess = { pid: process.pid, host: hostname() };
+	/** Whether the processes holding requests read from the spool were alive when last checked. */
+	private readonly owners = new Map<string, { alive: boolean; at: number }>();
+	private heldElsewhere = false;
+	private heldCheckedAt = 0;
 	private spool: Promise<void> = Promise.resolve();
 	private flushing?: Promise<void>;
 	private again = false;
@@ -177,9 +223,10 @@ export class Uploader {
 	private lastError?: { at: number; message: string };
 	private halted?: string;
 
-	constructor(readonly options: UploaderOptions) {
+	/** `after` is the stop of the uploader this one replaces in the same process, so its spooled requests are loaded too. */
+	constructor(readonly options: UploaderOptions, after?: Promise<void>) {
 		this.store = new Store(options.dir);
-		this.ready = this.load().catch((error) => this.noteError(`loading local state: ${errorText(error)}`));
+		this.ready = this.load(after).catch((error) => this.noteError(`loading local state: ${errorText(error)}`));
 		this.scanTimer = setInterval(() => { this.scan().catch((error) => this.noteError(errorText(error))); }, SCAN_INTERVAL_MS);
 		this.scanTimer.unref();
 	}
@@ -190,7 +237,9 @@ export class Uploader {
 		this.lastError = { at: Date.now(), message };
 	}
 
-	private async load(): Promise<void> {
+	private async load(after?: Promise<void>): Promise<void> {
+		await after;
+		this.self = this.options.owner ?? await currentProcess();
 		await this.store.init();
 		// Acknowledgements hold only for the server that gave them.
 		const acked = await this.store.loadAcked();
@@ -254,7 +303,7 @@ export class Uploader {
 
 	/**
 	 * Spools a request and its block texts. With `awaiting`, it is held back until
-	 * `completeRequest`; if this uploader ends first, a later one uploads it as it is.
+	 * `completeRequest`; if this process ends first, a later one uploads it as it is.
 	 */
 	enqueueRequest(input: RequestInput, payload: PayloadSource, options: { awaiting?: boolean } = {}): Promise<void> {
 		return this.task(async () => {
@@ -262,7 +311,7 @@ export class Uploader {
 			const split = splitPayload(value);
 			const record: SpooledRequest = {
 				...input, skeleton: split.skeleton, blocks: split.blocks,
-				...(options.awaiting ? { awaiting: { pid: process.pid, owner: this.id } } : {}),
+				...(options.awaiting ? { awaiting: { ...this.self, owner: this.id } } : {}),
 			};
 			for (const [hash, text] of split.data) {
 				if (this.parked.has(hash)) continue;
@@ -277,15 +326,19 @@ export class Uploader {
 		});
 	}
 
-	/** Rewrites a held request with what its assistant message adds, if anything, and releases it for upload. */
+	/**
+	 * Rewrites a request held in this process with what its assistant message adds, if anything,
+	 * and releases it for upload. An uploader this one replaced may have spooled it.
+	 */
 	completeRequest(id: string, completion: RequestCompletion = {}): Promise<void> {
 		return this.task(async () => {
-			const pending = this.requests.get(id);
-			if (!pending || pending.record.awaiting?.owner !== this.id) return;
-			const { awaiting: _, ...record } = pending.record;
+			const held = await this.store.loadRequest(id);
+			if (!held?.awaiting || !this.holds(held.awaiting)) return;
+			const { awaiting: _, ...record } = held;
 			for (const [key, value] of Object.entries(completion)) if (value !== undefined) (record as Record<string, unknown>)[key] = value;
-			pending.bytes = await this.store.saveRequest(record);
-			pending.record = record;
+			const bytes = await this.store.saveRequest(record);
+			const pending = this.requests.get(id);
+			if (pending) { pending.record = record; pending.bytes = bytes; }
 			this.poke();
 		});
 	}
@@ -340,6 +393,8 @@ export class Uploader {
 		if (this.scanning || this.closed) return;
 		this.scanning = true;
 		try {
+			// Requests held elsewhere go out once their process completes them or is gone.
+			if (this.heldElsewhere && Date.now() - this.heldCheckedAt >= HELD_CHECK_MS) this.poke(0);
 			for (const stream of this.streams.values()) {
 				if (stream.open === 0 || stream.state.stopped) continue;
 				const info = await stat(stream.state.path).catch(() => undefined);
@@ -433,12 +488,50 @@ export class Uploader {
 		}
 	}
 
-	/** A held request is uploaded once its call completes, or as it is once the uploader that holds it is gone. */
-	private sendable(record: SpooledRequest): boolean {
-		const { awaiting } = record;
-		if (!awaiting) return true;
-		if (awaiting.owner === this.id) return false;
-		return awaiting.pid === process.pid || !alive(awaiting.pid);
+	/** Whether a call is still streaming in this process; its assistant message comes through `completeRequest`. */
+	private holds(awaiting: NonNullable<SpooledRequest["awaiting"]>): boolean {
+		const { self } = this;
+		return awaiting.owner === this.id
+			|| (awaiting.pid === self.pid && (awaiting.host ?? self.host) === self.host && awaiting.started === self.started);
+	}
+
+	/** Whether the process holding a request may still complete it. */
+	private async holderAlive(record: SpooledRequest): Promise<boolean> {
+		const awaiting = record.awaiting!;
+		if ((awaiting.host ?? this.self.host) !== this.self.host) return Date.now() - Date.parse(record.at) < FOREIGN_HOST_HOLD_MS;
+		const known = this.owners.get(awaiting.owner);
+		if (known && (!known.alive || Date.now() - known.at < HELD_CHECK_MS)) return known.alive;
+		let result = alive(awaiting.pid);
+		if (result && awaiting.started !== undefined) {
+			const started = await processStart(awaiting.pid);
+			result = started === undefined || started === awaiting.started;
+		}
+		this.owners.set(awaiting.owner, { alive: result, at: Date.now() });
+		return result;
+	}
+
+	/**
+	 * Re-reads a request before it is sent, since another process may have uploaded it or completed
+	 * it. A held request goes out once its call completes, or as it is once its process is gone.
+	 */
+	private async sendable(pending: PendingRequest): Promise<boolean> {
+		if (pending.record.awaiting && this.holds(pending.record.awaiting)) return false;
+		if (!(await this.reload(pending))) return false;
+		const { record } = pending;
+		if (!record.awaiting) return true;
+		if (this.holds(record.awaiting)) return false;
+		if (!(await this.holderAlive(record))) return true;
+		this.heldElsewhere = true;
+		return false;
+	}
+
+	/** Replaces a request with its current file; false, and forgotten, once another process removed it. */
+	private async reload(pending: PendingRequest): Promise<boolean> {
+		const record = await this.store.loadRequest(pending.record.id);
+		if (!record) { this.forget(pending.record); return false; }
+		pending.record = record;
+		pending.bytes = jsonBytes(record);
+		return true;
 	}
 
 	/**
@@ -507,8 +600,12 @@ export class Uploader {
 			batch.blobs.push({ hash, data });
 			add(jsonBytes(data) + BLOB_OVERHEAD, { kind: "blob", hash });
 		};
-		for (const { record } of this.requests.values()) {
-			if (!this.sendable(record)) continue;
+		this.heldElsewhere = false;
+		this.heldCheckedAt = Date.now();
+		for (const pending of [...this.requests.values()]) {
+			if (!oversized(pending.bytes) && !room(pending.bytes)) continue;
+			if (!(await this.sendable(pending))) continue;
+			const { record } = pending;
 			for (const hash of record.blocks) {
 				if (!needed(hash)) continue;
 				const blob = this.blobs.get(hash)!;
@@ -673,17 +770,25 @@ export class Uploader {
 		this.noteError(`parked ${what}: the server keeps refusing it as too large (413); it stays in ${this.store.parked}`);
 	}
 
-	/** Forgets a request and deletes the block texts no other pending request references. */
-	private async finish(record: SpooledRequest, deleteRecord = true): Promise<void> {
+	/** Forgets a request and returns the spooled blocks no other pending request references. */
+	private forget(record: SpooledRequest): string[] {
 		this.requests.delete(record.id);
 		this.strikes.delete(itemId({ kind: "request", id: record.id }));
-		if (deleteRecord) await this.store.deleteRequest(record.id);
+		const unused: string[] = [];
 		for (const hash of record.blocks) {
 			const blob = this.blobs.get(hash);
 			if (!blob || --blob.refs > 0) continue;
 			this.blobs.delete(hash);
-			await this.store.deleteBlob(hash);
+			unused.push(hash);
 		}
+		return unused;
+	}
+
+	/** Forgets a request and deletes the block texts no other pending request references. */
+	private async finish(record: SpooledRequest, deleteRecord = true): Promise<void> {
+		const unused = this.forget(record);
+		if (deleteRecord) await this.store.deleteRequest(record.id);
+		for (const hash of unused) await this.store.deleteBlob(hash);
 	}
 
 	private async accepted(batch: Batch, body: Record<string, unknown>): Promise<Outcome> {
@@ -773,8 +878,7 @@ const shared = globalThis as { [UPLOADER]?: Uploader };
 export function acquireUploader(options: UploaderOptions): Uploader {
 	const current = shared[UPLOADER];
 	if (current && !current.isClosed && current.options.url === options.url && current.options.token === options.token && current.options.dir === options.dir) return current;
-	if (current) void current.stop();
-	const uploader = new Uploader(options);
+	const uploader = new Uploader(options, current?.stop());
 	shared[UPLOADER] = uploader;
 	return uploader;
 }

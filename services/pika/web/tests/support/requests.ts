@@ -112,3 +112,23 @@ export const anthropicCachedPayloads = (() => {
 		third: { ...rest, messages: [{ role: "user", content: "Fix the failing test" }, call, result(false), answer, { role: "user", content: [{ type: "text", text: "Thanks", cache_control: cache }] }] },
 	};
 })();
+
+/**
+ * Two consecutive Bedrock Converse requests for a Claude model as pi-ai sends them with prompt
+ * caching on: a separate `cachePoint` element ends the system prompt and the last user message.
+ */
+export const bedrockCachedPayloads = (() => {
+	const cachePoint = { cachePoint: { type: "default" } };
+	const base = {
+		modelId: "anthropic.claude-sonnet-4-5",
+		system: [{ text: SYSTEM }, cachePoint],
+		inferenceConfig: { maxTokens: 32000 },
+		toolConfig: { tools: [{ toolSpec: { name: "read", description: "Read the contents of a file.", inputSchema: { json: { type: "object" } } } }] },
+	};
+	const call = { role: "assistant", content: [{ toolUse: { toolUseId: "toolu_1", name: "read", input: { path: "src/api.ts" } } }] };
+	const result = { toolResult: { toolUseId: "toolu_1", content: [{ text: "export const base = '/';" }], status: "success" } };
+	return {
+		first: { ...base, messages: [{ role: "user", content: [{ text: "Fix the failing test" }, cachePoint] }] },
+		second: { ...base, messages: [{ role: "user", content: [{ text: "Fix the failing test" }] }, call, { role: "user", content: [result, cachePoint] }] },
+	};
+})();

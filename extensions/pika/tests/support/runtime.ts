@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,6 +110,11 @@ export async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs
 		if (Date.now() - started > timeoutMs) throw new Error(`timed out after ${timeoutMs} ms waiting for ${label}`);
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
+}
+
+/** The pid of a process that has already exited. */
+export function exitedPid(): number {
+	return spawnSync(process.execPath, ["-e", ""]).pid!;
 }
 
 export async function readText(path: string): Promise<string> {

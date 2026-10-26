@@ -8,6 +8,7 @@ import { mockLayout, renderApp, renderWithApi } from "./support/render";
 import {
 	anthropicCachedPayloads,
 	anthropicPayload,
+	bedrockCachedPayloads,
 	googlePayload,
 	modelRequest,
 	openAiChatPayload,
@@ -274,5 +275,14 @@ describe("payload normalization", () => {
 		// A changed message still ends the common prefix.
 		const edited = { ...third, messages: [{ role: "user", content: "Fix the other test" }, ...third.messages.slice(1)] };
 		expect(newMessageStart(messages(edited), messages(second))).toBe(0);
+	});
+
+	it("ignores moved Bedrock cachePoint elements when counting new messages", () => {
+		const { first, second } = bedrockCachedPayloads;
+		const messages = (payload: unknown) => normalizeRequest(payload, { api: "bedrock-converse-stream" }).messages;
+		expect(detectShape(second, { api: "bedrock-converse-stream" })).toBe("anthropic-messages");
+		expect(newMessageStart(messages(second), messages(first))).toBe(1);
+		const edited = { ...second, messages: [{ role: "user", content: [{ text: "Fix the other test" }] }, ...second.messages.slice(1)] };
+		expect(newMessageStart(messages(edited), messages(first))).toBe(0);
 	});
 });

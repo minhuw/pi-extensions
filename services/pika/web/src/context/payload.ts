@@ -460,16 +460,19 @@ export function normalizeRequest(payload: unknown, hints: { fidelity?: string; a
 	return { shape, ...parts, settings };
 }
 
+const isCachePoint = (block: unknown) => isRecord(block) && Object.keys(block).length === 1 && "cachePoint" in block;
+
 /**
- * A message without prompt-caching markers. Providers mark only the last user message with
- * `cache_control`, turning string content into a single text block to do so, so the same message
- * differs between consecutive requests.
+ * A message without prompt-caching markers. Providers mark only the last user message, so the same
+ * message differs between consecutive requests: Anthropic adds `cache_control`, turning string
+ * content into a single text block to hold it, and Bedrock appends a `cachePoint` content element.
  */
 function comparable(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(comparable);
 	if (!isRecord(value)) return value;
 	const out: Rec = {};
 	for (const [key, item] of Object.entries(value)) if (key !== "cache_control") out[key] = comparable(item);
+	if (Array.isArray(out.content)) out.content = out.content.filter((block) => !isCachePoint(block));
 	if (Array.isArray(out.content) && out.content.length === 1) {
 		const [block] = out.content;
 		if (isRecord(block) && block.type === "text" && typeof block.text === "string" && Object.keys(block).length === 2) out.content = block.text;
