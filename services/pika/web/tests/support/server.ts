@@ -8,7 +8,10 @@ import type {
 	Entry,
 	Facets,
 	ModelRequest,
+	OnlineSession,
 	Pairing,
+	RelayEvent,
+	RelayTarget,
 	RunDetail,
 	SearchHit,
 	SessionDetail,
@@ -54,6 +57,10 @@ function page<T>(items: T[], params: URLSearchParams, defaultLimit: number) {
 
 const UPDATES_TURN_LIMIT = 50;
 
+/** Relay limits the fake enforces (docs/RELAY.md). */
+const RELAY_MAX_TEXT_BYTES = 32 * 1024;
+const RELAY_EVENTS_MAX = 500;
+
 function withoutChildren({ children: _children, ...rest }: SessionDetail) {
 	return rest;
 }
@@ -74,6 +81,10 @@ export function createFakeServer({
 	browserSessions = [],
 	loginRetryAfter = 840,
 	legacyMe = false,
+	features = ["relay"],
+	relay,
+	online = [],
+	relayEvents = [],
 }: {
 	base?: string;
 	sessions?: FakeSession[];
@@ -97,6 +108,14 @@ export function createFakeServer({
 	loginRetryAfter?: number;
 	/** Answers `me` without `authMode`, as servers older than 0.2 do. */
 	legacyMe?: boolean;
+	/** Health's `features`; `null` leaves it out, as servers older than 0.3 do. */
+	features?: string[] | null;
+	/** Whether the relay routes answer; otherwise they say `relay_disabled`. Defaults to health listing relay. */
+	relay?: boolean;
+	/** Sessions online through relay. */
+	online?: OnlineSession[];
+	/** Relay events, newest first. */
+	relayEvents?: RelayEvent[];
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
@@ -110,7 +129,19 @@ export function createFakeServer({
 		devices: [...devices],
 		pairings: [...pairings],
 		browserSessions: [...browserSessions],
+		relay: relay ?? features?.includes("relay") === true,
+		online: [...online],
+		relayEvents: [...relayEvents],
+		/** The reason the next web sends are refused with, if any. */
+		relayFailure: undefined as string | undefined,
+		/** Whether online targets acknowledge in time, so sends report `delivered`; otherwise `queued`. */
+		relayAck: true,
+		/** How many of the next health requests fail with a 503. */
+		healthFailures: 0,
+		/** While set, web sends wait for it before they are answered. */
+		relayHold: undefined as Promise<void> | undefined,
 	};
+	let relaySent = 0;
 	const mutations: Mutation[] = [];
 	const findPairing = (code: string) => state.pairings.findIndex((item) => normalizePairingCode(item.code) === normalizePairingCode(code));
 	const signOutBrowser = () => {
@@ -121,6 +152,14 @@ export function createFakeServer({
 	const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = new URL(String(input), "http://localhost");
 		calls.push(`${url.pathname}${url.search}`);
+		if (url.pathname === withBase(base, "api/health")) {
+			if (state.healthFailures > 0) {
+				state.healthFailures -= 1;
+				return json(503, { error: "unavailable" });
+			}
+			const health = { ok: true, version: features === null ? "0.2.0" : "0.3.0", basePath: base };
+			return json(200, features === null ? health : { ...health, features });
+		}
 		if (!url.pathname.startsWith(prefix)) return json(404, { error: "not found" });
 		const parts = url.pathname.slice(prefix.length).split("/").map(decodeURIComponent);
 		const params = url.searchParams;
@@ -207,6 +246,57 @@ export function createFakeServer({
 			}
 		}
 
+		if (parts[0] === "relay") {
+			if (!state.relay) return json(404, { error: "relay_disabled" });
+			if (parts[1] === "sessions" && method === "GET") {
+				// By device, then the newest connection first.
+				const items = [...state.online].sort(
+					(a, b) => a.device.localeCompare(b.device) || Date.parse(b.connectedAt) - Date.parse(a.connectedAt),
+				);
+				return json(200, { items });
+			}
+			if (parts[1] === "events" && method === "GET") {
+				const limit = Math.min(Number(params.get("limit") ?? 100), RELAY_EVENTS_MAX);
+				return json(200, { items: state.relayEvents.slice(0, limit) });
+			}
+			if (parts[1] === "messages" && method === "POST") {
+				if (state.relayHold) await state.relayHold;
+				const request = (body ?? {}) as { to?: string; text?: string; urgent?: boolean };
+				const to = request.to ?? "";
+				const text = request.text ?? "";
+				const onlineTarget = state.online.find((item) => item.id === to);
+				const recorded = byId.get(to)?.detail;
+				const target: RelayTarget = onlineTarget
+					? { sessionId: to, device: onlineTarget.device, name: onlineTarget.name, title: onlineTarget.title, project: onlineTarget.project }
+					: recorded
+						? { sessionId: to, device: recorded.device, title: recorded.title, project: recorded.project }
+						: { sessionId: to };
+				let reason: string | undefined;
+				if (!text || !/^[A-Za-z0-9._-]{1,128}$/.test(to)) reason = "invalid";
+				else if (new TextEncoder().encode(text).length > RELAY_MAX_TEXT_BYTES) reason = "too_large";
+				else if (state.relayFailure) reason = state.relayFailure;
+				else if (!onlineTarget && !recorded) reason = "unknown_session";
+				relaySent += 1;
+				const id = `web-${relaySent}`;
+				const at = new Date().toISOString();
+				const status = reason ? "rejected" : onlineTarget && state.relayAck ? "delivered" : "queued";
+				state.relayEvents.unshift({
+					id,
+					at,
+					from: { kind: "web" },
+					to: target,
+					status,
+					reason,
+					deliveredAt: status === "delivered" ? at : undefined,
+					urgent: request.urgent === true,
+					hops: 0,
+					text,
+				});
+				if (reason) return json(reason === "rate_limited" || reason === "mailbox_full" ? 429 : 400, { error: reason });
+				return json(200, { id, status, to: target });
+			}
+			return json(405, { error: "method not allowed" });
+		}
 		if (parts[0] === "facets") {
 			return json(
 				200,

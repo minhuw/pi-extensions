@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQueries, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Icon } from "../components/icons";
+import { Icon, type IconName } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
 import { Markdown } from "../components/Markdown";
 import { cx, EmptyState, ErrorState, Pill, Skeleton, SkeletonLines } from "../components/ui";
@@ -76,6 +76,13 @@ function WorkStrip({ turn, expanded, onToggle }: { turn: Turn; expanded: boolean
 	);
 }
 
+/** How a turn started: a user prompt, a relay message, or another extension's message. */
+function turnStart(turn: Turn): { icon: IconName; label: string } {
+	if (turn.customType === undefined) return { icon: "user", label: `Prompt ${turn.index + 1}` };
+	if (turn.customType === "relay-message") return { icon: "message", label: "Relay message" };
+	return { icon: "message", label: "Extension message" };
+}
+
 function TurnHead({
 	row,
 	active,
@@ -88,6 +95,7 @@ function TurnHead({
 	onToggle: () => void;
 }) {
 	const { turn } = row;
+	const start = turnStart(turn);
 	return (
 		<div
 			className={cx(
@@ -100,8 +108,10 @@ function TurnHead({
 			data-highlighted={highlighted || undefined}
 		>
 			<div className="mb-2 flex items-center gap-2 text-[13px] text-muted">
-				<Icon name="user" size={14} />
-				<span>Prompt {turn.index + 1}</span>
+				<Icon name={start.icon} size={14} />
+				<span title={turn.customType} data-turn-start={turn.customType ?? "prompt"}>
+					{start.label}
+				</span>
 				<span className="ml-auto">{formatDateTime(turn.at)}</span>
 			</div>
 			{turn.userText ? <Markdown text={turn.userText} /> : <div className="text-muted italic">(empty prompt)</div>}

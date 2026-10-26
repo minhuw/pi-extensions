@@ -209,6 +209,16 @@ export const Icons = {
 			<path d="M3 13.5c.6-2.4 2.6-3.8 5-3.8s4.4 1.4 5 3.8" />
 		</Svg>
 	),
+	pulse: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M1.5 8.5h3l1.8-4.5 3 8 1.9-5 .8 1.5h2.5" />
+		</Svg>
+	),
+	message: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M2.5 4c0-.6.4-1 1-1h9c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H7l-3 2.5V11h-.5c-.6 0-1-.4-1-1z" />
+		</Svg>
+	),
 	sparkle: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8l4.8-1.4z" />

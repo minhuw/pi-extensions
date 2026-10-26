@@ -1,9 +1,11 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MessageDialog } from "../src/components/MessageDialog";
 import { ContextDrawer } from "../src/context/ContextDrawer";
 import { detectShape, newMessageStart, normalizeRequest, systemSections, type PayloadShape } from "../src/context/payload";
 import type { Entry, ModelRequest } from "../src/lib/types";
-import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
+import { assistantMessage, entry, header, onlineSession, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp, renderWithApi } from "./support/render";
 import {
 	anthropicCachedPayloads,
@@ -89,6 +91,41 @@ describe("what the model saw", () => {
 
 		fireEvent.keyDown(window, { key: "Escape" });
 		await waitFor(() => expect(document.querySelector("[data-context-drawer]")).toBeNull());
+	});
+
+	it("leaves Escape to a message composer open above it", async () => {
+		const request = modelRequest("r1", anthropicPayload);
+		const server = createFakeServer({ sessions: [{ detail: summary("s1"), entries: [entry(0, header("s1"))], turns: [] }], requests: [request] });
+		const closeDrawer = vi.fn();
+		const closeDialog = vi.fn();
+		function Composer() {
+			const [open, setOpen] = useState(true);
+			const onClose = () => {
+				closeDialog();
+				setOpen(false);
+			};
+			return open ? <MessageDialog session={onlineSession("s1", { name: "Alpha" })} onClose={onClose} /> : null;
+		}
+		renderWithApi(
+			<>
+				<ContextDrawer target={{ requestId: request.id, sessionId: "s1", seq: 5 }} onClose={closeDrawer} />
+				<Composer />
+			</>,
+			server.fetch,
+		);
+		const text = within(screen.getByRole("dialog", { name: "Message Alpha" })).getByLabelText("Message text");
+		fireEvent.change(text, { target: { value: "Hello" } });
+		fireEvent.keyDown(text, { key: "Escape" });
+		expect(closeDialog).not.toHaveBeenCalled();
+		expect(closeDrawer).not.toHaveBeenCalled();
+		fireEvent.change(text, { target: { value: "" } });
+		fireEvent.keyDown(text, { key: "Escape" });
+		expect(closeDialog).toHaveBeenCalledTimes(1);
+		expect(screen.queryByRole("dialog", { name: "Message Alpha" })).toBeNull();
+		expect(closeDrawer).not.toHaveBeenCalled();
+		// Without the composer in the way, Escape is the drawer's.
+		fireEvent.keyDown(screen.getByRole("dialog", { name: "What the model saw" }), { key: "Escape", bubbles: true });
+		expect(closeDrawer).toHaveBeenCalledTimes(1);
 	});
 
 	const shapes: [string, ModelRequest, PayloadShape, string[]][] = [

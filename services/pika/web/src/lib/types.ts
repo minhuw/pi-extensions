@@ -80,6 +80,8 @@ export interface Turn {
 	cost: number;
 	tokens: Tokens;
 	finalText: string;
+	/** The `customType` of the `custom_message` that started the turn, such as `relay-message`; absent for user prompts. */
+	customType?: string;
 }
 
 export interface Entry {
@@ -210,6 +212,84 @@ export interface Pairing {
 	requestedAt: string;
 	expiresAt: string;
 	deviceExists: boolean;
+}
+
+/** `GET {base}/api/health`. `features` is missing from servers older than 0.3. */
+export interface Health {
+	ok: boolean;
+	version: string;
+	basePath: string;
+	features?: string[];
+}
+
+// Relay shapes (docs/RELAY.md).
+
+export type RelaySessionState = "idle" | "busy";
+
+/** A pi session holding an open relay connection, from `GET relay/sessions`. */
+export interface OnlineSession {
+	id: string;
+	device: string;
+	host: string;
+	name?: string;
+	title?: string;
+	cwd: string;
+	project: string;
+	model?: string;
+	state: RelaySessionState;
+	piVersion?: string;
+	connectedAt: string;
+	stateSince: string;
+	lastSeenAt: string;
+	/** Whether pika has the session's transcript. */
+	recorded: boolean;
+}
+
+export type RelaySender =
+	| { kind: "session"; sessionId: string; device: string; name?: string; title?: string; project?: string }
+	| { kind: "web" };
+
+export interface RelayTarget {
+	sessionId: string;
+	device?: string;
+	name?: string;
+	title?: string;
+	project?: string;
+}
+
+export type RelayStatus = "queued" | "delivered" | "expired" | "rejected";
+
+/** Why the server refused a message; `self` and `hop_limit` come only from sessions. */
+export type RelayRejection =
+	| "invalid"
+	| "self"
+	| "too_large"
+	| "rate_limited"
+	| "hop_limit"
+	| "unknown_session"
+	| "mailbox_full"
+	| (string & {});
+
+/** One message on the dashboard, from `GET relay/events`, updated in place as its status changes. */
+export interface RelayEvent {
+	id: string;
+	at: string;
+	from: RelaySender;
+	to: RelayTarget;
+	status: RelayStatus;
+	reason?: RelayRejection;
+	deliveredAt?: string;
+	urgent: boolean;
+	replyTo?: string;
+	hops: number;
+	text: string;
+}
+
+/** `POST relay/messages` when the server accepted the message. */
+export interface RelaySendResult {
+	id: string;
+	status: "delivered" | "queued";
+	to: RelayTarget;
 }
 
 // pi session entry and message shapes (session-format.md, message-types.md).

@@ -50,13 +50,14 @@ afterEach(() => {
 });
 
 describe("devices page", () => {
-	it("is linked from the sidebar between Herder runs and Search", async () => {
+	it("is linked from the sidebar between Active sessions and Search", async () => {
 		renderApp("/", createFakeServer({}).fetch);
 		const nav = await screen.findByRole("navigation", { name: "Main" });
+		await within(nav).findByRole("link", { name: "Active sessions" });
 		const links = within(nav)
 			.getAllByRole("link")
 			.map((link) => link.textContent);
-		expect(links.slice(0, 4)).toEqual(["Sessions", "Herder runs", "Devices", "Search"]);
+		expect(links.slice(0, 5)).toEqual(["Sessions", "Herder runs", "Active sessions", "Devices", "Search"]);
 		fireEvent.click(within(nav).getByRole("link", { name: "Devices" }));
 		expect(await screen.findByRole("heading", { name: "Devices", level: 1 })).toBeTruthy();
 	});

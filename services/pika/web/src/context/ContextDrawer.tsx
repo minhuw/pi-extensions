@@ -487,7 +487,8 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape") onClose();
+			// A dialog above the drawer, like the message composer, takes its own Escape.
+			if (event.key === "Escape" && !event.defaultPrevented) onClose();
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);

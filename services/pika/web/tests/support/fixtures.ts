@@ -1,5 +1,5 @@
 // Fixtures shaped like pi session JSONL lines (session-format.md, message-types.md).
-import type { BrowserSession, Device, Entry, RawEntry, SessionDetail, Turn } from "../../src/lib/types";
+import type { BrowserSession, Device, Entry, OnlineSession, RawEntry, RelayEvent, SessionDetail, Turn } from "../../src/lib/types";
 import type { FakePairing } from "./server";
 
 const T0 = Date.parse("2026-10-20T09:00:00.000Z");
@@ -47,6 +47,11 @@ export function userMessage(text: string, at = 1000): RawEntry {
 		timestamp: iso(at),
 		message: { role: "user", content: text, timestamp: T0 + at },
 	};
+}
+
+/** An extension's message, such as relay's `relay-message`; a turn it starts carries its `customType`. */
+export function customMessage(customType: string, content: string, at = 1000): RawEntry {
+	return { type: "custom_message", id: nextId(), parentId: null, timestamp: iso(at), customType, content, display: true };
 }
 
 export function assistantMessage(content: unknown[], at = 2000, extra: Record<string, unknown> = {}): RawEntry {
@@ -167,6 +172,45 @@ export function browserSession(id: string, extra: Partial<BrowserSession> = {}):
 		userAgent: FIREFOX_LINUX,
 		ip: "192.168.1.10",
 		current: false,
+		...extra,
+	};
+}
+
+/** A session online through relay, connected `onlineMs` before now and in its current state for the last `stateMs`. */
+export function onlineSession(id: string, extra: Partial<OnlineSession> & { onlineMs?: number; stateMs?: number } = {}): OnlineSession {
+	const { onlineMs = 3_900_000, stateMs = 180_000, ...rest } = extra;
+	const now = Date.now();
+	return {
+		id,
+		device: "mini",
+		host: "mini.lan",
+		name: `Session ${id}`,
+		cwd: "/home/me/code/pika",
+		project: "pika",
+		model: "claude-sonnet-4-5",
+		state: "idle",
+		piVersion: "1.4.0",
+		connectedAt: new Date(now - onlineMs).toISOString(),
+		stateSince: new Date(now - stateMs).toISOString(),
+		lastSeenAt: new Date(now - 5_000).toISOString(),
+		recorded: true,
+		...rest,
+	};
+}
+
+/** A relay message accepted `agoMs` before now, from one session to another. */
+export function relayEvent(id: string, agoMs = 60_000, extra: Partial<RelayEvent> = {}): RelayEvent {
+	const at = new Date(Date.now() - agoMs).toISOString();
+	return {
+		id,
+		at,
+		from: { kind: "session", sessionId: "s-a", device: "mini", name: "Planner", project: "pika" },
+		to: { sessionId: "s-b", device: "laptop", name: "Reviewer", project: "pika" },
+		status: "delivered",
+		deliveredAt: at,
+		urgent: false,
+		hops: 1,
+		text: `Message ${id}`,
 		...extra,
 	};
 }

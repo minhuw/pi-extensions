@@ -8,11 +8,12 @@ import { BUTTON, Callout, ConfirmDialog, cx, EmptyState, ErrorState, PageTitle, 
 import { ApiError, authModeOf, useApi } from "../lib/api";
 import { formatCountdown, isValidDeviceName, normalizePairingCode, orderPairings, shortUserAgent } from "../lib/devices";
 import { formatDateTime, formatRelative } from "../lib/format";
+import { LAYOUT_GUARD_MS, useNow, useSettling } from "../lib/hooks";
 import type { BrowserSession, Device, Pairing } from "../lib/types";
 
 export const PAIRINGS_POLL_MS = 2_000;
-/** How long Approve stays disabled after requests come or go, so a click aimed before the cards moved can't land on another. */
-export const LAYOUT_GUARD_MS = 1_000;
+// Approve stays disabled this long after requests come or go.
+export { LAYOUT_GUARD_MS };
 
 const PAIRINGS_KEY = ["pairings"] as const;
 const DEVICES_KEY = ["devices"] as const;
@@ -22,36 +23,6 @@ type Notice = { tone: "green" | "red"; text: string };
 
 function messageOf(cause: unknown): string {
 	return cause instanceof Error ? cause.message : String(cause);
-}
-
-/** The current time, ticking every second while `active`. */
-function useNow(active: boolean): number {
-	const [now, setNow] = useState(() => Date.now());
-	useEffect(() => {
-		if (!active) return;
-		setNow(Date.now());
-		const timer = setInterval(() => setNow(Date.now()), 1000);
-		return () => clearInterval(timer);
-	}, [active]);
-	return now;
-}
-
-/** True for `ms` after `key` changes; not when it first gets a value. */
-function useSettling(key: string | undefined, ms: number): boolean {
-	const [last, setLast] = useState(key);
-	const [changes, setChanges] = useState(0);
-	const [settled, setSettled] = useState(0);
-	// Set during render, so the render that shows the change already disables the buttons.
-	if (key !== last) {
-		setLast(key);
-		if (last !== undefined && key !== undefined) setChanges(changes + 1);
-	}
-	useEffect(() => {
-		if (changes === 0) return;
-		const timer = setTimeout(() => setSettled(changes), ms);
-		return () => clearTimeout(timer);
-	}, [changes, ms]);
-	return changes !== settled;
 }
 
 function H2({ children, aside }: { children: ReactNode; aside?: ReactNode }) {

@@ -3,10 +3,11 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
 import { useShortcuts } from "../lib/keyboard";
+import { RELAY_BADGE_POLL_MS, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
 import { Icon, type IconName } from "./icons";
-import { cx } from "./ui";
+import { cx, Pill } from "./ui";
 
 const ScrollRootContext = createContext<HTMLElement | null>(null);
 
@@ -37,7 +38,7 @@ function initialSidebarOpen(): boolean {
 	}
 }
 
-function NavItem({ to, icon, children, end }: { to: string; icon: IconName; children: ReactNode; end?: boolean }) {
+function NavItem({ to, icon, children, end, badge }: { to: string; icon: IconName; children: ReactNode; end?: boolean; badge?: ReactNode }) {
 	return (
 		<NavLink
 			to={to}
@@ -51,6 +52,7 @@ function NavItem({ to, icon, children, end }: { to: string; icon: IconName; chil
 		>
 			<Icon name={icon} className="shrink-0" />
 			<span className="truncate">{children}</span>
+			{badge}
 		</NavLink>
 	);
 }
@@ -72,6 +74,29 @@ function SidebarSection({ title, items, param, icon }: { title: string; items: s
 				</Link>
 			))}
 		</div>
+	);
+}
+
+/** Online sessions in the sidebar; hidden when the server has no relay or it is off. */
+function ActiveSessionsItem() {
+	const { sessions, availability } = useOnlineSessions(false);
+	if (availability !== "on") return null;
+	const count = sessions.data?.items.length ?? 0;
+	return (
+		<NavItem
+			to="/active"
+			icon="pulse"
+			badge={
+				count > 0 && (
+					<span className="ml-auto shrink-0" data-online-count="">
+						<Pill tone="accent">{count}</Pill>
+						<span className="sr-only"> online</span>
+					</span>
+				)
+			}
+		>
+			Active sessions
+		</NavItem>
 	);
 }
 
@@ -115,6 +140,7 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 				<NavItem to="/runs" icon="herder">
 					Herder runs
 				</NavItem>
+				<ActiveSessionsItem />
 				<NavItem to="/devices" icon="key">
 					Devices
 				</NavItem>
@@ -158,6 +184,8 @@ export function Layout({ children }: { children?: ReactNode }) {
 	const signingOutValue = useMemo(() => ({ signingOut, setSigningOut }), [signingOut]);
 	const navigate = useNavigate();
 	const { pathname } = useLocation();
+	// Keeps the sidebar badge and the session page's Online badge fresh; the Active sessions page polls faster itself.
+	useOnlineSessions(signingOut || pathname === "/active" ? false : RELAY_BADGE_POLL_MS);
 	// The search page handles `/` itself by focusing its input.
 	useShortcuts(pathname === "/search" ? {} : { "/": () => navigate("/search") });
 

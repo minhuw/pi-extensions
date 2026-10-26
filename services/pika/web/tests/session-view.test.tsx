@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildTimeline } from "../src/session/timeline";
 import {
 	assistantMessage,
+	customMessage,
 	entry,
 	header,
 	iso,
@@ -74,6 +75,41 @@ beforeEach(() => {
 afterEach(() => restore());
 
 describe("session view", () => {
+	it("labels turns started by a relay message or another extension instead of calling them prompts", async () => {
+		const relayText = "[relay] Message from Planner on mini: please rebase onto main.";
+		const session: FakeSession = {
+			detail: summary("s1", { title: "Mixed turns" }),
+			entries: [
+				entry(0, header("s1")),
+				entry(1, userMessage("Fix the parser")),
+				entry(2, customMessage("relay-message", relayText, 2000)),
+				entry(3, customMessage("herder:prompt", "/herder: run started", 3000)),
+			],
+			turns: [
+				turn(0, 1, 1, { userText: "Fix the parser" }),
+				turn(1, 2, 2, { userText: relayText, customType: "relay-message" }),
+				turn(2, 3, 3, { userText: "/herder: run started", customType: "herder:prompt" }),
+			],
+		};
+		renderApp("/s/s1", createFakeServer({ sessions: [session] }).fetch);
+		await screen.findByRole("heading", { name: "Mixed turns" });
+		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn="${index}"]`)!;
+		await waitFor(() => expect(head(2)).toBeTruthy());
+		const label = (index: number) => head(index).querySelector<HTMLElement>("[data-turn-start]")!;
+		expect(label(0).textContent).toBe("Prompt 1");
+		expect(label(0).dataset.turnStart).toBe("prompt");
+		expect(label(1).textContent).toBe("Relay message");
+		expect(label(1).dataset.turnStart).toBe("relay-message");
+		expect(label(2).textContent).toBe("Extension message");
+		expect(label(2).getAttribute("title")).toBe("herder:prompt");
+		// The text is unchanged.
+		expect(within(head(1)).getByText(relayText)).toBeTruthy();
+		// The icon is the message icon, not the person icon user prompts get.
+		const icon = (index: number) => label(index).previousElementSibling?.outerHTML;
+		expect(icon(1)).toBe(icon(2));
+		expect(icon(1)).not.toBe(icon(0));
+	});
+
 	it("shows the title, properties, and a prompt card", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1", server.fetch);

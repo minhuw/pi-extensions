@@ -6,10 +6,14 @@ import type {
 	Device,
 	Entry,
 	Facets,
+	Health,
 	Me,
 	ModelRequest,
 	Page,
+	OnlineSession,
 	Pairing,
+	RelayEvent,
+	RelaySendResult,
 	RunDetail,
 	RunSummary,
 	SearchHit,
@@ -90,8 +94,12 @@ export class PikaApi {
 		return withBase(this.base, `api/v1/${path.replace(/^\/+/, "")}`) + query(params);
 	}
 
-	private async request<T>(path: string, params: Params = {}, init?: RequestInit): Promise<T> {
-		const response = await this.fetchImpl(this.url(path, params), {
+	private request<T>(path: string, params: Params = {}, init?: RequestInit): Promise<T> {
+		return this.fetchJson(this.url(path, params), path, init);
+	}
+
+	private async fetchJson<T>(url: string, path: string, init?: RequestInit): Promise<T> {
+		const response = await this.fetchImpl(url, {
 			credentials: "same-origin",
 			...init,
 			headers: { Accept: "application/json", ...(init?.headers ?? {}) },
@@ -121,6 +129,11 @@ export class PikaApi {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body ?? {}),
 		});
+	}
+
+	/** `{base}/api/health`, outside the read API; it is always open. */
+	health(): Promise<Health> {
+		return this.fetchJson(withBase(this.base, "api/health"), "health");
 	}
 
 	facets(): Promise<Facets> {
@@ -215,6 +228,20 @@ export class PikaApi {
 
 	denyPairing(code: string): Promise<void> {
 		return this.send(`pairings/${encodeURIComponent(code)}/deny`, "POST");
+	}
+
+	relaySessions(): Promise<{ items: OnlineSession[] }> {
+		return this.request("relay/sessions");
+	}
+
+	/** The relay's recent messages, newest first; the server keeps at most 500. */
+	relayEvents(limit?: number): Promise<{ items: RelayEvent[] }> {
+		return this.request("relay/events", { limit });
+	}
+
+	/** Sends a message from the user to a session; a refusal is an `ApiError` whose message is the reason. */
+	sendRelayMessage(body: { to: string; text: string; urgent: boolean }): Promise<RelaySendResult> {
+		return this.send("relay/messages", "POST", body);
 	}
 }
 

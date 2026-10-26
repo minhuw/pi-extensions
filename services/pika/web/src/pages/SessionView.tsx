@@ -2,10 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import { Icon } from "../components/icons";
-import { Callout, ErrorState, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
+import { MessageDialog } from "../components/MessageDialog";
+import { Callout, cx, ErrorState, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
 import { ApiError, useApi } from "../lib/api";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, totalTokens } from "../lib/format";
-import type { SessionDetail } from "../lib/types";
+import { useOnlineSessions } from "../lib/relay";
+import type { OnlineSession, SessionDetail } from "../lib/types";
 import { ViewStateProvider } from "../lib/viewState";
 import { ContextButton, ContextDrawerProvider } from "../context/ContextDrawer";
 import { SessionSlotsContext, SessionViewContext, type SessionSlots } from "../session/context";
@@ -131,6 +133,11 @@ function SessionPage({ id }: { id: string }) {
 	const [params, setParams] = useSearchParams();
 	const session = useQuery({ queryKey: ["session", id], queryFn: () => api.session(id) });
 	useLiveUpdates(id, session.data);
+	// The layout keeps the online sessions fresh.
+	const relay = useOnlineSessions(false);
+	const online = relay.availability === "on" ? relay.sessions.data?.items.find((item) => item.id === id) : undefined;
+	// A snapshot, so the composer stays open if the session goes offline meanwhile.
+	const [messaging, setMessaging] = useState<OnlineSession | null>(null);
 
 	const seqParam = params.get("seq");
 	const focusSeq = seqParam !== null && /^\d+$/.test(seqParam) ? Number(seqParam) : undefined;
@@ -183,6 +190,11 @@ function SessionPage({ id }: { id: string }) {
 								<Pill tone="green">live</Pill>
 							</span>
 						)}
+						{online && (
+							<span className="mt-4 shrink-0" data-online="" title="Connected to pika relay right now">
+								<Pill tone="green">Online</Pill>
+							</span>
+						)}
 					</div>
 					<Properties items={sessionProperties(session.data)} />
 					<div className="mb-6 flex flex-wrap items-center gap-2 border-y border-line py-2 text-[13px]">
@@ -199,9 +211,20 @@ function SessionPage({ id }: { id: string }) {
 						<span className="text-muted">
 							· {formatCount(session.data.entryCount)} entries · <kbd className="mono">j</kbd>/<kbd className="mono">k</kbd> to move between prompts
 						</span>
+						{online && (
+							<button
+								type="button"
+								onClick={() => setMessaging(online)}
+								className="ml-auto flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-muted hover:bg-hover"
+								aria-label="Message this session"
+							>
+								<Icon name="message" size={14} />
+								Message
+							</button>
+						)}
 						<a
 							href={api.exportUrl(id)}
-							className="ml-auto flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-muted hover:bg-hover"
+							className={cx(!online && "ml-auto", "flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-muted hover:bg-hover")}
 							download
 						>
 							<Icon name="download" size={14} />
@@ -209,6 +232,7 @@ function SessionPage({ id }: { id: string }) {
 						</a>
 					</div>
 					<TurnList key={id} sessionId={id} showHidden={showHidden} focusSeq={focusSeq} onFocusHandled={clearFocus} />
+					{messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
 				</SessionViewContext.Provider>
 			)}
 		</div>
