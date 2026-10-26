@@ -1,0 +1,37 @@
+# pika at https://homelab.example/pika/
+# Server: pika serve --bind 127.0.0.1:7171 --base-path /pika
+# Devices: "url": "https://homelab.example/pika"
+
+{
+	servers {
+		timeouts {
+			# Device uploads are gzip batches of up to 8 MiB; allow slow links.
+			read_body 2m
+		}
+	}
+}
+
+homelab.example {
+	# The UI uses relative asset URLs, so it needs the trailing slash.
+	redir /pika /pika/
+
+	# `handle`, not `handle_path`: pika expects the /pika prefix.
+	handle /pika/* {
+		# At least the server's --max-body (32 MiB by default).
+		request_body {
+			max_size 32MiB
+		}
+
+		# Optional: authenticate in the proxy instead of PIKA_PASSWORD. Devices use
+		# their bearer tokens, so leave ingest out. Hash with `caddy hash-password`.
+		# (Caddy < 2.8 calls the directive basicauth.)
+		# @browser not path /pika/api/ingest/*
+		# basic_auth @browser {
+		# 	me $2a$14$replace-with-the-hash
+		# }
+
+		reverse_proxy 127.0.0.1:7171
+	}
+
+	# Other sites on this host go here.
+}

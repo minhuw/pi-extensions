@@ -1,0 +1,9 @@
+.git
+target/
+**/node_modules/
+web/dist/
+pika-data/
+data/
+*.db
+*.db-shm
+*.db-wal

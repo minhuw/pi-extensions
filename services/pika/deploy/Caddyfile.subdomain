@@ -1,0 +1,29 @@
+# pika at https://pika.example.com
+# Server: pika serve --bind 127.0.0.1:7171   (base path /)
+# Devices: "url": "https://pika.example.com"
+
+{
+	servers {
+		timeouts {
+			# Device uploads are gzip batches of up to 8 MiB; allow slow links.
+			read_body 2m
+		}
+	}
+}
+
+pika.example.com {
+	# At least the server's --max-body (32 MiB by default).
+	request_body {
+		max_size 32MiB
+	}
+
+	# Optional: authenticate in the proxy instead of PIKA_PASSWORD. Devices use
+	# their bearer tokens, so leave ingest out. Hash with `caddy hash-password`.
+	# (Caddy < 2.8 calls the directive basicauth.)
+	# @browser not path /api/ingest/*
+	# basic_auth @browser {
+	# 	me $2a$14$replace-with-the-hash
+	# }
+
+	reverse_proxy 127.0.0.1:7171
+}

@@ -16,6 +16,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Loop](extensions/loop/README.md) | Session-owned recurring prompts with fixed, cron, or model-paced scheduling, bounded execution, and footer status. |
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session that keeps the current model and thinking level. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
+| [pika](extensions/pika/README.md) | Uploads every session entry, exact model request, subagent and Herder step session, and Herder journal to a self-hosted [pika server](services/pika/README.md) for search and reading; offline spool, exclude list, and `/pika` status. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 
 ## Themes
@@ -54,6 +55,8 @@ Herder keeps run state under the repository's git directory (`<git-common-dir>/h
 
 Magpie Provider connects to a separately running Magpie gateway (default `http://127.0.0.1:3425`). Use `/login magpie` to save its URL and gateway key and automatically expose its search/fetch MCP tools, or configure model access through environment variables. It does not install Magpie or change your selected model. See its [setup guide](extensions/magpie-provider/README.md) for remote keys, model discovery, and coexistence with Magpie's built-in Pi configuration adapter.
 
+pika does nothing until `~/.pi/agent/pika.json` names a server URL and device token. The server is a separate Rust binary in `services/pika/`, with an embedded web UI, a Dockerfile, and reverse-proxy examples; see its [README](services/pika/README.md). Trajectories include file contents and command output, so point pika only at a server you control. See [pika](extensions/pika/README.md).
+
 ## Development
 
 Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite`, and native TypeScript execution. Development dependencies and the lockfile target Pi SDK 1.4.0; the supported runtime minimum remains Pi 1.3.0. Run the offline suite after upgrading the host to check its extension loader, provider delegates, and session/tool lifecycle.
@@ -65,6 +68,8 @@ npm test        # full suite; includes the full TypeScript check
 ```
 
 For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and native-compaction checks.
+
+The pika server and web UI have their own toolchains (stable Rust and the web package's npm dependencies); see [Development](services/pika/README.md#development) in its README. `npm test` covers the extension only.
 
 ## License
 

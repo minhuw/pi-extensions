@@ -1,0 +1,19 @@
+# docker compose -f services/pika/deploy/compose.yaml up -d --build
+# docker compose -f services/pika/deploy/compose.yaml exec pika pika token create laptop
+services:
+  pika:
+    build: ..
+    image: pika
+    restart: unless-stopped
+    ports:
+      # Publish on loopback; the reverse proxy on the host forwards to it.
+      - "127.0.0.1:7171:7171"
+    environment:
+      PIKA_BASE_PATH: /pika
+      # PIKA_PASSWORD: change-me
+      # PIKA_MAX_BODY: 32MiB
+    volumes:
+      - pika-data:/data
+
+volumes:
+  pika-data:
