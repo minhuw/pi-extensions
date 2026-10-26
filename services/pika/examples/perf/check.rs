@@ -91,6 +91,10 @@ pub fn run(data_dir: &Path, config: &Config, full: bool) -> Result<Value> {
         let n = int(&conn, &format!("SELECT COUNT(*) FROM entries WHERE role = '{role}'"))?;
         check(&format!("role:{role}"), n, n > 0, "> 0".into());
     }
+    // Displayed notices arrive during runs, so each turn starts at a user prompt.
+    let turns = int(&conn, "SELECT SUM(turn_count) FROM sessions")?;
+    let prompts = int(&conn, "SELECT COUNT(*) FROM entries WHERE role = 'user'")?;
+    check("turns", turns, turns == prompts, format!("{prompts}"));
     for tool in TOOLS {
         let n = int(&conn, &format!("SELECT COUNT(*) FROM tool_calls WHERE name = '{tool}'"))?;
         check(&format!("tool:{tool}"), n, n > 0, "> 0".into());

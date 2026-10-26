@@ -236,6 +236,9 @@ async function flow(browser: Browser, t: BrowserTargets): Promise<void> {
 	await click(`[data-inline-toggle="${t.childId}"] button`);
 	await visible(`[data-inline-session="${t.childId}"] [data-turn='0']`);
 	await shot("07-subagent");
+	await go("/runs");
+	await visible(`[data-run-row="${t.runId}"]`);
+	await shot("08-runs");
 	await go(`/runs/${encodeURIComponent(t.runId)}`);
 	await visible("[data-step]");
 	await shot("09-run");

@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MockProvider } from "../../../extensions/pika/tests/support/provider-server.ts";
-import { allEntries, ReadApi, type Entry, type ModelRequest, type RunDetail, type SessionDetail } from "./api.ts";
+import { allEntries, ReadApi, type Entry, type ModelRequest, type RunDetail, type SessionDetail, type Turn } from "./api.ts";
 import { runBrowser } from "./browser.ts";
 import { ingestSession, largeSession } from "./large.ts";
-import { AGENT_CALL_ID, createProject, LOCAL_PROVIDER, PROMPTS, responder, SEARCH_WORD, startPi, type Pi } from "./scenario.ts";
+import { AGENT_CALL_ID, createProject, LOCAL_PROVIDER, NOTICE_AFTER_CALL_ID, NOTICE_TYPE, PROMPTS, responder, SEARCH_WORD, startPi, type Pi } from "./scenario.ts";
 import { PikaServer } from "./server.ts";
 import { check, checkEqual, env, log, sleep, waitFor } from "./util.ts";
 import { SessionWatcher } from "./watch.ts";
@@ -110,6 +110,7 @@ async function main(): Promise<void> {
 		await checkExports(api, watcher);
 		await checkRequests(api, provider, watcher, localContext);
 		await checkLinks(api, { mainId, childId: child.sessionId, stepId: step.sessionId, runId: herderRun });
+		await checkTurns(api, mainId, mainFile);
 
 		const large = largeSession();
 		await ingestSession(server.url, env("PIKA_E2E_TOKEN_DESKTOP"), large);
@@ -252,6 +253,37 @@ async function checkLinks(api: ReadApi, ids: { mainId: string; childId: string; 
 	check(step, `the Herder run view lists no step with session ${stepId}: ${JSON.stringify(run.steps)}`);
 	checkEqual({ role: step.role, status: step.status }, { role: "explorer", status: "ok" }, "the Herder step");
 	log(`links: subagent → Agent call ${AGENT_CALL_ID}, step ${step.key} → session ${stepId} in run ${runId}`);
+}
+
+/**
+ * The main session has one turn per user prompt plus one for the `/herder` prompt, and the subagent notice steered
+ * between a tool result and the next model call stays inside the turn it interrupts.
+ */
+async function checkTurns(api: ReadApi, mainId: string, mainFile: string): Promise<void> {
+	const entries = lines(mainFile);
+	const role = (entry: Record<string, unknown> | undefined) => (entry?.message as { role?: string } | undefined)?.role;
+	const users = entries.filter((entry) => entry.type === "message" && role(entry) === "user").length;
+	const turns = (await api.get<{ items: Turn[] }>(`sessions/${mainId}/turns?limit=1000`))?.items ?? [];
+	checkEqual(turns.length, users + 1, "the main session's turns: one per user prompt plus one for the /herder prompt");
+	const prompts = [PROMPTS.inspect, PROMPTS.delegate, PROMPTS.herder, PROMPTS.offline, PROMPTS.resumed, PROMPTS.online, PROMPTS.local];
+	checkEqual(turns.length, prompts.length, "the main session's turn count");
+	for (const [index, prompt] of prompts.entries()) {
+		const userText = turns[index]!.userText;
+		check(prompt === PROMPTS.herder ? userText.startsWith("/herder: run ") : userText.includes(prompt), `turn ${index} starts at ${JSON.stringify(userText.slice(0, 60))}, not the prompt ${JSON.stringify(prompt)}`);
+	}
+
+	const seq = entries.findIndex((entry) => entry.type === "custom_message" && entry.customType === NOTICE_TYPE && entry.display === true);
+	check(seq > 0, "the main session has no displayed subagent notice");
+	checkEqual(entries.filter((entry) => entry.customType === NOTICE_TYPE).length, 1, "subagent notices in the main session");
+	const before = entries[seq - 1]?.message as { role?: string; toolCallId?: string } | undefined;
+	checkEqual({ before: before?.role, call: before?.toolCallId, after: role(entries[seq + 1]) }, { before: "toolResult", call: NOTICE_AFTER_CALL_ID, after: "assistant" },
+		"the subagent notice's neighbours: it was delivered between a tool result and the next model call");
+	const turn = turns.find((item) => item.startSeq <= seq && seq <= item.endSeq);
+	check(turn, `no turn covers the notice at seq ${seq}`);
+	checkEqual({ index: turn.index, modelCalls: turn.modelCalls, toolCalls: turn.toolCalls, finalText: turn.finalText },
+		{ index: 0, modelCalls: 4, toolCalls: 3, finalText: "The data lists the crystals, and I fixed the typo in notes.md." },
+		"the turn the subagent notice interrupts");
+	log(`turns: ${turns.length} for ${users} user prompts and /herder; the notice at seq ${seq} stays in turn 0`);
 }
 
 try {

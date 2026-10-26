@@ -128,12 +128,13 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - `title` is the `session_info` name if set, otherwise the first user prompt cut to 120 characters.
   - Pages are keyset-paged on `lastAt`, so later pages never repeat a session. A session that gains entries between page fetches moves to the top of the list: it appears on a fresh first page and not on the later pages of the old walk.
 - **`GET sessions/:id`** returns a `SessionSummary` plus `{ children: (SessionSummary & { parentToolCallId? })[] }`.
-- **`GET sessions/:id/turns`** accepts `cursor` and `limit` (default 100). It returns `{ items: Turn[], nextCursor }`, with one `Turn` per user prompt:
+- **`GET sessions/:id/turns`** accepts `cursor` and `limit` (default 100). It returns `{ items: Turn[], nextCursor }`, with one `Turn` per user prompt, or per displayed extension message (a `custom_message` with `display: true`) that starts a run while the session is idle:
   ```
   { index, startSeq, endSeq, userText, at, durationMs,
     modelCalls, toolCalls, toolErrors, cost, tokens, finalText }
   ```
   `finalText` is the last assistant text in the turn, cut to 2,000 characters.
+  - A run is in progress after a user prompt until its first assistant reply, and after an assistant reply with `stopReason: "toolUse"` or with tool calls that have no tool result yet, unless its `stopReason` is `aborted` or `error`. A displayed extension message saved during a run, such as a subagent notice steered between a tool result and the next model call, stays inside its turn and changes neither its `userText` nor its `finalText`. A displayed message before the session's first turn starts one.
 - **`GET sessions/:id/entries`** accepts `from` (a seq), `to`, and `limit` (default 200, max 1000). It returns `{ items: Entry[] }`, where `Entry` is:
   ```
   { seq, offset, id, parentId, type, timestamp, raw, requestId?, truncated? }

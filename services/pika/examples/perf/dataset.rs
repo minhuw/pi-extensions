@@ -452,6 +452,9 @@ struct SessionGen<'a> {
     pending: Vec<(usize, usize)>,
     spawned: Vec<(usize, String, i64)>,
     capture: Option<Capture>,
+    /// A displayed notice steered into the next turn's run after its first tool results, as Subagents delivers a
+    /// background child's completion.
+    notice: Option<String>,
 }
 
 impl SessionGen<'_> {
@@ -739,8 +742,7 @@ impl SessionGen<'_> {
                 self.entry("custom", json!({ "customType": custom_type, "data": data }));
             }
             6..=7 => {
-                let content = v.prose_plus(self.rng, 100, 300);
-                self.entry("custom_message", json!({ "customType": "loop.tick", "content": content, "display": true }));
+                self.notice = Some(v.prose_plus(self.rng, 100, 300));
             }
             8..=9 => {
                 let m = &MODELS[self.model];
@@ -783,6 +785,9 @@ impl SessionGen<'_> {
             }
             self.step();
             call += 1;
+            if let Some(content) = self.notice.take() {
+                self.entry("custom_message", json!({ "customType": "subagent-notification", "content": content, "display": true }));
+            }
         }
         let mut content: Vec<Value> = self.thinking().into_iter().collect();
         let bytes = self.rng.lognormal(350.0, 0.8) as usize;
@@ -876,6 +881,7 @@ impl Generator<'_> {
                 pending,
                 spawned: Vec::new(),
                 capture: None,
+                notice: None,
             };
             g.compaction_every = g.rng.range(150, 450) as usize;
             g.name_at_turn = g.rng.chance(0.4).then(|| g.rng.below(3));

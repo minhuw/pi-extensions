@@ -234,31 +234,136 @@ fn lines_with_lone_surrogate_escapes_derive() {
 }
 
 /// A displayed extension message, such as `/herder <goal>`'s prompt, starts a turn; a hidden one does not.
-#[test]
-fn displayed_custom_messages_start_turns() {
+/// A session `id` from `(entry id, fields)` pairs; entry `n` is stamped `n` seconds after 09:00.
+fn turn_session(id: &str, entries: &[(&str, Value)]) -> Vec<String> {
+    let header = json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/w/x" });
+    std::iter::once(header.to_string())
+        .chain(entries.iter().enumerate().map(|(i, (entry_id, fields))| {
+            let mut v = json!({ "id": entry_id, "parentId": null, "timestamp": format!("2026-10-20T09:00:{:02}.000Z", i + 1) });
+            v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            v.to_string()
+        }))
+        .collect()
+}
+
+fn user(text: &str) -> Value {
+    json!({ "type": "message", "message": { "role": "user", "content": text, "timestamp": 1 } })
+}
+
+/// An assistant reply with `text`, one tool call per id in `calls`, and usage worth `cost`.
+fn reply(text: &str, calls: &[&str], stop: Option<&str>, cost: f64) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    content.extend(calls.iter().map(|id| json!({ "type": "toolCall", "id": id, "name": "bash", "arguments": { "command": "ls" } })));
+    let usage = json!({ "input": 100, "output": 10, "cacheRead": 1000, "cacheWrite": 0, "totalTokens": 1110,
+                        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost } });
+    let mut message = json!({ "role": "assistant", "content": content, "usage": usage, "timestamp": 1 });
+    if let Some(stop) = stop {
+        message["stopReason"] = json!(stop);
+    }
+    json!({ "type": "message", "message": message })
+}
+
+fn result(call: &str) -> Value {
+    json!({ "type": "message", "message": { "role": "toolResult", "toolCallId": call, "toolName": "bash",
+                                            "content": [{ "type": "text", "text": "ok" }], "isError": false, "timestamp": 1 } })
+}
+
+fn notice(text: &str, display: bool) -> Value {
+    json!({ "type": "custom_message", "customType": "subagent-notification", "content": text, "display": display })
+}
+
+/// Uploads `session` one line per batch, checks that reindex derives the same tables, and returns its turns as
+/// (start_seq, end_seq, user_text, final_text).
+fn derive_turns(id: &str, session: &[String]) -> (Env, Vec<(Value, Value, Value, Value)>) {
     let env = env();
-    let entry = |id: &str, seq: i64, fields: Value| {
-        let mut v = json!({ "id": id, "parentId": null, "timestamp": format!("2026-10-20T09:00:{seq:02}.000Z") });
-        v.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
-        v.to_string()
-    };
-    let assistant = |text: &str| json!({ "type": "message", "message": { "role": "assistant", "content": [{ "type": "text", "text": text }], "stopReason": "stop", "timestamp": 1 } });
-    let session = vec![
-        json!({ "type": "session", "version": 3, "id": "custom-1", "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/w/x" }).to_string(),
-        entry("u1", 1, json!({ "type": "message", "message": { "role": "user", "content": "first", "timestamp": 1 } })),
-        entry("a1", 2, assistant("one")),
-        entry("c1", 3, json!({ "type": "custom_message", "customType": "herder:prompt", "content": "/herder: run started", "display": true })),
-        entry("a2", 4, assistant("two")),
-        entry("c2", 5, json!({ "type": "custom_message", "customType": "note", "content": "hidden context", "display": false })),
-        entry("a3", 6, assistant("three")),
-    ];
-    upload(&env.store, "session:custom-1", "session", &session, 3);
-    let turns = query(&env.store, "SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'custom-1' ORDER BY idx");
-    let got: Vec<_> = turns.iter().map(|t| (t["start_seq"].clone(), t["end_seq"].clone(), t["user_text"].clone(), t["final_text"].clone())).collect();
-    assert_eq!(got, vec![
-        (json!(1), json!(2), json!("first"), json!("one")),
-        (json!(3), json!(6), json!("/herder: run started"), json!("three")),
+    upload(&env.store, &format!("session:{id}"), "session", session, 1);
+    let incremental = dump_derived(&env.store);
+    pika::reindex::reindex(&env.store).unwrap();
+    assert_eq!(dump_derived(&env.store), incremental);
+    let turns = query(&env.store, &format!("SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = '{id}' ORDER BY idx"));
+    let got = turns.iter().map(|t| (t["start_seq"].clone(), t["end_seq"].clone(), t["user_text"].clone(), t["final_text"].clone())).collect();
+    (env, got)
+}
+
+#[test]
+fn displayed_custom_messages_start_turns_while_idle() {
+    let session = turn_session("custom-1", &[
+        ("c0", notice("context before any turn", false)),
+        ("u1", user("first")),
+        ("a1", reply("one", &[], Some("stop"), 0.0)),
+        ("c1", json!({ "type": "custom_message", "customType": "herder:prompt", "content": "/herder: run started", "display": true })),
+        ("a2", reply("two", &[], Some("stop"), 0.0)),
+        ("c2", notice("hidden context", false)),
+        ("a3", reply("three", &[], Some("stop"), 0.0)),
+    ]);
+    let (env, turns) = derive_turns("custom-1", &session);
+    assert_eq!(turns, vec![
+        (json!(2), json!(3), json!("first"), json!("one")),
+        (json!(4), json!(7), json!("/herder: run started"), json!("three")),
     ]);
     let session = one(&env.store, "SELECT first_prompt, turn_count FROM sessions WHERE id = 'custom-1'");
     assert_eq!((&session["first_prompt"], &session["turn_count"]), (&json!("first"), &json!(2)));
+
+    // A displayed message that opens a session starts its first turn.
+    let (_, turns) = derive_turns("custom-2", &turn_session("custom-2", &[("c1", notice("loop pass", true)), ("a1", reply("done", &[], Some("stop"), 0.0))]));
+    assert_eq!(turns, vec![(json!(1), json!(2), json!("loop pass"), json!("done"))]);
+}
+
+/// Subagents steers a background child's completion notice into the parent's run between a tool result and the next
+/// model call; it belongs to the user's turn.
+#[test]
+fn displayed_custom_messages_during_a_run_stay_in_the_turn() {
+    let session = turn_session("steer-1", &[
+        ("u1", user("fix the build")),
+        ("a1", reply("looking", &["t1"], Some("toolUse"), 0.5)),
+        ("r1", result("t1")),
+        ("n1", notice("Background agent finished: tests pass", true)),
+        ("a2", reply("checking", &["t2", "t3"], Some("toolUse"), 0.25)),
+        ("r2", result("t2")),
+        ("r3", result("t3")),
+        ("a3", reply("The build is fixed.", &[], Some("stop"), 0.125)),
+    ]);
+    let (env, turns) = derive_turns("steer-1", &session);
+    assert_eq!(turns, vec![(json!(1), json!(8), json!("fix the build"), json!("The build is fixed."))]);
+    let turn = one(&env.store, "SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'steer-1'");
+    assert_eq!(
+        [&turn["model_calls"], &turn["tool_calls"], &turn["cost"], &turn["input"], &turn["output"], &turn["cache_read"], &turn["duration_ms"]],
+        [&json!(3), &json!(3), &json!(0.875), &json!(300), &json!(30), &json!(3000), &json!(7000)]
+    );
+    let notice_turn = one(&env.store, "SELECT e.turn FROM entries e JOIN sessions s USING (sid) WHERE s.id = 'steer-1' AND e.seq = 4");
+    assert_eq!(notice_turn["turn"], json!(0));
+
+    // The tool results of a `toolUse` reply have not arrived yet.
+    let (_, turns) = derive_turns("steer-2", &turn_session("steer-2", &[
+        ("u1", user("go")),
+        ("a1", reply("running", &["t1"], Some("toolUse"), 0.0)),
+        ("n1", notice("notice", true)),
+        ("r1", result("t1")),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("done"))]);
+
+    // A reply without a stop reason whose tool call has no result yet, and extension messages that follow the user
+    // prompt before the first reply, as from `before_agent_start`.
+    let (_, turns) = derive_turns("steer-3", &turn_session("steer-3", &[
+        ("u1", user("go")),
+        ("n1", notice("injected context", true)),
+        ("a1", reply("running", &["t1"], None, 0.0)),
+        ("n2", notice("notice", true)),
+        ("r1", result("t1")),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(6), json!("go"), json!("done"))]);
+
+    // pi runs no tools after an aborted reply, so the run is over.
+    let (_, turns) = derive_turns("steer-4", &turn_session("steer-4", &[
+        ("u1", user("go")),
+        ("a1", reply("partial", &["t1"], Some("aborted"), 0.0)),
+        ("n1", notice("/herder: resume", true)),
+        ("a2", reply("resumed", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![
+        (json!(1), json!(2), json!("go"), json!("partial")),
+        (json!(3), json!(4), json!("/herder: resume"), json!("resumed")),
+    ]);
 }

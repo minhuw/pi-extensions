@@ -20,6 +20,10 @@ export const EXTENSIONS = ["extensions/subagents/src/index.ts", "extensions/herd
 /** A word that only a tool result contains, for the search check. */
 export const SEARCH_WORD = "zephyrine";
 export const AGENT_CALL_ID = "call_agent_1";
+/** The tool call after whose batch a background subagent's completion notice is steered into the run. */
+export const NOTICE_AFTER_CALL_ID = "call_bash_1";
+export const NOTICE_TYPE = "subagent-notification";
+const NOTICE = "Background agent finished: the changelog check is done.";
 
 export const PROMPTS = {
 	inspect: "Look at data.txt, then fix the typo in notes.md.",
@@ -101,7 +105,7 @@ function scriptOf(prompt: string): string | undefined {
 export function responder(body: Record<string, unknown>): ScriptedReply | undefined {
 	const messages = (body.messages ?? []) as Message[];
 	let last = -1;
-	for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === "user") { last = i; break; }
+	for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.role === "user" && text(messages[i]!.content) !== NOTICE) { last = i; break; }
 	const prompt = last >= 0 ? text(messages[last]!.content) : "";
 	const step = messages.slice(last + 1).filter((message) => message.role === "assistant").length;
 	const script = (replies: ScriptedReply[]) => replies[Math.min(step, replies.length - 1)];
@@ -173,7 +177,9 @@ export interface Pi {
 
 /**
  * A real pi runtime with Subagents, Herder, and pika loaded by path, pika last, on the mock provider. `local` is a
- * model whose provider exposes no request payload. A listener after them records each call's context.
+ * model whose provider exposes no request payload. A listener after them records each call's context and, as
+ * Subagents does for a background child that finishes while the parent works, steers a displayed notice into the run
+ * at the `turn_end` after the tool batch of `NOTICE_AFTER_CALL_ID`.
  */
 export async function startPi(options: { cwd: string; agentDir: string; sessionDir: string; provider: MockProvider; local: FauxProviderHandle; sessionFile?: string }): Promise<Pi> {
 	const { cwd, agentDir, sessionDir, provider } = options;
@@ -184,7 +190,13 @@ export async function startPi(options: { cwd: string; agentDir: string; sessionD
 	const resources = new DefaultResourceLoader({
 		cwd, agentDir, noExtensions: true, additionalExtensionPaths: EXTENSIONS,
 		noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-		extensionFactories: [(pi) => { pi.on("context_with_system", (event) => { contexts.push(JSON.parse(JSON.stringify(event.messages)) as unknown[]); }); }],
+		extensionFactories: [(pi) => {
+			pi.on("context_with_system", (event) => { contexts.push(JSON.parse(JSON.stringify(event.messages)) as unknown[]); });
+			pi.on("turn_end", (event) => {
+				if (!event.toolResults.some((result) => result.toolCallId === NOTICE_AFTER_CALL_ID)) return;
+				pi.sendMessage({ customType: NOTICE_TYPE, content: NOTICE, display: true }, { deliverAs: "steer", triggerTurn: true });
+			});
+		}],
 	});
 	await resources.reload();
 	const loadErrors = resources.getExtensions().errors;

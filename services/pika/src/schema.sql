@@ -176,7 +176,7 @@ CREATE TABLE entries (
     PRIMARY KEY (sid, seq)
 ) WITHOUT ROWID;
 
--- Derived: one row per user prompt. `at` is the prompt's entry time; usage sums every usage source in the turn.
+-- Derived: one row per user prompt, or per displayed extension message that starts a run while idle. `at` is the prompt's entry time; usage sums every usage source in the turn.
 CREATE TABLE turns (
     sid INTEGER NOT NULL,
     idx INTEGER NOT NULL,

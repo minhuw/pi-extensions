@@ -379,6 +379,36 @@ impl Deriver<'_> {
         Ok(())
     }
 
+    /// Whether a run is in progress at this point of the current turn: its user prompt awaits the first reply, or its
+    /// last assistant message continues with tool calls. Reads only rows already written, so incremental ingest and
+    /// reindex agree.
+    fn run_in_progress(&self) -> Result<bool> {
+        let Some(turn) = &self.turn else { return Ok(false) };
+        let last: Option<(i64, Option<String>)> = self
+            .tx
+            .prepare_cached("SELECT seq, stop_reason FROM model_calls WHERE sid = ?1 AND seq >= ?2 ORDER BY seq DESC LIMIT 1")?
+            .query_row(params![self.s.sid, turn.start_seq], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(match last {
+            None => {
+                let role: Option<String> = self
+                    .tx
+                    .prepare_cached("SELECT role FROM entries WHERE sid = ?1 AND seq = ?2")?
+                    .query_row(params![self.s.sid, turn.start_seq], |r| r.get(0))
+                    .optional()?
+                    .flatten();
+                role.as_deref() == Some("user")
+            }
+            Some((_, Some(stop))) if stop == "toolUse" => true,
+            // pi ends the run without running the tools of an aborted or failed reply.
+            Some((_, Some(stop))) if stop == "aborted" || stop == "error" => false,
+            Some((seq, _)) => self
+                .tx
+                .prepare_cached("SELECT EXISTS (SELECT 1 FROM tool_calls WHERE sid = ?1 AND call_seq = ?2 AND result_seq IS NULL)")?
+                .query_row(params![self.s.sid, seq], |r| r.get(0))?,
+        })
+    }
+
     fn assistant(&mut self, seq: i64, entry: &Value, ts: Option<i64>, message: &Value) -> Result<Vec<String>> {
         let usage = Usage::parse(message.get("usage")).unwrap_or_default();
         self.add_usage(&usage);
@@ -560,8 +590,12 @@ impl Deriver<'_> {
                 if ty == "custom" && custom_type == Some(LINK_CUSTOM_TYPE) {
                     self.link(line.seq, v.get("data").unwrap_or(&empty))?;
                 }
-                // A displayed extension message, such as the prompt of `/herder <goal>`, is the prompt of its turn.
-                if ty == "custom_message" && v.get("display").and_then(Value::as_bool) == Some(true) {
+                // A displayed extension message that starts a run, such as the prompt of `/herder <goal>`, is the
+                // prompt of its turn. One delivered during a run, such as a steered subagent notice, stays inside it.
+                if ty == "custom_message"
+                    && v.get("display").and_then(Value::as_bool) == Some(true)
+                    && !self.run_in_progress()?
+                {
                     self.start_turn(line.seq, ts, &content_text(v.get("content")))?;
                 }
             }

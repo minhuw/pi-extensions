@@ -67,6 +67,16 @@ export interface SessionDetail extends SessionSummary {
 	children: (SessionSummary & { parentToolCallId?: string })[];
 }
 
+export interface Turn {
+	index: number;
+	startSeq: number;
+	endSeq: number;
+	userText: string;
+	modelCalls: number;
+	toolCalls: number;
+	finalText: string;
+}
+
 export interface ModelRequest {
 	id: string;
 	sessionId: string;
