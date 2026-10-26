@@ -30,9 +30,10 @@ export interface PiRunnerOptions {
 	abortGraceMs?: number;
 	/**
 	 * The run the sessions belong to. When given, each session is a Pi session file in `dir` that starts with a
-	 * `pi-extensions.session-link` entry; otherwise sessions stay in memory.
+	 * `pi-extensions.session-link` entry; otherwise sessions stay in memory. `parentSessionFile` becomes the header's
+	 * `parentSession`.
 	 */
-	sessions?: { dir: string; runId: string; repo: string; parentSessionId?: string };
+	sessions?: { dir: string; runId: string; repo: string; parentSessionId?: string; parentSessionFile?: string };
 }
 
 /** An entry of the shared child-session hook Set; extensions register these without importing each other. */
@@ -117,7 +118,7 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 			const tools = allowedTools(role.write, role.tools);
 			const created = await createAgentSession({
 				cwd: request.cwd, agentDir: context.agentDir, modelRuntime: runtime, resourceLoader: loader,
-				sessionManager: context.sessions ? SessionManager.create(request.cwd, context.sessions.dir) : SessionManager.inMemory(request.cwd), settingsManager,
+				sessionManager: context.sessions ? stepSessionManager(request.cwd, context.sessions) : SessionManager.inMemory(request.cwd), settingsManager,
 				tools: capture ? [...tools, STRUCTURED_OUTPUT_TOOL] : tools,
 				customTools: schema && capture ? [createStructuredOutputTool(schema, capture)] : [],
 				...(model && { model }), ...(thinkingLevel && { thinkingLevel }),
@@ -159,12 +160,19 @@ async function runAgent(request: AgentRunRequest, context: RunContext): Promise<
 	}
 }
 
+type RunSessions = NonNullable<PiRunnerOptions["sessions"]>;
+
+function stepSessionManager(cwd: string, run: RunSessions): SessionManager {
+	return SessionManager.create(cwd, run.dir, run.parentSessionFile !== undefined ? { parentSession: run.parentSessionFile } : undefined);
+}
+
 /** The step's `pi-extensions.session-link` data (`kind: "herder-step"`). */
-function sessionLink(request: AgentRunRequest, run: NonNullable<PiRunnerOptions["sessions"]>): object {
+function sessionLink(request: AgentRunRequest, run: RunSessions): object {
 	const step = request.step;
 	return {
 		kind: "herder-step",
 		...(run.parentSessionId !== undefined && { parentSessionId: run.parentSessionId }),
+		...(run.parentSessionFile !== undefined && { parentSessionFile: run.parentSessionFile }),
 		agentType: request.role.name,
 		...(step?.task !== undefined && { description: step.task }),
 		herder: {

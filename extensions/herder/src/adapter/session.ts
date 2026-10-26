@@ -204,9 +204,13 @@ export class Herder {
 			this.#warned = true;
 			s.ctx.ui.notify("Herder could not reach this session's model runtime; steps use one built from the agent directory, whose models and logins may differ.", "warning");
 		}
+		const parentSessionFile = s.ctx.sessionManager.getSessionFile();
 		return createPiAgentRunner({
 			modelRuntime, inheritModel: () => s.ctx.model, inheritThinking: () => this.pi.getThinkingLevel(), outputs: run.outputs,
-			sessions: { dir: run.paths.sessions, runId: run.runId, repo: repoName(this.vcs(s), run), parentSessionId: s.id },
+			sessions: {
+				dir: run.paths.sessions, runId: run.runId, repo: repoName(this.vcs(s), run), parentSessionId: s.id,
+				...(parentSessionFile !== undefined && { parentSessionFile }),
+			},
 		});
 	}
 

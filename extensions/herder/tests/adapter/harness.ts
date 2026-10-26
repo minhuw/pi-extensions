@@ -94,9 +94,13 @@ export class FakeRuntime implements HerderRuntime {
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 
-export interface HarnessOptions { cwd: string; sessionId?: string; hasUI?: boolean; options?: Partial<HerderOptions>; events?: ReturnType<typeof createEventBus> }
+/** `context` replaces fields of the extension context, such as `modelRegistry` and `model`. */
+export interface HarnessOptions {
+	cwd: string; sessionId?: string; sessionFile?: string; hasUI?: boolean; options?: Partial<HerderOptions>; events?: ReturnType<typeof createEventBus>;
+	context?: Record<string, unknown>;
+}
 
-export function harness({ cwd, sessionId = "session-a", hasUI = true, options = {}, events = createEventBus() }: HarnessOptions) {
+export function harness({ cwd, sessionId = "session-a", sessionFile, hasUI = true, options = {}, events = createEventBus(), context = {} }: HarnessOptions) {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, any>();
 	const tools = new Map<string, any>();
@@ -116,8 +120,8 @@ export function harness({ cwd, sessionId = "session-a", hasUI = true, options = 
 			setStatus: vi.fn((key: string, value?: string) => { if (value) statuses.set(key, value); else statuses.delete(key); }),
 			confirm,
 		},
-		sessionManager: { getSessionId: () => sessionId },
-		modelRegistry: {}, model: undefined,
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => sessionFile },
+		modelRegistry: {}, model: undefined, ...context,
 	} as unknown as ExtensionContext;
 	const pi = {
 		on: (name: string, handler: Handler) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },

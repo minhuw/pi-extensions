@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -14,6 +14,11 @@ const FEATURE = { match: "add the feature", files: { "feature.txt": "feature\n" 
 const crashAt = (point: FaultPoint) => ({ hit(at: FaultPoint) { if (at === point) throw new Error(`crash at ${at}`); } });
 const completions = (events: { t: string }[]) => events.filter((event): event is StepCompletedEvent => event.t === "step.completed");
 const failures = (events: { t: string }[]) => events.filter((event): event is StepFailedEvent => event.t === "step.failed");
+/** Session files as Pi leaves them once a session has a message. */
+const sessionFiles = (dir: string, ...ids: string[]) => {
+	mkdirSync(dir, { recursive: true });
+	return ids.map((id) => { const file = join(dir, `${id}.jsonl`); writeFileSync(file, `${JSON.stringify({ type: "session", id })}\n`); return file; });
+};
 
 describe("writing steps", () => {
 	it("commits onto the base, pins the step ref, journals, and removes the worktree", () => withRun(async (h) => {
@@ -232,17 +237,18 @@ describe("failures, continued", () => {
 
 	it("passes the step identity and journals each attempt's session on its outcome", () => withRun(async (h) => {
 		const steps: AgentRunRequest["step"][] = [];
+		const [s1, s2] = sessionFiles(h.store.paths.sessions, "s1", "s2");
 		h.runner.add(
-			{ match: "add the feature", fail: "transient", times: 1, session: { id: "s1", file: "/sessions/s1.jsonl" } },
-			{ ...FEATURE, session: { id: "s2", file: "/sessions/s2.jsonl" }, edit: (_cwd, request) => { steps.push(request.step); } },
+			{ match: "add the feature", fail: "transient", times: 1, session: { id: "s1", file: s1 } },
+			{ ...FEATURE, session: { id: "s2", file: s2 }, edit: (_cwd, request) => { steps.push(request.step); } },
 		);
 		const result = await h.executor().run("add the feature", { id: "impl", task: "T1" }, { launch: 3 });
 		expect(result.status).toBe("ok");
 		expect(h.types()).toEqual(["run.started", "step.started", "step.failed", "step.started", "step.completed"]);
 		for (const event of h.events().filter((event) => event.t === "step.started")) expect(event).not.toHaveProperty("sessionId");
-		expect(failures(h.events())).toMatchObject([{ attempt: 1, sessionId: "s1", sessionFile: "/sessions/s1.jsonl" }]);
-		expect(completions(h.events())).toMatchObject([{ sessionId: "s2", sessionFile: "/sessions/s2.jsonl" }]);
-		expect(h.store.state().steps.get(result.key)).toMatchObject({ sessionId: "s2", sessionFile: "/sessions/s2.jsonl" });
+		expect(failures(h.events())).toMatchObject([{ attempt: 1, sessionId: "s1", sessionFile: s1 }]);
+		expect(completions(h.events())).toMatchObject([{ sessionId: "s2", sessionFile: s2 }]);
+		expect(h.store.state().steps.get(result.key)).toMatchObject({ sessionId: "s2", sessionFile: s2 });
 		expect(steps).toEqual([{ key: result.key, id: "impl", task: "T1", attempt: 2, launch: 3 }]);
 		steps.length = 0;
 		const runner = { async run(request: AgentRunRequest) { steps.push(request.step); request.onSession?.({ id: "mem" }); return { text: "seen" }; } };
@@ -251,6 +257,20 @@ describe("failures, continued", () => {
 		const completion = completions(h.events()).at(-1)!;
 		expect(completion.sessionId).toBe("mem");
 		expect(completion).not.toHaveProperty("sessionFile");
+	}));
+
+	it("journals no session for an attempt whose session file was never written", () => withRun(async (h) => {
+		const [written] = sessionFiles(h.store.paths.sessions, "s2");
+		h.runner.add(
+			{ match: "add the feature", fail: "transient", times: 1, session: { id: "s1", file: join(h.store.paths.sessions, "s1.jsonl") } },
+			{ ...FEATURE, session: { id: "s2", file: written } },
+		);
+		expect((await h.executor().run("add the feature")).status).toBe("ok");
+		const [failure] = failures(h.events());
+		expect(failure).toMatchObject({ attempt: 1, errorClass: "transient" });
+		expect(failure).not.toHaveProperty("sessionId");
+		expect(failure).not.toHaveProperty("sessionFile");
+		expect(completions(h.events())).toMatchObject([{ sessionId: "s2", sessionFile: written }]);
 	}));
 
 	it("does not retry a step after a sibling hits a usage limit in the launch", () => withRun(async (h) => {
