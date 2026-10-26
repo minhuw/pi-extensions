@@ -178,7 +178,8 @@ it("spools a payload when the provider request starts, so a crash mid-stream sti
 	const prompt = first.session.prompt("a long answer").catch(() => undefined);
 	try {
 		await waitFor(() => provider.bodies.length === 1, 5_000, "the provider request");
-		const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests"))).filter((name) => name.endsWith(".json"));
+		// The spool is written off the request path, so it can trail the provider by a few fsyncs.
+		const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests")).catch(() => [])).filter((name) => name.endsWith(".json"));
 		await waitFor(async () => (await spooled()).length === 1, 2_000, "the spooled request");
 		// Held for its assistant message while the stream is open.
 		await new Promise((resolve) => setTimeout(resolve, 500));
@@ -264,7 +265,9 @@ it("rewrites the spooled payload with its assistant message before uploading it"
 	try {
 		const prompt = h.session.prompt("question");
 		await waitFor(() => provider.bodies.length === 1, 5_000, "the provider request");
-		const [name] = (await readdir(join(workspace.pikaDir, "spool", "requests"))).filter((file) => file.endsWith(".json"));
+		const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests")).catch(() => [])).filter((file) => file.endsWith(".json"));
+		await waitFor(async () => (await spooled()).length === 1, 2_000, "the spooled request");
+		const [name] = await spooled();
 		expect(name).toBeDefined();
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(ingest.sessionRequests(h.session.sessionId)).toEqual([]);
