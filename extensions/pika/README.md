@@ -172,16 +172,15 @@ Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goa
 
 ## Deployment
 
-The server is one Rust binary with the web UI embedded. Its [README](../../services/pika/README.md) is the reference for building, the CLI, backups, and the [deployment examples](../../services/pika/deploy/). The short version, from `services/pika/`:
+The server is one Rust binary with the web UI embedded, published as the multi-arch image `ghcr.io/minhuw/pika` (amd64 and arm64). Its [README](../../services/pika/README.md) is the reference for image tags, building, the CLI, backups, and the [deployment examples](../../services/pika/deploy/). The short version:
 
 ```bash
-docker build -t pika .
-docker run -d --name pika -p 127.0.0.1:7171:7171 -v pika-data:/data \
-  -e PIKA_BASE_PATH=/pika -e PIKA_PASSWORD='choose-one' pika
+docker run -d --name pika --restart unless-stopped -p 127.0.0.1:7171:7171 -v pika-data:/data \
+  -e PIKA_BASE_PATH=/pika -e PIKA_PASSWORD='choose-one' ghcr.io/minhuw/pika:latest
 docker exec pika pika token create laptop
 ```
 
-The [`Dockerfile`](../../services/pika/Dockerfile) builds the web UI with Node 22, builds the binary with `cargo build --release --locked`, and runs it as a non-root user with `/data` as its volume and a health check on `/api/health`.
+The image runs as a non-root user with `/data` as its volume and a health check on `/api/health`. To build it yourself, run `docker build -t pika services/pika` and use `pika` as the image.
 
 Behind nginx under a path prefix, forward the path unchanged and allow bodies up to the server's `--max-body`:
 

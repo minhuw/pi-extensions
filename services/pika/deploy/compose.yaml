@@ -1,9 +1,11 @@
-# docker compose -f services/pika/deploy/compose.yaml up -d --build
+# docker compose -f services/pika/deploy/compose.yaml up -d
 # docker compose -f services/pika/deploy/compose.yaml exec pika pika token create laptop
 services:
   pika:
-    build: ..
-    image: pika
+    # The published multi-arch image; see the server README's Docker section for its tags.
+    image: ghcr.io/minhuw/pika:latest
+    # To build from this checkout instead, replace `image` with:
+    # build: ..
     restart: unless-stopped
     ports:
       # Publish on loopback; the reverse proxy on the host forwards to it.

@@ -127,23 +127,55 @@ pika reindex
 
 ## Docker
 
-The [`Dockerfile`](Dockerfile) builds the web UI on `node:22-bookworm-slim`, builds the binary on `rust:1-bookworm` with `cargo build --release --locked` (embedding the UI), and runs it on `debian:bookworm-slim` as the non-root user `pika` (uid 10001). The build context is `services/pika/`.
+### Prebuilt image
+
+The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a multi-arch image (`linux/amd64` and `linux/arm64`, each built natively and smoke-tested) to `ghcr.io/minhuw/pika`:
+
+| Tag | Source |
+| --- | --- |
+| `latest`, `0.1.0`, `0.1` | a `pika-v0.1.0` release tag |
+| `edge` | the newest `master` commit that changed `services/pika/` |
+| `sha-<commit>` | that commit |
+
+Prefer a version tag in production and `edge` to follow `master`.
+
+To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-docker build -t pika services/pika
+git tag pika-v0.1.0 && git push origin pika-v0.1.0
+```
 
+A package that GitHub creates on its first publish is private. Make it public once under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
+
+### Running it
+
+```bash
 docker run -d --name pika --restart unless-stopped \
   -p 127.0.0.1:7171:7171 \
   -v pika-data:/data \
   -e PIKA_BASE_PATH=/pika \
   -e PIKA_PASSWORD='choose-one' \
-  pika
+  ghcr.io/minhuw/pika:latest
 
 docker exec pika pika token create laptop
 docker exec pika pika token list
 ```
 
-The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … pika token list` runs any other command against the same volume. Pass `PIKA_PASSWORD`, `PIKA_MAX_BODY`, or `PIKA_BASE_PATH` with `-e`.
+To upgrade, `docker pull` the tag and recreate the container with the same volume; the server migrates the database when it opens it.
+
+### Building it yourself
+
+The [`Dockerfile`](Dockerfile) builds the web UI on `node:22-bookworm-slim`, builds the binary on `rust:1-bookworm` with `cargo build --release --locked` (embedding the UI), and runs it on `debian:bookworm-slim` as the non-root user `pika` (uid 10001). The build context is `services/pika/`:
+
+```bash
+docker build -t pika services/pika
+```
+
+Then use `pika` in place of `ghcr.io/minhuw/pika:latest` in the commands here.
+
+### Configuration
+
+The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_PASSWORD`, `PIKA_MAX_BODY`, or `PIKA_BASE_PATH` with `-e`.
 
 The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s, normalizing the base path as the server does (`pika`, `pika/`, and `/pika/` all mean `/pika`). It reads only the environment, so set the base path and bind address with `-e PIKA_BASE_PATH` and `-e PIKA_BIND`, not as `serve --base-path` or `--bind` arguments: with a flag the server moves but the health check does not, and the container stays unhealthy. `docker ps` shows the result, and you can check it by hand:
 
@@ -155,7 +187,7 @@ To keep the data in a host directory instead of a named volume, make it writable
 
 ```bash
 sudo install -d -o 10001 -g 10001 /srv/pika
-docker run -d --name pika -p 127.0.0.1:7171:7171 -v /srv/pika:/data -e PIKA_BASE_PATH=/pika pika
+docker run -d --name pika -p 127.0.0.1:7171:7171 -v /srv/pika:/data -e PIKA_BASE_PATH=/pika ghcr.io/minhuw/pika:latest
 ```
 
 [`deploy/compose.yaml`](deploy/compose.yaml) is the same setup for Docker Compose.
