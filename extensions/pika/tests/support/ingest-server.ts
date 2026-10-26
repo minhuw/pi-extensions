@@ -16,7 +16,11 @@ interface BatchBody {
 	requests?: RequestItem[];
 }
 
-export type Mode = "ok" | "hang";
+/**
+ * `redirect` answers with a 307 to the same path under `/moved`, which is served as usual; `fail`
+ * answers 503; `unauthorized` answers 401 whatever the token.
+ */
+export type Mode = "ok" | "hang" | "redirect" | "fail" | "unauthorized";
 
 /** An in-memory ingest server with the spec's append, duplicate, gap, conflict, and idempotency rules. */
 export class MockIngest {
@@ -90,8 +94,17 @@ export class MockIngest {
 		const chunks: Buffer[] = [];
 		for await (const chunk of request) chunks.push(chunk as Buffer);
 		if (this.mode === "hang") return;
-		if (request.method !== "POST" || request.url !== "/pika/api/ingest/v1/batch") return this.reply(response, 404, { error: "not found" });
-		if (request.headers.authorization !== `Bearer ${TOKEN}`) return this.reply(response, 401, { error: "unauthorized" });
+		const moved = request.url?.startsWith("/moved/");
+		if (this.mode === "redirect" && !moved) {
+			this.responses.push(307);
+			response.writeHead(307, { location: `/moved${request.url ?? "/"}` });
+			response.end();
+			return;
+		}
+		if (this.mode === "fail") return this.reply(response, 503, { error: "unavailable" });
+		const path = moved ? request.url!.slice("/moved".length) : request.url;
+		if (request.method !== "POST" || path !== "/pika/api/ingest/v1/batch") return this.reply(response, 404, { error: "not found" });
+		if (this.mode === "unauthorized" || request.headers.authorization !== `Bearer ${TOKEN}`) return this.reply(response, 401, { error: "unauthorized" });
 		this.headers.push(request.headers);
 		let raw = Buffer.concat(chunks);
 		if (raw.length > this.maxBody) return this.reply(response, 413, { error: "too_large" });

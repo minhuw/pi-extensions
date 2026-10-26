@@ -79,7 +79,7 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
    PIKA_DATA_DIR=/srv/pika pika token create desktop
    ```
 
-3. On each machine, write `~/.pi/agent/pika.json` with that machine's token and the public URL including the base path, then start a new pi session:
+3. On each machine, run `/pika login` in pi and enter the public URL including the base path, then that machine's token. pika checks the token against the server before saving it, and uploads start right away; `/pika logout` removes it again. Alternatively, write `~/.pi/agent/pika.json` by hand and start a new pi session:
 
    ```json
    { "url": "https://homelab.example/pika", "token": "pika_…" }

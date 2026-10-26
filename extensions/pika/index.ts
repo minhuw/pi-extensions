@@ -1,8 +1,9 @@
 import { join } from "node:path";
-import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
-import { acquireUploader, currentUploader, releaseUploader, type Uploader } from "./uploader.ts";
+import { isPlainRemote, login, readConfigFile, writeConfigFile } from "./login.ts";
+import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
 
 export const CHILD_SESSION_HOOKS = Symbol.for("pi-extensions.child-session-hooks");
 export const SHUTDOWN_FLUSH_MS = 2_000;
@@ -16,8 +17,10 @@ export interface ChildSessionHook {
 // Module copies loaded for other cwds share this state, so it lives on globalThis.
 const SHARED = Symbol.for("pi-extensions.pika");
 interface Shared {
-	/** Enabled pika instances whose session has started and not shut down. */
-	active: number;
+	/** Enabled pika instances whose session has started and not shut down, each with what stops its capture. */
+	members: Map<object, () => void>;
+	/** Members `/pika logout` stopped whose session is still open, each with what attaches it again after a login. */
+	detached: Map<object, () => void>;
 	hook?: ChildSessionHook;
 	/** One capture per session id, owned by the last pika instance that started in it. */
 	captures: Map<string, SessionCapture>;
@@ -25,10 +28,12 @@ interface Shared {
 	excluded: Set<string>;
 }
 const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook> };
-const shared = (): Shared => global[SHARED] ??= { active: 0, captures: new Map(), excluded: new Set() };
+const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: new Map(), captures: new Map(), excluded: new Set() };
 const hooks = (): Set<ChildSessionHook> => global[CHILD_SESSION_HOOKS] ??= new Set();
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const USAGE = "Usage: /pika [status|login [url]|logout]";
+const SUBCOMMANDS = ["status", "login", "logout"];
 
 function modelInfo(ctx: ExtensionContext) {
 	const model = ctx.model;
@@ -43,6 +48,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	let sessionId: string | undefined;
 	let skipped: string | undefined;
 	let excludedKeys: string[] = [];
+	/** The context this instance last attached with; valid until its session shuts down. */
+	let attachedCtx: ExtensionContext | undefined;
 
 	// Capture errors are recorded for /pika and never reach the turn.
 	const guard = (fn: () => void) => {
@@ -56,13 +63,17 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 
 	const enabledConfig = () => config?.enabled ? config.config : undefined;
 
+	const uploaderOptions = (): UploaderOptions => {
+		const { url, token } = enabledConfig()!;
+		return { url, token, dir: join(getAgentDir(), "pika"), piVersion: VERSION };
+	};
+
 	function enroll(): Uploader {
 		const state = shared();
-		const { url, token } = enabledConfig()!;
-		const uploader = acquireUploader({ url, token, dir: join(getAgentDir(), "pika"), piVersion: VERSION });
+		const uploader = acquireUploader(uploaderOptions());
 		if (!joined) {
 			joined = true;
-			state.active++;
+			state.members.set(self, detach);
 			state.hook ??= { name: "pika", extensionFactory: (child) => pikaExtension(child) };
 			hooks().add(state.hook);
 		}
@@ -73,13 +84,37 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		if (!joined) return;
 		joined = false;
 		const state = shared();
-		state.active = Math.max(0, state.active - 1);
-		if (state.active > 0) return;
+		state.members.delete(self);
+		if (state.members.size > 0) return;
 		if (state.hook) hooks().delete(state.hook);
 		const uploader = currentUploader();
 		if (!uploader) return;
 		await uploader.drain(SHUTDOWN_FLUSH_MS);
-		if (shared().active === 0) await releaseUploader(uploader);
+		if (shared().members.size === 0) await releaseUploader(uploader);
+	}
+
+	/** Stops capturing without uploading anything more; `/pika logout` does this for every instance. */
+	function detach(): void {
+		joined = false;
+		sessionId = undefined;
+		skipped = undefined;
+		const ctx = attachedCtx;
+		if (ctx) shared().detached.set(self, () => { guard(() => attach(ctx)); });
+	}
+
+	/**
+	 * Stops every capture and upload in this process at once. Held calls are released without their
+	 * assistant message, and everything queued stays on disk for the next uploader.
+	 */
+	async function stopProcess(): Promise<void> {
+		const state = shared();
+		for (const stop of state.members.values()) stop();
+		state.members.clear();
+		for (const capture of state.captures.values()) capture.settle();
+		state.captures.clear();
+		if (state.hook) hooks().delete(state.hook);
+		const uploader = currentUploader();
+		if (uploader) await releaseUploader(uploader);
 	}
 
 	/** Why a session must not be captured, nor its children and Herder runs; checked before enrolling. */
@@ -114,21 +149,24 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		void uploader.openStream({ key, kind: "session", path: file, meta: { sessionId, cwd, ...(parentSession ? { parentSession } : {}) } });
 	}
 
-	pi.on("session_start", (_event, ctx) => {
-		guard(() => {
-			config = loadConfig(getAgentDir());
-			if (!config.enabled) return;
-			sessionId = ctx.sessionManager.getSessionId();
-			skipped = exclusion(ctx);
-			if (skipped) {
-				const file = ctx.sessionManager.getSessionFile();
-				excludedKeys = file ? [sessionId, file] : [sessionId];
-				for (const key of excludedKeys) shared().excluded.add(key);
-				return;
-			}
-			start(ctx, enroll());
-		});
-	});
+	/** Reads the configuration and, when enabled and not excluded, captures the session from its first line. */
+	function attach(ctx: ExtensionContext): void {
+		config = loadConfig(getAgentDir());
+		if (!config.enabled) return;
+		attachedCtx = ctx;
+		shared().detached.delete(self);
+		sessionId = ctx.sessionManager.getSessionId();
+		skipped = exclusion(ctx);
+		if (skipped) {
+			const file = ctx.sessionManager.getSessionFile();
+			excludedKeys = file ? [sessionId, file] : [sessionId];
+			for (const key of excludedKeys) shared().excluded.add(key);
+			return;
+		}
+		start(ctx, enroll());
+	}
+
+	pi.on("session_start", (_event, ctx) => { guard(() => attach(ctx)); });
 
 	pi.on("context_with_system", (event, ctx) => {
 		guard(() => owned(ctx)?.onContext(event.messages, modelInfo(ctx)));
@@ -164,6 +202,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		guard(() => {
 			for (const key of excludedKeys) shared().excluded.delete(key);
 			excludedKeys = [];
+			shared().detached.delete(self);
+			attachedCtx = undefined;
 			const capture = owned(ctx);
 			if (!capture) return;
 			shared().captures.delete(capture.sessionId);
@@ -186,10 +226,75 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		});
 	});
 
+	async function loginCommand(ctx: ExtensionCommandContext, arg: string | undefined): Promise<void> {
+		const before = loadConfig(getAgentDir());
+		const saved = await login(ctx, before.file, arg, before.enabled ? before.config.url : before.url, VERSION);
+		if (!saved) return;
+		// The token was just accepted, so the process starts a new uploader even with the same login,
+		// one a 401 or a long backoff stopped included. A session that had not joined joins now, and so
+		// do the other open sessions `/pika logout` stopped.
+		guard(() => {
+			config = loadConfig(getAgentDir());
+			if (!config.enabled) return;
+			if (currentUploader()) acquireUploader(uploaderOptions(), true);
+			if (!joined) attach(ctx);
+			const detached = shared().detached;
+			for (const [member, reattach] of [...detached]) {
+				detached.delete(member);
+				reattach();
+			}
+		});
+		const lines = [`Logged in to ${saved.url}; saved to ${saved.file}.${saved.reenabled ? ' Removed "enabled": false, so uploads are on again.' : ""}`];
+		const warnings: string[] = [];
+		if (isPlainRemote(saved.url)) warnings.push("The URL is plain http to another host, so the token travels unencrypted.");
+		const overridden = ["PIKA_URL", "PIKA_TOKEN"].filter((name) => process.env[name]);
+		if (overridden.length) warnings.push(`${overridden.join(" and ")} in the environment override${overridden.length === 1 ? "s" : ""} the saved value${overridden.length === 1 ? "" : "s"}.`);
+		const current = config;
+		if (process.env.PIKA_DISABLED === "1") warnings.push("The login is saved, but PIKA_DISABLED=1 keeps uploads off.");
+		else if (joined && !skipped && current?.enabled) lines.push(`This session now uploads to ${current.config.url}.`);
+		else if (skipped) lines.push(`This session is not captured: ${skipped}.`);
+		else if (current && !current.enabled) lines.push(`Uploads stay off: ${current.reason}.`);
+		lines.push("Other pi processes use it from their next session.");
+		ctx.ui.notify([...lines, ...warnings].join("\n"), warnings.length ? "warning" : "info");
+	}
+
+	async function logoutCommand(ctx: ExtensionCommandContext): Promise<void> {
+		const file = loadConfig(getAgentDir()).file;
+		const env = ["PIKA_URL", "PIKA_TOKEN"].filter((name) => process.env[name]);
+		const envWarning = env.length ? `${env.join(" and ")} ${env.length === 1 ? "is" : "are"} set in the environment, so new sessions still use ${env.length === 1 ? "it" : "them"}.` : undefined;
+		try {
+			const fields = await readConfigFile(file);
+			if (!fields || (!("url" in fields) && !("token" in fields))) {
+				ctx.ui.notify([`pika: nothing to log out; ${file} has no url or token.`, ...(envWarning ? [envWarning] : [])].join("\n"), "info");
+				return;
+			}
+			const { url: _url, token: _token, ...rest } = fields;
+			await writeConfigFile(file, rest);
+		} catch (error) {
+			ctx.ui.notify(`pika logout failed: ${errorText(error)}. Nothing changed.`, "error");
+			return;
+		}
+		await stopProcess();
+		config = loadConfig(getAgentDir());
+		const lines = [
+			`Logged out of pika: removed the url and token from ${file}. This process stopped uploading.`,
+			`Queued data stays in ${join(getAgentDir(), "pika")} and uploads after the next login.`,
+		];
+		ctx.ui.notify([...lines, ...(envWarning ? [envWarning] : [])].join("\n"), envWarning ? "warning" : "info");
+	}
+
 	pi.registerCommand("pika", {
-		description: "Show pika upload status",
-		handler: async (_args, ctx) => {
-			ctx.ui.notify(statusText(config ?? loadConfig(getAgentDir()), joined, sessionId, skipped), "info");
+		description: "Show pika upload status, or log in to or out of a pika server",
+		getArgumentCompletions: (prefix) => {
+			const items = SUBCOMMANDS.filter((name) => name.startsWith(prefix.trim())).map((name) => ({ value: name, label: name }));
+			return items.length ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const [command = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			if (command === "status" && !rest.length) ctx.ui.notify(statusText(config ?? loadConfig(getAgentDir()), joined, sessionId, skipped), "info");
+			else if (command === "login" && rest.length <= 1) await loginCommand(ctx, rest[0]);
+			else if (command === "logout" && !rest.length) await logoutCommand(ctx);
+			else ctx.ui.notify(USAGE, "error");
 		},
 	});
 }
@@ -201,7 +306,7 @@ function bytes(value: number): string {
 }
 
 export function statusText(config: ConfigResult, joined: boolean, sessionId: string | undefined, skipped: string | undefined): string {
-	if (!config.enabled) return `pika is disabled: ${config.reason}.`;
+	if (!config.enabled) return `pika is disabled: ${config.reason}.${config.unconfigured ? " Run /pika login to set it up." : ""}`;
 	const uploader = currentUploader();
 	const status = uploader?.status();
 	const lines = [

@@ -25,7 +25,7 @@ pika is part of this collection. Installing the collection loads it as the last 
    ```
 
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
-3. Write `~/.pi/agent/pika.json` (below) and run `/reload` or start a new pi session. `/pika` confirms that the session is captured.
+3. In pi, run `/pika login` and enter the server URL and the token (see [Log in](#log-in)). The current session starts uploading at once, and `/pika` confirms that it is captured. Writing `~/.pi/agent/pika.json` by hand (below) works too.
 
 To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension is the only thing the package loads:
 
@@ -45,7 +45,24 @@ For one invocation, `pi --extension /path/to/pi-extensions/extensions/pika/index
 
 ## Configuration
 
-`<agentDir>/pika.json`, normally `~/.pi/agent/pika.json`:
+### Log in
+
+`/pika login [url]` configures pika from inside pi, in the TUI or an RPC client:
+
+1. It asks for the server URL, including its base path (`https://homelab.example/pika`), unless you pass it as the argument. A blank answer keeps the current URL. The URL must be `http://` or `https://` without credentials, a query, or a fragment; trailing `/` are dropped. A plain `http://` URL to another host works, but the token then travels unencrypted, and the success message says so.
+2. It asks for the token from `pika token create <device>`. In the TUI, the input shows one `•` per character, never the token; typing, editing, and pasting work as usual. RPC clients show pika's prompt as a plain text input, which pika cannot mask. The token must be entered every time: pika never reuses the saved token or `PIKA_TOKEN`.
+3. It sends the server an empty batch with the token and saves nothing unless the server accepts it. If the server rejects the token, has no pika ingest API at the URL (404), answers with another status or a redirect, or cannot be reached within 5 s, pika says so and leaves `pika.json` as it was. Messages never contain the token.
+4. It saves `url` and `token` to `pika.json`, written atomically with mode `0600` (readable only by you), and keeps every other field. `"enabled": false` is removed, since logging in turns uploads on. If `pika.json` is a symbolic link, for example into a dotfiles repository, the link stays and the file it points to is replaced, also with mode `0600`; a link to a missing file is refused. If `pika.json` is not a JSON object, pika refuses to touch it until you fix or remove it.
+
+The login applies at once: the current session starts uploading from its first line, or the process moves to the new server if it was already uploading. Every successful login starts uploading anew, even with the same server and token, so it also resumes uploads a 401 stopped. Child sessions in the same process follow, including those still open from before a `/pika logout`, and other pi processes pick the login up at their next session start. Cancelling either prompt changes nothing.
+
+`/pika logout` removes `url` and `token` from `pika.json` and keeps the other fields. This pi process stops uploading at once, for its child sessions too; whatever is still queued stays in `<agentDir>/pika/` and is sent after the next login, which also resumes the sessions that are still open. With a symbolic link, the file it points to is rewritten, as for `/pika login`.
+
+`PIKA_URL` and `PIKA_TOKEN` still take precedence over the saved login, and `PIKA_DISABLED=1` keeps pika off; `/pika login` and `/pika logout` warn when one of them is set.
+
+### `pika.json`
+
+`<agentDir>/pika.json`, normally `~/.pi/agent/pika.json`, is what `/pika login` writes. You can also write it by hand:
 
 ```json
 {
@@ -73,7 +90,7 @@ Environment variables override the file:
 | `PIKA_TOKEN` | Replaces `token`. |
 | `PIKA_DISABLED=1` | Always disables pika, whatever the file says. |
 
-The configuration is read at each session start, so edits apply to the next new, resumed, or reloaded session.
+The configuration is read at each session start, so hand edits apply to the next new, resumed, or reloaded session. `/pika login` and `/pika logout` also apply at once in the pi process that runs them.
 
 ### Exclude list
 
@@ -100,7 +117,7 @@ pika never blocks or fails a turn. Its handlers only enqueue work, and errors ar
 
 Repeated messages and tool declarations are uploaded once, as content-addressed blocks: each element of a top-level array in the payload, and each top-level string over 2,048 characters, is sent by hash. pika remembers which hashes the server already has and sends only new ones.
 
-Network errors, timeouts (30 s per batch), and error answers other than 401, 409, and 413 are retried with exponential backoff from 0.5 s up to 60 s, for as long as pi runs. A 401 stops uploading until pi restarts. When the last session shuts down, pika flushes for at most 2 s, and whatever remains is sent the next time pi starts with pika enabled.
+Network errors, timeouts (30 s per batch), and error answers other than 401, 409, and 413 are retried with exponential backoff from 0.5 s up to 60 s, for as long as pi runs. A 401 stops uploading until `/pika login` succeeds, also with the same token, a new session starts in the same pi process, or pi restarts. When the last session shuts down, pika flushes for at most 2 s, and whatever remains is sent the next time pi starts with pika enabled.
 
 On a 413, pika halves its batch size, down to 256 KiB. When a batch of one item still gets 413 three times, pika parks that item and goes on with the rest. A parked block or request moves to `spool/parked/` and is not retried, and requests that reference a parked block stay incomplete on the server. A parked session line stops only its own stream, because later lines depend on it. Parked files are kept for inspection and are never retried, so set the proxy's body limit and the server's `--max-body` high enough first.
 
@@ -131,7 +148,7 @@ Do not share one agentDir between machines, for example over a network file syst
 
 ### `/pika`
 
-`/pika` shows:
+`/pika` (or `/pika status`) shows:
 
 - whether pika is enabled, or why not;
 - the server URL;
@@ -139,6 +156,8 @@ Do not share one agentDir between machines, for example over a network file syst
 - queued items and bytes;
 - the last successful upload and the last error;
 - any stream that stopped on a conflict or an oversized line, uploads stopped by a 401, and parked items with their directory.
+
+When no URL and token are configured, it suggests `/pika login`. `/pika login [url]` and `/pika logout` are described under [Log in](#log-in).
 
 ### Child-session hook
 
@@ -149,7 +168,7 @@ const hooks: Set<{ name: string; extensionFactory: (pi: ExtensionAPI) => void }>
 	(globalThis as any)[Symbol.for("pi-extensions.child-session-hooks")] ??= new Set();
 ```
 
-- Whoever needs the `Set` first creates it. pika adds one hook named `"pika"` when it starts capturing and removes it when the last captured session shuts down.
+- Whoever needs the `Set` first creates it. pika adds one hook named `"pika"` when it starts capturing and removes it when the last captured session shuts down, or at `/pika logout`.
 - An extension that creates child `AgentSession`s (Subagents and Herder in this collection) appends every registered hook's `extensionFactory`, last, to the child's `extensionFactories`, even when the child loads no other extensions.
 - While a hook is registered, Subagents persists every child as a Pi session file in its configured session directory, including nested and `persist_session: false` children. Herder always persists step sessions in `<runDir>/sessions/`.
 
@@ -196,7 +215,7 @@ location /pika/ {
 }
 ```
 
-Then set `"url": "https://homelab.example/pika"` in each machine's `pika.json`. Caddy examples, subdomain variants, and putting authentication in the proxy are covered in the server README; if the proxy adds authentication, leave `/api/ingest/` to pika's bearer tokens.
+Then run `/pika login https://homelab.example/pika` on each machine, or set that `url` in its `pika.json`. Caddy examples, subdomain variants, and putting authentication in the proxy are covered in the server README; if the proxy adds authentication, leave `/api/ingest/` to pika's bearer tokens.
 
 ## Tests
 
@@ -205,4 +224,4 @@ npm ci
 npm run test:pika
 ```
 
-`npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.
+`npm run test:pika` runs offline Vitest suites against real Pi runtimes and a mock ingest server with the server's append, gap, conflict, and idempotency rules. `/pika login` and `/pika logout` run through a scripted UI, in both RPC and TUI mode. Payload capture goes through Pi's real `openai-completions` implementation against a local mock endpoint. No live providers are used. `npm test` includes it. The cross-component test against the real server is `bash services/pika/scripts/e2e.sh`.

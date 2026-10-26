@@ -8,7 +8,9 @@ export interface PikaConfig {
 	exclude: string[];
 }
 
-export type ConfigResult = { enabled: true; config: PikaConfig; file: string } | { enabled: false; reason: string; file: string; url?: string };
+export type ConfigResult =
+	| { enabled: true; config: PikaConfig; file: string }
+	| { enabled: false; reason: string; file: string; url?: string; /** No server url or token is configured anywhere. */ unconfigured?: true };
 
 /** Reads `<agentDir>/pika.json`; `PIKA_URL` and `PIKA_TOKEN` override it and `PIKA_DISABLED=1` always disables. */
 export function loadConfig(agentDir: string, env: NodeJS.ProcessEnv = process.env): ConfigResult {
@@ -25,7 +27,7 @@ export function loadConfig(agentDir: string, env: NodeJS.ProcessEnv = process.en
 	const token = (env.PIKA_TOKEN || (typeof raw.token === "string" ? raw.token : "")).trim();
 	if (env.PIKA_DISABLED === "1") return { enabled: false, reason: "PIKA_DISABLED=1 is set", file, url: url || undefined };
 	if (raw.enabled === false) return { enabled: false, reason: `"enabled" is false in ${file}`, file, url: url || undefined };
-	if (!url || !token) return { enabled: false, reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`, file, url: url || undefined };
+	if (!url || !token) return { enabled: false, reason: `no server url and token configured (${file}, PIKA_URL, PIKA_TOKEN)`, file, url: url || undefined, unconfigured: true };
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("not http(s)");

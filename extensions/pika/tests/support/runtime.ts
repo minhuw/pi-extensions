@@ -7,7 +7,7 @@ import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { fauxProvider, type FauxProviderHandle } from "@earendil-works/pi-ai/providers/faux";
 import {
 	createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
-	type AgentSession, type ExtensionFactory,
+	type AgentSession, type ExtensionContext, type ExtensionFactory, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { TOKEN } from "./ingest-server.ts";
 
@@ -58,6 +58,9 @@ export interface SessionOptions {
 	openAiBaseUrl?: string;
 	faux?: FauxProviderHandle;
 	tools?: string[];
+	/** Bind this UI, so `ctx.hasUI` is true; without it the session has no UI. */
+	ui?: ExtensionUIContext;
+	mode?: ExtensionContext["mode"];
 }
 
 export interface Harness {
@@ -91,7 +94,7 @@ export async function startSession(options: SessionOptions): Promise<Harness> {
 		settingsManager: SettingsManager.inMemory({ defaultTools: options.tools ?? [], retry: { enabled: false } }),
 	});
 	const errors: unknown[] = [];
-	await session.bindExtensions({ mode: "rpc", onError: (error) => { errors.push(error); } });
+	await session.bindExtensions({ mode: options.mode ?? "rpc", ...(options.ui ? { uiContext: options.ui } : {}), onError: (error) => { errors.push(error); } });
 	let closed = false;
 	return {
 		session, faux, errors,

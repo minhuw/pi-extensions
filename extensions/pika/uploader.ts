@@ -157,6 +157,9 @@ export async function readLines(path: string, offset: number, end: number, maxBy
 	}
 }
 
+/** The `client` object of every batch. */
+export const clientInfo = (piVersion?: string) => ({ host: hostname(), pikaVersion: PIKA_VERSION, ...(piVersion ? { piVersion } : {}) });
+
 const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 const wireRecord = ({ awaiting: _, ...record }: SpooledRequest): RequestRecord => record;
 const itemId = (item: Item) => item.kind === "line" ? `line:${item.key}:${item.offset}` : `${item.kind}:${"hash" in item ? item.hash : "id" in item ? item.id : item.key}`;
@@ -266,34 +269,54 @@ export class Uploader {
 	private lastError?: { at: number; message: string };
 	private halted?: string;
 
-	/** `after` is the stop of the uploader this one replaces in the same process, so its spooled requests are loaded too. */
-	constructor(readonly options: UploaderOptions, after?: Promise<void>) {
+	/**
+	 * `previous` is the uploader this one replaces in the same process. It is stopped first, so its
+	 * spooled requests are loaded too, and the streams it had open stay open here.
+	 */
+	constructor(readonly options: UploaderOptions, previous?: Uploader) {
 		this.store = new Store(options.dir);
 		// An uploader standing in for another process (`owner`) holds only its own requests.
 		if (!options.owner) localOwners().add(this.id);
-		this.ready = this.load(after).catch((error) => this.noteError(`loading local state: ${errorText(error)}`));
+		this.ready = this.load(previous).catch((error) => this.noteError(`loading local state: ${errorText(error)}`));
 		this.scanTimer = setInterval(() => { this.scan().catch((error) => this.noteError(errorText(error))); }, SCAN_INTERVAL_MS);
 		this.scanTimer.unref();
 	}
 
 	get isClosed(): boolean { return this.closed; }
+	/** A 401 stopped uploads; only a new uploader tries the token again. */
+	get isHalted(): boolean { return this.halted !== undefined; }
 
 	noteError(message: string): void {
 		this.lastError = { at: Date.now(), message };
 	}
 
-	private async load(after?: Promise<void>): Promise<void> {
-		await after;
+	/**
+	 * Once `stop()` was called, loading changes nothing in the store beyond the directories that work
+	 * queued before the stop needs. The open streams are still taken over, since a replacement takes
+	 * them from this uploader in turn.
+	 */
+	private async load(previous?: Uploader): Promise<void> {
+		if (previous) {
+			await previous.stop();
+			// It may itself still be taking over open streams; `ready` never rejects.
+			await previous.ready;
+		}
 		this.self = this.options.owner ?? await currentProcess();
 		await this.store.init();
 		// Acknowledgements hold only for the server that gave them.
 		const acked = await this.store.loadAcked();
 		if (acked.url === this.options.url) for (const hash of acked.hashes) this.acked.add(hash);
-		else await this.store.rewriteAcked(this.options.url, []);
+		else if (!this.closed) await this.store.rewriteAcked(this.options.url, []);
 		for (const state of await this.store.loadActiveStreams()) {
 			if (this.streams.has(state.key)) continue;
 			this.streams.set(state.key, { state, open: 0, gapRetries: 0 });
 			if (state.kind === "herder-journal") this.queueDocuments(state);
+		}
+		for (const [key, { open }] of previous?.streams ?? []) {
+			const stream = this.streams.get(key);
+			if (!stream) continue;
+			stream.open += open;
+			if (previous!.herderRuns.has(key)) this.herderRuns.add(key);
 		}
 		for (const [name, size] of await this.store.listParked()) this.parked.set(name, size);
 		const blobs = await this.store.listBlobs();
@@ -306,7 +329,7 @@ export class Uploader {
 		for (const { hash, size, mtimeMs } of blobs) {
 			const count = refs.get(hash);
 			if (count) this.blobs.set(hash, { size, refs: count });
-			else if (mtimeMs < cutoff) await this.store.deleteBlob(hash);
+			else if (mtimeMs < cutoff && !this.closed) await this.store.deleteBlob(hash);
 		}
 		this.poke(0);
 	}
@@ -726,7 +749,7 @@ export class Uploader {
 
 	private async send(batch: Batch): Promise<Outcome> {
 		const body = JSON.stringify({
-			client: { host: hostname(), pikaVersion: PIKA_VERSION, ...(this.options.piVersion ? { piVersion: this.options.piVersion } : {}) },
+			client: clientInfo(this.options.piVersion),
 			...(batch.streams.length ? { streams: batch.streams } : {}),
 			...(batch.documents.length ? { documents: batch.documents.map(({ streamKey: _, ...document }) => document) } : {}),
 			...(batch.blobs.length ? { blobs: batch.blobs } : {}),
@@ -747,7 +770,7 @@ export class Uploader {
 		try { const value: unknown = JSON.parse(response.text); if (value && typeof value === "object") parsed = value as Record<string, unknown>; } catch { /* not JSON */ }
 		if (response.status === 200) return await this.accepted(batch, parsed);
 		if (response.status === 401) {
-			this.halted = "the server rejected the token (401); uploads stopped until pi restarts";
+			this.halted = "the server rejected the token (401); uploads stopped until /pika login succeeds or a new session starts";
 			this.noteError(this.halted);
 			return "stop";
 		}
@@ -938,11 +961,15 @@ export class Uploader {
 const UPLOADER = Symbol.for("pi-extensions.pika.uploader");
 const shared = globalThis as { [UPLOADER]?: Uploader };
 
-/** The process-wide uploader for these options; a different configuration replaces it. */
-export function acquireUploader(options: UploaderOptions): Uploader {
+/**
+ * The process-wide uploader for these options. A different configuration, a 401, or `fresh` replaces
+ * it; the replacement takes over its open streams.
+ */
+export function acquireUploader(options: UploaderOptions, fresh = false): Uploader {
 	const current = shared[UPLOADER];
-	if (current && !current.isClosed && current.options.url === options.url && current.options.token === options.token && current.options.dir === options.dir) return current;
-	const uploader = new Uploader(options, current?.stop());
+	if (!fresh && current && !current.isClosed && !current.isHalted
+		&& current.options.url === options.url && current.options.token === options.token && current.options.dir === options.dir) return current;
+	const uploader = new Uploader(options, current);
 	shared[UPLOADER] = uploader;
 	return uploader;
 }
