@@ -44,21 +44,61 @@ fn session_lookups_use_the_id_index() {
     });
 }
 
+/// Every root/device/project combination walks its own index, with and without a `model` filter and a time range;
+/// `model` looks each session up by the `session_models` primary key. No sort, and no scan beyond the index walk.
 #[test]
 fn session_lists_walk_the_index_of_their_filters() {
     with_conn(|conn| {
         let cursor = encode_cursor(&[json!(5), json!("x")]);
-        for (pairs, index) in [
-            (vec![], "sessions_last"),
-            (vec![("root", "true")], "sessions_root"),
-            (vec![("device", "d"), ("model", "m"), ("from", "2026-01-01")], "sessions_device"),
-            (vec![("project", "p"), ("cursor", cursor.as_str())], "sessions_project"),
-            (vec![("root", "true"), ("device", "d"), ("project", "p"), ("to", "2026-01-01")], "sessions_root_device_project"),
+        for (root, device, project, index) in [
+            (false, false, false, "sessions_last"),
+            (false, true, false, "sessions_device"),
+            (false, false, true, "sessions_project"),
+            (false, true, true, "sessions_device_project"),
+            (true, false, false, "sessions_root"),
+            (true, true, false, "sessions_root_device"),
+            (true, false, true, "sessions_root_project"),
+            (true, true, true, "sessions_root_device_project"),
         ] {
-            let (sql, args) = super::sessions::list_query(&params(&pairs), 50).unwrap();
-            let plan = plan(conn, &sql, Some(args));
-            assert!(plan[0].starts_with(&format!("SEARCH s USING INDEX {index} (")) || plan[0] == format!("SCAN s USING INDEX {index}"), "{pairs:?}: {plan:?}");
-            assert!(!plan.iter().any(|p| p.contains("TEMP B-TREE")), "{pairs:?}: {plan:?}");
+            for model in [false, true] {
+                for (range, bound) in [
+                    (vec![], None),
+                    (vec![("from", "2026-01-01")], Some("last_at>?")),
+                    (vec![("to", "2026-01-01"), ("cursor", cursor.as_str())], Some("last_at<?")),
+                ] {
+                    let mut pairs = Vec::new();
+                    let mut columns = Vec::new();
+                    if root {
+                        pairs.push(("root", "true"));
+                    }
+                    if device {
+                        pairs.push(("device", "d"));
+                        columns.push("device=?");
+                    }
+                    if project {
+                        pairs.push(("project", "p"));
+                        columns.push("project=?");
+                    }
+                    if model {
+                        pairs.push(("model", "m"));
+                    }
+                    pairs.extend(range);
+                    columns.extend(bound);
+                    let mut want = vec![if columns.is_empty() {
+                        format!("SCAN s USING INDEX {index}")
+                    } else {
+                        format!("SEARCH s USING INDEX {index} ({})", columns.join(" AND "))
+                    }];
+                    if model {
+                        want.push("SEARCH m EXISTS USING PRIMARY KEY (model=? AND sid=?)".into());
+                    }
+                    let (sql, args) = super::sessions::list_query(&params(&pairs), 50).unwrap();
+                    let plan = plan(conn, &sql, Some(args));
+                    assert_eq!(plan, want, "{pairs:?}");
+                    assert!(!plan.iter().any(|p| p.contains("TEMP B-TREE")), "{pairs:?}: {plan:?}");
+                    assert!(!plan[1..].iter().any(|p| p.starts_with("SCAN")), "{pairs:?}: {plan:?}");
+                }
+            }
         }
     });
 }
@@ -130,3 +170,4 @@ fn relevance_search_joins_only_the_best() {
         );
     });
 }
+

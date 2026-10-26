@@ -90,7 +90,7 @@ fn session_filters(p: &Params) -> (String, Vec<Sql>) {
 /// With filters, matches are first checked against the filtered sessions' sid bits in the document id, from a set
 /// SQLite builds once: joining every match of a common word to its document and session reads most of the index's
 /// documents. The bits identify the session while every sid is below 2^20 (`wide_sids` is false); otherwise matches
-/// that pass them are joined for the exact check.
+/// that pass them are joined for the exact check. Every hit passes the exact filters in its final join as well.
 pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statement>> {
     let relevance = match p.get("sort") {
         None | Some("newest") => false,
@@ -118,7 +118,8 @@ pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statem
     let mut args = Vec::new();
     let sql = if relevance {
         // One pass over the newest filtered matches scores them; only the best are joined and get snippets. The
-        // CROSS JOIN keeps `best` the outer loop: otherwise SQLite may walk every match of the query instead.
+        // CROSS JOIN keeps `best` the outer loop: otherwise SQLite may walk every match of the query instead. The exact
+        // filters in the final join cost at most `limit` lookups, where in `ranked` they would cost one per match.
         let (exact, exact_filters) = if wide_sids && !filters.is_empty() {
             (" JOIN search_docs d ON d.id = search_fts.rowid JOIN sessions s ON s.sid = d.sid", filters.as_str())
         } else {
@@ -129,11 +130,12 @@ pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statem
             args.extend(filter_args.iter().cloned());
         }
         if !exact_filters.is_empty() {
-            args.extend(filter_args);
+            args.extend(filter_args.iter().cloned());
         }
         args.push(Sql::Integer(RELEVANCE_WINDOW));
         args.push(Sql::Integer(limit));
         args.push(Sql::Text(query));
+        args.extend(filter_args);
         format!(
             "WITH ranked AS (
                  SELECT search_fts.rowid AS id, bm25(search_fts) AS rank FROM search_fts{exact}
@@ -147,7 +149,7 @@ pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statem
              JOIN search_docs d ON d.id = best.id
              JOIN sessions s ON s.sid = d.sid
              LEFT JOIN entries e ON e.sid = d.sid AND e.seq = d.seq
-             WHERE search_fts MATCH ?
+             WHERE search_fts MATCH ?{filters}
              ORDER BY best.rank, best.id DESC"
         )
     } else {
@@ -293,6 +295,122 @@ mod tests {
                         }
                         assert_eq!(found[0], want, "{filters:?} {sort}");
                         assert_eq!(found[1], want, "{filters:?} {sort}");
+                    }
+                }
+                Ok::<_, ReadError>(())
+            })
+            .unwrap();
+    }
+
+    /// A session whose lines have no `timestamp` indexes every part in one second. Past the 4,096 ids of that second
+    /// its documents keep their sid bits, so filters on either session find exactly that session's matches.
+    #[test]
+    fn filters_hold_when_one_second_runs_out_of_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let header = |id: &str, cwd: &str| {
+            json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-20T09:00:00.000Z", "cwd": cwd }).to_string()
+        };
+        let mut busy = vec![header("s0", "/x/p")];
+        busy.extend((0..4_200).map(|i| {
+            json!({ "type": "message", "id": format!("s0-{i}"), "parentId": null,
+                    "message": { "role": "user", "content": format!("alpha {i}") } })
+            .to_string()
+        }));
+        let neighbour = session("s1", "/x/q", &["alpha", "alpha beta", "gamma alpha"]);
+        for (id, device, lines) in [("s0", "a", busy), ("s1", "b", neighbour)] {
+            let batch = serde_json::from_value(json!({ "streams": [{ "key": format!("session:{id}"), "kind": "session", "offset": 0, "lines": lines }] }));
+            crate::ingest::apply(&store, device, &batch.unwrap()).unwrap();
+        }
+        store
+            .read(|conn| {
+                for (filters, want) in [
+                    (vec![("device", "a")], vec![("s0", 4_200)]),
+                    (vec![("project", "p")], vec![("s0", 4_200)]),
+                    (vec![("device", "b")], vec![("s1", 3)]),
+                    (vec![("device", "b"), ("project", "q")], vec![("s1", 3)]),
+                    (vec![], vec![("s0", 4_200), ("s1", 3)]),
+                ] {
+                    let params = |sort: &str, cursor: Option<&str>| {
+                        let mut p = Params::default();
+                        for (k, v) in filters.iter().copied().chain([("q", "alpha"), ("sort", sort), ("limit", "100")]) {
+                            p.0.insert(k.into(), v.into());
+                        }
+                        if let Some(cursor) = cursor {
+                            p.0.insert("cursor".into(), cursor.into());
+                        }
+                        p
+                    };
+                    let mut newest: Vec<(String, usize)> = Vec::new();
+                    let mut cursor = None;
+                    loop {
+                        let page = search(conn, &params("newest", cursor.as_deref()))?;
+                        for hit in page.items {
+                            match newest.iter_mut().find(|(id, _)| *id == hit.session_id) {
+                                Some((_, n)) => *n += 1,
+                                None => newest.push((hit.session_id, 1)),
+                            }
+                        }
+                        cursor = page.next_cursor;
+                        if cursor.is_none() {
+                            break;
+                        }
+                    }
+                    newest.sort();
+                    let want: Vec<(String, usize)> = want.iter().map(|(id, n)| (id.to_string(), *n)).collect();
+                    assert_eq!(newest, want, "newest {filters:?}");
+
+                    let relevance = search(conn, &params("relevance", None))?.items;
+                    let total: usize = want.iter().map(|(_, n)| n).sum();
+                    assert_eq!(relevance.len(), total.min(100), "relevance {filters:?}");
+                    assert!(relevance.iter().all(|h| want.iter().any(|(id, _)| *id == h.session_id)), "relevance {filters:?}");
+                }
+                Ok::<_, ReadError>(())
+            })
+            .unwrap();
+    }
+
+    /// A document whose id carries another session's sid bits passes the prefilter for that session, but no filtered
+    /// search returns it under that session's filters.
+    #[test]
+    fn hits_pass_the_exact_filters_whatever_their_sid_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        for (id, device, cwd) in [("s0", "a", "/x/p"), ("s1", "b", "/x/q")] {
+            let lines = session(id, cwd, &["alpha", "alpha beta"]);
+            let batch = serde_json::from_value(json!({ "streams": [{ "key": format!("session:{id}"), "kind": "session", "offset": 0, "lines": lines }] }));
+            crate::ingest::apply(&store, device, &batch.unwrap()).unwrap();
+        }
+        store
+            .write(|tx| {
+                let sid = |id: &str| tx.query_row("SELECT sid FROM sessions WHERE id = ?1", [id], |r| r.get::<_, i64>(0));
+                let forged = 1 << 32 | (sid("s1")? & SID_MASK) << SID_SHIFT | 5;
+                tx.execute(
+                    "INSERT INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, ?2, 1, 'user', 1000, 'alpha forged')",
+                    [forged, sid("s0")?],
+                )?;
+                tx.execute("INSERT INTO search_fts (rowid, text) VALUES (?1, 'alpha forged')", [forged])?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        store
+            .read(|conn| {
+                for filters in [vec![("device", "b")], vec![("project", "q")], vec![("device", "b"), ("project", "q")], vec![]] {
+                    let unfiltered = filters.is_empty();
+                    for (q, want) in [("alpha", if unfiltered { 5 } else { 2 }), ("forged", if unfiltered { 1 } else { 0 })] {
+                        for sort in ["newest", "relevance"] {
+                            let mut p = Params::default();
+                            for (k, v) in filters.iter().copied().chain([("q", q), ("sort", sort)]) {
+                                p.0.insert(k.into(), v.into());
+                            }
+                            for wide_sids in [false, true] {
+                                let hits = run(conn, statement(&p, wide_sids)?.unwrap())?.items;
+                                assert_eq!(hits.len(), want, "{filters:?} {q} {sort} {wide_sids}");
+                                if !unfiltered {
+                                    assert!(hits.iter().all(|h| h.session_id == "s1"), "{filters:?} {q} {sort} {wide_sids}");
+                                }
+                            }
+                        }
                     }
                 }
                 Ok::<_, ReadError>(())

@@ -6,7 +6,7 @@ It is built for one user in a homelab: plain HTTP, meant to sit behind a reverse
 
 ## Build
 
-Requirements: stable Rust (edition 2024, so 1.85 or newer) and Node 22 for the web UI. SQLite and zstd are compiled in; there are no system library dependencies.
+Requirements: stable Rust 1.89 or newer (the locked dependencies need it) and Node 22 for the web UI. SQLite and zstd are compiled in; there are no system library dependencies.
 
 ```bash
 cd services/pika
@@ -145,7 +145,7 @@ docker exec pika pika token list
 
 The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … pika token list` runs any other command against the same volume. Pass `PIKA_PASSWORD`, `PIKA_MAX_BODY`, or `PIKA_BASE_PATH` with `-e`.
 
-The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s. `docker ps` shows the result, and you can check it by hand:
+The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s, normalizing the base path as the server does (`pika`, `pika/`, and `/pika/` all mean `/pika`). It reads only the environment, so set the base path and bind address with `-e PIKA_BASE_PATH` and `-e PIKA_BIND`, not as `serve --base-path` or `--bind` arguments: with a flag the server moves but the health check does not, and the container stays unhealthy. `docker ps` shows the result, and you can check it by hand:
 
 ```bash
 curl -fsS http://127.0.0.1:7171/pika/api/health

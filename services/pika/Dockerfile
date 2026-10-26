@@ -31,7 +31,9 @@ USER pika
 WORKDIR /data
 VOLUME /data
 EXPOSE 7171
+# Trims whitespace and slashes from PIKA_BASE_PATH like the server, so `pika`, `/pika/`, and `/` all work.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-	CMD curl -fsS "http://127.0.0.1:${PIKA_BIND##*:}${PIKA_BASE_PATH%/}/api/health" >/dev/null || exit 1
+	CMD b=$(printf %s "$PIKA_BASE_PATH" | sed 's|^[[:space:]/]*||; s|[[:space:]/]*$||') \
+	&& curl -fsS "http://127.0.0.1:${PIKA_BIND##*:}${b:+/$b}/api/health" >/dev/null || exit 1
 ENTRYPOINT ["pika"]
 CMD ["serve"]

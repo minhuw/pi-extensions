@@ -63,8 +63,11 @@ ranking in two passes, and SQLite drove the final join from the full-text index 
 
 - A document id carries the low 20 bits of its session's sid. Filtered searches first test those bits against the
   filtered sessions' sids, from a set SQLite builds once per query; only matches that pass are joined. The bits
-  identify the session while every sid is below 2^20; past that, the exact join runs too.
-- A colliding document id now steps within its second's low 12 bits instead of carrying into the sid bits.
+  identify the session while every sid is below 2^20; past that, the exact join runs too. Relevance also applies the
+  exact filters in its final join, which costs at most `limit` lookups. Applying them in the scored window instead
+  joined up to 20,000 matches each and raised filtered relevance p95 from about 110 ms to 1.1 s for common words.
+- A colliding document id steps within its second's low 12 bits, and once all 4,096 are taken it moves to the next
+  second, so it never carries into the sid bits.
 - Relevance scores the newest 20,000 filtered matches in one pass and joins and snippets only the best `limit`,
   each looked up by rowid (`CROSS JOIN` keeps that order).
 - A filter that no session passes returns an empty page without searching.
@@ -73,34 +76,42 @@ ranking in two passes, and SQLite drove the final join from the full-text index 
 
 ## Latest results
 
-On an Apple Silicon Mac (10 cores, 16 GiB) on 2026-10-26, the whole script took 8.8 minutes:
+On an Apple Silicon Mac (10 cores, 16 GiB) on 2026-10-26, the whole script took 9.1 minutes:
 
 ```
 query class                      n    p50 ms    p95 ms    max ms     limit  result
-session list                 480       0.2       0.6       2.5     < 100  ok
-5k session: sessions/:id     400       0.1       0.2       0.3     < 200  ok
-5k session: turns            400       0.3       0.3       5.7     < 200  ok
-5k session: entries          400       1.1       1.1       6.4     < 200  ok
-20k session: sessions/:id    100       0.2       0.2       0.2         -  info
-20k session: turns           100       0.3       0.3       0.4         -  info
-20k session: entries         100       1.1       1.1       1.6         -  info
-search                       400      10.3     126.1     364.0     < 300  ok
+session list                 480       0.2       0.6       2.1     < 100  ok
+5k session: sessions/:id     400       0.1       0.2       0.5     < 200  ok
+5k session: turns            400       0.3       0.4       7.4     < 200  ok
+5k session: entries          400       1.1       1.4       7.2     < 200  ok
+20k session: sessions/:id    100       0.2       0.3       0.5         -  info
+20k session: turns           100       0.3       0.6       0.7         -  info
+20k session: entries         100       1.2       1.5       2.4         -  info
+search                       400      10.0     125.4     346.9     < 300  ok
 
 subclass                               n    p50 ms    p95 ms    max ms
-search: common newest              62       2.8      23.1      69.1
-search: common relevance           26      39.9     111.3     124.1
-search: filter all                 113       9.0     129.4     364.0
-search: filter device              93      11.0     128.1     299.0
-search: filter device+project      87       3.8     111.3     302.3
-search: filter project             107      16.1     126.9     339.4
-search: phrase newest              60      11.1      82.4     302.3
-search: phrase relevance           47     110.5     299.0     364.0
-search: rare newest                64       6.2      12.6      22.6
-search: rare relevance             37      10.5      19.9      25.6
-search: two-word newest            69      10.0      36.9     149.8
-search: two-word relevance         35      24.9      63.0     128.1
+session list: combination          225       0.2       0.9       2.1
+session list: dates                134       0.2       1.0       1.5
+session list: device               152       0.2       0.6       2.1
+session list: model                112       0.2       1.0       2.1
+session list: no filter            41       0.2       0.2       0.2
+session list: project              137       0.2       0.5       1.4
+session list: root                 164       0.2       0.9       1.4
+session list: second page          80       0.2       0.6       1.9
+search: common newest              62       2.8      22.1      75.0
+search: common relevance           26      36.3     114.3     125.4
+search: filter all                 113       9.1     137.1     324.0
+search: filter device              93      11.1     137.0     301.1
+search: filter device+project      87       3.6     114.3     330.5
+search: filter project             107      15.7     128.7     346.9
+search: phrase newest              60      11.6      87.8     330.5
+search: phrase relevance           47     115.5     301.1     346.9
+search: rare newest                64       5.9      16.9      26.4
+search: rare relevance             37       9.6      19.4      20.3
+search: two-word newest            69      10.0      36.3     141.4
+search: two-word relevance         35      24.3      61.9     137.1
 
-load: 482.0 s, 2560663 entries, 5312 entries/s, 3426 MiB of lines
+load: 492.2 s, 2560663 entries, 5202 entries/s, 3426 MiB of lines
 database: 10495 MiB, blob store: 12 MiB, server peak RSS: 50 MiB
 ```
 

@@ -64,11 +64,16 @@ pub fn index(tx: &Transaction, sid: i64, seq: i64, part: i64, at: i64, kind: Kin
     let mut insert =
         tx.prepare_cached("INSERT OR IGNORE INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
     // Ids collide only for sids 2^20 apart or many parts in one second. The next free id within the same second and
-    // sid bits keeps the order and the sid bits, which searches filter on; only a full second of 4,096 ids moves on.
+    // sid bits keeps the order and the sid bits, which searches filter on; once a second's 4,096 ids are taken, probing
+    // moves to the next second with the same sid bits (wrapping to second 0 past the last one).
     let mut tries = 0;
     while insert.execute(params![id, sid, seq, kind.as_str(), at, text])? == 0 {
         tries += 1;
-        id = if tries < LOW_IDS { id & !(LOW_IDS - 1) | (id + 1) & (LOW_IDS - 1) } else { id + 1 };
+        id = if tries % LOW_IDS != 0 {
+            id & !(LOW_IDS - 1) | id.wrapping_add(1) & (LOW_IDS - 1)
+        } else {
+            id.wrapping_add(1 << 32) & i64::MAX
+        };
     }
     tx.prepare_cached("INSERT INTO search_fts (rowid, text) VALUES (?1, ?2)")?.execute(params![id, text])?;
     Ok(())
@@ -105,5 +110,49 @@ mod tests {
             .unwrap();
         assert_eq!(ids, [doc_id(5_000, sid, 512, 0), doc_id(5_000, sid, 512, 1), doc_id(5_000, sid, 511, 7)]);
         assert!(ids.iter().all(|id| (id >> SID_SHIFT) & SID_MASK == sid), "{ids:?}");
+    }
+
+    /// Once one second's 4,096 ids are taken, further documents go to the next second, still with their sid bits.
+    #[test]
+    fn a_full_second_moves_on_without_changing_the_sid_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let sid = 7;
+        store
+            .write(|tx| {
+                for seq in 0..4_200 {
+                    index(tx, sid, seq, 0, 5_000, Kind::User, "same second")?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        let ids: Vec<i64> = store
+            .read(|conn| conn.prepare("SELECT id FROM search_docs ORDER BY id")?.query_map([], |r| r.get(0))?.collect())
+            .unwrap();
+        assert_eq!(ids.len(), 4_200);
+        assert!(ids.iter().all(|id| (id >> SID_SHIFT) & SID_MASK == sid), "sid bits");
+        assert_eq!(ids.iter().filter(|id| *id >> 32 == 5).count(), 4_096);
+        assert_eq!(ids.iter().filter(|id| *id >> 32 == 6).count(), 104);
+    }
+
+    /// Probing past the last second, which every later time is clamped to, wraps to second 0 instead of overflowing.
+    #[test]
+    fn the_last_second_wraps_to_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        store
+            .write(|tx| {
+                for seq in 0..4_097 {
+                    index(tx, SID_MASK, seq, 0, i64::MAX, Kind::User, "last second")?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        let ids: Vec<i64> = store
+            .read(|conn| conn.prepare("SELECT id FROM search_docs ORDER BY id")?.query_map([], |r| r.get(0))?.collect())
+            .unwrap();
+        assert_eq!((ids[0] >> 32, (ids[0] >> SID_SHIFT) & SID_MASK), (0, SID_MASK));
+        assert_eq!(ids[1..].iter().filter(|id| *id >> 32 == i32::MAX as i64).count(), 4_096);
+        assert_eq!(ids.last(), Some(&i64::MAX));
     }
 }
