@@ -19,6 +19,7 @@ pub fn reindex(store: &Store) -> Result<ReindexStats> {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
         store::clear_search_index(tx)?;
+        tx.execute("DELETE FROM settings WHERE key = ?1", [store::NEEDS_REINDEX])?;
         let streams: Vec<(i64, String, String, String)> = tx
             .prepare("SELECT id, key, kind, device FROM streams ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?

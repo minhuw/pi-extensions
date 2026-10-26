@@ -15,7 +15,7 @@ hex = "0.4.3"
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
 tracing = "0.1.44"

@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::search::{self, Kind};
 use super::{Line, StreamInfo, Usage, int_field, str_field, string_field, time_field};
-use crate::util::{basename, cut_chars};
+use crate::util::{basename, cut_chars, parse_json_lenient};
 
 pub const LINK_CUSTOM_TYPE: &str = "pi-extensions.session-link";
 const TITLE_CHARS: usize = 120;
@@ -519,7 +519,7 @@ impl Deriver<'_> {
     }
 
     fn line(&mut self, line: &Line) -> Result<()> {
-        let parsed: Option<Value> = serde_json::from_str(line.text).ok().filter(Value::is_object);
+        let parsed: Option<Value> = parse_json_lenient(line.text).ok().filter(Value::is_object);
         let empty = Value::Null;
         let v = parsed.as_ref().unwrap_or(&empty);
         let ty = if parsed.is_some() { str_field(v, "type").unwrap_or("") } else { "invalid" };

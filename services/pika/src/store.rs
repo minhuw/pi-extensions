@@ -10,6 +10,9 @@ use crate::blobs::BlobStore;
 const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql")];
 /// The first schema version whose derived tables an older database lacks; opening such a database reindexes it.
 const REINDEX_BELOW: usize = 2;
+/// Set in the transaction of a migration that needs a reindex, and cleared by the reindex that follows, so an
+/// interrupted or failed reindex runs again on the next open.
+pub const NEEDS_REINDEX: &str = "needs_reindex";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -51,8 +54,8 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Applies pending migrations and returns the version the database had.
-fn migrate(conn: &mut Connection) -> Result<usize> {
+/// Applies pending migrations.
+fn migrate(conn: &mut Connection) -> Result<()> {
     let version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? as usize;
     if version > MIGRATIONS.len() {
         bail!("database schema version {version} is newer than this pika ({})", MIGRATIONS.len());
@@ -60,10 +63,13 @@ fn migrate(conn: &mut Connection) -> Result<usize> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql).with_context(|| format!("applying migration {}", index + 1))?;
+        if version > 0 && index + 1 >= REINDEX_BELOW {
+            tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, x'01')", [NEEDS_REINDEX])?;
+        }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
         tx.commit()?;
     }
-    Ok(version)
+    Ok(())
 }
 
 impl Store {
@@ -73,7 +79,11 @@ impl Store {
         let db_path = data_dir.join("pika.db");
         let mut writer = Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
         configure(&writer)?;
-        let previous = migrate(&mut writer)?;
+        migrate(&mut writer)?;
+        let needs_reindex = writer
+            .query_row("SELECT 1 FROM settings WHERE key = ?1", [NEEDS_REINDEX], |_| Ok(()))
+            .optional()?
+            .is_some();
         let store = Arc::new(Store {
             blobs: BlobStore::new(data_dir.join("blobs")),
             data_dir,
@@ -81,9 +91,9 @@ impl Store {
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
         });
-        if (1..REINDEX_BELOW).contains(&previous) {
+        if needs_reindex {
             let stats = crate::reindex::reindex(&store).context("reindexing after the schema upgrade")?;
-            tracing::info!("reindexed {} streams after upgrading the schema from version {previous}", stats.streams);
+            tracing::info!("reindexed {} streams after a schema upgrade", stats.streams);
         }
         Ok(store)
     }

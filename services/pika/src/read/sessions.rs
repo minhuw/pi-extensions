@@ -9,6 +9,8 @@ pub const LIST_LIMIT: i64 = 50;
 pub const MAX_LIST_LIMIT: i64 = 500;
 pub const TURN_LIMIT: i64 = 100;
 pub const MAX_TURN_LIMIT: i64 = 1000;
+/// `updates` lists at most this many turns.
+pub const UPDATE_TURN_LIMIT: usize = 50;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,11 +89,18 @@ pub struct Turn {
     pub final_text: String,
 }
 
+/// `session`, `turns`, and `truncated` are present only when the session has entries after `since`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Updates {
     pub last_seq: i64,
     pub last_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<Vec<Turn>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 const SUMMARY_COLUMNS: &str = "s.id, s.device, s.project, s.cwd, s.title, s.started_at, s.last_at, s.entry_count, \
@@ -124,6 +133,33 @@ fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
         herder_run_id: r.get(17)?,
         last_at_ms: last_at,
     })
+}
+
+const TURN_COLUMNS: &str = "idx, start_seq, end_seq, user_text, at, duration_ms, model_calls, tool_calls, tool_errors, cost, \
+     input, output, cache_read, cache_write, final_text";
+
+fn turn(r: &Row) -> rusqlite::Result<Turn> {
+    Ok(Turn {
+        index: r.get(0)?,
+        start_seq: r.get(1)?,
+        end_seq: r.get(2)?,
+        user_text: r.get(3)?,
+        at: iso(r.get(4)?),
+        duration_ms: r.get(5)?,
+        model_calls: r.get(6)?,
+        tool_calls: r.get(7)?,
+        tool_errors: r.get(8)?,
+        cost: r.get(9)?,
+        tokens: Tokens { input: r.get(10)?, output: r.get(11)?, cache_read: r.get(12)?, cache_write: r.get(13)? },
+        final_text: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+    })
+}
+
+fn not_found(e: rusqlite::Error) -> ReadError {
+    match e {
+        rusqlite::Error::QueryReturnedNoRows => ReadError::NotFound,
+        e => e.into(),
+    }
 }
 
 fn distinct(conn: &Connection, sql: &str) -> ReadResult<Vec<String>> {
@@ -203,10 +239,7 @@ pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
     let session = conn
         .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS} FROM sessions s WHERE s.id = ?1"))?
         .query_row([id], summary)
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => ReadError::NotFound,
-            e => e.into(),
-        })?;
+        .map_err(not_found)?;
     let children = conn
         .prepare_cached(&format!(
             "SELECT {SUMMARY_COLUMNS}, l.parent_tool_call_id FROM sessions s LEFT JOIN session_links l USING (sid)
@@ -225,47 +258,64 @@ pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> 
         None => -1,
     };
     let items = conn
-        .prepare_cached(
-            "SELECT idx, start_seq, end_seq, user_text, at, duration_ms, model_calls, tool_calls, tool_errors, cost,
-                    input, output, cache_read, cache_write, final_text
-             FROM turns WHERE sid = ?1 AND idx > ?2 ORDER BY idx LIMIT ?3",
-        )?
-        .query_map(rusqlite::params![sid, after, limit + 1], |r| {
-            Ok(Turn {
-                index: r.get(0)?,
-                start_seq: r.get(1)?,
-                end_seq: r.get(2)?,
-                user_text: r.get(3)?,
-                at: iso(r.get(4)?),
-                duration_ms: r.get(5)?,
-                model_calls: r.get(6)?,
-                tool_calls: r.get(7)?,
-                tool_errors: r.get(8)?,
-                cost: r.get(9)?,
-                tokens: Tokens { input: r.get(10)?, output: r.get(11)?, cache_read: r.get(12)?, cache_write: r.get(13)? },
-                final_text: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
-            })
-        })?
+        .prepare_cached(&format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 AND idx > ?2 ORDER BY idx LIMIT ?3"))?
+        .query_map(rusqlite::params![sid, after, limit + 1], turn)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(page(items, limit, |t| vec![json!(t.index)]))
 }
 
-/// The session's latest entry, for polling. `since` (the caller's last seq) only needs to be an integer.
+/// What changed after the caller's last seq `since` (missing or invalid counts as -1), for polling an active
+/// session: its summary and every turn that ends after `since`. Turns end in index order, so the walk goes down
+/// from the newest turn and stops at the first that ends at or before `since`.
 pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
-    p.int("since")?;
-    let (entry_count, last_at): (i64, i64) = conn
-        .prepare_cached("SELECT entry_count, last_at FROM sessions WHERE id = ?1")?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => ReadError::NotFound,
-            e => e.into(),
-        })?;
-    Ok(Updates { last_seq: entry_count - 1, last_at: iso((entry_count > 0 && last_at != 0).then_some(last_at)) })
+    let since = p.int("since").ok().flatten().unwrap_or(-1);
+    // One snapshot for the summary and the turns.
+    let tx = conn.unchecked_transaction()?;
+    let (session, sid) = tx
+        .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS}, s.sid FROM sessions s WHERE s.id = ?1"))?
+        .query_row([id], |r| Ok((summary(r)?, r.get::<_, i64>(18)?)))
+        .map_err(not_found)?;
+    let last_seq = session.entry_count - 1;
+    let last_at = iso((session.entry_count > 0 && session.last_at_ms != 0).then_some(session.last_at_ms));
+    if last_seq <= since {
+        return Ok(Updates { last_seq, last_at, session: None, turns: None, truncated: None });
+    }
+    let mut turns = Vec::new();
+    let mut truncated = None;
+    let mut stmt = tx.prepare_cached(&format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 ORDER BY idx DESC"))?;
+    let mut rows = stmt.query([sid])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, i64>(2)? <= since {
+            break;
+        }
+        if turns.len() == UPDATE_TURN_LIMIT {
+            truncated = Some(true);
+            break;
+        }
+        turns.push(turn(row)?);
+    }
+    turns.reverse();
+    Ok(Updates { last_seq, last_at, session: Some(session), turns: Some(turns), truncated })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `updates` walks a session's turns down the primary key: no sort.
+    #[test]
+    fn update_turns_walk_the_primary_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let plan: Vec<String> = store
+            .read(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 ORDER BY idx DESC"))?
+                    .query_map([1], |r| r.get::<_, String>(3))?
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(plan, ["SEARCH turns USING PRIMARY KEY (sid=?)"], "{plan:?}");
+    }
 
     /// Every filter combination walks an index in `lastAt` order: no full scan and no sort.
     #[test]

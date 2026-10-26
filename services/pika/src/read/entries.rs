@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 
 use super::{Params, ReadError, ReadResult, iso, line_text, session_sid};
 use crate::blobs::BlobStore;
-use crate::util::{base64_decode, encode_path_segment};
+use crate::util::{base64_decode, encode_path_segment, parse_json_lenient};
 
 pub const ENTRY_LIMIT: i64 = 200;
 pub const MAX_ENTRY_LIMIT: i64 = 1000;
@@ -67,7 +67,7 @@ fn truncate_strings(v: &mut Value) -> bool {
 
 /// The parsed line, or the line as a JSON string when it is not JSON.
 fn parse(text: String) -> Value {
-    serde_json::from_str(&text).unwrap_or(Value::String(text))
+    parse_json_lenient(&text).unwrap_or(Value::String(text))
 }
 
 /// Entries `from..=to` by seq. `prefix` is the base path prefix for image URLs (empty for `/`).

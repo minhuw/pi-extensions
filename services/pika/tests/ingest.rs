@@ -14,6 +14,10 @@ fn export(env: &Env, id: &str) -> Vec<u8> {
     out
 }
 
+fn parsed(payload: &serde_json::value::RawValue) -> Value {
+    serde_json::from_str(payload.get()).unwrap()
+}
+
 fn line_count(env: &Env) -> i64 {
     one(&env.store, "SELECT COUNT(*) AS n FROM lines")["n"].as_i64().unwrap()
 }
@@ -152,7 +156,7 @@ fn request_split_and_reconstruct() {
     let stored = env.store.read(|conn| requests::load(conn, &env.store.blobs, "req-1")).unwrap().unwrap();
     assert!(stored.complete);
     assert_eq!(stored.fidelity, "payload");
-    assert_eq!(stored.payload, payload);
+    assert_eq!(parsed(&stored.payload), payload);
 }
 
 #[test]
@@ -201,7 +205,7 @@ fn missing_blobs_complete_the_request_when_they_arrive() {
     let load = || env.store.read(|conn| requests::load(conn, &env.store.blobs, "req-1")).unwrap().unwrap();
     let partial = load();
     assert!(!partial.complete);
-    assert_eq!(partial.payload["messages"][0]["$pika"], blocks[1].0);
+    assert_eq!(parsed(&partial.payload)["messages"][0]["$pika"], blocks[1].0);
 
     let (first, rest) = blocks.split_at(2);
     let r = ingest(&env.store, json!({ "blobs": blobs(first) })).unwrap();
@@ -216,7 +220,7 @@ fn missing_blobs_complete_the_request_when_they_arrive() {
     ingest(&env.store, json!({ "blobs": blobs(rest) })).unwrap();
     let done = load();
     assert!(done.complete);
-    assert_eq!(done.payload, payload);
+    assert_eq!(parsed(&done.payload), payload);
 }
 
 /// Deterministic prose so that blocks compress like real text.
@@ -281,7 +285,7 @@ fn growing_contexts_store_under_twice_their_distinct_bytes() {
     assert!((stored as usize) < 2 * distinct_bytes, "stored {stored} >= 2 x {distinct_bytes}");
 
     let stored = env.store.read(|conn| requests::load(conn, &env.store.blobs, "req-49")).unwrap().unwrap();
-    assert_eq!(stored.payload, last);
+    assert_eq!(parsed(&stored.payload), last);
 }
 
 fn walk(dir: &std::path::Path) -> u64 {

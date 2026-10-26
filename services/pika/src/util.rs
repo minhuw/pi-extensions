@@ -64,6 +64,48 @@ pub fn cut_bytes(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// Parses JSON like `serde_json::from_str`, but on failure retries with every `\uXXXX` escape of an unpaired UTF-16
+/// surrogate replaced by `\uFFFD`. `JSON.stringify` writes such escapes for strings cut between the halves of a pair,
+/// and Rust strings cannot hold them.
+pub fn parse_json_lenient(text: &str) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_str(text).or_else(|e| match replace_lone_surrogates(text) {
+        Some(fixed) => serde_json::from_str(&fixed),
+        None => Err(e),
+    })
+}
+
+fn surrogate_escape(b: &[u8], i: usize) -> Option<u16> {
+    let hex = b.get(i..i + 6).filter(|e| e.starts_with(b"\\u"))?;
+    let n = u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()?;
+    (0xD800..=0xDFFF).contains(&n).then_some(n)
+}
+
+/// `text` with unpaired surrogate escapes replaced by `\uFFFD`, or `None` when it has none.
+fn replace_lone_surrogates(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let mut out = String::new();
+    let (mut copied, mut i) = (0, 0);
+    while i < b.len() {
+        if b[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let Some(n) = surrogate_escape(b, i) else {
+            i += 2;
+            continue;
+        };
+        if n < 0xDC00 && surrogate_escape(b, i + 6).is_some_and(|low| low >= 0xDC00) {
+            i += 12;
+            continue;
+        }
+        out.push_str(&text[copied..i]);
+        out.push_str("\\uFFFD");
+        i += 6;
+        copied = i;
+    }
+    (copied > 0).then(|| out + &text[copied..])
+}
+
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -255,6 +297,16 @@ mod tests {
         assert_eq!(cut_bytes("héllo", 2), "h");
         assert_eq!(escape_html("<a href='x'>&\""), "&lt;a href=&#39;x&#39;&gt;&amp;&quot;");
         assert_eq!(encode_path_segment("a b/ü-1"), "a%20b%2F%C3%BC-1");
+    }
+
+    #[test]
+    fn lone_surrogate_escapes_parse_as_replacement_characters() {
+        let parse = |text: &str| parse_json_lenient(text).unwrap();
+        assert_eq!(parse(r#""a\ud83d""#), "a\u{fffd}");
+        assert_eq!(parse(r#"["\udc00x", "\ud83d\ude00", "\\ud83d", "\uD83D\uD83D\uDE00"]"#), serde_json::json!(["\u{fffd}x", "😀", "\\ud83d", "\u{fffd}😀"]));
+        assert_eq!(parse(r#"{"k": "\ud83d\n\ud83d"}"#), serde_json::json!({ "k": "\u{fffd}\n\u{fffd}" }));
+        assert!(parse_json_lenient(r#"{"k": "\ud83d"#).is_err());
+        assert!(parse_json_lenient("nope").is_err());
     }
 
     #[test]

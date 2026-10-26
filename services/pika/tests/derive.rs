@@ -189,3 +189,46 @@ fn reindex_rebuilds_identical_tables() {
     load_all(&other, 1000);
     assert_eq!(dump_derived(&other.store), incremental);
 }
+
+/// `JSON.stringify` writes an unpaired UTF-16 surrogate as an escape, for example when pi's grep tool cuts a line
+/// between the halves of an emoji. Such lines still derive, with U+FFFD in place of the surrogate.
+#[test]
+fn lines_with_lone_surrogate_escapes_derive() {
+    let env = env();
+    let lone = |v: Value| v.to_string().replace("LONE", "\\ud83d");
+    let session = vec![
+        json!({ "type": "session", "version": 3, "id": "lone-1", "timestamp": "2026-10-20T09:00:00.000Z", "cwd": "/w/x" }).to_string(),
+        json!({ "type": "message", "id": "u1", "parentId": null, "timestamp": "2026-10-20T09:00:01.000Z",
+                "message": { "role": "user", "content": "grep it", "timestamp": 1 } })
+        .to_string(),
+        json!({ "type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-10-20T09:00:02.000Z",
+                "message": { "role": "assistant", "content": [{ "type": "toolCall", "id": "call_g", "name": "grep", "arguments": {} }],
+                             "stopReason": "toolUse", "timestamp": 2 } })
+        .to_string(),
+        lone(json!({ "type": "message", "id": "r1", "parentId": "a1", "timestamp": "2026-10-20T09:00:03.500Z",
+                     "message": { "role": "toolResult", "toolCallId": "call_g", "toolName": "grep", "isError": true,
+                                  "content": [{ "type": "text", "text": "a.txt:1: smile LONE... [truncated]" }], "timestamp": 3 } })),
+    ];
+    assert!(session[3].contains(r"smile \ud83d..."));
+    upload(&env.store, "session:lone-1", "session", &session, 10);
+    let result = one(&env.store, "SELECT e.* FROM entries e JOIN sessions s USING (sid) WHERE s.id = 'lone-1' AND e.seq = 3");
+    assert_eq!((&result["type"], &result["role"]), (&json!("message"), &json!("toolResult")));
+    assert_eq!((&result["entry_id"], &result["parent_id"], &result["tool_call_ids"]), (&json!("r1"), &json!("a1"), &json!(r#"["call_g"]"#)));
+    let call = one(&env.store, "SELECT t.* FROM tool_calls t JOIN sessions s USING (sid) WHERE s.id = 'lone-1'");
+    assert_eq!((&call["result_seq"], &call["is_error"], &call["duration_ms"]), (&json!(3), &json!(1), &json!(1500)));
+    assert_eq!(call["output_size"], json!("a.txt:1: smile \u{fffd}... [truncated]".len()));
+    let turn = one(&env.store, "SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'lone-1'");
+    assert_eq!((&turn["tool_calls"], &turn["tool_errors"]), (&json!(1), &json!(1)));
+
+    let journal = vec![
+        json!({ "v": 1, "t": "run.started", "at": "2026-10-21T10:00:00.000Z", "runId": "r-lone", "title": "Lone", "repo": "/w/x" }).to_string(),
+        lone(json!({ "v": 1, "t": "step.started", "at": "2026-10-21T10:01:00.000Z", "key": "impl-T1", "id": "impl-T1", "attempt": 1,
+                     "role": "worker", "task": "T1", "launch": 1, "label": "Cut LONE" })),
+    ];
+    upload(&env.store, "herder:r-lone", "herder-journal", &journal, 10);
+    let event = one(&env.store, "SELECT t FROM herder_events WHERE seq = 1");
+    assert_eq!(event["t"], "step.started");
+    let step = one(&env.store, "SELECT * FROM herder_steps");
+    assert_eq!((&step["key"], &step["status"], &step["label"]), (&json!("impl-T1"), &json!("running"), &json!("Cut \u{fffd}")));
+    assert_eq!(one(&env.store, "SELECT step_count FROM herder_runs")["step_count"], 1);
+}

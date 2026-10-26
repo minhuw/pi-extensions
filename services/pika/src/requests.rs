@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
 use crate::blobs::BlobStore;
@@ -134,29 +135,55 @@ fn visit_numbers(v: &Value, f: &mut impl FnMut(i64, i64)) {
     }
 }
 
-/// Rebuilds the payload from a compact skeleton. `block(n, is_string)` yields the value for number `n`.
-pub fn expand(v: &Value, block: &mut impl FnMut(i64, bool) -> Result<Value>) -> Result<Value> {
+/// Rebuilds the payload from a compact skeleton as JSON text. `block(n, is_string, out)` appends the JSON of number
+/// `n` to `out`, so block text is spliced in without a round trip through `Value`.
+pub fn expand(v: &Value, block: &mut impl FnMut(i64, bool, &mut String) -> Result<()>) -> Result<String> {
+    let mut out = String::new();
+    write_expanded(v, &mut out, block)?;
+    Ok(out)
+}
+
+fn write_expanded(v: &Value, out: &mut String, block: &mut impl FnMut(i64, bool, &mut String) -> Result<()>) -> Result<()> {
     if let Some(runs) = runs_of(v) {
-        let mut items = Vec::new();
-        for (start, len) in runs {
-            for n in start..start + len {
-                items.push(block(n, false)?);
+        out.push('[');
+        for (i, n) in runs.into_iter().flat_map(|(start, len)| start..start + len).enumerate() {
+            if i > 0 {
+                out.push(',');
             }
+            block(n, false, out)?;
         }
-        return Ok(Value::Array(items));
+        out.push(']');
+        return Ok(());
     }
     if let Some((n, is_string)) = number_ref(v) {
-        return block(n, is_string);
+        return block(n, is_string, out);
     }
-    Ok(match v {
-        Value::Array(items) => Value::Array(items.iter().map(|i| expand(i, block)).collect::<Result<_>>()?),
-        Value::Object(obj) => Value::Object(
-            obj.iter()
-                .map(|(k, v)| Ok((k.clone(), expand(v, block)?)))
-                .collect::<Result<_>>()?,
-        ),
-        other => other.clone(),
-    })
+    match v {
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_expanded(item, out, block)?;
+            }
+            out.push(']');
+        }
+        Value::Object(obj) => {
+            out.push('{');
+            for (i, (key, item)) in obj.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key)?);
+                out.push(':');
+                write_expanded(item, out, block)?;
+            }
+            out.push('}');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+    Ok(())
 }
 
 pub struct NewRequest<'a> {
@@ -275,8 +302,9 @@ pub struct StoredRequest {
     pub model: Option<String>,
     pub at: Option<String>,
     pub complete: bool,
-    /// The reconstructed payload. Blocks that have not arrived stay as `{"$pika": hash}` refs.
-    pub payload: Value,
+    /// The reconstructed payload, with block text verbatim: a block may hold escapes of unpaired UTF-16 surrogates,
+    /// which `Value` cannot. Blocks that have not arrived stay as `{"$pika": hash}` refs.
+    pub payload: Box<RawValue>,
 }
 
 pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<StoredRequest>> {
@@ -316,15 +344,21 @@ pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<Sto
         }
     }
     let mut texts: BTreeMap<i64, Option<String>> = BTreeMap::new();
-    let payload = expand(&skeleton, &mut |n, is_string| {
+    let payload = expand(&skeleton, &mut |n, is_string, out| {
         let hash = hashes.get(&n).ok_or_else(|| anyhow!("request {id} refers to unknown block {n}"))?;
-        Ok(match texts.entry(n).or_insert_with(|| blobs.get_string(hash).ok()) {
-            None if is_string => json!({ "$pika": hash, "$type": "string" }),
-            None => json!({ "$pika": hash }),
-            Some(text) if is_string => Value::String(text.clone()),
-            Some(text) => serde_json::from_str(text).with_context(|| format!("block {hash}"))?,
-        })
+        match texts.entry(n).or_insert_with(|| blobs.get_string(hash).ok()) {
+            None if is_string => out.push_str(&json!({ "$pika": hash, "$type": "string" }).to_string()),
+            None => out.push_str(&json!({ "$pika": hash }).to_string()),
+            Some(text) if is_string => out.push_str(&serde_json::to_string(text)?),
+            Some(text) => {
+                // One JSON value; unlike `Value`, `RawValue` accepts escapes of unpaired surrogates.
+                let value: &RawValue = serde_json::from_str(text).with_context(|| format!("block {hash}"))?;
+                out.push_str(value.get());
+            }
+        }
+        Ok(())
     })?;
+    let payload = RawValue::from_string(payload).context("reconstructed payload")?;
     Ok(Some(StoredRequest { id: id.to_owned(), session_id, fidelity, provider, api, model, at, complete, payload }))
 }
 
@@ -341,11 +375,12 @@ mod tests {
         assert_eq!(compacted["messages"], json!({ "$pika_runs": [[0, 4]] }));
         assert_eq!(compacted["tools"], json!([]));
         assert_eq!(compacted["system"], json!({ "$pika": 4, "$type": "string" }));
-        let expanded = expand(&compacted, &mut |n, is_string| {
+        let expanded = expand(&compacted, &mut |n, is_string, out| {
             let text = &blocks[n as usize].1;
-            Ok(if is_string { Value::String(text.clone()) } else { serde_json::from_str(text)? })
+            out.push_str(&if is_string { serde_json::to_string(text)? } else { text.clone() });
+            Ok(())
         })
         .unwrap();
-        assert_eq!(expanded, payload);
+        assert_eq!(serde_json::from_str::<Value>(&expanded).unwrap(), payload);
     }
 }

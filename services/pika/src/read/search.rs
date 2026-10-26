@@ -9,8 +9,10 @@ use crate::util::escape_html;
 
 pub const SEARCH_LIMIT: i64 = 50;
 pub const MAX_SEARCH_LIMIT: i64 = 200;
+pub const MAX_RELEVANCE_LIMIT: i64 = 100;
 const SNIPPET_TOKENS: i64 = 24;
-/// `sort=relevance` ranks this many of the newest matches: scoring every match of a common term takes too long.
+/// `sort=relevance` ranks this many of the newest filtered matches: scoring every match of a common term takes too
+/// long.
 pub const RELEVANCE_WINDOW: i64 = 20_000;
 
 #[derive(Debug, Serialize)]
@@ -25,8 +27,6 @@ pub struct Hit {
     pub at: Option<String>,
     #[serde(skip)]
     rowid: i64,
-    #[serde(skip)]
-    score: f64,
 }
 
 /// Turns user input into an FTS5 query: each whitespace-separated word, or `"quoted phrase"`, becomes a quoted FTS5
@@ -72,16 +72,19 @@ struct Statement {
 
 /// The search statement, or `None` when the query has no terms.
 fn statement(p: &Params) -> ReadResult<Option<Statement>> {
-    let limit = p.limit(SEARCH_LIMIT, MAX_SEARCH_LIMIT)?;
     let relevance = match p.get("sort") {
         None | Some("newest") => false,
         Some("relevance") => true,
         Some(_) => return Err(bad("sort must be newest or relevance")),
     };
+    let limit = if relevance { p.limit(SEARCH_LIMIT, MAX_RELEVANCE_LIMIT)? } else { p.limit(SEARCH_LIMIT, MAX_SEARCH_LIMIT)? };
     let cursor = p.cursor()?;
+    if relevance && cursor.is_some() {
+        return Err(bad("sort=relevance returns one page"));
+    }
     let Some(query) = p.get("q").and_then(fts_query) else { return Ok(None) };
     let mut sql = format!(
-        "SELECT search_fts.rowid, bm25(search_fts), snippet(search_fts, 0, char({}), char({}), '…', {SNIPPET_TOKENS}),
+        "SELECT search_fts.rowid, snippet(search_fts, 0, char({}), char({}), '…', {SNIPPET_TOKENS}),
                 d.seq, d.kind, d.at, s.id, s.title, e.entry_id
          FROM search_fts
          JOIN search_docs d ON d.id = search_fts.rowid
@@ -90,40 +93,49 @@ fn statement(p: &Params) -> ReadResult<Option<Statement>> {
          WHERE search_fts MATCH ?",
         MARK_START as u32, MARK_END as u32
     );
-    let mut args = vec![Sql::Text(query.clone())];
+    let mut filters = String::new();
+    let mut filter_args = Vec::new();
     if let Some(device) = p.get("device") {
-        sql.push_str(" AND s.device = ?");
-        args.push(Sql::Text(device.to_owned()));
+        filters.push_str(" AND s.device = ?");
+        filter_args.push(Sql::Text(device.to_owned()));
     }
     if let Some(project) = p.get("project") {
-        sql.push_str(" AND s.project = ?");
-        args.push(Sql::Text(project.to_owned()));
+        filters.push_str(" AND s.project = ?");
+        filter_args.push(Sql::Text(project.to_owned()));
     }
+    sql.push_str(&filters);
+    let mut args = vec![Sql::Text(query.clone())];
+    args.extend(filter_args.iter().cloned());
     if relevance {
-        sql.push_str(
-            " AND search_fts.rowid >= (SELECT MIN(rowid) FROM
-                 (SELECT rowid FROM search_fts WHERE search_fts MATCH ? ORDER BY rowid DESC LIMIT ?))",
-        );
-        args.extend([Sql::Text(query), Sql::Integer(RELEVANCE_WINDOW)]);
-        if let Some(key) = &cursor {
-            let score = key.first().and_then(|v| v.as_f64()).ok_or_else(|| bad("invalid cursor"))?;
-            sql.push_str(" AND (bm25(search_fts) > ? OR (bm25(search_fts) = ? AND search_fts.rowid < ?))");
-            args.extend([Sql::Real(score), Sql::Real(score), Sql::Integer(cursor_int(key, 1)?)]);
-        }
+        // The window is the newest matches that pass the filters.
+        let window = if filters.is_empty() {
+            "SELECT rowid FROM search_fts WHERE search_fts MATCH ? ORDER BY rowid DESC LIMIT ?".to_owned()
+        } else {
+            format!(
+                "SELECT search_fts.rowid FROM search_fts JOIN search_docs d ON d.id = search_fts.rowid
+                 JOIN sessions s ON s.sid = d.sid WHERE search_fts MATCH ?{filters} ORDER BY search_fts.rowid DESC LIMIT ?"
+            )
+        };
+        sql.push_str(&format!(" AND search_fts.rowid >= (SELECT MIN(rowid) FROM ({window}))"));
+        args.push(Sql::Text(query));
+        args.extend(filter_args);
+        args.push(Sql::Integer(RELEVANCE_WINDOW));
         sql.push_str(" ORDER BY bm25(search_fts), search_fts.rowid DESC LIMIT ?");
+        args.push(Sql::Integer(limit));
     } else {
         if let Some(key) = &cursor {
             sql.push_str(" AND search_fts.rowid < ?");
             args.push(Sql::Integer(cursor_int(key, 0)?));
         }
         sql.push_str(" ORDER BY search_fts.rowid DESC LIMIT ?");
+        args.push(Sql::Integer(limit + 1));
     }
-    args.push(Sql::Integer(limit + 1));
     Ok(Some(Statement { sql, args, limit, relevance }))
 }
 
 /// Full-text search over session entries. `sort=newest` (the default) walks the index from the newest document and
-/// stops at `limit`; `sort=relevance` orders the newest `RELEVANCE_WINDOW` matches by bm25.
+/// stops at `limit`; `sort=relevance` returns the best `limit` by bm25 of the newest `RELEVANCE_WINDOW` filtered
+/// matches as one page. Relevance does not page because bm25 scores change with every indexed document.
 pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
     let Some(Statement { sql, args, limit, relevance }) = statement(p)? else {
         return Ok(Page { items: Vec::new(), next_cursor: None });
@@ -132,14 +144,13 @@ pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
     let rows = stmt.query_map(params_from_iter(args), |r| {
         Ok(Hit {
             rowid: r.get(0)?,
-            score: r.get(1)?,
-            snippet: render_snippet(&r.get::<_, String>(2)?),
-            seq: r.get(3)?,
-            kind: r.get(4)?,
-            at: iso(r.get(5)?),
-            session_id: r.get(6)?,
-            session_title: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            entry_id: r.get(8)?,
+            snippet: render_snippet(&r.get::<_, String>(1)?),
+            seq: r.get(2)?,
+            kind: r.get(3)?,
+            at: iso(r.get(4)?),
+            session_id: r.get(5)?,
+            session_title: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            entry_id: r.get(7)?,
         })
     });
     let items = match rows.and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>()) {
@@ -149,7 +160,7 @@ pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
         Err(e) => return Err(e.into()),
     };
     Ok(if relevance {
-        page(items, limit, |h| vec![json!(h.score), json!(h.rowid)])
+        Page { items, next_cursor: None }
     } else {
         page(items, limit, |h| vec![json!(h.rowid)])
     })

@@ -395,16 +395,97 @@ async fn turns_and_updates() {
     assert_eq!(app.all_pages(&format!("sessions/{SESSION_ID}/turns"), 1).await, *items);
     let child_turns = app.json(&format!("sessions/{HEADER_CHILD}/turns")).await;
     assert_eq!(child_turns, json!({ "items": [], "nextCursor": null }));
+}
 
-    let updates = app.json(&format!("sessions/{SESSION_ID}/updates?since=3")).await;
-    assert_eq!(updates, json!({ "lastSeq": 15, "lastAt": "2026-10-20T09:02:11.000Z" }));
-    let next = json!({ "type": "message", "id": "a0000016", "parentId": "a0000015", "timestamp": "2026-10-20T09:05:00.000Z",
-                       "message": { "role": "user", "content": "Thanks", "timestamp": 1 } })
-    .to_string();
-    app.append(DEVICE, &skey(SESSION_ID), "session", byte_len(&fixture("session.jsonl")), &[next]).await;
-    let updates = app.json(&format!("sessions/{SESSION_ID}/updates?since=15")).await;
-    assert_eq!(updates, json!({ "lastSeq": 16, "lastAt": "2026-10-20T09:05:00.000Z" }));
-    assert_eq!(app.status(&format!("sessions/{SESSION_ID}/updates?since=x")).await, StatusCode::BAD_REQUEST);
+/// `GET sessions/:id` without `children`.
+async fn summary_of(app: &App, id: &str) -> Value {
+    let mut detail = app.json(&format!("sessions/{id}")).await;
+    detail.as_object_mut().unwrap().remove("children");
+    detail
+}
+
+async fn updates(app: &App, id: &str, query: &str) -> Value {
+    app.json(&format!("sessions/{id}/updates{query}")).await
+}
+
+fn turn_indexes(updates: &Value) -> Vec<i64> {
+    updates["turns"].as_array().unwrap().iter().map(|t| t["index"].as_i64().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn updates_return_the_summary_and_changed_turns() {
+    let app = world().await;
+    let unchanged = json!({ "lastSeq": 15, "lastAt": "2026-10-20T09:02:11.000Z" });
+    assert_eq!(updates(&app, SESSION_ID, "?since=15").await, unchanged);
+    assert_eq!(updates(&app, SESSION_ID, "?since=99").await, unchanged);
+
+    // A missing or invalid `since` counts as -1.
+    let turns = app.json(&format!("sessions/{SESSION_ID}/turns")).await["items"].clone();
+    let everything = json!({ "lastSeq": 15, "lastAt": "2026-10-20T09:02:11.000Z", "session": summary_of(&app, SESSION_ID).await,
+                             "turns": turns });
+    for since in ["", "?since=", "?since=x", "?since=-1"] {
+        assert_eq!(updates(&app, SESSION_ID, since).await, everything, "{since}");
+    }
+    // Turn 0 covers seqs 5..=12 and turn 1 covers 13..=15.
+    assert_eq!(turn_indexes(&updates(&app, SESSION_ID, "?since=11").await), [0, 1]);
+    assert_eq!(turn_indexes(&updates(&app, SESSION_ID, "?since=12").await), [1]);
+    let tail = updates(&app, SESSION_ID, "?since=14").await;
+    assert_eq!(tail["turns"], json!([turns[1]]));
+    assert!(tail.get("truncated").is_none());
+
+    // The last turn grows.
+    let source = fixture("session.jsonl");
+    let grown = lines(&[json!({ "type": "message", "id": "a0000016", "parentId": "a0000015", "timestamp": "2026-10-24T09:05:00.000Z",
+                                "message": assistant("One more note.", "gpt-5", 5) })]);
+    app.append(DEVICE, &skey(SESSION_ID), "session", byte_len(&source), &grown).await;
+    let r = updates(&app, SESSION_ID, "?since=15").await;
+    assert_eq!((&r["lastSeq"], &r["lastAt"]), (&json!(16), &json!("2026-10-24T09:05:00.000Z")));
+    assert_eq!(r["session"], summary_of(&app, SESSION_ID).await);
+    assert_eq!(r["session"]["entryCount"], 17);
+    assert_eq!(turn_indexes(&r), [1]);
+    assert_eq!((&r["turns"][0]["endSeq"], &r["turns"][0]["modelCalls"], &r["turns"][0]["finalText"]), (&json!(16), &json!(2), &json!("One more note.")));
+
+    // New turns.
+    let more = lines(&[
+        json!({ "type": "message", "id": "a0000017", "parentId": "a0000016", "timestamp": "2026-10-24T09:06:00.000Z",
+                "message": { "role": "user", "content": "Thanks", "timestamp": 6 } }),
+        json!({ "type": "message", "id": "a0000018", "parentId": "a0000017", "timestamp": "2026-10-24T09:06:01.000Z",
+                "message": assistant("You are welcome.", "gpt-5", 7) }),
+        json!({ "type": "message", "id": "a0000019", "parentId": "a0000018", "timestamp": "2026-10-24T09:07:00.000Z",
+                "message": { "role": "user", "content": "Bye", "timestamp": 8 } }),
+    ]);
+    app.append(DEVICE, &skey(SESSION_ID), "session", byte_len(&source) + byte_len(&grown), &more).await;
+    let r = updates(&app, SESSION_ID, "?since=16").await;
+    assert_eq!((&r["lastSeq"], &r["session"]["entryCount"]), (&json!(19), &json!(20)));
+    assert_eq!(r["turns"], app.json(&format!("sessions/{SESSION_ID}/turns?cursor={}", pika::read::encode_cursor(&[json!(1)]))).await["items"]);
+    assert_eq!(turn_indexes(&r), [2, 3]);
+    assert_eq!((&r["turns"][0]["userText"], &r["turns"][1]["userText"]), (&json!("Thanks"), &json!("Bye")));
+    assert_eq!(turn_indexes(&updates(&app, SESSION_ID, "?since=15").await), [1, 2, 3]);
+
+    assert_eq!(app.status("sessions/nope/updates?since=3").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn updates_list_at_most_50_turns() {
+    let app = world().await;
+    let id = "many-turns";
+    let mut values = vec![json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-23T08:00:00.000Z", "cwd": "/w/x" })];
+    values.extend((0..60).map(|i| {
+        json!({ "type": "message", "id": format!("m{i}"), "parentId": null, "timestamp": "2026-10-23T08:00:01.000Z",
+                "message": { "role": "user", "content": format!("prompt {i}"), "timestamp": i } })
+    }));
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    // Turn i is seq i + 1 alone.
+    for since in [-1, 9] {
+        let r = updates(&app, id, &format!("?since={since}")).await;
+        assert_eq!(r["truncated"], true, "{since}");
+        assert_eq!(turn_indexes(&r), (10..60).collect::<Vec<_>>(), "{since}");
+    }
+    let r = updates(&app, id, "?since=10").await;
+    assert!(r.get("truncated").is_none());
+    assert_eq!(turn_indexes(&r), (10..60).collect::<Vec<_>>());
+    assert_eq!(turn_indexes(&updates(&app, id, "?since=58").await), [58, 59]);
+    assert!(updates(&app, id, "?since=60").await.get("turns").is_none());
 }
 
 #[tokio::test]
@@ -602,7 +683,11 @@ async fn search_snippets_kinds_filters_and_odd_input() {
     assert_eq!(app.all_pages("search?q=spin", 1).await, spin);
     let relevance = app.json("search?q=spin&sort=relevance").await["items"].as_array().unwrap().clone();
     assert_eq!(relevance.len(), 5);
-    assert_eq!(app.all_pages("search?q=spin&sort=relevance", 1).await, relevance);
+    // Relevance results are one page.
+    let top = app.json("search?q=spin&sort=relevance&limit=2").await;
+    assert_eq!((&top["items"], &top["nextCursor"]), (&json!(relevance[..2]), &Value::Null));
+    let cursor = app.json("search?q=spin&limit=1").await["nextCursor"].as_str().unwrap().to_owned();
+    assert_eq!(app.status(&format!("search?q=spin&sort=relevance&cursor={cursor}")).await, StatusCode::BAD_REQUEST);
 
     // Snippets escape HTML and mark matches.
     let hits = search(&app, "script").await;
@@ -655,7 +740,8 @@ async fn pages_stay_stable_while_data_arrives() {
                 "message": { "role": "user", "content": "Spin it again", "timestamp": 1 } }),
     ]);
     app.upload(DESKTOP, &skey(newest), "session", &new_session).await;
-    let next_turn = lines(&[json!({ "type": "message", "id": "a0000016", "parentId": "a0000015", "timestamp": "2026-10-20T09:01:00.000Z",
+    // The main session, not yet listed, gets a new entry newer than everything and moves to the top.
+    let next_turn = lines(&[json!({ "type": "message", "id": "a0000016", "parentId": "a0000015", "timestamp": "2026-10-23T09:00:00.000Z",
                                    "message": { "role": "user", "content": "One more thing", "timestamp": 1 } })]);
     app.append(DEVICE, &skey(SESSION_ID), "session", byte_len(&fixture("session.jsonl")), &next_turn).await;
 
@@ -666,10 +752,12 @@ async fn pages_stay_stable_while_data_arrives() {
         rest.extend(ids(page["items"].as_array().unwrap(), "id"));
         cursor = page["nextCursor"].as_str().map(str::to_owned);
     }
+    // Later pages repeat nothing; the moved session is on a fresh first page instead.
     let mut seen = ids(first["items"].as_array().unwrap(), "id");
     seen.extend(rest);
-    assert_eq!(seen, before);
-    assert_eq!(session_ids(&app, "?limit=1").await, [newest]);
+    let unmoved: Vec<String> = before.iter().filter(|id| *id != SESSION_ID).cloned().collect();
+    assert_eq!(seen, unmoved);
+    assert_eq!(session_ids(&app, "?limit=2").await, [SESSION_ID, newest]);
 
     let next = app.json(&format!("search?q=spin&limit=10&cursor={}", spin_first["nextCursor"].as_str().unwrap())).await;
     let mut spin_seen = spin_first["items"].as_array().unwrap().clone();
@@ -787,4 +875,104 @@ fn opening_a_version_1_database_builds_the_search_index() {
     let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(hits.items[0].seq, 4);
+}
+
+/// More than `RELEVANCE_WINDOW` newer matches on another device do not hide a device's own matches.
+#[tokio::test]
+async fn relevance_ranks_the_newest_matches_after_filters() {
+    let app = world().await;
+    let flood = "f1000000-0000-0000-0000-00000000000f";
+    let mut values = vec![json!({ "type": "session", "version": 3, "id": flood, "timestamp": "2026-10-24T08:00:00.000Z", "cwd": "/srv/widgets" })];
+    let window = pika::read::search::RELEVANCE_WINDOW as usize;
+    let start = pika::util::parse_iso_ms("2026-10-24T08:00:01.000Z").unwrap();
+    values.extend((0..window + 10).map(|i| {
+        json!({ "type": "message", "id": format!("f{i}"), "parentId": null, "timestamp": pika::util::format_iso_ms(start + i as i64 * 1000),
+                "message": assistant(&format!("gadgets report {i}"), "gpt-5", i as i64) })
+    }));
+    app.upload(DEVICE, &skey(flood), "session", &lines(&values)).await;
+
+    let newest = search(&app, &format!("gadgets&device={DESKTOP}")).await;
+    assert_eq!(newest.len(), 3);
+    for filter in [format!("device={DESKTOP}"), "project=gadgets".to_owned()] {
+        let r = app.json(&format!("search?q=gadgets&sort=relevance&{filter}")).await;
+        assert_eq!(r["nextCursor"], Value::Null);
+        let mut got = hit_keys(r["items"].as_array().unwrap());
+        got.sort();
+        let mut want = hit_keys(&newest);
+        want.sort();
+        assert_eq!(got, want, "{filter}");
+    }
+    let r = app.json("search?q=gadgets&sort=relevance&limit=500").await;
+    assert_eq!((r["items"].as_array().unwrap().len(), &r["nextCursor"]), (100, &Value::Null));
+}
+
+/// A context request whose message holds a lone surrogate escape comes back with the escape intact.
+#[tokio::test]
+async fn context_requests_keep_lone_surrogate_escapes() {
+    let app = world().await;
+    let blocks = [
+        r#"{"role":"user","content":"find the smile","timestamp":1}"#,
+        r#"{"role":"toolResult","toolCallId":"call_g","content":[{"type":"text","text":"a.txt: smile \ud83d... [truncated] C:\\udc00 \udc00x"}],"isError":false}"#,
+    ];
+    let hashes: Vec<String> = blocks.iter().map(|b| pika::util::sha256_hex(b.as_bytes())).collect();
+    let request = |id: &str| {
+        json!({ "id": id, "sessionId": SESSION_ID, "seq": 2, "at": "2026-10-20T09:00:03.000Z", "fidelity": "context",
+                "skeleton": { "messages": hashes.iter().map(|h| json!({ "$pika": h })).collect::<Vec<_>>(), "n": 1 },
+                "blocks": hashes })
+    };
+    let blobs: Vec<Value> = blocks.iter().zip(&hashes).map(|(b, h)| json!({ "hash": h, "data": b })).collect();
+    let r = app.ingest(DEVICE, json!({ "blobs": blobs, "requests": [request("req-lone")] })).await;
+    assert_eq!(r["missingBlobs"], json!([]));
+
+    #[derive(serde::Deserialize)]
+    struct Stored<'a> {
+        fidelity: &'a str,
+        complete: bool,
+        #[serde(borrow)]
+        payload: &'a serde_json::value::RawValue,
+    }
+    let reply = app.get("requests/req-lone").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let stored: Stored = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!((stored.fidelity, stored.complete), ("context", true));
+    assert_eq!(stored.payload.get(), format!(r#"{{"messages":[{},{}],"n":1}}"#, blocks[0], blocks[1]));
+}
+
+#[test]
+fn an_interrupted_upgrade_reindexes_on_the_next_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let mut source = fixture("session.jsonl");
+    let big = json!({ "type": "custom", "id": "big", "parentId": null, "timestamp": "2026-10-20T09:03:00.000Z",
+                      "customType": "big", "data": "x".repeat(pika::ingest::LINE_BLOB_THRESHOLD) });
+    source.push(big.to_string());
+    {
+        let store = pika::store::Store::open(&data).unwrap();
+        upload(&store, &skey(SESSION_ID), "session", &source, 100);
+    }
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(
+        "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(conn);
+
+    // The large line's blob is unreadable, so the reindex after the upgrade fails.
+    let hash: String = rusqlite::Connection::open(data.join("pika.db"))
+        .unwrap()
+        .query_row("SELECT blob FROM lines WHERE blob IS NOT NULL", [], |r| r.get(0))
+        .unwrap();
+    let blob = data.join("blobs").join(&hash[..2]).join(&hash[2..4]).join(format!("{hash}.zst"));
+    let aside = dir.path().join("aside.zst");
+    std::fs::rename(&blob, &aside).unwrap();
+    assert!(pika::store::Store::open(&data).is_err());
+
+    std::fs::rename(&aside, &blob).unwrap();
+    let store = pika::store::Store::open(&data).unwrap();
+    let mut params = pika::read::Params::default();
+    params.0.insert("q".into(), "flaky".into());
+    let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
+    assert_eq!(hits.items.len(), 1);
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
 }

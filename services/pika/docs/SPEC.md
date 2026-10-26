@@ -126,6 +126,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   ```
   - `project` is the basename of `cwd`; Herder step sessions use the link's `herder.repo` instead.
   - `title` is the `session_info` name if set, otherwise the first user prompt cut to 120 characters.
+  - Pages are keyset-paged on `lastAt`, so later pages never repeat a session. A session that gains entries between page fetches moves to the top of the list: it appears on a fresh first page and not on the later pages of the old walk.
 - **`GET sessions/:id`** returns a `SessionSummary` plus `{ children: (SessionSummary & { parentToolCallId? })[] }`.
 - **`GET sessions/:id/turns`** accepts `cursor` and `limit` (default 100). It returns `{ items: Turn[], nextCursor }`, with one `Turn` per user prompt:
   ```
@@ -137,19 +138,24 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   ```
   { seq, offset, id, parentId, type, timestamp, raw, requestId?, truncated? }
   ```
-  - `raw` is the parsed verbatim line.
+  - `raw` is the parsed verbatim line. An escaped unpaired UTF-16 surrogate (such as `\ud83d` alone, which `JSON.stringify` writes for a string cut inside a pair) parses as U+FFFD; derived tables parse lines the same way.
   - Strings longer than 65,536 characters are cut to that length and the entry is marked `truncated: true`.
   - Each image block's `data` becomes `""` and the block gains `src`: the URL of `GET sessions/:id/entries/:seq/image/:index`.
   - `GET sessions/:id/entries/:seq/raw` returns the verbatim line.
-- **`GET sessions/:id/updates`** accepts `since` (the caller's last seq) and returns `{ lastSeq, lastAt }`: the session's newest entry, so the UI can poll an active session cheaply and fetch `entries?from=<since + 1>` when `lastSeq` grew. `lastSeq` is `-1` for a session without entries.
+- **`GET sessions/:id/updates`** accepts `since` (the caller's last seq; missing or invalid counts as `-1`) and returns `{ lastSeq, lastAt, session?, turns?, truncated? }`, so the UI can poll an active session cheaply and fetch `entries?from=<since + 1>` when `lastSeq` grew.
+  - `lastSeq` and `lastAt` are the session's newest entry seq (`-1` for a session without entries) and its time.
+  - When `lastSeq > since`, `session` is the session's `SessionSummary` (as `GET sessions/:id` returns it, without `children`), and `turns` lists every `Turn` whose `endSeq > since`, ascending by `index`: the turn that grew plus any new turns. At most 50 are listed; when more qualify, `turns` holds the newest 50 and `truncated: true` is set, and the UI refetches its turns list instead.
+  - When `lastSeq <= since`, `session`, `turns`, and `truncated` are omitted.
+  - An unknown session id returns 404.
 - **`GET sessions/:id/export`** returns the verbatim JSONL, byte-identical to the original file.
-- **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request.
+- **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request. Block text is spliced in verbatim, so escapes of unpaired UTF-16 surrogates in context messages come back exactly as the client split them.
 - **Herder runs:**
   - `GET herder/runs` accepts `cursor` and `limit`, and returns `{ items: RunSummary[], nextCursor }`. `RunSummary` is `{ runId, device, repo, title, status, verdict?, startedAt, lastAt, stepCount }`.
   - `GET herder/runs/:id` returns `{ run: RunSummary, goal?, plan?, events: [{ seq, t, at, data }], steps: [{ key, id, task?, role, label?, phase?, status, attempts, sessionId?, commit?, startedAt?, endedAt? }] }`.
 - **`GET search`** accepts `q`, `device`, `project`, `sort`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
   - Every word of `q`, or `"quoted phrase"`, must match; operators and special characters are plain text.
-  - `sort` is `newest` (default, by entry time) or `relevance` (bm25 over the 20,000 newest matches).
+  - `sort` is `newest` (default, by entry time, keyset-paged with `cursor`) or `relevance`.
+  - `sort=relevance` returns a single page: the best `limit` (at most 100) matches by bm25 among the 20,000 newest matches that pass the `device` and `project` filters, with `nextCursor: null`. It does not page because bm25 scores change as documents are indexed; a `cursor` with `sort=relevance` is a 400.
   - `kind` is one of `user`, `assistant`, `tool-call`, `tool-result`, or `title` (a `session_info` name).
   - `snippet` is HTML-escaped text with `<mark>` around matches.
 - **Auth:**
@@ -172,6 +178,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
   - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them.
+  - A schema migration that adds derived tables records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 
 ## Extension configuration

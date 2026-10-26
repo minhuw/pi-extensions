@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use super::{Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, line_text, page};
 use crate::blobs::BlobStore;
+use crate::util::parse_json_lenient;
 
 pub const RUN_LIMIT: i64 = 50;
 pub const MAX_RUN_LIMIT: i64 = 500;
@@ -133,7 +134,7 @@ pub fn detail(conn: &Connection, blobs: &BlobStore, run_id: &str) -> ReadResult<
     let mut events = Vec::with_capacity(rows.len());
     for (seq, t, at, data, blob) in rows {
         let text = line_text(blobs, data, blob)?;
-        events.push(Event { seq, t, at: iso(at), data: serde_json::from_str(&text).unwrap_or(Value::String(text)) });
+        events.push(Event { seq, t, at: iso(at), data: parse_json_lenient(&text).unwrap_or(Value::String(text)) });
     }
 
     let mut steps: Vec<Step> = conn

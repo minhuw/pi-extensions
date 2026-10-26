@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 
 use super::{Line, StreamInfo, int_field, str_field, string_field, time_field};
-use crate::util::basename;
+use crate::util::{basename, parse_json_lenient};
 
 struct RunRow {
     rid: i64,
@@ -218,7 +218,7 @@ fn step_event(tx: &Transaction, run: &mut RunRow, seq: i64, at: Option<i64>, t: 
 pub fn apply(tx: &Transaction, info: &StreamInfo, lines: &[Line]) -> Result<()> {
     let mut run = load_run(tx, info.id)?;
     for line in lines {
-        let v: Value = serde_json::from_str(line.text).ok().filter(Value::is_object).unwrap_or(Value::Null);
+        let v: Value = parse_json_lenient(line.text).ok().filter(Value::is_object).unwrap_or(Value::Null);
         let t = str_field(&v, "t");
         let at = time_field(&v, "at");
         tx.prepare_cached("INSERT OR REPLACE INTO herder_events (rid, seq, offset, t, at) VALUES (?1, ?2, ?3, ?4, ?5)")?
