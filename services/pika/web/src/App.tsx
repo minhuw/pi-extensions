@@ -1,10 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
-import { BrowserRouter, Route, Routes } from "react-router";
+import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
+import { AuthGate } from "./components/AuthGate";
 import { Layout } from "./components/Layout";
 import { ApiContext, ApiError, PikaApi } from "./lib/api";
 import { NotFoundPage } from "./pages/NotFound";
-import { HerderRunsPage, SearchPage } from "./pages/Placeholders";
+import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
+import { LoginPage } from "./pages/Login";
+import { SearchPage } from "./pages/Search";
 import { SessionListPage } from "./pages/SessionList";
 import { SessionViewPage } from "./pages/SessionView";
 
@@ -20,16 +23,26 @@ export function createQueryClient(): QueryClient {
 	});
 }
 
+function LegacyRunRedirect() {
+	const { id = "" } = useParams();
+	return <Navigate to={`/runs/${encodeURIComponent(id)}`} replace />;
+}
+
 export function AppRoutes() {
 	return (
 		<Routes>
-			<Route element={<Layout />}>
-				<Route index element={<SessionListPage />} />
-				<Route path="s/:id" element={<SessionViewPage />} />
-				<Route path="herder" element={<HerderRunsPage />} />
-				<Route path="herder/:runId" element={<HerderRunsPage />} />
-				<Route path="search" element={<SearchPage />} />
-				<Route path="*" element={<NotFoundPage />} />
+			<Route path="login" element={<LoginPage />} />
+			<Route element={<AuthGate />}>
+				<Route element={<Layout />}>
+					<Route index element={<SessionListPage />} />
+					<Route path="s/:id" element={<SessionViewPage />} />
+					<Route path="runs" element={<HerderRunsPage />} />
+					<Route path="runs/:id" element={<HerderRunPage />} />
+					<Route path="herder" element={<Navigate to="/runs" replace />} />
+					<Route path="herder/:id" element={<LegacyRunRedirect />} />
+					<Route path="search" element={<SearchPage />} />
+					<Route path="*" element={<NotFoundPage />} />
+				</Route>
 			</Route>
 		</Routes>
 	);

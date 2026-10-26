@@ -1,6 +1,6 @@
 // An in-memory implementation of the read API for tests, served through a mocked fetch.
 import { withBase } from "../../src/lib/base";
-import type { Entry, Facets, SessionDetail, Turn } from "../../src/lib/types";
+import type { Entry, Facets, ModelRequest, RunDetail, SearchHit, SessionDetail, Turn } from "../../src/lib/types";
 
 export interface FakeSession {
 	detail: SessionDetail;
@@ -20,25 +20,58 @@ function page<T>(items: T[], params: URLSearchParams, defaultLimit: number) {
 	return { items: slice, nextCursor: next };
 }
 
+function withoutChildren({ children: _children, ...rest }: SessionDetail) {
+	return rest;
+}
+
 export function createFakeServer({
 	base = "/",
 	sessions = [],
 	facets,
+	requests = [],
+	runs = [],
+	hits = [],
+	password,
+	updates = true,
 }: {
 	base?: string;
 	sessions?: FakeSession[];
 	facets?: Facets;
+	requests?: ModelRequest[];
+	runs?: RunDetail[];
+	/** Search hits; the fake matches `q` against the snippet text and applies device/project via the sessions. */
+	hits?: SearchHit[];
+	/** Requires a login cookie for everything but `me` and `login`. */
+	password?: string;
+	/** Serves `sessions/:id/updates`; older servers answer 404. */
+	updates?: boolean;
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
+	const requestsById = new Map(requests.map((request) => [request.id, request]));
+	const runsById = new Map(runs.map((run) => [run.run.runId, run]));
 	const prefix = withBase(base, "api/v1/");
+	const state = { authenticated: false };
 
-	const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
+	const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = new URL(String(input), "http://localhost");
 		calls.push(`${url.pathname}${url.search}`);
 		if (!url.pathname.startsWith(prefix)) return json(404, { error: "not found" });
 		const parts = url.pathname.slice(prefix.length).split("/").map(decodeURIComponent);
 		const params = url.searchParams;
+
+		if (parts[0] === "me") return json(200, { authenticated: password === undefined || state.authenticated, passwordRequired: password !== undefined });
+		if (parts[0] === "login" && init?.method === "POST") {
+			const body = JSON.parse(String(init.body ?? "{}")) as { password?: string };
+			if (password !== undefined && body.password !== password) return json(401, { error: "unauthorized" });
+			state.authenticated = true;
+			return new Response(null, { status: 204 });
+		}
+		if (parts[0] === "logout") {
+			state.authenticated = false;
+			return new Response(null, { status: 204 });
+		}
+		if (password !== undefined && !state.authenticated) return json(401, { error: "unauthorized" });
 
 		if (parts[0] === "facets") {
 			return json(
@@ -59,15 +92,19 @@ export function createFakeServer({
 			}
 			const model = params.get("model");
 			if (model) list = list.filter((s) => s.models.includes(model));
-			const items = list.map(({ children: _children, ...rest }) => rest);
-			return json(200, page(items, params, 50));
+			return json(200, page(list.map(withoutChildren), params, 50));
 		}
 		if (parts[0] === "sessions") {
 			const session = byId.get(parts[1]);
 			if (!session) return json(404, { error: "not found" });
 			if (parts.length === 2) return json(200, session.detail);
 			if (parts[2] === "turns") return json(200, page(session.turns, params, 100));
-			if (parts[2] === "entries") {
+			if (parts[2] === "updates" && updates) {
+				const since = Number(params.get("since") ?? -1);
+				const lastSeq = session.entries.reduce((max, item) => Math.max(max, item.seq), -1);
+				return json(200, { lastSeq, session: withoutChildren(session.detail), turns: session.turns.filter((turn) => turn.endSeq > since) });
+			}
+			if (parts[2] === "entries" && parts.length === 3) {
 				const from = Number(params.get("from") ?? 0);
 				const to = params.has("to") ? Number(params.get("to")) : Number.POSITIVE_INFINITY;
 				const limit = Math.min(Number(params.get("limit") ?? 200), 1000);
@@ -80,8 +117,29 @@ export function createFakeServer({
 				return json(200, { items });
 			}
 		}
+		if (parts[0] === "requests") {
+			const request = requestsById.get(parts[1]);
+			return request ? json(200, request) : json(404, { error: "not found" });
+		}
+		if (parts[0] === "herder" && parts[1] === "runs") {
+			if (parts.length === 2) return json(200, page(runs.map((run) => run.run), params, 50));
+			const run = runsById.get(parts[2]);
+			return run ? json(200, run) : json(404, { error: "not found" });
+		}
+		if (parts[0] === "search") {
+			const q = (params.get("q") ?? "").toLowerCase();
+			const device = params.get("device");
+			const project = params.get("project");
+			const matching = hits.filter((hit) => {
+				const session = byId.get(hit.sessionId)?.detail;
+				if (device && session?.device !== device) return false;
+				if (project && session?.project !== project) return false;
+				return hit.snippet.toLowerCase().includes(q);
+			});
+			return json(200, page(matching, params, 50));
+		}
 		return json(404, { error: "not found" });
 	};
 
-	return { fetch: fetchImpl as typeof fetch, calls };
+	return { fetch: fetchImpl as typeof fetch, calls, state };
 }

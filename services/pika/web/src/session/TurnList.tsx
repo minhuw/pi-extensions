@@ -9,6 +9,7 @@ import { useApi } from "../lib/api";
 import { formatCost, formatDateTime, formatDuration, plural } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
 import type { Entry, Turn } from "../lib/types";
+import { useViewState } from "../lib/viewState";
 import { useScrollMargin } from "../lib/virtual";
 import { buildTimeline, type TimelineItem } from "./timeline";
 import { TimelineItemView } from "./TimelineItemView";
@@ -31,9 +32,11 @@ interface TurnEntries {
 	hasMore: boolean;
 }
 
-function entriesKey(sessionId: string, turn: Turn, from: number) {
+export function entriesKey(sessionId: string, turn: Pick<Turn, "endSeq">, from: number) {
 	return ["entries", sessionId, from, turn.endSeq] as const;
 }
+
+const HIGHLIGHT_MS = 2500;
 
 function estimateRow(row: Row | undefined): number {
 	if (!row) return 80;
@@ -73,17 +76,28 @@ function WorkStrip({ turn, expanded, onToggle }: { turn: Turn; expanded: boolean
 	);
 }
 
-function TurnHead({ row, active, onToggle }: { row: Extract<Row, { type: "head" }>; active: boolean; onToggle: () => void }) {
+function TurnHead({
+	row,
+	active,
+	highlighted,
+	onToggle,
+}: {
+	row: Extract<Row, { type: "head" }>;
+	active: boolean;
+	highlighted: boolean;
+	onToggle: () => void;
+}) {
 	const { turn } = row;
 	return (
 		<div
 			className={cx(
-				"rounded-t-md border-x border-t px-6 pt-5 pb-2",
+				"rounded-t-md border-x border-t px-6 pt-5 pb-2 transition-colors duration-700",
 				active ? "border-accent/40" : "border-line",
-				!row.expanded && "pb-2",
+				highlighted && "bg-accent-soft",
 			)}
 			data-turn={turn.index}
 			data-active={active || undefined}
+			data-highlighted={highlighted || undefined}
 		>
 			<div className="mb-2 flex items-center gap-2 text-[13px] text-muted">
 				<Icon name="user" size={14} />
@@ -114,15 +128,47 @@ function TurnFoot({ turn, active }: { turn: Turn; active: boolean }) {
 	);
 }
 
-function ItemShell({ active, children, seq }: { active: boolean; children: ReactNode; seq?: number }) {
+function ItemShell({
+	active,
+	children,
+	seq,
+	highlighted = false,
+}: {
+	active: boolean;
+	children: ReactNode;
+	seq?: number;
+	highlighted?: boolean;
+}) {
 	return (
-		<div className={cx("border-x px-6", active ? "border-accent/40" : "border-line")} data-entry-seq={seq}>
+		<div
+			className={cx("border-x px-6 transition-colors duration-700", active ? "border-accent/40" : "border-line", highlighted && "bg-accent-soft")}
+			data-entry-seq={seq}
+			data-highlighted={highlighted || undefined}
+		>
 			<div className="ml-1.5 border-l border-line py-1.5 pl-5">{children}</div>
 		</div>
 	);
 }
 
-export function TurnList({ sessionId, showHidden }: { sessionId: string; showHidden: boolean }) {
+function itemHasSeq(item: TimelineItem, seq: number): boolean {
+	return item.seq === seq || (item.kind === "tool" && item.resultEntry?.seq === seq);
+}
+
+export function TurnList({
+	sessionId,
+	showHidden,
+	nested = false,
+	focusSeq,
+	onFocusHandled,
+}: {
+	sessionId: string;
+	showHidden: boolean;
+	/** Inline inside another session's timeline: no j/k shortcuts. */
+	nested?: boolean;
+	/** An entry to scroll to: its turn is expanded and the entry briefly highlighted. */
+	focusSeq?: number;
+	onFocusHandled?: () => void;
+}) {
 	const api = useApi();
 	const queryClient = useQueryClient();
 	const turns = useInfiniteQuery({
@@ -134,7 +180,7 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 	const turnItems = useMemo(() => turns.data?.pages.flatMap((page) => page.items) ?? [], [turns.data]);
 
 	// Expanded turns and how many entry pages each has requested.
-	const [expanded, setExpanded] = useState<Map<number, number>>(() => new Map());
+	const [expanded, setExpanded] = useViewState<Map<number, number>>(`turns-expanded:${sessionId}`, () => new Map());
 	const [active, setActive] = useState(-1);
 
 	const turnsByIndex = useMemo(() => new Map(turnItems.map((turn) => [turn.index, turn])), [turnItems]);
@@ -169,7 +215,7 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 
 	const timelineCache = useRef(new Map<number, { pages: Entry[][]; showHidden: boolean; items: TimelineItem[] }>());
 
-	const rows = useMemo(() => {
+	const { rows, byTurn } = useMemo(() => {
 		const byTurn = new Map<number, TurnEntries>();
 		entryQueries.forEach(({ turn }, i) => {
 			const result = entryResults[i];
@@ -224,7 +270,7 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 			out.push({ type: "foot", key: `f${turn.index}`, turn });
 		});
 		if (turns.hasNextPage) out.push({ type: "turns-loader", key: "turns-loader" });
-		return out;
+		return { rows: out, byTurn };
 		// `entrySignature` stands in for `entryQueries` and `entryResults`, which are new arrays every render.
 	}, [turnItems, turnsByIndex, expanded, entrySignature, showHidden, turns.hasNextPage]);
 
@@ -248,7 +294,7 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 			else next.set(turn.index, 1);
 			return next;
 		});
-	}, []);
+	}, [setExpanded]);
 
 	// Load more turns or entry pages when their placeholder rows come into view.
 	const visibleKeys = virtualItems.map((item) => item.key).join(",");
@@ -270,6 +316,58 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 		}
 	}, [visibleKeys, rows, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
 
+	// Deep link: load turns until one holds `focusSeq`, expand it, page its entries, then scroll.
+	const [focus, setFocus] = useState(focusSeq);
+	const [highlight, setHighlight] = useState<number | undefined>();
+	useEffect(() => setFocus(focusSeq), [focusSeq]);
+	useEffect(() => {
+		if (highlight === undefined) return;
+		const timer = setTimeout(() => setHighlight(undefined), HIGHLIGHT_MS);
+		return () => clearTimeout(timer);
+	}, [highlight]);
+	useEffect(() => {
+		if (focus === undefined || turns.isPending) return;
+		const finish = (rowIndex: number | undefined, seq?: number) => {
+			if (rowIndex !== undefined) {
+				virtualizer.scrollToIndex(rowIndex, { align: "center" });
+				setHighlight(seq);
+			}
+			setFocus(undefined);
+			onFocusHandled?.();
+		};
+		const target = turnItems.find((turn) => turn.startSeq <= focus && focus <= turn.endSeq);
+		if (!target) {
+			const last = turnItems[turnItems.length - 1];
+			if (hasNextPage && (!last || last.endSeq < focus)) {
+				if (!isFetchingNextPage && !isFetchNextPageError) void fetchNextPage();
+				if (!isFetchNextPageError) return;
+			}
+			finish(undefined);
+			return;
+		}
+		const headIndex = rows.findIndex((row) => row.type === "head" && row.turn.index === target.index);
+		if (focus === target.startSeq) {
+			finish(headIndex, target.startSeq);
+			return;
+		}
+		if (!expanded.has(target.index)) {
+			setExpanded((current) => new Map(current).set(target.index, 1));
+			return;
+		}
+		const itemIndex = rows.findIndex((row) => row.type === "item" && row.turn.index === target.index && itemHasSeq(row.item, focus));
+		if (itemIndex >= 0) {
+			finish(itemIndex, focus);
+			return;
+		}
+		const state = byTurn.get(target.index);
+		if (!state || state.loading) return;
+		if (state.hasMore) {
+			setExpanded((current) => new Map(current).set(target.index, (current.get(target.index) ?? 1) + 1));
+			return;
+		}
+		finish(headIndex, target.startSeq);
+	});
+
 	const headRows = useMemo(() => rows.flatMap((row, index) => (row.type === "head" ? [index] : [])), [rows]);
 	const activeTurnIndex = rows[headRows[active] ?? -1]?.type === "head" ? (rows[headRows[active]] as Extract<Row, { type: "head" }>).turn.index : -1;
 	const move = (delta: number) => {
@@ -279,7 +377,7 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 		virtualizer.scrollToIndex(headRows[next], { align: "start" });
 		if (next === headRows.length - 1 && hasNextPage && !isFetchingNextPage) void fetchNextPage();
 	};
-	useShortcuts({ j: () => move(1), k: () => move(-1) });
+	useShortcuts(nested ? {} : { j: () => move(1), k: () => move(-1) });
 
 	if (turns.isPending) {
 		return (
@@ -311,9 +409,18 @@ export function TurnList({ sessionId, showHidden }: { sessionId: string; showHid
 						style={{ transform: `translateY(${virtual.start - scrollMargin}px)` }}
 					>
 						{row.type === "head" ? (
-							<TurnHead row={row} active={isActive} onToggle={() => toggle(row.turn)} />
+							<TurnHead
+								row={row}
+								active={isActive}
+								highlighted={highlight !== undefined && highlight === row.turn.startSeq}
+								onToggle={() => toggle(row.turn)}
+							/>
 						) : row.type === "item" ? (
-							<ItemShell active={isActive} seq={row.item.seq}>
+							<ItemShell
+								active={isActive}
+								seq={row.item.seq}
+								highlighted={highlight !== undefined && highlight !== row.turn.startSeq && itemHasSeq(row.item, highlight)}
+							>
 								<TimelineItemView item={row.item} />
 							</ItemShell>
 						) : row.type === "status" ? (

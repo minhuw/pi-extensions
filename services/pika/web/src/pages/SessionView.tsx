@@ -1,12 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router";
+import { useCallback, useMemo, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router";
 import { Icon } from "../components/icons";
 import { Callout, ErrorState, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
 import { ApiError, useApi } from "../lib/api";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, totalTokens } from "../lib/format";
-import type { ChildSession, SessionDetail } from "../lib/types";
-import { SessionViewContext } from "../session/context";
+import type { SessionDetail } from "../lib/types";
+import { ViewStateProvider } from "../lib/viewState";
+import { ContextButton, ContextDrawerProvider } from "../context/ContextDrawer";
+import { SessionSlotsContext, SessionViewContext, type SessionSlots } from "../session/context";
+import { isLive, useLiveUpdates } from "../session/live";
+import { InlineAgentChild, sessionContextFor, SubagentList } from "../session/subagents";
 import { TurnList } from "../session/TurnList";
 import { NotFoundPage } from "./NotFound";
 
@@ -78,14 +82,14 @@ function sessionProperties(session: SessionDetail): Property[] {
 			icon: "herder",
 			label: "Herder run",
 			value: (
-				<Link to={`/herder/${encodeURIComponent(session.herderRunId)}`} className="mono text-accent hover:underline">
+				<Link to={`/runs/${encodeURIComponent(session.herderRunId)}`} className="mono text-accent hover:underline">
 					{session.herderRunId}
 				</Link>
 			),
 		});
 	}
 	if (session.children.length > 0) {
-		items.push({ icon: "children", label: "Children", value: `${session.children.length} child session${session.children.length === 1 ? "" : "s"}` });
+		items.push({ icon: "children", label: "Subagents", value: <SubagentList items={session.children} /> });
 	}
 	return items;
 }
@@ -106,20 +110,42 @@ function HeaderSkeleton() {
 	);
 }
 
+const slots: SessionSlots = { ModelCallExtra: ContextButton, AgentChild: InlineAgentChild };
+
 export function SessionViewPage() {
 	const { id = "" } = useParams();
+	return (
+		<ViewStateProvider key={id}>
+			<ContextDrawerProvider>
+				<SessionSlotsContext.Provider value={slots}>
+					<SessionPage id={id} />
+				</SessionSlotsContext.Provider>
+			</ContextDrawerProvider>
+		</ViewStateProvider>
+	);
+}
+
+function SessionPage({ id }: { id: string }) {
 	const api = useApi();
 	const [showHidden, setShowHidden] = useState(false);
+	const [params, setParams] = useSearchParams();
 	const session = useQuery({ queryKey: ["session", id], queryFn: () => api.session(id) });
+	useLiveUpdates(id, session.data);
 
-	const context = useMemo(() => {
-		const childrenByToolCall = new Map<string, ChildSession>();
-		for (const child of session.data?.children ?? []) {
-			const toolCallId = child.parentToolCallId ?? child.link?.parentToolCallId;
-			if (toolCallId) childrenByToolCall.set(toolCallId, child);
-		}
-		return { sessionId: id, childrenByToolCall };
-	}, [id, session.data]);
+	const seqParam = params.get("seq");
+	const focusSeq = seqParam !== null && /^\d+$/.test(seqParam) ? Number(seqParam) : undefined;
+	const clearFocus = useCallback(() => {
+		setParams(
+			(current) => {
+				const next = new URLSearchParams(current);
+				next.delete("seq");
+				return next;
+			},
+			{ replace: true },
+		);
+	}, [setParams]);
+
+	const context = useMemo(() => sessionContextFor(id, session.data, { showHidden }), [id, session.data, showHidden]);
 
 	if (session.error instanceof ApiError && session.error.status === 404) return <NotFoundPage what="session" />;
 
@@ -150,7 +176,14 @@ export function SessionViewPage() {
 				)
 			) : (
 				<SessionViewContext.Provider value={context}>
-					<PageTitle>{session.data.title || "Untitled session"}</PageTitle>
+					<div className="flex items-start gap-3">
+						<PageTitle>{session.data.title || "Untitled session"}</PageTitle>
+						{isLive(session.data.lastAt) && (
+							<span className="mt-4 shrink-0" data-live="">
+								<Pill tone="green">live</Pill>
+							</span>
+						)}
+					</div>
 					<Properties items={sessionProperties(session.data)} />
 					<div className="mb-6 flex flex-wrap items-center gap-2 border-y border-line py-2 text-[13px]">
 						<label className="flex cursor-pointer items-center gap-2 rounded-sm px-1.5 py-0.5 text-muted hover:bg-hover">
@@ -175,7 +208,7 @@ export function SessionViewPage() {
 							Export JSONL
 						</a>
 					</div>
-					<TurnList key={id} sessionId={id} showHidden={showHidden} />
+					<TurnList key={id} sessionId={id} showHidden={showHidden} focusSeq={focusSeq} onFocusHandled={clearFocus} />
 				</SessionViewContext.Provider>
 			)}
 		</div>

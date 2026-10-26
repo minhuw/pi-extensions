@@ -118,25 +118,35 @@ export interface RunSummary {
 	stepCount: number;
 }
 
+export interface RunEvent {
+	seq: number;
+	t: string;
+	at: string;
+	/** The journal event; field names follow Herder's journal. */
+	data: unknown;
+}
+
+export interface RunStep {
+	key: string;
+	id: string;
+	task?: string;
+	role: string;
+	label?: string;
+	phase?: string;
+	status: string;
+	attempts: number;
+	sessionId?: string;
+	commit?: string;
+	startedAt?: string;
+	endedAt?: string;
+}
+
 export interface RunDetail {
 	run: RunSummary;
 	goal?: string;
 	plan?: string;
-	events: { seq: number; t: string; at: string; data: unknown }[];
-	steps: {
-		key: string;
-		id: string;
-		task?: string;
-		role: string;
-		label?: string;
-		phase?: string;
-		status: string;
-		attempts: number;
-		sessionId?: string;
-		commit?: string;
-		startedAt?: string;
-		endedAt?: string;
-	}[];
+	events: RunEvent[];
+	steps: RunStep[];
 }
 
 export interface SearchHit {
@@ -147,6 +157,16 @@ export interface SearchHit {
 	kind: "user" | "assistant" | "tool-call" | "tool-result" | "title";
 	snippet: string;
 	at: string;
+}
+
+/**
+ * `GET sessions/:id/updates?since=<seq>`: the session's summary and every turn that holds an entry
+ * after `since` (the turn that grew and any new ones). Not in spec v1; the UI falls back when absent.
+ */
+export interface SessionUpdates {
+	lastSeq: number;
+	session: SessionSummary;
+	turns: Turn[];
 }
 
 export interface Me {

@@ -11,6 +11,7 @@ import type {
 	SearchHit,
 	SessionDetail,
 	SessionSummary,
+	SessionUpdates,
 	Turn,
 } from "./types";
 
@@ -47,10 +48,18 @@ function query(params: Params): string {
 }
 
 export class PikaApi {
+	private readonly unauthorizedListeners = new Set<() => void>();
+
 	constructor(
 		readonly base: string,
 		private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
 	) {}
+
+	/** Called on every 401 except a failed login. Returns an unsubscribe function. */
+	onUnauthorized(listener: () => void): () => void {
+		this.unauthorizedListeners.add(listener);
+		return () => this.unauthorizedListeners.delete(listener);
+	}
 
 	/** Absolute URL path of a read API route, e.g. `url("sessions")`. */
 	url(path: string, params: Params = {}): string {
@@ -72,6 +81,7 @@ export class PikaApi {
 			}
 			const detail =
 				body && typeof body === "object" && "error" in body ? String((body as { error: unknown }).error) : response.statusText;
+			if (response.status === 401 && path !== "login") for (const listener of this.unauthorizedListeners) listener();
 			throw new ApiError(response.status, detail || `HTTP ${response.status}`, body);
 		}
 		const text = await response.text();
@@ -96,6 +106,10 @@ export class PikaApi {
 
 	entries(id: string, range: { from?: number; to?: number; limit?: number }): Promise<{ items: Entry[] }> {
 		return this.request(`sessions/${encodeURIComponent(id)}/entries`, range);
+	}
+
+	updates(id: string, since: number): Promise<SessionUpdates> {
+		return this.request(`sessions/${encodeURIComponent(id)}/updates`, { since });
 	}
 
 	rawEntryUrl(id: string, seq: number): string {

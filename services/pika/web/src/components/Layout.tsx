@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useShortcuts } from "../lib/keyboard";
 import { useTheme, type Theme } from "../lib/theme";
+import { useMe } from "./AuthGate";
 import { Icon, type IconName } from "./icons";
 import { cx } from "./ui";
 
@@ -65,6 +66,17 @@ function SidebarSection({ title, items, param, icon }: { title: string; items: s
 function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme: Theme; onToggleTheme: () => void }) {
 	const api = useApi();
 	const facets = useQuery({ queryKey: ["facets"], queryFn: () => api.facets(), staleTime: 60_000 });
+	const me = useMe();
+	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const signOut = async () => {
+		try {
+			await api.logout();
+		} finally {
+			queryClient.removeQueries();
+			navigate("/login", { replace: true });
+		}
+	};
 	return (
 		<aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-line bg-sidebar" aria-label="Sidebar">
 			<div className="flex h-12 items-center gap-2 px-3">
@@ -86,7 +98,7 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 				<NavItem to="/" icon="sessions" end>
 					Sessions
 				</NavItem>
-				<NavItem to="/herder" icon="herder">
+				<NavItem to="/runs" icon="herder">
 					Herder runs
 				</NavItem>
 				<NavItem to="/search" icon="search">
@@ -106,6 +118,16 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 					<Icon name={theme === "dark" ? "sun" : "moon"} />
 					{theme === "dark" ? "Light theme" : "Dark theme"}
 				</button>
+				{me.data?.passwordRequired && me.data.authenticated && (
+					<button
+						type="button"
+						onClick={() => void signOut()}
+						className="flex h-[30px] w-full items-center gap-2.5 rounded-sm px-2 text-[14px] text-muted hover:bg-hover"
+					>
+						<Icon name="external" />
+						Sign out
+					</button>
+				)}
 			</div>
 		</aside>
 	);

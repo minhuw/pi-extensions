@@ -5,6 +5,11 @@ export interface SessionViewContextValue {
 	sessionId: string;
 	/** Child sessions keyed by the parent tool call that spawned them. */
 	childrenByToolCall: Map<string, ChildSession>;
+	/** Every child of each tool call, oldest first; workflow calls spawn several. */
+	childGroups?: Map<string, ChildSession[]>;
+	/** Session ids from the page's session down to this one, for inline nesting. */
+	ancestors?: string[];
+	showHidden?: boolean;
 }
 
 export const SessionViewContext = createContext<SessionViewContextValue>({
