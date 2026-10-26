@@ -57,7 +57,8 @@ perf="$CARGO_TARGET_DIR/release/examples/perf"
 step "$perf" load --data-dir "$work/data" --plan "$work/plan.json" --stats "$work/load.json" ${scale[@]+"${scale[@]}"}
 step "$perf" check --data-dir "$work/data" --shape "$work/shape.json" ${scale[@]+"${scale[@]}"}
 
-"$pika" serve --data-dir "$work/data" --bind 127.0.0.1:0 >"$work/server.log" 2>&1 &
+# The benchmark reads the API without a login cookie.
+PIKA_AUTH=none "$pika" serve --data-dir "$work/data" --bind 127.0.0.1:0 >"$work/server.log" 2>&1 &
 server_pid=$!
 addr=""
 for _ in $(seq 1 600); do

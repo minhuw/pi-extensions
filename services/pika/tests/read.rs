@@ -6,7 +6,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use common::*;
-use pika::config::ServerConfig;
+use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use pika::util::encode_path_segment;
 use serde_json::{Value, json};
@@ -54,7 +54,10 @@ fn app(password: Option<&str>) -> App {
         .collect();
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.base_path = BASE.into();
-    config.password = password.map(str::to_owned);
+    match password {
+        Some(password) => config.password = Some(password.to_owned()),
+        None => config.auth = AuthMode::None,
+    }
     let app = router(AppState::new(env.store.clone(), config).unwrap());
     App { env, app, tokens }
 }
@@ -889,10 +892,10 @@ fn opening_a_version_1_database_builds_the_search_index() {
         upload(&store, &skey(SESSION_ID), "session", &fixture("session.jsonl"), 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; PRAGMA user_version = 1;",
-    )
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V4} PRAGMA user_version = 1;"
+    ))
     .unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
@@ -977,10 +980,10 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
         upload(&store, &skey(SESSION_ID), "session", &source, 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; PRAGMA user_version = 1;",
-    )
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V4} PRAGMA user_version = 1;"
+    ))
     .unwrap();
     drop(conn);
 

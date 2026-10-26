@@ -6,13 +6,50 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:7171";
 pub const DEFAULT_DATA_DIR: &str = "./pika-data";
 pub const DEFAULT_MAX_BODY: usize = 32 << 20;
 
+/// Who authenticates viewers of the UI and the read API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthMode {
+    /// pika's own password login; the server refuses to start without a password.
+    Password,
+    /// The reverse proxy authenticates every path except ingest, pairing, and health.
+    Proxy,
+    /// No authentication.
+    None,
+}
+
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::Password => "password",
+            AuthMode::Proxy => "proxy",
+            AuthMode::None => "none",
+        }
+    }
+}
+
+/// When the session cookie gets the `Secure` attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CookieSecure {
+    /// When a trusted proxy reports that the request arrived over HTTPS.
+    Auto,
+    Always,
+    Never,
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind: String,
     /// `/` or a path without a trailing slash, such as `/pika`.
     pub base_path: String,
     pub data_dir: PathBuf,
+    pub auth: AuthMode,
+    /// Read at startup; wins over `password` and the stored hash.
+    pub password_file: Option<PathBuf>,
+    /// Wins over the stored hash. Empty means unset.
     pub password: Option<String>,
+    pub cookie_secure: CookieSecure,
+    /// Take the client address from `X-Forwarded-For` and HTTPS from `X-Forwarded-Proto`.
+    pub trust_proxy: bool,
     pub max_body: usize,
 }
 
@@ -22,7 +59,11 @@ impl ServerConfig {
             bind: DEFAULT_BIND.into(),
             base_path: "/".into(),
             data_dir: data_dir.into(),
+            auth: AuthMode::Password,
+            password_file: None,
             password: None,
+            cookie_secure: CookieSecure::Auto,
+            trust_proxy: false,
             max_body: DEFAULT_MAX_BODY,
         }
     }

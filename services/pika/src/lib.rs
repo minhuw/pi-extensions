@@ -8,6 +8,8 @@ pub mod derive;
 pub mod export;
 pub mod http;
 pub mod ingest;
+pub mod pairing;
+pub mod ratelimit;
 pub mod read;
 pub mod reindex;
 pub mod requests;

@@ -14,6 +14,12 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     buf
 }
 
+/// A random 32-byte secret as unpadded base64url: 43 characters.
+pub fn random_secret() -> String {
+    use base64ct::Encoding;
+    base64ct::Base64UrlUnpadded::encode_string(&random_bytes::<32>())
+}
+
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

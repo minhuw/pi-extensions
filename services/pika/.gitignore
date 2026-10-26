@@ -3,3 +3,6 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Password file for deploy/compose.yaml
+deploy/pika-password.txt

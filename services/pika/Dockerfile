@@ -1,6 +1,7 @@
 # Build context: services/pika
 #   docker build -t pika services/pika
-#   docker run -d -p 127.0.0.1:7171:7171 -v pika-data:/data pika
+#   docker run --rm -it -v pika-data:/data pika password set
+#   docker run -d -p 127.0.0.1:7171:7171 -v pika-data:/data -e PIKA_TRUST_PROXY=1 pika
 
 FROM node:22-bookworm-slim AS web
 WORKDIR /src/web

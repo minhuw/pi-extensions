@@ -1,4 +1,10 @@
+# First create the UI password file next to this file; `up` fails without it. The container's user is uid 10001:
+#   printf '%s\n' 'choose-a-long-password' > services/pika/deploy/pika-password.txt
+#   chmod 600 services/pika/deploy/pika-password.txt && sudo chown 10001 services/pika/deploy/pika-password.txt
+# Or remove PIKA_PASSWORD_FILE and both `secrets` entries below, and store the password in the volume:
+#   docker compose -f services/pika/deploy/compose.yaml run --rm pika password set
 # docker compose -f services/pika/deploy/compose.yaml up -d
+# Pair machines from the UI's Devices page (`/pika login` in pi), or create a token:
 # docker compose -f services/pika/deploy/compose.yaml exec pika pika token create laptop
 services:
   pika:
@@ -12,10 +18,24 @@ services:
       - "127.0.0.1:7171:7171"
     environment:
       PIKA_BASE_PATH: /pika
-      # PIKA_PASSWORD: change-me
+      # Only the proxy reaches the port, so trust its X-Forwarded-For and X-Forwarded-Proto.
+      PIKA_TRUST_PROXY: "1"
+      # The UI password, from the secret below. To store it in the volume instead, remove this line and the
+      # secret, then run once:
+      #   docker compose -f services/pika/deploy/compose.yaml run --rm pika password set
+      PIKA_PASSWORD_FILE: /run/secrets/pika_password
+      # Or let the reverse proxy authenticate (leave /pika/api/ingest/, /pika/api/pair/, and /pika/api/health open):
+      # PIKA_AUTH: proxy
       # PIKA_MAX_BODY: 32MiB
+    secrets:
+      - pika_password
     volumes:
       - pika-data:/data
+
+secrets:
+  pika_password:
+    # One line with the password; readable by uid 10001, the container's user.
+    file: ./pika-password.txt
 
 volumes:
   pika-data:

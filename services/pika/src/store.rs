@@ -7,7 +7,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::blobs::BlobStore;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("schema.sql"),
+    include_str!("schema_v2.sql"),
+    include_str!("schema_v3.sql"),
+    include_str!("schema_v4.sql"),
+];
 /// The first schema version whose derived tables an older database lacks or derives differently; opening such a
 /// database reindexes it.
 const REINDEX_BELOW: usize = 3;
@@ -64,7 +69,7 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql).with_context(|| format!("applying migration {}", index + 1))?;
-        if version > 0 && index + 1 >= REINDEX_BELOW {
+        if version > 0 && version < REINDEX_BELOW && index + 1 >= REINDEX_BELOW {
             tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, x'01')", [NEEDS_REINDEX])?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;

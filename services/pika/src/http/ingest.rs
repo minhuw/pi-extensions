@@ -9,6 +9,7 @@ use serde_json::json;
 
 use super::{AppState, blocking, error, internal_error};
 use crate::ingest::{self, Batch, IngestError};
+use crate::util::{cut_chars, now_ms};
 
 enum Rejection {
     TooLarge,
@@ -46,8 +47,8 @@ pub async fn batch(State(state): State<AppState>, headers: HeaderMap, body: Body
         return error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
     let store = state.store.clone();
-    let device = match blocking(move || crate::auth::device_for_token(&store, &token)).await {
-        Ok(Some(device)) => device,
+    let (device, last_seen_at) = match blocking(move || crate::auth::device_for_token(&store, &token)).await {
+        Ok(Some(found)) => found,
         Ok(None) => return error(StatusCode::UNAUTHORIZED, "unauthorized"),
         Err(e) => return internal_error(e),
     };
@@ -69,6 +70,12 @@ pub async fn batch(State(state): State<AppState>, headers: HeaderMap, body: Body
     let store = state.store.clone();
     let result = tokio::task::spawn_blocking(move || {
         let batch = decode(&bytes, gzip, max)?;
+        let now = now_ms();
+        if crate::auth::touch_due(last_seen_at, now) {
+            let host = batch.client.as_ref().and_then(|c| c.get("host")).and_then(|h| h.as_str()).map(|h| cut_chars(h, 255));
+            crate::auth::touch_device(&store, &device, host.filter(|h| !h.is_empty()), now)
+                .map_err(|e| Rejection::Ingest(IngestError::Internal(e)))?;
+        }
         ingest::apply(&store, &device, &batch).map_err(Rejection::Ingest)
     })
     .await;

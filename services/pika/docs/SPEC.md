@@ -8,7 +8,7 @@ pika stores every pi trajectory from several machines on one self-hosted service
 Single user, homelab, plain HTTP behind a reverse proxy.
 
 ## Identity
-- **Device:** authenticated by a bearer token; the server maps token → device name. `pika token create <name>` prints a new token once and stores only its SHA-256 hash. `pika token list` and `pika token revoke <name>` manage them.
+- **Device:** authenticated by a bearer token; the server maps token → device name and stores only the token's SHA-256 hash. A device gets its token by pairing (see "Pairing"), or from `pika token create <name>`, which prints a new token once. `pika token list` and `pika token revoke <name>` manage them, as do the UI's Devices page and "Devices" routes.
 - **Session:** the pi session header `id`. Its stream key is `session:<sessionId>`.
 - **Herder run:** stream key `herder:<runId>`. Its documents are keyed `herder:<runId>:goal.md` and `herder:<runId>:plan.md`.
 
@@ -165,26 +165,112 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - `sort=relevance` returns a single page: the best `limit` (at most 100) matches by bm25 among the 20,000 newest matches that pass the `device` and `project` filters, with `nextCursor: null`. It does not page because bm25 scores change as documents are indexed; a `cursor` with `sort=relevance` is a 400.
   - `kind` is one of `user`, `assistant`, `tool-call`, `tool-result`, or `title` (a `session_info` name).
   - `snippet` is HTML-escaped text with `<mark>` around matches.
-- **Auth:**
-  - `POST login {password}` sets an HttpOnly cookie scoped to the base path.
-  - `POST logout` clears it.
-  - `GET me` returns `{ authenticated, passwordRequired }`.
-  - When no password is configured, everything is open. Otherwise every `/api/v1/*` route except `login` and `me` requires the cookie.
+- **Auth, sessions, devices, and pairings:** `login`, `logout`, `me`, `auth/sessions`, `devices`, and `pairings` are specified in "Authentication" and the sections after it. In `password` mode every `/api/v1/*` route except `login` and `me` requires a session cookie.
 - **Static UI:** served at `{base}/`. Unknown non-API paths under the base return `index.html`. The server injects `<meta name="pika-base" content="{base}">` into `index.html`, and the UI uses it for API calls and router paths. The UI build uses relative asset URLs.
+
+## Authentication
+`--auth` / `PIKA_AUTH` selects who authenticates viewers of the UI and the read API: `password` (default), `proxy`, or `none`. Ingest (`{base}/api/ingest/`) always uses device tokens; pairing (`{base}/api/pair/`) and `{base}/api/health` are always open.
+
+- **`password`:** the UI's data and every `/api/v1/*` route except `login` and `me` require a valid session cookie. **The server refuses to start when no password is configured:** it exits with status 2 and prints `pika: no password configured. Run 'pika password set', set PIKA_PASSWORD_FILE or PIKA_PASSWORD, or set PIKA_AUTH=proxy if your reverse proxy authenticates (PIKA_AUTH=none disables authentication).`
+- **`proxy`:** pika does no viewer authentication; the reverse proxy must authenticate every path except `/api/ingest/`, `/api/pair/`, and `/api/health`. The server logs one warning at startup.
+- **`none`:** no authentication at all, for local development and benchmarks. The server logs one warning at startup.
+
+### Passwords
+In `password` mode the first of these sources wins:
+1. `--password-file` / `PIKA_PASSWORD_FILE`: the file's contents with one trailing newline removed. An empty or unreadable file stops the server.
+2. `--password` / `PIKA_PASSWORD` (empty means unset).
+3. The hash stored by `pika password set`.
+
+A password from 1 or 2 is hashed in memory at startup; when one is used while a stored hash also exists, the server logs that the stored one is ignored. A server using the stored hash reads it at each login, so `pika password set` applies at once.
+
+- `pika password set` reads the new password twice without echo from the terminal, or once from stdin (one trailing newline removed) when stdin is not a terminal. It requires at least 12 characters, stores an argon2id PHC string in `settings` (`password_hash`), and revokes every session.
+- `pika password clear` removes the stored hash and, when there was one, revokes every session.
+
+Passwords are verified with argon2id: the `argon2` crate's default parameters, a random salt, and constant-time comparison.
+
+### Sessions
+- **Storage:** the table `auth_sessions(id_hash TEXT PRIMARY KEY, created_at INTEGER, last_seen_at INTEGER, expires_at INTEGER, user_agent TEXT, ip TEXT)` (named so because `sessions` holds pi sessions). The cookie `pika_session` holds a random 32-byte base64url id; only its SHA-256 is stored.
+- **Lifetime:** 30 days absolute. `last_seen_at` is updated at most once a minute per session. Expired rows are deleted lazily: when their cookie is next seen, and at every login.
+- **Retirement:** the 0.1 HMAC cookie `pika_auth` is no longer accepted; users log in again.
+- **Password change:** when the effective password changes between starts, every session is revoked. The server detects this with a fingerprint in `settings` (`password_fingerprint`); neither the password nor a fast hash of it is ever stored.
+  - For a password from `--password-file` or `--password`, the fingerprint is an argon2id PHC string of it, with the same parameters as login hashes. At startup the server verifies the password against the stored fingerprint (one argon2 run) and uses that PHC string for logins. When it does not match, or there is none, the server revokes every session and stores a new PHC string.
+  - For the stored hash, the fingerprint is an HMAC of its PHC string keyed with a random database key (`cookie_key`). `pika password set` updates it along with the hash.
+- **Cookie attributes:** `HttpOnly; SameSite=Lax; Path=<base>/` (or `/`); `Max-Age`. `Secure` follows `--cookie-secure` / `PIKA_COOKIE_SECURE`:
+  - `auto` (default): set when the request arrived over HTTPS, as reported by a trusted proxy;
+  - `always`;
+  - `never`.
+- **Trusted proxy:** `--trust-proxy` / `PIKA_TRUST_PROXY=1` (default off). The variable accepts `1`, `true`, `yes`, or `on`, and `0`, `false`, `no`, `off`, or empty, in any case. Any other value stops the server at startup with a usage error (exit status 2).
+  - When on: the client IP is the rightmost `X-Forwarded-For` address (the socket peer when that is missing or not an address), and HTTPS is `X-Forwarded-Proto: https`.
+  - When off: the client IP is the socket peer, and HTTPS is never assumed.
+- **Routes** under `{base}/api/v1/`. Browser sessions live under `auth/` because `sessions` is the pi session list.
+  - `POST login {password}` creates a session and sets the cookie; 200 `{ authenticated: true }`, 401 `{ error: "invalid_password" }`, or 429 (see "Login rate limiting"). In `proxy` and `none` modes it answers 200 without a cookie.
+  - `POST logout` deletes the current session and clears the cookie.
+  - `GET auth/sessions` → `{ items: [{ id, createdAt, lastSeenAt, expiresAt, userAgent?, ip?, current }] }`, live sessions newest first. `id` is the first 12 hex characters of the id hash.
+  - `DELETE auth/sessions/:id` → 204, or 404. Deleting the current session also clears the cookie.
+  - `POST auth/sessions/revoke-all` deletes every session including the current one, clears the cookie, and returns 200 `{}`.
+  - `GET me` → `{ authenticated, passwordRequired, authMode: "password" | "proxy" | "none" }`. In `proxy` and `none` modes `authenticated` is true and `passwordRequired` false.
+- **CSRF:** state-changing `/api/v1` routes use only POST with a JSON body (`{}` when there is nothing to send) or DELETE, and never GET. The JSON extractor rejects form posts with 415.
+
+### Login rate limiting
+Kept in memory, so a restart resets it.
+- **Per client IP:** at most 5 failed logins in a sliding 15 minutes. Further attempts get 429 `{ error: "too_many_attempts", retryAfter: <seconds> }` with a `Retry-After` header, without checking the password. A successful login clears that IP's failures.
+- **Global:** at most 100 failed logins per hour across all IPs. Past that, everyone gets the same 429 until the window frees.
+  - **Lockout:** this means anyone can block new logins for up to an hour by sending wrong passwords from many addresses. Existing sessions keep working (only `POST login` is refused), and ingest and pairing are unaffected. Restarting the server clears every login and pairing limit. To recover, use a browser that is still logged in, or restart pika, then block the offending addresses at the reverse proxy.
+- **Client IP:** an IPv4 address, also when it arrives IPv4-mapped (`::ffff:a.b.c.d`); for IPv6, the address's /64. The pairing limit counts clients the same way. Each limit tracks at most 10,000 clients; when that many have live entries, a new client gets the same 429 until one expires.
+- **Counting:** an attempt counts as failed before its password is checked, and a correct password takes it back. A request cancelled during the check still counts.
+- **Password checks:** at most 2 run at once. A login waits up to 5 s for one, then gets 429 `too_many_attempts` with `retryAfter: 1`. A check whose request was cancelled keeps its slot until argon2 finishes.
+
+## Devices
+- **`tokens` table:** `name`, `hash`, `created_at`, `created_via` (`cli` | `pairing`, default `cli`), `last_seen_at`, and `last_host`. Ingest updates the last two at most once a minute per device, from the batch's `client.host`.
+- **Routes** under `{base}/api/v1/`, authenticated:
+  - `GET devices` → `{ items: [{ name, createdAt, createdVia, lastSeenAt?, lastHost? }] }`, sorted by name.
+  - `DELETE devices/:name` → 204, or 404. Ingest refuses a revoked token immediately.
+- **CLI:** `pika token list` prints one tab-separated line per device: name, creation time, `created_via`, last-seen time (`never`), and last host (`-`).
+
+## Pairing
+Device authorization, like OAuth's device flow. The unauthenticated routes live under `{base}/api/pair/v1/`; a proxy that authenticates must leave `/api/pair/` open, as it does `/api/ingest/`.
+
+- **`POST start`** with body `{ device: string, host?: string, pikaVersion?: string }`.
+  - **Validation:** `device` is 1–64 characters of `[A-Za-z0-9._-]`; `host` is at most 255 characters. Otherwise, or for a body that is not such JSON, 400 `{ error: "invalid_device" }`. `pikaVersion` is cut to 64 characters.
+  - **Response:** 200 `{ pairingId, code, expiresAt, expiresIn: 600, interval: 2 }`.
+    - `pairingId` is a random 32-byte base64url secret known only to the device; the server stores its SHA-256.
+    - `code` is 8 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, formatted `XXXX-XXXX`, unique among stored pairings. Codes match case-insensitively, with or without the hyphen.
+  - **Limits:**
+    - at most 10 pending, unexpired pairings at a time, otherwise 429 `{ error: "too_many_pairings" }`. Expired pairings do not count; each start deletes those that expired more than 10 minutes ago;
+    - at most 5 starts per client IP per 10 minutes, otherwise 429 `{ error: "too_many_attempts", retryAfter }` with `Retry-After`. Every valid start counts, except one refused for `too_many_pairings`, which is checked first.
+  - **Recorded:** the request's client IP, device, host, and pikaVersion.
+- **`POST poll`** with body `{ pairingId }` answers 200 with `status`, except an unknown id, which answers 404 `{ error: "unknown_pairing" }` (a body that is not JSON gets 400):
+  - `{ status: "pending" }` until it's decided;
+  - `{ status: "approved", device, token }`, only once. The server creates the device token at this moment: it stores the hash with `created_via = 'pairing'`, revoking the old token of that name first if approval set `replace`. Then it deletes the pairing. **No plaintext token is ever stored.** If a token of that name appeared after an approval without `replace`, the answer is `{ status: "denied" }` instead;
+  - `{ status: "denied" }`, after which the pairing is deleted;
+  - `{ status: "expired" }`, after which the pairing is deleted. An expired pairing is kept for this answer until the next start deletes it (see the limits above); after that its poll gets 404.
+- **Authenticated `/api/v1` routes:**
+  - `GET pairings` → `{ items: [{ code, device, host?, ip?, pikaVersion?, requestedAt, expiresAt, deviceExists }] }`, pending and unexpired only, newest first.
+  - `POST pairings/:code/approve` with body `{ name?: string, replace?: boolean }`:
+    - `name` defaults to the requested device name and follows the same rules (400 `{ error: "invalid_device" }`);
+    - 409 `{ error: "device_exists" }` when the name is taken and `replace` is not true;
+    - 404 `{ error: "unknown_pairing" }` when the pairing is missing, expired, or no longer pending;
+    - 200 `{ device: <name> }` on success, marking the pairing approved.
+  - `POST pairings/:code/deny` with a JSON body → 204, or 404 `{ error: "unknown_pairing" }`.
+- **Approval page:** the UI route `{base}/devices?pair=<code>`. The extension builds this URL from its configured server URL.
 
 ## Server configuration
 - **Settings (flag / environment variable):**
   - `--bind` / `PIKA_BIND`, default `127.0.0.1:7171`
   - `--base-path` / `PIKA_BASE_PATH`, default `/`
   - `--data-dir` / `PIKA_DATA_DIR`, default `./pika-data`
+  - `--auth` / `PIKA_AUTH`: `password` (default), `proxy`, or `none`
+  - `--password-file` / `PIKA_PASSWORD_FILE`, optional
   - `--password` / `PIKA_PASSWORD`, optional
+  - `--cookie-secure` / `PIKA_COOKIE_SECURE`: `auto` (default), `always`, or `never`
+  - `--trust-proxy` / `PIKA_TRUST_PROXY=1`, default off
   - `--max-body` / `PIKA_MAX_BODY`
 - **Data dir layout:**
   - `pika.db`: SQLite in WAL mode.
   - `blobs/<h[0..2]>/<h[2..4]>/<h>.zst`: zstd-compressed content-addressed blobs.
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
-  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them.
+  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone.
   - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 
@@ -195,5 +281,9 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   ```
 - **Environment overrides:** `PIKA_URL` and `PIKA_TOKEN` override the file. `PIKA_DISABLED=1` always disables pika.
 - **Local state:** kept under `<agentDir>/pika/`: per-stream cursors, a disk spool for pending requests and blobs, and the set of hashes the server has acknowledged.
+- **Login command:** `/pika login` asks for the server URL, then `ctx.ui.select("How should this machine log in?", ["Pair with the pika web UI (recommended)", "Paste a token"])`; cancelling changes nothing.
+  - **Pairing:** it asks for the device name (default: the hostname sanitized to `[A-Za-z0-9._-]`, at most 64 characters) and calls `POST start`. A 404 (a pika older than 0.2) means the server cannot pair: it says so and continues with the token prompt. It shows the code and `<url>/devices?pair=<code>` (in the TUI with the remaining time and "Esc cancels"; elsewhere as a notification, waiting until the pairing ends or `ctx.signal` aborts), and polls every `interval` seconds until approved, denied, expired, unknown, cancelled, or 10 minutes have passed.
+  - On approval the token is validated and saved exactly like a pasted one, and the login takes effect at once. Denied, expired, or cancelled changes nothing.
+  - Messages never include the `pairingId` or the token.
 - **Status command:** `/pika` shows whether pika is enabled, the server URL, queued items and bytes, the last successful upload, and the last error.
 - **Load order:** the extension is listed last in this repository's `package.json` `pi.extensions`, so its `before_provider_request` handler runs after every other extension's.

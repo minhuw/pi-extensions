@@ -12,6 +12,9 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+/// SQL that removes what schema version 4 added, for tests that rewind `user_version`.
+pub const UNDO_V4: &str = "DROP TABLE auth_sessions; DROP TABLE pairings; ALTER TABLE tokens DROP COLUMN created_via;
+    ALTER TABLE tokens DROP COLUMN last_seen_at; ALTER TABLE tokens DROP COLUMN last_host;";
 
 pub struct Env {
     pub dir: TempDir,

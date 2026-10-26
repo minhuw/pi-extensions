@@ -6,7 +6,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use common::*;
-use pika::config::ServerConfig;
+use pika::config::{AuthMode, ServerConfig};
 use pika::http::{AppState, router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -22,7 +22,10 @@ fn server(base: &str, password: Option<&str>, max_body: Option<usize>) -> Server
     let token = pika::auth::create_token(&env.store, DEVICE).unwrap();
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.base_path = pika::config::normalize_base_path(base).unwrap();
-    config.password = password.map(str::to_owned);
+    match password {
+        Some(password) => config.password = Some(password.to_owned()),
+        None => config.auth = AuthMode::None,
+    }
     if let Some(max) = max_body {
         config.max_body = max;
     }
@@ -163,11 +166,15 @@ async fn password_login_guards_the_read_api() {
     let export = format!("/pika/api/v1/sessions/{SESSION_ID}/export");
 
     assert_eq!(get(&s.app, "/pika/api/health", None).await.status, StatusCode::OK);
-    assert_eq!(get(&s.app, "/pika/api/v1/me", None).await.json(), json!({ "authenticated": false, "passwordRequired": true }));
+    assert_eq!(
+        get(&s.app, "/pika/api/v1/me", None).await.json(),
+        json!({ "authenticated": false, "passwordRequired": true, "authMode": "password" })
+    );
     let r = get(&s.app, &export, None).await;
     assert_eq!((r.status, r.json()), (StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })));
     assert_eq!(post_json(&s.app, "/pika/api/v1/logout", &json!({}), None).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(get(&s.app, &export, Some("pika_auth=1.abc")).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(get(&s.app, &export, Some("pika_session=nope")).await.status, StatusCode::UNAUTHORIZED);
 
     let r = post_json(&s.app, "/pika/api/v1/login", &json!({ "password": "hunter3" }), None).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
@@ -176,7 +183,8 @@ async fn password_login_guards_the_read_api() {
     let r = post_json(&s.app, "/pika/api/v1/login", &json!({ "password": "hunter2" }), None).await;
     assert_eq!(r.status, StatusCode::OK);
     let set_cookie = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned();
-    assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("Path=/pika;"), "{set_cookie}");
+    assert!(set_cookie.starts_with("pika_session="), "{set_cookie}");
+    assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("Path=/pika/;"), "{set_cookie}");
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
 
     assert_eq!(get(&s.app, "/pika/api/v1/me", Some(&cookie)).await.json()["authenticated"], true);
@@ -191,6 +199,8 @@ async fn password_login_guards_the_read_api() {
     let r = post_json(&s.app, "/pika/api/v1/logout", &json!({}), Some(&cookie)).await;
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    // Logging out ends the session on the server too.
+    assert_eq!(get(&s.app, &export, Some(&cookie)).await.status, StatusCode::UNAUTHORIZED);
 
     // The ingest API keeps using device tokens, not the cookie.
     let r = send(&s.app, batch_request("/pika/api/ingest/v1/batch", None, session_batch(0, &lines), false)).await;
@@ -198,9 +208,12 @@ async fn password_login_guards_the_read_api() {
 }
 
 #[tokio::test]
-async fn without_a_password_everything_is_open() {
+async fn without_authentication_everything_is_open() {
     let s = server("/", None, None);
-    assert_eq!(get(&s.app, "/api/v1/me", None).await.json(), json!({ "authenticated": true, "passwordRequired": false }));
+    assert_eq!(
+        get(&s.app, "/api/v1/me", None).await.json(),
+        json!({ "authenticated": true, "passwordRequired": false, "authMode": "none" })
+    );
     let r = post_json(&s.app, "/api/v1/login", &json!({}), None).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(post_json(&s.app, "/api/v1/logout", &json!({}), None).await.status, StatusCode::OK);

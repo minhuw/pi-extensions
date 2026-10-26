@@ -1,5 +1,5 @@
 # pika at https://homelab.example/pika/
-# Server: pika serve --bind 127.0.0.1:7171 --base-path /pika
+# Server: PIKA_TRUST_PROXY=1 pika serve --bind 127.0.0.1:7171 --base-path /pika
 # Devices: "url": "https://homelab.example/pika"
 
 {
@@ -22,14 +22,16 @@ homelab.example {
 			max_size 32MiB
 		}
 
-		# Optional: authenticate in the proxy instead of PIKA_PASSWORD. Devices use
-		# their bearer tokens, so leave ingest out. Hash with `caddy hash-password`.
-		# (Caddy < 2.8 calls the directive basicauth.)
-		# @browser not path /pika/api/ingest/*
+		# Optional: authenticate in the proxy instead of a pika password, and run pika
+		# with PIKA_AUTH=proxy. Devices use bearer tokens for ingest, pairing devices
+		# have no login yet, and health checks are anonymous, so leave those three out.
+		# Hash with `caddy hash-password`. (Caddy < 2.8 calls the directive basicauth.)
+		# @browser not path /pika/api/ingest/* /pika/api/pair/* /pika/api/health
 		# basic_auth @browser {
 		# 	me $2a$14$replace-with-the-hash
 		# }
 
+		# Caddy sends X-Forwarded-For and X-Forwarded-Proto; run pika with PIKA_TRUST_PROXY=1.
 		reverse_proxy 127.0.0.1:7171
 	}
 
