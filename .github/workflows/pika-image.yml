@@ -112,7 +112,12 @@ jobs:
           fi
 
           for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:7171/api/health >/dev/null 2>&1 && break; sleep 1; done
-          curl -fsS http://127.0.0.1:7171/api/health
+          health=$(curl -fsS http://127.0.0.1:7171/api/health)
+          echo "$health"
+          if ! jq -e '.features | index("relay")' <<<"$health" >/dev/null; then
+            echo "::error::the health answer's features do not list relay"
+            exit 1
+          fi
           page=$(curl -fsS http://127.0.0.1:7171/)
           grep -q '<meta name="pika-base" content="/">' <<<"$page"
           if grep -q 'does not include the web UI' <<<"$page"; then
@@ -124,8 +129,19 @@ jobs:
             echo "::error::GET /api/v1/facets without a cookie answered $code instead of 401"
             exit 1
           fi
-          docker exec pika-root pika token create smoke | grep -q '^pika_'
+          token=$(docker exec pika-root pika token create smoke)
+          grep -q '^pika_' <<<"$token"
           docker exec pika-root pika token list | grep -q '^smoke'
+          code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7171/api/relay/v1/sessions)
+          if [[ "$code" != 401 ]]; then
+            echo "::error::GET /api/relay/v1/sessions without a token answered $code instead of 401"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" http://127.0.0.1:7171/api/relay/v1/sessions)
+          if [[ "$code" != 200 ]]; then
+            echo "::error::GET /api/relay/v1/sessions with a device token answered $code instead of 200"
+            exit 1
+          fi
 
           for _ in $(seq 1 45); do
             health=$(docker inspect -f '{{.State.Health.Status}}' pika-path)

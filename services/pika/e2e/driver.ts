@@ -1,8 +1,8 @@
 // pika end to end: a real pi runtime with Subagents, Herder, and pika uploads to the real server through a mock
 // provider; the read API must return every entry and request verbatim, across a server outage and a pi restart, and
-// the embedded UI must render it in the locally installed Chrome. Then a new machine pairs through `/pika login` while
-// the browser denies and approves it, the browser revokes it, signs out, and finally hits the login rate limit.
-// Run by services/pika/scripts/e2e.sh.
+// the embedded UI must render it in the locally installed Chrome. Then two pi processes on two devices talk through
+// relay (relay.ts), a new machine pairs through `/pika login` while the browser denies and approves it, the browser
+// revokes it, signs out, and finally hits the login rate limit. Run by services/pika/scripts/e2e.sh.
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,7 @@ import { allEntries, ReadApi, type Entry, type ModelRequest, type RunDetail, typ
 import { checkApprovedPairing, checkBrowserSessions, checkDeniedPairing, checkDevices, checkLoginRateLimit, type NewMachine } from "./auth.ts";
 import { checkViewer, openBrowser, type Ui } from "./browser.ts";
 import { ingestSession, largeSession } from "./large.ts";
+import { checkRelay } from "./relay.ts";
 import { AGENT_CALL_ID, createProject, LOCAL_PROVIDER, NOTICE_AFTER_CALL_ID, NOTICE_TYPE, PROMPTS, responder, SEARCH_WORD, startPi, type Pi } from "./scenario.ts";
 import { PikaServer } from "./server.ts";
 import { check, checkEqual, env, log, sleep, waitFor } from "./util.ts";
@@ -130,6 +131,13 @@ async function main(): Promise<void> {
 				password, mainId, childId: child.sessionId, stepId: step.sessionId, runId: herderRun, largeId: large.id, searchWord: SEARCH_WORD,
 				prompts: [PROMPTS.inspect, PROMPTS.delegate, PROMPTS.herder, PROMPTS.offline, PROMPTS.resumed, PROMPTS.online, PROMPTS.local],
 				herderPrompt: PROMPTS.herder,
+			});
+			await checkRelay(browser, {
+				url: server.url, api, root: join(work, "relay"), pidFile: env("PIKA_E2E_PI_PIDS"), ttlSeconds: Number(env("PIKA_RELAY_TTL_SECS")),
+				machines: {
+					a: { device: "workstation", token: env("PIKA_E2E_TOKEN_WORKSTATION"), name: "planner", project: "alpha" },
+					b: { device: "notebook", token: env("PIKA_E2E_TOKEN_NOTEBOOK"), name: "reviewer", project: "beta" },
+				},
 			});
 			await checkAuth(browser, { api, provider, local });
 			log(`browser: ${browser.shots.length} screenshots`);

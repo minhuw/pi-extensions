@@ -3,9 +3,11 @@
 # release binary refuses to start without a password, serves it with its embedded UI under /pika with a password, then
 # runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read
 # API and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, and the UI in the locally
-# installed Chrome; then a second machine pairing through `/pika login` while the browser denies and approves it, device
-# revocation, browser sign-out, and the login rate limit. Screenshots go to a temporary artifacts directory whose path
-# is printed at the end.
+# installed Chrome; then pika relay between two `pi --mode rpc` processes logged in as two devices (questions and
+# answers, the hop limit, expiry with a short TTL, `/relay off`, messages from the browser route and the dashboard, and
+# revocation closing the connection); then a second machine pairing through `/pika login` while the browser denies and
+# approves it, device revocation, browser sign-out, and the login rate limit. Screenshots go to a temporary artifacts
+# directory whose path is printed at the end.
 #
 # PIKA_CHROME selects the Chrome or Chromium binary; no browser is ever downloaded. PIKA_E2E_SKIP_BUILD=1 reuses
 # installed dependencies and earlier builds; PIKA_E2E_KEEP=1 keeps the temporary pi workspace and server data.
@@ -48,12 +50,16 @@ work="$(mktemp -d "$tmp/pika-e2e.XXXXXX")"
 artifacts="$(mktemp -d "$tmp/pika-e2e-artifacts.XXXXXX")"
 pidfile="$work/server.pid"
 : >"$pidfile"
+# The relay check's pi processes, one pid per line; pi renames its process, so only the pids find them.
+pi_pids="$work/pi.pids"
+: >"$pi_pids"
 step_pid=""
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
   local pid
-  for pid in $step_pid $(cat "$pidfile" 2>/dev/null); do
+  # Read apart: the pidfile has no trailing newline, so `cat` of both would join two pids into one.
+  for pid in $step_pid $(cat "$pidfile" 2>/dev/null) $(cat "$pi_pids" 2>/dev/null); do
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
@@ -128,6 +134,9 @@ port="$(node -e 'const s = require("net").createServer(); s.listen(0, "127.0.0.1
 base_path="/pika"
 url="http://127.0.0.1:$port$base_path"
 export PIKA_PASSWORD="e2e-$(node -e 'console.log(require("crypto").randomBytes(9).toString("hex"))')"
+# Test-only relay timings (docs/RELAY.md): undelivered messages expire after 6 s instead of 300, and the server pings
+# and re-checks tokens every 2 s instead of 20. The driver restarts the server with the same environment.
+export PIKA_RELAY_TTL_SECS=6 PIKA_RELAY_HEARTBEAT_SECS=2
 data="$work/data"
 
 PIKA_DATA_DIR="$data" "$pika" serve --bind "127.0.0.1:$port" --base-path "$base_path" >>"$work/server.log" 2>&1 &
@@ -156,6 +165,9 @@ echo "e2e: serving the embedded UI at $url"
 
 token_laptop="$(PIKA_DATA_DIR="$data" "$pika" token create laptop)"
 token_desktop="$(PIKA_DATA_DIR="$data" "$pika" token create desktop)"
+# The relay check's two machines.
+token_workstation="$(PIKA_DATA_DIR="$data" "$pika" token create workstation)"
+token_notebook="$(PIKA_DATA_DIR="$data" "$pika" token create notebook)"
 PIKA_DATA_DIR="$data" "$pika" token list | grep -q '^laptop' || { echo "e2e: token list does not show laptop" >&2; exit 1; }
 
 # The driver runs with its own HOME so pi, git, and Chrome never read the user's configuration.
@@ -167,5 +179,6 @@ step env \
   PIKA_E2E_WORK="$work" PIKA_E2E_BIN="$pika" PIKA_E2E_DATA="$data" PIKA_E2E_PORT="$port" PIKA_E2E_BASE_PATH="$base_path" \
   PIKA_E2E_PIDFILE="$pidfile" PIKA_E2E_SERVER_LOG="$work/server.log" \
   PIKA_E2E_TOKEN_LAPTOP="$token_laptop" PIKA_E2E_TOKEN_DESKTOP="$token_desktop" \
+  PIKA_E2E_TOKEN_WORKSTATION="$token_workstation" PIKA_E2E_TOKEN_NOTEBOOK="$token_notebook" PIKA_E2E_PI_PIDS="$pi_pids" \
   PIKA_E2E_CHROME="$chrome" PIKA_E2E_ARTIFACTS="$artifacts" \
   node --experimental-strip-types --no-warnings=ExperimentalWarning "$service/e2e/driver.ts"

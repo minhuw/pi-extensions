@@ -33,6 +33,14 @@ export class ReadApi {
 		return await response.json() as T;
 	}
 
+	/** POSTs a JSON body; returns the status and the parsed JSON answer. */
+	async post<T>(path: string, body: unknown): Promise<{ status: number; body: T }> {
+		const response = await fetch(`${this.base}/api/v1/${path}`, {
+			method: "POST", headers: { cookie: this.cookie, "content-type": "application/json" }, body: JSON.stringify(body),
+		});
+		return { status: response.status, body: await response.json() as T };
+	}
+
 	async text(path: string): Promise<string | undefined> {
 		const response = await this.raw(path);
 		if (response.status === 404) return undefined;
