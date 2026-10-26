@@ -17,10 +17,10 @@ pika.example.com {
 	}
 
 	# Optional: authenticate in the proxy instead of a pika password, and run pika
-	# with PIKA_AUTH=proxy. Devices use bearer tokens for ingest, pairing devices
-	# have no login yet, and health checks are anonymous, so leave those three out.
+	# with PIKA_AUTH=proxy. Devices use bearer tokens for ingest and relay, pairing
+	# devices have no login yet, and health checks are anonymous, so leave those out.
 	# Hash with `caddy hash-password`. (Caddy < 2.8 calls the directive basicauth.)
-	# @browser not path /api/ingest/* /api/pair/* /api/health
+	# @browser not path /api/ingest/* /api/pair/* /api/relay/* /api/health
 	# basic_auth @browser {
 	# 	me $2a$14$replace-with-the-hash
 	# }

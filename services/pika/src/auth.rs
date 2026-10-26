@@ -80,7 +80,16 @@ pub fn list_devices(store: &Store) -> Result<Vec<Device>> {
 }
 
 pub fn revoke_token(store: &Store, name: &str) -> Result<bool> {
-    Ok(store.write(|tx| tx.execute("DELETE FROM tokens WHERE name = ?1", [name]))? > 0)
+    Ok(!revoke_token_hashes(store, name)?.is_empty())
+}
+
+/// Revokes `name`'s token and returns the hashes it deleted, so that connections made with them can be closed.
+pub fn revoke_token_hashes(store: &Store, name: &str) -> Result<Vec<String>> {
+    Ok(store.write(|tx| delete_tokens(tx, name))?)
+}
+
+pub(crate) fn delete_tokens(tx: &Transaction, name: &str) -> rusqlite::Result<Vec<String>> {
+    tx.prepare_cached("DELETE FROM tokens WHERE name = ?1 RETURNING hash")?.query_map([name], |r| r.get(0))?.collect()
 }
 
 /// The device of a token and when it was last seen.
@@ -252,7 +261,7 @@ impl Auth {
             AuthMode::Proxy => {
                 tracing::warn!(
                     "PIKA_AUTH=proxy: pika does not authenticate viewers; the reverse proxy must authenticate every \
-                     path except api/ingest/, api/pair/, and api/health"
+                     path except api/ingest/, api/pair/, api/relay/, and api/health"
                 );
                 return Ok(Auth { mode: config.auth, password: None, checks: CheckCounters::default() });
             }

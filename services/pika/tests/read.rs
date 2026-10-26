@@ -400,6 +400,35 @@ async fn turns_and_updates() {
     assert_eq!(child_turns, json!({ "items": [], "nextCursor": null }));
 }
 
+#[tokio::test]
+async fn turns_started_by_an_extension_message_name_its_type() {
+    let app = app(None);
+    let id = "relayed";
+    let relayed = "[relay] Message m1 from your user in the pika web UI:\n\nhello";
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-23T08:00:00.000Z", "cwd": "/w/x" }),
+        json!({ "type": "message", "id": "u1", "parentId": null, "timestamp": "2026-10-23T08:00:01.000Z",
+                "message": { "role": "user", "content": "A prompt", "timestamp": 1 } }),
+        json!({ "type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-10-23T08:00:02.000Z",
+                "message": assistant("Done.", "gpt-5", 2) }),
+        json!({ "type": "custom_message", "id": "c1", "parentId": "a1", "timestamp": "2026-10-23T08:01:00.000Z",
+                "customType": "relay-message", "content": relayed, "display": true, "details": { "id": "m1" } }),
+        json!({ "type": "message", "id": "a2", "parentId": "c1", "timestamp": "2026-10-23T08:01:01.000Z",
+                "message": assistant("Hello back.", "gpt-5", 3) }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    let turns = app.json(&format!("sessions/{id}/turns")).await["items"].clone();
+    let turns = turns.as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!((&turns[0]["userText"], turns[0].get("customType")), (&json!("A prompt"), None));
+    assert_eq!(
+        (&turns[1]["startSeq"], &turns[1]["userText"], &turns[1]["customType"], &turns[1]["finalText"]),
+        (&json!(3), &json!(relayed), &json!("relay-message"), &json!("Hello back."))
+    );
+    // Updates list the same turns.
+    assert_eq!(updates(&app, id, "").await["turns"], json!(turns));
+}
+
 /// `GET sessions/:id` without `children`.
 async fn summary_of(app: &App, id: &str) -> Value {
     let mut detail = app.json(&format!("sessions/{id}")).await;

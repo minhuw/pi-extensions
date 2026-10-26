@@ -17,7 +17,7 @@ enum Rejection {
     Ingest(IngestError),
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(super) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim()).filter(|t| !t.is_empty())

@@ -46,9 +46,12 @@ pub async fn list(State(state): State<AppState>) -> Response {
 
 pub async fn revoke(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let store = state.store.clone();
-    match blocking(move || auth::revoke_token(&store, &name)).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => error(StatusCode::NOT_FOUND, "not_found"),
+    match blocking(move || auth::revoke_token_hashes(&store, &name)).await {
+        Ok(revoked) if revoked.is_empty() => error(StatusCode::NOT_FOUND, "not_found"),
+        Ok(revoked) => {
+            state.relay.close_tokens(&revoked, crate::relay::close::REVOKED, "token revoked");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => internal_error(e),
     }
 }
@@ -123,8 +126,10 @@ pub async fn poll(State(state): State<AppState>, body: Result<Json<PollBody>, Js
     match blocking(move || pairing::poll(&store, &body.pairing_id, now_ms())).await {
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_pairing"),
         Ok(Some(Poll::Pending)) => Json(json!({ "status": "pending" })).into_response(),
-        Ok(Some(Poll::Approved { device, token })) => {
+        Ok(Some(Poll::Approved { device, token, revoked })) => {
             tracing::info!("paired device {device:?}");
+            // An approval with `replace` revoked the device's old token.
+            state.relay.close_tokens(&revoked, crate::relay::close::REVOKED, "token revoked");
             Json(json!({ "status": "approved", "device": device, "token": token })).into_response()
         }
         Ok(Some(Poll::Denied)) => Json(json!({ "status": "denied" })).into_response(),

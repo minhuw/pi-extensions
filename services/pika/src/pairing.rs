@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
-use crate::auth::{device_exists, insert_token, valid_device_name};
+use crate::auth::{delete_tokens, device_exists, insert_token, valid_device_name};
 use crate::store::Store;
 use crate::util::{random_bytes, random_secret, sha256_hex};
 
@@ -87,7 +87,8 @@ pub fn start(store: &Store, request: &Request, now: i64) -> Result<Option<Starte
 
 pub enum Poll {
     Pending,
-    Approved { device: String, token: String },
+    /// `revoked` holds the hashes of the tokens an approval with `replace` deleted.
+    Approved { device: String, token: String, revoked: Vec<String> },
     Denied,
     Expired,
 }
@@ -118,16 +119,14 @@ pub fn poll(store: &Store, pairing_id: &str, now: i64) -> Result<Option<Poll>> {
             _ if expires_at <= now => Poll::Expired,
             ("pending", _) => return Ok(Some(Poll::Pending)),
             ("approved", Some(name)) => {
-                if replace {
-                    tx.execute("DELETE FROM tokens WHERE name = ?1", [&name])?;
-                }
+                let revoked = if replace { delete_tokens(tx, &name)? } else { Vec::new() };
                 if device_exists(tx, &name)? {
                     // A token of that name was created after the approval.
                     tracing::warn!("pairing for {name:?} refused: the device exists and approval did not replace it");
                     Poll::Denied
                 } else {
                     let token = insert_token(tx, &name, "pairing")?;
-                    Poll::Approved { device: name, token }
+                    Poll::Approved { device: name, token, revoked }
                 }
             }
             _ => Poll::Denied,

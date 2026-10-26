@@ -12,6 +12,7 @@ pub mod pairing;
 pub mod ratelimit;
 pub mod read;
 pub mod reindex;
+pub mod relay;
 pub mod requests;
 pub mod store;
 pub mod util;

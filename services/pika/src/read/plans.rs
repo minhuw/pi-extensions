@@ -106,7 +106,10 @@ fn session_lists_walk_the_index_of_their_filters() {
 #[test]
 fn the_first_page_of_a_session_reads_primary_keys() {
     with_conn(|conn| {
-        assert_eq!(plan(conn, &super::sessions::turns_sql(), None), ["SEARCH turns USING PRIMARY KEY (sid=? AND idx>?)"]);
+        assert_eq!(
+            plan(conn, &super::sessions::turns_sql(), None),
+            ["SEARCH t USING PRIMARY KEY (sid=? AND idx>?)", "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN"]
+        );
         assert_eq!(
             plan(conn, super::entries::LIST_SQL, None),
             [

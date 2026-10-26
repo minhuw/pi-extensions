@@ -87,6 +87,9 @@ pub struct Turn {
     pub cost: f64,
     pub tokens: Tokens,
     pub final_text: String,
+    /// The `customType` of the `custom_message` that started the turn; absent for a user prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_type: Option<String>,
 }
 
 /// `session`, `turns`, and `truncated` are present only when the session has entries after `since`.
@@ -135,8 +138,12 @@ fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
     })
 }
 
-const TURN_COLUMNS: &str = "idx, start_seq, end_seq, user_text, at, duration_ms, model_calls, tool_calls, tool_errors, cost, \
-     input, output, cache_read, cache_write, final_text";
+const TURN_COLUMNS: &str = "t.idx, t.start_seq, t.end_seq, t.user_text, t.at, t.duration_ms, t.model_calls, \
+     t.tool_calls, t.tool_errors, t.cost, t.input, t.output, t.cache_read, t.cache_write, t.final_text, e.custom_type";
+
+/// Turns with the entry that started each, when that is an extension message, so no reindex is needed for its type.
+const TURN_FROM: &str =
+    "turns t LEFT JOIN entries e ON e.sid = t.sid AND e.seq = t.start_seq AND e.type = 'custom_message'";
 
 fn turn(r: &Row) -> rusqlite::Result<Turn> {
     Ok(Turn {
@@ -152,6 +159,7 @@ fn turn(r: &Row) -> rusqlite::Result<Turn> {
         cost: r.get(9)?,
         tokens: Tokens { input: r.get(10)?, output: r.get(11)?, cache_read: r.get(12)?, cache_write: r.get(13)? },
         final_text: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+        custom_type: r.get(15)?,
     })
 }
 
@@ -247,7 +255,11 @@ pub(crate) fn children_sql() -> String {
 }
 
 pub(crate) fn turns_sql() -> String {
-    format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 AND idx > ?2 ORDER BY idx LIMIT ?3")
+    format!("SELECT {TURN_COLUMNS} FROM {TURN_FROM} WHERE t.sid = ?1 AND t.idx > ?2 ORDER BY t.idx LIMIT ?3")
+}
+
+fn update_turns_sql() -> String {
+    format!("SELECT {TURN_COLUMNS} FROM {TURN_FROM} WHERE t.sid = ?1 ORDER BY t.idx DESC")
 }
 
 pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
@@ -291,7 +303,7 @@ pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
     }
     let mut turns = Vec::new();
     let mut truncated = None;
-    let mut stmt = tx.prepare_cached(&format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 ORDER BY idx DESC"))?;
+    let mut stmt = tx.prepare_cached(&update_turns_sql())?;
     let mut rows = stmt.query([sid])?;
     while let Some(row) = rows.next()? {
         if row.get::<_, i64>(2)? <= since {
@@ -318,12 +330,16 @@ mod tests {
         let store = crate::store::Store::open(dir.path()).unwrap();
         let plan: Vec<String> = store
             .read(|conn| {
-                conn.prepare(&format!("EXPLAIN QUERY PLAN SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 ORDER BY idx DESC"))?
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {}", update_turns_sql()))?
                     .query_map([1], |r| r.get::<_, String>(3))?
                     .collect()
             })
             .unwrap();
-        assert_eq!(plan, ["SEARCH turns USING PRIMARY KEY (sid=?)"], "{plan:?}");
+        assert_eq!(
+            plan,
+            ["SEARCH t USING PRIMARY KEY (sid=?)", "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN"],
+            "{plan:?}"
+        );
     }
 
     /// Every filter combination walks an index in `lastAt` order: no full scan and no sort.

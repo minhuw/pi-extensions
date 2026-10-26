@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -51,6 +52,68 @@ pub struct ServerConfig {
     /// Take the client address from `X-Forwarded-For` and HTTPS from `X-Forwarded-Proto`.
     pub trust_proxy: bool,
     pub max_body: usize,
+    pub relay: RelayConfig,
+}
+
+/// Relay settings. Only `enabled`, `ttl`, and `heartbeat` come from the environment, and the last two only for tests
+/// and the end-to-end script; every other field keeps its default outside tests. See `docs/RELAY.md`.
+#[derive(Clone, Debug)]
+pub struct RelayConfig {
+    pub enabled: bool,
+    /// Undelivered messages are dropped this long after their acceptance.
+    pub ttl: Duration,
+    /// How often the server sends `ping` and re-validates each connection's token.
+    pub heartbeat: Duration,
+    /// A connection without any frame for this long is closed.
+    pub dead_after: Duration,
+    /// `hello` must arrive this soon after the upgrade.
+    pub hello_timeout: Duration,
+    /// How long `send` waits for the target's `ack` before answering `queued`.
+    pub ack_wait: Duration,
+    /// A socket write that takes longer closes the connection as dead.
+    pub write_timeout: Duration,
+    /// Bytes of frames a connection may have queued and not yet written; more closes it with 1008.
+    pub max_outgoing_bytes: usize,
+    pub max_text_bytes: usize,
+    pub max_frame_bytes: usize,
+    pub max_hops: u64,
+    /// Sends per sending session in a sliding minute.
+    pub sends_per_minute: usize,
+    /// Sends per sending device, across its sessions, in a sliding minute.
+    pub sends_per_minute_per_device: usize,
+    pub max_queued_per_target: usize,
+    pub max_queued: usize,
+    pub max_online: usize,
+    pub max_connections_per_device: usize,
+    /// Owners of offline sessions remembered at once; more forgets the oldest.
+    pub max_remembered: usize,
+    pub event_ring: usize,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        RelayConfig {
+            enabled: true,
+            ttl: Duration::from_secs(300),
+            heartbeat: Duration::from_secs(20),
+            dead_after: Duration::from_secs(45),
+            hello_timeout: Duration::from_secs(10),
+            ack_wait: Duration::from_secs(2),
+            write_timeout: Duration::from_secs(45),
+            max_outgoing_bytes: 8 << 20,
+            max_text_bytes: 32 << 10,
+            max_frame_bytes: 64 << 10,
+            max_hops: 8,
+            sends_per_minute: 60,
+            sends_per_minute_per_device: 300,
+            max_queued_per_target: 100,
+            max_queued: 10_000,
+            max_online: 1_000,
+            max_connections_per_device: 64,
+            max_remembered: 10_000,
+            event_ring: 500,
+        }
+    }
 }
 
 impl ServerConfig {
@@ -65,6 +128,7 @@ impl ServerConfig {
             cookie_secure: CookieSecure::Auto,
             trust_proxy: false,
             max_body: DEFAULT_MAX_BODY,
+            relay: RelayConfig::default(),
         }
     }
 

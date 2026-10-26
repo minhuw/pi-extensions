@@ -1,12 +1,13 @@
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::auth::NoPassword;
-use crate::config::{self, AuthMode, CookieSecure, ServerConfig};
+use crate::config::{self, AuthMode, CookieSecure, RelayConfig, ServerConfig};
 use crate::store::Store;
 
 #[derive(Parser)]
@@ -46,6 +47,15 @@ enum Command {
         /// Maximum request body size, such as 32MiB.
         #[arg(long, env = "PIKA_MAX_BODY", default_value = "32MiB")]
         max_body: String,
+        /// Relay messages between pi sessions: on or off.
+        #[arg(long, env = "PIKA_RELAY", default_value = "on", value_parser = parse_switch_on)]
+        relay: bool,
+        /// For tests only: seconds an undelivered relay message is kept (default 300).
+        #[arg(long, env = "PIKA_RELAY_TTL_SECS", hide = true, value_parser = clap::value_parser!(u64).range(1..))]
+        relay_ttl_secs: Option<u64>,
+        /// For tests only: seconds between relay heartbeats (default 20).
+        #[arg(long, env = "PIKA_RELAY_HEARTBEAT_SECS", hide = true, value_parser = clap::value_parser!(u64).range(1..))]
+        relay_heartbeat_secs: Option<u64>,
     },
     /// Manage device tokens.
     Token {
@@ -92,6 +102,11 @@ fn parse_switch(value: &str) -> Result<bool, String> {
     }
 }
 
+/// Like `parse_switch`, for a switch that is on by default: empty means on.
+fn parse_switch_on(value: &str) -> Result<bool, String> {
+    if value.trim().is_empty() { Ok(true) } else { parse_switch(value) }
+}
+
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -109,7 +124,26 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Serve { bind, base_path, auth, password_file, password, cookie_secure, trust_proxy, max_body } => {
+        Command::Serve {
+            bind,
+            base_path,
+            auth,
+            password_file,
+            password,
+            cookie_secure,
+            trust_proxy,
+            max_body,
+            relay,
+            relay_ttl_secs,
+            relay_heartbeat_secs,
+        } => {
+            let mut relay_config = RelayConfig { enabled: relay, ..RelayConfig::default() };
+            if let Some(secs) = relay_ttl_secs {
+                relay_config.ttl = Duration::from_secs(secs);
+            }
+            if let Some(secs) = relay_heartbeat_secs {
+                relay_config.heartbeat = Duration::from_secs(secs);
+            }
             let config = ServerConfig {
                 bind,
                 base_path: config::normalize_base_path(&base_path)?,
@@ -120,6 +154,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 cookie_secure,
                 trust_proxy,
                 max_body: config::parse_size(&max_body)?,
+                relay: relay_config,
             };
             let level = if std::env::var_os("PIKA_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
             tracing_subscriber::fmt().with_max_level(level).with_target(false).init();

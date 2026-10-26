@@ -131,9 +131,9 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **`GET sessions/:id/turns`** accepts `cursor` and `limit` (default 100). It returns `{ items: Turn[], nextCursor }`, with one `Turn` per user prompt, or per displayed extension message (a `custom_message` with `display: true`) that starts a run while the session is idle:
   ```
   { index, startSeq, endSeq, userText, at, durationMs,
-    modelCalls, toolCalls, toolErrors, cost, tokens, finalText }
+    modelCalls, toolCalls, toolErrors, cost, tokens, finalText, customType? }
   ```
-  `finalText` is the last assistant text in the turn, cut to 2,000 characters.
+  `finalText` is the last assistant text in the turn, cut to 2,000 characters. `customType` is the `customType` of the `custom_message` that started the turn, such as `relay-message`, and is absent for a user prompt; it is read from the entry at `startSeq`, so it needs no reindex.
   - A run is in progress after a user prompt until its first assistant reply. After a reply, it depends on the turn's last reply's `stopReason`:
     - `toolUse`: in progress.
     - `aborted`: ended.
@@ -169,10 +169,10 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **Static UI:** served at `{base}/`. Unknown non-API paths under the base return `index.html`. The server injects `<meta name="pika-base" content="{base}">` into `index.html`, and the UI uses it for API calls and router paths. The UI build uses relative asset URLs.
 
 ## Authentication
-`--auth` / `PIKA_AUTH` selects who authenticates viewers of the UI and the read API: `password` (default), `proxy`, or `none`. Ingest (`{base}/api/ingest/`) always uses device tokens; pairing (`{base}/api/pair/`) and `{base}/api/health` are always open.
+`--auth` / `PIKA_AUTH` selects who authenticates viewers of the UI and the read API: `password` (default), `proxy`, or `none`. Ingest (`{base}/api/ingest/`) and the relay's device routes (`{base}/api/relay/`) always use device tokens; pairing (`{base}/api/pair/`) and `{base}/api/health` are always open.
 
 - **`password`:** the UI's data and every `/api/v1/*` route except `login` and `me` require a valid session cookie. **The server refuses to start when no password is configured:** it exits with status 2 and prints `pika: no password configured. Run 'pika password set', set PIKA_PASSWORD_FILE or PIKA_PASSWORD, or set PIKA_AUTH=proxy if your reverse proxy authenticates (PIKA_AUTH=none disables authentication).`
-- **`proxy`:** pika does no viewer authentication; the reverse proxy must authenticate every path except `/api/ingest/`, `/api/pair/`, and `/api/health`. The server logs one warning at startup.
+- **`proxy`:** pika does no viewer authentication; the reverse proxy must authenticate every path except `/api/ingest/`, `/api/pair/`, `/api/relay/`, and `/api/health`. The server logs one warning at startup.
 - **`none`:** no authentication at all, for local development and benchmarks. The server logs one warning at startup.
 
 ### Passwords
@@ -224,7 +224,7 @@ Kept in memory, so a restart resets it.
 - **`tokens` table:** `name`, `hash`, `created_at`, `created_via` (`cli` | `pairing`, default `cli`), `last_seen_at`, and `last_host`. Ingest updates the last two at most once a minute per device, from the batch's `client.host`.
 - **Routes** under `{base}/api/v1/`, authenticated:
   - `GET devices` → `{ items: [{ name, createdAt, createdVia, lastSeenAt?, lastHost? }] }`, sorted by name.
-  - `DELETE devices/:name` → 204, or 404. Ingest refuses a revoked token immediately.
+  - `DELETE devices/:name` → 204, or 404. Ingest refuses a revoked token immediately, and the device's relay connections close with 4401 at once.
 - **CLI:** `pika token list` prints one tab-separated line per device: name, creation time, `created_via`, last-seen time (`never`), and last host (`-`).
 
 ## Pairing
@@ -254,6 +254,19 @@ Device authorization, like OAuth's device flow. The unauthenticated routes live 
   - `POST pairings/:code/deny` with a JSON body → 204, or 404 `{ error: "unknown_pairing" }`.
 - **Approval page:** the UI route `{base}/devices?pair=<code>`. The extension builds this URL from its configured server URL.
 
+## Relay
+Relay lets running pi sessions send text messages to each other through the server, and lists the online sessions in the web UI. Its contract, including frames, close codes, limits, and the extension and web sides, is [`docs/RELAY.md`](RELAY.md); this section lists what the server adds.
+
+- **Routes:**
+  - `GET {base}/api/relay/v1/connect`: the device WebSocket, authenticated with `Authorization: Bearer <device token>` before the upgrade (401 `{ error: "unauthorized" }` otherwise). Any device token may connect.
+  - `GET {base}/api/relay/v1/sessions` with the bearer token → `{ items: OnlineSession[] }`.
+  - Under the authenticated `{base}/api/v1/`: `GET relay/sessions`, `POST relay/messages`, and `GET relay/events?limit=`.
+  - `GET {base}/api/health` lists `"relay"` in `features` when relay is on.
+- **Settings:** `--relay` / `PIKA_RELAY`: `on` (default) or `off`, with the same spellings as `PIKA_TRUST_PROXY`; empty means on. When off, every relay route answers 404 `{ error: "relay_disabled" }`, before any authentication. `PIKA_RELAY_TTL_SECS` (default 300) and `PIKA_RELAY_HEARTBEAT_SECS` (default 20) exist for tests and the end-to-end script only, and are hidden from `--help`.
+- **State:** online sessions, the mailbox, and the event ring live in memory; a restart drops them. Ownership checks and `recorded` use the `sessions` table.
+- **Revocation:** revoking a token closes every relay connection made with it with 4401 at once, both from `DELETE devices/:name` and when a pairing approved with `replace` deletes the old token. A token revoked by another process (`pika token revoke`) is noticed within one heartbeat, because each connection re-checks its token every heartbeat; it is also checked again at `hello`.
+- **Shutdown:** stopping the server closes every relay connection with 1001.
+
 ## Server configuration
 - **Settings (flag / environment variable):**
   - `--bind` / `PIKA_BIND`, default `127.0.0.1:7171`
@@ -265,6 +278,7 @@ Device authorization, like OAuth's device flow. The unauthenticated routes live 
   - `--cookie-secure` / `PIKA_COOKIE_SECURE`: `auto` (default), `always`, or `never`
   - `--trust-proxy` / `PIKA_TRUST_PROXY=1`, default off
   - `--max-body` / `PIKA_MAX_BODY`
+  - `--relay` / `PIKA_RELAY`: `on` (default) or `off` (see "Relay")
 - **Data dir layout:**
   - `pika.db`: SQLite in WAL mode.
   - `blobs/<h[0..2]>/<h[2..4]>/<h>.zst`: zstd-compressed content-addressed blobs.

@@ -1,6 +1,6 @@
 # pika server
 
-`pika` is one Rust binary that stores every Pi trajectory from your machines and serves it back. It takes uploads from the [pika extension](../../extensions/pika/README.md), keeps each session line verbatim in SQLite, stores large content and request blocks once in a compressed blob store, and serves a read API and an embedded web UI: a filtered session list, session views with per-tool rendering, inline subagents and the exact request each model call received, Herder run views, and full-text search.
+`pika` is one Rust binary that stores every Pi trajectory from your machines and serves it back. It takes uploads from the [pika extension](../../extensions/pika/README.md), keeps each session line verbatim in SQLite, stores large content and request blocks once in a compressed blob store, and serves a read API and an embedded web UI: a filtered session list, session views with per-tool rendering, inline subagents and the exact request each model call received, Herder run views, and full-text search. It also relays messages between running Pi sessions on any of your machines (see [Relay](#relay)).
 
 It is built for one user in a homelab: plain HTTP, meant to sit behind a reverse proxy that terminates TLS. Devices authenticate with per-device tokens, which they get by pairing with the web UI. The UI is protected by one password with server-side sessions, or by the reverse proxy; the server refuses to start until one of them is set up.
 
@@ -24,6 +24,7 @@ pika [--data-dir DIR] <command>
 
 pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--password-file FILE]
            [--password PASSWORD] [--cookie-secure auto|always|never] [--trust-proxy] [--max-body SIZE]
+           [--relay on|off]
 pika password set
 pika password clear
 pika token create <device>
@@ -57,6 +58,7 @@ Every command opens the data directory and creates it if needed. `password`, `to
 | `--cookie-secure` | `PIKA_COOKIE_SECURE` | `auto` | When the session cookie is `Secure`: `auto` when a trusted proxy reports HTTPS, `always`, or `never`. |
 | `--trust-proxy` | `PIKA_TRUST_PROXY` | off | Takes the client address from the rightmost `X-Forwarded-For` entry and HTTPS from `X-Forwarded-Proto`. Turn it on behind a reverse proxy, and only then: without a proxy, clients could pick their own address. `1`, `true`, `yes`, or `on` turn it on; `0`, `false`, `no`, `off`, or empty leave it off; any other value stops `serve` with an error. |
 | `--max-body` | `PIKA_MAX_BODY` | `32MiB` | Largest ingest body, both as sent and after gzip decompression. Accepts bytes or `K`/`KiB`, `M`/`MiB`, `G`/`GiB` (all binary). |
+| `--relay` | `PIKA_RELAY` | `on` | Relay between Pi sessions (see [Relay](#relay)): `on` or `off`, with the same spellings as `--trust-proxy`, except that empty means `on`. When `off`, every relay route answers 404 `{ "error": "relay_disabled" }`. |
 
 Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In `password` mode the password comes from `--password-file`, else `--password`, else `pika password set`; the server logs when a configured password overrides a stored one. Prefer `pika password set` or a password file over `--password` and `PIKA_PASSWORD`, which other users can see in the process list or the container's configuration.
 
@@ -64,10 +66,11 @@ Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In 
 
 Every route is under the base path:
 
-- `GET api/health` returns `{ "ok": true, "version", "basePath" }`, without authentication.
+- `GET api/health` returns `{ "ok": true, "version", "basePath", "features" }`, without authentication. `features` lists `"relay"` when relay is on.
 - `POST api/ingest/v1/batch` takes uploads from devices with `Authorization: Bearer <token>`.
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI.
-- `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, and pairing approval.
+- `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
+- `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
 
 The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
@@ -103,7 +106,23 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 - **`Secure` cookies:** with the default `--cookie-secure auto`, the cookie is `Secure` when a trusted proxy (`PIKA_TRUST_PROXY=1`) reports `X-Forwarded-Proto: https`. Set `PIKA_COOKIE_SECURE=always` if the proxy does not send that header; `never` is for plain-HTTP setups.
 - **Rate limits:** after 5 failed logins from one client address in 15 minutes, that address gets `429 Too Many Requests` with `Retry-After` until the oldest failure is 15 minutes old; a successful login clears its count. After 100 failed logins in an hour from all addresses together, every login is refused until the hour frees up. Pairing allows 5 starts per address in 10 minutes and 10 pending pairings at a time. An IPv6 client counts by its /64, since one client usually holds a whole /64. The counts live in memory and reset when the server restarts. Behind a reverse proxy, set `PIKA_TRUST_PROXY=1`, or every client shares the proxy's address and its limits.
 - **If logins are blocked:** because of the global limit, anyone who can reach the login page can block new logins for up to an hour by sending wrong passwords from many addresses. Browsers that are already logged in keep working, and devices keep uploading. To get back in, use a browser that is still logged in, or restart pika (`docker restart pika`, or stop and start `pika serve`), which clears every limit. Then block the offending addresses at the reverse proxy, or put an authenticating proxy in front with `PIKA_AUTH=proxy` if it keeps happening.
-- **Devices:** the UI's Devices page lists each device with how its token was made, when it last uploaded, and from which host (updated at most once a minute), and revokes tokens; ingest refuses a revoked token at once. `pika token list` and `pika token revoke` do the same from the command line.
+- **Devices:** the UI's Devices page lists each device with how its token was made, when it last uploaded, and from which host (updated at most once a minute), and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. `pika token list` and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
+
+### Relay
+
+Relay lets a running Pi session send a text message to any other running Pi session on any machine logged into this server, and the UI's **Active sessions** page lists every online session and lets you message one. The [relay extension](../../extensions/relay/) connects each top-level Pi session over a WebSocket, using the pika extension's existing device token; there is no separate key or login. The protocol is specified in [`docs/RELAY.md`](docs/RELAY.md).
+
+- **Open by default:** relay is on unless you start the server with `PIKA_RELAY=off`. Any device token may connect, so **a device token now also lets that device see and message every online session**, not only upload. Revoke a device to cut it off; its relay connections close at once.
+- **Messages:** up to 32 KiB of text each, kept in memory until the target session accepts them or 5 minutes pass; a server restart drops queued messages and the dashboard's recent messages. Session transcripts, which pika already stores, are the permanent record. Each sending session may send 60 messages a minute, and the server keeps at most 100 queued messages per target and 10,000 in total.
+- **Turning it off:** set `PIKA_RELAY=off` (or `--relay off`) and restart the server. Health then omits `"relay"` from `features`, so extensions stay offline and the UI hides the page.
+- **Behind a proxy:** `/api/relay/` must stay open to devices and needs WebSocket upgrades (see [Reverse proxy](#reverse-proxy)).
+
+`PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
+
+### Upgrading from 0.2
+
+- [Relay](#relay) is new and on by default: every device token can now also message every online Pi session. Set `PIKA_RELAY=off` to keep 0.2's behavior.
+- Behind nginx, add the `api/relay/` location from the [`deploy/`](deploy/) examples, which passes WebSocket upgrades. If the proxy authenticates, also leave `/api/relay/` open.
 
 ### Upgrading from 0.1
 
@@ -158,7 +177,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.2.0`, `0.2` | a `pika-v0.2.0` release tag |
+| `latest`, `0.3.0`, `0.3` | a `pika-v0.3.0` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -167,7 +186,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.2.0 && git push origin pika-v0.2.0
+git tag pika-v0.3.0 && git push origin pika-v0.3.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
@@ -205,7 +224,7 @@ Then use `pika` in place of `ghcr.io/minhuw/pika:latest` in the commands here.
 
 ### Configuration
 
-The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
+The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, `PIKA_RELAY`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
 
 The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s, normalizing the base path as the server does (`pika`, `pika/`, and `/pika/` all mean `/pika`). It reads only the environment, so set the base path and bind address with `-e PIKA_BASE_PATH` and `-e PIKA_BIND`, not as `serve --base-path` or `--bind` arguments: with a flag the server moves but the health check does not, and the container stays unhealthy. `docker ps` shows the result, and you can check it by hand:
 
@@ -241,6 +260,7 @@ Every example:
 - allows request bodies of at least the server's `--max-body` (32 MiB by default) with `request_body max_size` or `client_max_body_size`; raise both together;
 - allows slow uploads: devices send gzip batches of up to 8 MiB uncompressed and give up on a batch after 30 s, then retry;
 - forwards `X-Forwarded-For` and `X-Forwarded-Proto`, so that with `PIKA_TRUST_PROXY=1` pika sees each client's address (for the login and pairing limits and the session list) and marks cookies `Secure` over HTTPS. Caddy sends both headers by default; nginx needs the two `proxy_set_header` lines;
+- passes WebSocket upgrades on `api/relay/`, for [Relay](#relay). Caddy does this as is. nginx needs a `location` for it with `proxy_http_version 1.1` and the `Upgrade` and `Connection` headers; because a `location` with its own `proxy_set_header` inherits none from the enclosing block, that location repeats `Host`, `X-Forwarded-For`, and `X-Forwarded-Proto`. The default 120 s read timeout is enough, since the server sends a heartbeat every 20 s;
 - with a path prefix, redirects `/pika` to `/pika/`, because the UI loads its assets by relative URL.
 
 Run pika behind a proxy with `PIKA_TRUST_PROXY=1`, and keep its port reachable only by the proxy (the examples bind it to `127.0.0.1`): when trusted, `X-Forwarded-For` decides the client address, and a client that reaches pika directly could set it.
@@ -259,6 +279,15 @@ location /pika/ {
     proxy_send_timeout 120s;
     proxy_read_timeout 120s;
 }
+location /pika/api/relay/ {
+    proxy_pass http://127.0.0.1:7171;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 ```
 
 and in Caddy:
@@ -275,7 +304,7 @@ homelab.example {
 }
 ```
 
-The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt three paths from the proxy's login (for example `/pika/api/ingest/`): `api/ingest/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; and `api/health`, for monitoring. Everything else, the UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
+The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt four paths from the proxy's login (for example `/pika/api/ingest/`): `api/ingest/` and `api/relay/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; and `api/health`, for monitoring. Everything else, the UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
 
 ## Development
 
