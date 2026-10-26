@@ -160,11 +160,12 @@ pub fn detail(conn: &Connection, blobs: &BlobStore, run_id: &str) -> ReadResult<
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    // Older journals carry no session ids; the step sessions' link entries name their step.
+    // Older journals carry no session ids; the step sessions' link entries name their step. A resumed launch
+    // restarts attempt numbering, so the newest launch wins before the highest attempt.
     let mut linked = conn.prepare_cached(
         "SELECT s.id FROM session_links l JOIN sessions s USING (sid)
          WHERE l.herder_run_id = ?1 AND l.herder_step_key = ?2
-         ORDER BY l.herder_attempt DESC, l.herder_launch DESC, s.started_at DESC, s.id DESC LIMIT 1",
+         ORDER BY l.herder_launch DESC, l.herder_attempt DESC, s.started_at DESC, s.id DESC LIMIT 1",
     )?;
     for step in steps.iter_mut().filter(|s| s.session_id.is_none()) {
         step.session_id = linked.query_row(params![run_id, step.key], |r| r.get(0)).optional()?;

@@ -70,6 +70,13 @@ fn parse(text: String) -> Value {
     parse_json_lenient(&text).unwrap_or(Value::String(text))
 }
 
+pub(crate) const LIST_SQL: &str = "SELECT e.seq, e.offset, e.entry_id, e.parent_id, e.type, e.ts, l.data, l.blob, m.request_id
+     FROM entries e
+     JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+     LEFT JOIN model_calls m ON m.sid = e.sid AND m.seq = e.seq
+     WHERE e.sid = ?1 AND e.seq >= ?2 AND e.seq <= ?3
+     ORDER BY e.seq LIMIT ?4";
+
 /// Entries `from..=to` by seq. `prefix` is the base path prefix for image URLs (empty for `/`).
 pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params) -> ReadResult<Entries> {
     let sid = session_sid(conn, id)?;
@@ -77,14 +84,7 @@ pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Pa
     let from = p.int("from")?.unwrap_or(0);
     let to = p.int("to")?.unwrap_or(i64::MAX);
     let rows = conn
-        .prepare_cached(
-            "SELECT e.seq, e.offset, e.entry_id, e.parent_id, e.type, e.ts, l.data, l.blob, m.request_id
-             FROM entries e
-             JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
-             LEFT JOIN model_calls m ON m.sid = e.sid AND m.seq = e.seq
-             WHERE e.sid = ?1 AND e.seq >= ?2 AND e.seq <= ?3
-             ORDER BY e.seq LIMIT ?4",
-        )?
+        .prepare_cached(LIST_SQL)?
         .query_map(params![sid, from, to, limit], |r| {
             Ok((
                 Entry {

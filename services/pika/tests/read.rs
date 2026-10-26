@@ -173,13 +173,13 @@ fn linked_child() -> Vec<String> {
     ])
 }
 
-fn step_session(id: &str, at: &str, step: &str, role: &str, attempt: i64, prompt: &str) -> Vec<String> {
+fn step_session(id: &str, at: &str, step: &str, role: &str, (launch, attempt): (i64, i64), prompt: &str) -> Vec<String> {
     lines(&[
         json!({ "type": "session", "version": 3, "id": id, "timestamp": at, "cwd": "/home/me/.git/herder/worktrees/r1/x" }),
         json!({ "type": "custom", "id": "s0000001", "parentId": null, "timestamp": at, "customType": "pi-extensions.session-link",
                 "data": { "kind": "herder-step", "parentSessionId": "orch-1",
                           "herder": { "runId": RUN_ID, "stepKey": step, "stepId": step, "task": "T1", "role": role,
-                                      "attempt": attempt, "launch": 1, "repo": "widgets" } } }),
+                                      "attempt": attempt, "launch": launch, "repo": "widgets" } } }),
         json!({ "type": "message", "id": "s0000002", "parentId": "s0000001", "timestamp": at,
                 "message": { "role": "user", "content": prompt, "timestamp": 1 } }),
     ])
@@ -249,9 +249,9 @@ async fn load(app: &App) {
     app.upload(DEVICE, &skey(SESSION_ID), "session", &fixture("session.jsonl")).await;
     app.upload(DEVICE, &skey(LINKED_CHILD), "session", &linked_child()).await;
     app.upload(DEVICE, &format!("herder:{RUN_ID}"), "herder-journal", &fixture("herder-journal.jsonl")).await;
-    let step = step_session(STEP_SESSION, "2026-10-21T10:05:31.000Z", "impl-T1", "worker", 2, "Implement T1");
+    let step = step_session(STEP_SESSION, "2026-10-21T10:05:31.000Z", "impl-T1", "worker", (1, 2), "Implement T1");
     app.upload(DEVICE, &skey(STEP_SESSION), "session", &step).await;
-    let review = step_session(REVIEW_SESSION, "2026-10-21T10:09:11.000Z", "review-T1", "reviewer", 1, "Review T1");
+    let review = step_session(REVIEW_SESSION, "2026-10-21T10:09:11.000Z", "review-T1", "reviewer", (1, 1), "Review T1");
     app.upload(DEVICE, &skey(REVIEW_SESSION), "session", &review).await;
     app.ingest(
         DEVICE,
@@ -636,6 +636,32 @@ async fn herder_runs_and_run_detail() {
     assert!(running["steps"][0].get("sessionId").is_none() && running["steps"][0].get("endedAt").is_none());
     assert_eq!(app.status("herder/runs/nope").await, StatusCode::NOT_FOUND);
     assert_eq!(app.status("herder/runs?cursor=WzFd").await, StatusCode::BAD_REQUEST);
+}
+
+/// A resumed launch restarts attempt numbering: a step's linked session is the newest launch's, not the highest
+/// attempt's.
+#[tokio::test]
+async fn step_sessions_from_links_prefer_the_newest_launch() {
+    let app = app(None);
+    let journal = lines(&[
+        json!({ "v": 1, "t": "run.started", "at": "2026-10-21T10:00:00.000Z", "runId": RUN_ID, "title": "Resume", "repo": "/home/me/code/widgets" }),
+        json!({ "v": 1, "t": "step.started", "at": "2026-10-21T10:01:00.000Z", "key": "impl-T5", "id": "impl-T5", "attempt": 1, "role": "worker", "launch": 1 }),
+        json!({ "v": 1, "t": "step.failed", "at": "2026-10-21T10:02:00.000Z", "key": "impl-T5", "attempt": 1, "errorClass": "transient", "final": false }),
+        json!({ "v": 1, "t": "step.started", "at": "2026-10-21T10:03:00.000Z", "key": "impl-T5", "id": "impl-T5", "attempt": 2, "role": "worker", "launch": 1 }),
+        json!({ "v": 1, "t": "step.failed", "at": "2026-10-21T10:04:00.000Z", "key": "impl-T5", "attempt": 2, "errorClass": "interrupted", "final": true }),
+        json!({ "v": 1, "t": "script.launched", "at": "2026-10-21T11:00:00.000Z", "launch": 2 }),
+        json!({ "v": 1, "t": "step.started", "at": "2026-10-21T11:01:00.000Z", "key": "impl-T5", "id": "impl-T5", "attempt": 1, "role": "worker", "launch": 2 }),
+    ]);
+    app.upload(DEVICE, &format!("herder:{RUN_ID}"), "herder-journal", &journal).await;
+    for (id, at, launch_attempt) in [
+        ("t5-l1a1", "2026-10-21T10:01:01.000Z", (1, 1)),
+        ("t5-l2a1", "2026-10-21T11:01:01.000Z", (2, 1)),
+        ("t5-l1a2", "2026-10-21T10:03:01.000Z", (1, 2)),
+    ] {
+        app.upload(DEVICE, &skey(id), "session", &step_session(id, at, "impl-T5", "worker", launch_attempt, "Implement T5")).await;
+    }
+    let detail = app.json(&format!("herder/runs/{RUN_ID}")).await;
+    assert_eq!((&detail["steps"][0]["key"], &detail["steps"][0]["sessionId"]), (&json!("impl-T5"), &json!("t5-l2a1")));
 }
 
 async fn search(app: &App, query: &str) -> Vec<Value> {

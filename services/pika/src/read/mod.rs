@@ -6,6 +6,9 @@ pub mod herder;
 pub mod search;
 pub mod sessions;
 
+#[cfg(test)]
+mod plans;
+
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -126,9 +129,11 @@ pub fn page<T>(mut items: Vec<T>, limit: i64, key: impl Fn(&T) -> Vec<Value>) ->
     Page { items, next_cursor }
 }
 
+pub(crate) const SESSION_SID_SQL: &str = "SELECT sid FROM sessions WHERE id = ?1";
+
 /// The derived row id (`streams.id`) of a session.
 pub fn session_sid(conn: &Connection, session_id: &str) -> ReadResult<i64> {
-    conn.prepare_cached("SELECT sid FROM sessions WHERE id = ?1")?
+    conn.prepare_cached(SESSION_SID_SQL)?
         .query_row([session_id], |r| r.get(0))
         .optional()?
         .ok_or(ReadError::NotFound)

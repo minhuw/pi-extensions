@@ -176,7 +176,7 @@ pub fn facets(conn: &Connection) -> ReadResult<Facets> {
 
 /// The session list statement and its arguments. `from` and `to` bound `lastAt` (inclusive). Each combination of the
 /// device, project, and root filters walks an index in `lastAt` order; `model` and the time bounds filter along it.
-fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>)> {
+pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>)> {
     let (root, device, project) = (p.bool("root")?, p.get("device"), p.get("project"));
     // Without statistics SQLite may prefer sessions_parent for `root` and then sort, so name the index.
     let index = match (root, device.is_some(), project.is_some()) {
@@ -235,16 +235,25 @@ pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<SessionSummary>> {
     Ok(page(items, limit, |s| vec![json!(s.last_at_ms), json!(s.id)]))
 }
 
+pub(crate) fn detail_sql() -> String {
+    format!("SELECT {SUMMARY_COLUMNS} FROM sessions s WHERE s.id = ?1")
+}
+
+pub(crate) fn children_sql() -> String {
+    format!(
+        "SELECT {SUMMARY_COLUMNS}, l.parent_tool_call_id FROM sessions s LEFT JOIN session_links l USING (sid)
+         WHERE s.parent_session_id = ?1 ORDER BY s.started_at, s.id"
+    )
+}
+
+pub(crate) fn turns_sql() -> String {
+    format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 AND idx > ?2 ORDER BY idx LIMIT ?3")
+}
+
 pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
-    let session = conn
-        .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS} FROM sessions s WHERE s.id = ?1"))?
-        .query_row([id], summary)
-        .map_err(not_found)?;
+    let session = conn.prepare_cached(&detail_sql())?.query_row([id], summary).map_err(not_found)?;
     let children = conn
-        .prepare_cached(&format!(
-            "SELECT {SUMMARY_COLUMNS}, l.parent_tool_call_id FROM sessions s LEFT JOIN session_links l USING (sid)
-             WHERE s.parent_session_id = ?1 ORDER BY s.started_at, s.id"
-        ))?
+        .prepare_cached(&children_sql())?
         .query_map([id], |r| Ok(ChildSession { summary: summary(r)?, parent_tool_call_id: r.get(18)? }))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(SessionDetail { summary: session, children })
@@ -258,7 +267,7 @@ pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> 
         None => -1,
     };
     let items = conn
-        .prepare_cached(&format!("SELECT {TURN_COLUMNS} FROM turns WHERE sid = ?1 AND idx > ?2 ORDER BY idx LIMIT ?3"))?
+        .prepare_cached(&turns_sql())?
         .query_map(rusqlite::params![sid, after, limit + 1], turn)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(page(items, limit, |t| vec![json!(t.index)]))
