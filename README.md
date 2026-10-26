@@ -17,6 +17,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Molt](extensions/molt/README.md) | `/molt` starts a new session that keeps the current model and thinking level. |
 | [Statusline Footer](extensions/statusline-footer/README.md) | A rich, theme-aware footer for model, context, performance, cost, and Git telemetry. |
 | [pika](extensions/pika/README.md) | Uploads every session entry, exact model request, subagent and Herder step session, and Herder journal to a self-hosted [pika server](services/pika/README.md) for search and reading; offline spool, exclude list, and `/pika` status. |
+| [Relay](extensions/relay/README.md) | Text messages between running pi sessions on all your machines through your pika server, with `relay_list`, `relay_send`, and `relay_status` tools and `/relay`; needs the pika extension logged in and a pika server 0.3.0 or newer. |
 | [Magpie Provider](extensions/magpie-provider/README.md) | Live gateway model discovery, native Pi streaming APIs, and automatic native-compaction attempts for OpenAI/Codex Responses models; Magpie manages upstream accounts and routing. |
 
 ## Themes
