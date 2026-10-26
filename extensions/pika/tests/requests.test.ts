@@ -2,13 +2,13 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitPayload } from "../blocks.ts";
 import { SessionCapture } from "../capture.ts";
 import pikaExtension, { CHILD_SESSION_HOOKS, type ChildSessionHook } from "../index.ts";
 import { currentUploader, releaseUploader, Uploader } from "../uploader.ts";
-import { MockIngest } from "./support/ingest-server.ts";
+import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { MockProvider } from "./support/provider-server.ts";
 import { exitedPid, readText, startSession, waitFor, Workspace } from "./support/runtime.ts";
 
@@ -126,7 +126,7 @@ it("never blocks a turn when the server accepts connections but never answers", 
 
 it("does not fail a turn when pika's internals throw", async () => {
 	await workspace.enable(ingest.url);
-	for (const method of ["onContext", "onPayload", "onAssistant", "settle"] as const) {
+	for (const method of ["onContext", "onPayload", "onAssistantStart", "onAssistant", "settle"] as const) {
 		vi.spyOn(SessionCapture.prototype, method).mockImplementation(() => { throw new Error(`simulated ${method} failure`); });
 	}
 	vi.spyOn(Uploader.prototype, "poke").mockImplementation(() => { throw new Error("simulated poke failure"); });
@@ -199,6 +199,61 @@ it("spools a payload when the provider request starts, so a crash mid-stream sti
 		await prompt;
 		await first.shutdown();
 	}
+}, 20_000);
+
+it("spools a context-fidelity call when its response starts, so a crash mid-stream still delivers it", async () => {
+	await workspace.enable(ingest.url);
+	const faux = fauxProvider({ api: "pika-slow-api", provider: "pika-slow", models: [{ id: "test" }], tokensPerSecond: 2 });
+	faux.setResponses([fauxAssistantMessage("a slow answer ".repeat(50))]);
+	const first = await startSession({ workspace, faux, extensions: [pikaExtension] });
+	const id = first.session.sessionId;
+	const started = new Promise<void>((resolve) => first.session.subscribe((event) => { if (event.type === "message_start" && event.message.role === "assistant") resolve(); }));
+	const prompt = first.session.prompt("a long answer").catch(() => undefined);
+	try {
+		await started;
+		const spooled = async () => (await readdir(join(workspace.pikaDir, "spool", "requests")).catch(() => [])).filter((name) => name.endsWith(".json"));
+		await waitFor(async () => (await spooled()).length === 1, 2_000, "the spooled context request");
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(ingest.sessionRequests(id)).toEqual([]);
+
+		await simulateCrash();
+		const second = await startSession({ workspace, extensions: [pikaExtension] });
+		try {
+			await waitFor(() => ingest.sessionRequests(id).length === 1, 5_000, "the request after the restart");
+			const [request] = ingest.sessionRequests(id);
+			expect(request).toMatchObject({ fidelity: "context", seq: 1, provider: "pika-slow", model: "test" });
+			expect(request!.assistant).toBeUndefined();
+			const sent = ingest.payload(request!.id) as { messages: { role: string }[] };
+			expect(sent.messages[0]!.role).toBe("system");
+			expect(JSON.stringify(sent.messages)).toContain("a long answer");
+			await waitFor(async () => (await spooled()).length === 0, 2_000, "an empty spool");
+		} finally { await second.shutdown(); }
+	} finally {
+		first.session.abort();
+		await prompt;
+		await first.shutdown();
+	}
+}, 20_000);
+
+it("replaces a spooled context call with the payload that arrives after it, under the same id", async () => {
+	await workspace.enable(ingest.url);
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	try {
+		const session = new SessionCapture("s1", "session:s1", () => uploader, {});
+		session.onContext([{ role: "user", content: "hello" }], { provider: "p", model: "m" });
+		// A provider that starts its response before it exposes the payload.
+		session.onAssistantStart({ role: "assistant", timestamp: 1 });
+		session.onPayload({ model: "m", messages: [{ role: "user", content: "hello" }] }, { provider: "p", model: "m" });
+		session.onAssistant({ role: "assistant", timestamp: 5, responseId: "r1" });
+		await waitFor(() => ingest.sessionRequests("s1").length === 1, 5_000, "the request");
+		await uploader.flush();
+		const requests = ingest.sessionRequests("s1");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({ fidelity: "payload", seq: 1, assistant: { timestamp: 5, responseId: "r1" } });
+		expect(ingest.payload(requests[0]!.id)).toEqual({ model: "m", messages: [{ role: "user", content: "hello" }] });
+		await waitFor(async () => (await readdir(join(workspace.pikaDir, "spool", "requests"))).every((name) => !name.endsWith(".json")), 2_000, "an empty spool");
+		expect(await spooledBlobs()).toEqual([]);
+	} finally { await uploader.stop(); }
 }, 20_000);
 
 it("rewrites the spooled payload with its assistant message before uploading it", async () => {

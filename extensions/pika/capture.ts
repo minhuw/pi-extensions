@@ -3,12 +3,14 @@ import type { RequestCompletion, RequestInput, Uploader } from "./uploader.ts";
 
 interface ModelInfo { provider?: string; api?: string; model?: string }
 
-/** One model call: the context pi built for it and, once the provider exposes it, the spooled payload's request id. */
+/** One model call: the context pi built for it and, once spooled, its request id and what was spooled. */
 interface Call {
 	at: string;
 	model: ModelInfo;
 	messages?: unknown[];
 	requestId?: string;
+	seq?: number;
+	spooled?: "payload" | "context";
 }
 
 interface AssistantLike {
@@ -36,7 +38,8 @@ const modelFields = (model: ModelInfo): ModelInfo => ({
  * `context_with_system`. `before_provider_request` spools its payload at once, held until the
  * next assistant `message_end` adds `assistant`; a call that never gets one (an abort before
  * the response, a compaction or other side request) is released without it. A call without a
- * payload is recorded with its context when its assistant message arrives, and dropped otherwise.
+ * payload is spooled with its context, held the same way, when its response starts; a payload
+ * that still arrives for it replaces that record. A call that ends before either is dropped.
  */
 export class SessionCapture {
 	owner: object;
@@ -55,13 +58,24 @@ export class SessionCapture {
 
 	onPayload(payload: unknown, model: ModelInfo): void {
 		const json = JSON.stringify(payload) ?? "null";
-		if (!this.call || this.call.requestId !== undefined) {
+		if (!this.call || this.call.spooled === "payload") {
 			this.settle();
 			this.call = { at: new Date().toISOString(), model };
 		}
 		const call = this.call;
-		call.requestId = randomUUID();
+		call.requestId ??= randomUUID();
+		call.spooled = "payload";
 		void this.uploader()?.enqueueRequest(this.input(call, "payload", model), { json }, { awaiting: true });
+	}
+
+	/** The call's response started; without a payload by now, its context is spooled so a crash still records it. */
+	onAssistantStart(message: AssistantLike): void {
+		const call = this.call;
+		if (!call?.messages || call.spooled) return;
+		call.requestId = randomUUID();
+		call.spooled = "context";
+		const model = { provider: message.provider ?? call.model.provider, api: message.api ?? call.model.api, model: message.model ?? call.model.model };
+		void this.uploader()?.enqueueRequest(this.input(call, "context", model), { value: { messages: call.messages } }, { awaiting: true });
 	}
 
 	onAssistant(message: AssistantLike): void {
@@ -78,7 +92,7 @@ export class SessionCapture {
 		}
 	}
 
-	/** Releases an unanswered call's spooled payload without `assistant`. */
+	/** Releases an unanswered call's spooled request without `assistant`. */
 	settle(): void {
 		const call = this.call;
 		this.call = undefined;
@@ -86,6 +100,6 @@ export class SessionCapture {
 	}
 
 	private input(call: Call, fidelity: RequestInput["fidelity"], model: ModelInfo): RequestInput {
-		return { id: call.requestId ?? randomUUID(), sessionId: this.sessionId, seq: ++this.seq, at: call.at, fidelity, ...modelFields(model) };
+		return { id: call.requestId ?? randomUUID(), sessionId: this.sessionId, seq: call.seq ??= ++this.seq, at: call.at, fidelity, ...modelFields(model) };
 	}
 }

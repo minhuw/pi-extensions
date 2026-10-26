@@ -34,6 +34,22 @@ it("excludes cwd prefixes on directory boundaries and globs that match the cwd o
 	expect(isExcluded("/work/app", [])).toBe(false);
 });
 
+it("resolves relative globs and plain paths alike against pi's start directory, and matches **/ at any depth", () => {
+	const start = process.cwd();
+	expect(isExcluded(join(start, "scratch", "a"), ["scratch"])).toBe(true);
+	expect(isExcluded(join(start, "scratch", "a", "b"), ["scratch/*"])).toBe(true);
+	expect(isExcluded(join(start, "scratch"), ["scratch/*"])).toBe(false);
+	expect(isExcluded(join(start, "other", "scratch", "a"), ["scratch/*"])).toBe(false);
+	expect(isExcluded(join(start, "tmp-1"), ["./tmp-*"])).toBe(true);
+	expect(isExcluded(join(homedir(), "x", "a", "b"), ["~/x/*"])).toBe(true);
+	expect(isExcluded(join(homedir(), "y", "a"), ["~/x/*"])).toBe(false);
+	expect(isExcluded("/srv/deep/down/secret", ["**/secret"])).toBe(true);
+	expect(isExcluded("/srv/deep/secret/app", ["**/secret"])).toBe(true);
+	expect(isExcluded("/srv/deep/secretive", ["**/secret"])).toBe(false);
+	expect(isExcluded("/srv/client-a/app", ["/srv/client-*/app"])).toBe(true);
+	expect(isExcluded("/srv/client-a/web", ["/srv/client-*/app"])).toBe(false);
+});
+
 it("explains in /pika why pika is disabled", () => {
 	expect(statusText({ enabled: false, reason: "PIKA_DISABLED=1 is set", file: "/x/pika.json" }, false, undefined, undefined)).toBe("pika is disabled: PIKA_DISABLED=1 is set.");
 	expect(statusText({ enabled: true, file: "/x/pika.json", config: { url: "http://h/pika", token: "t", exclude: [] } }, true, "abc", "/w is excluded"))

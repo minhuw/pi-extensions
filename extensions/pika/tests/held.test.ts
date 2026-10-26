@@ -5,7 +5,7 @@ import { readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { acquireUploader, currentUploader, processStart, releaseUploader, Uploader, type OwnerProcess, type RequestInput } from "../uploader.ts";
+import { acquireUploader, currentUploader, machineId, processStart, releaseUploader, Uploader, type OwnerProcess, type RequestInput } from "../uploader.ts";
 import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { exitedPid, waitFor, Workspace } from "./support/runtime.ts";
 
@@ -40,9 +40,21 @@ async function liveProcess(): Promise<{ child: ChildProcess; owner: OwnerProcess
 	children.push(child);
 	await once(child, "spawn");
 	const started = await processStart(child.pid!);
-	expect(started).toBeDefined();
-	return { child, owner: { pid: child.pid!, host: hostname(), started } };
+	// Windows reports no start time.
+	if (process.platform !== "win32") expect(started).toBeDefined();
+	return { child, owner: { pid: child.pid!, machine: await machineId(), ...(started ? { started } : {}) } };
 }
+
+async function hold(owner: OwnerProcess, at?: Date): Promise<string> {
+	const offline = await new MockIngest().reserve();
+	const id = randomUUID();
+	const a = uploader(offline.url, owner);
+	await a.enqueueRequest(input(id, at), { value: payload }, { awaiting: true });
+	await a.stop();
+	return id;
+}
+
+const HOURS = 60 * 60 * 1000;
 
 it("uploads the completed copy of a request another process held, completed, and could not upload before it exited", async () => {
 	const { child, owner } = await liveProcess();
@@ -93,30 +105,85 @@ it("keeps a request held by a live process, and forgets it once that process upl
 
 it("uploads a held request as it is once its process is gone, also when another process now has its pid", async () => {
 	const { owner: live } = await liveProcess();
-	const offline = await new MockIngest().reserve();
-	const hold = async (owner: OwnerProcess, at?: Date) => {
-		const id = randomUUID();
-		const a = uploader(offline.url, owner);
-		await a.enqueueRequest(input(id, at), { value: payload }, { awaiting: true });
-		await a.stop();
-		return id;
-	};
 	const exited = await hold({ ...live, pid: exitedPid() });
-	const reused = await hold({ ...live, started: "Thu Jan  1 00:00:00 1970" });
+	// Pid reuse is only detectable where the OS reports start times.
+	const reused = live.started === undefined ? undefined : await hold({ ...live, started: "1" });
 	const held = await hold(live);
-	const elsewhere = await hold({ ...live, host: "elsewhere.invalid" });
-	const elsewhereLongAgo = await hold({ ...live, host: "elsewhere.invalid" }, new Date(Date.now() - 7 * 60 * 60 * 1000));
+	const elsewhere = await hold({ ...live, machine: "elsewhere.invalid" });
+	const elsewhereLongAgo = await hold({ ...live, machine: "elsewhere.invalid" }, new Date(Date.now() - 7 * HOURS));
 
 	const b = uploader(ingest.url);
 	await b.ready;
 	await b.flush();
-	expect([...ingest.requests.keys()].sort()).toEqual([exited, reused, elsewhereLongAgo].sort());
+	expect([...ingest.requests.keys()].sort()).toEqual([exited, elsewhereLongAgo, ...(reused ? [reused] : [])].sort());
 	for (const request of ingest.requests.values()) {
 		expect(request.assistant).toBeUndefined();
 		expect(request).not.toHaveProperty("awaiting");
 		expect(ingest.payload(request.id)).toEqual(payload);
 	}
 	expect(await spooled()).toEqual([`${held}.json`, `${elsewhere}.json`].sort());
+}, 20_000);
+
+it.skipIf(process.platform === "win32")("fingerprints a process the same way whatever the caller's TZ", async () => {
+	const saved = process.env.TZ;
+	try {
+		process.env.TZ = "America/New_York";
+		const first = await processStart(process.pid);
+		process.env.TZ = "UTC";
+		const second = await processStart(process.pid);
+		process.env.TZ = "Asia/Kolkata";
+		const third = await processStart(process.pid);
+		expect(first).toBeDefined();
+		expect(second).toBe(first);
+		expect(third).toBe(first);
+	} finally {
+		if (saved === undefined) delete process.env.TZ;
+		else process.env.TZ = saved;
+	}
+});
+
+it("keeps a request held by a live process that an earlier version recorded with its hostname and a localized start time", async () => {
+	const { owner: live } = await liveProcess();
+	const legacy = { pid: live.pid, host: hostname(), started: "Sat Oct 24 17:16:19 2026" } as OwnerProcess;
+	const held = await hold(legacy);
+	const exited = await hold({ ...legacy, pid: exitedPid() });
+
+	const b = uploader(ingest.url);
+	await b.ready;
+	await b.flush();
+	expect([...ingest.requests.keys()]).toEqual([exited]);
+	expect(await spooled()).toEqual([`${held}.json`]);
+}, 20_000);
+
+it("checks the holder on this machine whatever hostname the record carries", async () => {
+	const { owner: live } = await liveProcess();
+	// The hostname changed, for example with DHCP, after the holder wrote the record.
+	const renamed = { ...live, host: "before-dhcp.invalid" } as OwnerProcess;
+	const exited = await hold({ ...renamed, pid: exitedPid() });
+	const held = await hold(renamed);
+
+	const b = uploader(ingest.url);
+	await b.ready;
+	await b.flush();
+	expect([...ingest.requests.keys()]).toEqual([exited]);
+	expect(ingest.requests.get(exited)!.assistant).toBeUndefined();
+	expect(await spooled()).toEqual([`${held}.json`]);
+}, 20_000);
+
+it("never takes a record left with this process's pid by another process for its own, and caps holds it cannot verify", async () => {
+	const { owner: live } = await liveProcess();
+	const machine = await machineId();
+	// A record with no start time, as on Windows, from an earlier process that had this pid.
+	const samePid = await hold({ pid: process.pid, machine });
+	const unverifiable = { pid: live.pid, machine };
+	const recent = await hold(unverifiable);
+	const stale = await hold(unverifiable, new Date(Date.now() - 7 * HOURS));
+
+	const b = uploader(ingest.url);
+	await b.ready;
+	await b.flush();
+	expect([...ingest.requests.keys()].sort()).toEqual([samePid, stale].sort());
+	expect(await spooled()).toEqual([`${recent}.json`]);
 }, 20_000);
 
 it("holds a call that is still streaming when the uploader in its process is replaced, until it completes", async () => {

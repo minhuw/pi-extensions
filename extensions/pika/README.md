@@ -27,12 +27,16 @@ pika is part of this collection. Installing the collection loads it as the last 
 2. Install the collection on each machine: `pi install git:github.com/minhuw/pi-extensions` (see the [root README](../../README.md#install)).
 3. Write `~/.pi/agent/pika.json` (below) and run `/reload` or start a new pi session. `/pika` confirms that the session is captured.
 
-To load pika on its own, without the rest of the collection, narrow the package's extensions in `~/.pi/agent/settings.json`:
+To load pika on its own, without the rest of the collection, narrow the package in `~/.pi/agent/settings.json`. Pi loads every resource type a filter leaves out, so the empty `skills`, `prompts`, and `themes` lists are needed too; with them, pika's extension is the only thing the package loads:
 
 ```json
 {
   "packages": [
-    { "source": "git:github.com/minhuw/pi-extensions", "extensions": ["extensions/pika/index.ts"] }
+    {
+      "source": "git:github.com/minhuw/pi-extensions",
+      "extensions": ["extensions/pika/index.ts"],
+      "skills": [], "prompts": [], "themes": []
+    }
   ]
 }
 ```
@@ -77,7 +81,8 @@ Each `exclude` entry is matched against the session's working directory:
 
 - A plain path excludes that directory and everything below it: `"/home/me/work/client"` excludes `/home/me/work/client` and `/home/me/work/client/api`, but not `/home/me/work/client2`.
 - A pattern with `*`, `**`, or `?` excludes a cwd when the pattern matches the cwd or one of its ancestors. `*` and `?` stay within one path segment, and `**` crosses segments: `"/home/me/scratch/*"` excludes every directory under `/home/me/scratch`, and `"**/secret-*"` excludes any directory below one whose name starts with `secret-`.
-- `~` and `~/…` expand to the home directory. Relative paths resolve against the directory pi was started in, so prefer absolute paths.
+- `~` and `~/…` expand to the home directory, and absolute patterns are used as written.
+- Relative patterns, plain or glob, resolve against the directory pi was started in: started in `/home/me`, `"scratch/*"` means `/home/me/scratch/*`. Patterns that start with `**` are the exception and match at any depth. Prefer absolute or `~/` patterns, since pi's start directory changes.
 
 An excluded session's child sessions and Herder runs are skipped too, wherever they run. A child counts as the session's child when its `parentSession` header names the session file, or when its `pi-extensions.session-link` entry names the session id or file. A Herder run is also skipped when its run directory is excluded.
 
@@ -105,14 +110,24 @@ State lives in `<agentDir>/pika/`, normally `~/.pi/agent/pika/`:
 | --- | --- |
 | `streams/` | One cursor per stream: the byte length the server has acknowledged, written atomically. Session lines are read again from the session file itself, so the file is the queue. |
 | `streams/done/` | Cursors of fully uploaded, closed streams. |
-| `spool/requests/` | Captured requests, written as soon as the request starts, until the server accepts them with none of their blocks missing. |
+| `spool/requests/` | Captured requests, until the server accepts them with none of their blocks missing. A payload is written when the provider request starts; a `fidelity: "context"` call, when its response starts. |
 | `spool/blobs/` | Block texts of spooled requests, so pika can always answer `missingBlobs`. A block is deleted once every request that references it is complete. |
 | `spool/parked/` | Items the server refused as too large. |
 | `acked.log` | A bounded set (100,000) of block hashes the server already has, and the server URL they belong to. A different URL starts an empty set. |
 
-After a crash or a lost connection nothing is lost and nothing is duplicated on the server. On the next start, pika resumes every open stream from its cursor and resends spooled requests; at worst something is sent twice, and the server ignores duplicates. If pi dies while a response is streaming, the request is uploaded without its `assistant` link. If the server reports a gap below pika's cursor, for example after it was restored from an older backup, pika rewinds the stream and resends from the server's length. If the server's copy of a stream differs from the local file, the stream stops with a conflict and `/pika` shows it.
+After a crash or a lost connection nothing is lost and nothing is duplicated on the server. On the next start, pika resumes every open stream from its cursor and resends spooled requests; at worst something is sent twice, and the server ignores duplicates. A request stays held, and is not uploaded, until its assistant message arrives. If pi dies while a response is streaming, the request is uploaded without its `assistant` link, for payload and context fidelity alike. Only a call that ends before its response starts and that exposed no payload, for example one aborted while the provider connects, is not recorded. If the server reports a gap below pika's cursor, for example after it was restored from an older backup, pika rewinds the stream and resends from the server's length. If the server's copy of a stream differs from the local file, the stream stops with a conflict and `/pika` shows it.
 
 Delete `~/.pi/agent/pika/` to forget all local state. Sessions that are resumed afterwards are uploaded again from offset 0, and the server ignores the lines it already has.
+
+### Several pi processes
+
+All pi processes on a machine share `<agentDir>/pika/`, and any of them uploads what another spooled. A request held for its assistant message records the process that holds it: its pid, a machine id, and the process start time. Another process uploads the request without waiting once that process is gone, and checks again every 5 s while it runs.
+
+- The machine id is `/etc/machine-id` (or `/var/lib/dbus/machine-id`) on Linux and `IOPlatformUUID` on macOS, so it survives hostname changes from DHCP or a VPN. Other platforms use the hostname.
+- The start time rules out a reused pid. It is the boot id and start ticks on Linux and the `ps` start time in epoch seconds on macOS and other Unix systems. Requests held by an earlier pika version, which recorded a localized start time, are checked by pid alone, within the 6-hour limit below.
+- Where pika cannot verify a holder, it uploads the request as it is 6 hours after it was captured: when the holder ran on another machine, or on Windows, which has no start time to tell a reused pid from the original process. On Windows, a request held by an exited process whose pid now belongs to another long-running process therefore waits up to 6 hours.
+
+Do not share one agentDir between machines, for example over a network file system. pika cannot tell whether a process on another machine is alive, so requests that machine held would wait 6 hours.
 
 ### `/pika`
 

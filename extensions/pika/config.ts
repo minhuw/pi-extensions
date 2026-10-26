@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 export interface PikaConfig {
 	url: string;
@@ -52,14 +52,17 @@ function globToRegExp(glob: string): RegExp {
 	return new RegExp(`^${source}$`);
 }
 
-/** A cwd is excluded when a pattern is a prefix directory of it, or a glob matching it or one of its ancestors. */
+/**
+ * A cwd is excluded when a pattern is a prefix directory of it, or a glob matching it or one of its
+ * ancestors. Relative patterns resolve against pi's start directory, except globs starting with `**`.
+ */
 export function isExcluded(cwd: string, patterns: readonly string[]): boolean {
 	const target = resolve(cwd);
 	for (const rawPattern of patterns) {
 		const pattern = expandHome(rawPattern.trim());
 		if (!pattern) continue;
 		if (/[*?]/.test(pattern)) {
-			const regexp = globToRegExp(pattern);
+			const regexp = globToRegExp(pattern.startsWith("**") || isAbsolute(pattern) ? pattern : resolve(pattern));
 			for (let dir = target; ; ) {
 				if (regexp.test(dir)) return true;
 				const parent = resolve(dir, "..");

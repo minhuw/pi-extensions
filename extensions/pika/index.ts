@@ -140,6 +140,10 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		return undefined;
 	});
 
+	pi.on("message_start", (event, ctx) => {
+		guard(() => { if (isAssistant(event.message)) owned(ctx)?.onAssistantStart(event.message); });
+	});
+
 	pi.on("message_end", (event, ctx) => {
 		guard(() => {
 			const capture = owned(ctx);

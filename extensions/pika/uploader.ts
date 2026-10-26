@@ -29,10 +29,15 @@ const MAX_GAP_RETRIES = 3;
 const STOP_WAIT_MS = 1_000;
 /** Unreferenced spooled blobs younger than this may belong to a request another process is spooling. */
 const ORPHAN_BLOB_AGE_MS = 60_000;
-/** How long another process counts as alive, while it holds a request, before it is checked again. */
+/** How long a verdict on whether the process holding a request is alive stands before it is checked again. */
 const HELD_CHECK_MS = 5_000;
-/** A request held by a process on another host, which cannot be checked from here, is uploaded as it is after this. */
-const FOREIGN_HOST_HOLD_MS = 6 * 60 * 60 * 1000;
+/**
+ * A held request whose process cannot be verified from here, because it ran on another machine or
+ * has no start time to rule out a reused pid, is uploaded as it is after this.
+ */
+const MAX_UNVERIFIED_HOLD_MS = 6 * 60 * 60 * 1000;
+/** Start times `processStart` reports: epoch seconds, or Linux's boot id and clock ticks. Earlier versions stored a localized date. */
+const COMPARABLE_START = /^(?:\d+|[0-9a-f-]*:\d+)$/;
 
 const gzipAsync = promisify(gzip);
 const execFileAsync = promisify(execFile);
@@ -48,10 +53,12 @@ export interface UploaderOptions {
 	owner?: OwnerProcess;
 }
 
-/** A process that holds requests: its pid, host, and start time as the OS reports it, when known. */
+/** A process that holds requests: its pid, machine, and start time as `processStart` reports it, when known. */
 export interface OwnerProcess {
 	pid: number;
-	host: string;
+	machine?: string;
+	/** What earlier versions recorded instead of `machine`. */
+	host?: string;
 	started?: string;
 }
 
@@ -158,8 +165,13 @@ function alive(pid: number): boolean {
 }
 
 let bootId: Promise<string> | undefined;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const LSTART = /^\w{3}\s+(\w{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2}):(\d{2})\s+(\d{4})$/;
 
-/** When `pid` started, as the OS reports it, so a reused pid does not pass for an exited process; undefined if unknown. */
+/**
+ * When `pid` started, so a reused pid does not pass for an exited process; undefined if unknown.
+ * Linux: boot id and clock ticks; other platforms with `ps`: epoch seconds; Windows: unknown.
+ */
 export async function processStart(pid: number): Promise<string | undefined> {
 	if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
 	try {
@@ -171,16 +183,45 @@ export async function processStart(pid: number): Promise<string | undefined> {
 			return ticks ? `${await bootId}:${ticks}` : undefined;
 		}
 		if (process.platform === "win32") return undefined;
-		const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, LC_ALL: "C" }, timeout: 5_000 });
-		return stdout.trim() || undefined;
+		// `lstart` is in the caller's time zone and locale; fixing both makes it the same for every caller.
+		const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { env: { ...process.env, TZ: "UTC0", LC_ALL: "C" }, timeout: 5_000 });
+		const match = LSTART.exec(stdout.trim());
+		const month = match ? MONTHS.indexOf(match[1]!) : -1;
+		if (!match || month < 0) return undefined;
+		return String(Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5])) / 1000);
 	} catch {
 		return undefined;
 	}
 }
 
+let machine: Promise<string> | undefined;
+
+/** A stable id of this machine: Linux's machine-id, macOS's IOPlatformUUID, otherwise the hostname. */
+export function machineId(): Promise<string> {
+	return machine ??= (async () => {
+		try {
+			if (process.platform === "linux") {
+				for (const file of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+					const id = (await readFile(file, "utf8").catch(() => "")).trim();
+					if (id) return id;
+				}
+			} else if (process.platform === "darwin") {
+				const { stdout } = await execFileAsync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { timeout: 5_000 });
+				const id = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(stdout)?.[1];
+				if (id) return id;
+			}
+		} catch { /* the hostname below */ }
+		return hostname();
+	})();
+}
+
 let thisProcess: Promise<OwnerProcess> | undefined;
-const currentProcess = () => thisProcess ??= processStart(process.pid)
-	.then((started) => ({ pid: process.pid, host: hostname(), ...(started ? { started } : {}) }));
+const currentProcess = () => thisProcess ??= Promise.all([processStart(process.pid), machineId()])
+	.then(([started, machine]) => ({ pid: process.pid, machine, ...(started ? { started } : {}) }));
+
+const OWNERS = Symbol.for("pi-extensions.pika.owners");
+/** Ids of the uploaders created in this process, shared by module copies. */
+const localOwners = (): Set<string> => (globalThis as { [OWNERS]?: Set<string> })[OWNERS] ??= new Set();
 
 /**
  * Process-wide uploader. Session entries are read from their source files between the
@@ -202,8 +243,8 @@ export class Uploader {
 	private readonly strikes = new Map<string, number>();
 	private readonly documents = new Map<string, PendingDocument>();
 	private readonly herderRuns = new Set<string>();
-	private self: OwnerProcess = { pid: process.pid, host: hostname() };
-	/** Whether the processes holding requests read from the spool were alive when last checked. */
+	private self: OwnerProcess = { pid: process.pid };
+	/** Whether the processes holding requests read from the spool were alive when last checked, and when. */
 	private readonly owners = new Map<string, { alive: boolean; at: number }>();
 	private heldElsewhere = false;
 	private heldCheckedAt = 0;
@@ -226,6 +267,8 @@ export class Uploader {
 	/** `after` is the stop of the uploader this one replaces in the same process, so its spooled requests are loaded too. */
 	constructor(readonly options: UploaderOptions, after?: Promise<void>) {
 		this.store = new Store(options.dir);
+		// An uploader standing in for another process (`owner`) holds only its own requests.
+		if (!options.owner) localOwners().add(this.id);
 		this.ready = this.load(after).catch((error) => this.noteError(`loading local state: ${errorText(error)}`));
 		this.scanTimer = setInterval(() => { this.scan().catch((error) => this.noteError(errorText(error))); }, SCAN_INTERVAL_MS);
 		this.scanTimer.unref();
@@ -313,6 +356,7 @@ export class Uploader {
 				...input, skeleton: split.skeleton, blocks: split.blocks,
 				...(options.awaiting ? { awaiting: { ...this.self, owner: this.id } } : {}),
 			};
+			const previous = this.requests.get(record.id);
 			for (const [hash, text] of split.data) {
 				if (this.parked.has(hash)) continue;
 				const blob = this.blobs.get(hash);
@@ -321,6 +365,8 @@ export class Uploader {
 				this.blobs.set(hash, { size: Buffer.byteLength(text), refs: 1 });
 			}
 			const bytes = await this.store.saveRequest(record);
+			// A payload replaces the context spooled earlier for the same call.
+			if (previous) for (const hash of this.forget(previous.record)) await this.store.deleteBlob(hash);
 			this.requests.set(record.id, { record, bytes, missingRounds: 0 });
 			this.poke();
 		});
@@ -490,24 +536,36 @@ export class Uploader {
 
 	/** Whether a call is still streaming in this process; its assistant message comes through `completeRequest`. */
 	private holds(awaiting: NonNullable<SpooledRequest["awaiting"]>): boolean {
-		const { self } = this;
-		return awaiting.owner === this.id
-			|| (awaiting.pid === self.pid && (awaiting.host ?? self.host) === self.host && awaiting.started === self.started);
+		return awaiting.owner === this.id || (!this.options.owner && awaiting.pid === process.pid && localOwners().has(awaiting.owner));
 	}
 
-	/** Whether the process holding a request may still complete it. */
+	/** Whether the process holding a request may still complete it; a verdict stands for `HELD_CHECK_MS`. */
 	private async holderAlive(record: SpooledRequest): Promise<boolean> {
 		const awaiting = record.awaiting!;
-		if ((awaiting.host ?? this.self.host) !== this.self.host) return Date.now() - Date.parse(record.at) < FOREIGN_HOST_HOLD_MS;
 		const known = this.owners.get(awaiting.owner);
-		if (known && (!known.alive || Date.now() - known.at < HELD_CHECK_MS)) return known.alive;
-		let result = alive(awaiting.pid);
-		if (result && awaiting.started !== undefined) {
-			const started = await processStart(awaiting.pid);
-			result = started === undefined || started === awaiting.started;
-		}
+		if (known && Date.now() - known.at < HELD_CHECK_MS) return known.alive;
+		const result = await this.checkHolder(record);
 		this.owners.set(awaiting.owner, { alive: result, at: Date.now() });
 		return result;
+	}
+
+	private async checkHolder(record: SpooledRequest): Promise<boolean> {
+		const awaiting = record.awaiting!;
+		const unverified = () => Date.now() - Date.parse(record.at) < MAX_UNVERIFIED_HOLD_MS;
+		const comparable = awaiting.started !== undefined && COMPARABLE_START.test(awaiting.started);
+		const sameStart = async () => comparable && alive(awaiting.pid) && await processStart(awaiting.pid) === awaiting.started;
+		const local = awaiting.machine !== undefined ? awaiting.machine === this.self.machine
+			// Earlier versions recorded the hostname, which can change while the process runs.
+			: awaiting.host === undefined || awaiting.host === hostname() || await sameStart();
+		if (!local) return unverified();
+		if (!alive(awaiting.pid)) return false;
+		// Uploaders in this process are known; another one with this pid has exited.
+		if (awaiting.pid === process.pid) return localOwners().has(awaiting.owner);
+		if (comparable) {
+			const started = await processStart(awaiting.pid);
+			if (started !== undefined) return started === awaiting.started;
+		}
+		return unverified();
 	}
 
 	/**
