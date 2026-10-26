@@ -379,9 +379,9 @@ impl Deriver<'_> {
         Ok(())
     }
 
-    /// Whether a run is in progress at this point of the current turn: its user prompt awaits the first reply, or its
-    /// last assistant message continues with tool calls. Reads only rows already written, so incremental ingest and
-    /// reindex agree.
+    /// Whether a run is in progress at this point of the current turn: its user prompt awaits the first reply, its
+    /// last assistant message continues with tool calls, or pi recorded a recovery from a failed or truncated reply.
+    /// Reads only rows already written, so incremental ingest and reindex agree.
     fn run_in_progress(&self) -> Result<bool> {
         let Some(turn) = &self.turn else { return Ok(false) };
         let last: Option<(i64, Option<String>)> = self
@@ -400,13 +400,34 @@ impl Deriver<'_> {
                 role.as_deref() == Some("user")
             }
             Some((_, Some(stop))) if stop == "toolUse" => true,
-            // pi ends the run without running the tools of an aborted or failed reply.
-            Some((_, Some(stop))) if stop == "aborted" || stop == "error" => false,
-            Some((seq, _)) => self
-                .tx
-                .prepare_cached("SELECT EXISTS (SELECT 1 FROM tool_calls WHERE sid = ?1 AND call_seq = ?2 AND result_seq IS NULL)")?
-                .query_row(params![self.s.sid, seq], |r| r.get(0))?,
+            // pi ends the run without running the tools of an aborted reply.
+            Some((_, Some(stop))) if stop == "aborted" => false,
+            // pi retries a failed or truncated reply after omitting it (`context_edit`) or compacting, and answers the
+            // tool calls of a truncated reply with error results before calling the model again.
+            Some((seq, Some(stop))) if stop == "error" || stop == "length" => {
+                self.recovery_after(seq)? || (stop == "length" && self.has_tool_calls(seq)?)
+            }
+            // pi runs or fails every tool call of a reply, then calls the model again.
+            Some((seq, _)) => self.has_tool_calls(seq)?,
         })
+    }
+
+    fn has_tool_calls(&self, seq: i64) -> Result<bool> {
+        Ok(self
+            .tx
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM tool_calls WHERE sid = ?1 AND call_seq = ?2)")?
+            .query_row(params![self.s.sid, seq], |r| r.get(0))?)
+    }
+
+    /// Whether a `context_edit` or `compaction` entry follows `seq`. Scans only the entries after the turn's last model
+    /// call.
+    fn recovery_after(&self, seq: i64) -> Result<bool> {
+        Ok(self
+            .tx
+            .prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM entries WHERE sid = ?1 AND seq > ?2 AND type IN ('context_edit', 'compaction'))",
+            )?
+            .query_row(params![self.s.sid, seq], |r| r.get(0))?)
     }
 
     fn assistant(&mut self, seq: i64, entry: &Value, ts: Option<i64>, message: &Value) -> Result<Vec<String>> {

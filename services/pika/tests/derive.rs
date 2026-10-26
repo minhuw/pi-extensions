@@ -367,3 +367,72 @@ fn displayed_custom_messages_during_a_run_stay_in_the_turn() {
         (json!(3), json!(4), json!("/herder: resume"), json!("resumed")),
     ]);
 }
+
+fn error_result(call: &str) -> Value {
+    let mut v = result(call);
+    v["message"]["isError"] = json!(true);
+    v
+}
+
+/// pi omits a failed (`error`) or truncated (`length`) reply with a `context_edit`, compacts, or answers a truncated
+/// reply's tool calls with error results, then calls the model again; a notice steered in before that retry belongs to
+/// the user's turn.
+#[test]
+fn displayed_custom_messages_during_recovery_stay_in_the_turn() {
+    let omit = |target: &str| json!({ "type": "context_edit", "targetId": target, "replacement": null });
+    let compaction = json!({ "type": "compaction", "summary": "earlier work", "firstKeptEntryId": "u1", "tokensBefore": 5000 });
+
+    // A retryable error, retried after pi omitted the failed attempt.
+    let (env, turns) = derive_turns("retry-1", &turn_session("retry-1", &[
+        ("u1", user("go")),
+        ("a1", reply("overloaded", &[], Some("error"), 0.5)),
+        ("e1", omit("a1")),
+        ("n1", notice("Background agent finished", true)),
+        ("a2", reply("retried answer", &[], Some("stop"), 0.25)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("retried answer"))]);
+    let turn = one(&env.store, "SELECT t.* FROM turns t JOIN sessions s USING (sid) WHERE s.id = 'retry-1'");
+    assert_eq!([&turn["model_calls"], &turn["cost"]], [&json!(2), &json!(0.75)]);
+
+    // Context-overflow recovery compacts before the retry.
+    let (_, turns) = derive_turns("retry-2", &turn_session("retry-2", &[
+        ("u1", user("go")),
+        ("a1", reply("too long", &[], Some("error"), 0.0)),
+        ("k1", compaction.clone()),
+        ("n1", notice("notice", true)),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("done"))]);
+
+    // Without a recovery entry the error ended the run, so the notice starts one.
+    let (_, turns) = derive_turns("retry-3", &turn_session("retry-3", &[
+        ("u1", user("go")),
+        ("a1", reply("failed", &[], Some("error"), 0.0)),
+        ("n1", notice("notice", true)),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![
+        (json!(1), json!(2), json!("go"), json!("failed")),
+        (json!(3), json!(4), json!("notice"), json!("done")),
+    ]);
+
+    // A truncated reply's tool calls get error results and the model is called again.
+    let (_, turns) = derive_turns("length-1", &turn_session("length-1", &[
+        ("u1", user("go")),
+        ("a1", reply("cut", &["t1"], Some("length"), 0.0)),
+        ("r1", error_result("t1")),
+        ("n1", notice("notice", true)),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("done"))]);
+
+    // A recoverable truncated reply without tool calls is omitted and retried.
+    let (_, turns) = derive_turns("length-2", &turn_session("length-2", &[
+        ("u1", user("go")),
+        ("a1", reply("cut", &[], Some("length"), 0.0)),
+        ("e1", omit("a1")),
+        ("n1", notice("notice", true)),
+        ("a2", reply("done", &[], Some("stop"), 0.0)),
+    ]));
+    assert_eq!(turns, vec![(json!(1), json!(5), json!("go"), json!("done"))]);
+}

@@ -134,7 +134,13 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
     modelCalls, toolCalls, toolErrors, cost, tokens, finalText }
   ```
   `finalText` is the last assistant text in the turn, cut to 2,000 characters.
-  - A run is in progress after a user prompt until its first assistant reply, and after an assistant reply with `stopReason: "toolUse"` or with tool calls that have no tool result yet, unless its `stopReason` is `aborted` or `error`. A displayed extension message saved during a run, such as a subagent notice steered between a tool result and the next model call, stays inside its turn and changes neither its `userText` nor its `finalText`. A displayed message before the session's first turn starts one.
+  - A run is in progress after a user prompt until its first assistant reply. After a reply, it depends on the turn's last reply's `stopReason`:
+    - `toolUse`: in progress.
+    - `aborted`: ended.
+    - `error` or `length`: in progress if a `context_edit` or `compaction` entry follows the reply, because pi recorded a recovery (an automatic retry, or overflow or truncation recovery) and calls the model again. A `length` reply with tool calls is also in progress, since pi answers them with error results and continues. Otherwise ended.
+    - anything else, or missing: in progress if the reply has tool calls, whether or not their results have arrived; otherwise ended.
+
+    A displayed extension message saved during a run, such as a subagent notice steered between a tool result and the next model call, stays inside its turn and changes neither its `userText` nor its `finalText`. A displayed message before the session's first turn starts one.
 - **`GET sessions/:id/entries`** accepts `from` (a seq), `to`, and `limit` (default 200, max 1000). It returns `{ items: Entry[] }`, where `Entry` is:
   ```
   { seq, offset, id, parentId, type, timestamp, raw, requestId?, truncated? }
