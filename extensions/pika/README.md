@@ -196,6 +196,19 @@ Before the child's first prompt, the creator appends a link entry to the child s
 
 Every field except `kind` is optional, and `herder` is present only for Herder steps. The server links the child to its parent from this entry and falls back to the session header's `parentSession`. Another extension that creates child sessions can follow the same contract to have them captured and linked.
 
+### Credentials registry
+
+pika publishes its active server credentials for other extensions, such as [relay](../relay/README.md), which never import it:
+
+```ts
+const registry: { current: { url: string; token: string; isExcluded(cwd: string): boolean } | undefined; listeners: Set<() => void> } =
+	(globalThis as any)[Symbol.for("pi-extensions.pika.credentials")] ??= { current: undefined, listeners: new Set() };
+```
+
+- `current` is set while pika is enabled with a URL and token, and `undefined` when it is disabled (including `PIKA_DISABLED=1`), logged out, or unconfigured. `isExcluded` applies the [exclude list](#exclude-list).
+- pika reads the configuration at each session start, `/pika login`, and `/pika logout`, and calls every listener after each change, including a login that switches servers. A configuration that reads the same is no change.
+- Either side may create the registry first.
+
 ### Herder runs
 
 Herder emits `herder:run` on `pi.events` with `{ runId, runDir, journalPath, goalPath, planPath, repo, title }` when a run starts or resumes and after journal appends. pika tails `journalPath` as stream `herder:<runId>` and uploads `goal.md` and `plan.md` as documents whenever their sha256 changes. The uploaded versions are recorded with the server URL, like the acknowledged hashes, so after `/pika login` switches to another server the new server gets each run's goal and plan again without waiting for them to change. Versions recorded by pika 0.1, without a URL, count as the server's that the acknowledged hashes were recorded for. Only runs started from a captured session are uploaded.

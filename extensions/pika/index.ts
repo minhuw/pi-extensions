@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
+import { publishCredentials } from "./credentials.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
 
@@ -164,6 +165,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	/** Reads the configuration and, when enabled and not excluded, captures the session from its first line. */
 	function attach(ctx: ExtensionContext): void {
 		config = loadConfig(getAgentDir());
+		publishCredentials(config);
 		if (!config.enabled) return;
 		attachedCtx = ctx;
 		shared().detached.delete(self);
@@ -286,6 +288,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		// do the other open sessions `/pika logout` stopped.
 		guard(() => {
 			config = loadConfig(getAgentDir());
+			publishCredentials(config);
 			if (!config.enabled) return;
 			if (currentUploader()) acquireUploader(uploaderOptions(), true);
 			// A session that shut down while the file was written keeps its old context out of the process.
@@ -330,6 +333,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		}
 		await stopProcess();
 		config = loadConfig(getAgentDir());
+		guard(() => publishCredentials(config!));
 		const lines = [
 			`Logged out of pika: removed the url and token from ${file}. This process stopped uploading.`,
 			`Queued data stays in ${join(getAgentDir(), "pika")} and uploads after the next login.`,
