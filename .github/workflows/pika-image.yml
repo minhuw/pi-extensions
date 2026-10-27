@@ -85,6 +85,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: pika:smoke
+          build-args: PIKA_REVISION=${{ github.sha }}
           load: true
           cache-from: type=gha,scope=pika-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=pika-${{ env.PLATFORM_PAIR }}
@@ -116,6 +117,14 @@ jobs:
           echo "$health"
           if ! jq -e '.features | index("relay")' <<<"$health" >/dev/null; then
             echo "::error::the health answer's features do not list relay"
+            exit 1
+          fi
+          if [[ "$(jq -r .revision <<<"$health")" != "${GITHUB_SHA::7}" ]]; then
+            echo "::error::the health answer does not name the commit ${GITHUB_SHA::7}"
+            exit 1
+          fi
+          if ! docker exec pika-root pika --version | grep -qx "pika [0-9.]* (${GITHUB_SHA::7})"; then
+            echo "::error::pika --version does not name the commit ${GITHUB_SHA::7}"
             exit 1
           fi
           page=$(curl -fsS http://127.0.0.1:7171/)
@@ -168,6 +177,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ env.IMAGE }}
+          build-args: PIKA_REVISION=${{ github.sha }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=pika-${{ env.PLATFORM_PAIR }}
 

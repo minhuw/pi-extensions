@@ -223,6 +223,21 @@ async fn without_authentication_everything_is_open() {
 }
 
 #[tokio::test]
+async fn health_names_the_version_and_the_commit_when_the_build_knew_it() {
+    let s = server("/", None, None);
+    let health = get(&s.app, "/api/health", None).await.json();
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    // The image build passes PIKA_REVISION; a plain `cargo build` does not.
+    match pika::REVISION {
+        "" => assert!(health.get("revision").is_none(), "{health}"),
+        revision => {
+            assert!(revision.len() == 7 && revision.bytes().all(|b| b.is_ascii_hexdigit()), "{revision}");
+            assert_eq!(health["revision"], revision);
+        }
+    }
+}
+
+#[tokio::test]
 async fn routes_live_under_the_base_path() {
     let s = server("/pika/", None, None);
     let health = get(&s.app, "/pika/api/health", None).await;

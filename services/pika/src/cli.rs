@@ -11,7 +11,7 @@ use crate::config::{self, AuthMode, CookieSecure, RelayConfig, ServerConfig};
 use crate::store::Store;
 
 #[derive(Parser)]
-#[command(name = "pika", version, about = "Stores and serves pi trajectories")]
+#[command(name = "pika", version = env!("PIKA_BUILD"), about = "Stores and serves pi trajectories")]
 struct Cli {
     /// Directory holding pika.db and the blob store.
     #[arg(long, env = "PIKA_DATA_DIR", default_value = config::DEFAULT_DATA_DIR, global = true)]

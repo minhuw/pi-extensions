@@ -66,7 +66,7 @@ Flags win over environment variables. `PIKA_DEBUG=1` turns on debug logging. In 
 
 Every route is under the base path:
 
-- `GET api/health` returns `{ "ok": true, "version", "basePath", "features" }`, without authentication. `features` lists `"relay"` when relay is on.
+- `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
 - `POST api/ingest/v1/batch` takes uploads from devices with `Authorization: Bearer <token>`.
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
@@ -211,6 +211,8 @@ docker exec pika pika token list
 Instead of `password set`, mount the password as a file, such as a Docker or Compose secret, and point `PIKA_PASSWORD_FILE` at it (`-v /srv/secrets/pika-password:/run/secrets/pika_password:ro -e PIKA_PASSWORD_FILE=/run/secrets/pika_password`; the file must be readable by uid 10001). [`deploy/compose.yaml`](deploy/compose.yaml) does this with a Compose secret. With `-e PIKA_AUTH=proxy` the proxy authenticates instead. Without a password or `PIKA_AUTH`, the container exits at once and `docker logs pika` says why.
 
 To upgrade, `docker pull` the tag and recreate the container with the same volume; the server migrates the database when it opens it. Coming from 0.1, read [Upgrading from 0.1](#upgrading-from-01) first.
+
+The bottom of the UI's sidebar shows the version and commit the server runs, such as `pika 0.3.0 (a1b2c3d)`; `docker exec pika pika --version` and `curl …/api/health` say the same. `edge` keeps the version of the last release, so compare the commit with the latest one on `master` to tell whether it is up to date.
 
 ### Building it yourself
 

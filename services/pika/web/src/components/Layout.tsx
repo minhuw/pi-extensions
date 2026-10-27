@@ -3,7 +3,7 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
 import { useShortcuts } from "../lib/keyboard";
-import { RELAY_BADGE_POLL_MS, useOnlineSessions } from "../lib/relay";
+import { RELAY_BADGE_POLL_MS, useHealth, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
 import { Icon, type IconName } from "./icons";
@@ -171,8 +171,25 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 						Sign out
 					</button>
 				)}
+				<ServerVersion />
 			</div>
 		</aside>
+	);
+}
+
+/** The server's version and the commit it was built from, so you can tell whether it runs the latest build. */
+function ServerVersion() {
+	const { data } = useHealth();
+	if (!data?.version) return null;
+	const build = data.revision ? `${data.version} (${data.revision})` : data.version;
+	return (
+		<div
+			className="select-text px-2 pt-1.5 text-[12px] text-muted"
+			title={data.revision ? `pika ${data.version}, built from commit ${data.revision}` : `pika ${data.version}`}
+			data-server-version=""
+		>
+			pika {build}
+		</div>
 	);
 }
 

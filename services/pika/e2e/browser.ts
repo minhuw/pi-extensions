@@ -163,6 +163,17 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await visible(`[data-session-row="${t.mainId}"]`);
 	log("browser: signed in");
 
+	// The sidebar names the server's version and the commit it was built from, as health does.
+	const health = await page.evaluate(async () => {
+		const base = document.querySelector('meta[name="pika-base"]')?.getAttribute("content") ?? "/";
+		return (await fetch(`${base.replace(/\/?$/, "/")}api/health`)).json() as Promise<{ version: string; revision?: string }>;
+	});
+	const built = process.env.PIKA_REVISION?.slice(0, 7);
+	if (built) checkEqual(health.revision, built, "the commit health names");
+	const versionLine = await textOf("[data-server-version]");
+	checkEqual(versionLine, `pika ${health.version}${health.revision ? ` (${health.revision})` : ""}`, "the sidebar's version line");
+	log(`browser: the sidebar shows "${versionLine}"`);
+
 	// 2. The session list shows the root sessions; the device filter narrows it to the desktop's large session.
 	const listed = async () => page.$$eval("[data-session-row]", (nodes) => nodes.map((node) => node.getAttribute("data-session-row")));
 	await visible(`[data-session-row="${t.largeId}"]`);

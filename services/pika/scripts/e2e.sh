@@ -105,6 +105,8 @@ if [[ "${PIKA_E2E_SKIP_BUILD:-}" != 1 ]]; then
   echo "e2e: building the web UI"
   step npm run build --prefix "$service/web"
   echo "e2e: building the release binary"
+  # The commit the binary reports; the browser checks expect it.
+  export PIKA_REVISION="$(git -C "$repo" rev-parse HEAD)"
   step cargo build --release --locked --manifest-path "$service/Cargo.toml" --bin pika
 fi
 echo "e2e: type-checking the driver"

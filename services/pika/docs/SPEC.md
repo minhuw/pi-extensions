@@ -268,6 +268,7 @@ Relay lets running pi sessions send text messages to each other through the serv
 - **Shutdown:** stopping the server closes every relay connection with 1001.
 
 ## Server configuration
+- **Version:** `GET {base}/api/health`, always open, returns `{ ok, version, basePath, features, revision? }`. `revision` is the first 7 hex digits of the commit the binary was built from, taken at build time from `PIKA_REVISION` (the image workflow passes the commit); it is missing when the build had none. `pika --version` and the startup log line show `<version> (<revision>)` the same way, and the web UI shows it at the bottom of the sidebar.
 - **Settings (flag / environment variable):**
   - `--bind` / `PIKA_BIND`, default `127.0.0.1:7171`
   - `--base-path` / `PIKA_BASE_PATH`, default `/`

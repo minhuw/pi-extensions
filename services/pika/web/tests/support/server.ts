@@ -82,6 +82,7 @@ export function createFakeServer({
 	loginRetryAfter = 840,
 	legacyMe = false,
 	features = ["relay"],
+	revision,
 	relay,
 	online = [],
 	relayEvents = [],
@@ -110,6 +111,8 @@ export function createFakeServer({
 	legacyMe?: boolean;
 	/** Health's `features`; `null` leaves it out, as servers older than 0.3 do. */
 	features?: string[] | null;
+	/** Health's `revision`, the commit the server was built from; servers built without one leave it out. */
+	revision?: string;
 	/** Whether the relay routes answer; otherwise they say `relay_disabled`. Defaults to health listing relay. */
 	relay?: boolean;
 	/** Sessions online through relay. */
@@ -157,7 +160,7 @@ export function createFakeServer({
 				state.healthFailures -= 1;
 				return json(503, { error: "unavailable" });
 			}
-			const health = { ok: true, version: features === null ? "0.2.0" : "0.3.0", basePath: base };
+			const health = { ok: true, version: features === null ? "0.2.0" : "0.3.0", basePath: base, ...(revision ? { revision } : {}) };
 			return json(200, features === null ? health : { ...health, features });
 		}
 		if (!url.pathname.startsWith(prefix)) return json(404, { error: "not found" });

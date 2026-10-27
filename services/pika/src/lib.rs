@@ -16,3 +16,6 @@ pub mod relay;
 pub mod requests;
 pub mod store;
 pub mod util;
+
+/// The commit this binary was built from, as 7 hex digits, or empty when the build did not say (see `build.rs`).
+pub const REVISION: &str = env!("PIKA_REVISION_SHORT");

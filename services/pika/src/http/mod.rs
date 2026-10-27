@@ -97,7 +97,11 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 
 async fn health(State(state): State<AppState>) -> Response {
     let features: &[&str] = if state.relay.enabled() { &["relay"] } else { &[] };
     let (version, base_path) = (env!("CARGO_PKG_VERSION"), &state.config.base_path);
-    Json(json!({ "ok": true, "version": version, "basePath": base_path, "features": features })).into_response()
+    let mut health = json!({ "ok": true, "version": version, "basePath": base_path, "features": features });
+    if !crate::REVISION.is_empty() {
+        health["revision"] = json!(crate::REVISION);
+    }
+    Json(health).into_response()
 }
 
 /// The whole application with every route under the configured base path.
@@ -144,7 +148,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.bind).await?;
     tracing::info!(
         "pika {} listening on http://{}{} (data {}, auth {}{})",
-        env!("CARGO_PKG_VERSION"),
+        env!("PIKA_BUILD"),
         listener.local_addr()?,
         config.base_path,
         config.data_dir.display(),

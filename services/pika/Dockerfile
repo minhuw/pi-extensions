@@ -15,6 +15,8 @@ WORKDIR /src
 COPY . .
 # Release builds embed web/dist.
 COPY --from=web /src/web/dist web/dist
+# The commit /api/health, the web UI, and --version report; the image workflow passes it.
+ARG PIKA_REVISION=
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

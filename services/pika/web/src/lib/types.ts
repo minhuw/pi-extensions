@@ -220,6 +220,8 @@ export interface Health {
 	version: string;
 	basePath: string;
 	features?: string[];
+	/** The commit the server was built from, 7 hex digits; missing when its build did not record one, as up to 0.3.0. */
+	revision?: string;
 }
 
 // Relay shapes (docs/RELAY.md).
