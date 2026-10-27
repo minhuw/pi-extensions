@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import { Icon } from "../components/icons";
 import { MessageDialog } from "../components/MessageDialog";
-import { Callout, cx, ErrorState, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
+import { Callout, cx, ErrorState, Page, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
 import { ApiError, useApi } from "../lib/api";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, totalTokens } from "../lib/format";
 import { useOnlineSessions } from "../lib/relay";
@@ -157,7 +157,7 @@ function SessionPage({ id }: { id: string }) {
 	if (session.error instanceof ApiError && session.error.status === 404) return <NotFoundPage what="session" />;
 
 	return (
-		<div className="mx-auto w-full max-w-[900px] px-12 pt-16 pb-32">
+		<Page className="pb-32">
 			<nav className="mb-6 flex items-center gap-1.5 text-[13px] text-muted" aria-label="Breadcrumb">
 				<Link to="/" className="rounded-sm px-1 hover:bg-hover">
 					Sessions
@@ -183,19 +183,26 @@ function SessionPage({ id }: { id: string }) {
 				)
 			) : (
 				<SessionViewContext.Provider value={context}>
-					<div className="flex items-start gap-3">
-						<PageTitle>{session.data.title || "Untitled session"}</PageTitle>
-						{isLive(session.data.lastAt) && (
-							<span className="mt-4 shrink-0" data-live="">
-								<Pill tone="green">live</Pill>
-							</span>
-						)}
-						{online && (
-							<span className="mt-4 shrink-0" data-online="" title="Connected to pika relay right now">
-								<Pill tone="green">Online</Pill>
-							</span>
-						)}
-					</div>
+					<PageTitle
+						badges={
+							(isLive(session.data.lastAt) || online) && (
+								<>
+									{isLive(session.data.lastAt) && (
+										<span data-live="">
+											<Pill tone="green">live</Pill>
+										</span>
+									)}
+									{online && (
+										<span data-online="" title="Connected to pika relay right now">
+											<Pill tone="green">Online</Pill>
+										</span>
+									)}
+								</>
+							)
+						}
+					>
+						{session.data.title || "Untitled session"}
+					</PageTitle>
 					<Properties items={sessionProperties(session.data)} />
 					<div className="mb-6 flex flex-wrap items-center gap-2 border-y border-line py-2 text-[13px]">
 						<label className="flex cursor-pointer items-center gap-2 rounded-sm px-1.5 py-0.5 text-muted hover:bg-hover">
@@ -235,6 +242,6 @@ function SessionPage({ id }: { id: string }) {
 					{messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
 				</SessionViewContext.Provider>
 			)}
-		</div>
+		</Page>
 	);
 }

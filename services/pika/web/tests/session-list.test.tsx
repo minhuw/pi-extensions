@@ -69,9 +69,19 @@ describe("session list", () => {
 		expect(new Date(params.get("to")!).getTime()).toBe(new Date("2026-10-02T23:59:59.999").getTime());
 	});
 
-	it("shows an empty state", async () => {
+	it("shows a first-run empty state that says how to add a machine", async () => {
 		renderApp("/", createFakeServer({ sessions: [] }).fetch);
-		expect(await screen.findByText("No sessions")).toBeTruthy();
+		const empty = (await screen.findByText("No sessions yet")).closest<HTMLElement>("[data-state=empty]")!;
+		expect(empty.textContent).toContain("Run /pika login in pi on each machine. Sessions appear here as they run.");
+		expect(empty.querySelector("code")?.textContent).toBe("/pika login");
+		expect(empty.querySelector("svg[data-pika-logo]")).not.toBeNull();
+	});
+
+	it("keeps a filtered empty state plain", async () => {
+		renderApp("/?device=nowhere", createFakeServer({ sessions }).fetch);
+		const empty = (await screen.findByText("Nothing matches these filters.")).closest<HTMLElement>("[data-state=empty]")!;
+		expect(within(empty).getByText("No sessions")).toBeTruthy();
+		expect(empty.querySelector("svg")).toBeNull();
 	});
 
 	it("loads further pages as the list scrolls", async () => {

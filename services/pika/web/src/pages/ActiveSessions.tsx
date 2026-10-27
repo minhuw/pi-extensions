@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import { Icon } from "../components/icons";
 import { useSigningOut } from "../components/Layout";
 import { MessageDialog } from "../components/MessageDialog";
-import { BUTTON, Callout, cx, EmptyState, ErrorState, PageTitle, Pill, SkeletonLines } from "../components/ui";
+import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatDateTime, formatRelative, plural } from "../lib/format";
 import { LAYOUT_GUARD_MS, useNow, useSettling } from "../lib/hooks";
@@ -372,13 +372,13 @@ export function ActiveSessionsPage() {
 		);
 
 	return (
-		<div className="mx-auto w-full max-w-[960px] px-12 pt-16 pb-24">
+		<Page className="pb-24">
 			<PageTitle>Active sessions</PageTitle>
-			<p className="mt-2 text-[15px] text-muted">
+			<p className="mt-2 text-[15px] text-pretty text-muted">
 				pi sessions running right now on machines logged into pika. Send one a message, or follow what sessions send each other.
 			</p>
 			{body}
 			{messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
-		</div>
+		</Page>
 	);
 }

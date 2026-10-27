@@ -232,3 +232,24 @@ export function Icon({ name, ...props }: IconProps & { name: IconName }) {
 	const Component = Icons[name];
 	return <Component {...props} />;
 }
+
+/**
+ * The pika logo, inlined so it renders under any base path. The source of truth is
+ * services/pika/resource/pika-icon.svg; keep these shapes in step with it.
+ */
+export function PikaLogo({ size = 20, ...props }: SVGProps<SVGSVGElement> & { size?: number }) {
+	return (
+		<svg width={size} height={size} viewBox="0 0 1254 1254" aria-hidden="true" data-pika-logo="" {...props}>
+			<path
+				fill="#F9856D"
+				d="M397 449 323 376C273 327 271 269 303 222 331 180 376 154 426 154 471 154 508 173 540 205L688 361C580 362 480 397 397 449Z"
+			/>
+			<path
+				fill="#4D90C2"
+				d="M596 261C601 218 630 187 667 178 730 160 783 190 817 245 844 288 857 338 854 389 968 427 1044 502 1044 601 1044 724 943 823 793 823H474V1044Q474 1110 409 1110H278Q212 1110 212 1044V779C212 648 272 538 397 449 480 397 580 362 688 361Z"
+			/>
+			<path fill="#FCC64D" d="M474 758H604C708 758 789 840 789 940V983Q789 1047 725 1047H474Z" />
+			<circle fill="#FFFFFF" cx="847" cy="570" r="54" />
+		</svg>
+	);
+}

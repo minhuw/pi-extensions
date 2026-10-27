@@ -151,13 +151,33 @@ export function Divider({ className }: { className?: string }) {
 	return <hr className={cx("border-0 border-t border-line", className)} />;
 }
 
-export function PageTitle({ children }: { children: ReactNode }) {
-	return <h1 className="text-[36px] leading-tight font-semibold tracking-[-0.01em] break-words">{children}</h1>;
+/** Every top-level page's column, so page titles start at the same x on every page. */
+export const PAGE_COLUMN = "mx-auto w-full max-w-[900px] px-12";
+
+/** A top-level page: the shared column and top padding; `className` adds the bottom padding. */
+export function Page({ children, className }: { children: ReactNode; className?: string }) {
+	return <div className={cx(PAGE_COLUMN, "pt-16", className)}>{children}</div>;
 }
 
-export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
+/** The page's title; `badges` (status pills) follow its last word inline, at the cap height. */
+export function PageTitle({ children, badges }: { children: ReactNode; badges?: ReactNode }) {
+	const title = "font-semibold tracking-[-0.01em]";
+	if (!badges) return <h1 className={cx("text-[36px] leading-tight break-words", title)}>{children}</h1>;
+	// No wrap between the title's last word and the badges, so they move to the next line together.
+	return (
+		<div className="text-[36px] leading-tight break-words whitespace-nowrap">
+			<h1 className={cx("inline whitespace-normal", title)}>{children}</h1>
+			<span className="ml-3 inline-flex gap-1.5 align-[8px] text-[12px] leading-5" data-title-badges="">
+				{badges}
+			</span>
+		</div>
+	);
+}
+
+export function EmptyState({ title, visual, children }: { title: string; visual?: ReactNode; children?: ReactNode }) {
 	return (
 		<div className="py-16 text-center" data-state="empty">
+			{visual && <div className="mb-4 flex justify-center">{visual}</div>}
 			<div className="text-[15px] font-medium">{title}</div>
 			{children && <div className="mt-1 text-[14px] text-muted">{children}</div>}
 		</div>

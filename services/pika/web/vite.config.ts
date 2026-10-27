@@ -8,7 +8,8 @@ export default defineConfig(({ mode }) => ({
 	plugins: [react(), tailwindcss()],
 	server: {
 		// Herder worktrees live under `.git/`, which Vite's default deny list blocks for test modules.
-		...(mode === "test" ? { fs: { deny: [".env", ".env.*", "*.{crt,pem}"] } } : {}),
+		// Tests also read the logo's source of truth, `../resource/pika-icon.svg`.
+		...(mode === "test" ? { fs: { deny: [".env", ".env.*", "*.{crt,pem}"], allow: [".", "../resource"] } } : {}),
 		proxy: {
 			"/api": "http://127.0.0.1:7171",
 		},

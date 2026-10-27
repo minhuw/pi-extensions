@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { ME_KEY, SIGNED_OUT, useMe } from "../components/AuthGate";
 import { Icon } from "../components/icons";
 import { useSigningOut } from "../components/Layout";
-import { BUTTON, Callout, ConfirmDialog, cx, EmptyState, ErrorState, PageTitle, Pill, SkeletonLines } from "../components/ui";
+import { BUTTON, Callout, ConfirmDialog, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
 import { ApiError, authModeOf, useApi } from "../lib/api";
 import { formatCountdown, isValidDeviceName, normalizePairingCode, orderPairings, shortUserAgent } from "../lib/devices";
 import { formatDateTime, formatRelative } from "../lib/format";
@@ -527,7 +527,7 @@ export function DevicesPage() {
 	};
 
 	return (
-		<div className="mx-auto w-full max-w-[960px] px-12 pt-16 pb-24">
+		<Page className="pb-24">
 			<PageTitle>Devices</PageTitle>
 			<p className="mt-2 text-[15px] text-muted">Machines that upload to pika, and requests from new ones to join.</p>
 			{mode === "none" && (
@@ -558,6 +558,6 @@ export function DevicesPage() {
 					</Callout>
 				</>
 			)}
-		</div>
+		</Page>
 	);
 }

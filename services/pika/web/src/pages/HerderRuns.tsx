@@ -1,9 +1,9 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useMemo, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
-import { Icon } from "../components/icons";
+import { Icon, PikaLogo } from "../components/icons";
 import { Markdown } from "../components/Markdown";
-import { EmptyState, ErrorState, PageTitle, Pill, Properties, Skeleton, SkeletonLines, Toggle, type Property } from "../components/ui";
+import { EmptyState, ErrorState, Page, PageTitle, Pill, Properties, Skeleton, SkeletonLines, Toggle, type Property } from "../components/ui";
 import {
 	buildRunView,
 	label,
@@ -63,7 +63,7 @@ export function HerderRunsPage() {
 	});
 	const items = useMemo(() => runs.data?.pages.flatMap((page) => page.items) ?? [], [runs.data]);
 	return (
-		<div className="mx-auto w-full max-w-[1200px] px-12 pt-16 pb-24">
+		<Page className="pb-24">
 			<PageTitle>Herder runs</PageTitle>
 			<hr className="mt-6 mb-2 border-0 border-t border-line" />
 			{runs.isPending ? (
@@ -75,7 +75,9 @@ export function HerderRunsPage() {
 			) : runs.isError && items.length === 0 ? (
 				<ErrorState error={runs.error} onRetry={() => void runs.refetch()} />
 			) : items.length === 0 ? (
-				<EmptyState title="No Herder runs">Runs appear here once a device uploads a Herder journal.</EmptyState>
+				<EmptyState title="No Herder runs" visual={<PikaLogo size={40} />}>
+					Runs appear here once a device uploads a Herder journal.
+				</EmptyState>
 			) : (
 				<div data-run-list="">
 					{items.map((run) => (
@@ -93,7 +95,7 @@ export function HerderRunsPage() {
 					)}
 				</div>
 			)}
-		</div>
+		</Page>
 	);
 }
 
@@ -237,7 +239,7 @@ export function HerderRunPage() {
 
 	if (run.error instanceof ApiError && run.error.status === 404) return <NotFoundPage what="run" />;
 	return (
-		<div className="mx-auto w-full max-w-[900px] px-12 pt-16 pb-32">
+		<Page className="pb-32">
 			<nav className="mb-6 flex items-center gap-1.5 text-[13px] text-muted" aria-label="Breadcrumb">
 				<Link to="/runs" className="rounded-sm px-1 hover:bg-hover">
 					Herder runs
@@ -389,6 +391,6 @@ export function HerderRunPage() {
 					</>
 				)
 			)}
-		</div>
+		</Page>
 	);
 }

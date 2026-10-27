@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { FilterChip, MenuOption } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
-import { EmptyState, ErrorState, PageTitle, SkeletonLines } from "../components/ui";
+import { EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
@@ -157,7 +157,7 @@ export function SearchPage() {
 	const groups = useMemo(() => groupHits(results.data?.pages.flatMap((page) => page.items) ?? []), [results.data]);
 
 	return (
-		<div className="mx-auto w-full max-w-[900px] px-12 pt-16 pb-24">
+		<Page className="pb-24">
 			<PageTitle>Search</PageTitle>
 			<label className="mt-6 flex h-10 items-center gap-2 rounded-md border border-line px-3 focus-within:border-accent/50">
 				<Icon name="search" className="shrink-0 text-muted" />
@@ -232,6 +232,6 @@ export function SearchPage() {
 					)}
 				</div>
 			)}
-		</div>
+		</Page>
 	);
 }

@@ -6,7 +6,7 @@ import { useShortcuts } from "../lib/keyboard";
 import { RELAY_BADGE_POLL_MS, useHealth, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
-import { Icon, type IconName } from "./icons";
+import { Icon, PikaLogo, type IconName } from "./icons";
 import { cx, Pill } from "./ui";
 
 const ScrollRootContext = createContext<HTMLElement | null>(null);
@@ -119,8 +119,8 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 	return (
 		<aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-line bg-sidebar" aria-label="Sidebar">
 			<div className="flex h-12 items-center gap-2 px-3">
-				<Link to="/" className="flex items-center gap-2 rounded-sm px-1 font-semibold hover:bg-hover">
-					<span className="flex h-5 w-5 items-center justify-center rounded-sm bg-ink text-[12px] text-page">p</span>
+				<Link to="/" className="flex h-7 items-center gap-1.5 rounded-sm pr-1.5 pl-1 font-semibold hover:bg-hover">
+					<PikaLogo size={22} className="shrink-0" />
 					pika
 				</Link>
 				<button
@@ -171,20 +171,20 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 						Sign out
 					</button>
 				)}
-				<ServerVersion />
+				<ServerVersion className="px-2 pt-1.5" />
 			</div>
 		</aside>
 	);
 }
 
 /** The server's version and the commit it was built from, so you can tell whether it runs the latest build. */
-function ServerVersion() {
+export function ServerVersion({ className }: { className?: string }) {
 	const { data } = useHealth();
 	if (!data?.version) return null;
 	const build = data.revision ? `${data.version} (${data.revision})` : data.version;
 	return (
 		<div
-			className="select-text px-2 pt-1.5 text-[12px] text-muted"
+			className={cx("select-text text-[12px] text-muted", className)}
 			title={data.revision ? `pika ${data.version}, built from commit ${data.revision}` : `pika ${data.version}`}
 			data-server-version=""
 		>

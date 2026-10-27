@@ -1,8 +1,9 @@
 import { Link } from "react-router";
+import { cx, PAGE_COLUMN } from "../components/ui";
 
 export function NotFoundPage({ what = "page" }: { what?: string }) {
 	return (
-		<div className="mx-auto max-w-[900px] px-12 pt-32 text-center" data-state="not-found">
+		<div className={cx(PAGE_COLUMN, "pt-32 text-center")} data-state="not-found">
 			<div className="text-[64px] leading-none font-semibold text-muted/40">404</div>
 			<h1 className="mt-4 text-[24px] font-semibold">This {what} doesn’t exist</h1>
 			<p className="mt-2 text-muted">It may not have been uploaded yet, or the link is wrong.</p>

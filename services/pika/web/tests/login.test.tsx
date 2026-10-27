@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { browserPage } from "../src/components/AuthGate";
 import { ApiError } from "../src/lib/api";
@@ -26,7 +26,7 @@ describe("login", () => {
 	it("sends the user to the login page and back after signing in", async () => {
 		const server = createFakeServer({ sessions: [session()], password: "hunter2" });
 		renderApp("/s/s1", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
 
 		const input = screen.getByLabelText("Password");
@@ -42,11 +42,34 @@ describe("login", () => {
 		expect(await screen.findByRole("button", { name: "Sign out" })).toBeTruthy();
 	});
 
-	it("queries nothing but `me` before a signed-out browser reaches the login page", async () => {
+	it("queries nothing of the read API but `me` before a signed-out browser reaches the login page", async () => {
 		const server = createFakeServer({ sessions: [session()], password: "hunter2" });
 		renderApp("/", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
-		expect(server.calls).toEqual(["/api/v1/me"]);
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		// The login page asks the always-open health for the server's version.
+		expect(server.calls.filter((call) => call !== "/api/health")).toEqual(["/api/v1/me"]);
+	});
+
+	it("signs in on a card with the logo and the server's version", async () => {
+		renderApp("/login", createFakeServer({ password: "hunter2", revision: "56b7f44" }).fetch);
+		const form = await screen.findByRole("form", { name: "Sign in" });
+		expect(form.querySelector("svg[data-pika-logo]")?.getAttribute("aria-hidden")).toBe("true");
+		expect(within(form).getByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect(within(form).getByText("This server is password protected.")).toBeTruthy();
+		expect(document.activeElement).toBe(within(form).getByLabelText("Password"));
+		expect((within(form).getByRole("button", { name: "Continue" }) as HTMLButtonElement).disabled).toBe(true);
+		await waitFor(() => expect(document.querySelector("[data-server-version]")?.textContent).toBe("pika 0.3.0 (56b7f44)"));
+		// The version sits under the card, not in it.
+		expect(form.contains(document.querySelector("[data-server-version]"))).toBe(false);
+	});
+
+	it("shows no version line on the login page while health is failing", async () => {
+		const server = createFakeServer({ password: "hunter2" });
+		server.state.healthFailures = 100;
+		renderApp("/login", server.fetch);
+		await screen.findByRole("form", { name: "Sign in" });
+		await waitFor(() => expect(server.calls.filter((call) => call === "/api/health").length).toBeGreaterThan(0));
+		expect(document.querySelector("[data-server-version]")).toBeNull();
 	});
 
 	it("sends any 401 to the login page in password mode", async () => {
@@ -59,7 +82,7 @@ describe("login", () => {
 			return base.fetch(input, init);
 		}) as typeof fetch;
 		renderApp("/s/s1", fetchImpl);
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 	});
 
 	it.each(["proxy", "none"] as const)("reloads instead of showing the password form on a 401 in %s mode", async (authMode) => {
@@ -83,7 +106,7 @@ describe("login", () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 			expect(reload).toHaveBeenCalledTimes(1);
 			expect(sawPassword).toBe(false);
-			expect(screen.queryByRole("heading", { name: "Sign in" })).toBeNull();
+			expect(screen.queryByRole("heading", { name: "Sign in to pika" })).toBeNull();
 		} finally {
 			observer.disconnect();
 			reload.mockRestore();
@@ -126,7 +149,7 @@ describe("login", () => {
 		const server = createFakeServer({ sessions: [session()], authMode });
 		renderApp("/login?next=%2Fs%2Fs1", server.fetch);
 		expect(await screen.findByRole("heading", { name: "Protected session" })).toBeTruthy();
-		expect(screen.queryByRole("heading", { name: "Sign in" })).toBeNull();
+		expect(screen.queryByRole("heading", { name: "Sign in to pika" })).toBeNull();
 		expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
 	});
 

@@ -377,7 +377,7 @@ describe("browser sessions", () => {
 		const server = signedIn({ browserSessions: sessions() });
 		renderApp("/devices", server.fetch);
 		fireEvent.click(await screen.findByRole("button", { name: "Sign out this browser" }));
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 		expect(server.mutations).toEqual([{ method: "DELETE", path: "/api/v1/auth/sessions/aaaaaaaaaaaa", body: undefined, json: false }]);
 		expect(server.state.authenticated).toBe(false);
 	});
@@ -389,7 +389,7 @@ describe("browser sessions", () => {
 		const dialog = screen.getByRole("dialog", { name: "Sign out everywhere?" });
 		expect(server.mutations).toEqual([]);
 		fireEvent.click(within(dialog).getByRole("button", { name: "Sign out everywhere" }));
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 		expect(server.mutations).toEqual([{ method: "POST", path: "/api/v1/auth/sessions/revoke-all", body: {}, json: true }]);
 		expect(server.state.browserSessions).toEqual([]);
 	});
@@ -426,7 +426,7 @@ describe("browser sessions", () => {
 		for (let poll = 0; poll < 3; poll += 1) await nextPoll();
 		expect(polls()).toBe(before);
 		release();
-		expect(await screen.findByRole("heading", { name: "Sign in" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 		expect(polls()).toBe(before);
 		expect(server.calls.filter((call) => call === path)).toHaveLength(1);
 	});

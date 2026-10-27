@@ -3,9 +3,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router";
 import { FilterChip, MenuOption } from "../components/FilterChip";
-import { Icon } from "../components/icons";
+import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
-import { EmptyState, ErrorState, PageTitle, Pill, Skeleton } from "../components/ui";
+import { EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { useApi, type SessionFilters } from "../lib/api";
 import { formatCost, formatCount, formatDuration, formatRelative, totalTokens } from "../lib/format";
 import type { SessionSummary } from "../lib/types";
@@ -231,7 +231,7 @@ export function SessionListPage() {
 	}, [lastIndex, items.length, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
 
 	return (
-		<div className="mx-auto w-full max-w-[1200px] px-12 pt-16 pb-24">
+		<Page className="pb-24">
 			<PageTitle>Sessions</PageTitle>
 			<div className="mt-5">
 				<Filters />
@@ -245,9 +245,11 @@ export function SessionListPage() {
 				</div>
 			) : sessions.isError && items.length === 0 ? (
 				<ErrorState error={sessions.error} onRetry={() => void sessions.refetch()} />
+			) : items.length === 0 && params.toString() ? (
+				<EmptyState title="No sessions">Nothing matches these filters.</EmptyState>
 			) : items.length === 0 ? (
-				<EmptyState title="No sessions">
-					{params.toString() ? "Nothing matches these filters." : "Sessions appear here once a device uploads them."}
+				<EmptyState title="No sessions yet" visual={<PikaLogo size={40} />}>
+					Run <code className="code-chip">/pika login</code> in pi on each machine. Sessions appear here as they run.
 				</EmptyState>
 			) : (
 				<div ref={listRef} className="relative" style={{ height: virtualizer.getTotalSize() }} data-session-list="">
@@ -268,6 +270,6 @@ export function SessionListPage() {
 				</div>
 			)}
 			{sessions.isFetchNextPageError && <ErrorState error={sessions.error} onRetry={() => void sessions.fetchNextPage()} />}
-		</div>
+		</Page>
 	);
 }
