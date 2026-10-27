@@ -82,7 +82,7 @@ describe("/pika login pairing", () => {
 			await waitFor(() => ingest.pendingPairings().length === 1, 5_000, "a pending pairing");
 			const [pending] = ingest.pendingPairings();
 			const device = defaultDeviceName();
-			expect(pending).toMatchObject({ device, host: hostname(), pikaVersion: "0.2.0" });
+			expect(pending).toMatchObject({ device, host: hostname(), pikaVersion: PIKA_VERSION });
 			expect(ingest.pairRequests[0]).toEqual({ path: "start", body: { device, host: hostname(), pikaVersion: PIKA_VERSION } });
 			await waitFor(() => ui.messages.some((message) => message.includes(link(pending!.code))), 5_000, "the approval link");
 			expect(ui.last).toEqual({

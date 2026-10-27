@@ -9,7 +9,7 @@ import { gzip } from "node:zlib";
 import { sha256, splitPayload } from "./blocks.ts";
 import { MAX_ACKED, Store, type RequestRecord, type SpooledRequest, type StreamKind, type StreamState } from "./store.ts";
 
-export const PIKA_VERSION = "0.2.0";
+export const PIKA_VERSION = "0.3.0";
 /** Uncompressed batch body limit; the server accepts 32 MiB by default. */
 export const MAX_BATCH_BYTES = 8 * 1024 * 1024 - 64 * 1024;
 const MIN_BATCH_BYTES = 256 * 1024;
