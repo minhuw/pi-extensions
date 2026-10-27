@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde_json::{Map, Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
 use crate::config::RelayConfig;
@@ -799,6 +799,15 @@ impl Inner {
 }
 
 /// The relay's state; one per server.
+/// A running connection task; see [`Relay::task`].
+pub struct Task<'a>(&'a Relay);
+
+impl Drop for Task<'_> {
+    fn drop(&mut self) {
+        self.0.tasks.send_modify(|n| *n -= 1);
+    }
+}
+
 pub struct Relay {
     config: RelayConfig,
     inner: Mutex<Inner>,
@@ -806,6 +815,8 @@ pub struct Relay {
     next_message: AtomicU64,
     /// Expiry and ack-wait timers that have neither fired nor been aborted.
     timers: Arc<AtomicUsize>,
+    /// Connection tasks still running, including ones finishing their close handshake.
+    tasks: watch::Sender<usize>,
 }
 
 impl Relay {
@@ -832,7 +843,20 @@ impl Relay {
             next_conn: AtomicU64::new(1),
             next_message: AtomicU64::new(1),
             timers: Arc::default(),
+            tasks: watch::channel(0).0,
         }
+    }
+
+    /// Counts a connection task until the guard drops, so stopping the server can wait for its close handshake.
+    pub fn task(&self) -> Task<'_> {
+        self.tasks.send_modify(|n| *n += 1);
+        Task(self)
+    }
+
+    /// Waits until every connection task has ended, at most `within`; whether they all did.
+    pub async fn drained(&self, within: Duration) -> bool {
+        let mut tasks = self.tasks.subscribe();
+        tokio::time::timeout(within, tasks.wait_for(|n| *n == 0)).await.is_ok()
     }
 
     pub fn config(&self) -> &RelayConfig {

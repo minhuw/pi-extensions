@@ -153,11 +153,18 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     );
     let relay = state.relay.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
-    let shutdown = async move {
-        shutdown_signal().await;
-        relay.close_all(crate::relay::close::GOING_AWAY, "server stopping");
+    let shutdown = {
+        let relay = relay.clone();
+        async move {
+            shutdown_signal().await;
+            relay.close_all(crate::relay::close::GOING_AWAY, "server stopping");
+        }
     };
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    // Upgraded relay connections outlive the HTTP server; let them finish their close handshakes.
+    if !relay.drained(std::time::Duration::from_secs(3)).await {
+        tracing::warn!("relay: stopping with connections still closing");
+    }
     Ok(())
 }
 

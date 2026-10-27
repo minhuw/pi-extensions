@@ -157,6 +157,7 @@ fn close_frame(code: u16, reason: &str) -> Message {
 /// frames, so a peer that stops reading holds up none of that.
 async fn run(state: AppState, socket: WebSocket, device: String, token: String) {
     let relay = state.relay.clone();
+    let _task = relay.task();
     let config = relay.config().clone();
     let (mut sink, mut stream) = socket.split();
     let Some(connection) = relay.connect(&device, sha256_hex(token.as_bytes())) else {
@@ -225,8 +226,21 @@ async fn run(state: AppState, socket: WebSocket, device: String, token: String) 
         tracing::debug!("relay: closing a connection of {device}: {code} {reason}");
         let _ = close_writer.send((code, reason));
         let _ = writer.await;
+        // Read the peer's answer to the close frame: a socket closed with it unread is reset, and the peer loses the
+        // close frame, as Linux showed when the server stopped.
+        let answered = async {
+            while let Some(Ok(message)) = stream.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(CLOSE_HANDSHAKE, answered).await;
     }
 }
+
+/// How long a closing connection waits for the peer to answer its close frame.
+const CLOSE_HANDSHAKE: Duration = Duration::from_secs(2);
 
 /// Writes a connection's frames, each within `timeout`, until the reader asks it to close; then it skips the frames
 /// still queued and sends the close frame, also within `timeout`. A write that fails or does not finish in time ends
