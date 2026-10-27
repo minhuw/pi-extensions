@@ -25,19 +25,27 @@ it.each([
 	expect(sanitize(text)).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
 });
 
+/** The fastest of five runs, so a garbage collection or a busy machine does not count against one. */
+function fastest(run: () => void): number {
+	let best = Infinity;
+	for (let i = 0; i < 5; i++) {
+		const started = performance.now();
+		run();
+		best = Math.min(best, performance.now() - started);
+	}
+	return best;
+}
+
 it("sanitizes 32 KiB of unterminated string introducers in linear time", () => {
 	sanitize("\x1b]x".repeat(100));
 	for (const unit of ["\x1b]", "\x1bP", "\x1b_", "\x9d", "\x90", "\x1b[0", "\x1b "]) {
 		const text = unit.repeat(Math.ceil(32 * 1024 / unit.length));
-		const started = performance.now();
-		const result = sanitize(text);
-		// The old lazy pattern took over 200 ms here; a linear one takes about one.
-		expect(performance.now() - started, JSON.stringify(unit)).toBeLessThan(50);
-		expect(result).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+		// The old lazy pattern took over 200 ms on every run; a linear one takes about one.
+		expect(fastest(() => sanitize(text)), JSON.stringify(unit)).toBeLessThan(50);
+		expect(sanitize(text)).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
 	}
-	const started = performance.now();
 	expect(sanitize(`\x1b]${"a".repeat(32 * 1024)}`)).toBe("a".repeat(32 * 1024));
-	expect(performance.now() - started).toBeLessThan(50);
+	expect(fastest(() => sanitize(`\x1b]${"a".repeat(32 * 1024)}`))).toBeLessThan(50);
 });
 
 it("strips zero-width characters and bidi controls from header fields, and keeps them in message text", () => {
