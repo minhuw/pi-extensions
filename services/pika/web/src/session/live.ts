@@ -2,10 +2,13 @@ import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/r
 import { useEffect, useRef } from "react";
 import { ApiError, useApi } from "../lib/api";
 import type { Entry, Page, SessionDetail, SessionUpdates, Turn } from "../lib/types";
+import { traceKey } from "../trace/data";
 import { entriesKey } from "./TurnList";
 
 export const LIVE_WINDOW_MS = 120_000;
 export const LIVE_POLL_MS = 3_000;
+/** A live session's trace refetches at most this often; an unchanged one revalidates cheaply with its ETag. */
+export const TRACE_REFRESH_MS = 10_000;
 
 export function isLive(lastAt: string | undefined, now: number = Date.now()): boolean {
 	const time = lastAt ? Date.parse(lastAt) : Number.NaN;
@@ -31,9 +34,17 @@ function carryEntries(queryClient: QueryClient, sessionId: string, before: Turn,
 
 /**
  * Applies an updates response: refreshes the summary, replaces the turns that changed, and appends
- * new ones. A truncated response refetches the turns list instead.
+ * new ones. A truncated response refetches the turns list instead. The session's own trace refetches
+ * through `refreshTrace`, which may throttle it; its subagents' traces refetch when it shows them
+ * changed (see `fetchTrace`).
  */
-export function applySessionUpdates(queryClient: QueryClient, sessionId: string, update: SessionUpdates) {
+export function applySessionUpdates(
+	queryClient: QueryClient,
+	sessionId: string,
+	update: SessionUpdates,
+	refreshTrace: () => void = () => void queryClient.invalidateQueries({ queryKey: traceKey(sessionId), exact: true }),
+) {
+	refreshTrace();
 	const detail = queryClient.getQueryData<SessionDetail>(["session", sessionId]);
 	if (detail && update.session) {
 		queryClient.setQueryData<SessionDetail>(["session", sessionId], { ...detail, ...update.session, children: detail.children });
@@ -87,6 +98,18 @@ export function useLiveUpdates(sessionId: string, session: SessionDetail | undef
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let since = knownLastSeq(queryClient, initial);
 		let lastAt = initial.lastAt;
+		// At most one trace refetch per `TRACE_REFRESH_MS`, counted from when the trace last arrived.
+		let traceTimer: ReturnType<typeof setTimeout> | undefined;
+		const invalidateTrace = () => void queryClient.invalidateQueries({ queryKey: traceKey(sessionId), exact: true });
+		const refreshTrace = () => {
+			if (traceTimer !== undefined) return;
+			const updatedAt = queryClient.getQueryState(traceKey(sessionId))?.dataUpdatedAt ?? 0;
+			const wait = updatedAt ? Math.max(0, updatedAt + TRACE_REFRESH_MS - Date.now()) : 0;
+			traceTimer = setTimeout(() => {
+				traceTimer = undefined;
+				invalidateTrace();
+			}, wait);
+		};
 
 		const tick = async () => {
 			try {
@@ -94,7 +117,7 @@ export function useLiveUpdates(sessionId: string, session: SessionDetail | undef
 				if (cancelled) return;
 				lastAt = update.lastAt ?? update.session?.lastAt ?? lastAt;
 				if (update.lastSeq > since) {
-					applySessionUpdates(queryClient, sessionId, update);
+					applySessionUpdates(queryClient, sessionId, update, refreshTrace);
 					since = update.lastSeq;
 				}
 			} catch (error) {
@@ -106,6 +129,11 @@ export function useLiveUpdates(sessionId: string, session: SessionDetail | undef
 		return () => {
 			cancelled = true;
 			clearTimeout(timer);
+			// A refresh still waiting is not dropped: the trace is marked stale for whoever shows it next.
+			if (traceTimer !== undefined) {
+				clearTimeout(traceTimer);
+				invalidateTrace();
+			}
 		};
 	}, [api, queryClient, sessionId, live]);
 }

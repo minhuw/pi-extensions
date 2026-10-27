@@ -171,6 +171,110 @@ export interface SearchHit {
 	at: string;
 }
 
+/** A turn as `GET sessions/:id/trace` lists it; times are epoch milliseconds, omitted when unknown. */
+export interface TraceTurn {
+	index: number;
+	startSeq: number;
+	endSeq: number;
+	at?: number;
+	durationMs: number;
+	userText: string;
+	customType?: string;
+	modelCalls: number;
+	toolCalls: number;
+	toolErrors: number;
+	cost: number;
+	tokens: Tokens;
+}
+
+/** A model call: `start` is the assistant message's timestamp, `end` its entry's. */
+export interface TraceLlmRecord {
+	kind: "llm";
+	seq: number;
+	turn?: number;
+	start?: number;
+	end?: number;
+	model?: string;
+	provider?: string;
+	stopReason?: string;
+	error?: string;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	requestId?: string;
+	/** The first ≤160 characters of the assistant's text. */
+	text?: string;
+	thinking?: boolean;
+	toolCalls?: number;
+}
+
+/** A tool call; `seq` is the assistant entry that made it and `resultSeq` its result's. */
+export interface TraceToolRecord {
+	kind: "tool";
+	seq: number;
+	resultSeq?: number;
+	turn?: number;
+	callId: string;
+	/** Omitted when the call was not recorded; `toolName` reads it. */
+	name?: string;
+	start?: number;
+	end?: number;
+	durationMs?: number;
+	isError: boolean;
+	/** Computed from the arguments: a command's first line, a path, a pattern, a URL, … */
+	summary?: string;
+	outputSize?: number;
+	childSessionId?: string;
+}
+
+export interface TraceCompactionRecord {
+	kind: "compaction";
+	seq: number;
+	turn?: number;
+	at?: number;
+	tokensBefore?: number;
+}
+
+export interface TraceBranchSummaryRecord {
+	kind: "branch-summary";
+	seq: number;
+	turn?: number;
+	at?: number;
+}
+
+export type TraceRecord = TraceLlmRecord | TraceToolRecord | TraceCompactionRecord | TraceBranchSummaryRecord;
+
+export interface TraceChild {
+	sessionId: string;
+	parentToolCallId?: string;
+	agentType?: string;
+	description?: string;
+	kind: "subagent" | "herder-step" | (string & {});
+	/** Both omitted while the child has no entries, as a subagent that just started. */
+	startedAt?: number;
+	lastAt?: number;
+	entryCount: number;
+	tokens: Tokens;
+	cost: number;
+	title: string;
+}
+
+/**
+ * `GET sessions/:id/trace`: the session's shape without its raw entries. Records are sorted by `seq`. The server
+ * omits what it does not know, never inventing it: the bounds of a session without entries, a turn's or record's
+ * times, a tool's name.
+ */
+export interface SessionTrace {
+	sessionId: string;
+	startedAt?: number;
+	lastAt?: number;
+	turns: TraceTurn[];
+	records: TraceRecord[];
+	children: TraceChild[];
+}
+
 /**
  * `GET sessions/:id/updates?since=<seq>`. `session`, `turns`, and `truncated` are present only when
  * `lastSeq > since`; `turns` holds every turn with `endSeq > since` (at most 50, ascending), and

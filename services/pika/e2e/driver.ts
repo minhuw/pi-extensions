@@ -12,11 +12,12 @@ import { ScriptedUI } from "../../../extensions/pika/tests/support/ui.ts";
 import { allEntries, ReadApi, type Entry, type ModelRequest, type RunDetail, type SessionDetail, type Turn } from "./api.ts";
 import { checkApprovedPairing, checkBrowserSessions, checkDeniedPairing, checkDevices, checkLoginRateLimit, checkRename, checkRepairing, type NewMachine } from "./auth.ts";
 import { checkViewer, openBrowser, type Ui } from "./browser.ts";
-import { ingestSession, largeSession } from "./large.ts";
+import { edgeSessions, ingestSession, largeSession } from "./large.ts";
 import { checkRelay } from "./relay.ts";
 import { AGENT_CALL_ID, createProject, LOCAL_PROVIDER, NOTICE_AFTER_CALL_ID, NOTICE_TYPE, PROMPTS, responder, SEARCH_WORD, startPi, type Pi } from "./scenario.ts";
 import { PikaServer } from "./server.ts";
 import { check, checkEqual, env, log, sleep, waitFor } from "./util.ts";
+import { checkEdgeTraces, checkTrace } from "./trajectory.ts";
 import { SessionWatcher } from "./watch.ts";
 
 /** AC-1: each entry is retrievable from the read API within this long of being written. */
@@ -127,6 +128,11 @@ async function main(): Promise<void> {
 		await ingestSession(server.url, env("PIKA_E2E_TOKEN_DESKTOP"), large);
 		check(await api.text(`sessions/${large.id}/export`) === large.text, "the 5,000-entry session does not export byte for byte");
 		log(`loaded the 5,000-entry session ${large.id}`);
+		const trace = await checkTrace(api, { mainId, childId: child.sessionId, stepId: step.sessionId, largeId: large.id });
+		// Awkward shapes for the trajectory: long names and summaries, a failure, a compaction, no timings, no tools.
+		const edges = edgeSessions();
+		for (const session of [edges.edge, edges.chat]) await ingestSession(server.url, env("PIKA_E2E_TOKEN_LAPTOP"), session);
+		await checkEdgeTraces(api, { edgeId: edges.edge.id, chatId: edges.chat.id });
 
 		const browser = await openBrowser({ url: server.url, chrome: env("PIKA_E2E_CHROME"), artifacts: env("PIKA_E2E_ARTIFACTS"), profile: join(work, "chrome-profile") });
 		try {
@@ -134,6 +140,7 @@ async function main(): Promise<void> {
 				password, mainId, childId: child.sessionId, stepId: step.sessionId, runId: herderRun, largeId: large.id, desktopId: env("PIKA_E2E_ID_DESKTOP"), searchWord: SEARCH_WORD,
 				prompts: [PROMPTS.inspect, PROMPTS.delegate, PROMPTS.herder, PROMPTS.offline, PROMPTS.resumed, PROMPTS.online, PROMPTS.local],
 				herderPrompt: PROMPTS.herder,
+				trace, edgeId: edges.edge.id, chatId: edges.chat.id,
 			});
 			await checkRelay(browser, {
 				url: server.url, api, root: join(work, "relay"), pidFile: env("PIKA_E2E_PI_PIDS"), ttlSeconds: Number(env("PIKA_RELAY_TTL_SECS")),

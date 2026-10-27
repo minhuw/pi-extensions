@@ -72,7 +72,7 @@ describe("virtualization", () => {
 		const fixture = manyTurns();
 		expect(fixture.entries.length).toBe(5001);
 		const server = createFakeServer({ sessions: [fixture] });
-		renderApp("/s/many", server.fetch);
+		renderApp("/s/many?view=transcript", server.fetch);
 		await screen.findByText("Question 0");
 		expect(entryNodeCount()).toBeGreaterThan(0);
 		expect(entryNodeCount()).toBeLessThan(300);
@@ -93,7 +93,7 @@ describe("virtualization", () => {
 		const fixture = longTurn();
 		expect(fixture.entries.length).toBe(5000);
 		const server = createFakeServer({ sessions: [fixture] });
-		renderApp("/s/long", server.fetch);
+		renderApp("/s/long?view=transcript", server.fetch);
 		fireEvent.click(await screen.findByRole("button", { name: /model calls/ }));
 		await waitFor(() => expect(document.querySelectorAll("[data-entry-seq]").length).toBeGreaterThan(0));
 		expect(entryNodeCount()).toBeLessThan(300);

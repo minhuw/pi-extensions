@@ -58,7 +58,7 @@ describe("what the model saw", () => {
 		const r1 = modelRequest("r1", { ...anthropicPayload, messages: anthropicPayload.messages.slice(0, 1) });
 		const r2 = modelRequest("r2", anthropicPayload);
 		const server = createFakeServer({ sessions: [sessionWithRequests()], requests: [r1, r2] });
-		renderApp("/s/s1", server.fetch);
+		renderApp("/s/s1?view=transcript", server.fetch);
 		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }));
 		const buttons = await screen.findAllByRole("button", { name: "Show what the model saw" });
 		expect(buttons).toHaveLength(2);
@@ -217,7 +217,7 @@ describe("what the model saw", () => {
 		const r1 = modelRequest("r1", { ...anthropicPayload, messages: anthropicPayload.messages.slice(0, 1) });
 		const r2 = modelRequest("r2", { ...anthropicPayload, messages: [anthropicPayload.messages[0], { $pika: "ab".repeat(32) }] }, { complete: false });
 		const server = createFakeServer({ sessions: [sessionWithRequests()], requests: [r1, r2] });
-		renderApp("/s/s1", server.fetch);
+		renderApp("/s/s1?view=transcript", server.fetch);
 		fireEvent.click(await screen.findByRole("button", { name: /2 model calls/ }));
 		const open = async () => {
 			fireEvent.click((await screen.findAllByRole("button", { name: "Show what the model saw" }))[1]);

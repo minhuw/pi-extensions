@@ -167,7 +167,26 @@ describe("search page", () => {
 		expect(await screen.findByText("No results")).toBeTruthy();
 	});
 
-	it("opens a result at its entry: expands the turn and highlights the entry", async () => {
+	it("opens a result at its record: selects, highlights, and inspects the tool call", async () => {
+		renderApp("/search?q=base", createFakeServer({ sessions: sessions(), hits: HITS }).fetch);
+		const link = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-hit='3']");
+			if (!node) throw new Error("no hit");
+			return node;
+		});
+		fireEvent.click(link);
+		expect(await screen.findByRole("heading", { name: "Fix the base path" })).toBeTruthy();
+		// The tool result at seq 3 belongs to the bash call made at seq 2.
+		await waitFor(() => expect(document.querySelector("[data-ledger-row][data-seq='2'][data-kind='shell'][data-highlighted]")).toBeTruthy());
+		expect(document.querySelectorAll("[data-highlighted]")).toHaveLength(1);
+		const row = document.querySelector<HTMLElement>("[data-ledger-row][data-highlighted]")!;
+		expect(row.getAttribute("aria-selected")).toBe("true");
+		expect(row.textContent).toContain("grep -rn base src");
+		expect(document.querySelector("[data-inspector]")?.textContent).toContain("grep -rn base src");
+	});
+
+	it("opens a result at its entry in the transcript: expands the turn and highlights the entry", async () => {
+		localStorage.setItem("pika-session-view", "transcript");
 		renderApp("/search?q=base", createFakeServer({ sessions: sessions(), hits: HITS }).fetch);
 		const link = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-hit='3']");
@@ -195,7 +214,7 @@ describe("search page", () => {
 		}
 		const server = createFakeServer({ sessions: [{ detail: summary("long", { entryCount: entries.length }), entries, turns }] });
 		const target = 1 + 120 * 2 + 1;
-		renderApp(`/s/long?seq=${target}`, server.fetch);
+		renderApp(`/s/long?view=transcript&seq=${target}`, server.fetch);
 		await waitFor(() => expect(document.querySelector(`[data-entry-seq='${target}'][data-highlighted]`)).toBeTruthy());
 		expect(server.calls).toContain("/api/v1/sessions/long/turns?cursor=100&limit=100");
 		expect(server.calls).toContain(`/api/v1/sessions/long/entries?from=${target - 1}&to=${target}&limit=200`);

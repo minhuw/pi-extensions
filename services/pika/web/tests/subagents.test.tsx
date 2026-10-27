@@ -51,6 +51,16 @@ function fixture() {
 	return [parent, c1, c1n, w1, w2];
 }
 
+/** Transcript tool rows start collapsed; opens the first closed one of `id` under `root`. */
+async function openTool(id: string, root: ParentNode = document) {
+	const row = await waitFor(() => {
+		const node = root.querySelector<HTMLElement>(`[data-tool="${id}"] > button[aria-expanded="false"]`);
+		if (!node) throw new Error(`no closed ${id} tool`);
+		return node;
+	});
+	fireEvent.click(row);
+}
+
 let restore: () => void;
 beforeEach(() => {
 	restore = mockLayout({ viewport: 20_000, rowHeight: 80 });
@@ -58,19 +68,27 @@ beforeEach(() => {
 afterEach(() => restore());
 
 describe("inline subagents", () => {
-	it("lists the children as a Subagents property", async () => {
+	it("lists the children in the Subagents tile", async () => {
 		renderApp("/s/p1", createFakeServer({ sessions: fixture() }).fetch);
-		await screen.findByText("Subagents", { selector: "dt span" });
-		const list = document.querySelector<HTMLElement>("[data-subagents]")!;
-		expect([...list.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(["/s/c1", "/s/w1", "/s/w2"]);
+		const tile = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-kpi='subagents']");
+			if (!node) throw new Error("no tile");
+			return node;
+		});
+		expect(tile.querySelector("[data-kpi-value]")?.textContent).toBe("3");
+		const list = tile.querySelector<HTMLElement>("[data-subagents]")!;
+		expect([...list.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(["/s/c1"]);
+		fireEvent.click(within(list).getByRole("button", { name: "+2" }));
+		expect([...list.querySelectorAll("a")].map((link) => link.getAttribute("href"))).toEqual(["/s/c1", "/s/c1", "/s/w1", "/s/w2"]);
 		expect(within(list).getByText("Fix tests")).toBeTruthy();
 		expect(within(list).getAllByText("reviewer")).toHaveLength(2);
 	});
 
 	it("expands an Agent call into its child session, lazily and recursively", async () => {
 		const server = createFakeServer({ sessions: fixture() });
-		renderApp("/s/p1", server.fetch);
+		renderApp("/s/p1?view=transcript", server.fetch);
 		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }));
+		await openTool("agent");
 		const card = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-agent-card]");
 			if (!node) throw new Error("no agent card");
@@ -96,7 +114,9 @@ describe("inline subagents", () => {
 
 		fireEvent.click(within(inline).getByRole("button", { name: /2 model calls/ }));
 		expect(await within(inline).findByText("c1 done", { selector: "[data-entry-seq] p" })).toBeTruthy();
-		const nestedCard = within(inline).getAllByText("Look around", { selector: "[data-agent-card] span" })[0].closest<HTMLElement>("[data-agent-card]")!;
+		await openTool("agent", inline);
+		const nestedCard = inline.querySelector<HTMLElement>("[data-agent-card]")!;
+		expect(within(nestedCard).getByText("Look around")).toBeTruthy();
 		fireEvent.click(within(nestedCard).getByRole("button", { name: /Subagent session/ }));
 		const nested = await waitFor(() => {
 			const node = inline.querySelector<HTMLElement>("[data-inline-session='c1n']");
@@ -108,8 +128,9 @@ describe("inline subagents", () => {
 	});
 
 	it("groups workflow children under their workflow call", async () => {
-		renderApp("/s/p1", createFakeServer({ sessions: fixture() }).fetch);
+		renderApp("/s/p1?view=transcript", createFakeServer({ sessions: fixture() }).fetch);
 		fireEvent.click(await screen.findByRole("button", { name: /3 model calls/ }));
+		await openTool("workflow");
 		const card = await waitFor(() => {
 			const node = document.querySelector<HTMLElement>("[data-workflow-card]");
 			if (!node) throw new Error("no workflow card");

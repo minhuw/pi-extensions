@@ -2,10 +2,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import puppeteer, { type Browser, type ElementHandle, type Page } from "puppeteer-core";
 import { LARGE_ENTRIES, LARGE_TURNS } from "./large.ts";
+import { checkEdgeTrajectories, checkLargeTrajectory, checkTrajectory, checkTrajectoryNavigation, MAX_ENTRY_NODES, type TrajectoryTargets } from "./trajectory.ts";
 import { check, checkEqual, log, sleep, waitFor } from "./util.ts";
-
-/** Entry rows rendered in the DOM must stay below this for a 5,000-entry session. */
-const MAX_ENTRY_NODES = 300;
 
 export interface BrowserTargets {
 	password: string;
@@ -21,6 +19,11 @@ export interface BrowserTargets {
 	prompts: string[];
 	/** The `/herder <goal>` command among them, whose card shows the prompt Herder sent. */
 	herderPrompt: string;
+	/** The main session's trace, as `checkTrace` found it. */
+	trace: TrajectoryTargets;
+	/** The sessions of `edgeSessions`: awkward records, and no tool calls. */
+	edgeId: string;
+	chatId: string;
 }
 
 /** A failing response a step provokes on purpose: `count` answers with `status` to `method` on a URL ending in `path`. */
@@ -116,10 +119,20 @@ function browserUi(browser: Browser, page: Page, options: { url: string; artifac
 		count: (selector) => page.$$eval(selector, (nodes) => nodes.length),
 		textOf: (selector) => page.$eval(selector, (node) => (node as HTMLElement).innerText),
 		visible,
-		// Virtualized lists render rows a frame after they scroll into view.
+		// Virtualized lists render rows a frame after they scroll into view, and may remount a row while it is measured;
+		// Puppeteer finds no clickable point on a detached row before it sends any click, so trying again is safe.
 		async click(selector) {
-			await visible(selector);
-			await page.click(selector);
+			const deadline = Date.now() + 5_000;
+			for (;;) {
+				await visible(selector);
+				try {
+					await page.click(selector);
+					return;
+				} catch (error) {
+					if (!/not clickable|detached/i.test((error as Error).message) || Date.now() > deadline) throw error;
+					await sleep(100);
+				}
+			}
 		},
 		async setTheme(theme) {
 			ui.theme = theme;
@@ -195,9 +208,22 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await shot("03-sessions-filtered");
 	log("browser: session list and device filter");
 
-	// 3. Session view: prompt cards, and the bash, read, and edit renderers once the first turn expands.
+	// 3. The trajectory is the session page's default view: KPI strip, overview, ledger, inspector, subagents, deep
+	// links, the view switch, replay, and the 5,000-entry session.
 	await go(`/s/${encodeURIComponent(t.mainId)}`);
-	await visible("[data-turn='0']");
+	await visible("[data-trajectory] [data-ledger-row]");
+	check(new URL(page.url()).searchParams.get("view") === null, `the default view put ?view= in the URL ${page.url()}`);
+	const trajectory = { mainId: t.mainId, childId: t.childId, firstPrompt: t.prompts[0]!, searchWord: t.searchWord, trace: t.trace };
+	await checkTrajectory(ui, trajectory, true);
+	await checkTrajectoryNavigation(ui, { ...trajectory, searchSeq: t.trace.bash.resultSeq! }, true);
+	await checkLargeTrajectory(ui, t.largeId, true);
+	await checkEdgeTrajectories(ui, { edgeId: t.edgeId, chatId: t.chatId }, true);
+	noProblems("in the light trajectory");
+
+	// The transcript: switching to it is remembered, so plain session links below open it.
+	await go(`/s/${encodeURIComponent(t.mainId)}`);
+	await click("[data-view-switch] [data-view='transcript']");
+	await visible("[data-session-page='transcript'] [data-turn='0']");
 	check((await textOf("[data-turn='0']")).includes(t.prompts[0]!.slice(0, 30)), "the first prompt card does not show the first prompt");
 	await shot("04-session");
 	// The list is virtualized: later prompt cards render once they scroll into view.
@@ -214,7 +240,11 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	check((await textOf(lastTurn)).includes(t.prompts[t.prompts.length - 1]!), "the last prompt card does not show the last prompt");
 	await page.$eval("[data-scroll-root]", (root) => { root.scrollTop = 0; });
 	await click("[data-work-strip='0']");
-	for (const tool of ["bash", "read", "edit"]) await visible(`[data-tool="${tool}"]`);
+	// Tool calls start as collapsed rows; only failed ones start open.
+	for (const tool of ["bash", "read", "edit"]) {
+		await click(`[data-tool="${tool}"] > button[aria-expanded=false]`);
+		await visible(`[data-tool="${tool}"] > button[aria-expanded=true]`);
+	}
 	check((await textOf("[data-tool='bash']")).includes(t.searchWord), "the bash renderer does not show the command's output");
 	await visible("[data-tool='edit'] [data-diff]");
 	await shot("05-session-tools");
@@ -236,6 +266,7 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	// 5. The subagent nests inline under its Agent call.
 	await click("[data-work-strip='0']");
 	await click("[data-work-strip='1']");
+	await click("[data-tool='agent'] > button[aria-expanded=false]");
 	await visible("[data-agent-card]");
 	await click(`[data-inline-toggle="${t.childId}"] button`);
 	await visible(`[data-inline-session="${t.childId}"] [data-turn='0']`);
@@ -267,6 +298,7 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	check((await textOf(hit)).includes(t.searchWord), "the search hit does not show the word");
 	await shot("11-search");
 	const seq = await page.$eval(hit, (node) => node.getAttribute("data-hit"));
+	checkEqual(Number(seq), t.trace.bash.resultSeq, "the search hit's seq: the result of the first bash call");
 	await click(hit);
 	await waitFor(() => page.url().includes(`/s/${t.mainId}`), 10_000, "the search hit's session");
 	const target = await visible("[data-entry-seq][data-highlighted]");
@@ -320,6 +352,7 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await visible("[data-work-strip='0']");
 	check(await page.evaluate(() => document.documentElement.dataset.theme === "dark"), "the dark theme does not persist across pages");
 	await click("[data-work-strip='0']");
+	await click("[data-tool='edit'] > button[aria-expanded=false]");
 	await visible("[data-tool='edit'] [data-diff]");
 	await shot("05-session-tools");
 	await click("[data-turn-list] [data-context-button]");
@@ -329,9 +362,14 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await page.waitForSelector("[data-context-drawer]", { hidden: true });
 	await click("[data-work-strip='0']");
 	await click("[data-work-strip='1']");
+	await click("[data-tool='agent'] > button[aria-expanded=false]");
 	await click(`[data-inline-toggle="${t.childId}"] button`);
 	await visible(`[data-inline-session="${t.childId}"] [data-turn='0']`);
 	await shot("07-subagent");
+	await checkTrajectory(ui, trajectory, false);
+	await checkTrajectoryNavigation(ui, { ...trajectory, searchSeq: t.trace.bash.resultSeq! }, false);
+	await checkLargeTrajectory(ui, t.largeId, false);
+	await checkEdgeTrajectories(ui, { edgeId: t.edgeId, chatId: t.chatId }, false);
 	await go("/runs");
 	await visible(`[data-run-row="${t.runId}"]`);
 	await shot("08-runs");

@@ -26,6 +26,18 @@
 	--color-yellow-soft: rgba(223, 171, 1, 0.12);
 	--color-skeleton: rgba(55, 53, 47, 0.08);
 
+	/* The categorical palette of the trajectory view: one hue per kind of record. */
+	--color-k-user: #2e7bc4;
+	--color-k-llm: #8058c8;
+	--color-k-thinking: #b9a4e6;
+	--color-k-shell: #c47f12;
+	--color-k-read: #16897c;
+	--color-k-write: #3d8b47;
+	--color-k-other: #6c7684;
+	--color-k-agent: #c44b8c;
+	--color-k-compaction: #b38a12;
+	--color-k-error: #d4453c;
+
 	--radius-sm: 4px;
 	--radius-md: 6px;
 }
@@ -48,6 +60,16 @@
 	--color-yellow: #ffdc49;
 	--color-yellow-soft: rgba(255, 220, 73, 0.1);
 	--color-skeleton: rgba(255, 255, 255, 0.07);
+	--color-k-user: #62a6ec;
+	--color-k-llm: #a98af0;
+	--color-k-thinking: #6d5a9c;
+	--color-k-shell: #e2a84a;
+	--color-k-read: #3fbcab;
+	--color-k-write: #6cbf75;
+	--color-k-other: #97a1ae;
+	--color-k-agent: #ea7fba;
+	--color-k-compaction: #dcbd4f;
+	--color-k-error: #f2675e;
 	color-scheme: dark;
 }
 
@@ -186,10 +208,47 @@
 		overflow-wrap: anywhere;
 	}
 
+	.tnum {
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* A ledger row that just arrived in a live session. */
+	.row-in {
+		animation: pika-row-in 150ms ease-out;
+	}
+
 	.skeleton {
 		background: var(--color-skeleton);
 		border-radius: var(--radius-sm);
 		animation: pika-pulse 1.6s ease-in-out infinite;
+	}
+}
+
+@keyframes pika-row-in {
+	from {
+		opacity: 0;
+		translate: 0 4px;
+	}
+}
+
+@keyframes pika-running {
+	50% {
+		opacity: 0.35;
+	}
+}
+
+.running-dot {
+	animation: pika-running 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.row-in,
+	.running-dot,
+	.skeleton {
+		animation: none;
+	}
+	* {
+		transition-duration: 0ms !important;
 	}
 }
 

@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 import { AuthGate } from "./components/AuthGate";
 import { Layout } from "./components/Layout";
+import { Skeleton, SkeletonLines } from "./components/ui";
 import { ApiContext, ApiError, PikaApi } from "./lib/api";
 import { ActiveSessionsPage } from "./pages/ActiveSessions";
 import { DevicesPage } from "./pages/Devices";
@@ -11,7 +12,23 @@ import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
 import { LoginPage } from "./pages/Login";
 import { SearchPage } from "./pages/Search";
 import { SessionListPage } from "./pages/SessionList";
-import { SessionViewPage } from "./pages/SessionView";
+
+// The session page, with its trajectory, transcript renderers, and context viewer, loads on demand in its own chunk.
+const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
+
+function SessionPageLoading() {
+	return (
+		<div className="w-full px-6 pt-6" aria-busy="true" aria-label="Loading session">
+			<Skeleton className="h-4 w-40" />
+			<Skeleton className="mt-4 h-7 w-2/3" />
+			<Skeleton className="mt-3 h-5 w-1/2" />
+			<Skeleton className="mt-4 h-[58px] w-full" />
+			<div className="mt-8">
+				<SkeletonLines lines={4} />
+			</div>
+		</div>
+	);
+}
 
 export function createQueryClient(): QueryClient {
 	return new QueryClient({
@@ -37,7 +54,14 @@ export function AppRoutes() {
 			<Route element={<AuthGate />}>
 				<Route element={<Layout />}>
 					<Route index element={<SessionListPage />} />
-					<Route path="s/:id" element={<SessionViewPage />} />
+					<Route
+						path="s/:id"
+						element={
+							<Suspense fallback={<SessionPageLoading />}>
+								<SessionViewPage />
+							</Suspense>
+						}
+					/>
 					<Route path="runs" element={<HerderRunsPage />} />
 					<Route path="runs/:id" element={<HerderRunPage />} />
 					<Route path="herder" element={<Navigate to="/runs" replace />} />

@@ -16,6 +16,8 @@ import type {
 	RunDetail,
 	SearchHit,
 	SessionDetail,
+	SessionTrace,
+	TraceRecord,
 	Turn,
 } from "../../src/lib/types";
 
@@ -79,6 +81,162 @@ function withoutChildren({ children: _children, ...rest }: SessionDetail) {
 	return rest;
 }
 
+type Json = Record<string, unknown>;
+
+function isObject(value: unknown): value is Json {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function epoch(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string") {
+		const time = Date.parse(value);
+		return Number.isNaN(time) ? undefined : time;
+	}
+	return undefined;
+}
+
+/** The contract's summary rules, written out again so the fake does not trust the code under test. */
+function traceSummary(name: string, args: Json): string | undefined {
+	const text = (key: string) => (typeof args[key] === "string" ? (args[key] as string) : undefined);
+	const base = (/^mcp__.+?__(.+)$/.exec(name)?.[1] ?? name).toLowerCase();
+	let summary: string | undefined;
+	if (/^mcp__/.test(name)) summary = Object.values(args).find((value): value is string => typeof value === "string" && value.length <= 400);
+	else if (["bash", "shell", "powershell"].includes(base)) summary = text("command")?.split("\n")[0];
+	else if (base === "read") {
+		const path = text("path") ?? text("file_path");
+		const offset = typeof args.offset === "number" ? args.offset : undefined;
+		const limit = typeof args.limit === "number" ? args.limit : undefined;
+		summary = path && (offset !== undefined || limit !== undefined) ? `${path}:${offset ?? 1}-${(offset ?? 1) + (limit ?? 1) - 1}` : path;
+	} else if (base === "write" || base === "edit") summary = text("path") ?? text("file_path");
+	else if (["grep", "find", "ls", "glob"].includes(base)) summary = [text("pattern"), text("path")].filter(Boolean).join(" in ") || undefined;
+	else if (base === "web_search") summary = text("query");
+	else if (base === "web_fetch") summary = text("url");
+	else if (name === "Agent") summary = `${text("subagent_type") ?? "agent"}: ${text("description") ?? ""}`;
+	else summary = Object.values(args).find((value): value is string => typeof value === "string" && value.length <= 400);
+	if (summary === undefined) return undefined;
+	return [...summary.replace(/[\u0000-\u001f\u007f]/g, " ")].slice(0, 160).join("");
+}
+
+/** `GET sessions/:id/trace`, derived from a fake session's entries, turns, and children. */
+export function traceOf(session: FakeSession): SessionTrace {
+	const turnOf = (seq: number) => session.turns.find((turn) => turn.startSeq <= seq && seq <= turn.endSeq)?.index;
+	const results = new Map<string, Entry>();
+	for (const item of session.entries) {
+		const message = item.raw.message;
+		if (isObject(message) && message.role === "toolResult" && typeof message.toolCallId === "string") results.set(message.toolCallId, item);
+	}
+	const children = session.detail.children;
+	const records: TraceRecord[] = [];
+	for (const item of session.entries) {
+		const raw = item.raw;
+		const turn = turnOf(item.seq);
+		const at = epoch(item.timestamp);
+		if (raw.type === "compaction") {
+			records.push({ kind: "compaction", seq: item.seq, turn, ...(at !== undefined ? { at } : {}), ...(typeof raw.tokensBefore === "number" ? { tokensBefore: raw.tokensBefore } : {}) });
+			continue;
+		}
+		if (raw.type === "branch_summary") {
+			records.push({ kind: "branch-summary", seq: item.seq, turn, ...(at !== undefined ? { at } : {}) });
+			continue;
+		}
+		const message = raw.message;
+		if (raw.type !== "message" || !isObject(message) || message.role !== "assistant") continue;
+		const content = Array.isArray(message.content) ? message.content.filter(isObject) : [];
+		const usage = isObject(message.usage) ? message.usage : {};
+		const cost = isObject(usage.cost) && typeof usage.cost.total === "number" ? usage.cost.total : 0;
+		const start = epoch(message.timestamp);
+		const end = start !== undefined && typeof message.durationMs === "number" ? start + message.durationMs : at;
+		const calls = content.filter((block) => block.type === "toolCall");
+		const text = content.find((block) => block.type === "text" && typeof block.text === "string")?.text as string | undefined;
+		records.push({
+			kind: "llm",
+			seq: item.seq,
+			turn,
+			...(start !== undefined ? { start } : {}),
+			...(end !== undefined ? { end } : {}),
+			model: typeof message.model === "string" ? message.model : undefined,
+			provider: typeof message.provider === "string" ? message.provider : undefined,
+			stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+			...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
+			input: Number(usage.input ?? 0),
+			output: Number(usage.output ?? 0),
+			cacheRead: Number(usage.cacheRead ?? 0),
+			cacheWrite: Number(usage.cacheWrite ?? 0),
+			cost,
+			...(item.requestId ? { requestId: item.requestId } : {}),
+			...(text ? { text: text.slice(0, 160) } : {}),
+			...(content.some((block) => block.type === "thinking") ? { thinking: true } : {}),
+			toolCalls: calls.length,
+		});
+		for (const call of calls) {
+			const callId = String(call.id);
+			const name = String(call.name);
+			const result = results.get(callId);
+			const resultMessage = isObject(result?.raw.message) ? result.raw.message : undefined;
+			const ended = resultMessage ? (epoch(resultMessage.timestamp) ?? epoch(result?.timestamp)) : undefined;
+			const durationMs =
+				typeof resultMessage?.durationMs === "number" ? resultMessage.durationMs : ended !== undefined && end !== undefined ? Math.max(0, ended - end) : undefined;
+			const output = resultMessage && Array.isArray(resultMessage.content) ? resultMessage.content.filter(isObject) : [];
+			const child = children.find((candidate) => (candidate.parentToolCallId ?? candidate.link?.parentToolCallId) === callId);
+			const summary = traceSummary(name, isObject(call.arguments) ? call.arguments : {});
+			records.push({
+				kind: "tool",
+				seq: item.seq,
+				...(result ? { resultSeq: result.seq } : {}),
+				turn,
+				callId,
+				name,
+				...(end !== undefined ? { start: end } : {}),
+				...(ended !== undefined ? { end: ended } : {}),
+				...(durationMs !== undefined ? { durationMs } : {}),
+				isError: resultMessage?.isError === true,
+				...(summary !== undefined ? { summary } : {}),
+				...(resultMessage ? { outputSize: output.reduce((n, block) => n + (typeof block.text === "string" ? block.text.length : 0), 0) } : {}),
+				...(child && name === "Agent" ? { childSessionId: child.id } : {}),
+			});
+		}
+	}
+	// As the server's `times`: a session without entries has no start or end, and nothing is invented.
+	const times = (summary: { startedAt?: string; lastAt?: string; entryCount: number }) => {
+		const started = epoch(summary.startedAt);
+		const last = epoch(summary.lastAt);
+		if (summary.entryCount <= 0 || (started === undefined && !last)) return {};
+		return { ...((started ?? last) !== undefined ? { startedAt: started ?? last } : {}), ...(last !== undefined ? { lastAt: last } : {}) };
+	};
+	return {
+		sessionId: session.detail.id,
+		...times(session.detail),
+		turns: session.turns.map((turn) => ({
+			index: turn.index,
+			startSeq: turn.startSeq,
+			endSeq: turn.endSeq,
+			...(epoch(turn.at) !== undefined ? { at: epoch(turn.at) } : {}),
+			durationMs: turn.durationMs,
+			userText: turn.userText.slice(0, 200),
+			...(turn.customType ? { customType: turn.customType } : {}),
+			modelCalls: turn.modelCalls,
+			toolCalls: turn.toolCalls,
+			toolErrors: turn.toolErrors,
+			cost: turn.cost,
+			tokens: turn.tokens,
+		})),
+		records,
+		children: children.map((child) => ({
+			sessionId: child.id,
+			...((child.parentToolCallId ?? child.link?.parentToolCallId) ? { parentToolCallId: child.parentToolCallId ?? child.link?.parentToolCallId } : {}),
+			...(child.link?.agentType ? { agentType: child.link.agentType } : {}),
+			...(child.link?.description ? { description: child.link.description } : {}),
+			kind: child.link?.kind === "herder-step" ? "herder-step" : "subagent",
+			...times(child),
+			entryCount: child.entryCount,
+			tokens: child.tokens,
+			cost: child.cost,
+			title: child.title,
+		})),
+	};
+}
+
 export function createFakeServer({
 	base = "/",
 	sessions = [],
@@ -101,6 +259,8 @@ export function createFakeServer({
 	relay,
 	online = [],
 	relayEvents = [],
+	trace = true,
+	traces,
 }: {
 	base?: string;
 	sessions?: FakeSession[];
@@ -137,6 +297,10 @@ export function createFakeServer({
 	online?: OnlineSession[];
 	/** Relay events, newest first. */
 	relayEvents?: RelayEvent[];
+	/** Serves `sessions/:id/trace`; older servers answer 404. */
+	trace?: boolean;
+	/** Traces served as given instead of derived, by session id: malformed or partial ones. */
+	traces?: Record<string, unknown>;
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
@@ -391,6 +555,7 @@ export function createFakeServer({
 			if (!session) return json(404, { error: "not found" });
 			if (parts.length === 2) return json(200, session.detail);
 			if (parts[2] === "turns") return json(200, page(session.turns, params, 100));
+			if (parts[2] === "trace" && trace) return json(200, traces?.[session.detail.id] ?? traceOf(session));
 			if (parts[2] === "updates" && updates) {
 				const raw = params.get("since");
 				const since = raw !== null && /^-?\d+$/.test(raw) ? Number(raw) : -1;

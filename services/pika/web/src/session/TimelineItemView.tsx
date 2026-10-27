@@ -1,10 +1,14 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { CodeBlock } from "../components/code";
 import { Icon, type IconName } from "../components/icons";
 import { Markdown } from "../components/Markdown";
 import { Callout, cx, Pill, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
-import { formatCost, formatCount, formatTime } from "../lib/format";
+import { formatCount, formatTime } from "../lib/format";
+import { useViewState } from "../lib/viewState";
+import { formatFineCost, formatSpan } from "../trace/format";
+import { FAMILY_CLASSES, firstStringArg, recordBadge, recordIcon, showsToolName, toolFamily } from "../trace/kinds";
+import { KindBadge, Ring } from "../trace/parts";
 import type { Entry, ToolCall, ToolResultMessage } from "../lib/types";
 import { useSessionSlots, useSessionView } from "./context";
 import { contentImages, contentText, type TimelineItem } from "./timeline";
@@ -12,32 +16,70 @@ import { BashOutput, parseBashOutput } from "./tools/bash";
 import { findToolRenderer } from "./tools/registry";
 import { ToolErrorCallout } from "./tools/shared";
 
-export function ToolView({ call, result, resultEntry }: { call: ToolCall; result?: ToolResultMessage; resultEntry?: Entry }) {
+function toolDuration(result?: ToolResultMessage, resultEntry?: Entry, callEntry?: Entry): number | undefined {
+	const explicit = (result as { durationMs?: unknown } | undefined)?.durationMs;
+	if (typeof explicit === "number") return explicit;
+	const end = result?.timestamp ?? (resultEntry?.timestamp ? Date.parse(resultEntry.timestamp) : undefined);
+	const start = callEntry?.timestamp ? Date.parse(callEntry.timestamp) : undefined;
+	return end !== undefined && start !== undefined && end >= start ? end - start : undefined;
+}
+
+/**
+ * A tool call as one dense row, the ledger's, that expands to its full renderer. `defaultOpen`
+ * defaults to open for standalone use; the transcript opens only failed calls, and a call a deep
+ * link highlights (`reveal`), so the highlighted row shows the output the link points at.
+ */
+export function ToolView({
+	call,
+	result,
+	resultEntry,
+	callEntry,
+	defaultOpen = true,
+	reveal = false,
+}: {
+	call: ToolCall;
+	result?: ToolResultMessage;
+	resultEntry?: Entry;
+	callEntry?: Entry;
+	defaultOpen?: boolean;
+	reveal?: boolean;
+}) {
 	const renderer = findToolRenderer(call.name);
-	const [open, setOpen] = useState(true);
-	const summary = renderer.summary?.(call);
+	const { sessionId } = useSessionView();
+	const [open, setOpen] = useViewState(`tool-open:${sessionId}:${call.id}`, defaultOpen);
+	useEffect(() => {
+		if (reveal) setOpen(true);
+	}, [reveal, setOpen]);
 	const Component = renderer.Component;
+	const family = toolFamily(call.name);
+	const error = result?.isError === true;
+	const duration = toolDuration(result, resultEntry, callEntry);
+	const record = { kind: "tool" as const, seq: 0, callId: call.id, name: call.name, isError: error };
+	const badge = recordBadge(record);
+	const summary = renderer.summary?.(call) ?? firstStringArg(call.arguments);
 	return (
 		<div data-tool={renderer.id} data-tool-name={call.name}>
 			<button
 				type="button"
 				aria-expanded={open}
 				onClick={() => setOpen(!open)}
-				className="-mx-1 flex w-[calc(100%+0.5rem)] min-w-0 items-center gap-2 rounded-sm px-1 py-0.5 text-left text-[14px] hover:bg-hover"
+				className="-mx-1.5 flex h-7 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-sm px-1.5 text-left text-[13px] hover:bg-hover"
 			>
-				<span aria-hidden="true" className="w-3 shrink-0 text-[11px] text-muted">
-					{open ? "▾" : "▸"}
-				</span>
-				<Icon name={renderer.icon} className="shrink-0 text-muted" />
-				<span className="font-medium">{call.name}</span>
-				{summary && !open && <span className="mono min-w-0 flex-1 truncate text-muted">{summary}</span>}
-				<span className="ml-auto flex shrink-0 items-center gap-1.5">
-					{result?.isError && <Pill tone="red">error</Pill>}
+				<KindBadge family={family} label={badge} className={cx(error && "!bg-red-soft !text-red")} />
+				<Icon name={recordIcon(record)} size={14} className={cx("shrink-0", error ? "text-red" : FAMILY_CLASSES[family].text)} />
+				{showsToolName(record) && <span className="shrink-0 font-medium">{call.name}</span>}
+				{summary && <span className="mono min-w-0 flex-1 truncate text-[12px] text-ink/75">{summary}</span>}
+				<span className="ml-auto flex shrink-0 items-center gap-2">
+					{duration !== undefined && <span className="mono tnum text-[11.5px] text-muted">{formatSpan(duration)}</span>}
+					{error && <Pill tone="red">error</Pill>}
 					{!result && <Pill>no result</Pill>}
+					<span aria-hidden="true" className={cx("w-3 text-center text-[10px] text-muted transition-transform duration-150", open && "rotate-90")}>
+						▸
+					</span>
 				</span>
 			</button>
 			{open && (
-				<div className="mt-1.5 pl-[18px]">
+				<div className="mt-1 mb-2 pl-[52px]">
 					<Component call={call} result={result} resultEntry={resultEntry} />
 					{result?.isError && !renderer.handlesErrors && (
 						<div className="mt-2">
@@ -64,18 +106,25 @@ function ModelCall({ item }: { item: Extract<TimelineItem, { kind: "model-call" 
 	const { ModelCallExtra } = useSessionSlots();
 	const { message } = item;
 	const usage = message.usage;
-	const parts = [
-		message.model,
-		usage && `${formatCount(usage.input + (usage.cacheRead ?? 0))} in · ${formatCount(usage.output)} out`,
-		usage?.cost?.total ? formatCost(usage.cost.total) : undefined,
-		message.thinkingLevel && `thinking ${message.thinkingLevel}`,
-	].filter(Boolean);
+	const prompt = usage ? usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) : 0;
+	const hit = usage && prompt > 0 ? (usage.cacheRead ?? 0) / prompt : undefined;
+	const error = message.stopReason === "error" || message.stopReason === "aborted" || Boolean(message.errorMessage);
 	return (
-		<div className="flex items-center gap-2 pt-1 text-[12px] text-muted" data-model-call="">
-			<Icon name="sparkle" size={13} className="shrink-0" />
-			<span className="min-w-0 truncate">{parts.join(" · ")}</span>
-			<span className="ml-auto shrink-0">{formatTime(message.timestamp ?? item.entry.timestamp)}</span>
-			{ModelCallExtra && <ModelCallExtra sessionId={sessionId} entry={item.entry} />}
+		<div className="flex h-7 items-center gap-2 text-[12px] text-muted" data-model-call="">
+			<KindBadge family="llm" label="LLM" className={cx(error && "!bg-red-soft !text-red")} />
+			<span className="min-w-0 truncate text-ink/80">{message.model}</span>
+			{message.thinkingLevel && message.thinkingLevel !== "off" && <span className="shrink-0">thinking {message.thinkingLevel}</span>}
+			<span className="ml-auto flex shrink-0 items-center gap-2.5">
+				{usage && (
+					<span className="mono tnum text-[11.5px]" title={`${formatCount(usage.input)} input · ${formatCount(usage.cacheRead ?? 0)} cache read · ${formatCount(usage.output)} output`}>
+						{formatCount(prompt)}→{formatCount(usage.output)}
+					</span>
+				)}
+				{hit !== undefined && <Ring value={hit} className="text-k-read" title={`Cache hit ${Math.round(hit * 100)}%`} />}
+				{usage?.cost?.total ? <span className="mono tnum text-[11.5px]">{formatFineCost(usage.cost.total)}</span> : null}
+				<span className="mono tnum text-[11.5px]">{formatTime(message.timestamp ?? item.entry.timestamp)}</span>
+				{ModelCallExtra && <ModelCallExtra sessionId={sessionId} entry={item.entry} />}
+			</span>
 		</div>
 	);
 }
@@ -134,7 +183,7 @@ function Images({ content }: { content: unknown }) {
 }
 
 /** One row of an expanded turn's timeline. */
-export function TimelineItemView({ item }: { item: TimelineItem }) {
+export function TimelineItemView({ item, highlighted = false }: { item: TimelineItem; highlighted?: boolean }) {
 	switch (item.kind) {
 		case "model-call":
 			return <ModelCall item={item} />;
@@ -152,7 +201,7 @@ export function TimelineItemView({ item }: { item: TimelineItem }) {
 				</Toggle>
 			);
 		case "tool":
-			return <ToolView call={item.call} result={item.result} resultEntry={item.resultEntry} />;
+			return <ToolView call={item.call} result={item.result} resultEntry={item.resultEntry} callEntry={item.entry} defaultOpen={item.result?.isError === true} reveal={highlighted} />;
 		case "tool-result":
 			return (
 				<div>

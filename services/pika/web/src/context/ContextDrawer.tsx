@@ -455,10 +455,10 @@ function requestStaleTime(query: Query<ModelRequest>): number {
 	return query.state.data?.complete ? Infinity : 0;
 }
 
-export function ContextDrawer({ target, onClose }: { target: ContextTarget; onClose: () => void }) {
+/** "What the model saw" for one captured request: the drawer's body, also shown in the trajectory inspector. */
+export function ContextView({ target, scrollPane }: { target: ContextTarget; scrollPane: HTMLElement | null }) {
 	const api = useApi();
 	const queryClient = useQueryClient();
-	const [scrollPane, setScrollPane] = useState<HTMLElement | null>(null);
 	const request = useQuery({ queryKey: ["request", target.requestId], queryFn: () => api.modelRequest(target.requestId), staleTime: requestStaleTime });
 	const previousId = useQuery({
 		queryKey: ["previous-request", target.sessionId, target.seq],
@@ -485,6 +485,23 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 		[normal, previousNormal],
 	);
 
+	if (request.isPending) return <SkeletonLines lines={6} />;
+	if (request.isError) return <ErrorState error={request.error} onRetry={() => void request.refetch()} />;
+	if (!normal) return null;
+	return (
+		<RequestBody
+			request={request.data}
+			normal={normal}
+			newFrom={newFrom}
+			previousKnown={previousId.isSuccess && previousId.data === null}
+			scrollPane={scrollPane}
+		/>
+	);
+}
+
+export function ContextDrawer({ target, onClose }: { target: ContextTarget; onClose: () => void }) {
+	const [scrollPane, setScrollPane] = useState<HTMLElement | null>(null);
+
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
 			// A dialog above the drawer, like the message composer, takes its own Escape.
@@ -509,21 +526,7 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 				</button>
 			</div>
 			<div ref={setScrollPane} className="min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-16" data-scroll-pane="">
-				{request.isPending ? (
-					<SkeletonLines lines={6} />
-				) : request.isError ? (
-					<ErrorState error={request.error} onRetry={() => void request.refetch()} />
-				) : (
-					normal && (
-						<RequestBody
-							request={request.data}
-							normal={normal}
-							newFrom={newFrom}
-							previousKnown={previousId.isSuccess && previousId.data === null}
-							scrollPane={scrollPane}
-						/>
-					)
-				)}
+				<ContextView target={target} scrollPane={scrollPane} />
 			</div>
 		</aside>
 	);

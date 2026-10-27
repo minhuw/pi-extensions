@@ -42,11 +42,11 @@ function estimateRow(row: Row | undefined): number {
 	if (!row) return 80;
 	switch (row.type) {
 		case "head":
-			return 150;
+			return 110;
 		case "item":
-			return row.item.kind === "tool" ? 160 : row.item.kind === "model-call" ? 28 : 60;
+			return row.item.kind === "tool" || row.item.kind === "model-call" ? 30 : 56;
 		case "foot":
-			return 120;
+			return 90;
 		default:
 			return 48;
 	}
@@ -64,7 +64,7 @@ function WorkStrip({ turn, expanded, onToggle }: { turn: Turn; expanded: boolean
 			type="button"
 			aria-expanded={expanded}
 			onClick={onToggle}
-			className="-mx-2 mt-3 flex w-[calc(100%+1rem)] items-center gap-2 rounded-sm px-2 py-1 text-left text-[14px] text-muted hover:bg-hover"
+			className="-mx-2 mt-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-sm px-2 py-0.5 text-left text-[13px] text-muted hover:bg-hover"
 			data-work-strip={turn.index}
 		>
 			<span aria-hidden="true" className="w-3 text-[11px]">
@@ -99,7 +99,7 @@ function TurnHead({
 	return (
 		<div
 			className={cx(
-				"rounded-t-md border-x border-t px-6 pt-5 pb-2 transition-colors duration-700",
+				"rounded-t-md border-x border-t px-5 pt-3.5 pb-1.5 transition-colors duration-700",
 				active ? "border-accent/40" : "border-line",
 				highlighted && "bg-accent-soft",
 			)}
@@ -107,14 +107,15 @@ function TurnHead({
 			data-active={active || undefined}
 			data-highlighted={highlighted || undefined}
 		>
-			<div className="mb-2 flex items-center gap-2 text-[13px] text-muted">
-				<Icon name={start.icon} size={14} />
+			<div className="mb-1.5 flex items-center gap-2 text-[12px] text-muted">
+				<span className="mono tnum font-semibold text-k-user">#{turn.index + 1}</span>
+				<Icon name={start.icon} size={13} className="text-k-user" />
 				<span title={turn.customType} data-turn-start={turn.customType ?? "prompt"}>
 					{start.label}
 				</span>
-				<span className="ml-auto">{formatDateTime(turn.at)}</span>
+				<span className="tnum ml-auto">{formatDateTime(turn.at)}</span>
 			</div>
-			{turn.userText ? <Markdown text={turn.userText} /> : <div className="text-muted italic">(empty prompt)</div>}
+			{turn.userText ? <Markdown text={turn.userText} className="text-[15px]" /> : <div className="text-muted italic">(empty prompt)</div>}
 			<WorkStrip turn={turn} expanded={row.expanded} onToggle={onToggle} />
 		</div>
 	);
@@ -122,15 +123,15 @@ function TurnHead({
 
 function TurnFoot({ turn, active }: { turn: Turn; active: boolean }) {
 	return (
-		<div className="pb-6">
-			<div className={cx("rounded-b-md border-x border-b px-6 pb-5", active ? "border-accent/40" : "border-line", turn.finalText ? "pt-3" : "pt-1")}>
+		<div className="pb-4">
+			<div className={cx("rounded-b-md border-x border-b px-5 pb-3.5", active ? "border-accent/40" : "border-line", turn.finalText ? "pt-2" : "pt-1")}>
 				{turn.finalText && (
-					<div className="border-t border-line pt-4" data-final-answer={turn.index}>
-						<div className="mb-1.5 flex items-center gap-2 text-[13px] text-muted">
-							<Icon name="sparkle" size={14} />
+					<div className="border-t border-line pt-3" data-final-answer={turn.index}>
+						<div className="mb-1 flex items-center gap-2 text-[12px] text-muted">
+							<Icon name="sparkle" size={13} className="text-k-llm" />
 							Answer
 						</div>
-						<Markdown text={turn.finalText} className="text-[16px]" />
+						<Markdown text={turn.finalText} className="text-[15px]" />
 					</div>
 				)}
 			</div>
@@ -151,11 +152,11 @@ function ItemShell({
 }) {
 	return (
 		<div
-			className={cx("border-x px-6 transition-colors duration-700", active ? "border-accent/40" : "border-line", highlighted && "bg-accent-soft")}
+			className={cx("border-x px-5 transition-colors duration-700", active ? "border-accent/40" : "border-line", highlighted && "bg-accent-soft")}
 			data-entry-seq={seq}
 			data-highlighted={highlighted || undefined}
 		>
-			<div className="ml-1.5 border-l border-line py-1.5 pl-5">{children}</div>
+			<div className="ml-1.5 border-l border-line py-0.5 pl-4">{children}</div>
 		</div>
 	);
 }
@@ -410,6 +411,7 @@ export function TurnList({
 				const row = rows[virtual.index];
 				if (!row) return null;
 				const isActive = row.type !== "turns-loader" && row.turn.index === activeTurnIndex;
+				const itemHighlighted = row.type === "item" && highlight !== undefined && highlight !== row.turn.startSeq && itemHasSeq(row.item, highlight);
 				return (
 					<div
 						key={virtual.key}
@@ -429,9 +431,9 @@ export function TurnList({
 							<ItemShell
 								active={isActive}
 								seq={row.item.seq}
-								highlighted={highlight !== undefined && highlight !== row.turn.startSeq && itemHasSeq(row.item, highlight)}
+								highlighted={itemHighlighted}
 							>
-								<TimelineItemView item={row.item} />
+								<TimelineItemView item={row.item} highlighted={itemHighlighted} />
 							</ItemShell>
 						) : row.type === "status" ? (
 							<ItemShell active={isActive}>

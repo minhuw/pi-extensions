@@ -20,6 +20,7 @@ import type {
 	SearchHit,
 	SessionDetail,
 	SessionSummary,
+	SessionTrace,
 	SessionUpdates,
 	Turn,
 } from "./types";
@@ -155,6 +156,11 @@ export class PikaApi {
 
 	entries(id: string, range: { from?: number; to?: number; limit?: number }): Promise<{ items: Entry[] }> {
 		return this.request(`sessions/${encodeURIComponent(id)}/entries`, range);
+	}
+
+	/** The session's records for the trajectory view, without raw entries. */
+	trace(id: string): Promise<SessionTrace> {
+		return this.request(`sessions/${encodeURIComponent(id)}/trace`);
 	}
 
 	updates(id: string, since: number): Promise<SessionUpdates> {

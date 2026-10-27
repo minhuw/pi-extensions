@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # pika's end-to-end check (AC-1, AC-2, AC-8): installs and builds everything from a fresh checkout, checks that the
 # release binary refuses to start without a password, serves it with its embedded UI under /pika with a password, then
-# runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read
-# API and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, and the UI in the locally
-# installed Chrome; then pika relay between two `pi --mode rpc` processes logged in as two devices (questions and
-# answers, the hop limit, expiry with a short TTL, `/relay off`, renaming a device, messages from the browser route and
-# the dashboard, and revocation closing the connection); then a second machine pairing through `/pika login` under a
-# free-text name while the browser denies and approves it, pairing again after `/pika logout` and continuing the same
-# device by its device key, renaming and revoking it, browser sign-out, and the login rate limit. Screenshots go to a
-# temporary artifacts directory whose path is printed at the end.
+# runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read API
+# and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, the trace route against what
+# pi wrote, and the UI in the locally installed Chrome (the session page's trajectory view: KPI strip, canvas overview,
+# ledger, inspector, lazy subagents, deep links, replay; and the transcript view); then pika relay between two
+# `pi --mode rpc` processes logged in as two devices (questions and answers, the hop limit, expiry with a short TTL,
+# `/relay off`, renaming a device, messages from the browser route and the dashboard, and revocation closing the
+# connection); then a second machine pairing through `/pika login` under a free-text name while the browser denies and
+# approves it, pairing again after `/pika logout` and continuing the same device by its device key, renaming and
+# revoking it, browser sign-out, and the login rate limit. Screenshots go to a temporary artifacts directory whose path
+# is printed at the end.
 #
 # PIKA_CHROME selects the Chrome or Chromium binary; no browser is ever downloaded. PIKA_E2E_SKIP_BUILD=1 reuses
 # installed dependencies and earlier builds; PIKA_E2E_KEEP=1 keeps the temporary pi workspace and server data.

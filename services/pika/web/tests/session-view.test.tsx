@@ -91,7 +91,7 @@ describe("session view", () => {
 				turn(2, 3, 3, { userText: "/herder: run started", customType: "herder:prompt" }),
 			],
 		};
-		renderApp("/s/s1", createFakeServer({ sessions: [session] }).fetch);
+		renderApp("/s/s1?view=transcript", createFakeServer({ sessions: [session] }).fetch);
 		await screen.findByRole("heading", { name: "Mixed turns" });
 		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn="${index}"]`)!;
 		await waitFor(() => expect(head(2)).toBeTruthy());
@@ -110,14 +110,35 @@ describe("session view", () => {
 		expect(icon(1)).not.toBe(icon(0));
 	});
 
-	it("shows the title, properties, and a prompt card", async () => {
+	it("shows the title, chips, and key numbers instead of a property table", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1", server.fetch);
-		expect(await screen.findByRole("heading", { name: "Fix the failing test" })).toBeTruthy();
-		for (const label of ["Device", "Project", "Directory", "Started", "Duration", "Tokens", "Cost", "Models", "Parent"]) {
-			expect(screen.getByText(label, { selector: "dt span" })).toBeTruthy();
-		}
-		expect(screen.getByRole("link", { name: "Parent session" }).getAttribute("href")).toBe("/s/parent-1");
+		const heading = await screen.findByRole("heading", { name: "Fix the failing test", level: 1 });
+		expect(heading.getAttribute("title")).toBe("Fix the failing test");
+		expect(heading.classList).toContain("line-clamp-2");
+		expect(document.querySelector("dl dt")).toBeNull();
+		const chips = document.querySelector<HTMLElement>("[data-session-chips]")!;
+		expect(chips.textContent).toContain("mini");
+		expect(chips.textContent).toContain("pika");
+		expect(chips.querySelector("[data-cwd]")?.getAttribute("title")).toBe("/home/me/code/pika");
+		expect(chips.textContent).toContain("10m");
+		expect(chips.textContent).toContain("claude-sonnet-4-5");
+		expect(within(chips).getByRole("link", { name: /Parent session/ }).getAttribute("href")).toBe("/s/parent-1");
+		const kpi = (name: string) => document.querySelector<HTMLElement>(`[data-kpi="${name}"] [data-kpi-value]`)?.textContent;
+		await waitFor(() => expect(kpi("turns")).toBe("1"));
+		expect(kpi("llm")).toBe("3");
+		expect(kpi("tools")).toBe("2");
+		expect(document.querySelector("[data-kpi='tools'] [data-kpi-errors]")?.textContent).toBe("1 error");
+		expect(kpi("tokens")).toBe("96.4k");
+		expect(kpi("cost")).toBe("$0.31");
+		expect(kpi("subagents")).toBe("1");
+		expect(kpi("context")).toBe("9.2k");
+		expect(screen.getByRole("link", { name: "Export JSONL" }).getAttribute("href")).toBe("/api/v1/sessions/s1/export");
+	});
+
+	it("shows a prompt card with its work strip and final answer in the transcript", async () => {
+		const server = createFakeServer({ sessions: [sessionFixture()] });
+		renderApp("/s/s1?view=transcript", server.fetch);
 		expect(await screen.findByText("failing", { selector: "strong" })).toBeTruthy();
 		const strip = document.querySelector<HTMLElement>("[data-work-strip='0']")!;
 		expect(strip.textContent).toContain("3 model calls · 2 tools · 2m 14s · $0.31");
@@ -129,7 +150,7 @@ describe("session view", () => {
 		const named = sessionFixture();
 		named.detail = { ...named.detail, device: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", deviceName: "Studio Mac" };
 		const first = renderApp("/s/s1", createFakeServer({ sessions: [named] }).fetch);
-		const device = () => screen.getByText("Device", { selector: "dt span" }).closest("dt")!.nextElementSibling as HTMLElement;
+		const device = () => document.querySelector<HTMLElement>("[data-device-chip]")!;
 		await screen.findByRole("heading", { name: "Fix the failing test" });
 		expect(device().textContent).toBe("Studio Mac");
 		first.unmount();
@@ -143,7 +164,7 @@ describe("session view", () => {
 
 	it("expands a turn into a timeline loaded from that turn's entries", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
-		renderApp("/s/s1", server.fetch);
+		renderApp("/s/s1?view=transcript", server.fetch);
 		const strip = await screen.findByRole("button", { name: /3 model calls/ });
 		expect(strip.getAttribute("aria-expanded")).toBe("false");
 		expect(server.calls.some((call) => call.includes("/entries"))).toBe(false);
@@ -161,11 +182,18 @@ describe("session view", () => {
 		fireEvent.click(thinking);
 		expect(screen.getByText(/fails because of the base path/)).toBeTruthy();
 
-		// Tool calls are paired with results.
+		// Tool calls are paired with results; they are one-line rows, and only failed ones start open.
 		const bash = document.querySelector<HTMLElement>('[data-tool="bash"]')!;
-		expect(within(bash).getByText("npm test", { selector: "code" })).toBeTruthy();
+		expect(within(bash).getByText("BASH")).toBeTruthy();
+		// The command's code block; highlighting, which loads on demand, may split it into spans.
+		expect([...bash.querySelectorAll("code")].some((code) => code.textContent?.includes("npm test"))).toBe(true);
 		expect(within(bash).getByRole("alert").textContent).toContain("Exited with code 1");
 		const read = document.querySelector<HTMLElement>('[data-tool="read"]')!;
+		const row = within(read).getByRole("button", { expanded: false });
+		expect(row.textContent).toContain("READ");
+		expect(row.textContent).toContain("src/api.ts");
+		expect(within(read).queryByText("export const base = '/';")).toBeNull();
+		fireEvent.click(row);
 		expect(within(read).getByText("export const base = '/';")).toBeTruthy();
 		expect(document.querySelectorAll('[data-entry-seq="4"]').length).toBe(0);
 
@@ -185,7 +213,7 @@ describe("session view", () => {
 		const fixture = sessionFixture();
 		fixture.turns = [fixture.turns[0], turn(1, 10, 10), turn(2, 11, 11)];
 		const server = createFakeServer({ sessions: [fixture] });
-		renderApp("/s/s1", server.fetch);
+		renderApp("/s/s1?view=transcript", server.fetch);
 		await screen.findByText("Prompt number 3");
 		fireEvent.keyDown(window, { key: "j" });
 		await waitFor(() => expect(document.querySelector("[data-turn][data-active]")?.getAttribute("data-turn")).toBe("0"));

@@ -5,6 +5,7 @@ import SOURCE from "../../resource/pika-icon.svg?raw";
 import { PikaLogo } from "../src/components/icons";
 import { PAGE_COLUMN } from "../src/components/ui";
 import type { RunDetail } from "../src/lib/types";
+import { TRANSCRIPT_COLUMN, TRAJECTORY_COLUMN } from "../src/pages/SessionView";
 import { onlineSession, summary } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
@@ -68,7 +69,6 @@ describe("logo", () => {
 describe("page width", () => {
 	const routes: [string, string][] = [
 		["/", "Sessions"],
-		["/s/s1", "Fix the parser"],
 		["/runs", "Herder runs"],
 		["/runs/r-1", "Add pika search"],
 		["/search", "Search"],
@@ -86,10 +86,26 @@ describe("page width", () => {
 		for (const name of PAGE_COLUMN.split(" ")) expect(page.classList).toContain(name);
 		expect(page.className).not.toMatch(/max-w-\[(?!900px)/);
 	});
+
+	it("gives the session page the full width, and the transcript a wider reading column", async () => {
+		const server = createFakeServer({ sessions: [{ detail: summary("s1", { title: "Fix the parser" }), turns: [], entries: [] }] });
+		const first = renderApp("/s/s1", server.fetch);
+		const heading = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		const header = heading.closest<HTMLElement>("[data-session-header]")!;
+		for (const name of TRAJECTORY_COLUMN.split(" ")) expect(header.classList).toContain(name);
+		expect(header.className).not.toMatch(/max-w-/);
+		first.unmount();
+
+		renderApp("/s/s1?view=transcript", server.fetch);
+		const again = await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		const column = again.closest<HTMLElement>("[data-session-header]")!;
+		for (const name of TRANSCRIPT_COLUMN.split(" ")) expect(column.classList).toContain(name);
+		expect(TRANSCRIPT_COLUMN).toContain("max-w-[1100px]");
+	});
 });
 
 describe("title badges", () => {
-	it("follow the session title's last word inline", async () => {
+	it("follow the session title, which is clamped to two lines", async () => {
 		const lastAt = new Date(Date.now() - 10_000).toISOString();
 		const server = createFakeServer({
 			sessions: [{ detail: summary("s1", { title: "Refactor the parser", lastAt }), turns: [], entries: [] }],
@@ -98,17 +114,14 @@ describe("title badges", () => {
 		renderApp("/s/s1", server.fetch);
 		const heading = await screen.findByRole("heading", { name: "Refactor the parser", level: 1 });
 		await waitFor(() => expect(document.querySelector("[data-online]")).not.toBeNull());
-		// The heading flows inline, and the badges come right after it in the same line box.
-		expect(heading.classList).toContain("inline");
+		// Long titles clamp to two lines and keep the full text in the tooltip.
+		expect(heading.classList).toContain("line-clamp-2");
+		expect(heading.getAttribute("title")).toBe("Refactor the parser");
 		const badges = heading.nextElementSibling as HTMLElement;
 		expect(badges.hasAttribute("data-title-badges")).toBe(true);
-		expect(badges.classList).toContain("inline-flex");
+		expect(badges.classList).toContain("shrink-0");
 		expect(badges.querySelector("[data-live]")?.textContent).toBe("live");
 		expect(badges.querySelector("[data-online]")?.textContent).toBe("Online");
-		// The title's last word and the badges never part at a line break.
-		expect(heading.parentElement!.classList).not.toContain("flex");
-		expect(heading.parentElement!.classList).toContain("whitespace-nowrap");
-		expect(heading.classList).toContain("whitespace-normal");
 	});
 
 	it("leave a title without badges a plain heading", async () => {
