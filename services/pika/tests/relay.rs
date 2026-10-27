@@ -1084,13 +1084,29 @@ async fn a_reader_that_stops_reading_still_goes_offline_when_silent() {
         c.relay.dead_after = dead_after;
     })
     .await;
-    let online = tokio::time::Instant::now();
-    let mut t = slow_online(&s, "sess-t").await;
+    let Client { ws } = slow_online(&s, "sess-t").await;
+    // It keeps talking while the flood fills the socket buffers, which on Linux take megabytes and outlast the
+    // timeout, and falls silent once a write waits.
+    let (mut sink, stream) = ws.split();
+    let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+    let talking = tokio::spawn(async move {
+        loop {
+            sink.send(Message::text(json!({ "type": "pong" }).to_string())).await.unwrap();
+            let last = tokio::time::Instant::now();
+            tokio::select! {
+                _ = &mut stopped => return (sink, last),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+    });
     let ids = flood(&s, "sess-t", |s| stalled(s, "sess-t")).await;
-    assert!(online.elapsed() < dead_after, "the flood took {:?}", online.elapsed());
+    stop.send(()).unwrap();
+    let (sink, silent) = talking.await.unwrap();
+    let mut t = Client { ws: stream.reunite(sink).unwrap() };
+    assert!(stalled(&s, "sess-t") && silent.elapsed() < dead_after, "{:?}", silent.elapsed());
     // The silence timeout runs while a write waits, and takes the connection out at once.
     sessions_until(&s, |items| items.is_empty()).await;
-    assert!(online.elapsed() >= dead_after, "{:?}", online.elapsed());
+    assert!(silent.elapsed() >= dead_after, "{:?}", silent.elapsed());
     assert_eq!(s.state.relay.connections(), 0);
     assert_eq!(s.state.relay.queued(), ids.len(), "unacknowledged messages stay queued");
     // Once it reads again, the close frame follows what the socket already held.
