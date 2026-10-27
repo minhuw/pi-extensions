@@ -190,7 +190,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.3.1`, `0.3` | a `pika-v0.3.1` release tag |
+| `latest`, `0.4.0`, `0.4` | a `pika-v0.4.0` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -199,7 +199,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.3.1 && git push origin pika-v0.3.1
+git tag pika-v0.4.0 && git push origin pika-v0.4.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
