@@ -147,6 +147,9 @@ describe("/herder-improve and /herder-simplify", () => {
 			expect(values("deep --a")).toEqual(["deep --auto"]);
 			expect(command.getArgumentCompletions("deep --auto --a")).toBeNull();
 			expect(command.getArgumentCompletions("zzz")).toBeNull();
+			// An open menu takes the Enter that should run the command, so a complete word gets none.
+			expect(command.getArgumentCompletions("deep")).toBeNull();
+			expect(command.getArgumentCompletions("deep --auto")).toBeNull();
 		}
 		expect(h.commands.get("herder-improve").getArgumentCompletions("ro").map((item: { value: string }) => item.value)).toEqual(["roadmap"]);
 		expect(h.commands.get("herder-simplify").getArgumentCompletions("ro")).toBeNull();

@@ -66,6 +66,19 @@ describe("registration", () => {
 		for (const item of h.tools.values()) expect(item.description.length).toBeLessThan(400);
 	});
 
+	it("completes /herder arguments, keeping earlier words, and offers no menu for a word typed in full", () => {
+		const command = setup().h.commands.get("herder");
+		const values = (prefix: string) => command.getArgumentCompletions(prefix)?.map((item: { value: string }) => item.value);
+		expect(values("")).toEqual(["status", "resume", "deliver", "abort", "clean", "help"]);
+		expect(values("re")).toEqual(["resume"]);
+		expect(values("deliver ")).toEqual(["deliver series", "deliver branch", "deliver squash", "deliver uncommitted", "deliver --curate"]);
+		expect(values("deliver squash --c")).toEqual(["deliver squash --curate"]);
+		expect(values("deliver --curate s")).toEqual(["deliver --curate series", "deliver --curate squash"]);
+		// An open menu takes the Enter that should run the command, so a complete word gets none.
+		for (const prefix of ["status", "abort", "deliver", "deliver squash", "deliver squash --curate"]) expect(values(prefix), prefix).toBeUndefined();
+		expect(values("add pagination")).toBeUndefined();
+	});
+
 	it("loads the real extension without touching git, timers, or the runtime", () => {
 		const registered: string[] = [];
 		const pi = { on() {}, registerCommand: (name: string) => registered.push(`/${name}`), registerTool: (tool: { name: string }) => registered.push(tool.name), events: { on() { return () => {}; }, emit() {} } };

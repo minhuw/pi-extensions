@@ -214,9 +214,13 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 		description: "Durable, verified coding runs: /herder <goal> | status | resume | deliver [mode] [--curate] | abort | clean",
 		getArgumentCompletions: (prefix) => {
 			const words = prefix.trimStart().split(/\s+/);
-			if (words.length > 1) return words[0] === "deliver" ? [...DELIVERY_MODES, "--curate"].filter((item) => item.startsWith(words.at(-1)!)).map((value) => ({ value: `deliver ${value}`, label: value })) : null;
-			const items = SUBCOMMANDS.filter((name) => name.startsWith(words[0] ?? ""));
-			return items.length ? items.map((value) => ({ value, label: value })) : null;
+			const last = words.pop() ?? "";
+			const options: readonly string[] = !words.length ? SUBCOMMANDS : words[0] === "deliver" ? [...DELIVERY_MODES, "--curate"] : [];
+			// A word typed in full gets no menu: an open menu takes the Enter that should run the command.
+			if (options.includes(last)) return null;
+			const items = options.filter((item) => item.startsWith(last) && !words.includes(item));
+			// A completion replaces every argument, so it keeps the words before the last.
+			return items.length ? items.map((item) => ({ value: [...words, item].join(" "), label: item })) : null;
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			try {
@@ -254,6 +258,8 @@ export function registerCommands(pi: ExtensionAPI, herder: Herder): void {
 			getArgumentCompletions: (prefix) => {
 				const typed = prefix.trimStart().split(/\s+/);
 				const last = typed.pop() ?? "";
+				// A word typed in full gets no menu: an open menu takes the Enter that should run the command.
+				if (AUDIT_WORDS[kind].includes(last)) return null;
 				const items = AUDIT_WORDS[kind].filter((word) => word.startsWith(last) && !typed.includes(word));
 				return items.length ? items.map((word) => ({ value: [...typed, word].join(" "), label: word })) : null;
 			},
