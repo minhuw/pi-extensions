@@ -263,7 +263,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
     let (mut a, welcome) = Client::online(&s, &s.laptop, "sess-a").await;
     assert_eq!(
         welcome,
-        json!({ "type": "welcome", "device": "laptop", "serverVersion": "0.3.0",
+        json!({ "type": "welcome", "device": "laptop", "serverVersion": env!("CARGO_PKG_VERSION"),
             "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768, "maxHops": 8 } })
     );
     let items = sessions(&s).await;
@@ -739,7 +739,10 @@ async fn relay_off_disables_every_route() {
     })
     .await;
     let health = http(&s.app, get("/api/health", None, None)).await;
-    assert_eq!((health.json()["features"].clone(), health.json()["version"].clone()), (json!([]), json!("0.3.0")));
+    assert_eq!(
+        (health.json()["features"].clone(), health.json()["version"].clone()),
+        (json!([]), json!(env!("CARGO_PKG_VERSION")))
+    );
     let disabled = (404, json!({ "error": "relay_disabled" }));
     assert_eq!(refused(&s, Some(&s.laptop)).await, disabled);
     assert_eq!(refused(&s, None).await, disabled);
