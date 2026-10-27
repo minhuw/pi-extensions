@@ -92,4 +92,6 @@ it("/relay on says why a session stays offline, and unknown subcommands show the
 	}
 	const command = h.session.extensionRunner.getCommand("relay")!;
 	expect(await command.getArgumentCompletions!("o")).toEqual([{ value: "off", label: "off" }, { value: "on", label: "on" }]);
+	// A subcommand typed in full gets no menu, so Enter runs it.
+	expect(await command.getArgumentCompletions!("off")).toBeNull();
 });

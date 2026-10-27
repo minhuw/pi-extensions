@@ -547,6 +547,7 @@ describe("/pika", () => {
 			const command = h.session.extensionRunner.getCommand("pika")!;
 			expect(await command.getArgumentCompletions!("lo")).toEqual([{ value: "login", label: "login" }, { value: "logout", label: "logout" }]);
 			expect(await command.getArgumentCompletions!("x")).toBeNull();
+			expect(await command.getArgumentCompletions!("logout")).toBeNull();
 		} finally { await h.shutdown(); }
 	}, 20_000);
 });

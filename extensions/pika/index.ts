@@ -344,7 +344,9 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("pika", {
 		description: "Show pika upload status, or log in to or out of a pika server",
 		getArgumentCompletions: (prefix) => {
-			const items = SUBCOMMANDS.filter((name) => name.startsWith(prefix.trim())).map((name) => ({ value: name, label: name }));
+			// Nothing to offer for a subcommand typed in full: an open menu takes the Enter that should run it.
+			const typed = prefix.trim();
+			const items = SUBCOMMANDS.filter((name) => name.startsWith(typed) && name !== typed).map((name) => ({ value: name, label: name }));
 			return items.length ? items : null;
 		},
 		handler: async (args, ctx) => {

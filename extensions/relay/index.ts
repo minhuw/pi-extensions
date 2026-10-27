@@ -581,7 +581,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("relay", {
 		description: "Show pika relay status, send a message to another pi session, or turn relay off or on for this session",
 		getArgumentCompletions: (prefix) => {
-			const items = SUBCOMMANDS.filter((name) => name.startsWith(prefix.trim())).map((name) => ({ value: name, label: name }));
+			// Nothing to offer for a subcommand typed in full: an open menu takes the Enter that should run it.
+			const typed = prefix.trim();
+			const items = SUBCOMMANDS.filter((name) => name.startsWith(typed) && name !== typed).map((name) => ({ value: name, label: name }));
 			return items.length ? items : null;
 		},
 		handler: async (args, context) => {
