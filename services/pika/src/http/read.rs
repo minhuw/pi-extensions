@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -26,6 +26,7 @@ pub fn routes() -> Router<AppState> {
         .route("/sessions/{id}/entries/{seq}/raw", get(raw_entry))
         .route("/sessions/{id}/entries/{seq}/image/{index}", get(image))
         .route("/sessions/{id}/updates", get(updates))
+        .route("/sessions/{id}/trace", get(trace))
         .route("/sessions/{id}/export", get(export_session))
         .route("/requests/{id}", get(request))
         .route("/herder/runs", get(herder_runs))
@@ -66,6 +67,65 @@ async fn json<T: Serialize + Send + 'static>(
     }
 }
 
+/// Whether `Accept-Encoding` gives gzip a non-zero quality, by name or through `*`; a named `gzip` wins over `*`.
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    let (mut gzip, mut any) = (None, None);
+    for item in headers.get_all(header::ACCEPT_ENCODING).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')) {
+        let mut parts = item.split(';').map(str::trim);
+        let coding = parts.next().unwrap_or("");
+        // A malformed quality counts as 1, as if absent.
+        let q = parts
+            .find_map(|p| {
+                let (name, value) = p.split_once('=')?;
+                name.trim().eq_ignore_ascii_case("q").then(|| value.trim().parse::<f32>().ok()).flatten()
+            })
+            .unwrap_or(1.0);
+        if coding.eq_ignore_ascii_case("gzip") || coding.eq_ignore_ascii_case("x-gzip") {
+            gzip.get_or_insert(q);
+        } else if coding == "*" {
+            any.get_or_insert(q);
+        }
+    }
+    gzip.or(any).is_some_and(|q| q > 0.0)
+}
+
+/// Whether `If-None-Match` lists `etag` (weakly compared) or is `*`.
+fn none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers.get_all(header::IF_NONE_MATCH).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).any(|tag| {
+        let tag = tag.trim();
+        tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == etag
+    })
+}
+
+/// The trace's `ETag` for its fingerprint; the gzipped body is another representation, so it has its own tag.
+fn trace_etag(fingerprint: &str, gzip: bool) -> String {
+    if gzip { format!("\"{fingerprint}-gzip\"") } else { format!("\"{fingerprint}\"") }
+}
+
+/// JSON, gzipped when the request accepts it, serialized straight into the encoder.
+fn json_maybe_gzip(value: &impl Serialize, gzip: bool) -> Response {
+    let body = if gzip {
+        // The encoder compresses on every write, so it takes serde's small writes through a buffer.
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, encoder);
+        serde_json::to_writer(&mut writer, value)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| Ok(writer.into_inner().map_err(|e| e.into_error())?.finish()?))
+    } else {
+        serde_json::to_vec(value).map_err(anyhow::Error::from)
+    };
+    match body {
+        Ok(body) => {
+            let mut response = ([(header::CONTENT_TYPE, "application/json"), (header::VARY, "accept-encoding")], body).into_response();
+            if gzip {
+                response.headers_mut().insert(header::CONTENT_ENCODING, header::HeaderValue::from_static("gzip"));
+            }
+            response
+        }
+        Err(e) => internal_error(format!("{e:#}")),
+    }
+}
+
 fn seq_param(raw: &str) -> ReadResult<i64> {
     raw.parse().map_err(|_| read::bad("seq must be an integer"))
 }
@@ -88,6 +148,31 @@ async fn turns(State(state): State<AppState>, Path(id): Path<String>, Query(para
 
 async fn updates(State(state): State<AppState>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
     json(&state, move |_, conn| read::sessions::updates(conn, &id, &Params(params))).await
+}
+
+/// Live views poll the trace, so it is revalidated by `ETag` and only built when it changed.
+async fn trace(State(state): State<AppState>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+    let gzip = accepts_gzip(&headers);
+    let unchanged = move |fingerprint: &str| none_match(&headers, &trace_etag(fingerprint, gzip));
+    let (fingerprint, trace) =
+        match query(&state, move |store, conn| read::trace::trace_if_changed(conn, &store.blobs, &id, unchanged)).await {
+            Ok(result) => result,
+            Err(e) => return read_error(e),
+        };
+    let mut response = match trace {
+        None => StatusCode::NOT_MODIFIED.into_response(),
+        // A large trace takes milliseconds to serialize and compress, so that runs off the async runtime too.
+        Some(trace) => tokio::task::spawn_blocking(move || json_maybe_gzip(&trace, gzip))
+            .await
+            .unwrap_or_else(|e| internal_error(format!("{e:#}"))),
+    };
+    if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        let headers = response.headers_mut();
+        headers.insert(header::ETAG, trace_etag(&fingerprint, gzip).parse().expect("hex digits make a valid header"));
+        headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
+        headers.insert(header::VARY, header::HeaderValue::from_static("accept-encoding"));
+    }
+    response
 }
 
 async fn entries(State(state): State<AppState>, Path(id): Path<String>, Query(params): QueryParams) -> Response {

@@ -49,8 +49,8 @@ impl Client {
         Ok(self.conn.as_mut().unwrap())
     }
 
-    fn exchange(&mut self, path: &str) -> Result<Reply> {
-        let request = format!("GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\n\r\n", self.addr);
+    fn exchange(&mut self, path: &str, extra: &str) -> Result<Reply> {
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\n{extra}\r\n", self.addr);
         let conn = self.connect()?;
         let started = Instant::now();
         conn.get_mut().write_all(request.as_bytes())?;
@@ -109,12 +109,17 @@ impl Client {
 
     /// GETs a read API path relative to `{base}/api/v1/`; a stale keep-alive connection is retried once.
     fn get(&mut self, rel: &str) -> Result<Reply> {
+        self.get_with(rel, "")
+    }
+
+    /// `get` with extra header lines, each ending in CRLF.
+    fn get_with(&mut self, rel: &str, extra: &str) -> Result<Reply> {
         let path = format!("{}/api/v1/{rel}", self.prefix);
-        let reply = match self.exchange(&path) {
+        let reply = match self.exchange(&path, extra) {
             Ok(reply) => reply,
             Err(_) => {
                 self.conn = None;
-                self.exchange(&path)?
+                self.exchange(&path, extra)?
             }
         };
         ensure!(reply.status == 200, "GET {path}: {} {}", reply.status, String::from_utf8_lossy(&reply.body));
@@ -368,6 +373,10 @@ pub fn run(options: Options) -> Result<bool> {
     let mut huge_detail = Class::new("20k session: sessions/:id", None);
     let mut huge_turns = Class::new("20k session: turns", None);
     let mut huge_entries = Class::new("20k session: entries", None);
+    let mut trace = Class::new("5k session: trace", Some(200.0));
+    let mut huge_trace = Class::new("20k session: trace", None);
+    // The raw and gzipped size of the first large session's trace, and its record count.
+    let mut trace_sizes = Value::Null;
     let mut search = Class::new("search", Some(300.0));
 
     // Session list, with a second page through the cursor after some first pages.
@@ -396,10 +405,10 @@ pub fn run(options: Options) -> Result<bool> {
         }
     }
 
-    // The first page of the large sessions: the summary with children, the turns, and the first entries.
-    for (ids, d, t, e, n) in [
-        (&plan.big, &mut detail, &mut turns, &mut entries, samples),
-        (&plan.huge, &mut huge_detail, &mut huge_turns, &mut huge_entries, samples / 4),
+    // The first page of the large sessions: the summary with children, the turns, the first entries, and the trace.
+    for (ids, d, t, e, tr, n) in [
+        (&plan.big, &mut detail, &mut turns, &mut entries, &mut trace, samples),
+        (&plan.huge, &mut huge_detail, &mut huge_turns, &mut huge_entries, &mut huge_trace, samples / 4),
     ] {
         ensure!(!ids.is_empty(), "the plan names no large sessions");
         for i in 0..if run_section("session") { WARMUP / 4 + n } else { 0 } {
@@ -425,7 +434,23 @@ pub fn run(options: Options) -> Result<bool> {
                     failures.push(format!("sessions/{id}/entries did not return 200 entries"));
                 }
             }
+            // As a browser asks for it: gzipped.
+            let reply = client.get_with(&format!("sessions/{id}/trace"), "Accept-Encoding: gzip\r\n")?;
+            if measured {
+                tr.samples.push((Vec::new(), reply.elapsed.as_secs_f64() * 1e3));
+            }
         }
+    }
+    if run_section("session") {
+        let id = q(&plan.big[0]);
+        let gzipped = client.get_with(&format!("sessions/{id}/trace"), "Accept-Encoding: gzip\r\n")?.body.len();
+        let raw = client.get(&format!("sessions/{id}/trace"))?;
+        let records = raw.json()?["records"].as_array().map_or(0, Vec::len);
+        if records == 0 {
+            failures.push(format!("sessions/{id}/trace returned no records"));
+        }
+        ensure!(gzipped < raw.body.len(), "sessions/{id}/trace was not gzipped");
+        trace_sizes = json!({ "records": records, "rawBytes": raw.body.len(), "gzipBytes": gzipped });
     }
 
     for i in 0..if run_section("search") { WARMUP + samples } else { 0 } {
@@ -448,7 +473,8 @@ pub fn run(options: Options) -> Result<bool> {
         let _ = watcher.join();
     }
 
-    let classes = [&list, &detail, &turns, &entries, &huge_detail, &huge_turns, &huge_entries, &search];
+    let classes =
+        [&list, &detail, &turns, &entries, &trace, &huge_detail, &huge_turns, &huge_entries, &huge_trace, &search];
     println!();
     println!("{:<28} {:>5} {:>9} {:>9} {:>9} {:>9}  result", "query class", "n", "p50 ms", "p95 ms", "max ms", "limit");
     let mut summaries = serde_json::Map::new();
@@ -509,6 +535,14 @@ pub fn run(options: Options) -> Result<bool> {
             mib(load["lineBytes"].as_u64().unwrap_or(0))
         );
     }
+    if !trace_sizes.is_null() {
+        println!(
+            "5k session trace: {} records, {:.0} KiB raw, {:.0} KiB gzipped",
+            trace_sizes["records"],
+            trace_sizes["rawBytes"].as_f64().unwrap_or(0.0) / 1024.0,
+            trace_sizes["gzipBytes"].as_f64().unwrap_or(0.0) / 1024.0
+        );
+    }
     println!("database: {:.0} MiB, blob store: {:.0} MiB, server peak RSS: {:.0} MiB", mib(db_bytes), mib(blob_bytes), mib(peak_rss));
     for failure in &failures {
         println!("FAIL: {failure}");
@@ -516,7 +550,7 @@ pub fn run(options: Options) -> Result<bool> {
     println!(
         "{}",
         json!({ "pikaPerf": { "pass": pass, "classes": summaries, "load": load, "shape": read_json(options.shape),
-                              "dbBytes": db_bytes, "blobBytes": blob_bytes, "peakRssBytes": peak_rss, "failures": failures } })
+                              "traceSizes": trace_sizes, "dbBytes": db_bytes, "blobBytes": blob_bytes, "peakRssBytes": peak_rss, "failures": failures } })
     );
     Ok(pass)
 }

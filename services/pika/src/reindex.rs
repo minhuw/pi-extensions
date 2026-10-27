@@ -20,6 +20,10 @@ pub fn reindex(store: &Store) -> Result<ReindexStats> {
         }
         store::clear_search_index(tx)?;
         tx.execute("DELETE FROM settings WHERE key = ?1", [store::NEEDS_REINDEX])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![store::DERIVED_GENERATION, crate::util::random_bytes::<8>()],
+        )?;
         let streams: Vec<(i64, String, String, String)> = tx
             .prepare("SELECT id, key, kind, device FROM streams ORDER BY id")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?

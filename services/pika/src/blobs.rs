@@ -52,6 +52,19 @@ impl BlobStore {
         Ok(zstd::stream::decode_all(file)?)
     }
 
+    /// The blob's data if it decompresses to at most `max` bytes, decompressing no more than `max + 1` bytes.
+    pub fn get_bounded(&self, hash: &str, max: u64) -> Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        if !is_hash(hash) {
+            bail!("invalid blob hash {hash:?}");
+        }
+        let path = self.path(hash);
+        let file = std::fs::File::open(&path).with_context(|| format!("opening blob {}", path.display()))?;
+        let mut data = Vec::new();
+        zstd::stream::read::Decoder::new(file)?.take(max + 1).read_to_end(&mut data)?;
+        Ok((data.len() as u64 <= max).then_some(data))
+    }
+
     pub fn get_string(&self, hash: &str) -> Result<String> {
         Ok(String::from_utf8(self.get(hash)?)?)
     }

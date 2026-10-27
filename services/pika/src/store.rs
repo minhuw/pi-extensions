@@ -20,6 +20,8 @@ const REINDEX_BELOW: usize = 3;
 /// Set in the transaction of a migration that needs a reindex, and cleared by the reindex that follows, so an
 /// interrupted or failed reindex runs again on the next open.
 pub const NEEDS_REINDEX: &str = "needs_reindex";
+/// Random bytes that every reindex replaces, so caches of derived data (the trace's `ETag`) change with it.
+pub const DERIVED_GENERATION: &str = "derived_generation";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.

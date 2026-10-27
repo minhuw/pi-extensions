@@ -157,6 +157,28 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - When `lastSeq > since`, `session` is the session's `SessionSummary` (as `GET sessions/:id` returns it, without `children`), and `turns` lists every `Turn` whose `endSeq > since`, ascending by `index`: the turn that grew plus any new turns. At most 50 are listed; when more qualify, `turns` holds the newest 50 and `truncated: true` is set, and the UI refetches its turns list instead.
   - When `lastSeq <= since`, `session`, `turns`, and `truncated` are omitted.
   - An unknown session id returns 404.
+- **`GET sessions/:id/trace`** returns the whole session as one compact list of records for the trajectory view, built from the derived tables, so the UI needs no raw entries for its overview and ledger. Unlike the other routes, its times are Unix milliseconds. Absent values are omitted, never `null` or invented. An unknown session id returns 404. The JSON is gzipped (`Content-Encoding: gzip`) when `Accept-Encoding` gives `gzip`, `x-gzip`, or `*` a non-zero quality (an explicit `gzip;q=0` wins over `*`); every response has `Vary: accept-encoding`.
+  - Responses carry an `ETag`, different for the gzipped and the plain body, and `Cache-Control: no-cache`, so a live view's browser revalidates each poll. A request whose `If-None-Match` lists the current tag (or `*`) gets `304 Not Modified` without the trace being built. The tag is a hash of the session's entry count and last time, the number of captured requests of the session (a request that arrives after its model call sets `requestId`), the number of its children with their total entry count and latest time, the `derived_generation` setting, which every reindex replaces, and a random value per server process, since another build may derive a different trace from the same rows.
+  ```
+  { sessionId, startedAt?, lastAt?,
+    turns: [{ index, startSeq, endSeq, at?, durationMs, userText, customType?,
+              modelCalls, toolCalls, toolErrors, cost, tokens }],
+    records: (Llm | Tool | Compaction | BranchSummary)[],
+    children: [{ sessionId, parentToolCallId?, agentType?, description?, kind, startedAt?, lastAt?,
+                 entryCount, tokens, cost, title }] }
+  Llm           = { kind: "llm", seq, turn?, start?, end?, model?, provider?, stopReason?, error?,
+                    input, output, cacheRead, cacheWrite, cost, requestId?, text?, thinking?, toolCalls }
+  Tool          = { kind: "tool", seq, resultSeq?, turn?, callId, name?, start?, end?, durationMs?, isError, summary,
+                    outputSize?, childSessionId? }
+  Compaction    = { kind: "compaction", seq, turn?, at?, tokensBefore? }
+  BranchSummary = { kind: "branch-summary", seq, turn?, at? }
+  ```
+  - `turns` are the session's turns as `GET sessions/:id/turns` gives them, without `finalText`, with `userText` cut to 200 characters.
+  - `records` are sorted by `seq`. A tool call has its assistant message's seq and follows it, in the message's order; a tool result without its call has the result's seq.
+  - An `llm` record is an assistant message. `start` is its `timestamp`, which pi sets when the request starts. `end` is `start + durationMs` when the message has pi's `durationMs` (the time to the end of the response), otherwise the entry's `timestamp`, which pi writes once the response has ended. Times outside the years 1970 to 9999 and a `durationMs` that is negative, not finite, or over 7 days are left out. A line in the blob store is read only when it decompresses to at most 4 MiB; a longer or unreadable one (logged once per request) gives its record no `text`, `thinking`, `durationMs`, or `tokensBefore`. `text` is its first non-empty text block and `thinking: true` marks a thinking block; `error` is its `errorMessage`; `toolCalls` counts its tool calls.
+  - A `tool` record's `start` and `end` are the times of the entries of its call and result, and `durationMs` is their difference; a call without a result has no `end`. `summary` comes from the arguments: for `bash`, `shell`, and `powershell`, the command's first line; for `read`, the path, plus `:offset-limit`, `:offset`, or `:-limit` for the arguments given; for `write` and `edit`, the path; for `grep`, `find`, `ls`, and `glob`, `<pattern> in <path>`, or whichever is given; for `web_search`, the query; for `web_fetch`, the URL; for `Agent`, `<subagent_type>: <description>`. For any other tool, such as `mcp__server__tool`, and when those arguments are missing, it is the first string argument of at most 160 characters, else the first line of the first string argument, else `""`. Tool names match case-insensitively. Arguments that are not a JSON object give `""`. Control characters become spaces, and `summary` and `text` are trimmed and cut to 160 characters. `childSessionId` is the first child (by `startedAt`, children without one last, then by id) whose `parentToolCallId` is the call's id.
+  - `compaction` and `branch-summary` records are those entries; `tokensBefore` is the compaction's.
+  - `children` are the child sessions as `GET sessions/:id` lists them, except that those without `startedAt` come last, with the link's `agentType` and `description`. `kind` is `herder-step` for a Herder step session (link kind `herder-step` or a Herder run id), otherwise `subagent`.
 - **`GET sessions/:id/export`** returns the verbatim JSONL, byte-identical to the original file.
 - **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request. Block text is spliced in verbatim, so escapes of unpaired UTF-16 surrogates in context messages come back exactly as the client split them.
 - **Herder runs:**
@@ -298,7 +320,7 @@ Relay lets running pi sessions send text messages to each other through the serv
   - `blobs/<h[0..2]>/<h[2..4]>/<h>.zst`: zstd-compressed content-addressed blobs.
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
-  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `devices`, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone.
+  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `devices`, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone, except that it replaces the `derived_generation` setting with random bytes, which the trace's `ETag` includes.
   - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 

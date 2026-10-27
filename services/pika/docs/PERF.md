@@ -1,8 +1,8 @@
 # pika performance check
 
 `bash services/pika/scripts/perf.sh` checks AC-7: with one year of data from five machines, the filtered session
-list answers in p95 < 100 ms, the first page of a 5,000-entry session in p95 < 200 ms per request, and search in
-p95 < 300 ms. It needs about 12 GiB of free disk in `$TMPDIR` and takes about 12 minutes on an Apple Silicon Mac,
+list answers in p95 < 100 ms, the first page of a 5,000-entry session in p95 < 200 ms per request, the session's
+trace in p95 < 200 ms, and search in p95 < 300 ms. It needs about 12 GiB of free disk in `$TMPDIR` and takes about 12 minutes on an Apple Silicon Mac,
 most of it loading.
 
 The script:
@@ -49,11 +49,12 @@ from a fixed seed. Times run from the first request byte to the last response by
 | Class | Requests | Limit (p95) |
 | --- | --- | --- |
 | session list | `sessions?limit=50`: no filter, root only, device, project, model, a date range, and combinations; some followed by their second page | < 100 ms |
-| 5,000-entry session | `sessions/:id`, `sessions/:id/turns`, and `sessions/:id/entries?from=0&limit=200`, each a class | < 200 ms each |
+| 5,000-entry session | `sessions/:id`, `sessions/:id/turns`, `sessions/:id/entries?from=0&limit=200`, and `sessions/:id/trace` with `Accept-Encoding: gzip`, each a class | < 200 ms each |
 | search | common words, rare words, two words, and quoted phrases; with no filter, device, project, or both; newest first and by relevance | < 300 ms |
 
-The same requests for the 20,000-entry sessions are reported for information. The report also gives the load time
-and rate, the database and blob store sizes, and the server's peak RSS.
+The same requests for the 20,000-entry sessions are reported for information. The report also gives the raw and
+gzipped size of one 5,000-entry session's trace, the load time and rate, the database and blob store sizes, and the
+server's peak RSS.
 
 ## What the check found
 
@@ -72,48 +73,76 @@ ranking in two passes, and SQLite drove the final join from the full-text index 
   each looked up by rowid (`CROSS JOIN` keeps that order).
 - A filter that no session passes returns an empty page without searching.
 
+The trace reads every model call, tool call, and turn of the session by primary key, and the line of each assistant
+message, for its first text, thinking, and `durationMs`, with a typed parse that skips tool arguments without building
+values. Compactions and branch summaries come from a walk of the session's derived `entries` rows by primary key with
+a type filter, about 1 ms for 5,000 entries, so no type index is needed. Most of the trace's time is reading the
+assistant lines and compressing: gzip at the default level takes about 20 ms for the 1.5 MB trace of a 5,000-entry
+session and makes it 25% smaller than the fastest level. Serializing goes into the encoder through a 64 KiB buffer;
+without one, each of serde's small writes ran the compressor and a trace took seven times as long.
+
+The trace has no response cap: it grows linearly with the session, at about 340 bytes of JSON per record (about 85
+bytes gzipped on this generated text). A 5,000-entry session has about 4,500 records and a 1.5 MB trace (370 KiB
+gzipped); a 20,000-entry session has about 18,000 records and a 6.1 MB trace (1.5 MB gzipped), which takes about
+140 ms. A live view polls the trace every 3 s, so each response carries an `ETag` from a fingerprint query (the
+session's and its children's entry counts and times, its request count, and the reindex generation; see the spec),
+and a poll of an unchanged session gets `304 Not Modified` in under 0.5 ms without building the trace. Arguments are
+summarized from a borrowed parse that decodes only the strings a summary uses, and blob-stored lines are decompressed
+only up to 4 MiB; with these, the 5,000-entry trace takes the same time as before (p50 32 ms against 33 ms through
+HTTP with gzip, on a 0.04-scale dataset whose large sessions are full size).
+
 `src/read/plans.rs` pins the query plans of the hot queries, so a regression fails `cargo test`.
 
 ## Latest results
 
-On an Apple Silicon Mac (10 cores, 16 GiB) on 2026-10-26, the whole script took 9.1 minutes:
+On an Apple Silicon Mac mini (10 cores) on 2026-10-27, while another build ran on the machine, the whole script took
+14.5 minutes; loading was slower than in earlier runs (762 s against 492 s):
 
 ```
 query class                      n    p50 ms    p95 ms    max ms     limit  result
-session list                 480       0.2       0.6       2.1     < 100  ok
-5k session: sessions/:id     400       0.1       0.2       0.5     < 200  ok
-5k session: turns            400       0.3       0.4       7.4     < 200  ok
-5k session: entries          400       1.1       1.4       7.2     < 200  ok
-20k session: sessions/:id    100       0.2       0.3       0.5         -  info
-20k session: turns           100       0.3       0.6       0.7         -  info
-20k session: entries         100       1.2       1.5       2.4         -  info
-search                       400      10.0     125.4     346.9     < 300  ok
+session list                 480       0.2       0.8       5.4     < 100  ok
+5k session: sessions/:id     400       0.2       0.3       1.7     < 200  ok
+5k session: turns            400       0.5       0.7       9.5     < 200  ok
+5k session: entries          400       1.3       1.8      64.3     < 200  ok
+5k session: trace            400      34.0      43.2     187.1     < 200  ok
+20k session: sessions/:id    100       0.4       0.5       1.8         -  info
+20k session: turns           100       0.6       0.9       5.7         -  info
+20k session: entries         100       1.4       2.1      10.7         -  info
+20k session: trace           100     143.1     171.3     238.6         -  info
+search                       400      14.2     131.7     427.7     < 300  ok
 
 subclass                               n    p50 ms    p95 ms    max ms
-session list: combination          225       0.2       0.9       2.1
-session list: dates                134       0.2       1.0       1.5
-session list: device               152       0.2       0.6       2.1
-session list: model                112       0.2       1.0       2.1
-session list: no filter            41       0.2       0.2       0.2
-session list: project              137       0.2       0.5       1.4
-session list: root                 164       0.2       0.9       1.4
-session list: second page          80       0.2       0.6       1.9
-search: common newest              62       2.8      22.1      75.0
-search: common relevance           26      36.3     114.3     125.4
-search: filter all                 113       9.1     137.1     324.0
-search: filter device              93      11.1     137.0     301.1
-search: filter device+project      87       3.6     114.3     330.5
-search: filter project             107      15.7     128.7     346.9
-search: phrase newest              60      11.6      87.8     330.5
-search: phrase relevance           47     115.5     301.1     346.9
-search: rare newest                64       5.9      16.9      26.4
-search: rare relevance             37       9.6      19.4      20.3
-search: two-word newest            69      10.0      36.3     141.4
-search: two-word relevance         35      24.3      61.9     137.1
+session list: combination          225       0.2       0.9       2.0
+session list: dates                134       0.3       1.1       1.3
+session list: device               152       0.2       0.9       2.0
+session list: model                112       0.3       1.2       2.0
+session list: no filter            41       0.2       0.3       0.4
+session list: project              137       0.2       0.5       0.8
+session list: root                 164       0.2       0.9       1.3
+session list: second page          80       0.2       0.8       5.4
+search: common newest              62       2.8      28.9      57.9
+search: common relevance           26      42.7     114.3     119.7
+search: filter all                 113      15.8     133.7     427.7
+search: filter device              93      14.9     136.1     306.6
+search: filter device+project      87       3.8     119.7     181.9
+search: filter project             107      19.1     138.2     302.5
+search: phrase newest              60      17.8      91.7     181.9
+search: phrase relevance           47     119.7     302.5     427.7
+search: rare newest                64       9.7      15.3      24.3
+search: rare relevance             37      13.4      25.2      28.3
+search: two-word newest            69      16.5      41.5     131.7
+search: two-word relevance         35      30.1      69.6     149.7
 
-load: 492.2 s, 2560663 entries, 5202 entries/s, 3426 MiB of lines
-database: 10495 MiB, blob store: 12 MiB, server peak RSS: 50 MiB
+load: 762.4 s, 2560663 entries, 3359 entries/s, 3425 MiB of lines
+5k session trace: 4498 records, 1473 KiB raw, 371 KiB gzipped
+database: 10497 MiB, blob store: 12 MiB, server peak RSS: 344 MiB
 ```
+
+The generated text is random words with random call ids, so the trace compresses about 4x here; real sessions
+repeat more. The peak RSS rose from 50 MiB to 344 MiB with the 20,000-entry traces (about 6 MB of JSON each): macOS's
+allocator keeps the freed large buffers (`Malloc Large (empty)` in `vmmap`) and returns them later, and a run of other
+large responses brought the server back to about 65 MiB in a separate check. Traces of 5,000-entry sessions alone kept
+it near 60 MiB.
 
 Before the search changes, one filtered search of a common word took 38 s, and the first full run had not finished
 its searches after 10 minutes; the other classes were already well within their limits. The slowest searches are

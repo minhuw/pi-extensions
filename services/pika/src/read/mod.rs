@@ -5,6 +5,7 @@ pub mod entries;
 pub mod herder;
 pub mod search;
 pub mod sessions;
+pub mod trace;
 
 #[cfg(test)]
 mod plans;

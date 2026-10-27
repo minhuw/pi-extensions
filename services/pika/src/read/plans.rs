@@ -174,3 +174,55 @@ fn relevance_search_joins_only_the_best() {
     });
 }
 
+
+/// The trace reads every table of one session by primary key or by its own index, and each line by its position. Its
+/// compactions walk the session's entries without a type index, which reads only the small derived rows. Its
+/// fingerprint counts the session's requests from a covering index and its children from the parent index.
+#[test]
+fn the_trace_reads_primary_keys() {
+    use super::trace::*;
+    with_conn(|conn| {
+        assert_eq!(plan(conn, SESSION_SQL, None), ["SEARCH sessions USING INDEX sqlite_autoindex_sessions_1 (id=?)"]);
+        assert_eq!(
+            plan(conn, TURNS_SQL, None),
+            ["SEARCH t USING PRIMARY KEY (sid=?)", "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN"]
+        );
+        assert_eq!(
+            plan(conn, MODEL_CALLS_SQL, None),
+            [
+                "SEARCH m USING PRIMARY KEY (sid=?)",
+                "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
+                "SEARCH l USING INDEX lines_position (stream_id=? AND offset=?) LEFT-JOIN",
+            ]
+        );
+        assert_eq!(plan(conn, TOOL_CALLS_SQL, None), ["SEARCH tool_calls USING PRIMARY KEY (sid=?)"]);
+        assert_eq!(
+            plan(conn, SUMMARIES_SQL, None),
+            [
+                "SEARCH e USING PRIMARY KEY (sid=?)",
+                "SEARCH l USING INDEX lines_position (stream_id=? AND offset=?) LEFT-JOIN",
+            ]
+        );
+        assert_eq!(
+            plan(conn, CHILDREN_SQL, None),
+            [
+                "SEARCH s USING INDEX sessions_parent (parent_session_id=?)",
+                "SEARCH l USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+                "USE TEMP B-TREE FOR ORDER BY",
+            ]
+        );
+        assert_eq!(
+            plan(conn, FINGERPRINT_SQL, None),
+            [
+                "CO-ROUTINE c",
+                "SEARCH sessions USING INDEX sessions_parent (parent_session_id=?)",
+                "SEARCH s USING INDEX sqlite_autoindex_sessions_1 (id=?)",
+                "SCAN c",
+                "CORRELATED SCALAR SUBQUERY 1",
+                "SEARCH r USING COVERING INDEX requests_assistant (session_id=?)",
+                "SCALAR SUBQUERY 2",
+                "SEARCH settings USING PRIMARY KEY (key=?)",
+            ]
+        );
+    });
+}

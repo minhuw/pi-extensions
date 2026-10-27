@@ -871,7 +871,7 @@ async fn snapshot(app: &App) -> BTreeMap<String, (u16, Vec<u8>)> {
     .map(|p| p.to_string())
     .collect();
     for id in [SESSION_ID, DESK_SESSION, HEADER_CHILD, LINKED_CHILD, STEP_SESSION, REVIEW_SESSION] {
-        for sub in ["", "/turns", "/turns?limit=1", "/entries", "/entries?from=3&limit=2", "/updates", "/entries/0/raw", "/export"] {
+        for sub in ["", "/turns", "/turns?limit=1", "/entries", "/entries?from=3&limit=2", "/updates", "/entries/0/raw", "/export", "/trace"] {
             paths.push(format!("sessions/{id}{sub}"));
         }
     }
@@ -921,6 +921,7 @@ async fn read_routes_require_the_login_cookie() {
         format!("sessions/{SESSION_ID}/entries/1/raw"),
         format!("sessions/{SESSION_ID}/entries/13/image/0"),
         format!("sessions/{SESSION_ID}/updates"),
+        format!("sessions/{SESSION_ID}/trace"),
         format!("sessions/{SESSION_ID}/export"),
         "requests/req-1".into(),
         "herder/runs".into(),
@@ -1064,4 +1065,414 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
+}
+
+/// Removes `key` from `v` and returns it as a float, for comparing sums with a tolerance.
+fn take_f64(v: &mut Value, key: &str) -> f64 {
+    v.as_object_mut().unwrap().remove(key).unwrap().as_f64().unwrap()
+}
+
+#[tokio::test]
+async fn trace_of_a_session_with_children() {
+    let app = world().await;
+    let mut trace = app.json(&format!("sessions/{SESSION_ID}/trace")).await;
+    let ms = |iso: &str| pika::util::parse_iso_ms(iso).unwrap();
+    assert_eq!(
+        (&trace["sessionId"], &trace["startedAt"], &trace["lastAt"]),
+        (&json!(SESSION_ID), &json!(ms("2026-10-20T09:00:00Z")), &json!(ms("2026-10-20T09:02:11Z")))
+    );
+    let turns = trace["turns"].as_array_mut().unwrap();
+    assert!((take_f64(&mut turns[0], "cost") - 0.0428).abs() < 1e-9);
+    assert_eq!(
+        turns[0],
+        json!({ "index": 0, "startSeq": 5, "endSeq": 12, "at": ms("2026-10-20T09:00:02Z"), "durationMs": 58_000,
+                "userText": "Why does `test_widget_spin` fail intermittently?\nIt passes locally — sometimes. 🌀",
+                "modelCalls": 3, "toolCalls": 2, "toolErrors": 1,
+                "tokens": { "input": 7400, "output": 650, "cacheRead": 9900, "cacheWrite": 100 } })
+    );
+    assert_eq!((&turns[1]["index"], &turns[1]["startSeq"], &turns[1]["userText"]), (&json!(1), &json!(13), &json!("Now add a regression test")));
+    let records = trace["records"].as_array().unwrap();
+    let kinds: Vec<(&str, i64)> = records.iter().map(|r| (r["kind"].as_str().unwrap(), r["seq"].as_i64().unwrap())).collect();
+    assert_eq!(kinds, [("llm", 6), ("tool", 6), ("llm", 8), ("tool", 8), ("llm", 10), ("compaction", 12), ("llm", 14)]);
+    // No `durationMs` in the fixture: the call ends at its entry's time.
+    assert_eq!(
+        records[0],
+        json!({ "kind": "llm", "seq": 6, "turn": 0, "start": 1792486802500_i64, "end": ms("2026-10-20T09:00:05Z"),
+                "model": "claude-sonnet-4-5", "provider": "anthropic", "stopReason": "toolUse",
+                "input": 1200, "output": 150, "cacheRead": 800, "cacheWrite": 100, "cost": 0.0123, "requestId": "req-1",
+                "text": "Let me run it.", "thinking": true, "toolCalls": 1 })
+    );
+    assert_eq!(
+        records[1],
+        json!({ "kind": "tool", "seq": 6, "resultSeq": 7, "turn": 0, "callId": "call_1", "name": "bash",
+                "start": ms("2026-10-20T09:00:05Z"), "end": ms("2026-10-20T09:00:07Z"), "durationMs": 2000, "isError": false,
+                "summary": "pytest -k spin", "outputSize": 8, "childSessionId": LINKED_CHILD })
+    );
+    assert_eq!((&records[3]["isError"], &records[3]["summary"], records[3].get("childSessionId")), (&json!(true), &json!("missing.py"), None));
+    for absent in ["text", "thinking", "requestId", "error"] {
+        assert!(records[2].get(absent).is_none(), "{absent}");
+    }
+    assert_eq!(records[5], json!({ "kind": "compaction", "seq": 12, "turn": 0, "at": ms("2026-10-20T09:01:00Z"), "tokensBefore": 9000 }));
+    assert_eq!(
+        trace["children"],
+        json!([
+            { "sessionId": LINKED_CHILD, "parentToolCallId": "call_1", "agentType": "recon", "description": "Look around",
+              "kind": "subagent", "startedAt": ms("2026-10-20T09:00:06Z"), "lastAt": ms("2026-10-20T09:00:06.900Z"),
+              "entryCount": 4, "tokens": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0 }, "cost": 0.001,
+              "title": "Inspect the spin test" },
+            { "sessionId": HEADER_CHILD, "kind": "subagent", "startedAt": ms("2026-10-20T10:00:00Z"),
+              "lastAt": ms("2026-10-20T10:00:00Z"), "entryCount": 1,
+              "tokens": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }, "cost": 0.0, "title": "" },
+        ])
+    );
+
+    // A Herder step session is a `herder-step` child of its orchestrator.
+    let orchestrator = lines(&[json!({ "type": "session", "version": 3, "id": "orch-1", "timestamp": "2026-10-21T10:00:00.000Z", "cwd": "/w" })]);
+    app.upload(DEVICE, &skey("orch-1"), "session", &orchestrator).await;
+    let orch = app.json("sessions/orch-1/trace").await;
+    let kinds: Vec<(&str, &str)> =
+        orch["children"].as_array().unwrap().iter().map(|c| (c["sessionId"].as_str().unwrap(), c["kind"].as_str().unwrap())).collect();
+    assert_eq!(kinds, [(STEP_SESSION, "herder-step"), (REVIEW_SESSION, "herder-step")]);
+    assert_eq!((&orch["turns"], &orch["records"]), (&json!([]), &json!([])));
+
+    assert_eq!(app.status("sessions/nope/trace").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn trace_records_summaries_order_and_missing_times() {
+    let app = app(None);
+    let id = "traced";
+    let call = |id: &str, name: &str, args: Value| json!({ "type": "toolCall", "id": id, "name": name, "arguments": args });
+    let result = |seq: usize, call_id: &str, at: &str, is_error: bool| {
+        json!({ "type": "message", "id": format!("r{seq}"), "parentId": null, "timestamp": at,
+                "message": { "role": "toolResult", "toolCallId": call_id, "toolName": "x", "isError": is_error,
+                             "content": [{ "type": "text", "text": "out" }], "timestamp": 1 } })
+    };
+    let big_code = format!("const r = await tools.bash({{}});\n{}", "x".repeat(400));
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-23T08:00:00.000Z", "cwd": "/w/x" }),
+        json!({ "type": "message", "id": "u1", "parentId": null, "timestamp": "2026-10-23T08:00:01.000Z",
+                "message": { "role": "user", "content": "Do the things", "timestamp": 1 } }),
+        // Calls in message order, which is not the order of their ids.
+        json!({ "type": "message", "id": "a1", "parentId": "u1", "timestamp": "2026-10-23T08:00:05.000Z",
+                "message": { "role": "assistant", "api": "anthropic-messages", "provider": "anthropic", "model": "m1",
+                             "stopReason": "toolUse", "timestamp": 1792742402000_i64, "durationMs": 2500.4,
+                             "usage": { "input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4, "totalTokens": 10, "cost": { "total": 0.5 } },
+                             "content": [
+                                 { "type": "text", "text": "\n Working\ton\u{1}it\n" },
+                                 call("z1", "bash", json!({ "command": "cargo test --locked\necho done" })),
+                                 call("y2", "read", json!({ "path": "src/lib.rs", "offset": 10, "limit": 40 })),
+                                 call("x3", "grep", json!({ "pattern": "fn main", "path": "src" })),
+                                 call("w4", "find", json!({ "pattern": "*.rs" })),
+                                 call("v5", "web_search", json!({ "query": "sqlite index" })),
+                                 call("u6", "web_fetch", json!({ "url": "https://sqlite.org/lang.html" })),
+                                 call("t7", "edit", json!({ "path": "src/a.rs", "edits": [{ "oldText": "a", "newText": "b" }] })),
+                                 call("s8", "write", json!({ "path": "notes/é.md", "content": "hello" })),
+                                 call("r9", "Agent", json!({ "subagent_type": "recon", "description": "Map the code", "prompt": "Go" })),
+                                 call("q10", "mcp__rea__decompile", json!({ "depth": 2, "target": "libfoo.so", "notes": "long" })),
+                                 call("p11", "codemode", json!({ "code": big_code })),
+                                 call("o12", "bash", json!({ "command": format!("echo {}", "é".repeat(300)) })),
+                             ] } }),
+        result(3, "z1", "2026-10-23T08:00:06.000Z", false),
+        result(4, "y2", "2026-10-23T08:00:07.000Z", true),
+        // A model call without times, and a call that never gets a result.
+        json!({ "type": "message", "id": "a2", "parentId": "r4",
+                "message": { "role": "assistant", "content": [call("n13", "ls", json!({ "path": "/tmp" }))], "stopReason": "toolUse" } }),
+        // A result without its call.
+        result(6, "ghost", "2026-10-23T08:00:09.000Z", false),
+        json!({ "type": "branch_summary", "id": "b1", "parentId": "r6", "timestamp": "2026-10-23T08:00:10.000Z", "summary": "s", "fromId": "a1" }),
+        json!({ "type": "compaction", "id": "c1", "parentId": "b1", "summary": "s", "firstKeptEntryId": "a1" }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    // Two children of the Agent call: the tool record names the first.
+    for (child, at) in [("kid-2", "2026-10-23T08:00:09.000Z"), ("kid-1", "2026-10-23T08:00:08.000Z")] {
+        let child_lines = lines(&[
+            json!({ "type": "session", "version": 3, "id": child, "timestamp": at, "cwd": "/w/x" }),
+            json!({ "type": "custom", "id": "l1", "parentId": null, "timestamp": at, "customType": "pi-extensions.session-link",
+                    "data": { "kind": "subagent", "parentSessionId": id, "parentToolCallId": "r9", "agentType": "recon" } }),
+        ]);
+        app.upload(DEVICE, &skey(child), "session", &child_lines).await;
+    }
+
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let records = trace["records"].as_array().unwrap();
+    let order: Vec<(i64, &str)> =
+        records.iter().map(|r| (r["seq"].as_i64().unwrap(), r["callId"].as_str().unwrap_or(r["kind"].as_str().unwrap()))).collect();
+    assert_eq!(
+        order,
+        [
+            (2, "llm"), (2, "z1"), (2, "y2"), (2, "x3"), (2, "w4"), (2, "v5"), (2, "u6"), (2, "t7"), (2, "s8"), (2, "r9"),
+            (2, "q10"), (2, "p11"), (2, "o12"), (5, "llm"), (5, "n13"), (6, "ghost"), (7, "branch-summary"), (8, "compaction"),
+        ]
+    );
+    let ms = |iso: &str| pika::util::parse_iso_ms(iso).unwrap();
+    // `durationMs` gives the end: the request started at `timestamp`.
+    assert_eq!(
+        records[0],
+        json!({ "kind": "llm", "seq": 2, "turn": 0, "start": 1792742402000_i64, "end": 1792742404500_i64, "model": "m1",
+                "provider": "anthropic", "stopReason": "toolUse", "input": 1, "output": 2, "cacheRead": 3, "cacheWrite": 4,
+                "cost": 0.5, "text": "Working on it", "toolCalls": 12 })
+    );
+    let summaries: Vec<&str> = records[1..13].iter().map(|r| r["summary"].as_str().unwrap()).collect();
+    let long_echo = format!("echo {}", "é".repeat(155));
+    assert_eq!(
+        summaries,
+        [
+            "cargo test --locked", "src/lib.rs:10-40", "fn main in src", "*.rs", "sqlite index", "https://sqlite.org/lang.html",
+            "src/a.rs", "notes/é.md", "recon: Map the code", "libfoo.so", "const r = await tools.bash({});", &long_echo,
+        ]
+    );
+    assert_eq!(
+        records[1],
+        json!({ "kind": "tool", "seq": 2, "resultSeq": 3, "turn": 0, "callId": "z1", "name": "bash",
+                "start": ms("2026-10-23T08:00:05Z"), "end": ms("2026-10-23T08:00:06Z"), "durationMs": 1000, "isError": false,
+                "summary": "cargo test --locked", "outputSize": 3 })
+    );
+    assert_eq!(records[2]["isError"], true);
+    assert_eq!(records[9]["childSessionId"], "kid-1");
+    // Missing times are omitted, never invented.
+    assert_eq!(
+        records[13],
+        json!({ "kind": "llm", "seq": 5, "turn": 0, "stopReason": "toolUse", "input": 0, "output": 0, "cacheRead": 0,
+                "cacheWrite": 0, "cost": 0.0, "toolCalls": 1 })
+    );
+    assert_eq!(records[14], json!({ "kind": "tool", "seq": 5, "turn": 0, "callId": "n13", "name": "ls", "isError": false, "summary": "/tmp" }));
+    assert_eq!(
+        records[15],
+        json!({ "kind": "tool", "seq": 6, "resultSeq": 6, "turn": 0, "callId": "ghost", "name": "x",
+                "end": ms("2026-10-23T08:00:09Z"), "isError": false, "summary": "", "outputSize": 3 })
+    );
+    assert_eq!(records[16], json!({ "kind": "branch-summary", "seq": 7, "turn": 0, "at": ms("2026-10-23T08:00:10Z") }));
+    assert_eq!(records[17], json!({ "kind": "compaction", "seq": 8, "turn": 0 }));
+    let children: Vec<(&str, &str)> = trace["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["sessionId"].as_str().unwrap(), c["parentToolCallId"].as_str().unwrap()))
+        .collect();
+    assert_eq!(children, [("kid-1", "r9"), ("kid-2", "r9")]);
+}
+
+#[tokio::test]
+async fn trace_is_gzipped_when_accepted() {
+    let app = world().await;
+    let path = format!("{BASE}/api/v1/sessions/{SESSION_ID}/trace");
+    let plain = app.get_abs(&path, None).await;
+    assert_eq!(plain.status, StatusCode::OK);
+    assert!(plain.headers.get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(plain.headers[header::VARY], "accept-encoding");
+    let cases = [
+        ("gzip", true),
+        ("br, gzip;q=0.5", true),
+        ("br, gzip; q=0.5", true),
+        ("deflate, GZIP", true),
+        ("*", true),
+        ("br, *;q=0.1", true),
+        ("gzip;q=0", false),
+        ("gzip; q = 0.0", false),
+        ("*;q=0", false),
+        ("gzip;q=0, *", false),
+        ("*, gzip; q=0", false),
+        ("gzip;q=1, *;q=0", true),
+        ("br", false),
+        ("identity", false),
+    ];
+    for (accept, gzipped) in cases {
+        let request = Request::get(&path).header(header::ACCEPT_ENCODING, accept).body(Body::empty()).unwrap();
+        let r = app.send(request).await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.headers[header::CONTENT_TYPE], "application/json");
+        let body = if gzipped {
+            assert_eq!(r.headers[header::CONTENT_ENCODING], "gzip", "{accept}");
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&r.body[..]), &mut out).unwrap();
+            out
+        } else {
+            assert!(r.headers.get(header::CONTENT_ENCODING).is_none(), "{accept}");
+            r.body
+        };
+        assert_eq!(body, plain.body, "{accept}");
+    }
+}
+
+/// GETs the trace with optional `Accept-Encoding` and `If-None-Match` headers.
+async fn get_trace(app: &App, id: &str, gzip: bool, if_none_match: Option<&str>) -> Reply {
+    let mut request = Request::get(format!("{BASE}/api/v1/sessions/{id}/trace"));
+    if gzip {
+        request = request.header(header::ACCEPT_ENCODING, "gzip");
+    }
+    if let Some(tag) = if_none_match {
+        request = request.header(header::IF_NONE_MATCH, tag);
+    }
+    app.send(request.body(Body::empty()).unwrap()).await
+}
+
+fn etag(r: &Reply) -> String {
+    r.headers[header::ETAG].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn trace_is_revalidated_by_etag() {
+    let app = world().await;
+    let first = get_trace(&app, SESSION_ID, false, None).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.headers[header::CACHE_CONTROL], "no-cache");
+    let tag = etag(&first);
+    assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+    for if_none_match in [tag.clone(), format!("W/{tag}"), format!("\"nope\", {tag}"), "*".into()] {
+        let r = get_trace(&app, SESSION_ID, false, Some(&if_none_match)).await;
+        assert_eq!(r.status, StatusCode::NOT_MODIFIED, "{if_none_match}");
+        assert!(r.body.is_empty());
+        assert_eq!(etag(&r), tag);
+        assert_eq!(r.headers[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(r.headers[header::VARY], "accept-encoding");
+    }
+    assert_eq!(get_trace(&app, SESSION_ID, false, Some("\"nope\"")).await.status, StatusCode::OK);
+
+    // The gzipped body is another representation with its own tag.
+    let gzipped = get_trace(&app, SESSION_ID, true, None).await;
+    let gzip_tag = etag(&gzipped);
+    assert_ne!(gzip_tag, tag);
+    assert_eq!(gzipped.headers[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(get_trace(&app, SESSION_ID, true, Some(&tag)).await.status, StatusCode::OK);
+    let r = get_trace(&app, SESSION_ID, true, Some(&gzip_tag)).await;
+    assert_eq!((r.status, etag(&r)), (StatusCode::NOT_MODIFIED, gzip_tag.clone()));
+    assert_eq!(get_trace(&app, SESSION_ID, false, Some(&gzip_tag)).await.status, StatusCode::OK);
+
+    // Every change the trace shows changes the tag: a request that arrives after its model call sets `requestId`, ...
+    let mut tags = vec![tag];
+    let changed = |r: Reply, tags: &mut Vec<String>| {
+        assert_eq!(r.status, StatusCode::OK);
+        let tag = etag(&r);
+        assert!(!tags.contains(&tag), "{tag} is not new");
+        tags.push(tag);
+        r.json()
+    };
+    let (batch, _) = request_batch("req-9", 1792486802500, &payload(), None);
+    app.ingest(DEVICE, batch).await;
+    let trace = changed(get_trace(&app, SESSION_ID, false, Some(&tags[0])).await, &mut tags);
+    assert_eq!(trace["records"][0]["requestId"], "req-9");
+    // ... an entry of the session, ...
+    let next_turn = lines(&[json!({ "type": "message", "id": "a0000016", "parentId": "a0000015", "timestamp": "2026-10-23T09:00:00.000Z",
+                                   "message": { "role": "user", "content": "One more thing", "timestamp": 1 } })]);
+    app.append(DEVICE, &skey(SESSION_ID), "session", byte_len(&fixture("session.jsonl")), &next_turn).await;
+    let trace = changed(get_trace(&app, SESSION_ID, false, Some(tags.last().unwrap())).await, &mut tags);
+    assert_eq!(trace["turns"].as_array().unwrap().last().unwrap()["userText"], "One more thing");
+    // ... an entry of a child, ...
+    let child_entry = lines(&[json!({ "type": "session_info", "id": "l0000009", "parentId": "l0000002",
+                                     "timestamp": "2026-10-20T09:00:07.000Z", "name": "Renamed" })]);
+    app.append(DEVICE, &skey(LINKED_CHILD), "session", byte_len(&linked_child()), &child_entry).await;
+    let trace = changed(get_trace(&app, SESSION_ID, false, Some(tags.last().unwrap())).await, &mut tags);
+    assert_eq!(trace["children"][0]["entryCount"], 5);
+    // ... a new child, ...
+    let late = lines(&[json!({ "type": "session", "version": 3, "id": "late-child", "timestamp": "2026-10-20T11:00:00.000Z",
+                               "cwd": "/w", "parentSession": format!("/x/2026-10-20T09-00-00-000Z_{SESSION_ID}.jsonl") })]);
+    app.upload(DEVICE, &skey("late-child"), "session", &late).await;
+    let trace = changed(get_trace(&app, SESSION_ID, false, Some(tags.last().unwrap())).await, &mut tags);
+    assert_eq!(trace["children"].as_array().unwrap().len(), 3);
+    // ... and a reindex, which can derive other rows from the same lines.
+    let before = get_trace(&app, SESSION_ID, false, None).await;
+    pika::reindex::reindex(&app.env.store).unwrap();
+    let after = changed(get_trace(&app, SESSION_ID, false, Some(tags.last().unwrap())).await, &mut tags);
+    assert_eq!(after, before.json());
+
+    assert_eq!(get_trace(&app, "nope", false, Some("*")).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn trace_reads_blob_lines_and_survives_missing_blobs() {
+    let app = app(None);
+    let id = "blobby";
+    let big = "x".repeat(pika::ingest::LINE_BLOB_THRESHOLD);
+    let assistant = |eid: &str, at: &str, ts: Value, duration: Value, text: &str, padding: &str| {
+        json!({ "type": "message", "id": eid, "parentId": null, "timestamp": at,
+                "message": { "role": "assistant", "provider": "p", "model": "m", "stopReason": "stop", "timestamp": ts,
+                             "durationMs": duration,
+                             "content": [{ "type": "thinking", "thinking": padding }, { "type": "text", "text": text }] } })
+    };
+    let at = |s: u32| format!("2026-10-24T08:00:{s:02}.000Z");
+    let ms = |s: u32| pika::util::parse_iso_ms(&at(s)).unwrap();
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": at(0), "cwd": "/w" }),
+        json!({ "type": "message", "id": "u1", "parentId": null, "timestamp": at(1),
+                "message": { "role": "user", "content": "Go", "timestamp": 1 } }),
+        // Stored in the blob store.
+        assistant("a1", &at(5), json!(ms(2)), json!(1000), "Big one", &big),
+        assistant("a2", &at(9), json!(ms(6)), json!(1000), "Lost", &format!("{big}y")),
+        // Implausible times and durations are left out.
+        assistant("a3", &at(10), json!(i64::MAX), json!(1e300), "a3", ""),
+        assistant("a4", &at(11), json!(ms(10)), json!(-5), "a4", ""),
+        assistant("a5", &at(12), json!(ms(11)), json!(8.0 * 86_400_000.0), "a5", ""),
+        assistant("a6", &at(13), json!(-1), json!(5), "a6", ""),
+        json!({ "type": "compaction", "id": "c1", "parentId": null, "timestamp": at(14), "summary": big,
+                "firstKeptEntryId": "a1", "tokensBefore": 1234 }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    let blobs: Vec<String> = app.env.store.read(|conn| {
+        let mut stmt = conn.prepare("SELECT blob FROM lines WHERE blob IS NOT NULL ORDER BY offset").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<Vec<String>>>()
+    }).unwrap();
+    assert_eq!(blobs.len(), 3);
+
+    let records = |trace: &Value| trace["records"].as_array().unwrap().clone();
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let r = records(&trace);
+    assert_eq!((&r[0]["text"], &r[0]["thinking"], &r[0]["start"], &r[0]["end"]), (&json!("Big one"), &json!(true), &json!(ms(2)), &json!(ms(2) + 1000)));
+    assert_eq!((&r[1]["text"], &r[1]["end"]), (&json!("Lost"), &json!(ms(6) + 1000)));
+    assert_eq!(r[6], json!({ "kind": "compaction", "seq": 8, "turn": 0, "at": ms(14), "tokensBefore": 1234 }));
+
+    // An unreadable blob leaves its record without the line's facts instead of failing the trace.
+    std::fs::remove_file(app.env.store.blobs.path(&blobs[1])).unwrap();
+    std::fs::write(app.env.store.blobs.path(&blobs[2]), b"not zstd").unwrap();
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let r = records(&trace);
+    assert_eq!((&r[0]["text"], &r[0]["end"]), (&json!("Big one"), &json!(ms(2) + 1000)));
+    assert_eq!(
+        r[1],
+        json!({ "kind": "llm", "seq": 3, "turn": 0, "start": ms(6), "end": ms(9), "model": "m", "provider": "p", "stopReason": "stop",
+                "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0.0, "toolCalls": 0 })
+    );
+    let times: Vec<(Option<i64>, Option<i64>)> = r[2..6].iter().map(|r| (r["start"].as_i64(), r["end"].as_i64())).collect();
+    assert_eq!(times, [(None, Some(ms(10))), (Some(ms(10)), Some(ms(11))), (Some(ms(11)), Some(ms(12))), (None, Some(ms(13)))]);
+    assert_eq!(r[6], json!({ "kind": "compaction", "seq": 8, "turn": 0, "at": ms(14) }));
+}
+
+#[tokio::test]
+async fn trace_children_kinds_and_order() {
+    let app = app(None);
+    let id = "parent";
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-24T08:00:00.000Z", "cwd": "/w" }),
+        json!({ "type": "message", "id": "a1", "parentId": null, "timestamp": "2026-10-24T08:00:05.000Z",
+                "message": { "role": "assistant", "stopReason": "toolUse",
+                             "content": [{ "type": "toolCall", "id": "k1", "name": "SubagentWorkflow", "arguments": { "name": "w" } }] } }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    let link = |data: Value| json!({ "type": "custom", "id": "l1", "parentId": null, "customType": "pi-extensions.session-link", "data": data });
+    // Without any time, so with no `startedAt`: listed last and not the tool's child, though its id sorts first.
+    let timeless = lines(&[
+        json!({ "type": "session", "version": 3, "id": "a-timeless", "cwd": "/w" }),
+        link(json!({ "kind": "subagent", "parentSessionId": id, "parentToolCallId": "k1" })),
+    ]);
+    // A Herder step known only by its link kind, without a run id.
+    let step = lines(&[
+        json!({ "type": "session", "version": 3, "id": "b-step", "timestamp": "2026-10-24T08:00:07.000Z", "cwd": "/w" }),
+        link(json!({ "kind": "herder-step", "parentSessionId": id })),
+    ]);
+    let timed = lines(&[
+        json!({ "type": "session", "version": 3, "id": "c-timed", "timestamp": "2026-10-24T08:00:06.000Z", "cwd": "/w" }),
+        link(json!({ "kind": "subagent", "parentSessionId": id, "parentToolCallId": "k1" })),
+    ]);
+    for (child, child_lines) in [("a-timeless", &timeless), ("b-step", &step), ("c-timed", &timed)] {
+        app.upload(DEVICE, &skey(child), "session", child_lines).await;
+    }
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let children: Vec<(&str, &str, bool)> = trace["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["sessionId"].as_str().unwrap(), c["kind"].as_str().unwrap(), c.get("startedAt").is_some()))
+        .collect();
+    assert_eq!(children, [("c-timed", "subagent", true), ("b-step", "herder-step", true), ("a-timeless", "subagent", false)]);
+    assert_eq!(trace["records"][1]["childSessionId"], "c-timed");
 }
