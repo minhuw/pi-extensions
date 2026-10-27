@@ -1,7 +1,8 @@
 // pika relay end to end (docs/RELAY.md, "End to end"): two real `pi --mode rpc` processes with relay and pika, each
 // logged in as its own device, talk through the real server. A asks B with relay_send and B's answer reaches A; a chain
 // between them stops at the hop limit; `/relay off` takes B offline, and a message to it expires after the short test
-// TTL with a notice that starts a turn in A; messages from the browser route and from the dashboard in Chrome reach B;
+// TTL with a notice that starts a turn in A; renaming A's device shows in relay's lists and on the dashboard; messages
+// from the browser route and from the dashboard in Chrome reach B;
 // B's uploaded transcript holds what it received; revoking B's device on the Devices page closes its connection with
 // 4401. Run by driver.ts between the viewer and the authentication checks.
 import { readFileSync } from "node:fs";
@@ -31,6 +32,8 @@ const PROMPTS = {
 	late: (to: string) => `Send the late note to session ${to}.`,
 };
 const chainText = (hop: number) => `chain hop ${hop}`;
+/** A's device name after the dashboard check renames it: free text, sorted before B's. */
+const RENAMED_A = "Ana's workstation ✓";
 
 export interface RelayTargets {
 	url: string;
@@ -44,10 +47,11 @@ export interface RelayTargets {
 	ttlSeconds: number;
 }
 
-interface Machine { device: string; token: string; name: string; project: string }
+/** `deviceId` is the device's id; `device` is its name, which relay shows. */
+interface Machine { deviceId: string; device: string; token: string; name: string; project: string }
 
 interface OnlineSession {
-	id: string; device: string; host: string; name?: string; title?: string; cwd: string; project: string; model?: string;
+	id: string; device: string; deviceName?: string; host: string; name?: string; title?: string; cwd: string; project: string; model?: string;
 	state: string; piVersion?: string; connectedAt: string; stateSince: string; lastSeenAt: string; recorded: boolean;
 }
 interface RelayEvent {
@@ -55,7 +59,7 @@ interface RelayEvent {
 	deliveredAt?: string; urgent: boolean; replyTo?: string; hops: number; text: string;
 }
 
-type Sender = { sessionId: string; name: string; device: string; project: string };
+type Sender = { sessionId: string; name: string; deviceId: string; device: string; project: string };
 
 /** The content RELAY.md specifies for a message from a session. */
 function sessionContent(id: string, from: Sender, text: string, replyTo?: string): string {
@@ -138,9 +142,9 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		const a = await startMachine("a");
 		const b = await startMachine("b");
 		const { a: ma, b: mb } = t.machines;
-		const A: Sender = { sessionId: a.sessionId, name: ma.name, device: ma.device, project: ma.project };
-		const B: Sender = { sessionId: b.sessionId, name: mb.name, device: mb.device, project: mb.project };
-		log(`relay: A ${A.sessionId} on ${A.device}, B ${B.sessionId} on ${B.device}`);
+		const A: Sender = { sessionId: a.sessionId, name: ma.name, deviceId: ma.deviceId, device: ma.device, project: ma.project };
+		const B: Sender = { sessionId: b.sessionId, name: mb.name, deviceId: mb.deviceId, device: mb.device, project: mb.project };
+		log(`relay: A ${A.sessionId} on ${A.device} (${A.deviceId}), B ${B.sessionId} on ${B.device} (${B.deviceId})`);
 		const settled = (label: string) => Promise.all([a.settled(60_000, label), b.settled(60_000, label)]);
 		const events = async () => (await t.api.get<{ items: RelayEvent[] }>("relay/events?limit=500"))?.items ?? [];
 		const deviceRoute = async (token: string) => {
@@ -163,11 +167,13 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 			const items = await online();
 			return items.length === 2 && items.find((item) => item.id === B.sessionId)?.recorded ? items : undefined;
 		}, 15_000, "both sessions online, B recorded, on the device route");
-		// Sorted by device: notebook (B) before workstation (A).
-		checkEqual(listed.map((item) => ({ id: item.id, device: item.device, name: item.name, project: item.project, cwd: item.cwd.endsWith(`/${item.project}`), model: item.model, state: item.state })), [
-			{ id: B.sessionId, device: B.device, name: B.name, project: B.project, cwd: true, model: `${PROVIDER}/${MODEL}`, state: "idle" },
-			{ id: A.sessionId, device: A.device, name: A.name, project: A.project, cwd: true, model: `${PROVIDER}/${MODEL}`, state: "idle" },
-		], "the online sessions on the device route");
+		// Sorted by device name: Bo's notebook (B) before workstation (A).
+		const shown = (items: OnlineSession[]) => items.map((item) => ({
+			id: item.id, device: item.device, deviceName: item.deviceName, name: item.name, project: item.project, cwd: item.cwd.endsWith(`/${item.project}`), model: item.model, state: item.state,
+		}));
+		const onlineAs = (session: Sender) =>
+			({ id: session.sessionId, device: session.deviceId, deviceName: session.device, name: session.name, project: session.project, cwd: true, model: `${PROVIDER}/${MODEL}`, state: "idle" });
+		checkEqual(shown(listed), [onlineAs(B), onlineAs(A)], "the online sessions on the device route");
 		checkEqual((await deviceRoute(mb.token)).items.map((item) => item.id), listed.map((item) => item.id), "the online sessions with B's token");
 		checkEqual(((await t.api.get<{ items: OnlineSession[] }>("relay/sessions"))?.items ?? []).map((item) => item.id).sort(), both, "the online sessions on the browser route");
 		log("relay: both sessions are online on the device and browser routes");
@@ -184,7 +190,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		const received = custom(bEntries, "relay-received").find((entry) => entry.data?.id === askId);
 		check(received, `B has no relay-received entry for ${askId}`);
 		checkEqual({ ...received.data, at: typeof received.data?.at },
-			{ id: askId, from: { kind: "session", sessionId: A.sessionId, device: A.device, name: A.name, title: A.name, project: A.project }, text: QUESTION, hops: 1, urgent: false, at: "string" },
+			{ id: askId, from: { kind: "session", sessionId: A.sessionId, device: A.deviceId, deviceName: A.device, name: A.name, title: A.name, project: A.project }, text: QUESTION, hops: 1, urgent: false, at: "string" },
 			"B's relay-received entry for the question");
 		const question = customMessages(bEntries, "relay-message").find((entry) => entry.details?.id === askId);
 		check(question, `B has no relay-message for ${askId}`);
@@ -251,9 +257,9 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		check(!custom(await b.entries(), "relay-received").some((entry) => entry.data?.id === lateId), "B received the expired message after /relay on");
 
 		// 6. A message from the browser route reaches B and starts its turn; an unknown target is refused.
-		const sent = await t.api.post<{ id: string; status: string; to: { sessionId: string; device?: string; name?: string } }>("relay/messages", { to: B.sessionId, text: WEB_ROUTE_TEXT });
-		checkEqual({ status: sent.status, delivery: sent.body.status, to: [sent.body.to?.sessionId, sent.body.to?.device, sent.body.to?.name] },
-			{ status: 200, delivery: "delivered", to: [B.sessionId, B.device, B.name] }, "POST relay/messages to B");
+		const sent = await t.api.post<{ id: string; status: string; to: { sessionId: string; device?: string; deviceName?: string; name?: string } }>("relay/messages", { to: B.sessionId, text: WEB_ROUTE_TEXT });
+		checkEqual({ status: sent.status, delivery: sent.body.status, to: [sent.body.to?.sessionId, sent.body.to?.device, sent.body.to?.deviceName, sent.body.to?.name] },
+			{ status: 200, delivery: "delivered", to: [B.sessionId, B.deviceId, B.device, B.name] }, "POST relay/messages to B");
 		const refused = await t.api.post<{ error: string }>("relay/messages", { to: "no-such-session", text: "hello" });
 		checkEqual({ status: refused.status, body: refused.body }, { status: 400, body: { error: "unknown_session" } }, "POST relay/messages to an unknown session");
 		const webRoute = await waitFor(async () => customMessages(await b.entries(), "relay-message").find((entry) => entry.details?.id === sent.body.id), 10_000, "the browser route's message in B");
@@ -263,9 +269,26 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		answered(await b.entries(), webRoute, "the browser route's message in B");
 		log(`relay: the browser route's message ${sent.body.id} reached B and started a turn`);
 
-		// 7. The dashboard lists both sessions by device and the messages, in both themes.
+		// 7. Renaming A's device on the Devices page shows in the next relay answers and on the dashboard, which lists
+		// both sessions by device, sorted by name, and the messages, in both themes.
+		await browser.go("/devices");
+		await browser.click(`[data-device="${A.deviceId}"] button[aria-label^="Rename"]`);
+		await browser.visible("[data-dialog=rename] input");
+		await browser.page.$eval("[data-dialog=rename] input", (input) => (input as HTMLInputElement).select());
+		await browser.page.type("[data-dialog=rename] input", RENAMED_A);
+		await browser.click("[data-dialog=rename] button[type=submit]");
+		await browser.visible("[data-notice=green]");
+		checkEqual(await browser.textOf("[data-notice=green]"), `Renamed ${A.device} to ${RENAMED_A}.`, "the notice after renaming A's device");
+		checkEqual(await browser.textOf(`[data-device="${A.deviceId}"] [data-device-label]`), RENAMED_A, "A's device row after the rename");
+		const renamedA: Sender = { ...A, device: RENAMED_A };
+		// Ana's workstation now sorts before Bo's notebook.
+		checkEqual(shown(await online()), [onlineAs(renamedA), onlineAs(B)], "the online sessions on the device route after renaming A's device");
+		checkEqual(((await t.api.get<{ items: OnlineSession[] }>("relay/sessions"))?.items ?? []).map((item) => [item.id, item.deviceName]),
+			[[A.sessionId, RENAMED_A], [B.sessionId, B.device]], "the online sessions on the browser route after renaming A's device");
 		await browser.go("/active");
-		for (const session of [A, B]) await browser.visible(`[data-relay-device="${session.device}"] [data-online-session="${session.sessionId}"]`);
+		for (const session of [renamedA, B]) await browser.visible(`[data-relay-device="${session.deviceId}"][data-device-name="${session.device}"] [data-online-session="${session.sessionId}"]`);
+		checkEqual(await browser.page.$$eval("[data-relay-device]", (nodes) => nodes.map((node) => node.getAttribute("data-relay-device"))), [A.deviceId, B.deviceId], "the dashboard's device groups");
+		check((await browser.textOf(`[data-relay-device="${A.deviceId}"] h3`)).includes(RENAMED_A), "A's device group is not headed by its new name");
 		for (const id of [askId, answerSent[1]!, hopEvent.id, lateId, sent.body.id]) await browser.visible(`[data-relay-event="${id}"]`);
 		checkEqual(await browser.page.$eval(`[data-relay-event="${hopEvent.id}"]`, (node) => node.getAttribute("data-status")), "rejected", "the dashboard's status of the cut chain message");
 		checkEqual(await browser.page.$eval(`[data-relay-event="${lateId}"]`, (node) => node.getAttribute("data-status")), "expired", "the dashboard's status of the late note");
@@ -325,7 +348,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 
 		// 11. Revoking B's device on the Devices page closes its relay connection with 4401.
 		await browser.go("/devices");
-		await browser.click(`button[aria-label="Revoke ${B.device}"]`);
+		await browser.click(`[data-device="${B.deviceId}"] button[aria-label^="Revoke"]`);
 		await browser.click("[role=dialog] button::-p-text(Revoke)");
 		await browser.visible("[data-notice=green]");
 		await waitFor(async () => (await onlineIds()).join() === A.sessionId, 10_000, "B to go offline after the revocation");

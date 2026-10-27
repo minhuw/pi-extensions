@@ -89,6 +89,22 @@ describe("search page", () => {
 		expect(s2.querySelector("div")).toBeNull();
 	});
 
+	it("labels the device filter by name and searches by id", async () => {
+		const list = sessions();
+		list[1].detail = { ...list[1].detail, device: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", deviceName: "Studio Mac" };
+		const server = createFakeServer({ sessions: list, hits: HITS });
+		renderApp("/search?q=base", server.fetch);
+		await screen.findAllByText("base", { selector: "mark" });
+		fireEvent.click(screen.getByRole("button", { name: /^Device/ }));
+		expect((await screen.findAllByRole("menuitemradio")).map((option) => option.textContent)).toEqual(["✓Any device", "mini", "Studio Mac"]);
+		fireEvent.click(screen.getByRole("menuitemradio", { name: "Studio Mac" }));
+		expect(await screen.findByRole("button", { name: "Device: Studio Mac" })).toBeTruthy();
+		await waitFor(() =>
+			expect(server.calls).toContain("/api/v1/search?q=base&device=4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a&limit=50"),
+		);
+		await waitFor(() => expect([...document.querySelectorAll("[data-result-group]")].map((g) => g.getAttribute("data-result-group"))).toEqual(["s2"]));
+	});
+
 	it("debounces typing into the query and focuses the input with /", async () => {
 		const server = createFakeServer({ sessions: sessions(), hits: HITS });
 		renderApp("/search", server.fetch);

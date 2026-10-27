@@ -5,6 +5,7 @@ import { Icon } from "../components/icons";
 import { MessageDialog } from "../components/MessageDialog";
 import { Callout, cx, ErrorState, Page, PageTitle, Pill, Properties, Skeleton, SkeletonLines, type Property } from "../components/ui";
 import { ApiError, useApi } from "../lib/api";
+import { deviceLabel } from "../lib/devices";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, totalTokens } from "../lib/format";
 import { useOnlineSessions } from "../lib/relay";
 import type { OnlineSession, SessionDetail } from "../lib/types";
@@ -19,7 +20,7 @@ import { NotFoundPage } from "./NotFound";
 function sessionProperties(session: SessionDetail): Property[] {
 	const tokens = totalTokens(session.tokens);
 	const items: Property[] = [
-		{ icon: "device", label: "Device", value: <Pill>{session.device}</Pill> },
+		{ icon: "device", label: "Device", value: <Pill title={session.device}>{deviceLabel(session)}</Pill> },
 		{
 			icon: "folder",
 			label: "Project",

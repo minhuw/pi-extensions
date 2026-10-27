@@ -41,8 +41,20 @@ async fn device(state: &AppState, headers: &HeaderMap) -> anyhow::Result<Option<
     Ok(found.map(|(device, _)| (device, token)))
 }
 
+/// Reloads the relay's device names from the store, so that a rename from `pika token rename`, in another process,
+/// shows too. Names are only for display: a failure, or a snapshot that an in-process rename overtook, keeps the old
+/// ones.
+async fn refresh_names(state: &AppState) {
+    let (store, generation) = (state.store.clone(), state.relay.names_generation());
+    match blocking(move || Ok(store.read(crate::auth::device_names)?)).await {
+        Ok(names) => state.relay.set_names(names, generation),
+        Err(e) => tracing::warn!("relay: reading device names: {e:#}"),
+    }
+}
+
 /// `{ items: OnlineSession[] }`.
 async fn session_list(state: &AppState) -> Response {
+    refresh_names(state).await;
     let items = state.relay.online();
     let ids: Vec<String> = items.iter().map(|s| s.info.id.clone()).collect();
     let store = state.store.clone();
@@ -78,6 +90,7 @@ pub async fn events(State(state): State<AppState>, Query(query): Query<BTreeMap<
                 .into_response();
         }
     };
+    refresh_names(&state).await;
     Json(json!({ "items": state.relay.events(limit) })).into_response()
 }
 
@@ -98,6 +111,7 @@ pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value
         Err(_) => Value::Null,
     };
     let draft = Draft::parse(&body, true);
+    refresh_names(&state).await;
     let recorded = match recorded(&state, &draft).await {
         Ok(recorded) => recorded,
         Err(e) => return internal_error(e),
@@ -106,7 +120,7 @@ pub async fn post_message(State(state): State<AppState>, body: Result<Json<Value
     state.relay.send(Origin::Web, draft, recorded, Reply::Web(tx));
     match rx.await {
         Ok(Outcome::Accepted { id, delivered, target }) => Json(json!({
-            "id": id, "status": if delivered { "delivered" } else { "queued" }, "to": target.to_json(),
+            "id": id, "status": if delivered { "delivered" } else { "queued" }, "to": state.relay.target_json(&target),
         }))
         .into_response(),
         Ok(Outcome::Rejected(reason)) => {
@@ -317,6 +331,7 @@ async fn handle(
             if revoked(state, token, device).await {
                 return Err((close::REVOKED, "token revoked"));
             }
+            refresh_names(state).await;
             let (store, id) = (state.store.clone(), info.id.clone());
             let recorded = match blocking(move || relay::recorded(&store, &id)).await {
                 Ok(recorded) => recorded,
@@ -335,6 +350,7 @@ async fn handle(
         ("send", true) => {
             let client_id = relay::client_id(&frame).ok_or(BAD)?;
             let draft = Draft::parse(&Value::Object(frame), false);
+            refresh_names(state).await;
             let recorded = match recorded(state, &draft).await {
                 Ok(recorded) => recorded,
                 Err(e) => {

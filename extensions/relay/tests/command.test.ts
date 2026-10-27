@@ -35,6 +35,24 @@ it("/relay shows the connection, the server, this session, and the other online 
 	expect(notes.last!.message.split("\n").at(-1)).toBe("No other pi session is online.");
 });
 
+it("/relay shows the device name, and the id when an older server sends no name", async () => {
+	relay.device = "7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47";
+	relay.deviceName = "Work laptop";
+	const notes = new Notes();
+	const a = await online(notes);
+	const b = await online();
+	await a.session.prompt("/relay");
+	const lines = notes.last!.message.split("\n");
+	expect(lines[0]).toBe("Relay is online as device Work laptop.");
+	expect(lines[4]).toMatch(new RegExp(`^  ${b.session.sessionId} · Work laptop · project`));
+
+	relay.deviceName = undefined;
+	const olderNotes = new Notes();
+	await online(olderNotes);
+	await harnesses.at(-1)!.session.prompt("/relay");
+	expect(olderNotes.last!.message.split("\n")[0]).toBe("Relay is online as device 7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47.");
+});
+
 it("/relay send sends as the user and reports the outcome", async () => {
 	const notes = new Notes();
 	const a = await online(notes);

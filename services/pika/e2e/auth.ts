@@ -1,19 +1,30 @@
-// pika 0.2's authentication end to end: a new machine pairs through the real extension's `/pika login` while the
-// browser denies and then approves its request on the Devices page; revoking the device stops its uploads; signing
-// out retires the browser's session cookie; and the login page's rate limit. Run by driver.ts after the viewer checks.
+// pika's authentication end to end: a new machine pairs through the real extension's `/pika login` under a free-text
+// name while the browser denies and then approves its request on the Devices page; after `/pika logout` it pairs again,
+// the browser recognizes it by its device key, and approving continues the same device; the Devices page renames it;
+// revoking it stops its uploads; signing out retires the browser's session cookie; and the login page's rate limit.
+// Run by driver.ts after the viewer and relay checks.
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import type { ScriptedUI } from "../../../extensions/pika/tests/support/ui.ts";
-import { allEntries, type ReadApi, type SessionSummary } from "./api.ts";
+import { allEntries, devices, type ReadApi, type SessionSummary } from "./api.ts";
 import type { Ui } from "./browser.ts";
 import { PROMPTS, type Pi } from "./scenario.ts";
 import { check, checkEqual, log, waitFor } from "./util.ts";
 
-// The method prompt of the contract's `/pika login`. The extension's own constants live in login.ts, which Node's type
-// stripping cannot load, so the driver checks the prompt it sees against these.
+// The prompts of the contract's `/pika login`. The extension's own constants live in login.ts, which Node's type
+// stripping cannot load, so the driver checks the prompts it sees against these.
 const METHOD_TITLE = "How should this machine log in?";
 const PAIR = "Pair with the pika web UI (recommended)";
 const PASTE = "Paste a token";
+const URL_TITLE = "pika server URL: the address you open the pika web UI at, e.g. https://pika.example.com or http://192.168.1.10:7171";
+const URL_PLACEHOLDER = "https://pika.example.com";
+const URL_WARNING = "pika: the server URL must start with http:// or https://. Enter the address you open the pika web UI at, e.g. https://pika.example.com, or press Esc to cancel.";
+const NAME_WARNING = "pika: that name does not work: use 1 to 64 characters, without control characters. Enter another, or press Esc to cancel.";
+const nameTitle = (suggested: string) => `Name for this machine in pika (any text up to 64 characters; blank uses ${suggested})`;
+/** The name pika suggests: this host's name without `.local`, as the extension's `defaultDeviceName` makes it. */
+const SUGGESTED = [...hostname().trim().replace(/\.local$/i, "")].slice(0, 64).join("").trim() || "pi";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** The server's poll interval is 2 s; approval and denial reach pi within a few polls. */
 const DECIDED_MS = 15_000;
 
@@ -22,7 +33,7 @@ export interface NewMachine {
 	agentDir: string;
 	pi: Pi;
 	ui: ScriptedUI;
-	/** Tokens that must never appear in anything pika showed. */
+	/** Tokens and keys that must never appear in anything pika showed. */
 	secrets: string[];
 }
 
@@ -32,52 +43,84 @@ export interface AuthTargets {
 	api: ReadApi;
 	/** The device name the new machine asks for. */
 	device: string;
+	/** The name the Devices page renames it to. */
+	renamed: string;
 }
 
+/** The device the machine paired as. */
+export interface Paired { id: string; token: string; sessionId: string }
+
 const configFile = (machine: NewMachine) => join(machine.agentDir, "pika.json");
+const keyFile = (machine: NewMachine) => join(machine.agentDir, "pika", "device-key.json");
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * Starts `/pika login <url>` on the new machine, choosing pairing with `device` as its name, and returns the code and
- * approval page from the notification pika shows outside the TUI, with the command's promise.
+ * Starts `/pika login` on the new machine, choosing pairing, and returns the code and approval page from the
+ * notification pika shows outside the TUI, with the command's promise. `inputs` answers the prompts (the URL ones
+ * only without `arg`); pika pairs as `name`.
  */
-async function startPairing(machine: NewMachine, t: AuthTargets): Promise<{ code: string; link: string; command: Promise<void> }> {
+async function startPairing(machine: NewMachine, t: AuthTargets, login: { arg?: string; inputs: string[]; name: string }): Promise<{ code: string; link: string; command: Promise<void> }> {
 	const { ui, pi } = machine;
 	const notes = ui.notes.length;
 	ui.choices = [PAIR];
-	ui.inputs = [t.device];
-	const command = pi.session.prompt(`/pika login ${t.url}`);
+	ui.inputs = [...login.inputs];
+	const command = pi.session.prompt(login.arg ? `/pika login ${login.arg}` : "/pika login");
 	// A failure before the code shows would otherwise only surface as a timeout.
 	command.catch(() => {});
-	const pattern = new RegExp(`^To pair this machine with pika as ${escapeRegExp(t.device)}, open (\\S+) and approve the code (\\S+)\\. The code expires in 10 minutes; waiting for approval…$`);
-	const match = await waitFor(() => ui.notes.slice(notes).map((note) => pattern.exec(note.message)).find(Boolean) ?? false, 10_000, "pika to show the pairing code");
+	const pattern = new RegExp(`^To pair this machine with pika as ${escapeRegExp(login.name)}, open (\\S+) and approve the code (\\S+)\\. The code expires in 10 minutes; waiting for approval…$`);
+	const match = await waitFor(() => ui.notes.slice(notes).map((note) => pattern.exec(note.message)).find(Boolean) ?? false, 10_000, "pika to show the pairing code")
+		.catch((error: Error) => { throw new Error(`${error.message}; pika showed ${JSON.stringify(ui.notes.slice(notes))}`); });
 	const [link, code] = [match[1]!, match[2]!];
 	checkEqual(link, `${t.url}/devices?pair=${encodeURIComponent(code)}`, "the approval page pika shows");
 	check(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(code), `the pairing code ${code} is not XXXX-XXXX from the code alphabet`);
 	checkEqual(ui.selects.at(-1), { title: METHOD_TITLE, options: [PAIR, PASTE] }, "the login method prompt");
-	check(ui.prompts.at(-1)?.title.startsWith("Device name for this machine"), `pika asked ${JSON.stringify(ui.prompts.at(-1))} instead of the device name`);
+	checkEqual(ui.prompts.at(-1), { title: nameTitle(SUGGESTED), placeholder: SUGGESTED }, "the device name prompt");
+	checkEqual(ui.inputs, [], "prompts pika did not ask");
 	return { code, link, command };
 }
 
-/** Opens the approval page the way the user would, and checks the request is highlighted with nothing edited. */
-async function openRequest(browser: Ui, t: AuthTargets, code: string, link: string): Promise<string> {
+/** The device a pairing request is recognized as, as the approval page should show it. */
+interface Recognized { id: string; name: string; active: boolean }
+
+/**
+ * Opens the approval page the way the user would, and checks the request is highlighted with nothing edited: a new
+ * device proposes the requested name, a recognized one its own name. With `shot`, screenshots the card in both themes.
+ */
+async function openRequest(browser: Ui, code: string, link: string, request: { name: string; recognized?: Recognized; shot?: string }): Promise<string> {
 	await browser.page.goto(link, { waitUntil: "networkidle0" });
 	const card = `[data-pairing="${code}"]`;
 	await browser.visible(`${card}[data-highlighted]`);
 	checkEqual(await browser.count("[data-pairing][data-highlighted]"), 1, "highlighted pairing requests");
-	const name = await browser.page.$eval(`${card} input`, (input) => (input as HTMLInputElement).value);
-	checkEqual(name, t.device, "the device name the approval page proposes");
 	const text = await browser.textOf(card);
 	check(text.includes(code) && /Expires in \d+:\d\d/.test(text), `the pairing request shows ${JSON.stringify(text)}`);
-	check(!(await browser.count(`${card} [data-device-exists]`)), "the approval page reports that the new device already exists");
-	await browser.shot("16-devices-pairing");
+	checkEqual(await browser.textOf(`${card} [data-pairing-name]`), `Requested name ${request.name}`, "the requested name on the approval page");
+	const { recognized } = request;
+	const proposed = await browser.page.$eval(`${card} input:not([type=radio])`, (input) => (input as HTMLInputElement).value);
+	checkEqual(proposed, recognized?.name ?? request.name, "the device name the approval page proposes");
+	if (recognized) {
+		checkEqual(await browser.page.$eval(card, (node) => node.getAttribute("data-pairing-match")), recognized.id, "the device the approval page recognized");
+		checkEqual(await browser.textOf(`${card} [data-pairing-recognized="key"]`), `Recognized as ${recognized.name} by its device key`, "the recognition callout");
+		const chosen = await browser.page.$eval(`${card} input[type=radio]:checked`, (input) => (input.closest("label") as HTMLElement).innerText);
+		checkEqual(chosen, `Continue ${recognized.name}\n${recognized.active ? "Same history; its current token stops working." : "Same history."}`, "the approval page's default choice");
+	} else {
+		check(!(await browser.count(`${card}[data-pairing-match], ${card} [data-pairing-recognized]`)), "the approval page recognized a new machine");
+		check((await browser.textOf(`${card} [data-pairing-new]`)).includes("Approves a new device."), "the approval page does not approve a new device by default");
+	}
+	if (request.shot) {
+		const theme = browser.theme;
+		for (const each of [theme, theme === "dark" ? "light" : "dark"] as const) {
+			await browser.setTheme(each);
+			await browser.shot(request.shot);
+		}
+		await browser.setTheme(theme);
+	}
 	return card;
 }
 
 /** The browser denies the first request: pi reports it and nothing changes on the machine or the server. */
 export async function checkDeniedPairing(browser: Ui, machine: NewMachine, t: AuthTargets): Promise<void> {
-	const { code, link, command } = await startPairing(machine, t);
-	const card = await openRequest(browser, t, code, link);
+	const { code, link, command } = await startPairing(machine, t, { arg: t.url, inputs: [t.device], name: t.device });
+	const card = await openRequest(browser, code, link, { name: t.device });
 	await browser.click(`${card} button::-p-text(Deny)`);
 	await browser.visible("[data-notice=green]");
 	checkEqual(await browser.textOf("[data-notice=green]"), `Denied the request from ${t.device}.`, "the notice after denying");
@@ -91,56 +134,184 @@ export async function checkDeniedPairing(browser: Ui, machine: NewMachine, t: Au
 	log(`pairing: denied ${code} in the browser; pi reported it and saved nothing`);
 }
 
-interface Device { name: string; createdAt: string; createdVia: string; lastSeenAt?: string; lastHost?: string }
-const devices = async (api: ReadApi) => (await api.get<{ items: Device[] }>("devices"))?.items ?? [];
-
-/**
- * The browser approves the second request unchanged: pi saves the token like a pasted one, owner-only, and the
- * session uploads at once, attributed to the paired device. Returns the token.
- */
-export async function checkApprovedPairing(browser: Ui, machine: NewMachine, t: AuthTargets): Promise<string> {
-	const { code, link, command } = await startPairing(machine, t);
-	const card = await openRequest(browser, t, code, link);
-	await browser.click(`${card} button[aria-label="Approve ${code}"]`);
-	await browser.visible("[data-notice=green]");
-	checkEqual(await browser.textOf("[data-notice=green]"), `Approved ${t.device}. pi on that machine finishes logging in by itself.`, "the notice after approving");
-	await withTimeout(command, DECIDED_MS, "/pika login to finish after the approval");
+/** pika.json after a login: owner-only, with the server URL and a new token, which it returns. */
+function savedToken(machine: NewMachine, t: AuthTargets): string {
 	const file = configFile(machine);
-	const last = machine.ui.last;
-	check(last?.type === "info" && last.message.startsWith(`Logged in to ${t.url} as ${t.device}; saved to ${file}.`) && last.message.includes(`This session now uploads to ${t.url}.`),
-		`pika's message after the approval: ${JSON.stringify(last)}`);
-
 	checkEqual(statSync(file).mode & 0o777, 0o600, "the mode of pika.json after pairing");
 	const saved = JSON.parse(readFileSync(file, "utf8")) as { url?: string; token?: string };
 	check(typeof saved.token === "string" && /^pika_[0-9a-f]{64}$/.test(saved.token), "pika.json holds no device token after pairing");
 	checkEqual(saved.url, t.url, "the server URL in pika.json");
-	const token = saved.token;
-	check(!machine.secrets.includes(token), "pairing handed out the token of another device");
-	machine.secrets.push(token);
-	checkEqual((await t.api.get<{ items: unknown[] }>("pairings"))?.items, [], "pending pairings after the approval");
+	check(!machine.secrets.includes(saved.token), "pairing handed out a token pika handed out before");
+	machine.secrets.push(saved.token);
+	return saved.token;
+}
 
-	// The session that ran /pika login joined at once; its next prompt uploads with the new token.
-	await machine.pi.prompt(PROMPTS.paired);
+/** This install's device key file: owner-only, made on this machine; returns the key. */
+function savedKey(machine: NewMachine): string {
+	const file = keyFile(machine);
+	checkEqual(statSync(file).mode & 0o777, 0o600, "the mode of device-key.json");
+	const saved = JSON.parse(readFileSync(file, "utf8")) as { v?: unknown; key?: unknown; machine?: unknown };
+	check(saved.v === 1 && typeof saved.key === "string" && /^[0-9a-f]{64}$/.test(saved.key) && typeof saved.machine === "string" && /^[0-9a-f]{64}$/.test(saved.machine),
+		`device-key.json holds ${JSON.stringify(Object.keys(saved))} instead of v, key, and machine`);
+	return saved.key;
+}
+
+/** The id a device row shows (its first 8 characters) and the whole id its `data-device-id` and title hold, when they agree. */
+async function deviceIdShown(browser: Ui, row: string): Promise<{ text: string; full: string }> {
+	const [text, full, title] = await browser.page.$eval(`${row} [data-device-id]`, (node) => [(node as HTMLElement).innerText, node.getAttribute("data-device-id") ?? "", node.getAttribute("title") ?? ""]);
+	checkEqual(title, full, "the title of a device row's id");
+	return { text: text!, full: full! };
+}
+
+/** The session that ran `/pika login` uploads `prompt`'s entries at once, attributed to `id`; returns its summary. */
+async function uploads(machine: NewMachine, t: AuthTargets, prompt: string, id: string): Promise<SessionSummary> {
+	await machine.pi.prompt(prompt);
 	const sessionId = machine.pi.session.sessionId;
 	const lines = () => readFileSync(machine.pi.session.sessionFile!, "utf8").split("\n").filter(Boolean).length;
 	await waitFor(async () => ((await allEntries(t.api, sessionId))?.length ?? 0) === lines() || undefined, 10_000, "the paired machine's session to upload");
 	const summary = await t.api.get<SessionSummary>(`sessions/${sessionId}`);
-	checkEqual(summary?.device, t.device, "the device the paired machine's session is attributed to");
-	const device = (await devices(t.api)).find((item) => item.name === t.device);
-	checkEqual({ createdVia: device?.createdVia, seen: typeof device?.lastSeenAt === "string" }, { createdVia: "pairing", seen: true }, `the paired device ${t.device}`);
+	check(summary, `the read API does not have session ${sessionId}`);
+	checkEqual(summary.device, id, "the device the paired machine's session is attributed to");
+	return summary;
+}
+
+/**
+ * The browser approves the second request unchanged: the server makes a new device with a UUID id and the requested
+ * name, pi saves the token like a pasted one, owner-only, and the session uploads at once, attributed to that id.
+ */
+export async function checkApprovedPairing(browser: Ui, machine: NewMachine, t: AuthTargets): Promise<Paired> {
+	const { code, link, command } = await startPairing(machine, t, { arg: t.url, inputs: [t.device], name: t.device });
+	const card = await openRequest(browser, code, link, { name: t.device, shot: "16-devices-pairing" });
+	await browser.click(`${card} button[aria-label="Approve ${code}"]`);
+	await browser.visible("[data-notice=green]");
+	checkEqual(await browser.textOf("[data-notice=green]"), `Approved ${t.device}.`, "the notice after approving");
+	await withTimeout(command, DECIDED_MS, "/pika login to finish after the approval");
+	const file = configFile(machine);
+	const last = machine.ui.last;
+	check(last?.type === "info" && last.message.startsWith(`Logged in to ${t.url} as ${t.device}; saved to ${file}.\n`) && last.message.includes(`This session now uploads to ${t.url}.`),
+		`pika's message after the approval: ${JSON.stringify(last)}`);
+	const token = savedToken(machine, t);
+	machine.secrets.push(savedKey(machine));
+	checkEqual((await t.api.get<{ items: unknown[] }>("pairings"))?.items, [], "pending pairings after the approval");
+
+	const named = (await devices(t.api)).filter((item) => item.name === t.device);
+	checkEqual(named.length, 1, `devices named ${t.device}`);
+	const id = named[0]!.id;
+	check(UUID.test(id), `the paired device's id ${id} is not a UUID v4`);
+	const summary = await uploads(machine, t, PROMPTS.paired, id);
+	checkEqual(summary.deviceName, t.device, "the device name of the paired machine's session");
+	const device = (await devices(t.api)).find((item) => item.id === id);
+	checkEqual({ name: device?.name, createdVia: device?.createdVia, seen: typeof device?.lastSeenAt === "string", hasKey: device?.hasKey },
+		{ name: t.device, createdVia: "pairing", seen: true, hasKey: true }, `the paired device ${id}`);
+	// The page lists the new device under its name, with its id. The device exists once pi polled, after the page
+	// refreshed its list on approving; the page keeps refetching after an approval, so it shows without a reload.
+	const row = `[data-device="${id}"]`;
+	await browser.visible(row);
+	checkEqual(await browser.textOf(`${row} [data-device-label]`), t.device, "the paired device's row");
+	checkEqual(await deviceIdShown(browser, row), { text: `${id.slice(0, 8)}…`, full: id }, "the id the paired device's row shows");
 	noSecrets(machine);
 	browser.noProblems("while approving a pairing request");
-	log(`pairing: approved ${code}; pika.json is 0600 and session ${sessionId} uploads as ${t.device}`);
-	return token;
+	log(`pairing: approved ${code} as ${id} (${t.device}); pika.json is 0600 and session ${summary.id} uploads as it`);
+	return { id, token, sessionId: summary.id };
+}
+
+/**
+ * `/pika logout` keeps the device key; `/pika login` without a URL asks for it again (a URL without a scheme is
+ * refused, then asked again; an invalid name likewise; blank takes the suggestion). The approval page recognizes the
+ * request by its device key, and approving it unchanged continues the device: same id and name, a new token, the old
+ * one refused, and the session keeps uploading as that device.
+ */
+export async function checkRepairing(browser: Ui, machine: NewMachine, t: AuthTargets, paired: Paired): Promise<Paired> {
+	const { ui } = machine;
+	const key = savedKey(machine);
+	await machine.pi.session.prompt("/pika logout");
+	check(ui.last?.message.startsWith(`Logged out of pika: removed the url and token from ${configFile(machine)}.`), `/pika logout said ${JSON.stringify(ui.last)}`);
+	checkEqual(JSON.parse(readFileSync(configFile(machine), "utf8")), {}, "pika.json after /pika logout");
+	checkEqual(savedKey(machine), key, "the device key after /pika logout");
+
+	const notes = ui.notes.length;
+	const prompts = ui.prompts.length;
+	const { code, link, command } = await startPairing(machine, t, { inputs: ["localhost:7171", t.url, "bad\u0007name", ""], name: SUGGESTED });
+	checkEqual(ui.prompts.slice(prompts), [
+		{ title: URL_TITLE, placeholder: URL_PLACEHOLDER }, { title: URL_TITLE, placeholder: URL_PLACEHOLDER },
+		{ title: nameTitle(SUGGESTED), placeholder: SUGGESTED }, { title: nameTitle(SUGGESTED), placeholder: SUGGESTED },
+	], "the prompts of /pika login without a URL");
+	checkEqual(ui.notes.slice(notes, notes + 2), [{ message: URL_WARNING, type: "warning" }, { message: NAME_WARNING, type: "warning" }], "the warnings for a URL without a scheme and an invalid name");
+
+	const card = await openRequest(browser, code, link, { name: SUGGESTED, recognized: { id: paired.id, name: t.device, active: true }, shot: "22-devices-pairing-recognized" });
+	await browser.click(`${card} button[aria-label="Approve ${code}"]`);
+	await browser.visible("[data-notice=green]");
+	checkEqual(await browser.textOf("[data-notice=green]"), `Approved ${t.device}; it continues the existing device.`, "the notice after approving a recognized machine");
+	await withTimeout(command, DECIDED_MS, "/pika login to finish after approving the recognized machine");
+	const last = ui.last;
+	// The message's "continues" comes from the poll's `continued`.
+	check(last?.type === "info" && last.message.startsWith(`Logged in to ${t.url} as ${t.device}; saved to ${configFile(machine)}. This continues the existing device.\n`)
+		&& last.message.includes(`This session now uploads to ${t.url}.`), `pika's message after continuing the device: ${JSON.stringify(last)}`);
+	const token = savedToken(machine, t);
+	checkEqual(savedKey(machine), key, "the device key after pairing again");
+
+	const ingest = await fetch(`${t.url}/api/ingest/v1/batch`, {
+		method: "POST", headers: { authorization: `Bearer ${paired.token}`, "content-type": "application/json" }, body: JSON.stringify({ client: { host: "e2e" } }),
+	});
+	checkEqual(ingest.status, 401, "ingest with the token the continued device had before");
+	checkEqual((await devices(t.api)).filter((item) => item.id === paired.id || item.name === t.device || item.name === SUGGESTED).map((item) => [item.id, item.name, item.hasKey]),
+		[[paired.id, t.device, true]], "the devices after continuing one");
+	const summary = await uploads(machine, t, PROMPTS.continued, paired.id);
+	checkEqual({ id: summary.id, deviceName: summary.deviceName }, { id: paired.sessionId, deviceName: t.device }, "the continued machine's session");
+	await waitFor(async () => (await browser.count(`[data-device="${paired.id}"]`)) === 1, 5_000, "the Devices page to list the continued device once");
+	noSecrets(machine);
+	browser.noProblems("while approving a recognized machine");
+	log(`pairing: after /pika logout, ${code} was recognized by its device key and continued ${paired.id}; the old token is refused`);
+	return { ...paired, token };
+}
+
+/** Renaming the device on the Devices page changes its name everywhere it is shown, but not its id. */
+export async function checkRename(browser: Ui, t: AuthTargets, paired: Paired): Promise<void> {
+	await browser.go("/devices");
+	const row = `[data-device="${paired.id}"]`;
+	const dialog = "[data-dialog=rename]";
+	const open = async () => {
+		await browser.click(`${row} button[aria-label^="Rename"]`);
+		await browser.visible(`${dialog} input`);
+		checkEqual(await browser.page.$eval(`${dialog} input`, (input) => (input as HTMLInputElement).value), t.device, "the name the rename dialog starts with");
+		check((await browser.textOf(dialog)).includes(`Rename ${t.device}`), "the rename dialog does not name the device");
+		await browser.page.$eval(`${dialog} input`, (input) => (input as HTMLInputElement).select());
+		await browser.page.type(`${dialog} input`, t.renamed);
+	};
+	// The dialog is modal, so the theme changes with it closed; Cancel keeps the old name.
+	const theme = browser.theme;
+	for (const each of [theme === "dark" ? "light" : "dark", theme] as const) {
+		await browser.setTheme(each);
+		await open();
+		await browser.shot("23-devices-rename");
+		if (each !== theme) {
+			await browser.click(`${dialog} button::-p-text(Cancel)`);
+			await browser.page.waitForSelector(dialog, { hidden: true });
+		}
+	}
+	await browser.click(`${dialog} button[type=submit]`);
+	await browser.visible("[data-notice=green]");
+	checkEqual(await browser.textOf("[data-notice=green]"), `Renamed ${t.device} to ${t.renamed}.`, "the notice after renaming");
+	await browser.page.waitForSelector(dialog, { hidden: true });
+	checkEqual([await browser.textOf(`${row} [data-device-label]`), (await deviceIdShown(browser, row)).full], [t.renamed, paired.id], "the renamed device's row");
+	checkEqual((await devices(t.api)).find((item) => item.id === paired.id)?.name, t.renamed, "the renamed device in the API");
+	checkEqual((await t.api.get<SessionSummary>(`sessions/${paired.sessionId}`))?.deviceName, t.renamed, "the device name of the renamed device's session");
+
+	await browser.go("/");
+	const label = `[data-session-row="${paired.sessionId}"] [data-device-label="${paired.id}"]`;
+	await browser.visible(label);
+	checkEqual(await browser.textOf(label), t.renamed, "the device the session list names for the renamed device's session");
+	browser.noProblems("while renaming a device");
+	log(`devices: renamed ${paired.id} from ${t.device} to ${t.renamed}; the session list shows the new name`);
 }
 
 /**
  * The Devices page lists the paired device with its last-seen time, in both themes; revoking it there makes the
  * server refuse its token at once, and the machine's uploader stops with a 401.
  */
-export async function checkDevices(browser: Ui, machine: NewMachine, t: AuthTargets, token: string): Promise<void> {
+export async function checkDevices(browser: Ui, machine: NewMachine, t: AuthTargets, paired: Paired): Promise<void> {
 	await browser.go("/devices");
-	const row = `[data-device="${t.device}"]`;
+	const row = `[data-device="${paired.id}"]`;
 	await browser.visible(row);
 	const cells = await browser.page.$$eval(`${row} td`, (nodes) => nodes.map((node) => (node as HTMLElement).innerText.trim()));
 	check(cells[1]?.includes("paired"), `the device row's Added cell is ${JSON.stringify(cells[1])}`);
@@ -152,15 +323,16 @@ export async function checkDevices(browser: Ui, machine: NewMachine, t: AuthTarg
 		await browser.shot("17-devices");
 	}
 
-	await browser.click(`button[aria-label="Revoke ${t.device}"]`);
+	await browser.click(`${row} button[aria-label^="Revoke"]`);
+	check((await browser.textOf("[role=dialog]")).includes(`Revoke ${t.renamed}?`), "the revoke confirmation does not name the device");
 	await browser.click("[role=dialog] button::-p-text(Revoke)");
 	await browser.visible("[data-notice=green]");
-	checkEqual(await browser.textOf("[data-notice=green]"), `Revoked ${t.device}.`, "the notice after revoking");
+	checkEqual(await browser.textOf("[data-notice=green]"), `Revoked ${t.renamed}.`, "the notice after revoking");
 	await waitFor(async () => (await browser.count(row)) === 0, 5_000, "the revoked device to leave the list");
-	check(!(await devices(t.api)).some((item) => item.name === t.device), "the revoked device is still listed by the API");
+	check(!(await devices(t.api)).some((item) => item.id === paired.id), "the revoked device is still listed by the API");
 
 	const ingest = await fetch(`${t.url}/api/ingest/v1/batch`, {
-		method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ client: { host: "e2e" } }),
+		method: "POST", headers: { authorization: `Bearer ${paired.token}`, "content-type": "application/json" }, body: JSON.stringify({ client: { host: "e2e" } }),
 	});
 	checkEqual(ingest.status, 401, "ingest with the revoked token");
 	await machine.pi.prompt(PROMPTS.revoked);
@@ -173,7 +345,7 @@ export async function checkDevices(browser: Ui, machine: NewMachine, t: AuthTarg
 	check(status.includes("Stopped: the server rejected the token (401)"), `/pika after the revocation:\n${status}`);
 	noSecrets(machine);
 	browser.noProblems("on the Devices page");
-	log(`devices: ${t.device} last seen ${cells[2]}; after revoking it, ingest answers 401 and /pika reports the uploader stopped`);
+	log(`devices: ${t.renamed} last seen ${cells[2]}; after revoking it, ingest answers 401 and /pika reports the uploader stopped`);
 }
 
 async function browserCookie(browser: Ui, t: AuthTargets): Promise<string> {

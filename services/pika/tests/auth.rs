@@ -60,6 +60,14 @@ impl Req {
         r.body = Body::from(body.to_string());
         r
     }
+    fn patch(path: &str, body: Value) -> Req {
+        let mut r = Req::new(Method::PATCH, path).header("content-type", "application/json");
+        r.body = Body::from(body.to_string());
+        r
+    }
+    fn bearer(self, token: &str) -> Req {
+        self.header("authorization", &format!("Bearer {token}"))
+    }
     fn form(path: &str, text: &str) -> Req {
         let mut r = Req::new(Method::POST, path).header("content-type", "application/x-www-form-urlencoded");
         r.body = Body::from(text.to_owned());
@@ -716,6 +724,7 @@ async fn management_routes_need_a_login_in_password_mode() {
         Req::post("/api/v1/logout", json!({})),
         Req::get("/api/v1/devices"),
         Req::delete(&format!("/api/v1/devices/{DEVICE}")),
+        Req::patch(&format!("/api/v1/devices/{DEVICE}"), json!({ "name": "x" })),
         Req::get("/api/v1/pairings"),
         Req::post("/api/v1/pairings/ABCD-EFGH/approve", json!({})),
         Req::post("/api/v1/pairings/ABCD-EFGH/deny", json!({})),
@@ -733,21 +742,25 @@ async fn management_routes_need_a_login_in_password_mode() {
 #[tokio::test]
 async fn devices_can_be_listed_and_revoked() {
     let env = env();
-    let token = pika::auth::create_token(&env.store, DEVICE).unwrap();
-    pika::auth::create_token(&env.store, "desktop").unwrap();
+    let token = common::device(&env.store, DEVICE);
+    common::device(&env.store, "desktop");
+    common::device_named(&env.store, "b-id", "Desktop");
     let a = app(&env, config(&env));
     let cookie = logged_in(&a).await;
 
+    // By name case-insensitively, then by id.
     let r = Req::get("/api/v1/devices").cookie(&cookie).send(&a).await;
     let items = r.json()["items"].as_array().unwrap().clone();
-    assert_eq!(items.iter().map(|d| d["name"].clone()).collect::<Vec<_>>(), [json!("desktop"), json!(DEVICE)]);
-    assert_eq!(items[1]["createdVia"], "cli");
-    assert!(items[1].get("lastSeenAt").is_none() && items[1].get("lastHost").is_none());
+    let listed: Vec<(&str, &str)> = items.iter().map(|d| (d["id"].as_str().unwrap(), d["name"].as_str().unwrap())).collect();
+    assert_eq!(listed, [("b-id", "Desktop"), ("desktop", "desktop"), (DEVICE, DEVICE)]);
+    let keys: Vec<&str> = items[2].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["id", "name", "createdAt", "createdVia", "hasKey"]);
+    assert_eq!((&items[2]["createdVia"], &items[2]["hasKey"]), (&json!("cli"), &json!(false)));
 
     // Ingest records the device's last upload at most once a minute.
     assert_eq!(ingest_with(&a, &token, "laptop.lan").await, StatusCode::OK);
     let r = Req::get("/api/v1/devices").cookie(&cookie).send(&a).await;
-    let laptop = r.json()["items"][1].clone();
+    let laptop = r.json()["items"][2].clone();
     assert_eq!(laptop["lastHost"], "laptop.lan");
     assert!(laptop["lastSeenAt"].as_str().unwrap().ends_with('Z'));
     let recent = pika::util::now_ms() - 30_000;
@@ -762,21 +775,62 @@ async fn devices_can_be_listed_and_revoked() {
     assert!(row["last_seen_at"].as_i64().unwrap() > stale + 60_000);
     assert_eq!(row["last_host"], "elsewhere");
 
-    // `pika token list` shows it too.
+    // `pika token list` shows it too: id, name, created, via, last upload, host, sorted like the route.
     let out = pika(&env.dir.path().join("data")).args(["token", "list"]).output().unwrap();
     let listing = String::from_utf8(out.stdout).unwrap();
+    let ids: Vec<&str> = listing.lines().map(|l| l.split('\t').next().unwrap()).collect();
+    assert_eq!(ids, ["b-id", "desktop", DEVICE], "{listing}");
     let line = listing.lines().find(|l| l.starts_with("laptop\t")).unwrap();
     let fields: Vec<&str> = line.split('\t').collect();
-    assert_eq!((fields.len(), fields[2], fields[4]), (5, "cli", "elsewhere"), "{line}");
-    assert!(fields[3].ends_with('Z'), "{line}");
-    assert!(listing.lines().any(|l| l.starts_with("desktop\t") && l.ends_with("\tcli\tnever\t-")), "{listing}");
+    assert_eq!((fields.len(), fields[1], fields[3], fields[5]), (6, DEVICE, "cli", "elsewhere"), "{line}");
+    assert!(fields[2].ends_with('Z') && fields[4].ends_with('Z'), "{line}");
+    assert!(listing.lines().any(|l| l.starts_with("b-id\tDesktop\t") && l.ends_with("\tcli\tnever\t-")), "{listing}");
 
-    // Revoking refuses the token at once.
+    // Revoking refuses the token at once and keeps the device's row.
     let r = Req::delete(&format!("/api/v1/devices/{DEVICE}")).cookie(&cookie).send(&a).await;
     assert_eq!(r.status, StatusCode::NO_CONTENT);
     assert_eq!(ingest_with(&a, &token, "laptop.lan").await, StatusCode::UNAUTHORIZED);
     let r = Req::delete(&format!("/api/v1/devices/{DEVICE}")).cookie(&cookie).send(&a).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(one(&env.store, &format!("SELECT name FROM devices WHERE id = '{DEVICE}'"))["name"], DEVICE);
+    assert_eq!(Req::delete("/api/v1/devices/not%20an%20id").cookie(&cookie).send(&a).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn devices_can_be_renamed() {
+    let env = env();
+    common::device(&env.store, DEVICE);
+    // A device without a token, such as one known only from its uploads.
+    set_sql(&env, "INSERT INTO devices (id, name, created_at) VALUES ('old-desk', 'old-desk', 1)");
+    let a = app(&env, config(&env));
+    let cookie = logged_in(&a).await;
+    let rename = |id: &str, body: Value| {
+        let (a, cookie, path) = (a.clone(), cookie.clone(), format!("/api/v1/devices/{id}"));
+        async move { Req::patch(&path, body).cookie(&cookie).send(&a).await }
+    };
+
+    let r = rename(DEVICE, json!({ "name": "  Ana's MacBook Pro  " })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": DEVICE, "name": "Ana's MacBook Pro" })));
+    let r = Req::get("/api/v1/devices").cookie(&cookie).send(&a).await;
+    assert_eq!(r.json()["items"][0]["name"], "Ana's MacBook Pro");
+    let r = rename("old-desk", json!({ "name": "Büro" })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "id": "old-desk", "name": "Büro" })));
+    assert_eq!(one(&env.store, "SELECT name FROM devices WHERE id = 'old-desk'")["name"], "Büro");
+
+    for body in [json!({}), json!({ "name": "" }), json!({ "name": "   " }), json!({ "name": 7 }), json!({ "name": "a\nb" })] {
+        let r = rename(DEVICE, body.clone()).await;
+        assert_eq!((r.status, r.json()), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_name" })), "{body}");
+    }
+    for id in ["nobody", "not%20an%20id"] {
+        let r = rename(id, json!({ "name": "x" })).await;
+        assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "unknown_device" })), "{id}");
+    }
+    let r = Req::new(Method::PATCH, &format!("/api/v1/devices/{DEVICE}"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .cookie(&cookie)
+        .send(&a)
+        .await;
+    assert_eq!(r.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
 async fn start(a: &Router, ip: &str, body: Value) -> Reply {
@@ -785,6 +839,14 @@ async fn start(a: &Router, ip: &str, body: Value) -> Reply {
 
 async fn poll(a: &Router, pairing_id: &str) -> Reply {
     Req::post("/api/pair/v1/poll", json!({ "pairingId": pairing_id })).send(a).await
+}
+
+fn is_uuid(id: &str) -> bool {
+    let groups: Vec<&str> = id.split('-').collect();
+    groups.iter().map(|g| g.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12]
+        && id.chars().all(|c| c == '-' || c.is_ascii_digit() || ('a'..='f').contains(&c))
+        && groups[2].starts_with('4')
+        && "89ab".contains(&groups[3][..1])
 }
 
 fn is_code(code: &str) -> bool {
@@ -800,11 +862,16 @@ async fn pairing_start_validates_and_limits() {
     let invalid = [
         json!({}),
         json!({ "device": "" }),
+        json!({ "device": "   " }),
         json!({ "device": "a".repeat(65) }),
-        json!({ "device": "has space" }),
-        json!({ "device": "ümlaut" }),
+        json!({ "device": "é".repeat(65) }),
+        json!({ "device": "tab\there" }),
+        json!({ "device": "line\u{2028}break" }),
+        json!({ "device": "next\u{85}line" }),
         json!({ "device": 7 }),
         json!({ "device": "box", "host": "h".repeat(256) }),
+        // The name is checked before the key.
+        json!({ "device": "", "key": "nope" }),
     ];
     for body in invalid {
         let r = start(&a, "10.0.0.1", body.clone()).await;
@@ -812,8 +879,13 @@ async fn pairing_start_validates_and_limits() {
     }
     let r = Req::form("/api/pair/v1/start", "device=box").send(&a).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    for key in [json!("nope"), json!("A".repeat(64)), json!("a".repeat(63)), json!("a".repeat(65)), json!("g".repeat(64)), json!(7)] {
+        let r = start(&a, "10.0.0.1", json!({ "device": "box", "key": key })).await;
+        let expected = if key.is_string() { json!({ "error": "invalid_key" }) } else { json!({ "error": "invalid_device" }) };
+        assert_eq!((r.status, r.json()), (StatusCode::BAD_REQUEST, expected), "{key}");
+    }
 
-    let r = start(&a, "10.0.0.1", json!({ "device": "a".repeat(64), "host": "h".repeat(255), "pikaVersion": "0.2.0" })).await;
+    let r = start(&a, "10.0.0.1", json!({ "device": "é".repeat(64), "host": "h".repeat(255), "pikaVersion": "0.2.0" })).await;
     assert_eq!(r.status, StatusCode::OK);
     let body = r.json();
     let keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
@@ -861,7 +933,7 @@ async fn an_approved_pairing_hands_out_its_token_once() {
     let mut c = config(&env);
     c.base_path = "/pika".into();
     let a = router(AppState::new(env.store.clone(), c).unwrap());
-    let r = Req::post("/pika/api/pair/v1/start", json!({ "device": "work-laptop", "host": "wl.lan", "pikaVersion": "0.2.0" }))
+    let r = Req::post("/pika/api/pair/v1/start", json!({ "device": " Work laptop ", "host": "wl.lan", "pikaVersion": "0.2.0" }))
         .peer("10.9.0.1")
         .send(&a)
         .await;
@@ -877,9 +949,11 @@ async fn an_approved_pairing_hands_out_its_token_once() {
     let items = r.json()["items"].as_array().unwrap().clone();
     assert_eq!(items.len(), 1);
     let item = &items[0];
+    let keys: Vec<&str> = item.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["code", "name", "host", "ip", "pikaVersion", "requestedAt", "expiresAt"]);
     assert_eq!(
-        (&item["code"], &item["device"], &item["host"], &item["ip"], &item["pikaVersion"], &item["deviceExists"]),
-        (&json!(code), &json!("work-laptop"), &json!("wl.lan"), &json!("10.9.0.1"), &json!("0.2.0"), &json!(false))
+        (&item["code"], &item["name"], &item["host"], &item["ip"], &item["pikaVersion"]),
+        (&json!(code), &json!("Work laptop"), &json!("wl.lan"), &json!("10.9.0.1"), &json!("0.2.0"))
     );
     assert!(item["requestedAt"].as_str().unwrap() < item["expiresAt"].as_str().unwrap());
 
@@ -889,26 +963,36 @@ async fn an_approved_pairing_hands_out_its_token_once() {
     // Codes match without the hyphen and in any case.
     let loose = code.replace('-', "").to_lowercase();
     let r = Req::post(&format!("/pika/api/v1/pairings/{loose}/approve"), json!({})).cookie(&cookie).send(&a).await;
-    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "device": "work-laptop" })));
+    assert_eq!(r.status, StatusCode::OK);
+    let device = r.json()["device"].as_str().unwrap().to_owned();
+    assert!(is_uuid(&device), "{device}");
+    assert_eq!(r.json(), json!({ "device": device, "name": "Work laptop", "continued": false }));
     let r = Req::get("/pika/api/v1/pairings").cookie(&cookie).send(&a).await;
     assert_eq!(r.json()["items"], json!([]));
     let r = Req::post(&format!("/pika/api/v1/pairings/{code}/approve"), json!({})).cookie(&cookie).send(&a).await;
     assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "unknown_pairing" })));
-    // No token exists until the device polls.
-    assert!(query(&env.store, "SELECT * FROM tokens WHERE name = 'work-laptop'").is_empty());
+    // No device or token exists until the device polls.
+    assert!(query(&env.store, &format!("SELECT * FROM tokens WHERE name = '{device}'")).is_empty());
+    assert!(query(&env.store, &format!("SELECT * FROM devices WHERE id = '{device}'")).is_empty());
 
     let r = Req::post("/pika/api/pair/v1/poll", json!({ "pairingId": pairing_id })).send(&a).await;
     assert_eq!(r.status, StatusCode::OK);
     let body = r.json();
-    assert_eq!((&body["status"], &body["device"]), (&json!("approved"), &json!("work-laptop")));
     let token = body["token"].as_str().unwrap().to_owned();
     assert!(token.starts_with("pika_"));
+    assert_eq!(
+        body,
+        json!({ "status": "approved", "device": device, "name": "Work laptop", "token": token, "continued": false })
+    );
+    let row = one(&env.store, &format!("SELECT name, key_hash, created_at FROM devices WHERE id = '{device}'"));
+    assert_eq!((&row["name"], &row["key_hash"]), (&json!("Work laptop"), &Value::Null));
+    assert!(row["created_at"].as_i64().unwrap() > pika::util::now_ms() - 60_000);
     let r = Req::post("/pika/api/pair/v1/poll", json!({ "pairingId": pairing_id })).send(&a).await;
     assert_eq!((r.status, r.json()), (StatusCode::NOT_FOUND, json!({ "error": "unknown_pairing" })));
 
     let r = Req::post("/pika/api/ingest/v1/batch", batch("wl.lan")).header("authorization", &format!("Bearer {token}")).send(&a).await;
     assert_eq!(r.status, StatusCode::OK);
-    let row = one(&env.store, "SELECT created_via, hash, last_host FROM tokens WHERE name = 'work-laptop'");
+    let row = one(&env.store, &format!("SELECT created_via, hash, last_host FROM tokens WHERE name = '{device}'"));
     assert_eq!((&row["created_via"], &row["last_host"]), (&json!("pairing"), &json!("wl.lan")));
     assert_eq!(row["hash"], json!(pika::util::sha256_hex(token.as_bytes())));
     // Neither secret was ever written to the database.
@@ -952,44 +1036,200 @@ async fn pairings_can_be_denied_or_expire() {
     }
 }
 
+const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const OTHER_KEY: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+/// Starts a pairing, with `token` as the bearer when given; returns its id and code.
+async fn start_as(a: &Router, body: Value, token: Option<&str>) -> (String, String) {
+    let mut request = Req::post("/api/pair/v1/start", body).peer("10.0.0.1");
+    if let Some(token) = token {
+        request = request.bearer(token);
+    }
+    let r = request.send(a).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    (r.json()["pairingId"].as_str().unwrap().to_owned(), r.json()["code"].as_str().unwrap().to_owned())
+}
+
+async fn pairing_items(a: &Router, cookie: &str) -> Vec<Value> {
+    Req::get("/api/v1/pairings").cookie(cookie).send(a).await.json()["items"].as_array().unwrap().clone()
+}
+
+async fn approve(a: &Router, cookie: &str, code: &str, body: Value) -> Reply {
+    Req::post(&format!("/api/v1/pairings/{code}/approve"), body).cookie(cookie).send(a).await
+}
+
+fn key_hash_of(env: &Env, id: &str) -> Value {
+    one(&env.store, &format!("SELECT key_hash FROM devices WHERE id = '{id}'"))["key_hash"].clone()
+}
+
 #[tokio::test]
-async fn approving_an_existing_device_name_needs_replace() {
+async fn a_pairing_from_a_known_install_continues_its_device() {
     let env = env();
-    let old = pika::auth::create_token(&env.store, DEVICE).unwrap();
+    let old = common::device_named(&env.store, DEVICE, "Laptop");
     let a = app(&env, config(&env));
     let cookie = logged_in(&a).await;
-    let r = start(&a, "10.0.0.1", json!({ "device": DEVICE })).await;
-    let (id, code) = (r.json()["pairingId"].as_str().unwrap().to_owned(), r.json()["code"].as_str().unwrap().to_owned());
-    let items = Req::get("/api/v1/pairings").cookie(&cookie).send(&a).await.json()["items"].clone();
-    assert_eq!(items[0]["deviceExists"], true);
 
-    let approve = |body: Value| {
-        let (a, cookie, code) = (a.clone(), cookie.clone(), code.clone());
-        async move { Req::post(&format!("/api/v1/pairings/{code}/approve"), body).cookie(&cookie).send(&a).await }
-    };
-    let r = approve(json!({})).await;
-    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "device_exists" })));
-    let r = approve(json!({ "replace": false })).await;
-    assert_eq!(r.status, StatusCode::CONFLICT);
-    let r = approve(json!({ "name": "bad name" })).await;
-    assert_eq!((r.status, r.json()), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_device" })));
-    let r = approve(json!({ "replace": true })).await;
-    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "device": DEVICE })));
+    // Recognized by its current token. The start answer never tells.
+    let r = Req::post("/api/pair/v1/start", json!({ "device": "new name", "key": KEY })).peer("10.0.0.1").bearer(&old).send(&a).await;
+    let body = r.json();
+    let keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["pairingId", "code", "expiresAt", "expiresIn", "interval"]);
+    let (id, code) = (r.json()["pairingId"].as_str().unwrap().to_owned(), r.json()["code"].as_str().unwrap().to_owned());
+    let items = pairing_items(&a, &cookie).await;
+    assert_eq!(items[0]["name"], "new name");
+    assert_eq!(items[0]["match"], json!({ "id": DEVICE, "name": "Laptop", "by": "token", "active": true }));
+    assert!(!contains(&db_bytes(&env), KEY));
+
+    // `continues` omitted continues the match, under its current name.
+    let r = approve(&a, &cookie, &code, json!({})).await;
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "device": DEVICE, "name": "Laptop", "continued": true })));
     // The old token works until the device collects the new one.
     assert_eq!(ingest_with(&a, &old, "x").await, StatusCode::OK);
-    let token = poll(&a, &id).await.json()["token"].as_str().unwrap().to_owned();
+    let r = poll(&a, &id).await;
+    let token = r.json()["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        r.json(),
+        json!({ "status": "approved", "device": DEVICE, "name": "Laptop", "token": token, "continued": true })
+    );
     assert_eq!(ingest_with(&a, &old, "x").await, StatusCode::UNAUTHORIZED);
     assert_eq!(ingest_with(&a, &token, "x").await, StatusCode::OK);
     assert_eq!(one(&env.store, &format!("SELECT created_via FROM tokens WHERE name = '{DEVICE}'"))["created_via"], "pairing");
+    // The key now points at the device.
+    assert_eq!(key_hash_of(&env, DEVICE), json!(pika::util::sha256_hex(KEY.as_bytes())));
+    assert_eq!(Req::get("/api/v1/devices").cookie(&cookie).send(&a).await.json()["items"][0]["hasKey"], true);
 
-    // Another name avoids the conflict.
-    let r = start(&a, "10.0.0.1", json!({ "device": DEVICE })).await;
-    let (id, code) = (r.json()["pairingId"].as_str().unwrap().to_owned(), r.json()["code"].as_str().unwrap().to_owned());
-    let r = Req::post(&format!("/api/v1/pairings/{code}/approve"), json!({ "name": "laptop-2" })).cookie(&cookie).send(&a).await;
-    assert_eq!(r.json(), json!({ "device": "laptop-2" }));
-    // A token of that name created after the approval wins; the device is told it was denied.
-    pika::auth::create_token(&env.store, "laptop-2").unwrap();
-    assert_eq!(poll(&a, &id).await.json(), json!({ "status": "denied" }));
+    // Recognized by its key after the token is gone; a bearer that resolves to nothing is ignored.
+    assert_eq!(Req::delete(&format!("/api/v1/devices/{DEVICE}")).cookie(&cookie).send(&a).await.status, StatusCode::NO_CONTENT);
+    let (id, code) = start_as(&a, json!({ "device": "laptop", "key": KEY }), Some("pika_unknown")).await;
+    let items = pairing_items(&a, &cookie).await;
+    assert_eq!(items[0]["match"], json!({ "id": DEVICE, "name": "Laptop", "by": "key", "active": false }));
+    let r = approve(&a, &cookie, &code, json!({ "name": "  Laptop 2 " })).await;
+    assert_eq!(r.json(), json!({ "device": DEVICE, "name": "Laptop 2", "continued": true }));
+    let r = poll(&a, &id).await;
+    assert_eq!((&r.json()["device"], &r.json()["name"], &r.json()["continued"]), (&json!(DEVICE), &json!("Laptop 2"), &json!(true)));
+    assert_eq!(one(&env.store, &format!("SELECT name FROM devices WHERE id = '{DEVICE}'"))["name"], "Laptop 2");
+
+    // An unknown bearer and no key: no match.
+    start_as(&a, json!({ "device": "box" }), Some("pika_unknown")).await;
+    assert!(pairing_items(&a, &cookie).await[0].get("match").is_none());
+}
+
+#[tokio::test]
+async fn approval_chooses_the_device_to_continue() {
+    let env = env();
+    let laptop = common::device_named(&env.store, DEVICE, "Laptop");
+    // A device known only from its uploads, without a token.
+    set_sql(&env, "INSERT INTO devices (id, name, created_at) VALUES ('old-desk', 'Old desk', 1)");
+    let a = app(&env, config(&env));
+    let cookie = logged_in(&a).await;
+
+    // `null` makes a new device even when the request was recognized, named as requested.
+    let (id, code) = start_as(&a, json!({ "device": "Second laptop" }), Some(&laptop)).await;
+    let r = approve(&a, &cookie, &code, json!({ "continues": null })).await;
+    let device = r.json()["device"].as_str().unwrap().to_owned();
+    assert!(is_uuid(&device) && device != DEVICE, "{device}");
+    assert_eq!(r.json(), json!({ "device": device, "name": "Second laptop", "continued": false }));
+    let r = poll(&a, &id).await;
+    assert_eq!((&r.json()["device"], &r.json()["continued"]), (&json!(device), &json!(false)));
+    // The recognized device keeps its token.
+    assert_eq!(ingest_with(&a, &laptop, "x").await, StatusCode::OK);
+
+    // Without a match, omitted `continues` makes a new device too.
+    let (_, code) = start_as(&a, json!({ "device": "box" }), None).await;
+    let r = approve(&a, &cookie, &code, json!({ "name": "Box" })).await;
+    assert_eq!((&r.json()["name"], &r.json()["continued"]), (&json!("Box"), &json!(false)));
+    assert!(is_uuid(r.json()["device"].as_str().unwrap()));
+
+    // An id continues that device, with or without a token, named as it is unless `name` says otherwise.
+    let (id, code) = start_as(&a, json!({ "device": "desk" }), None).await;
+    for (body, error) in [
+        (json!({ "continues": "nobody" }), (StatusCode::NOT_FOUND, json!({ "error": "unknown_device" }))),
+        (json!({ "continues": "old-desk", "name": "" }), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_name" }))),
+        (json!({ "name": "a\u{2029}b" }), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_name" }))),
+        (json!({ "name": "x".repeat(65) }), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_name" }))),
+    ] {
+        let r = approve(&a, &cookie, &code, body.clone()).await;
+        assert_eq!((r.status, r.json()), error, "{body}");
+    }
+    let r = approve(&a, &cookie, &code, json!({ "continues": "old-desk" })).await;
+    assert_eq!(r.json(), json!({ "device": "old-desk", "name": "Old desk", "continued": true }));
+    let r = poll(&a, &id).await;
+    assert_eq!((&r.json()["device"], &r.json()["name"], &r.json()["continued"]), (&json!("old-desk"), &json!("Old desk"), &json!(true)));
+    assert_eq!(query(&env.store, "SELECT * FROM tokens WHERE name = 'old-desk'").len(), 1);
+
+    // A continued device's current token stops working.
+    let (id, code) = start_as(&a, json!({ "device": "anything" }), None).await;
+    let r = approve(&a, &cookie, &code, json!({ "continues": DEVICE, "name": "Laptop again" })).await;
+    assert_eq!(r.json(), json!({ "device": DEVICE, "name": "Laptop again", "continued": true }));
+    let token = poll(&a, &id).await.json()["token"].as_str().unwrap().to_owned();
+    assert_eq!(ingest_with(&a, &laptop, "x").await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ingest_with(&a, &token, "x").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_key_moves_to_the_device_it_was_last_paired_as() {
+    let env = env();
+    let a = app(&env, config(&env));
+    let cookie = logged_in(&a).await;
+    let (id, code) = start_as(&a, json!({ "device": "first", "key": KEY }), None).await;
+    let first = approve(&a, &cookie, &code, json!({})).await.json()["device"].as_str().unwrap().to_owned();
+    poll(&a, &id).await;
+    assert_eq!(key_hash_of(&env, &first), json!(pika::util::sha256_hex(KEY.as_bytes())));
+
+    // Paired again from the same install as a new device: the key moves.
+    let (id, code) = start_as(&a, json!({ "device": "second", "key": KEY }), None).await;
+    assert_eq!(pairing_items(&a, &cookie).await[0]["match"]["id"], json!(first));
+    let second = approve(&a, &cookie, &code, json!({ "continues": null })).await.json()["device"].as_str().unwrap().to_owned();
+    // Approval alone moves nothing.
+    assert_eq!(key_hash_of(&env, &first), json!(pika::util::sha256_hex(KEY.as_bytes())));
+    poll(&a, &id).await;
+    assert_eq!(key_hash_of(&env, &first), Value::Null);
+    assert_eq!(key_hash_of(&env, &second), json!(pika::util::sha256_hex(KEY.as_bytes())));
+
+    // A pairing without a key leaves the device's key alone.
+    let (id, code) = start_as(&a, json!({ "device": "x" }), None).await;
+    approve(&a, &cookie, &code, json!({ "continues": second })).await;
+    poll(&a, &id).await;
+    assert_eq!(key_hash_of(&env, &second), json!(pika::util::sha256_hex(KEY.as_bytes())));
+}
+
+#[tokio::test]
+async fn bind_gives_a_device_its_key_once() {
+    let env = env();
+    let laptop = common::device(&env.store, DEVICE);
+    let desktop = common::device(&env.store, "desktop");
+    let a = app(&env, config(&env));
+    let bind = |token: Option<&str>, body: Value| {
+        let (a, token) = (a.clone(), token.map(str::to_owned));
+        async move {
+            let mut request = Req::post("/api/pair/v1/bind", body);
+            if let Some(token) = token {
+                request = request.bearer(&token);
+            }
+            request.send(&a).await
+        }
+    };
+
+    for token in [None, Some("pika_unknown")] {
+        let r = bind(token, json!({ "key": KEY })).await;
+        assert_eq!((r.status, r.json()), (StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })));
+    }
+    for body in [json!({}), json!({ "key": "short" }), json!({ "key": KEY.to_uppercase() }), json!({ "key": 1 })] {
+        let r = bind(Some(&laptop), body.clone()).await;
+        assert_eq!((r.status, r.json()), (StatusCode::BAD_REQUEST, json!({ "error": "invalid_key" })), "{body}");
+    }
+    assert_eq!(bind(Some(&laptop), json!({ "key": KEY })).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(key_hash_of(&env, DEVICE), json!(pika::util::sha256_hex(KEY.as_bytes())));
+    // The same key again is fine; another key, or this key for another device, is a conflict.
+    assert_eq!(bind(Some(&laptop), json!({ "key": KEY })).await.status, StatusCode::NO_CONTENT);
+    let r = bind(Some(&laptop), json!({ "key": OTHER_KEY })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "key_conflict" })));
+    let r = bind(Some(&desktop), json!({ "key": KEY })).await;
+    assert_eq!((r.status, r.json()), (StatusCode::CONFLICT, json!({ "error": "key_conflict" })));
+    assert_eq!(key_hash_of(&env, DEVICE), json!(pika::util::sha256_hex(KEY.as_bytes())));
+    assert_eq!(key_hash_of(&env, "desktop"), Value::Null);
+    assert_eq!(bind(Some(&desktop), json!({ "key": OTHER_KEY })).await.status, StatusCode::NO_CONTENT);
+    assert!(!contains(&db_bytes(&env), KEY));
 }
 
 #[test]
@@ -998,24 +1238,108 @@ fn upgrading_from_version_3_keeps_tokens_and_does_not_reindex() {
     let data = dir.path().join("data");
     {
         let store = pika::store::Store::open(&data).unwrap();
-        pika::auth::create_token(&store, DEVICE).unwrap();
+        common::device(&store, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V4} PRAGMA user_version = 3;")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V5} {UNDO_V4} PRAGMA user_version = 3;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     let row = one(&store, "SELECT name, created_via, last_seen_at FROM tokens");
     assert_eq!((&row["name"], &row["created_via"], &row["last_seen_at"]), (&json!(DEVICE), &json!("cli"), &Value::Null));
+    assert_eq!(one(&store, "SELECT id, name FROM devices"), one(&store, "SELECT name AS id, name FROM tokens"));
     let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
+}
+
+#[tokio::test]
+async fn upgrading_from_version_4_keeps_device_names_as_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let session = fixture("session.jsonl");
+    let derived = {
+        let store = pika::store::Store::open(&data).unwrap();
+        // Uploads from a device with a token and from one whose token is gone.
+        upload(&store, &format!("session:{SESSION_ID}"), "session", &session, 50);
+        let batch = json!({ "streams": [stream("session:other", "session", 0, &session[..1])] });
+        pika::ingest::apply(&store, "old-desk", &serde_json::from_value(batch).unwrap()).unwrap();
+        dump_derived(&store)
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!(
+        "{UNDO_V5} PRAGMA user_version = 4;
+         INSERT INTO tokens (name, hash, created_at, created_via) VALUES ('{DEVICE}', '{}', 100, 'pairing'), ('phone', '{}', 200, 'cli');
+         UPDATE streams SET created_at = 50 WHERE device = 'old-desk';
+         INSERT INTO pairings (id_hash, code, device, requested_at, expires_at)
+             VALUES ('{}', 'ABCDEFGH', 'tablet', 1, 9999999999999);
+         INSERT INTO pairings (id_hash, code, device, requested_at, expires_at, status, name, replace)
+             VALUES ('{}', 'ABCDEFGJ', 'tv', 1, 9999999999999, 'approved', 'tv', 0),
+                    ('{}', 'ABCDEFGK', 'laptop again', 1, 9999999999999, 'approved', '{DEVICE}', 1),
+                    ('{}', 'ABCDEFGL', 'phone again', 1, 9999999999999, 'approved', 'phone', 0);",
+        pika::util::sha256_hex(b"pika_old-laptop"),
+        pika::util::sha256_hex(b"pika_old-phone"),
+        pika::util::sha256_hex(b"pending-id"),
+        pika::util::sha256_hex(b"approved-id"),
+        pika::util::sha256_hex(b"replace-id"),
+        pika::util::sha256_hex(b"keep-id"),
+    ))
+    .unwrap();
+    drop(conn);
+
+    let env = Env { store: pika::store::Store::open(&data).unwrap(), dir };
+    let version: i64 = env.store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
+    assert_eq!(version, 5);
+    // No reindex: the derived tables are untouched.
+    assert_eq!(env.store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(dump_derived(&env.store), derived);
+    let devices = query(&env.store, "SELECT id, name, key_hash, created_at FROM devices ORDER BY id");
+    let devices: Vec<(Value, Value, Value, Value)> =
+        devices.into_iter().map(|d| (d["id"].clone(), d["name"].clone(), d["key_hash"].clone(), d["created_at"].clone())).collect();
+    assert_eq!(
+        devices,
+        [
+            (json!(DEVICE), json!(DEVICE), Value::Null, json!(100)),
+            (json!("old-desk"), json!("old-desk"), Value::Null, json!(50)),
+            (json!("phone"), json!("phone"), Value::Null, json!(200)),
+        ]
+    );
+
+    let a = app(&env, config(&env));
+    let cookie = logged_in(&a).await;
+    let r = Req::get("/api/v1/devices").cookie(&cookie).send(&a).await;
+    let ids: Vec<Value> = r.json()["items"].as_array().unwrap().iter().map(|d| d["id"].clone()).collect();
+    assert_eq!(ids, [DEVICE, "phone"]);
+    let r = Req::get(&format!("/api/v1/sessions/{SESSION_ID}")).cookie(&cookie).send(&a).await;
+    assert_eq!((&r.json()["device"], &r.json()["deviceName"]), (&json!(DEVICE), &json!(DEVICE)));
+    // A pending pairing from before the upgrade is listed without a match and can be approved.
+    let items = pairing_items(&a, &cookie).await;
+    assert_eq!((items.len(), &items[0]["code"], &items[0]["name"]), (1, &json!("ABCD-EFGH"), &json!("tablet")));
+    assert!(items[0].get("match").is_none());
+    let r = approve(&a, &cookie, "ABCD-EFGH", json!({ "continues": "old-desk" })).await;
+    assert_eq!(r.json(), json!({ "device": "old-desk", "name": "old-desk", "continued": true }));
+    let r = poll(&a, "pending-id").await;
+    assert_eq!((&r.json()["device"], &r.json()["continued"]), (&json!("old-desk"), &json!(true)));
+    // One approved before the upgrade creates the device it named.
+    let r = poll(&a, "approved-id").await;
+    assert_eq!((&r.json()["status"], &r.json()["device"], &r.json()["name"], &r.json()["continued"]), (&json!("approved"), &json!("tv"), &json!("tv"), &json!(false)));
+    assert_eq!(one(&env.store, "SELECT name FROM devices WHERE id = 'tv'")["name"], "tv");
+    // One that replaced a device with a token continues it, and the old token stops working.
+    assert_eq!(ingest_with(&a, "pika_old-laptop", "h").await, StatusCode::OK);
+    let r = poll(&a, "replace-id").await;
+    assert_eq!((&r.json()["status"], &r.json()["device"], &r.json()["name"], &r.json()["continued"]), (&json!("approved"), &json!(DEVICE), &json!(DEVICE), &json!(true)));
+    assert_eq!(ingest_with(&a, "pika_old-laptop", "h").await, StatusCode::UNAUTHORIZED);
+    assert_eq!(ingest_with(&a, r.json()["token"].as_str().unwrap(), "h").await, StatusCode::OK);
+    // One that did not replace a device with a token is denied, and the device keeps its token.
+    assert_eq!(poll(&a, "keep-id").await.json(), json!({ "status": "denied" }));
+    assert_eq!(ingest_with(&a, "pika_old-phone", "h").await, StatusCode::OK);
 }
 
 #[test]
 fn polls_for_unknown_or_pending_pairings_do_not_wait_for_the_writer() {
     let env = env();
     let now = pika::util::now_ms();
-    let request = pika::pairing::Request { device: "box", host: None, ip: None, pika_version: None };
+    let request =
+        pika::pairing::Request { device: "box", host: None, ip: None, pika_version: None, token_hash: None, key_hash: None };
     let pairing_id = pika::pairing::start(&env.store, &request, now).unwrap().unwrap().pairing_id;
     let (held, wait_held) = mpsc::channel();
     let (release, wait_release) = mpsc::channel::<()>();
@@ -1076,4 +1400,63 @@ fn trust_proxy_accepts_only_switch_values() {
         let e = serve_with(&data, &[("PIKA_TRUST_PROXY", value)]).unwrap_err();
         assert!(e.starts_with("Some(2): ") && e.contains(&format!("invalid value '{value}' for '--trust-proxy'")), "{e}");
     }
+}
+
+/// Runs `pika token ...`; returns its exit success, stdout, and stderr.
+fn token_cli(data: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+    let out = pika(data).arg("token").args(args).output().unwrap();
+    (out.status.success(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn the_token_cli_names_devices_by_id_or_unique_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (ok, token, created) = token_cli(&data, &["create", "  Ana's laptop  "]);
+    assert!(ok, "{created}");
+    let token = token.strip_suffix('\n').unwrap();
+    assert!(token.starts_with("pika_") && !token.contains('\n'), "{token}");
+    let id = created.strip_prefix("created device ").unwrap().strip_suffix(" (Ana's laptop)\n").unwrap().to_owned();
+    assert!(is_uuid(&id), "{created}");
+    let (ok, _, error) = token_cli(&data, &["create", "bad\u{7}name"]);
+    assert!(!ok && error.starts_with("pika: device names use 1-64 characters"), "{error}");
+
+    let (_, _, created) = token_cli(&data, &["create", "twin"]);
+    let twin1 = created.split(' ').nth(2).unwrap().to_owned();
+    let (_, _, created) = token_cli(&data, &["create", "twin"]);
+    let twin2 = created.split(' ').nth(2).unwrap().to_owned();
+    let (_, listing, _) = token_cli(&data, &["list"]);
+    let names: Vec<&str> = listing.lines().map(|l| l.split('\t').nth(1).unwrap()).collect();
+    assert_eq!(names, ["Ana's laptop", "twin", "twin"], "{listing}");
+    assert!(listing.lines().all(|l| l.split('\t').count() == 6), "{listing}");
+
+    // Ambiguous names name the ids; unknown ones fail.
+    let (ok, _, error) = token_cli(&data, &["revoke", "twin"]);
+    let mut twins = [twin1.clone(), twin2.clone()];
+    twins.sort();
+    assert!(!ok, "{error}");
+    assert_eq!(error, format!("pika: several devices are named \"twin\": {}, {}; revoke by id\n", twins[0], twins[1]));
+    let (ok, _, error) = token_cli(&data, &["rename", "twin", "x"]);
+    assert!(!ok && error.ends_with("; rename by id\n"), "{error}");
+    let (ok, _, error) = token_cli(&data, &["revoke", "nobody"]);
+    assert_eq!((ok, error.as_str()), (false, "pika: no device \"nobody\"\n"));
+
+    // By id, then by a name only one device has.
+    let (ok, _, renamed) = token_cli(&data, &["rename", &twin1, "  Twin one "]);
+    assert!(ok, "{renamed}");
+    let (ok, _, revoked) = token_cli(&data, &["revoke", "twin"]);
+    assert_eq!((ok, revoked), (true, format!("revoked twin ({twin2})\n")));
+    let (ok, _, revoked) = token_cli(&data, &["revoke", &id]);
+    assert_eq!((ok, revoked), (true, format!("revoked Ana's laptop ({id})\n")));
+    // A revoked device keeps its row: it can be renamed, but not revoked again.
+    let (ok, _, error) = token_cli(&data, &["revoke", &id]);
+    assert_eq!((ok, error), (false, format!("pika: no device \"{id}\"\n")));
+    let (ok, _, _) = token_cli(&data, &["rename", "Ana's laptop", "Ana's old laptop"]);
+    assert!(ok);
+    let (ok, _, error) = token_cli(&data, &["rename", &id, ""]);
+    assert!(!ok && error.starts_with("pika: device names use"), "{error}");
+    let (_, listing, _) = token_cli(&data, &["list"]);
+    assert_eq!(listing.lines().map(|l| l.split('\t').take(2).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>(), [format!("{twin1} Twin one")]);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(one(&store, &format!("SELECT name FROM devices WHERE id = '{id}'"))["name"], "Ana's old laptop");
 }

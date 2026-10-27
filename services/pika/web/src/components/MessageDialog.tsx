@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ApiError, useApi } from "../lib/api";
+import { deviceLabel } from "../lib/devices";
 import { MAX_TEXT_BYTES, reasonMessage, RELAY_EVENTS_KEY, sessionLabel, targetLabel, utf8Length } from "../lib/relay";
 import type { OnlineSession } from "../lib/types";
 import { Icon } from "./icons";
@@ -69,7 +70,7 @@ export function MessageDialog({ session, onClose }: { session: OnlineSession; on
 		// The previous result stays, dimmed, until this one replaces it, so nothing moves under the pointer.
 		try {
 			const sent = await api.sendRelayMessage({ to: session.id, text, urgent });
-			const to = targetLabel({ device: session.device, name: session.name, title: session.title, ...sent.to, sessionId: session.id });
+			const to = targetLabel({ device: session.device, deviceName: session.deviceName, name: session.name, title: session.title, ...sent.to, sessionId: session.id });
 			setResult(
 				sent.status === "delivered"
 					? { status: "delivered", text: `Delivered to ${to}.` }
@@ -114,7 +115,7 @@ export function MessageDialog({ session, onClose }: { session: OnlineSession; on
 				<div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 text-[13px] text-muted">
 					<span className="flex items-center gap-1">
 						<Icon name="device" size={13} />
-						{session.device}
+						{deviceLabel(session)}
 					</span>
 					{session.project && (
 						<span className="flex items-center gap-1">

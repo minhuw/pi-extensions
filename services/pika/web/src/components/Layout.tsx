@@ -2,10 +2,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
+import { deviceOptions } from "../lib/devices";
 import { useShortcuts } from "../lib/keyboard";
 import { RELAY_BADGE_POLL_MS, useHealth, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
+import { plainOptions, type FilterOption } from "./FilterChip";
 import { Icon, PikaLogo, type IconName } from "./icons";
 import { cx, Pill } from "./ui";
 
@@ -57,20 +59,20 @@ function NavItem({ to, icon, children, end, badge }: { to: string; icon: IconNam
 	);
 }
 
-function SidebarSection({ title, items, param, icon }: { title: string; items: string[]; param: string; icon: IconName }) {
+function SidebarSection({ title, items, param, icon }: { title: string; items: FilterOption[]; param: string; icon: IconName }) {
 	if (items.length === 0) return null;
 	return (
 		<div className="mt-5">
 			<div className="px-2 pb-1 text-[12px] font-medium text-muted">{title}</div>
 			{items.slice(0, 8).map((item) => (
 				<Link
-					key={item}
-					to={`/?${param}=${encodeURIComponent(item)}`}
+					key={item.value}
+					to={`/?${param}=${encodeURIComponent(item.value)}`}
 					className="flex h-[28px] items-center gap-2.5 rounded-sm px-2 text-[14px] text-muted hover:bg-hover"
-					title={item}
+					title={item.label}
 				>
 					<Icon name={icon} className="shrink-0" size={14} />
-					<span className="truncate">{item}</span>
+					<span className="truncate">{item.label}</span>
 				</Link>
 			))}
 		</div>
@@ -147,8 +149,8 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 				<NavItem to="/search" icon="search">
 					Search
 				</NavItem>
-				<SidebarSection title="Projects" items={facets.data?.projects ?? []} param="project" icon="folder" />
-				<SidebarSection title="Devices" items={facets.data?.devices ?? []} param="device" icon="device" />
+				<SidebarSection title="Projects" items={plainOptions(facets.data?.projects ?? [])} param="project" icon="folder" />
+				<SidebarSection title="Devices" items={deviceOptions(facets.data?.devices ?? [])} param="device" icon="device" />
 			</nav>
 			<div className="border-t border-line px-2 py-2">
 				<button

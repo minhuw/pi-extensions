@@ -3,7 +3,7 @@ use rusqlite::{Connection, Row, params_from_iter};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, page, session_sid};
+use super::{DeviceNames, Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, page, session_sid};
 
 pub const LIST_LIMIT: i64 = 50;
 pub const MAX_LIST_LIMIT: i64 = 500;
@@ -15,9 +15,15 @@ pub const UPDATE_TURN_LIMIT: usize = 50;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Facets {
-    pub devices: Vec<String>,
+    pub devices: Vec<FacetDevice>,
     pub projects: Vec<String>,
     pub models: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FacetDevice {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, Default)]
@@ -34,6 +40,8 @@ pub struct Tokens {
 pub struct SessionSummary {
     pub id: String,
     pub device: String,
+    /// Filled from the device's row after the query; see `DeviceNames`.
+    pub device_name: String,
     pub project: String,
     pub cwd: String,
     pub title: String,
@@ -120,6 +128,7 @@ fn summary(r: &Row) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
         id: r.get(0)?,
         device: r.get(1)?,
+        device_name: String::new(),
         project: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
         cwd: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
         title: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
@@ -174,9 +183,23 @@ fn distinct(conn: &Connection, sql: &str) -> ReadResult<Vec<String>> {
     Ok(conn.prepare_cached(sql)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
+impl SessionSummary {
+    fn named(mut self, names: &DeviceNames) -> SessionSummary {
+        self.device_name = names.of(&self.device);
+        self
+    }
+}
+
+/// The devices of recorded sessions, by name case-insensitively, then id.
 pub fn facets(conn: &Connection) -> ReadResult<Facets> {
+    let names = DeviceNames::load(conn)?;
+    let mut devices: Vec<FacetDevice> = distinct(conn, "SELECT DISTINCT device FROM sessions ORDER BY device")?
+        .into_iter()
+        .map(|id| FacetDevice { name: names.of(&id), id })
+        .collect();
+    devices.sort_by(|a, b| crate::auth::by_name((&a.id, &a.name), (&b.id, &b.name)));
     Ok(Facets {
-        devices: distinct(conn, "SELECT DISTINCT device FROM sessions ORDER BY device")?,
+        devices,
         projects: distinct(conn, "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project")?,
         models: distinct(conn, "SELECT DISTINCT model FROM session_models ORDER BY model")?,
     })
@@ -240,6 +263,8 @@ pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<SessionSummary>> {
         .prepare_cached(&sql)?
         .query_map(params_from_iter(args), summary)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let names = DeviceNames::load(conn)?;
+    let items = items.into_iter().map(|s| s.named(&names)).collect();
     Ok(page(items, limit, |s| vec![json!(s.last_at_ms), json!(s.id)]))
 }
 
@@ -264,11 +289,14 @@ fn update_turns_sql() -> String {
 
 pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
     let session = conn.prepare_cached(&detail_sql())?.query_row([id], summary).map_err(not_found)?;
+    let names = DeviceNames::load(conn)?;
     let children = conn
         .prepare_cached(&children_sql())?
-        .query_map([id], |r| Ok(ChildSession { summary: summary(r)?, parent_tool_call_id: r.get(18)? }))?
+        .query_map([id], |r| {
+            Ok(ChildSession { summary: summary(r)?.named(&names), parent_tool_call_id: r.get(18)? })
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(SessionDetail { summary: session, children })
+    Ok(SessionDetail { summary: session.named(&names), children })
 }
 
 pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> {
@@ -296,6 +324,7 @@ pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
         .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS}, s.sid FROM sessions s WHERE s.id = ?1"))?
         .query_row([id], |r| Ok((summary(r)?, r.get::<_, i64>(18)?)))
         .map_err(not_found)?;
+    let session = session.named(&DeviceNames::load(&tx)?);
     let last_seq = session.entry_count - 1;
     let last_at = iso((session.entry_count > 0 && session.last_at_ms != 0).then_some(session.last_at_ms));
     if last_seq <= since {

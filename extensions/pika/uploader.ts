@@ -199,25 +199,33 @@ export async function processStart(pid: number): Promise<string | undefined> {
 	}
 }
 
-let machine: Promise<string> | undefined;
+/** This machine's id, and whether the OS gave it (`fromOs`) or it is the hostname fallback. */
+export interface MachineSource { id: string; fromOs: boolean }
 
-/** A stable id of this machine: Linux's machine-id, macOS's IOPlatformUUID, otherwise the hostname. */
-export function machineId(): Promise<string> {
+let machine: Promise<MachineSource> | undefined;
+
+/** Linux's machine-id or macOS's IOPlatformUUID (`fromOs`), otherwise the hostname; found once per process. */
+export function machineSource(): Promise<MachineSource> {
 	return machine ??= (async () => {
 		try {
 			if (process.platform === "linux") {
 				for (const file of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
 					const id = (await readFile(file, "utf8").catch(() => "")).trim();
-					if (id) return id;
+					if (id) return { id, fromOs: true };
 				}
 			} else if (process.platform === "darwin") {
 				const { stdout } = await execFileAsync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { timeout: 5_000 });
 				const id = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(stdout)?.[1];
-				if (id) return id;
+				if (id) return { id, fromOs: true };
 			}
 		} catch { /* the hostname below */ }
-		return hostname();
+		return { id: hostname(), fromOs: false };
 	})();
+}
+
+/** A stable id of this machine: Linux's machine-id, macOS's IOPlatformUUID, otherwise the hostname. */
+export function machineId(): Promise<string> {
+	return machineSource().then((source) => source.id);
 }
 
 let thisProcess: Promise<OwnerProcess> | undefined;

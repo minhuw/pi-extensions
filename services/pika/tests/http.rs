@@ -19,7 +19,7 @@ struct Server {
 
 fn server(base: &str, password: Option<&str>, max_body: Option<usize>) -> Server {
     let env = env();
-    let token = pika::auth::create_token(&env.store, DEVICE).unwrap();
+    let token = common::device(&env.store, DEVICE);
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.base_path = pika::config::normalize_base_path(base).unwrap();
     match password {

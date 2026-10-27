@@ -131,13 +131,15 @@ function SessionRow({
 	);
 }
 
-function DeviceGroup({ device, sessions, children }: { device: string; sessions: OnlineSession[]; children: ReactNode }) {
-	const hosts = [...new Set(sessions.map((session) => session.host).filter((host) => host && host !== device))];
+function DeviceGroup({ device, name, sessions, children }: { device: string; name: string; sessions: OnlineSession[]; children: ReactNode }) {
+	const hosts = [...new Set(sessions.map((session) => session.host).filter((host) => host && host !== name && host !== device))];
 	return (
-		<section aria-label={`Sessions on ${device}`} data-relay-device={device} className="mt-5 first:mt-3">
+		<section aria-label={`Sessions on ${name}`} data-relay-device={device} data-device-name={name} className="mt-5 first:mt-3">
 			<h3 className="flex min-w-0 items-center gap-2 px-2 pb-1 text-[14px] font-medium">
 				<Icon name="device" className="shrink-0 text-muted" />
-				<span className="break-all">{device}</span>
+				<span className="break-words" title={device}>
+					{name}
+				</span>
 				{hosts.length > 0 && <span className="min-w-0 truncate font-normal text-muted">{hosts.join(", ")}</span>}
 				<span className="ml-auto shrink-0 text-[13px] font-normal text-muted">{plural(sessions.length, "session")}</span>
 			</h3>
@@ -336,7 +338,7 @@ export function ActiveSessionsPage() {
 				) : (
 					<div data-online-sessions="">
 						{groups.map((group) => (
-							<DeviceGroup key={group.device} device={group.device} sessions={group.sessions}>
+							<DeviceGroup key={group.device} device={group.device} name={group.name} sessions={group.sessions}>
 								{group.sessions.map((session) => (
 									<SessionRow key={session.id} session={session} now={now} settling={sessionsSettling} onMessage={setMessaging} />
 								))}

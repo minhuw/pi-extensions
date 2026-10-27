@@ -33,7 +33,10 @@ export interface SessionLink {
 
 export interface SessionSummary {
 	id: string;
+	/** The device id. */
 	device: string;
+	/** The device's display name; missing from servers older than 0.4, so show the id instead. */
+	deviceName?: string;
 	project: string;
 	cwd: string;
 	title: string;
@@ -61,8 +64,14 @@ export interface Page<T> {
 	nextCursor?: string | null;
 }
 
+/** A device as filters list it: the id is the filter value, the name its label. */
+export interface DeviceRef {
+	id: string;
+	name: string;
+}
+
 export interface Facets {
-	devices: string[];
+	devices: DeviceRef[];
 	projects: string[];
 	models: string[];
 }
@@ -111,6 +120,7 @@ export interface ModelRequest {
 export interface RunSummary {
 	runId: string;
 	device: string;
+	deviceName?: string;
 	repo: string;
 	title: string;
 	status: string;
@@ -194,24 +204,48 @@ export interface BrowserSession {
 	current: boolean;
 }
 
+/** A device with a token, from `GET devices`. `createdAt` and `createdVia` describe its token. */
 export interface Device {
+	/** Identity; never changes. Legacy devices use their old name. */
+	id: string;
+	/** Display label; need not be unique. */
 	name: string;
 	createdAt: string;
 	createdVia: "cli" | "pairing" | (string & {});
 	lastSeenAt?: string | null;
 	lastHost?: string | null;
+	/** Whether a device key recognizes the machine when it pairs again. */
+	hasKey: boolean;
+}
+
+/** The device a pending pairing was recognized as when it started. */
+export interface PairingMatch {
+	id: string;
+	name: string;
+	by: "token" | "key";
+	/** Whether that device has a token, which approving stops. */
+	active: boolean;
 }
 
 /** A pending pairing request, from `GET pairings`. */
 export interface Pairing {
 	code: string;
-	device: string;
+	/** The requested device name. */
+	name: string;
 	host?: string | null;
 	ip?: string | null;
 	pikaVersion?: string | null;
 	requestedAt: string;
 	expiresAt: string;
-	deviceExists: boolean;
+	match?: PairingMatch;
+}
+
+/** `POST pairings/:code/approve`. */
+export interface PairingApproval {
+	/** The id the token will belong to. */
+	device: string;
+	name: string;
+	continued: boolean;
 }
 
 /** `GET {base}/api/health`. `features` is missing from servers older than 0.3. */
@@ -232,6 +266,7 @@ export type RelaySessionState = "idle" | "busy";
 export interface OnlineSession {
 	id: string;
 	device: string;
+	deviceName?: string;
 	host: string;
 	name?: string;
 	title?: string;
@@ -248,12 +283,13 @@ export interface OnlineSession {
 }
 
 export type RelaySender =
-	| { kind: "session"; sessionId: string; device: string; name?: string; title?: string; project?: string }
+	| { kind: "session"; sessionId: string; device: string; deviceName?: string; name?: string; title?: string; project?: string }
 	| { kind: "web" };
 
 export interface RelayTarget {
 	sessionId: string;
 	device?: string;
+	deviceName?: string;
 	name?: string;
 	title?: string;
 	project?: string;

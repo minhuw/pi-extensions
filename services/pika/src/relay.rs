@@ -41,6 +41,15 @@ pub mod close {
 /// A close code and its reason.
 pub type Closing = (u16, &'static str);
 
+/// Device names by id. Frames and lists carry ids and look the names up when they are serialized, so a rename shows
+/// in everything sent after it.
+pub type Names = HashMap<String, String>;
+
+/// The name of device `id`, or the id when it has none.
+fn name_of<'a>(names: &'a Names, id: &'a str) -> &'a str {
+    names.get(id).map_or(id, String::as_str)
+}
+
 const MAX_ID_CHARS: usize = 128;
 const MAX_CLIENT_ID_CHARS: usize = 64;
 const MAX_MESSAGE_ID_CHARS: usize = 64;
@@ -318,7 +327,7 @@ pub enum Sender {
 }
 
 impl Sender {
-    pub fn to_json(&self) -> Value {
+    pub fn to_json(&self, names: &Names) -> Value {
         match self {
             Sender::Web => json!({ "kind": "web" }),
             Sender::Session { session_id, device, name, title, project } => {
@@ -326,6 +335,7 @@ impl Sender {
                 object.insert("kind".into(), "session".into());
                 object.insert("sessionId".into(), session_id.as_str().into());
                 object.insert("device".into(), device.as_str().into());
+                object.insert("deviceName".into(), name_of(names, device).into());
                 put(&mut object, "name", name);
                 put(&mut object, "title", title);
                 object.insert("project".into(), project.as_str().into());
@@ -366,10 +376,11 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn to_json(&self) -> Value {
+    pub fn to_json(&self, names: &Names) -> Value {
         let mut object = Map::new();
         object.insert("sessionId".into(), self.session_id.as_str().into());
         put(&mut object, "device", &self.device);
+        put(&mut object, "deviceName", &self.device.as_deref().map(|d| name_of(names, d).to_owned()));
         put(&mut object, "name", &self.name);
         put(&mut object, "title", &self.title);
         put(&mut object, "project", &self.project);
@@ -460,12 +471,12 @@ struct Event {
 }
 
 impl Event {
-    fn to_json(&self) -> Value {
+    fn to_json(&self, names: &Names) -> Value {
         let mut object = Map::new();
         object.insert("id".into(), self.id.as_str().into());
         object.insert("at".into(), format_iso_ms(self.at).into());
-        object.insert("from".into(), self.from.to_json());
-        object.insert("to".into(), self.to.to_json());
+        object.insert("from".into(), self.from.to_json(names));
+        object.insert("to".into(), self.to.to_json(names));
         object.insert("status".into(), self.status.as_str().into());
         put(&mut object, "reason", &self.reason.map(|r| r.as_str().to_owned()));
         put(&mut object, "deliveredAt", &self.delivered_at.map(format_iso_ms));
@@ -497,25 +508,24 @@ struct Message {
 }
 
 impl Message {
-    fn frame(&self) -> String {
-        message_frame(&self.id, &self.from, &self.text, self.urgent, &self.reply_to, self.hops, self.sent_at)
+    fn frame(&self, names: &Names) -> String {
+        let draft = (self.text.as_str(), self.urgent, &self.reply_to, self.hops);
+        message_frame(&self.id, &self.from, draft, self.sent_at, names)
     }
 }
 
-/// The `message` frame that pushes a message to its target.
+/// The `message` frame that pushes a message to its target; `draft` is its text, urgent flag, `replyTo`, and hops.
 fn message_frame(
     id: &str,
     from: &Sender,
-    text: &str,
-    urgent: bool,
-    reply_to: &Option<String>,
-    hops: u64,
+    (text, urgent, reply_to, hops): (&str, bool, &Option<String>, u64),
     sent_at: i64,
+    names: &Names,
 ) -> String {
     let mut object = Map::new();
     object.insert("type".into(), "message".into());
     object.insert("id".into(), id.into());
-    object.insert("from".into(), from.to_json());
+    object.insert("from".into(), from.to_json(names));
     object.insert("text".into(), text.into());
     object.insert("urgent".into(), urgent.into());
     put(&mut object, "replyTo", reply_to);
@@ -600,6 +610,7 @@ impl Online {
 /// An online session as the session lists show it; `recorded` is looked up by the caller.
 pub struct OnlineSession {
     pub device: String,
+    pub device_name: String,
     pub info: SessionInfo,
     pub connected_at: i64,
     pub state_since: i64,
@@ -611,6 +622,7 @@ impl OnlineSession {
         let mut object = Map::new();
         object.insert("id".into(), self.info.id.as_str().into());
         object.insert("device".into(), self.device.as_str().into());
+        object.insert("deviceName".into(), self.device_name.as_str().into());
         object.insert("host".into(), self.info.host.as_str().into());
         put(&mut object, "name", &self.info.name);
         put(&mut object, "title", &self.info.title);
@@ -647,6 +659,9 @@ struct Inner {
     rates: SlidingWindow,
     device_rates: SlidingWindow,
     events: VecDeque<Event>,
+    names: Names,
+    /// Counts in-process renames, so that a snapshot of the store read before one does not undo it.
+    names_generation: u64,
 }
 
 impl Inner {
@@ -757,7 +772,7 @@ impl Inner {
                 let frame = match outcome {
                     Outcome::Accepted { id, delivered, target } => json!({
                         "type": "sent", "clientId": client_id, "id": id,
-                        "status": if delivered { "delivered" } else { "queued" }, "to": target.to_json(),
+                        "status": if delivered { "delivered" } else { "queued" }, "to": target.to_json(&self.names),
                     }),
                     Outcome::Rejected(reason) => json!({
                         "type": "sent", "clientId": client_id, "status": "rejected", "reason": reason.as_str(),
@@ -791,7 +806,7 @@ impl Inner {
     fn status(&mut self, message: &Message, status: Status, at: i64) {
         let Some(conn) = message.from.session_id().and_then(|s| self.conn_of(s)) else { return };
         let frame = json!({
-            "type": "status", "id": message.id, "status": status.as_str(), "to": message.to.to_json(),
+            "type": "status", "id": message.id, "status": status.as_str(), "to": message.to.to_json(&self.names),
             "at": format_iso_ms(at),
         });
         self.push(conn, frame.to_string());
@@ -838,6 +853,8 @@ impl Relay {
                 rates: SlidingWindow::new(config.sends_per_minute, minute),
                 device_rates: SlidingWindow::new(config.sends_per_minute_per_device, minute),
                 events: VecDeque::new(),
+                names: Names::new(),
+                names_generation: 0,
             }),
             config,
             next_conn: AtomicU64::new(1),
@@ -887,6 +904,32 @@ impl Relay {
             f(&relay);
         })
         .abort_handle()
+    }
+
+    /// The current names generation; read it before reading the names from the store, then pass it to `set_names`.
+    pub fn names_generation(&self) -> u64 {
+        self.lock().names_generation
+    }
+
+    /// Replaces the device names with the store's current ones, read when the names generation was `generation`. A
+    /// snapshot read before a later `rename` is dropped: it may predate that rename.
+    pub fn set_names(&self, names: Names, generation: u64) {
+        let mut inner = self.lock();
+        if inner.names_generation == generation {
+            inner.names = names;
+        }
+    }
+
+    /// Names device `id` `name` from now on.
+    pub fn rename(&self, id: &str, name: &str) {
+        let mut inner = self.lock();
+        inner.names.insert(id.to_owned(), name.to_owned());
+        inner.names_generation += 1;
+    }
+
+    /// A target as JSON, with its device's current name.
+    pub fn target_json(&self, target: &Target) -> Value {
+        target.to_json(&self.lock().names)
     }
 
     /// Registers a new connection of `device`, made with the token whose SHA-256 is `token_hash`, or `None` when the
@@ -964,6 +1007,7 @@ impl Relay {
         let welcome = json!({
             "type": "welcome",
             "device": device,
+            "deviceName": name_of(&inner.names, &device),
             "serverVersion": env!("CARGO_PKG_VERSION"),
             "limits": {
                 "ttlSeconds": self.config.ttl.as_secs(),
@@ -980,7 +1024,7 @@ impl Relay {
             .flatten()
             .filter_map(|m| inner.messages.get(m))
             .filter(|m| m.owner == device)
-            .map(Message::frame)
+            .map(|m| m.frame(&inner.names))
             .collect();
         for frame in queued {
             inner.push(conn, frame);
@@ -1050,9 +1094,9 @@ impl Relay {
         // Text within its limit can still make a `message` frame over the frame limit: JSON escapes each control
         // character as six bytes.
         let too_large = || {
+            let parts = (draft.text.as_str(), draft.urgent, &draft.reply_to, draft.hops);
             draft.text.len() > config.max_text_bytes
-                || message_frame(&id, &sender, &draft.text, draft.urgent, &draft.reply_to, draft.hops, now).len()
-                    > config.max_frame_bytes
+                || message_frame(&id, &sender, parts, now, &inner.names).len() > config.max_frame_bytes
         };
         let rejection = if !draft.valid {
             Some(Reason::Invalid)
@@ -1107,7 +1151,8 @@ impl Relay {
         };
         match inner.online.get(&draft.to).filter(|o| o.device == message.owner).map(|o| o.conn) {
             Some(conn) => {
-                inner.push(conn, message.frame());
+                let frame = message.frame(&inner.names);
+                inner.push(conn, frame);
                 message.reply = Some(reply);
                 let waiting = id.clone();
                 message.ack_wait = Some(self.timer(config.ack_wait, move |relay| relay.ack_wait_ended(&waiting)));
@@ -1190,7 +1235,7 @@ impl Relay {
         }
     }
 
-    /// The online sessions, by device, then newest connection first.
+    /// The online sessions, by device name case-insensitively, then device id, then newest connection first.
     pub fn online(&self) -> Vec<OnlineSession> {
         let inner = self.lock();
         let mut items: Vec<OnlineSession> = inner
@@ -1198,6 +1243,7 @@ impl Relay {
             .values()
             .map(|o| OnlineSession {
                 device: o.device.clone(),
+                device_name: name_of(&inner.names, &o.device).to_owned(),
                 info: o.info.clone(),
                 connected_at: o.connected_at,
                 state_since: o.state_since,
@@ -1205,14 +1251,17 @@ impl Relay {
             })
             .collect();
         items.sort_by(|a, b| {
-            a.device.cmp(&b.device).then(b.connected_at.cmp(&a.connected_at)).then_with(|| a.info.id.cmp(&b.info.id))
+            crate::auth::by_name((&a.device, &a.device_name), (&b.device, &b.device_name))
+                .then(b.connected_at.cmp(&a.connected_at))
+                .then_with(|| a.info.id.cmp(&b.info.id))
         });
         items
     }
 
     /// The newest `limit` events, newest first.
     pub fn events(&self, limit: usize) -> Vec<Value> {
-        self.lock().events.iter().rev().take(limit).map(Event::to_json).collect()
+        let inner = self.lock();
+        inner.events.iter().rev().take(limit).map(|e| e.to_json(&inner.names)).collect()
     }
 
     /// How many messages wait in the mailbox.
@@ -1259,6 +1308,20 @@ mod tests {
         assert_eq!((c.max_queued_per_target, c.max_queued), (100, 10_000));
         assert_eq!((c.max_online, c.max_connections_per_device, c.event_ring), (1_000, 64, 500));
         assert_eq!(c.max_remembered, 10_000);
+    }
+
+    #[test]
+    fn a_names_snapshot_older_than_a_rename_does_not_undo_it() {
+        let relay = Relay::new(RelayConfig::default());
+        let generation = relay.names_generation();
+        // The store is read here, then a rename lands before the snapshot is applied.
+        let stale = Names::from([("laptop".to_owned(), "old".to_owned())]);
+        relay.rename("laptop", "new");
+        relay.set_names(stale, generation);
+        assert_eq!(relay.lock().names["laptop"], "new");
+        let fresh = Names::from([("laptop".to_owned(), "newer".to_owned())]);
+        relay.set_names(fresh, relay.names_generation());
+        assert_eq!(relay.lock().names["laptop"], "newer");
     }
 
     #[test]

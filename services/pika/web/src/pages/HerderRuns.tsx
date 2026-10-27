@@ -15,6 +15,7 @@ import {
 	type StepView,
 } from "../herder/run";
 import { ApiError, useApi } from "../lib/api";
+import { deviceLabel } from "../lib/devices";
 import { formatDateTime, formatDuration, formatRelative, plural } from "../lib/format";
 import type { RunDetail, RunSummary } from "../lib/types";
 import { NotFoundPage } from "./NotFound";
@@ -44,7 +45,7 @@ function RunRow({ run }: { run: RunSummary }) {
 				</span>
 				<span className="flex items-center gap-1">
 					<Icon name="device" size={13} />
-					{run.device}
+					{deviceLabel(run)}
 				</span>
 				<span>{plural(run.stepCount, "step")}</span>
 				<span className="mono">{run.runId}</span>
@@ -204,7 +205,7 @@ function runProperties(detail: RunDetail, sessionId?: string): Property[] {
 			value: run.verdict ? <Pill tone={verdictTone(run.verdict)}>{label(run.verdict)}</Pill> : <span className="text-muted">—</span>,
 		},
 		{ icon: "folder", label: "Repo", value: run.repo || "—" },
-		{ icon: "device", label: "Device", value: <Pill>{run.device}</Pill> },
+		{ icon: "device", label: "Device", value: <Pill title={run.device}>{deviceLabel(run)}</Pill> },
 		{
 			icon: "calendar",
 			label: "Started",

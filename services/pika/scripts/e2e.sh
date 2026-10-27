@@ -4,10 +4,11 @@
 # runs services/pika/e2e/driver.ts: a real pi runtime with Subagents, Herder, and pika against a mock provider, read
 # API and fidelity assertions across a server outage and a pi restart, a 5,000-entry session, and the UI in the locally
 # installed Chrome; then pika relay between two `pi --mode rpc` processes logged in as two devices (questions and
-# answers, the hop limit, expiry with a short TTL, `/relay off`, messages from the browser route and the dashboard, and
-# revocation closing the connection); then a second machine pairing through `/pika login` while the browser denies and
-# approves it, device revocation, browser sign-out, and the login rate limit. Screenshots go to a temporary artifacts
-# directory whose path is printed at the end.
+# answers, the hop limit, expiry with a short TTL, `/relay off`, renaming a device, messages from the browser route and
+# the dashboard, and revocation closing the connection); then a second machine pairing through `/pika login` under a
+# free-text name while the browser denies and approves it, pairing again after `/pika logout` and continuing the same
+# device by its device key, renaming and revoking it, browser sign-out, and the login rate limit. Screenshots go to a
+# temporary artifacts directory whose path is printed at the end.
 #
 # PIKA_CHROME selects the Chrome or Chromium binary; no browser is ever downloaded. PIKA_E2E_SKIP_BUILD=1 reuses
 # installed dependencies and earlier builds; PIKA_E2E_KEEP=1 keeps the temporary pi workspace and server data.
@@ -165,12 +166,28 @@ script="$(grep -o 'src="[^"]*assets/[^"]*\.js"' <<<"$index" | head -n 1 | sed 's
 curl -fsS "$url/$script" -o /dev/null || { echo "e2e: the embedded script $script is not served" >&2; exit 1; }
 echo "e2e: serving the embedded UI at $url"
 
-token_laptop="$(PIKA_DATA_DIR="$data" "$pika" token create laptop)"
-token_desktop="$(PIKA_DATA_DIR="$data" "$pika" token create desktop)"
-# The relay check's two machines.
-token_workstation="$(PIKA_DATA_DIR="$data" "$pika" token create workstation)"
-token_notebook="$(PIKA_DATA_DIR="$data" "$pika" token create notebook)"
-PIKA_DATA_DIR="$data" "$pika" token list | grep -q '^laptop' || { echo "e2e: token list does not show laptop" >&2; exit 1; }
+# Creates a device named $2 and sets token_$1 to its token and id_$1 to its id, which `token create` names on stderr.
+create_device() {
+  local token said id
+  token="$(PIKA_DATA_DIR="$data" "$pika" token create "$2" 2>"$work/token-create.err")"
+  said="$(cat "$work/token-create.err")"
+  id="$(sed -n 's/^created device \([0-9a-f-]\{36\}\) (\(.*\))$/\1/p' <<<"$said")"
+  if [[ -z "$id" || "$said" != "created device $id ($2)" ]]; then
+    echo "e2e: token create $2 said \"$said\" instead of 'created device <uuid> ($2)'" >&2
+    exit 1
+  fi
+  [[ "$token" =~ ^pika_[0-9a-f]{64}$ ]] || { echo "e2e: token create $2 printed no token" >&2; exit 1; }
+  printf -v "token_$1" '%s' "$token"
+  printf -v "id_$1" '%s' "$id"
+}
+create_device laptop laptop
+create_device desktop desktop
+# The relay check's two machines; a name is free text.
+create_device workstation workstation
+create_device notebook "Bo's notebook"
+# Tab-separated: id, name, created, via, last upload, host.
+PIKA_DATA_DIR="$data" "$pika" token list | awk -F'\t' -v id="$id_notebook" '$1 == id && $2 == "Bo'\''s notebook" && $4 == "cli" { found = 1 } END { exit !found }' \
+  || { echo "e2e: token list does not show Bo's notebook by its id" >&2; PIKA_DATA_DIR="$data" "$pika" token list >&2; exit 1; }
 
 # The driver runs with its own HOME so pi, git, and Chrome never read the user's configuration.
 mkdir -p "$work/home"
@@ -182,5 +199,6 @@ step env \
   PIKA_E2E_PIDFILE="$pidfile" PIKA_E2E_SERVER_LOG="$work/server.log" \
   PIKA_E2E_TOKEN_LAPTOP="$token_laptop" PIKA_E2E_TOKEN_DESKTOP="$token_desktop" \
   PIKA_E2E_TOKEN_WORKSTATION="$token_workstation" PIKA_E2E_TOKEN_NOTEBOOK="$token_notebook" PIKA_E2E_PI_PIDS="$pi_pids" \
+  PIKA_E2E_ID_DESKTOP="$id_desktop" PIKA_E2E_ID_WORKSTATION="$id_workstation" PIKA_E2E_ID_NOTEBOOK="$id_notebook" \
   PIKA_E2E_CHROME="$chrome" PIKA_E2E_ARTIFACTS="$artifacts" \
   node --experimental-strip-types --no-warnings=ExperimentalWarning "$service/e2e/driver.ts"

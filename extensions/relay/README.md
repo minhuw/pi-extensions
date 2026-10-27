@@ -46,11 +46,15 @@ A message that arrives while the session is busy waits in pi's follow-up or stee
 
 Every field of a message comes from another device or the web UI. Terminal escape sequences and control characters other than newline and tab are stripped before a message is shown, and the sender's name, title, device, and project are put on one line without double quotes, zero-width characters, or bidirectional controls, in the text the model reads and in the sender line pi shows, so a crafted name cannot forge a second message header or disguise itself.
 
+## Device names
+
+A device has an id, which never changes, and a name, which you choose when you pair it and can change on the server's Devices page. relay shows the name wherever it shows a device: in `relay_list` and `/relay`, in the sender line of a message and the header the model reads, and in delivery notices. A pika server older than 0.4 sends no names; relay then shows the device id, which for devices paired before 0.4 is the name they were paired with. Names need not be unique; addressing, ownership, and revocation use the id.
+
 ## Tools
 
 Top-level sessions in the TUI or RPC mode get three tools; print and JSON sessions, including every Subagents and Herder child, never do:
 
-- **`relay_list`** `{ device?, project?, query? }` lists the other online sessions: id, device, project, name or title, idle or busy, model, and how long each has been online.
+- **`relay_list`** `{ device?, project?, query? }` lists the other online sessions: id, device, project, name or title, idle or busy, model, and how long each has been online. `device` matches a device's name or its id, ignoring case.
 - **`relay_send`** `{ to, text, urgent?, replyTo? }` sends a message and reports `delivered` (the target session accepted it) or `queued` (it is offline or busy accepting it). A message not delivered within 5 minutes is dropped, and the sender's session gets a `relay-notice` that starts a turn. Delivered means received, not read or answered; answers arrive later as messages.
 - **`relay_status`** `{ id? }` shows the state of messages this session sent in this process: `queued`, `delivered`, `expired`, or `rejected`.
 

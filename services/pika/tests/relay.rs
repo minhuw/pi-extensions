@@ -38,8 +38,8 @@ struct Server {
 /// A served router with tokens for `laptop` and `desktop`, `PIKA_AUTH=none` unless `configure` says otherwise.
 async fn server_with(configure: impl FnOnce(&mut ServerConfig)) -> Server {
     let env = env();
-    let laptop = pika::auth::create_token(&env.store, DEVICE).unwrap();
-    let desktop = pika::auth::create_token(&env.store, OTHER).unwrap();
+    let laptop = common::device(&env.store, DEVICE);
+    let desktop = common::device(&env.store, OTHER);
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.auth = AuthMode::None;
     configure(&mut config);
@@ -99,7 +99,15 @@ fn get(path: &str, token: Option<&str>, cookie: Option<&str>) -> Request<Body> {
 }
 
 fn post(path: &str, body: Value, cookie: Option<&str>) -> Request<Body> {
-    let mut request = Request::builder().method(Method::POST).uri(path).header("content-type", "application/json");
+    with_body(Method::POST, path, body, cookie)
+}
+
+fn patch(path: &str, body: Value, cookie: Option<&str>) -> Request<Body> {
+    with_body(Method::PATCH, path, body, cookie)
+}
+
+fn with_body(method: Method, path: &str, body: Value, cookie: Option<&str>) -> Request<Body> {
+    let mut request = Request::builder().method(method).uri(path).header("content-type", "application/json");
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
@@ -263,7 +271,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
     let (mut a, welcome) = Client::online(&s, &s.laptop, "sess-a").await;
     assert_eq!(
         welcome,
-        json!({ "type": "welcome", "device": "laptop", "serverVersion": env!("CARGO_PKG_VERSION"),
+        json!({ "type": "welcome", "device": "laptop", "deviceName": "laptop", "serverVersion": env!("CARGO_PKG_VERSION"),
             "limits": { "ttlSeconds": 300, "heartbeatSeconds": 20, "maxTextBytes": 32768, "maxHops": 8 } })
     );
     let items = sessions(&s).await;
@@ -277,7 +285,7 @@ async fn hello_is_answered_with_welcome_and_lists_the_session() {
     }
     assert_eq!(
         fixed,
-        json!({ "id": "sess-a", "device": "laptop", "host": "laptop.local", "name": "name-sess-a",
+        json!({ "id": "sess-a", "device": "laptop", "deviceName": "laptop", "host": "laptop.local", "name": "name-sess-a",
             "cwd": "/home/me/code/widgets", "project": "widgets", "model": "faux/model", "state": "idle",
             "piVersion": "1.4.0", "recorded": false })
     );
@@ -414,15 +422,16 @@ async fn a_message_acknowledged_in_time_is_delivered() {
     assert_eq!(
         fixed,
         json!({ "type": "message", "id": id, "text": "hello b", "urgent": true, "replyTo": "earlier-id", "hops": 2,
-            "from": { "kind": "session", "sessionId": "sess-a", "device": "laptop", "name": "name-sess-a",
-                "project": "widgets" } })
+            "from": { "kind": "session", "sessionId": "sess-a", "device": "laptop", "deviceName": "laptop",
+                "name": "name-sess-a", "project": "widgets" } })
     );
     b.send(json!({ "type": "ack", "id": id })).await;
     let sent = a.next().await;
     assert_eq!(
         sent,
         json!({ "type": "sent", "clientId": "c1", "id": id, "status": "delivered",
-            "to": { "sessionId": "sess-b", "device": "desktop", "name": "name-sess-b", "project": "widgets" } })
+            "to": { "sessionId": "sess-b", "device": "desktop", "deviceName": "desktop", "name": "name-sess-b",
+                "project": "widgets" } })
     );
     // A second ack is ignored, and no status follows a delivered `sent`.
     b.send(json!({ "type": "ack", "id": id })).await;
@@ -466,7 +475,7 @@ async fn an_offline_target_gets_its_messages_on_reconnect() {
     for (n, text) in ["one", "two", "three"].iter().enumerate() {
         let sent = a.relay(send(&format!("c{n}"), SESSION_ID, text)).await;
         assert_eq!(sent["status"], "queued");
-        assert_eq!(sent["to"], json!({ "sessionId": SESSION_ID, "device": "laptop", "project": "widgets" }));
+        assert_eq!(sent["to"], json!({ "sessionId": SESSION_ID, "device": "laptop", "deviceName": "laptop", "project": "widgets" }));
         sent_ids.push(sent["id"].as_str().unwrap().to_owned());
     }
     // The sender reconnects; status goes to its current connection.
@@ -798,7 +807,7 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
     let list = http(&s.app, get("/api/v1/relay/sessions", None, Some(&cookie))).await;
     assert_eq!(list.status, StatusCode::OK);
     let items = list.json()["items"].as_array().unwrap().clone();
-    assert_eq!(ids(&items), ["sess-b", SESSION_ID, "sess-a"], "by device, then newest first");
+    assert_eq!(ids(&items), ["sess-b", SESSION_ID, "sess-a"], "by device name, then newest first");
     assert_eq!(items.iter().map(|i| i["recorded"].as_bool().unwrap()).collect::<Vec<_>>(), [false, true, false]);
     assert_eq!(items, sessions(&s).await);
 
@@ -822,7 +831,8 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
     assert_eq!(
         posted.json(),
         json!({ "id": message["id"], "status": "delivered",
-            "to": { "sessionId": "sess-b", "device": "desktop", "name": "name-sess-b", "project": "widgets" } })
+            "to": { "sessionId": "sess-b", "device": "desktop", "deviceName": "desktop", "name": "name-sess-b",
+                "project": "widgets" } })
     );
 
     // A recorded session that is offline.
@@ -834,7 +844,7 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
     assert_eq!((queued.status, &queued.json()["status"]), (StatusCode::OK, &json!("queued")));
     assert_eq!(
         queued.json()["to"],
-        json!({ "sessionId": "offline-recorded", "device": "desktop", "project": "widgets" })
+        json!({ "sessionId": "offline-recorded", "device": "desktop", "deviceName": "desktop", "project": "widgets" })
     );
 
     for (body, status, reason) in [
@@ -881,7 +891,8 @@ async fn the_browser_lists_sessions_and_sends_as_the_web() {
         fixed,
         json!({ "id": message["id"], "from": { "kind": "web" }, "status": "delivered", "urgent": true, "hops": 0,
             "text": "from the web",
-            "to": { "sessionId": "sess-b", "device": "desktop", "name": "name-sess-b", "project": "widgets" } })
+            "to": { "sessionId": "sess-b", "device": "desktop", "deviceName": "desktop", "name": "name-sess-b",
+                "project": "widgets" } })
     );
     assert_eq!((&all[0]["reason"], &all[0]["to"]), (&json!("invalid"), &json!({ "sessionId": "" })));
     let two = http(&s.app, get("/api/v1/relay/events?limit=2", None, Some(&cookie))).await.json();
@@ -954,7 +965,7 @@ fn health_of(addr: &str) -> Value {
 async fn the_server_reads_relay_settings_from_the_environment() {
     let env = env();
     let data = env.dir.path().join("data");
-    let token = pika::auth::create_token(&env.store, DEVICE).unwrap();
+    let token = common::device(&env.store, DEVICE);
     let cases = [
         ("off", json!([])),
         ("OFF", json!([])),
@@ -1252,14 +1263,14 @@ async fn a_token_revoked_before_hello_closes_with_4401() {
 }
 
 #[tokio::test]
-async fn pairing_with_replace_closes_the_old_tokens_connections_at_once() {
+async fn continuing_a_device_closes_the_old_tokens_connections_at_once() {
     let s = server().await;
     let (mut old, _) = Client::online(&s, &s.laptop, "sess-a").await;
     let (_other, _) = Client::online(&s, &s.desktop, "sess-b").await;
-    let started = http(&s.app, post("/api/pair/v1/start", json!({ "device": DEVICE }), None)).await.json();
+    let started = http(&s.app, post("/api/pair/v1/start", json!({ "device": "Laptop" }), None)).await.json();
     let code = started["code"].as_str().unwrap();
-    let r = http(&s.app, post(&format!("/api/v1/pairings/{code}/approve"), json!({ "replace": true }), None)).await;
-    assert_eq!(r.status, StatusCode::OK);
+    let r = http(&s.app, post(&format!("/api/v1/pairings/{code}/approve"), json!({ "continues": DEVICE }), None)).await;
+    assert_eq!((r.status, r.json()), (StatusCode::OK, json!({ "device": DEVICE, "name": DEVICE, "continued": true })));
     // The old token works until the device collects the new one.
     assert_eq!(old.relay(send("c1", "nobody", "x")).await["reason"], "unknown_session");
     let polled = http(&s.app, post("/api/pair/v1/poll", json!({ "pairingId": started["pairingId"] }), None)).await;
@@ -1268,7 +1279,68 @@ async fn pairing_with_replace_closes_the_old_tokens_connections_at_once() {
     assert_eq!(old.closed().await, 4401);
     assert!(collected.elapsed() < Duration::from_secs(1), "{:?}", collected.elapsed());
     assert_eq!(ids(&sessions(&s).await), ["sess-b"]);
+    // Ownership stays with the device id: the new token takes the session back.
     Client::online(&s, &token, "sess-a").await;
+}
+
+#[tokio::test]
+async fn a_replacing_pairing_approved_before_the_upgrade_closes_the_old_tokens_connections_at_once() {
+    let s = server().await;
+    let (mut old, _) = Client::online(&s, &s.laptop, "sess-a").await;
+    let (_other, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    // Approved under schema version 4: no target, the name is the device id, and `replace` takes over its token.
+    let sql = "INSERT INTO pairings (id_hash, code, device, requested_at, expires_at, status, name, replace)
+               VALUES (?1, 'ABCDEFGK', 'laptop again', 1, 9999999999999, 'approved', ?2, 1)";
+    s.env.store.write(|tx| tx.execute(sql, [pika::util::sha256_hex(b"replace-id"), DEVICE.to_owned()])).unwrap();
+    let polled = http(&s.app, post("/api/pair/v1/poll", json!({ "pairingId": "replace-id" }), None)).await.json();
+    assert_eq!((&polled["status"], &polled["device"], &polled["continued"]), (&json!("approved"), &json!(DEVICE), &json!(true)));
+    let collected = tokio::time::Instant::now();
+    assert_eq!(old.closed().await, 4401);
+    assert!(collected.elapsed() < Duration::from_secs(1), "{:?}", collected.elapsed());
+    assert_eq!(ids(&sessions(&s).await), ["sess-b"]);
+    Client::online(&s, polled["token"].as_str().unwrap(), "sess-a").await;
+}
+
+#[tokio::test]
+async fn relay_objects_carry_device_names_that_follow_renames() {
+    let s = server().await;
+    // Named so that they sort the other way round from their ids.
+    s.env.store.write(|tx| tx.execute_batch("UPDATE devices SET name = 'A laptop' WHERE id = 'laptop';
+        UPDATE devices SET name = 'desk' WHERE id = 'desktop'")).unwrap();
+    let (mut a, welcome) = Client::online(&s, &s.laptop, "sess-a").await;
+    assert_eq!((&welcome["device"], &welcome["deviceName"]), (&json!(DEVICE), &json!("A laptop")));
+    let (mut b, _) = Client::online(&s, &s.desktop, "sess-b").await;
+    let items = sessions(&s).await;
+    assert_eq!(ids(&items), ["sess-a", "sess-b"]);
+    assert_eq!((&items[1]["device"], &items[1]["deviceName"]), (&json!(OTHER), &json!("desk")));
+
+    a.send(send("c1", "sess-b", "hi")).await;
+    let message = b.next().await;
+    assert_eq!((&message["from"]["device"], &message["from"]["deviceName"]), (&json!(DEVICE), &json!("A laptop")));
+    b.send(json!({ "type": "ack", "id": message["id"] })).await;
+    let sent = a.next().await;
+    assert_eq!((&sent["to"]["device"], &sent["to"]["deviceName"]), (&json!(OTHER), &json!("desk")));
+
+    // A rename through the Devices route shows at once, in lists and in frames sent after it.
+    let r = http(&s.app, patch(&format!("/api/v1/devices/{DEVICE}"), json!({ "name": "Zed laptop" }), None)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let items = sessions(&s).await;
+    assert_eq!(ids(&items), ["sess-b", "sess-a"]);
+    assert_eq!(items[1]["deviceName"], "Zed laptop");
+    let event = &events(&s, "").await[0];
+    assert_eq!((&event["from"]["deviceName"], &event["to"]["deviceName"]), (&json!("Zed laptop"), &json!("desk")));
+    a.send(send("c2", "sess-b", "again")).await;
+    assert_eq!(b.next().await["from"]["deviceName"], "Zed laptop");
+
+    // So does one from `pika token rename` in another process, from the next list or send on.
+    s.env.store.write(|tx| tx.execute("UPDATE devices SET name = 'Desk 2' WHERE id = 'desktop'", [])).unwrap();
+    assert_eq!(sessions(&s).await[0]["deviceName"], "Desk 2");
+    b.send(send("c3", "sess-a", "back")).await;
+    assert_eq!(a.next().await["from"]["deviceName"], "Desk 2");
+
+    // Equal names sort by device id.
+    s.env.store.write(|tx| tx.execute("UPDATE devices SET name = 'same'", [])).unwrap();
+    assert_eq!(ids(&sessions(&s).await), ["sess-b", "sess-a"]);
 }
 
 #[tokio::test]

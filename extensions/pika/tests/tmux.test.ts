@@ -122,7 +122,7 @@ it.skipIf(!hasTmux)("masks the token in a real terminal and shows the pairing co
 		await terminal.waitFor((screen) => /How should this machine log in\?[\s\S]*→ Pair with the pika web UI/.test(screen.slice(screen.lastIndexOf("How should")))
 			&& screen.lastIndexOf("How should") > screen.lastIndexOf("Logged in to"), "the method choice again");
 		terminal.key("Enter");
-		await terminal.waitFor((screen) => screen.includes("Device name for this machine"), "the device name prompt");
+		await terminal.waitFor((screen) => screen.includes("Name for this machine in pika"), "the device name prompt");
 		terminal.type("tmux-pair");
 		terminal.key("Enter");
 		screen = await terminal.waitFor((text) => /Code: [A-Z2-9]{4}-[A-Z2-9]{4}/.test(text), "the pairing code");
@@ -132,7 +132,7 @@ it.skipIf(!hasTmux)("masks the token in a real terminal and shows the pairing co
 		expect(ingest.pendingPairings().map((pairing) => pairing.code)).toEqual([code]);
 		expect(ingest.approve(code)).toBe(200);
 		screen = await terminal.waitFor((text) => text.includes(`Logged in to ${ingest.url} as tmux-pair; saved to`), "the paired login");
-		const paired = ingest.devices.get("tmux-pair")!.token;
+		const paired = ingest.deviceNamed("tmux-pair").token!;
 		expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ url: ingest.url, token: paired });
 		expect((await stat(file)).mode & 0o777).toBe(0o600);
 		expectHidden(screen, [token, paired, ...ingest.pairingIds]);

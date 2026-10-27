@@ -1,32 +1,22 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readlink, realpath, rename, rm, type FileHandle } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, truncateToWidth } from "@earendil-works/pi-tui";
-import { defaultDeviceName, DEVICE_NAME, PairingView, pairingLimits, startPairing, waitForApproval } from "./pairing.ts";
+import { normalizeUrl } from "./config.ts";
+import { bindDeviceKey, deviceKey } from "./device-key.ts";
+import { defaultDeviceName, LEGACY_DEVICE_NAME, legacyDeviceName, type PairedDevice, PairingView, pairingLimits, startPairing, validDeviceName, waitForApproval } from "./pairing.ts";
 import { clientInfo } from "./uploader.ts";
 
 export const VALIDATE_TIMEOUT_MS = 5_000;
 export const METHOD_TITLE = "How should this machine log in?";
 export const PAIR = "Pair with the pika web UI (recommended)";
 export const PASTE = "Paste a token";
+export const URL_TITLE = "pika server URL: the address you open the pika web UI at, e.g. https://pika.example.com or http://192.168.1.10:7171";
+export const URL_PLACEHOLDER = "https://pika.example.com";
+export const nameTitle = (suggested: string) => `Name for this machine in pika (any text up to 64 characters; blank uses ${suggested})`;
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-
-/**
- * The server URL as pika stores it: http(s) only, without credentials, a query, or a fragment, and
- * with the server's base path kept but no trailing slash. Messages never repeat the input, which
- * may be a mistyped token.
- */
-export function normalizeUrl(input: string): string {
-	const text = input.trim();
-	let url: URL;
-	try { url = new URL(text); } catch { throw new Error("the server URL is not a valid URL"); }
-	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("the server URL must start with http:// or https://");
-	if (url.username || url.password) throw new Error("the server URL must not contain credentials");
-	if (url.search || url.hash || /[?#]/.test(text)) throw new Error("the server URL must not have a query or fragment");
-	return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-}
 
 /** Whether a token sent to `url` travels unencrypted beyond this machine. */
 export function isPlainRemote(url: string): boolean {
@@ -162,9 +152,12 @@ export interface Login {
 	file: string;
 	/** `"enabled": false` was removed from the file. */
 	reenabled: boolean;
-	/** The device name the server approved, after pairing. */
-	device?: string;
+	/** The device the server approved, after pairing. */
+	device?: ApprovedDevice;
 }
+
+/** An approved device; `id` is unknown when the server's answer did not name it usably. */
+export type ApprovedDevice = Omit<PairedDevice, "id"> & { id?: string };
 
 /**
  * How a login learns that it no longer counts. `index.ts` keeps one login per process: a newer
@@ -190,25 +183,48 @@ async function promptToken(ctx: ExtensionCommandContext, url: string, signal: Ab
 	return ctx.ui.input(`${title} (pika cannot mask it in this client)`, undefined, { signal });
 }
 
-/** `device` of a failure names the device an unusable approval created. */
-type Paired = { kind: "approved"; device: string; token: string } | { kind: "failed"; problem: string; device?: string } | { kind: "cancelled" } | { kind: "unsupported" };
+/** `device` of a failure names the device an unusable approval created or continued. */
+type Paired = { kind: "approved"; device: ApprovedDevice; token: string } | { kind: "failed"; problem: string; device?: ApprovedDevice } | { kind: "cancelled" } | { kind: "unsupported" };
+
+/** What lets the server recognize a re-pairing: this install's device key, and the configured token when it belongs to `url`. */
+export interface Recognition { keyDir: string; configured: { url?: string; token?: string } }
+
+/** Asks for this machine's device name until it is valid; blank takes the suggestion, and undefined means cancelled. */
+async function promptName(ctx: ExtensionCommandContext, signal: AbortSignal): Promise<string | undefined> {
+	const suggested = defaultDeviceName();
+	for (;;) {
+		const answer = await ctx.ui.input(nameTitle(suggested), suggested, { signal });
+		if (answer === undefined || signal.aborted) return undefined;
+		const name = answer.trim() || suggested;
+		if (validDeviceName(name)) return name;
+		ctx.ui.notify("pika: that name does not work: use 1 to 64 characters, without control characters. Enter another, or press Esc to cancel.", "warning");
+	}
+}
+
+/** The configured token, when the configured URL is `url`; never a token for another server. */
+function tokenFor(url: string, configured: Recognition["configured"]): string | undefined {
+	if (!configured.url || !configured.token) return undefined;
+	try { return normalizeUrl(configured.url) === url ? configured.token : undefined; } catch { return undefined; }
+}
 
 /**
  * Pairs this machine through the web UI: asks for a device name, shows the code and the approval
  * page, and waits for the decision. `unsupported` means the server predates pairing; `device` of an
- * approval is the name the server gave, else the one asked for.
+ * approval is what the server gave, else the name asked for.
  */
-async function pair(ctx: ExtensionCommandContext, url: string, control: LoginControl): Promise<Paired> {
+async function pair(ctx: ExtensionCommandContext, url: string, control: LoginControl, recognition: Recognition): Promise<Paired> {
 	const { signal } = control;
-	const suggested = defaultDeviceName();
-	const answer = await ctx.ui.input(`Device name for this machine (blank uses ${suggested})`, suggested, { signal });
-	if (answer === undefined || signal.aborted) return { kind: "cancelled" };
-	const device = answer.trim() || suggested;
-	if (!DEVICE_NAME.test(device)) return { kind: "failed", problem: "the device name must be 1 to 64 letters, digits, '.', '_', or '-'" };
-	const started = await startPairing(url, device, signal);
+	const device = await promptName(ctx, signal);
+	if (device === undefined) return { kind: "cancelled" };
+	const key = await deviceKey(recognition.keyDir);
+	if (signal.aborted) return { kind: "cancelled" };
+	const token = tokenFor(url, recognition.configured);
+	const started = await startPairing(url, device, signal, { ...(key ? { key } : {}), ...(token ? { token } : {}) });
 	if (started.kind === "unsupported") {
 		if (signal.aborted) return { kind: "cancelled" };
-		ctx.ui.notify(`${url} cannot pair devices: it is a pika server older than 0.2. Paste a token from \`pika token create ${device}\` instead.`, "warning");
+		ctx.ui.notify(LEGACY_DEVICE_NAME.test(device)
+			? `${url} cannot pair devices: it is a pika server older than 0.2. Paste a token from \`pika token create ${device}\` instead.`
+			: `${url} cannot pair devices: it is a pika server older than 0.2, which accepts only letters, digits, '.', '_', and '-' in device names. Paste a token from \`pika token create ${legacyDeviceName(device)}\` instead.`, "warning");
 		return started;
 	}
 	if (started.kind !== "started") return started;
@@ -217,10 +233,12 @@ async function pair(ctx: ExtensionCommandContext, url: string, control: LoginCon
 	const lifetime = Math.min(expiresIn * 1000, pairingLimits.timeoutMs);
 	const cancel = new AbortController();
 	control.waiting = true;
+	// The server's answer did not say which device it approved: only the name asked for is known.
+	const asked: ApprovedDevice = { name: device, continued: false };
 	const waiting = waitForApproval(url, started.pairing, AbortSignal.any([cancel.signal, signal]))
 		.then((outcome): Paired => {
-			if (outcome.kind === "approved") return { ...outcome, device: outcome.device ?? device };
-			if (outcome.kind === "failed" && outcome.approved) return { kind: "failed", problem: outcome.problem, device: outcome.approved.device ?? device };
+			if (outcome.kind === "approved") return { ...outcome, device: outcome.device ?? asked };
+			if (outcome.kind === "failed" && outcome.approved) return { kind: "failed", problem: outcome.problem, device: outcome.approved.device ?? asked };
 			return outcome;
 		})
 		.finally(() => { control.waiting = false; });
@@ -239,17 +257,45 @@ async function pair(ctx: ExtensionCommandContext, url: string, control: LoginCon
 	return waiting;
 }
 
+/** Asks for the server URL until it is valid; blank keeps `current`, and undefined means cancelled. */
+async function promptUrl(ctx: ExtensionCommandContext, current: string | undefined, signal: AbortSignal): Promise<string | undefined> {
+	const title = current ? `${URL_TITLE} (blank keeps ${current})` : URL_TITLE;
+	for (;;) {
+		const answer = await ctx.ui.input(title, current ?? URL_PLACEHOLDER, { signal });
+		if (answer === undefined || signal.aborted) return undefined;
+		const entered = answer.trim() || current;
+		let problem: string;
+		if (!entered) problem = "no server URL entered, and none is saved to keep";
+		else if (!/^https?:\/\//i.test(entered)) problem = "the server URL must start with http:// or https://";
+		else {
+			try { return normalizeUrl(entered); } catch (error) { problem = errorText(error); }
+		}
+		ctx.ui.notify(`pika: ${problem}. Enter the address you open the pika web UI at, e.g. ${URL_PLACEHOLDER}, or press Esc to cancel.`, "warning");
+	}
+}
+
+/** How an approved device is named in messages: its name, and its id when it is known and differs. */
+const deviceText = (device: ApprovedDevice) => device.id === undefined || device.name === device.id ? device.name : `${device.name} (${device.id})`;
+
 /**
  * Asks for the server URL (`arg`, or blank keeps `current`), then pairs with the web UI or takes a
  * newly entered token, validates the token against the server, and saves both to `file`, keeping
- * its other fields. Once `control` says the login was replaced or its session ended, it saves
- * nothing; after its session ended it does not show anything either.
+ * its other fields; then binds this install's device key to the token's device, in the
+ * background. Once `control` says the login was replaced or its session ended, it saves nothing;
+ * after its session ended it does not show anything either.
  */
 export async function login(ctx: ExtensionCommandContext, file: string, arg: string | undefined, current: string | undefined, piVersion?: string, control: LoginControl = lone(ctx)): Promise<Login | undefined> {
 	const { signal } = control;
-	// Pairing creates the device on the server, so a login that ends without its token says which.
-	let paired: { device: string; url: string } | undefined;
-	const orphan = () => paired ? ` The pairing created the device ${paired.device} on ${paired.url}, but this machine did not keep its token; revoke ${paired.device} on the Devices page (${paired.url}/devices). ${file} is unchanged.` : " Nothing changed.";
+	// Pairing creates or continues the device on the server, so a login that ends without its token says which.
+	let paired: { device: ApprovedDevice; url: string } | undefined;
+	const orphan = () => {
+		if (!paired) return " Nothing changed.";
+		const { device, url } = paired;
+		const what = deviceText(device);
+		return device.continued
+			? ` The pairing gave the existing device ${what} on ${url} a new token, which stopped its previous one, but this machine did not keep it; run /pika login again, or revoke ${what} on the Devices page (${url}/devices). ${file} is unchanged.`
+			: ` The pairing created the device ${what} on ${url}, but this machine did not keep its token; revoke ${what} on the Devices page (${url}/devices). ${file} is unchanged.`;
+	};
 	const notify = (message: string, type: "info" | "error") => { if (control.isOpen()) ctx.ui.notify(message, type); return undefined; };
 	const fail = (message: string) => notify(`pika login failed: ${message}.${orphan()}`, "error");
 	const cancelled = () => notify(`pika login cancelled${typeof signal.reason === "string" ? `: ${signal.reason}` : ""}.${orphan()}`, paired ? "error" : "info");
@@ -257,24 +303,30 @@ export async function login(ctx: ExtensionCommandContext, file: string, arg: str
 		ctx.ui.notify(`/pika login needs an interactive UI. Edit ${file} or set PIKA_URL and PIKA_TOKEN instead.`, "error");
 		return undefined;
 	}
-	try { await readConfigFile(file); } catch (error) { return fail(errorText(error)); }
+	let before: Record<string, unknown> | undefined;
+	try { before = await readConfigFile(file); } catch (error) { return fail(errorText(error)); }
+	const stored = (name: "url" | "token") => typeof before?.[name] === "string" ? (before[name] as string).trim() : "";
+	const recognition: Recognition = {
+		keyDir: join(dirname(file), "pika"),
+		configured: { url: process.env.PIKA_URL?.trim() || stored("url") || undefined, token: process.env.PIKA_TOKEN?.trim() || stored("token") || undefined },
+	};
 
-	let entered = arg?.trim();
-	if (!entered) {
-		const answer = await ctx.ui.input(current ? `pika server URL (blank keeps ${current})` : "pika server URL", current, { signal });
-		if (answer === undefined || signal.aborted) return cancelled();
-		entered = answer.trim() || current;
-		if (!entered) return fail("no server URL entered");
-	}
 	let url: string;
-	try { url = normalizeUrl(entered); } catch (error) { return fail(errorText(error)); }
+	const entered = arg?.trim();
+	if (entered) {
+		try { url = normalizeUrl(entered); } catch (error) { return fail(errorText(error)); }
+	} else {
+		const answer = await promptUrl(ctx, current, signal);
+		if (answer === undefined) return cancelled();
+		url = answer;
+	}
 
 	const method = await ctx.ui.select(METHOD_TITLE, [PAIR, PASTE], { signal });
 	if (method === undefined || signal.aborted) return cancelled();
 	let token: string | undefined;
-	let device: string | undefined;
+	let device: ApprovedDevice | undefined;
 	if (method === PAIR) {
-		const outcome = await pair(ctx, url, control);
+		const outcome = await pair(ctx, url, control, recognition);
 		if (outcome.kind === "approved") {
 			({ token, device } = outcome);
 			paired = { device, url };
@@ -306,6 +358,7 @@ export async function login(ctx: ExtensionCommandContext, file: string, arg: str
 		if (reenabled) delete fields.enabled;
 		if (!control.isCurrent()) return cancelled();
 		await writeConfigFile(file, { ...fields, url, token });
+		void bindDeviceKey(url, token, recognition.keyDir);
 		return { url, file, reenabled, ...(device ? { device } : {}) };
 	} catch (error) {
 		return fail(errorText(error));

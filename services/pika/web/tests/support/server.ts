@@ -5,6 +5,7 @@ import type {
 	AuthMode,
 	BrowserSession,
 	Device,
+	DeviceRef,
 	Entry,
 	Facets,
 	ModelRequest,
@@ -32,8 +33,21 @@ function noContent(): Response {
 	return new Response(null, { status: 204 });
 }
 
-/** A pending pairing; the fake derives `deviceExists` from its devices. */
-export type FakePairing = Omit<Pairing, "deviceExists">;
+/** A pending pairing, `match` included as the server would have recognized it at start. */
+export type FakePairing = Pairing;
+
+/** The server's device name rule, written out again so the fake does not trust the code under test. */
+function validName(name: string): boolean {
+	const trimmed = name.trim();
+	const length = [...trimmed].length;
+	return length >= 1 && length <= 64 && !/[\p{Cc}\u2028\u2029]/u.test(trimmed);
+}
+
+/** Sorted like the server: by name case-insensitively, then id. */
+function byName<T>(items: readonly T[], name: (item: T) => string, id: (item: T) => string): T[] {
+	const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+	return [...items].sort((a, b) => compare(name(a).toLowerCase(), name(b).toLowerCase()) || compare(id(a), id(b)));
+}
 
 /** A state-changing request as the fake received it. */
 export interface Mutation {
@@ -77,6 +91,7 @@ export function createFakeServer({
 	authMode,
 	authenticated = false,
 	devices = [],
+	retiredDevices = [],
 	pairings = [],
 	browserSessions = [],
 	loginRetryAfter = 840,
@@ -102,7 +117,10 @@ export function createFakeServer({
 	authMode?: AuthMode;
 	/** Starts signed in, in password mode. */
 	authenticated?: boolean;
+	/** Devices with a token, as `GET devices` lists them. */
 	devices?: Device[];
+	/** Devices without a token (revoked): pairing can continue them and they can be renamed, but they are not listed. */
+	retiredDevices?: DeviceRef[];
 	pairings?: FakePairing[];
 	browserSessions?: BrowserSession[];
 	/** Seconds the login rate limit reports. */
@@ -130,6 +148,7 @@ export function createFakeServer({
 		authenticated,
 		failedLogins: 0,
 		devices: [...devices],
+		retiredDevices: [...retiredDevices],
 		pairings: [...pairings],
 		browserSessions: [...browserSessions],
 		relay: relay ?? features?.includes("relay") === true,
@@ -143,8 +162,15 @@ export function createFakeServer({
 		healthFailures: 0,
 		/** While set, web sends wait for it before they are answered. */
 		relayHold: undefined as Promise<void> | undefined,
+		/**
+		 * While set, an approved device is listed only once its machine polls, as on the real server: approvals put it in
+		 * `unpolled`, and `poll()` lists it.
+		 */
+		devicesOnPoll: false,
+		unpolled: [] as Device[],
 	};
 	let relaySent = 0;
+	let devicesCreated = 0;
 	const mutations: Mutation[] = [];
 	const findPairing = (code: string) => state.pairings.findIndex((item) => normalizePairingCode(item.code) === normalizePairingCode(code));
 	const signOutBrowser = () => {
@@ -213,21 +239,28 @@ export function createFakeServer({
 			return json(405, { error: "method not allowed" });
 		}
 		if (parts[0] === "devices") {
-			if (parts.length === 1 && method === "GET") return json(200, { items: [...state.devices].sort((a, b) => a.name.localeCompare(b.name)) });
+			if (parts.length === 1 && method === "GET") return json(200, { items: byName(state.devices, (d) => d.name, (d) => d.id) });
 			if (parts.length === 2 && method === "DELETE") {
-				const before = state.devices.length;
-				state.devices = state.devices.filter((item) => item.name !== parts[1]);
-				return state.devices.length < before ? noContent() : json(404, { error: "not found" });
+				const revoked = state.devices.find((item) => item.id === parts[1]);
+				if (!revoked) return json(404, { error: "unknown_device" });
+				state.devices = state.devices.filter((item) => item !== revoked);
+				state.retiredDevices.push({ id: revoked.id, name: revoked.name });
+				return noContent();
+			}
+			if (parts.length === 2 && method === "PATCH") {
+				const name = (body as { name?: unknown } | undefined)?.name;
+				if (typeof name !== "string" || !validName(name)) return json(400, { error: "invalid_name" });
+				const target = state.devices.find((item) => item.id === parts[1]) ?? state.retiredDevices.find((item) => item.id === parts[1]);
+				if (!target) return json(404, { error: "unknown_device" });
+				target.name = name.trim();
+				return json(200, { id: target.id, name: target.name });
 			}
 			return json(405, { error: "method not allowed" });
 		}
 		if (parts[0] === "pairings") {
 			if (parts.length === 1 && method === "GET") {
 				const now = Date.now();
-				const pending = state.pairings.filter((item) => Date.parse(item.expiresAt) > now);
-				return json(200, {
-					items: pending.map((item) => ({ ...item, deviceExists: state.devices.some((d) => d.name === item.device) })),
-				});
+				return json(200, { items: state.pairings.filter((item) => Date.parse(item.expiresAt) > now) });
 			}
 			if (parts.length !== 3 || method !== "POST") return json(405, { error: "method not allowed" });
 			const index = findPairing(parts[1]);
@@ -238,24 +271,45 @@ export function createFakeServer({
 				return noContent();
 			}
 			if (parts[2] === "approve") {
-				const request = (body ?? {}) as { name?: string; replace?: boolean };
-				const name = request.name ?? pairing.device;
-				if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) return json(400, { error: "invalid_device" });
-				if (state.devices.some((d) => d.name === name) && request.replace !== true) return json(409, { error: "device_exists" });
-				state.devices = state.devices.filter((d) => d.name !== name);
-				state.devices.push({ name, createdAt: new Date().toISOString(), createdVia: "pairing", lastSeenAt: null, lastHost: null });
+				// The device then polls at once: the fake applies what that poll does on the real server.
+				const request = (body ?? {}) as { name?: string; continues?: string | null };
+				const continues = request.continues === undefined ? (pairing.match?.id ?? null) : request.continues;
+				const existing =
+					continues === null
+						? undefined
+						: (state.devices.find((d) => d.id === continues) ?? state.retiredDevices.find((d) => d.id === continues));
+				if (continues !== null && !existing) return json(404, { error: "unknown_device" });
+				const name = request.name ?? existing?.name ?? pairing.name;
+				if (!validName(name)) return json(400, { error: "invalid_name" });
+				devicesCreated += 1;
+				const id = existing?.id ?? `00000000-0000-4000-8000-${String(devicesCreated).padStart(12, "0")}`;
+				const previous = state.devices.find((d) => d.id === id);
+				const created: Device = {
+					id,
+					name: name.trim(),
+					createdAt: new Date().toISOString(),
+					createdVia: "pairing",
+					lastSeenAt: previous?.lastSeenAt ?? null,
+					lastHost: previous?.lastHost ?? null,
+					hasKey: true,
+				};
+				if (state.devicesOnPoll) state.unpolled.push(created);
+				else {
+					state.devices = state.devices.filter((d) => d.id !== id);
+					state.retiredDevices = state.retiredDevices.filter((d) => d.id !== id);
+					state.devices.push(created);
+				}
 				state.pairings.splice(index, 1);
-				return json(200, { device: name });
+				return json(200, { device: id, name: name.trim(), continued: existing !== undefined });
 			}
 		}
 
 		if (parts[0] === "relay") {
 			if (!state.relay) return json(404, { error: "relay_disabled" });
 			if (parts[1] === "sessions" && method === "GET") {
-				// By device, then the newest connection first.
-				const items = [...state.online].sort(
-					(a, b) => a.device.localeCompare(b.device) || Date.parse(b.connectedAt) - Date.parse(a.connectedAt),
-				);
+				// By device name, then id, then the newest connection first.
+				const newest = [...state.online].sort((a, b) => Date.parse(b.connectedAt) - Date.parse(a.connectedAt));
+				const items = byName(newest, (s) => s.deviceName ?? s.device, (s) => s.device);
 				return json(200, { items });
 			}
 			if (parts[1] === "events" && method === "GET") {
@@ -270,9 +324,16 @@ export function createFakeServer({
 				const onlineTarget = state.online.find((item) => item.id === to);
 				const recorded = byId.get(to)?.detail;
 				const target: RelayTarget = onlineTarget
-					? { sessionId: to, device: onlineTarget.device, name: onlineTarget.name, title: onlineTarget.title, project: onlineTarget.project }
+					? {
+							sessionId: to,
+							device: onlineTarget.device,
+							deviceName: onlineTarget.deviceName,
+							name: onlineTarget.name,
+							title: onlineTarget.title,
+							project: onlineTarget.project,
+						}
 					: recorded
-						? { sessionId: to, device: recorded.device, title: recorded.title, project: recorded.project }
+						? { sessionId: to, device: recorded.device, deviceName: recorded.deviceName, title: recorded.title, project: recorded.project }
 						: { sessionId: to };
 				let reason: string | undefined;
 				if (!text || !/^[A-Za-z0-9._-]{1,128}$/.test(to)) reason = "invalid";
@@ -304,7 +365,11 @@ export function createFakeServer({
 			return json(
 				200,
 				facets ?? {
-					devices: [...new Set(sessions.map((s) => s.detail.device))],
+					devices: byName(
+						[...new Map(sessions.map((s) => [s.detail.device, { id: s.detail.device, name: s.detail.deviceName ?? s.detail.device }])).values()],
+						(d) => d.name,
+						(d) => d.id,
+					),
 					projects: [...new Set(sessions.map((s) => s.detail.project))],
 					models: [...new Set(sessions.flatMap((s) => s.detail.models))],
 				},
@@ -375,5 +440,13 @@ export function createFakeServer({
 		return json(404, { error: "not found" });
 	};
 
-	return { fetch: fetchImpl as typeof fetch, calls, mutations, state };
+	/** The machines of `unpolled` approvals poll: their devices are listed from now on. */
+	const poll = () => {
+		for (const created of state.unpolled.splice(0)) {
+			state.devices = state.devices.filter((d) => d.id !== created.id);
+			state.retiredDevices = state.retiredDevices.filter((d) => d.id !== created.id);
+			state.devices.push(created);
+		}
+	};
+	return { fetch: fetchImpl as typeof fetch, calls, mutations, state, poll };
 }

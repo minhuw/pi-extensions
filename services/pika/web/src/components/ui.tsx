@@ -213,6 +213,50 @@ export const BUTTON = {
 	quiet: `${BUTTON_BASE} text-muted hover:bg-hover hover:text-ink`,
 };
 
+/** A modal dialog frame: Escape or the backdrop cancels. The caller focuses what should have focus first. */
+export function Dialog({
+	title,
+	children,
+	onCancel,
+	label,
+}: {
+	title: string;
+	children: ReactNode;
+	onCancel: () => void;
+	/** `data-dialog` value, for tests and e2e. */
+	label?: string;
+}) {
+	const titleId = useId();
+	const cancel = useRef(onCancel);
+	cancel.current = onCancel;
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			event.preventDefault();
+			cancel.current();
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, []);
+	return (
+		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6 dark:bg-black/50" onClick={onCancel}>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby={titleId}
+				data-dialog={label}
+				onClick={(event) => event.stopPropagation()}
+				className="w-full max-w-[420px] rounded-md border border-line bg-page px-5 py-4 text-ink shadow-xl"
+			>
+				<h2 id={titleId} className="text-[16px] font-semibold break-words">
+					{title}
+				</h2>
+				{children}
+			</div>
+		</div>
+	);
+}
+
 /** A modal confirmation; Escape or the backdrop cancels, and Cancel has focus first. */
 export function ConfirmDialog({
 	title,
@@ -229,42 +273,21 @@ export function ConfirmDialog({
 	onConfirm: () => void;
 	onCancel: () => void;
 }) {
-	const titleId = useId();
 	const cancelRef = useRef<HTMLButtonElement>(null);
-	const cancel = useRef(onCancel);
-	cancel.current = onCancel;
 	useEffect(() => {
 		cancelRef.current?.focus();
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key !== "Escape") return;
-			event.preventDefault();
-			cancel.current();
-		};
-		window.addEventListener("keydown", onKeyDown);
-		return () => window.removeEventListener("keydown", onKeyDown);
 	}, []);
 	return (
-		<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6 dark:bg-black/50" onClick={onCancel}>
-			<div
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby={titleId}
-				onClick={(event) => event.stopPropagation()}
-				className="w-full max-w-[420px] rounded-md border border-line bg-page px-5 py-4 text-ink shadow-xl"
-			>
-				<h2 id={titleId} className="text-[16px] font-semibold">
-					{title}
-				</h2>
-				<div className="mt-2 text-[14px] text-muted">{children}</div>
-				<div className="mt-5 flex justify-end gap-2">
-					<button ref={cancelRef} type="button" onClick={onCancel} className={BUTTON.secondary}>
-						Cancel
-					</button>
-					<button type="button" onClick={onConfirm} disabled={busy} className={BUTTON.danger}>
-						{confirmLabel}
-					</button>
-				</div>
+		<Dialog title={title} onCancel={onCancel}>
+			<div className="mt-2 text-[14px] text-muted">{children}</div>
+			<div className="mt-5 flex justify-end gap-2">
+				<button ref={cancelRef} type="button" onClick={onCancel} className={BUTTON.secondary}>
+					Cancel
+				</button>
+				<button type="button" onClick={onConfirm} disabled={busy} className={BUTTON.danger}>
+					{confirmLabel}
+				</button>
 			</div>
-		</div>
+		</Dialog>
 	);
 }

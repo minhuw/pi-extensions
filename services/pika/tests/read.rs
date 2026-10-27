@@ -14,6 +14,9 @@ use tower::ServiceExt;
 
 const BASE: &str = "/pika";
 const DESKTOP: &str = "desktop";
+/// The devices' names, which sort the other way round from their ids.
+const DEVICE_NAME: &str = "Laptop";
+const DESKTOP_NAME: &str = "Zed's desk";
 const DESK_SESSION: &str = "d0000000-0000-0000-0000-00000000000d";
 const HEADER_CHILD: &str = "c4ild000-0000-0000-0000-000000000001";
 const LINKED_CHILD: &str = "c4ild000-0000-0000-0000-000000000003";
@@ -48,9 +51,9 @@ struct App {
 
 fn app(password: Option<&str>) -> App {
     let env = env();
-    let tokens = [DEVICE, DESKTOP]
+    let tokens = [(DEVICE, DEVICE_NAME), (DESKTOP, DESKTOP_NAME)]
         .iter()
-        .map(|d| (d.to_string(), pika::auth::create_token(&env.store, d).unwrap()))
+        .map(|(d, name)| (d.to_string(), common::device_named(&env.store, d, name)))
         .collect();
     let mut config = ServerConfig::new(env.dir.path().join("data"));
     config.base_path = BASE.into();
@@ -290,8 +293,8 @@ async fn facets_and_session_list_filters() {
     let app = world().await;
     assert_eq!(
         app.json("facets").await,
-        json!({ "devices": [DESKTOP, DEVICE], "projects": ["gadgets", "widgets"],
-                "models": ["claude-haiku-4-5", "claude-sonnet-4-5", "gpt-5"] })
+        json!({ "devices": [{ "id": DEVICE, "name": DEVICE_NAME }, { "id": DESKTOP, "name": DESKTOP_NAME }],
+                "projects": ["gadgets", "widgets"], "models": ["claude-haiku-4-5", "claude-sonnet-4-5", "gpt-5"] })
     );
 
     let newest_first = [DESK_SESSION, REVIEW_SESSION, STEP_SESSION, HEADER_CHILD, SESSION_ID, LINKED_CHILD];
@@ -338,7 +341,7 @@ async fn session_summary_detail_and_children() {
     assert_eq!(
         summary,
         json!({
-            "id": SESSION_ID, "device": DEVICE, "project": "widgets", "cwd": "/home/me/code/widgets",
+            "id": SESSION_ID, "device": DEVICE, "deviceName": DEVICE_NAME, "project": "widgets", "cwd": "/home/me/code/widgets",
             "title": "Fix flaky widget test", "startedAt": "2026-10-20T09:00:00.000Z", "lastAt": "2026-10-20T09:02:11.000Z",
             "durationMs": 131_000, "entryCount": 16, "models": ["claude-sonnet-4-5", "gpt-5"],
             "tokens": { "input": 8300, "output": 730, "cacheRead": 9900, "cacheWrite": 100 },
@@ -357,6 +360,7 @@ async fn session_summary_detail_and_children() {
     assert_eq!(children[0]["link"]["agentType"], "recon");
     assert_eq!(children[0]["title"], "Inspect the spin test");
     assert_eq!(children[0]["parentSessionId"], SESSION_ID);
+    assert_eq!(children[0]["deviceName"], DEVICE_NAME);
     assert!(children[1].get("parentToolCallId").is_none() && children[1].get("link").is_none());
     assert_eq!((&children[1]["parentSessionId"], &children[1]["title"], &children[1]["entryCount"]), (&json!(SESSION_ID), &json!(""), &json!(1)));
 
@@ -369,11 +373,38 @@ async fn session_summary_detail_and_children() {
         assert!(desk.get(absent).is_none(), "{absent}");
     }
     assert_eq!((&desk["device"], &desk["project"], &desk["childCount"]), (&json!(DESKTOP), &json!("gadgets"), &json!(0)));
+    assert_eq!(desk["deviceName"], DESKTOP_NAME);
 
     assert_eq!(app.status("sessions/nope").await, StatusCode::NOT_FOUND);
     assert_eq!(app.status("sessions/nope/turns").await, StatusCode::NOT_FOUND);
     assert_eq!(app.status("sessions/nope/entries").await, StatusCode::NOT_FOUND);
     assert_eq!(app.status("sessions/nope/updates").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn device_names_follow_renames_and_fall_back_to_the_id() {
+    let app = world().await;
+    app.env.store.write(|tx| tx.execute("UPDATE devices SET name = 'alpha' WHERE id = ?1", [DESKTOP])).unwrap();
+    // Uploads from a device without a row, such as one written by an older server in between.
+    let batch = json!({ "streams": [stream("session:ghost-1", "session", 0, &fixture("session.jsonl")[..1])] });
+    pika::ingest::apply(&app.env.store, "ghost", &serde_json::from_value(batch).unwrap()).unwrap();
+
+    let facets = app.json("facets").await;
+    assert_eq!(
+        facets["devices"],
+        json!([{ "id": DESKTOP, "name": "alpha" }, { "id": "ghost", "name": "ghost" }, { "id": DEVICE, "name": DEVICE_NAME }])
+    );
+    assert_eq!(summary_of(&app, DESK_SESSION).await["deviceName"], "alpha");
+    assert_eq!(updates(&app, DESK_SESSION, "").await["session"]["deviceName"], "alpha");
+    assert_eq!(app.json(&format!("herder/runs/{RUN2}")).await["run"]["deviceName"], "alpha");
+    let ghost = app.json("sessions?device=ghost").await;
+    assert_eq!((&ghost["items"][0]["device"], &ghost["items"][0]["deviceName"]), (&json!("ghost"), &json!("ghost")));
+    // Filters take the id, not the name.
+    assert_eq!(session_ids(&app, &format!("?device={DESKTOP}")).await, [DESK_SESSION]);
+    assert_eq!(session_ids(&app, "?device=alpha").await, Vec::<String>::new());
+    let hits = search(&app, &format!("gadgets&device={DESKTOP}")).await;
+    assert!(!hits.is_empty() && hits.iter().all(|h| h["sessionId"] == DESK_SESSION), "{hits:?}");
+    assert!(search(&app, "gadgets&device=alpha").await.is_empty());
 }
 
 #[tokio::test]
@@ -632,9 +663,9 @@ async fn herder_runs_and_run_detail() {
     assert_eq!(
         runs["items"],
         json!([
-            { "runId": RUN2, "device": DESKTOP, "repo": "gadgets", "title": "Speed up gadgets", "status": "running",
+            { "runId": RUN2, "device": DESKTOP, "deviceName": DESKTOP_NAME, "repo": "gadgets", "title": "Speed up gadgets", "status": "running",
               "startedAt": "2026-10-22T09:00:00.000Z", "lastAt": "2026-10-22T09:01:00.000Z", "stepCount": 1 },
-            { "runId": RUN_ID, "device": DEVICE, "repo": "widgets", "title": "Add pagination", "status": "delivered",
+            { "runId": RUN_ID, "device": DEVICE, "deviceName": DEVICE_NAME, "repo": "widgets", "title": "Add pagination", "status": "delivered",
               "verdict": "met", "startedAt": "2026-10-21T10:00:00.000Z", "lastAt": "2026-10-21T10:14:00.000Z", "stepCount": 2 },
         ])
     );
@@ -923,7 +954,7 @@ fn opening_a_version_1_database_builds_the_search_index() {
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -1011,7 +1042,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);

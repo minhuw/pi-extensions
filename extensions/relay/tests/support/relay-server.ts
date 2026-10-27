@@ -13,6 +13,7 @@ export type SentAnswer = { status: "delivered" | "queued"; id: string; to: Targe
 export interface Connection {
 	ws: WebSocket;
 	device: string;
+	deviceName?: string;
 	openedAt: number;
 	/** The session as `hello` described it, with later `state` frames applied. */
 	session?: HelloSession;
@@ -27,6 +28,9 @@ type PushedMessage = Partial<{ id: string; from: unknown; text: string; urgent: 
 
 /** A message the default `send` handling routed between two connections. */
 export interface Routed { id: string; from: string; to: string; text: string; hops: number; urgent: boolean; replyTo?: string }
+
+/** The device fields of an object that names a connection's device. */
+const named = (connection: Connection) => ({ device: connection.device, ...(connection.deviceName !== undefined ? { deviceName: connection.deviceName } : {}) });
 
 const json = (response: ServerResponse, status: number, body: unknown) => {
 	response.writeHead(status, { "Content-Type": "application/json" });
@@ -49,6 +53,8 @@ export class FakeRelay {
 	features: string[] | undefined = ["relay"];
 	readonly tokens = new Set([TOKEN]);
 	device = "laptop";
+	/** The device's display name; undefined answers like a server older than 0.4, which sends none. */
+	deviceName: string | undefined;
 	/** Every upgrade request, accepted or not. */
 	readonly upgrades: { at: number; authorization?: string; path: string }[] = [];
 	readonly connections: Connection[] = [];
@@ -120,7 +126,7 @@ export class FakeRelay {
 	}
 
 	private accept(ws: WebSocket): void {
-		const connection: Connection = { ws, device: this.device, openedAt: Date.now(), frames: [], welcomed: false };
+		const connection: Connection = { ws, device: this.device, ...(this.deviceName !== undefined ? { deviceName: this.deviceName } : {}), openedAt: Date.now(), frames: [], welcomed: false };
 		this.connections.push(connection);
 		ws.on("close", (code, reason) => { connection.closed = { code, reason: reason.toString() }; });
 		ws.on("message", (data, binary) => {
@@ -144,7 +150,7 @@ export class FakeRelay {
 				if (other !== connection && !other.closed && other.session?.id === hello.id) other.ws.close(4410);
 			}
 			connection.welcomed = true;
-			this.sendTo(connection, { type: "welcome", device: connection.device, serverVersion: "0.3.0", limits: this.limits });
+			this.sendTo(connection, { type: "welcome", ...named(connection), serverVersion: "0.3.0", limits: this.limits });
 			for (const queued of this.mailbox.values()) if (queued.sessionId === hello.id) this.sendTo(connection, queued.frame);
 		} else if (frame.type === "ack") {
 			this.mailbox.delete(String(frame.id));
@@ -159,7 +165,7 @@ export class FakeRelay {
 
 	private target(id: string): Target {
 		const session = this.online(id)?.session;
-		return session ? { sessionId: id, device: this.online(id)!.device, ...(session.name ? { name: session.name } : {}), ...(session.title ? { title: session.title } : {}), project: session.project } : { sessionId: id };
+		return session ? { sessionId: id, ...named(this.online(id)!), ...(session.name ? { name: session.name } : {}), ...(session.title ? { title: session.title } : {}), project: session.project } : { sessionId: id };
 	}
 
 	private async route(from: Connection, frame: Frame): Promise<SentAnswer> {
@@ -176,7 +182,7 @@ export class FakeRelay {
 		const sender = from.session!;
 		this.sendTo(target, {
 			type: "message", id, text: frame.text, urgent: frame.urgent === true, hops, sentAt: new Date().toISOString(),
-			from: { kind: "session", sessionId: sender.id, device: from.device, ...(sender.name ? { name: sender.name } : {}), ...(sender.title ? { title: sender.title } : {}), project: sender.project },
+			from: { kind: "session", sessionId: sender.id, ...named(from), ...(sender.name ? { name: sender.name } : {}), ...(sender.title ? { title: sender.title } : {}), project: sender.project },
 			...(frame.replyTo ? { replyTo: frame.replyTo } : {}),
 		});
 		const acked = await this.waitForAck(to, id, this.ackWaitMs).then(() => true, () => false);
@@ -198,7 +204,7 @@ export class FakeRelay {
 		return this.connections.filter((connection) => connection.welcomed && !connection.closed && connection.session).map((connection) => {
 			const session = connection.session!;
 			return {
-				id: session.id, device: connection.device, host: session.host, cwd: session.cwd, project: session.project, state: session.state,
+				id: session.id, ...named(connection), host: session.host, cwd: session.cwd, project: session.project, state: session.state,
 				...(session.name ? { name: session.name } : {}), ...(session.title ? { title: session.title } : {}), ...(session.model ? { model: session.model } : {}),
 				...(session.piVersion ? { piVersion: session.piVersion } : {}),
 				connectedAt: new Date(connection.openedAt).toISOString(), stateSince: new Date(connection.openedAt).toISOString(), lastSeenAt: new Date().toISOString(),

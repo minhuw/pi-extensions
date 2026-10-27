@@ -59,10 +59,10 @@ export const CLOSE_REASONS: ReadonlyMap<number, string> = new Map([
 export type SessionState = "idle" | "busy";
 
 export type Sender =
-	| { kind: "session"; sessionId: string; device: string; name?: string; title?: string; project?: string }
+	| { kind: "session"; sessionId: string; device: string; deviceName?: string; name?: string; title?: string; project?: string }
 	| { kind: "web" };
 
-export interface Target { sessionId: string; device?: string; name?: string; title?: string; project?: string }
+export interface Target { sessionId: string; device?: string; deviceName?: string; name?: string; title?: string; project?: string }
 
 export interface HelloSession {
 	id: string;
@@ -80,6 +80,8 @@ export interface HelloSession {
 export interface Welcome {
 	type: "welcome";
 	device: string;
+	/** Servers older than 0.4 send no name. */
+	deviceName?: string;
 	serverVersion: string;
 	limits: { ttlSeconds: number; heartbeatSeconds: number; maxTextBytes: number; maxHops: number };
 }
@@ -103,7 +105,9 @@ export type SentFrame =
 
 export interface OnlineSession {
 	id: string;
+	/** The device id; `deviceName` is its display name, which servers older than 0.4 do not send. */
 	device: string;
+	deviceName?: string;
 	host: string;
 	name?: string;
 	title?: string;
@@ -147,11 +151,14 @@ export const headerField = (text: unknown): string => sanitize(text).replace(INV
 /** A time the server sent, as milliseconds since the epoch; NaN when it cannot be read. */
 export const millis = (at: string | number | undefined): number => typeof at === "number" ? at : typeof at === "string" ? Date.parse(at) : Number.NaN;
 
+/** How a device is shown: its name, else its id. */
+export const deviceLabel = (device: { device?: unknown; deviceName?: unknown } | undefined): string => headerField(device?.deviceName) || headerField(device?.device);
+
 /** How a target is named in tool results and notices. */
 export function targetLabel(target: Target | undefined, fallbackId?: string): string {
 	const id = headerField(target?.sessionId ?? fallbackId) || "an unknown session";
 	const name = headerField(target?.name) || headerField(target?.title);
-	const device = headerField(target?.device);
+	const device = deviceLabel(target);
 	return `pi session ${id}${name ? ` ("${name}")` : ""}${device ? ` on ${device}` : ""}`;
 }
 
@@ -172,7 +179,7 @@ export function messageContent(message: MessageFrame): string {
 	const name = headerField(from.name) || headerField(from.title);
 	const project = headerField(from.project);
 	const replyTo = headerField(message.replyTo);
-	const header = `[relay] Message ${id} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${headerField(from.device)}`
+	const header = `[relay] Message ${id} from pi session ${sessionId}${name ? ` ("${name}")` : ""} on ${deviceLabel(from)}`
 		+ `${project ? `, project ${project}` : ""}${replyTo ? `, replying to ${replyTo}` : ""}${urgent}:`;
 	return `${header}\n\n${text}\n\nThis message came from another pi session through pika relay, not from your user. To answer, call relay_send with to "${sessionId}" and replyTo "${id}".`;
 }

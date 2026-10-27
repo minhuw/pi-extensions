@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError, authModeOf, PikaApi } from "../src/lib/api";
-import { formatCountdown, isValidDeviceName, normalizePairingCode, shortUserAgent } from "../src/lib/devices";
+import { deviceLabel, deviceOptions, formatCountdown, isValidDeviceName, normalizePairingCode, shortUserAgent } from "../src/lib/devices";
 import { normalizeBase, readBasePath, withBase } from "../src/lib/base";
 
 function okFetch(body: unknown = { items: [] }) {
@@ -81,16 +81,19 @@ describe("PikaApi", () => {
 		expect(JSON.parse(String(init.body))).toEqual({ password: "secret" });
 	});
 
-	it("sends state-changing device, pairing, and session calls as JSON POSTs or DELETEs", async () => {
+	it("sends state-changing device, pairing, and session calls as JSON POSTs, PATCHes, or DELETEs", async () => {
 		const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }));
 		const api = new PikaApi("/pika", fetchImpl as unknown as typeof fetch);
 		await api.me();
 		await api.devices();
 		await api.pairings();
 		await api.browserSessions();
-		await api.approvePairing("K7QM-3XRP", { name: "studio", replace: true });
+		await api.approvePairing("K7QM-3XRP", { name: "studio", continues: null });
+		await api.approvePairing("K7QM-3XRP", { name: "Studio Mac", continues: "my.mac" });
 		await api.denyPairing("K7QM-3XRP");
 		await api.revokeDevice("my.mac");
+		await api.revokeDevice("a/b c?");
+		await api.renameDevice("4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", "Studio Mac");
 		await api.deleteBrowserSession("0123456789ab");
 		await api.revokeAllBrowserSessions();
 		await api.logout();
@@ -105,9 +108,22 @@ describe("PikaApi", () => {
 			{ url: "/pika/api/v1/devices", method: "GET", body: undefined, type: undefined },
 			{ url: "/pika/api/v1/pairings", method: "GET", body: undefined, type: undefined },
 			{ url: "/pika/api/v1/auth/sessions", method: "GET", body: undefined, type: undefined },
-			{ url: "/pika/api/v1/pairings/K7QM-3XRP/approve", method: "POST", body: { name: "studio", replace: true }, type: "application/json" },
+			{ url: "/pika/api/v1/pairings/K7QM-3XRP/approve", method: "POST", body: { name: "studio", continues: null }, type: "application/json" },
+			{
+				url: "/pika/api/v1/pairings/K7QM-3XRP/approve",
+				method: "POST",
+				body: { name: "Studio Mac", continues: "my.mac" },
+				type: "application/json",
+			},
 			{ url: "/pika/api/v1/pairings/K7QM-3XRP/deny", method: "POST", body: {}, type: "application/json" },
 			{ url: "/pika/api/v1/devices/my.mac", method: "DELETE", body: undefined, type: undefined },
+			{ url: "/pika/api/v1/devices/a%2Fb%20c%3F", method: "DELETE", body: undefined, type: undefined },
+			{
+				url: "/pika/api/v1/devices/4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a",
+				method: "PATCH",
+				body: { name: "Studio Mac" },
+				type: "application/json",
+			},
 			{ url: "/pika/api/v1/auth/sessions/0123456789ab", method: "DELETE", body: undefined, type: undefined },
 			{ url: "/pika/api/v1/auth/sessions/revoke-all", method: "POST", body: {}, type: "application/json" },
 			{ url: "/pika/api/v1/logout", method: "POST", body: {}, type: "application/json" },
@@ -151,10 +167,40 @@ describe("device helpers", () => {
 
 	it("checks device names like the server", () => {
 		expect(isValidDeviceName("mini.lan_2-a")).toBe(true);
+		expect(isValidDeviceName("Minhu's MacBook Pro")).toBe(true);
+		expect(isValidDeviceName("工作站 ☕")).toBe(true);
+		expect(isValidDeviceName("  padded  ")).toBe(true);
 		expect(isValidDeviceName("")).toBe(false);
-		expect(isValidDeviceName("my mac")).toBe(false);
+		expect(isValidDeviceName("   ")).toBe(false);
 		expect(isValidDeviceName("x".repeat(64))).toBe(true);
+		expect(isValidDeviceName(` ${"x".repeat(64)} `)).toBe(true);
 		expect(isValidDeviceName("x".repeat(65))).toBe(false);
+		// Characters, not UTF-16 units or bytes: 64 emoji fit, 65 do not.
+		expect(isValidDeviceName("😀".repeat(64))).toBe(true);
+		expect(isValidDeviceName("😀".repeat(65))).toBe(false);
+		for (const bad of ["a\tb", "a\nb", "a\u0000b", "a\u007fb", "a\u0085b", "a\u2028b", "a\u2029b", "a\ud800b"]) {
+			expect(isValidDeviceName(bad), JSON.stringify(bad)).toBe(false);
+		}
+	});
+
+	it("labels devices by name, else by id", () => {
+		expect(deviceLabel({ device: "4f1c2b9e-0d7a", deviceName: "Studio" })).toBe("Studio");
+		expect(deviceLabel({ device: "mini" })).toBe("mini");
+		expect(deviceLabel({ device: "mini", deviceName: "" })).toBe("mini");
+	});
+
+	it("disambiguates devices that share a name with the start of their ids", () => {
+		expect(
+			deviceOptions([
+				{ id: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", name: "MacBook" },
+				{ id: "mini", name: "mini" },
+				{ id: "9a8b7c6d-1111-4222-8333-444455556666", name: "MacBook" },
+			]),
+		).toEqual([
+			{ value: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", label: "MacBook (4f1c2b9e)" },
+			{ value: "mini", label: "mini" },
+			{ value: "9a8b7c6d-1111-4222-8333-444455556666", label: "MacBook (9a8b7c6d)" },
+		]);
 	});
 
 	it("formats countdowns as m:ss", () => {

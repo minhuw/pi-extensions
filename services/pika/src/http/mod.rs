@@ -115,7 +115,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/sessions/revoke-all", post(auth::revoke_all))
         .route("/auth/sessions/{id}", delete(auth::delete_session))
         .route("/devices", get(devices::list))
-        .route("/devices/{name}", delete(devices::revoke))
+        .route("/devices/{id}", delete(devices::revoke).patch(devices::rename))
         .route("/pairings", get(devices::pairings))
         .route("/pairings/{code}/approve", post(devices::approve))
         .route("/pairings/{code}/deny", post(devices::deny));
@@ -129,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ingest/v1/batch", post(ingest::batch))
         .route("/api/pair/v1/start", post(devices::start))
         .route("/api/pair/v1/poll", post(devices::poll))
+        .route("/api/pair/v1/bind", post(devices::bind))
         .merge(relay::device_routes(&state))
         .nest("/api/v1", v1)
         .fallback(ui::serve)

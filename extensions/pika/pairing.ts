@@ -9,13 +9,33 @@ export const pairingLimits = { timeoutMs: 10 * 60_000, minIntervalMs: 1_000 };
 const MAX_INTERVAL_MS = 30_000;
 /** Polls in a row that fail before pairing gives up; a single lost answer does not end it. */
 const MAX_POLL_FAILURES = 3;
-export const DEVICE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+/** Every device id the server makes matches this; names are free text (`validDeviceName`). */
+export const DEVICE_ID = /^[A-Za-z0-9._-]{1,64}$/;
+/** The only device names pika servers older than 0.4 accept. */
+export const LEGACY_DEVICE_NAME = DEVICE_ID;
 const CODE = /^[A-Za-z0-9-]{1,32}$/;
+const NOT_IN_NAMES = /[\p{Cc}\u2028\u2029]/u;
 
-/** The hostname with every run of other characters replaced by `-`, at most 64 characters. */
-export function defaultDeviceName(host = hostname()): string {
-	return host.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64).replace(/^-+|-+$/g, "") || "pi";
+/** Whether `name`, trimmed, is a device name: 1 to 64 characters without control characters or line and paragraph separators. */
+export function validDeviceName(name: string): boolean {
+	const trimmed = name.trim();
+	const length = [...trimmed].length;
+	return length >= 1 && length <= 64 && !NOT_IN_NAMES.test(trimmed);
 }
+
+/** The hostname without a trailing `.local`, at most 64 characters; `pi` when that is not a valid name. */
+export function defaultDeviceName(host = hostname()): string {
+	const name = [...host.trim().replace(/\.local$/i, "")].slice(0, 64).join("").trim();
+	return validDeviceName(name) ? name : "pi";
+}
+
+/** `name` with every run of characters servers older than 0.4 refuse replaced by `-`, at most 64 characters; `pi` when nothing is left. */
+export function legacyDeviceName(name: string): string {
+	return name.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64).replace(/^-+|-+$/g, "") || "pi";
+}
+
+/** A device the server approved this pairing as: its id, its name, and whether it continues an existing device. */
+export interface PairedDevice { id: string; name: string; continued: boolean }
 
 export interface Pairing {
 	/** The device's secret for polling; never shown. */
@@ -25,23 +45,23 @@ export interface Pairing {
 	interval: number;
 }
 
-/** `approved`: the server approved the pairing, and so created the device, but its answer was unusable. */
-export type Failure = { kind: "failed"; problem: string; approved?: { device?: string } } | { kind: "cancelled" };
+/** `approved`: the server approved the pairing, and so created or continued the device, but its answer was unusable. */
+export type Failure = { kind: "failed"; problem: string; approved?: { device?: PairedDevice } } | { kind: "cancelled" };
 export type Started = { kind: "started"; pairing: Pairing } | { kind: "unsupported" } | Failure;
-export type Approval = { kind: "approved"; device?: string; token: string } | Failure;
+export type Approval = { kind: "approved"; device?: PairedDevice; token: string } | Failure;
 
 const failed = (problem: string): Failure => ({ kind: "failed", problem });
 const CANCELLED: Failure = { kind: "cancelled" };
 
 /** POSTs JSON under `{url}/api/pair/v1/`; undefined when the server cannot be reached. Bodies are never echoed. */
-async function post(url: string, path: string, body: unknown, signal: AbortSignal | undefined): Promise<{ status: number; json: Record<string, unknown> } | undefined> {
+async function post(url: string, path: string, body: unknown, signal: AbortSignal | undefined, token?: string): Promise<{ status: number; json: Record<string, unknown> } | undefined> {
 	const timeout = AbortSignal.timeout(PAIR_REQUEST_TIMEOUT_MS);
 	try {
 		const response = await fetch(`${url}/api/pair/v1/${path}`, {
 			method: "POST",
 			redirect: "error",
 			signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
-			headers: { "Content-Type": "application/json" },
+			headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
 			body: JSON.stringify(body),
 		});
 		let json: Record<string, unknown> = {};
@@ -57,14 +77,25 @@ async function post(url: string, path: string, body: unknown, signal: AbortSigna
 
 const positive = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 
-/** Asks the server for a pairing code for `device`; `unsupported` when the server predates pairing (404). */
-export async function startPairing(url: string, device: string, signal?: AbortSignal): Promise<Started> {
-	const response = await post(url, "start", { device, host: hostname().slice(0, 255), pikaVersion: PIKA_VERSION }, signal);
+/**
+ * Asks the server for a pairing code for a device named `device`; `unsupported` when the server
+ * predates pairing (404). `key` (this install's device key) and `token` (this machine's current
+ * token for this same server) let the server recognize the device a re-pairing continues.
+ */
+export async function startPairing(url: string, device: string, signal?: AbortSignal, recognize: { key?: string; token?: string } = {}): Promise<Started> {
+	const body = { device, host: hostname().slice(0, 255), pikaVersion: PIKA_VERSION, ...(recognize.key ? { key: recognize.key } : {}) };
+	const response = await post(url, "start", body, signal, recognize.token);
 	if (signal?.aborted) return CANCELLED;
 	if (!response) return failed(`could not reach ${url}`);
 	const { status, json } = response;
 	if (status === 404) return { kind: "unsupported" };
-	if (status === 400) return failed("the server refused the device name");
+	if (status === 400) {
+		if (json.error === "invalid_key") return failed("the server refused this machine's device key");
+		// A 0.4 server refuses only names this rule refuses too; one that refuses a name the rule allows is older.
+		if (json.error === "invalid_device" && validDeviceName(device)) return failed("the server refused the device name; pika servers older than 0.4 accept only letters, digits, '.', '_', and '-'");
+		if (json.error === "invalid_device") return failed("the server refused the device name");
+		return failed(`the server refused the pairing request${typeof json.error === "string" && /^[a-z_]{1,64}$/.test(json.error) ? ` (${json.error})` : ""}`);
+	}
 	if (status === 429) {
 		if (json.error === "too_many_pairings") return failed("the server has too many pending pairings; approve or deny them in the web UI, or wait until they expire");
 		const after = positive(json.retryAfter, 0);
@@ -103,8 +134,11 @@ export async function waitForApproval(url: string, pairing: Pairing, signal: Abo
 		const response = await post(url, "poll", { pairingId: pairing.pairingId }, undefined);
 		const status = response?.status === 200 ? response.json.status : undefined;
 		if (status === "approved") {
-			const { token, device } = response!.json;
-			const named = typeof device === "string" && DEVICE_NAME.test(device) ? { device } : {};
+			const { token, device, name, continued } = response!.json;
+			// Servers older than 0.4 send no name, and no `continued`: their device id is its name.
+			const named = typeof device === "string" && DEVICE_ID.test(device)
+				? { device: { id: device, name: typeof name === "string" && validDeviceName(name) ? name.trim() : device, continued: continued === true } }
+				: {};
 			if (typeof token !== "string" || !token.trim()) return { kind: "failed", problem: "the server approved the pairing but sent no token", approved: named };
 			return { kind: "approved", token: token.trim(), ...named };
 		}

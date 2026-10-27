@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,11 +7,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::config::{AuthMode, ServerConfig};
 use crate::store::Store;
-use crate::util::{constant_time_eq, hmac_sha256, now_ms, random_bytes, random_secret, sha256_hex};
+use crate::util::{constant_time_eq, hmac_sha256, is_hash, now_ms, random_bytes, random_secret, sha256_hex};
 
 pub const SESSION_COOKIE: &str = "pika_session";
 pub const SESSION_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
@@ -23,76 +24,172 @@ const DB_KEY_SETTING: &str = "cookie_key";
 const PASSWORD_HASH_SETTING: &str = "password_hash";
 const FINGERPRINT_SETTING: &str = "password_fingerprint";
 
-pub fn valid_device_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+/// A device id: 1-64 characters of `[A-Za-z0-9._-]`. Devices from before 0.4 keep their name as their id; new ones
+/// get a UUID.
+pub fn valid_device_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }
 
-/// Creates a device token and returns it; only its SHA-256 is stored.
-pub fn create_token(store: &Store, name: &str) -> Result<String> {
-    if !valid_device_name(name) {
-        bail!("device names use 1-64 characters from [A-Za-z0-9._-]");
-    }
-    store.write(|tx| {
-        if device_exists(tx, name)? {
-            bail!("a token for {name:?} exists; revoke it first");
-        }
-        Ok(insert_token(tx, name, "cli")?)
-    })
+/// A device name as stored: trimmed, then 1-64 characters without control characters, U+2028, or U+2029. `None` when
+/// it is not a valid name.
+pub fn device_name(input: &str) -> Option<&str> {
+    let name = input.trim();
+    let count = name.chars().count();
+    let forbidden = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+    ((1..=64).contains(&count) && !name.chars().any(forbidden)).then_some(name)
 }
 
-pub(crate) fn device_exists(tx: &Transaction, name: &str) -> rusqlite::Result<bool> {
-    Ok(tx.query_row("SELECT 1 FROM tokens WHERE name = ?1", [name], |_| Ok(())).optional()?.is_some())
+/// A random UUID v4, lowercase and hyphenated, the id of a new device.
+pub fn new_device_id() -> String {
+    let mut bytes = random_bytes::<16>();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
-/// Inserts a token for `name`, created via `cli` or `pairing`, and returns it; only its SHA-256 is stored.
-pub(crate) fn insert_token(tx: &Transaction, name: &str, via: &str) -> rusqlite::Result<String> {
+/// The stored hash of a device key: 64 lowercase hex characters. `None` for a malformed key.
+pub fn key_hash(key: &str) -> Option<String> {
+    is_hash(key).then(|| sha256_hex(key.as_bytes()))
+}
+
+/// A device created by `create_device`, with its token, shown once.
+pub struct NewDevice {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+}
+
+/// Creates a device named `name` with a new id and a token; only the token's SHA-256 is stored.
+pub fn create_device(store: &Store, name: &str) -> Result<NewDevice> {
+    let Some(name) = device_name(name) else {
+        bail!("device names use 1-64 characters, without control characters");
+    };
+    let id = new_device_id();
+    let token = store.write(|tx| {
+        insert_device(tx, &id, name, now_ms())?;
+        insert_token(tx, &id, "cli")
+    })?;
+    Ok(NewDevice { id, name: name.to_owned(), token })
+}
+
+pub(crate) fn insert_device(tx: &Transaction, id: &str, name: &str, now: i64) -> rusqlite::Result<()> {
+    tx.execute("INSERT INTO devices (id, name, created_at) VALUES (?1, ?2, ?3)", params![id, name, now])?;
+    Ok(())
+}
+
+/// Inserts a token for device `id`, created via `cli` or `pairing`, and returns it; only its SHA-256 is stored.
+pub(crate) fn insert_token(tx: &Transaction, id: &str, via: &str) -> rusqlite::Result<String> {
     let token = format!("pika_{}", hex::encode(random_bytes::<32>()));
     tx.execute(
         "INSERT INTO tokens (name, hash, created_at, created_via) VALUES (?1, ?2, ?3, ?4)",
-        params![name, sha256_hex(token.as_bytes()), now_ms(), via],
+        params![id, sha256_hex(token.as_bytes()), now_ms(), via],
     )?;
     Ok(token)
 }
 
+/// A device with a token; `created_at` and `created_via` describe the token.
 pub struct Device {
+    pub id: String,
     pub name: String,
     pub created_at: i64,
     pub created_via: String,
     pub last_seen_at: Option<i64>,
     pub last_host: Option<String>,
+    pub has_key: bool,
+}
+
+/// Orders devices by name, case-insensitively, then by id.
+pub fn by_name(a: (&str, &str), b: (&str, &str)) -> std::cmp::Ordering {
+    a.1.to_lowercase().cmp(&b.1.to_lowercase()).then_with(|| a.0.cmp(b.0))
 }
 
 /// Devices with tokens, by name.
 pub fn list_devices(store: &Store) -> Result<Vec<Device>> {
-    Ok(store.read(|conn| {
-        conn.prepare("SELECT name, created_at, created_via, last_seen_at, last_host FROM tokens ORDER BY name")?
-            .query_map([], |r| {
-                Ok(Device {
-                    name: r.get(0)?,
-                    created_at: r.get(1)?,
-                    created_via: r.get(2)?,
-                    last_seen_at: r.get(3)?,
-                    last_host: r.get(4)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-    })?)
+    let mut devices = store.read(|conn| {
+        conn.prepare(
+            "SELECT t.name, COALESCE(d.name, t.name), t.created_at, t.created_via, t.last_seen_at, t.last_host,
+                    d.key_hash IS NOT NULL
+             FROM tokens t LEFT JOIN devices d ON d.id = t.name",
+        )?
+        .query_map([], |r| {
+            Ok(Device {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+                created_via: r.get(3)?,
+                last_seen_at: r.get(4)?,
+                last_host: r.get(5)?,
+                has_key: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+    })?;
+    devices.sort_by(|a, b| by_name((&a.id, &a.name), (&b.id, &b.name)));
+    Ok(devices)
 }
 
-pub fn revoke_token(store: &Store, name: &str) -> Result<bool> {
-    Ok(!revoke_token_hashes(store, name)?.is_empty())
+/// Every device's name by id, with or without a token. A device without a row is shown by its id.
+pub fn device_names(conn: &Connection) -> rusqlite::Result<HashMap<String, String>> {
+    conn.prepare_cached("SELECT id, name FROM devices")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
 }
 
-/// Revokes `name`'s token and returns the hashes it deleted, so that connections made with them can be closed.
-pub fn revoke_token_hashes(store: &Store, name: &str) -> Result<Vec<String>> {
-    Ok(store.write(|tx| delete_tokens(tx, name))?)
+/// The name of device `id`, if it has a row.
+pub fn name_of(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    conn.prepare_cached("SELECT name FROM devices WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()
 }
 
-pub(crate) fn delete_tokens(tx: &Transaction, name: &str) -> rusqlite::Result<Vec<String>> {
-    tx.prepare_cached("DELETE FROM tokens WHERE name = ?1 RETURNING hash")?.query_map([name], |r| r.get(0))?.collect()
+/// Renames device `id`, with or without a token, and returns the stored name; `Ok(None)` when there is no such device.
+/// `name` must be valid (see `device_name`).
+pub fn rename_device(store: &Store, id: &str, name: &str) -> Result<Option<String>> {
+    let Some(name) = device_name(name) else { bail!("device names use 1-64 characters, without control characters") };
+    let renamed = store.write(|tx| tx.execute("UPDATE devices SET name = ?2 WHERE id = ?1", params![id, name]))?;
+    Ok((renamed > 0).then(|| name.to_owned()))
 }
 
-/// The device of a token and when it was last seen.
+/// The device id that `given` names for the CLI's `revoke` (only devices with a token count) or `rename`: a device
+/// id, else the name of exactly one device.
+pub fn resolve_device(store: &Store, given: &str, revoking: bool) -> Result<String> {
+    let token = if revoking { " AND EXISTS (SELECT 1 FROM tokens WHERE tokens.name = devices.id)" } else { "" };
+    let (by_id, mut by_name) = store.read(|conn| {
+        let by_id: Option<String> = conn
+            .query_row(&format!("SELECT id FROM devices WHERE id = ?1{token}"), [given], |r| r.get(0))
+            .optional()?;
+        let by_name = conn
+            .prepare(&format!("SELECT id FROM devices WHERE name = ?1{token}"))?
+            .query_map([given], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok::<_, rusqlite::Error>((by_id, by_name))
+    })?;
+    if let Some(id) = by_id {
+        return Ok(id);
+    }
+    match by_name.len() {
+        0 => bail!("no device {given:?}"),
+        1 => Ok(by_name.remove(0)),
+        _ => {
+            by_name.sort();
+            let action = if revoking { "revoke" } else { "rename" };
+            bail!("several devices are named {given:?}: {}; {action} by id", by_name.join(", "))
+        }
+    }
+}
+
+pub fn revoke_token(store: &Store, id: &str) -> Result<bool> {
+    Ok(!revoke_token_hashes(store, id)?.is_empty())
+}
+
+/// Revokes device `id`'s token and returns the hashes it deleted, so that connections made with them can be closed.
+/// The device's row, with its name and key, stays.
+pub fn revoke_token_hashes(store: &Store, id: &str) -> Result<Vec<String>> {
+    Ok(store.write(|tx| delete_tokens(tx, id))?)
+}
+
+pub(crate) fn delete_tokens(tx: &Transaction, id: &str) -> rusqlite::Result<Vec<String>> {
+    tx.prepare_cached("DELETE FROM tokens WHERE name = ?1 RETURNING hash")?.query_map([id], |r| r.get(0))?.collect()
+}
+
+/// The device id of a token and when it was last seen.
 pub fn device_for_token(store: &Store, token: &str) -> Result<Option<(String, Option<i64>)>> {
     let hash = sha256_hex(token.as_bytes());
     Ok(store.read(|conn| {
@@ -102,18 +199,52 @@ pub fn device_for_token(store: &Store, token: &str) -> Result<Option<(String, Op
     })?)
 }
 
+/// The answer to `POST api/pair/v1/bind`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bind {
+    /// The device has this key now, or had it already.
+    Bound,
+    /// The token is missing, unknown, or revoked.
+    Unauthorized,
+    /// The device has another key, or another device has this one; bind never moves or overwrites a key.
+    Conflict,
+}
+
+/// Gives the device of `token` the key whose hash is `key_hash`, when neither already has another.
+pub fn bind_key(store: &Store, token: &str, key_hash: &str) -> Result<Bind> {
+    let hash = sha256_hex(token.as_bytes());
+    Ok(store.write(|tx| {
+        let id: Option<String> =
+            tx.query_row("SELECT name FROM tokens WHERE hash = ?1", [&hash], |r| r.get(0)).optional()?;
+        let Some(id) = id else { return Ok::<_, rusqlite::Error>(Bind::Unauthorized) };
+        let current: Option<Option<String>> =
+            tx.query_row("SELECT key_hash FROM devices WHERE id = ?1", [&id], |r| r.get(0)).optional()?;
+        match current {
+            Some(Some(current)) => return Ok(if current == key_hash { Bind::Bound } else { Bind::Conflict }),
+            Some(None) => {}
+            // A token always has a device row; this one has none, so there is nothing to bind to.
+            None => return Ok(Bind::Conflict),
+        }
+        if tx.query_row("SELECT 1 FROM devices WHERE key_hash = ?1", [key_hash], |_| Ok(())).optional()?.is_some() {
+            return Ok(Bind::Conflict);
+        }
+        tx.execute("UPDATE devices SET key_hash = ?2 WHERE id = ?1", params![id, key_hash])?;
+        Ok(Bind::Bound)
+    })?)
+}
+
 /// Whether a device last seen at `last_seen_at` is due for `touch_device`.
 pub fn touch_due(last_seen_at: Option<i64>, now: i64) -> bool {
     last_seen_at.is_none_or(|seen| seen <= now - TOUCH_INTERVAL_MS)
 }
 
 /// Records that a device uploaded from `host`, at most once per `TOUCH_INTERVAL_MS`.
-pub fn touch_device(store: &Store, name: &str, host: Option<&str>, now: i64) -> Result<bool> {
+pub fn touch_device(store: &Store, id: &str, host: Option<&str>, now: i64) -> Result<bool> {
     Ok(store.write(|tx| {
         tx.execute(
             "UPDATE tokens SET last_seen_at = ?2, last_host = COALESCE(?3, last_host)
              WHERE name = ?1 AND (last_seen_at IS NULL OR last_seen_at <= ?2 - ?4)",
-            params![name, now, host, TOUCH_INTERVAL_MS],
+            params![id, now, host, TOUCH_INTERVAL_MS],
         )
     })? > 0)
 }
@@ -436,4 +567,75 @@ pub fn delete_session_by_id(store: &Store, id: &str) -> Result<Vec<String>> {
 /// Signs every browser out; returns how many sessions ended.
 pub fn revoke_all_sessions(store: &Store) -> Result<usize> {
     Ok(store.write(|tx| tx.execute("DELETE FROM auth_sessions", []))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_names_are_free_text_without_control_characters() {
+        for (input, stored) in [
+            ("Ana's MacBook Pro", "Ana's MacBook Pro"),
+            ("  padded\t", "padded"),
+            ("Büro-Rechner 2", "Büro-Rechner 2"),
+            ("工作电脑", "工作电脑"),
+            ("emoji 💻", "emoji 💻"),
+            ("x", "x"),
+        ] {
+            assert_eq!(device_name(input), Some(stored), "{input:?}");
+        }
+        let long = "é".repeat(64);
+        assert_eq!(device_name(&long), Some(long.as_str()), "64 characters count, not bytes");
+        for input in [
+            "",
+            "   ",
+            "a\nb",
+            "a\tb",
+            "bell\u{7}",
+            "del\u{7f}",
+            "next\u{85}line",
+            "line\u{2028}sep",
+            "para\u{2029}sep",
+            &"a".repeat(65),
+            &"é".repeat(65),
+        ] {
+            assert_eq!(device_name(input), None, "{input:?}");
+        }
+        // Whitespace at the ends, U+2028 included, is trimmed before the check.
+        assert_eq!(device_name("\u{2028}ok\u{85}"), Some("ok"));
+        assert_eq!(device_name(&format!(" {} ", "a".repeat(64))).map(str::len), Some(64));
+    }
+
+    #[test]
+    fn device_ids_keep_the_old_name_rule() {
+        assert!(valid_device_id("laptop") && valid_device_id("a.b_c-D9") && valid_device_id(&"a".repeat(64)));
+        for id in ["", "has space", "ümlaut", "a/b", &"a".repeat(65)] {
+            assert!(!valid_device_id(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn new_device_ids_are_uuid_v4() {
+        let ids: std::collections::HashSet<String> = (0..100).map(|_| new_device_id()).collect();
+        assert_eq!(ids.len(), 100);
+        for id in &ids {
+            assert!(valid_device_id(id), "{id}");
+            let bytes = id.as_bytes();
+            assert_eq!(id.len(), 36);
+            assert!([8, 13, 18, 23].iter().all(|&i| bytes[i] == b'-'), "{id}");
+            assert!(id.bytes().all(|b| b == b'-' || matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{id}");
+            assert_eq!(bytes[14], b'4', "{id}");
+            assert!(b"89ab".contains(&bytes[19]), "{id}");
+        }
+    }
+
+    #[test]
+    fn device_keys_are_64_lowercase_hex_characters() {
+        let key = "0123456789abcdef".repeat(4);
+        assert_eq!(key_hash(&key), Some(sha256_hex(key.as_bytes())));
+        for key in [String::new(), "0".repeat(63), "0".repeat(65), key.to_uppercase(), "g".repeat(64)] {
+            assert_eq!(key_hash(&key), None, "{key:?}");
+        }
+    }
 }

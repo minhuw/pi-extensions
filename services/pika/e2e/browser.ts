@@ -14,6 +14,8 @@ export interface BrowserTargets {
 	stepId: string;
 	runId: string;
 	largeId: string;
+	/** The id of the device named `desktop`, which uploaded the large session. */
+	desktopId: string;
 	searchWord: string;
 	/** Prompt texts of the main session, in order. */
 	prompts: string[];
@@ -187,7 +189,9 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 		const rows = await listed();
 		return rows.length === 1 && rows[0] === t.largeId;
 	}, 10_000, "the device filter to list only the desktop session");
-	check(page.url().includes("device=desktop"), `the device filter is not in the URL ${page.url()}`);
+	// The filter names the device and keeps its id in the URL.
+	check(new URL(page.url()).searchParams.get("device") === t.desktopId, `the device filter does not put the desktop's id ${t.desktopId} in the URL ${page.url()}`);
+	checkEqual(await textOf(`[data-session-row="${t.largeId}"] [data-device-label="${t.desktopId}"]`), "desktop", "the device the filtered session row names");
 	await shot("03-sessions-filtered");
 	log("browser: session list and device filter");
 

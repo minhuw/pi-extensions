@@ -35,6 +35,8 @@ export const PROMPTS = {
 	local: "Answer from the local model.",
 	/** The first prompt of the machine that joins by pairing. */
 	paired: "Run the paired check.",
+	/** That machine's prompt after it paired again and continued its device. */
+	continued: "Run the continued check.",
 	/** A prompt after that machine's device was revoked. */
 	revoked: "Run the revoked check.",
 };
@@ -154,6 +156,7 @@ export function responder(body: Record<string, unknown>): ScriptedReply | undefi
 		case "resumed":
 		case "online":
 		case "paired":
+		case "continued":
 		case "revoked":
 			return script([
 				{ toolCalls: [call(`call_${name}`, "bash", { command: `echo ${name} check` })] },

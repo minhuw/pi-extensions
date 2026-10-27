@@ -12,6 +12,10 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+/// SQL that removes what schema version 5 added, for tests that rewind `user_version`.
+pub const UNDO_V5: &str = "DROP TABLE devices; ALTER TABLE pairings DROP COLUMN key_hash;
+    ALTER TABLE pairings DROP COLUMN matched; ALTER TABLE pairings DROP COLUMN matched_by;
+    ALTER TABLE pairings DROP COLUMN target;";
 /// SQL that removes what schema version 4 added, for tests that rewind `user_version`.
 pub const UNDO_V4: &str = "DROP TABLE auth_sessions; DROP TABLE pairings; ALTER TABLE tokens DROP COLUMN created_via;
     ALTER TABLE tokens DROP COLUMN last_seen_at; ALTER TABLE tokens DROP COLUMN last_host;";
@@ -25,6 +29,25 @@ pub fn env() -> Env {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("data")).unwrap();
     Env { dir, store }
+}
+
+/// Creates device `id`, named `name`, with a token, and returns the token. Devices from before 0.4 have ids like
+/// these after the upgrade; `pika token create` gives new devices a UUID.
+pub fn device_named(store: &Store, id: &str, name: &str) -> String {
+    let token = format!("pika_{}", hex::encode(pika::util::random_bytes::<32>()));
+    let hash = pika::util::sha256_hex(token.as_bytes());
+    store
+        .write(|tx| {
+            tx.execute("INSERT INTO devices (id, name, created_at) VALUES (?1, ?2, 1)", [id, name])?;
+            tx.execute("INSERT INTO tokens (name, hash, created_at) VALUES (?1, ?2, ?3)", rusqlite::params![id, hash, pika::util::now_ms()])
+        })
+        .unwrap();
+    token
+}
+
+/// `device_named` with the id as the name.
+pub fn device(store: &Store, id: &str) -> String {
+    device_named(store, id, id)
 }
 
 pub fn fixture(name: &str) -> Vec<String> {

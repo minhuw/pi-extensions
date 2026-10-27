@@ -9,7 +9,7 @@ pub mod sessions;
 #[cfg(test)]
 mod plans;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
@@ -127,6 +127,20 @@ pub fn page<T>(mut items: Vec<T>, limit: i64, key: impl Fn(&T) -> Vec<Value>) ->
     items.truncate(limit as usize);
     let next_cursor = if more { items.last().map(|last| encode_cursor(&key(last))) } else { None };
     Page { items, next_cursor }
+}
+
+/// Device names by id, read from the small `devices` table and applied in Rust, so the read queries need no join and
+/// keep their plans. A device without a row is shown by its id.
+pub struct DeviceNames(HashMap<String, String>);
+
+impl DeviceNames {
+    pub fn load(conn: &Connection) -> ReadResult<DeviceNames> {
+        Ok(DeviceNames(crate::auth::device_names(conn)?))
+    }
+
+    pub fn of(&self, id: &str) -> String {
+        self.0.get(id).cloned().unwrap_or_else(|| id.to_owned())
+    }
 }
 
 pub(crate) const SESSION_SID_SQL: &str = "SELECT sid FROM sessions WHERE id = ?1";

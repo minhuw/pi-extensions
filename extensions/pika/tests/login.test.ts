@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { loadConfig } from "../config.ts";
+import { loadConfig, normalizeUrl } from "../config.ts";
 import pikaExtension, { CHILD_SESSION_HOOKS, statusText, type ChildSessionHook } from "../index.ts";
-import { isPlainRemote, login, MaskedInput, normalizeUrl, PASTE } from "../login.ts";
+import { isPlainRemote, login, MaskedInput, PASTE, URL_TITLE } from "../login.ts";
 import { currentUploader } from "../uploader.ts";
 import { MockIngest, TOKEN } from "./support/ingest-server.ts";
 import { readText, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
@@ -133,14 +133,14 @@ describe("/pika login", () => {
 			ui.choices = [choice];
 			await command(ui, "/pika login");
 			expect(ui.last?.message).toBe(outcome);
-			expect(ui.prompts[0]).toEqual({ title: `pika server URL (blank keeps ${ingest.url})`, placeholder: ingest.url });
+			expect(ui.prompts[0]).toEqual({ title: `pika server URL: the address you open the pika web UI at, e.g. https://pika.example.com or http://192.168.1.10:7171 (blank keeps ${ingest.url})`, placeholder: ingest.url });
 			expect(await fileText()).toBe(existing);
 		}
 		// No request ever carried the stored token.
 		expect(ingest.bodies).toEqual([]);
 	}, 30_000);
 
-	it("keeps the current URL on a blank answer and needs one when there is none", async () => {
+	it("keeps the current URL on a blank answer, and asks again with a warning for a blank or invalid one", async () => {
 		await workspace.configure({ url: `${ingest.url}/`, token: "stored" });
 		const ui = new ScriptedUI();
 		ui.inputs = ["  ", TOKEN];
@@ -149,13 +149,43 @@ describe("/pika login", () => {
 		expect(JSON.parse((await fileText())!)).toEqual({ url: ingest.url, token: TOKEN });
 
 		await workspace.configure(undefined);
-		const blank = new ScriptedUI();
-		blank.inputs = [""];
-		blank.choices = [PASTE];
-		await command(blank, "/pika login");
-		expect(blank.prompts[0]).toEqual({ title: "pika server URL", placeholder: undefined });
-		expect(blank.last?.message).toBe("pika login failed: no server URL entered. Nothing changed.");
+		const retry = new ScriptedUI();
+		retry.inputs = ["", "pika.example.com", "192.168.1.10:7171", "ftp://host/pika", "https://user:pw@host", "https://host/pika?x=1", "http://", `${ingest.url}/`, TOKEN];
+		retry.choices = [PASTE];
+		await command(retry, "/pika login");
+		expect(URL_TITLE).toBe("pika server URL: the address you open the pika web UI at, e.g. https://pika.example.com or http://192.168.1.10:7171");
+		expect(retry.prompts.slice(0, 8)).toEqual(Array(8).fill({ title: URL_TITLE, placeholder: "https://pika.example.com" }));
+		const hint = "Enter the address you open the pika web UI at, e.g. https://pika.example.com, or press Esc to cancel.";
+		expect(retry.notes.filter((note) => note.type === "warning")).toEqual([
+			"no server URL entered, and none is saved to keep",
+			"the server URL must start with http:// or https://",
+			"the server URL must start with http:// or https://",
+			"the server URL must start with http:// or https://",
+			"the server URL must not contain credentials",
+			"the server URL must not have a query or fragment",
+			"the server URL is not a valid URL",
+		].map((problem) => ({ type: "warning", message: `pika: ${problem}. ${hint}` })));
+		expect(JSON.parse((await fileText())!)).toEqual({ url: ingest.url, token: TOKEN });
+		await expectNoSecret(retry, ["pw@"]);
+
+		const cancelled = new ScriptedUI();
+		await workspace.configure(undefined);
+		cancelled.inputs = ["nope", undefined];
+		await command(cancelled, "/pika login");
+		expect(cancelled.last).toEqual({ type: "info", message: "pika login cancelled. Nothing changed." });
+		expect(cancelled.selects).toEqual([]);
 		expect(await fileText()).toBeUndefined();
+	}, 20_000);
+
+	it("asks for the URL the same way in the TUI", async () => {
+		const ui = new ScriptedUI();
+		ui.inputs = ["", ingest.url];
+		ui.choices = [PASTE];
+		ui.keys = [[paste(TOKEN), ENTER]];
+		await command(ui, "/pika login", "tui");
+		expect(ui.prompts).toEqual([{ title: URL_TITLE, placeholder: "https://pika.example.com" }, { title: URL_TITLE, placeholder: "https://pika.example.com" }]);
+		expect(ui.notes[0]?.type).toBe("warning");
+		expect(JSON.parse((await fileText())!)).toEqual({ url: ingest.url, token: TOKEN });
 	}, 20_000);
 
 	it.each(["{ not json", "[1, 2]", "\"text\""])("refuses a pika.json that is not a JSON object (%s) before asking anything", async (text) => {

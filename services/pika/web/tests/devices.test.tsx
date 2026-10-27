@@ -1,7 +1,8 @@
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LAYOUT_GUARD_MS, PAIRINGS_POLL_MS } from "../src/pages/Devices";
+import { APPROVED_WATCH_MS, LAYOUT_GUARD_MS, PAIRINGS_POLL_MS } from "../src/pages/Devices";
 import { browserSession, device, pairing, SAFARI_MAC } from "./support/fixtures";
+import { installMatchMedia } from "./support/media";
 import { renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
@@ -41,6 +42,9 @@ function deviceTable(): HTMLElement {
 	return table;
 }
 
+const STUDIO_ID = "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a";
+const OTHER_ID = "0a9b8c7d-1111-4222-8333-444455556666";
+
 function signedIn(extra: Parameters<typeof createFakeServer>[0] = {}) {
 	return createFakeServer({ password: "hunter2", authenticated: true, ...extra });
 }
@@ -64,12 +68,17 @@ describe("devices page", () => {
 
 	it("lists devices and pending pairing requests", async () => {
 		const server = signedIn({
-			devices: [device("mini", { createdVia: "pairing" }), device("laptop", { lastSeenAt: null, lastHost: null })],
+			devices: [
+				device("mini", { createdVia: "pairing" }),
+				device("laptop", { lastSeenAt: null, lastHost: null }),
+				device(STUDIO_ID, { name: "Studio Mac", hasKey: true }),
+			],
 			pairings: [pairing("K7QM-3XRP", "studio", 120_000)],
 		});
 		renderApp("/devices", server.fetch);
 		const request = await findCard("K7QM-3XRP");
 		expect(within(request).getByText("K7QM-3XRP")).toBeTruthy();
+		expect(request.querySelector("[data-pairing-name]")?.textContent).toBe("Requested name studio");
 		expect((within(request).getByLabelText("Device name") as HTMLInputElement).value).toBe("studio");
 		expect(within(request).getByText("studio.local")).toBeTruthy();
 		expect(within(request).getByText("192.168.1.20")).toBeTruthy();
@@ -79,13 +88,27 @@ describe("devices page", () => {
 		expect(countdown("K7QM-3XRP")).toBeLessThanOrEqual(480);
 		expect(screen.getByText(/check that the code matches the one pi shows/)).toBeTruthy();
 
-		await waitFor(() => expect(document.querySelectorAll("[data-device]")).toHaveLength(2));
+		await waitFor(() => expect(document.querySelectorAll("[data-device]")).toHaveLength(3));
 		const rows = [...document.querySelectorAll<HTMLElement>("[data-device]")];
-		expect(rows.map((row) => row.dataset.device)).toEqual(["laptop", "mini"]);
+		// By name, case-insensitively.
+		expect(rows.map((row) => row.dataset.device)).toEqual(["laptop", "mini", STUDIO_ID]);
+		expect(rows.map((row) => row.dataset.deviceName)).toEqual(["laptop", "mini", "Studio Mac"]);
 		expect(within(rows[0]).getByText("CLI")).toBeTruthy();
 		expect(within(rows[0]).getByText("never")).toBeTruthy();
 		expect(within(rows[1]).getByText("paired")).toBeTruthy();
 		expect(within(rows[1]).getByText("mini.lan")).toBeTruthy();
+		// The name, with the id muted in monospace below it: its first 8 characters, and all of it in the title.
+		expect(rows[2].querySelector("[data-device-label]")?.textContent).toBe("Studio Mac");
+		const id = rows[2].querySelector<HTMLElement>("[data-device-id]");
+		expect(id?.textContent).toBe("4f1c2b9e…");
+		expect(id?.dataset.deviceId).toBe(STUDIO_ID);
+		expect(id?.title).toBe(STUDIO_ID);
+		expect(id?.classList.contains("font-mono")).toBe(true);
+		expect(id?.classList.contains("text-muted")).toBe(true);
+		// An id of at most 8 characters shows whole.
+		expect(rows[1].querySelector<HTMLElement>("[data-device-id]")?.textContent).toBe("mini");
+		expect(within(rows[2]).getByRole("button", { name: "Rename Studio Mac" })).toBeTruthy();
+		expect(within(rows[2]).getByRole("button", { name: "Revoke Studio Mac" })).toBeTruthy();
 	});
 
 	it("explains how to add a device when there are none", async () => {
@@ -97,67 +120,260 @@ describe("devices page", () => {
 		expect(screen.getByText(/No pending requests/)).toBeTruthy();
 	});
 
-	it("approves with the edited name and refreshes both lists", async () => {
+	it("approves a new device with the edited name and refreshes both lists", async () => {
 		const server = signedIn({ pairings: [pairing("K7QM-3XRP", "studio")] });
 		renderApp("/devices?pair=K7QM-3XRP", server.fetch);
 		const request = await findCard("K7QM-3XRP");
-		fireEvent.change(within(request).getByLabelText("Device name"), { target: { value: "studio-mac" } });
+		expect(request.hasAttribute("data-pairing-match")).toBe(false);
+		expect(within(request).getByText("Approves a new device.")).toBeTruthy();
+		// No devices yet, so nothing to continue.
+		expect(within(request).queryByLabelText("Continue an existing device instead")).toBeNull();
+		fireEvent.change(within(request).getByLabelText("Device name"), { target: { value: "  Studio Mac  " } });
 		fireEvent.click(within(request).getByRole("button", { name: "Approve K7QM-3XRP" }));
 
-		expect(await screen.findByText(/Approved studio-mac\./)).toBeTruthy();
+		expect(await screen.findByText("Approved Studio Mac.")).toBeTruthy();
+		// Both fields, explicitly, and the name trimmed.
 		expect(server.mutations).toEqual([
-			{ method: "POST", path: "/api/v1/pairings/K7QM-3XRP/approve", body: { name: "studio-mac" }, json: true },
+			{ method: "POST", path: "/api/v1/pairings/K7QM-3XRP/approve", body: { name: "Studio Mac", continues: null }, json: true },
 		]);
 		await waitFor(() => expect(screen.queryByRole("region", { name: "Pairing request K7QM-3XRP" })).toBeNull());
-		expect(await within(deviceTable()).findByText("studio-mac")).toBeTruthy();
+		const row = await waitFor(() => {
+			const found = document.querySelector<HTMLElement>('[data-device-name="Studio Mac"]');
+			if (!found) throw new Error("no row");
+			return found;
+		});
+		expect(row.dataset.device).toMatch(/^[0-9a-f-]{36}$/);
 		expect(screen.getByText(/No pending requests\./)).toBeTruthy();
 		// The deep link's request was handled here, so it isn't reported missing.
 		expect(screen.queryByText(/No pending request with code/)).toBeNull();
 	});
 
-	it("rejects an invalid device name before sending", async () => {
-		renderApp("/devices", signedIn({ pairings: [pairing("K7QM-3XRP", "studio")] }).fetch);
-		const request = await findCard("K7QM-3XRP");
-		fireEvent.change(within(request).getByLabelText("Device name"), { target: { value: "my mac" } });
-		expect(within(request).getByText(/Use 1–64 letters/)).toBeTruthy();
-		expect((within(request).getByRole("button", { name: "Approve K7QM-3XRP" }) as HTMLButtonElement).disabled).toBe(true);
+	it("lists a newly approved device once its machine has polled, without a reload", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const server = signedIn({ devices: [device("mini")], pairings: [pairing("K7QM-3XRP", "studio")] });
+		server.state.devicesOnPoll = true;
+		renderApp("/devices", server.fetch);
+		fireEvent.click(within(await findCard("K7QM-3XRP")).getByRole("button", { name: "Approve K7QM-3XRP" }));
+		expect(await screen.findByText("Approved studio.")).toBeTruthy();
+		await waitFor(() => expect(screen.queryByRole("region", { name: "Pairing request K7QM-3XRP" })).toBeNull());
+		// The machine has not polled yet, so the server lists no new device.
+		await nextPoll();
+		expect(document.querySelector('[data-device-name="studio"]')).toBeNull();
+		server.poll();
+		await nextPoll();
+		await waitFor(() => expect(document.querySelector('[data-device-name="studio"]')).toBeTruthy());
+		// Then the list stops refetching.
+		const listed = () => server.calls.filter((call) => call === "/api/v1/devices").length;
+		const count = listed();
+		await nextPoll();
+		await nextPoll();
+		expect(listed()).toBe(count);
 	});
 
-	it("requires ticking Replace for an existing device and sends replace: true", async () => {
-		const server = signedIn({ devices: [device("mini")], pairings: [pairing("K7QM-3XRP", "mini")] });
+	it("stops refetching the devices a while after an approval whose machine never polls", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true });
+		const server = signedIn({ pairings: [pairing("K7QM-3XRP", "studio")] });
+		server.state.devicesOnPoll = true;
 		renderApp("/devices", server.fetch);
-		const request = await findCard("K7QM-3XRP");
-		expect(within(request).getByText("A device named mini exists.")).toBeTruthy();
-		const approve = within(request).getByRole("button", { name: "Approve K7QM-3XRP" }) as HTMLButtonElement;
-		expect(approve.disabled).toBe(true);
-		fireEvent.click(within(request).getByRole("checkbox", { name: /Replace it/ }));
-		expect(approve.disabled).toBe(false);
-		fireEvent.click(approve);
-		expect(await screen.findByText(/Approved mini\./)).toBeTruthy();
-		expect(server.mutations[0]).toEqual({
-			method: "POST",
-			path: "/api/v1/pairings/K7QM-3XRP/approve",
-			body: { name: "mini", replace: true },
-			json: true,
+		fireEvent.click(within(await findCard("K7QM-3XRP")).getByRole("button", { name: "Approve K7QM-3XRP" }));
+		expect(await screen.findByText("Approved studio.")).toBeTruthy();
+		const listed = () => server.calls.filter((call) => call === "/api/v1/devices").length;
+		await nextPoll();
+		expect(listed()).toBeGreaterThan(2);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(APPROVED_WATCH_MS);
 		});
-		expect(server.state.devices.map((d) => [d.name, d.createdVia])).toEqual([["mini", "pairing"]]);
+		const count = listed();
+		await nextPoll();
+		await nextPoll();
+		expect(listed()).toBe(count);
 	});
 
-	it("shows the exists state when the server answers 409", async () => {
-		const server = signedIn({ pairings: [pairing("K7QM-3XRP", "mini")] });
+	it.each([
+		["blank", "   "],
+		["65 characters", "x".repeat(65)],
+		["a tab", "my\tmac"],
+		// A text input drops line breaks itself, so other control characters stand in for them.
+		["an escape character", "my\u001bmac"],
+		["NEL (U+0085)", "my\u0085mac"],
+		["a line separator", "my\u2028mac"],
+	])("rejects a name that is %s before sending", async (_label, name) => {
+		const server = signedIn({ pairings: [pairing("K7QM-3XRP", "studio")] });
 		renderApp("/devices", server.fetch);
 		const request = await findCard("K7QM-3XRP");
-		await screen.findByText("No devices yet");
-		// Another browser adds the device before this one approves.
-		server.state.devices.push(device("mini"));
-		fireEvent.click(within(request).getByRole("button", { name: "Approve K7QM-3XRP" }));
-		expect(await within(request).findByText("A device named mini exists.")).toBeTruthy();
-		expect(server.state.pairings).toHaveLength(1);
+		const input = within(request).getByLabelText("Device name");
+		fireEvent.change(input, { target: { value: name } });
+		expect(within(request).getByText("Use 1-64 characters, without control characters.")).toBeTruthy();
+		expect(input.getAttribute("aria-invalid")).toBe("true");
+		expect(approveButton("K7QM-3XRP").disabled).toBe(true);
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(server.mutations).toEqual([]);
+	});
 
-		fireEvent.click(within(card("K7QM-3XRP")).getByRole("checkbox", { name: /Replace it/ }));
-		fireEvent.click(within(card("K7QM-3XRP")).getByRole("button", { name: "Approve K7QM-3XRP" }));
-		expect(await screen.findByText(/Approved mini\./)).toBeTruthy();
-		expect(server.mutations.map((m) => m.body)).toEqual([{ name: "mini" }, { name: "mini", replace: true }]);
+	it.each([
+		["spaces", "Minhu's MacBook Pro"],
+		["non-ASCII characters", "工作站 – café ☕"],
+		["64 characters", "é".repeat(64)],
+		["64 emoji", "😀".repeat(64)],
+	])("accepts a name with %s", async (_label, name) => {
+		const server = signedIn({ pairings: [pairing("K7QM-3XRP", "studio")] });
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		fireEvent.change(within(request).getByLabelText("Device name"), { target: { value: name } });
+		expect(within(request).queryByText("Use 1-64 characters, without control characters.")).toBeNull();
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await screen.findByText(`Approved ${name}.`)).toBeTruthy();
+		expect(server.mutations[0]?.body).toEqual({ name, continues: null });
+	});
+
+	it("continues the device a request was recognized as by its key", async () => {
+		const server = signedIn({
+			devices: [device(STUDIO_ID, { name: "Studio Mac", hasKey: true }), device("mini")],
+			pairings: [pairing("K7QM-3XRP", "studio", 30_000, { match: { id: STUDIO_ID, name: "Studio Mac", by: "key", active: true } })],
+		});
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		expect(request.dataset.pairingMatch).toBe(STUDIO_ID);
+		expect(request.querySelector("[data-pairing-recognized]")?.textContent).toBe("Recognized as Studio Mac by its device key");
+		const keep = within(request).getByRole("radio", { name: /Continue Studio Mac/ }) as HTMLInputElement;
+		expect(keep.checked).toBe(true);
+		expect(within(request).getByText("Same history; its current token stops working.")).toBeTruthy();
+		expect((within(request).getByRole("radio", { name: "Add as a new device" }) as HTMLInputElement).checked).toBe(false);
+		// Continuing pre-fills the device's name, not the requested one.
+		expect((within(request).getByLabelText("Device name") as HTMLInputElement).value).toBe("Studio Mac");
+
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await screen.findByText("Approved Studio Mac; it continues the existing device.")).toBeTruthy();
+		expect(server.mutations).toEqual([
+			{ method: "POST", path: "/api/v1/pairings/K7QM-3XRP/approve", body: { name: "Studio Mac", continues: STUDIO_ID }, json: true },
+		]);
+		expect(server.state.devices.map((d) => d.id).sort()).toEqual(["mini", STUDIO_ID].sort());
+	});
+
+	it("adds a recognized request as a new device when the user switches", async () => {
+		const server = signedIn({
+			retiredDevices: [{ id: "old-mac", name: "Old Mac" }],
+			pairings: [pairing("K7QM-3XRP", "studio", 30_000, { match: { id: "old-mac", name: "Old Mac", by: "token", active: false } })],
+		});
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		expect(request.querySelector("[data-pairing-recognized]")?.textContent).toBe("Recognized as Old Mac by its current token");
+		// Without a token there is nothing to stop.
+		expect(within(request).getByText("Same history.")).toBeTruthy();
+		const input = within(request).getByLabelText("Device name") as HTMLInputElement;
+		expect(input.value).toBe("Old Mac");
+
+		fireEvent.click(within(request).getByRole("radio", { name: "Add as a new device" }));
+		expect(input.value).toBe("studio");
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await screen.findByText("Approved studio.")).toBeTruthy();
+		expect(server.mutations[0]?.body).toEqual({ name: "studio", continues: null });
+		expect(server.state.retiredDevices).toEqual([{ id: "old-mac", name: "Old Mac" }]);
+	});
+
+	it.each([
+		["light", false],
+		["dark", true],
+	] as const)("shows the recognized device in the %s theme", async (theme, dark) => {
+		installMatchMedia(dark);
+		renderApp(
+			"/devices",
+			signedIn({
+				devices: [device(STUDIO_ID, { name: "Studio Mac" })],
+				pairings: [pairing("K7QM-3XRP", "studio", 30_000, { match: { id: STUDIO_ID, name: "Studio Mac", by: "key", active: true } })],
+			}).fetch,
+		);
+		const request = await findCard("K7QM-3XRP");
+		expect(document.documentElement.dataset.theme).toBe(theme);
+		// Theme tokens only, so both themes style it.
+		const recognized = request.querySelector<HTMLElement>("[data-pairing-recognized]")!;
+		expect(recognized.className).toContain("bg-soft");
+		expect(recognized.className).not.toMatch(/(?:bg|text)-(?:white|black|gray|slate)/);
+		expect(within(request).getByRole("radio", { name: /Continue Studio Mac/ })).toBeTruthy();
+	});
+
+	it("re-fills the name when the choice changes, unless the user edited it", async () => {
+		renderApp(
+			"/devices",
+			signedIn({
+				devices: [device(STUDIO_ID, { name: "Studio Mac" })],
+				pairings: [pairing("K7QM-3XRP", "studio", 30_000, { match: { id: STUDIO_ID, name: "Studio Mac", by: "key", active: true } })],
+			}).fetch,
+		);
+		const request = await findCard("K7QM-3XRP");
+		const input = within(request).getByLabelText("Device name") as HTMLInputElement;
+		const keep = within(request).getByRole("radio", { name: /Continue Studio Mac/ });
+		const fresh = within(request).getByRole("radio", { name: "Add as a new device" });
+		fireEvent.click(fresh);
+		expect(input.value).toBe("studio");
+		fireEvent.click(keep);
+		expect(input.value).toBe("Studio Mac");
+
+		fireEvent.change(input, { target: { value: "Studio" } });
+		fireEvent.click(fresh);
+		expect(input.value).toBe("Studio");
+		fireEvent.click(keep);
+		expect(input.value).toBe("Studio");
+		// Typed back to what the choice fills in, it follows the choice again.
+		fireEvent.change(input, { target: { value: "Studio Mac" } });
+		fireEvent.click(fresh);
+		expect(input.value).toBe("studio");
+	});
+
+	it("continues an existing device chosen for an unrecognized request", async () => {
+		const server = signedIn({
+			devices: [device(STUDIO_ID, { name: "MacBook" }), device(OTHER_ID, { name: "MacBook" }), device("mini")],
+			pairings: [pairing("K7QM-3XRP", "studio")],
+		});
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		const select = (await within(request).findByLabelText("Continue an existing device instead")) as HTMLSelectElement;
+		expect(select.value).toBe("");
+		// Devices that share a name show the start of their ids.
+		expect([...select.options].map((option) => option.textContent)).toEqual([
+			"New device",
+			`MacBook (${OTHER_ID.slice(0, 8)})`,
+			`MacBook (${STUDIO_ID.slice(0, 8)})`,
+			"mini",
+		]);
+		const input = within(request).getByLabelText("Device name") as HTMLInputElement;
+		expect(input.value).toBe("studio");
+
+		fireEvent.change(select, { target: { value: STUDIO_ID } });
+		expect(input.value).toBe("MacBook");
+		expect(within(request).getByText("Continues MacBook; its current token stops working.")).toBeTruthy();
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await screen.findByText("Approved MacBook; it continues the existing device.")).toBeTruthy();
+		expect(server.mutations[0]?.body).toEqual({ name: "MacBook", continues: STUDIO_ID });
+	});
+
+	it("goes back to a new device when the select is cleared", async () => {
+		const server = signedIn({ devices: [device("mini")], pairings: [pairing("K7QM-3XRP", "studio")] });
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		const select = (await within(request).findByLabelText("Continue an existing device instead")) as HTMLSelectElement;
+		fireEvent.change(select, { target: { value: "mini" } });
+		expect((within(request).getByLabelText("Device name") as HTMLInputElement).value).toBe("mini");
+		fireEvent.change(select, { target: { value: "" } });
+		expect((within(request).getByLabelText("Device name") as HTMLInputElement).value).toBe("studio");
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await screen.findByText("Approved studio.")).toBeTruthy();
+		expect(server.mutations[0]?.body).toEqual({ name: "studio", continues: null });
+	});
+
+	it("says so when the device to continue is gone", async () => {
+		const server = signedIn({ devices: [device("mini")], pairings: [pairing("K7QM-3XRP", "studio")] });
+		renderApp("/devices", server.fetch);
+		const request = await findCard("K7QM-3XRP");
+		fireEvent.change(await within(request).findByLabelText("Continue an existing device instead"), { target: { value: "mini" } });
+		// Another browser forgets it meanwhile; the fake keeps no record of it at all.
+		server.state.devices = [];
+		fireEvent.click(approveButton("K7QM-3XRP"));
+		expect(await within(request).findByRole("alert")).toHaveProperty(
+			"textContent",
+			"That device no longer exists. Choose another, or add a new device.",
+		);
+		expect(server.state.pairings).toHaveLength(1);
 	});
 
 	it("denies a request", async () => {
@@ -288,16 +504,17 @@ describe("devices page", () => {
 		expect(approveButton("K7QM-3XRP").disabled).toBe(false);
 	});
 
-	it("unticks Replace when the name changes", async () => {
-		renderApp("/devices", signedIn({ devices: [device("mini")], pairings: [pairing("K7QM-3XRP", "mini")] }).fetch);
-		const request = await findCard("K7QM-3XRP");
-		fireEvent.click(within(request).getByRole("checkbox", { name: /Replace it/ }));
-		expect(approveButton("K7QM-3XRP").disabled).toBe(false);
-		const input = within(request).getByLabelText("Device name");
-		fireEvent.change(input, { target: { value: "mini2" } });
-		fireEvent.change(input, { target: { value: "mini" } });
-		expect((within(request).getByRole("checkbox", { name: /Replace it/ }) as HTMLInputElement).checked).toBe(false);
-		expect(approveButton("K7QM-3XRP").disabled).toBe(true);
+	it("copies a device's whole id", async () => {
+		const writeText = vi.fn(async (_text: string) => {});
+		Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+		try {
+			renderApp("/devices", signedIn({ devices: [device(STUDIO_ID, { name: "Studio Mac" })] }).fetch);
+			fireEvent.click(await screen.findByRole("button", { name: "Copy the id of Studio Mac" }));
+			expect(await screen.findByRole("button", { name: "Copied the id of Studio Mac" })).toBeTruthy();
+			expect(writeText).toHaveBeenCalledWith(STUDIO_ID);
+		} finally {
+			Reflect.deleteProperty(navigator, "clipboard");
+		}
 	});
 
 	it("wraps a long unbroken host instead of overflowing", async () => {
@@ -317,7 +534,95 @@ describe("devices page", () => {
 			return cell;
 		});
 		expect(lastHost.textContent).toBe(host);
-		expect(lastHost.classList.contains("break-all")).toBe(true);
+		// Wraps at hyphens and dots first, so `wangminhus-Mini` breaks after its hyphen, not inside a word; a host
+		// with nowhere to wrap still breaks inside the column rather than widening the table.
+		expect(lastHost.classList.contains("break-all")).toBe(false);
+		expect(lastHost.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
+	});
+
+	it("revokes by id, encoding it in the URL", async () => {
+		const server = signedIn({ devices: [device("lab/pi #2", { name: "Lab Pi" }), device("mini")] });
+		renderApp("/devices", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: "Revoke Lab Pi" }));
+		const dialog = screen.getByRole("dialog", { name: "Revoke Lab Pi?" });
+		expect(dialog.textContent).toContain("lab/pi #2");
+		fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
+		expect(await screen.findByText("Revoked Lab Pi.")).toBeTruthy();
+		expect(server.mutations).toEqual([{ method: "DELETE", path: "/api/v1/devices/lab%2Fpi%20%232", body: undefined, json: false }]);
+		await waitFor(() => expect(document.querySelector('[data-device-name="Lab Pi"]')).toBeNull());
+		expect(document.querySelector('[data-device="mini"]')).toBeTruthy();
+	});
+
+	it("renames a device by id", async () => {
+		const server = signedIn({ devices: [device(STUDIO_ID, { name: "MacBook" }), device("mini")] });
+		renderApp("/devices", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename MacBook" }));
+		const dialog = screen.getByRole("dialog", { name: "Rename MacBook" });
+		const input = within(dialog).getByLabelText("Device name") as HTMLInputElement;
+		expect(input.value).toBe("MacBook");
+		expect(dialog.textContent).toContain(STUDIO_ID);
+		fireEvent.change(input, { target: { value: " Studio Mac " } });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+		expect(await screen.findByText("Renamed MacBook to Studio Mac.")).toBeTruthy();
+		expect(screen.queryByRole("dialog")).toBeNull();
+		expect(server.mutations).toEqual([{ method: "PATCH", path: `/api/v1/devices/${STUDIO_ID}`, body: { name: "Studio Mac" }, json: true }]);
+		const row = await waitFor(() => {
+			const found = document.querySelector<HTMLElement>(`[data-device="${STUDIO_ID}"][data-device-name="Studio Mac"]`);
+			if (!found) throw new Error("not renamed yet");
+			return found;
+		});
+		expect(within(row).getByRole("button", { name: "Rename Studio Mac" })).toBeTruthy();
+	});
+
+	it.each([
+		["blank", ""],
+		["65 characters", "x".repeat(65)],
+		["a control character", "Studio\u0007"],
+	])("will not rename to a name that is %s", async (_label, name) => {
+		const server = signedIn({ devices: [device("mini")] });
+		renderApp("/devices", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename mini" }));
+		const dialog = screen.getByRole("dialog", { name: "Rename mini" });
+		fireEvent.change(within(dialog).getByLabelText("Device name"), { target: { value: name } });
+		expect(within(dialog).getByText("Use 1-64 characters, without control characters.")).toBeTruthy();
+		const save = within(dialog).getByRole("button", { name: "Rename" }) as HTMLButtonElement;
+		expect(save.disabled).toBe(true);
+		fireEvent.submit(within(dialog).getByLabelText("Device name"));
+		expect(server.mutations).toEqual([]);
+	});
+
+	it("says so when the device to rename is gone, and keeps the dialog open", async () => {
+		const server = signedIn({ devices: [device("mini"), device("laptop")] });
+		renderApp("/devices", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename mini" }));
+		const dialog = screen.getByRole("dialog", { name: "Rename mini" });
+		server.state.devices = server.state.devices.filter((d) => d.id !== "mini");
+		fireEvent.change(within(dialog).getByLabelText("Device name"), { target: { value: "mini 2" } });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+		expect(await within(dialog).findByRole("alert")).toHaveProperty("textContent", "This device no longer exists.");
+		expect(screen.getByRole("dialog", { name: "Rename mini" })).toBeTruthy();
+		// The list refreshes behind the dialog.
+		await waitFor(() => expect(document.querySelector('[data-device="mini"]')).toBeNull());
+		fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("shows the server's refusal of a name", async () => {
+		const server = signedIn({ devices: [device("mini")] });
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method === "PATCH") return new Response(JSON.stringify({ error: "invalid_name" }), { status: 400 });
+			return server.fetch(input, init);
+		}) as typeof fetch;
+		renderApp("/devices", fetchImpl);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename mini" }));
+		const dialog = screen.getByRole("dialog", { name: "Rename mini" });
+		fireEvent.change(within(dialog).getByLabelText("Device name"), { target: { value: "mini 2" } });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+		expect(await within(dialog).findByRole("alert")).toHaveProperty(
+			"textContent",
+			"The server refused this name. Use 1-64 characters, without control characters.",
+		);
 	});
 
 	it("asks before revoking a device, then sends DELETE", async () => {
@@ -336,6 +641,47 @@ describe("devices page", () => {
 		expect(server.mutations).toEqual([{ method: "DELETE", path: "/api/v1/devices/mini", body: undefined, json: false }]);
 		await waitFor(() => expect(document.querySelector('[data-device="mini"]')).toBeNull());
 		expect(document.querySelector('[data-device="laptop"]')).toBeTruthy();
+	});
+
+	it("closes the rename dialog on Escape without renaming", async () => {
+		const server = signedIn({ devices: [device("mini")] });
+		renderApp("/devices", server.fetch);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename mini" }));
+		fireEvent.change(within(screen.getByRole("dialog", { name: "Rename mini" })).getByLabelText("Device name"), { target: { value: "mini 2" } });
+		fireEvent.keyDown(window, { key: "Escape" });
+		expect(screen.queryByRole("dialog")).toBeNull();
+		expect(server.mutations).toEqual([]);
+		expect(document.querySelector('[data-device="mini"]')?.getAttribute("data-device-name")).toBe("mini");
+	});
+
+	it.each([
+		["succeeds", true, "Renamed mini to mini 2."],
+		["fails", false, "Could not rename mini: the server refused the name."],
+	])("says so when a rename the dialog was closed during %s", async (_label, succeeds, text) => {
+		const server = signedIn({ devices: [device("mini")] });
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (init?.method !== "PATCH") return server.fetch(input, init);
+			await held;
+			return succeeds ? server.fetch(input, init) : new Response(JSON.stringify({ error: "invalid_name" }), { status: 400 });
+		}) as typeof fetch;
+		renderApp("/devices", fetchImpl);
+		fireEvent.click(await screen.findByRole("button", { name: "Rename mini" }));
+		const dialog = screen.getByRole("dialog", { name: "Rename mini" });
+		fireEvent.change(within(dialog).getByLabelText("Device name"), { target: { value: "mini 2" } });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+		fireEvent.keyDown(window, { key: "Escape" });
+		expect(screen.queryByRole("dialog")).toBeNull();
+		await act(async () => {
+			release();
+			await held;
+		});
+		expect(await screen.findByText(text)).toBeTruthy();
+		expect(screen.queryByRole("dialog")).toBeNull();
+		if (succeeds) await waitFor(() => expect(document.querySelector('[data-device="mini"]')?.getAttribute("data-device-name")).toBe("mini 2"));
 	});
 
 	it("closes the confirmation on Escape", async () => {
@@ -455,7 +801,7 @@ describe("browser sessions", () => {
 		expect(document.querySelector("[data-browser-sessions]")).toBeNull();
 		expect(screen.queryByText("pika has no authentication")).toBeNull();
 		expect(await findCard("K7QM-3XRP")).toBeTruthy();
-		expect(await within(await waitFor(deviceTable)).findByText("mini")).toBeTruthy();
+		await waitFor(() => expect(within(deviceTable()).getByRole("button", { name: "Revoke mini" })).toBeTruthy());
 		expect(server.calls.some((call) => call.includes("auth/sessions"))).toBe(false);
 		expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
 	});

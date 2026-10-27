@@ -204,6 +204,67 @@ describe("active sessions page", () => {
 	});
 });
 
+describe("device names", () => {
+	const MAC_A = "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a";
+	const MAC_B = "0a9b8c7d-1111-4222-8333-444455556666";
+
+	it("groups sessions by device id, headed and sorted by the device's name", async () => {
+		const server = createFakeServer({
+			online: [
+				onlineSession("s-1", { device: MAC_A, deviceName: "MacBook", host: "macbook-a.local", onlineMs: 60_000 }),
+				onlineSession("s-2", { device: MAC_B, deviceName: "MacBook", host: "macbook-b.local", onlineMs: 50_000 }),
+				onlineSession("s-3", { device: "zz-legacy", deviceName: "alpha box", onlineMs: 40_000 }),
+				onlineSession("s-4", { device: "old-server", deviceName: undefined, host: "old-server", onlineMs: 30_000 }),
+				onlineSession("s-5", { device: MAC_A, deviceName: "MacBook", host: "macbook-a.local", onlineMs: 20_000 }),
+			],
+		});
+		renderApp("/active", server.fetch);
+		await waitFor(() => expect(rowIds()).toHaveLength(5));
+		const groups = [...document.querySelectorAll<HTMLElement>("[data-relay-device]")];
+		// By name case-insensitively, then id; a device without a name goes by its id.
+		expect(groups.map((group) => [group.dataset.relayDevice, group.dataset.deviceName])).toEqual([
+			["zz-legacy", "alpha box"],
+			[MAC_B, "MacBook"],
+			[MAC_A, "MacBook"],
+			["old-server", "old-server"],
+		]);
+		expect(groups[0].getAttribute("aria-label")).toBe("Sessions on alpha box");
+		expect(within(groups[0]).getByText("alpha box")).toBeTruthy();
+		expect(within(groups[0]).queryByText("zz-legacy")).toBeNull();
+		expect(within(groups[2]).getByText("2 sessions")).toBeTruthy();
+		expect(within(groups[2]).getByText("macbook-a.local")).toBeTruthy();
+		expect(rowIds()).toEqual(["s-3", "s-2", "s-1", "s-5", "s-4"]);
+		// A host the same as the name or id is not repeated.
+		expect(within(groups[3]).getAllByText("old-server")).toHaveLength(1);
+	});
+
+	it("names devices in messages, falling back to their ids", async () => {
+		const server = createFakeServer({
+			relayEvents: [
+				relayEvent("m1", 60_000, {
+					from: { kind: "session", sessionId: "s-a", device: MAC_A, deviceName: "Studio Mac", name: "Planner" },
+					to: { sessionId: "s-b", device: "laptop", name: "Reviewer" },
+				}),
+			],
+		});
+		renderApp("/active", server.fetch);
+		await waitFor(() => expect(eventIds()).toEqual(["m1"]));
+		expect(within(event("m1")).getByText("Planner on Studio Mac")).toBeTruthy();
+		expect(within(event("m1")).getByText("Reviewer on laptop")).toBeTruthy();
+	});
+
+	it("names the device in the composer and its result", async () => {
+		const server = createFakeServer({ online: [onlineSession("s-a", { name: "Alpha", device: MAC_A, deviceName: "Studio Mac" })] });
+		renderApp("/active", server.fetch);
+		const { dialog, text } = await openComposer("Alpha");
+		expect(dialog.textContent).toContain("Studio Mac");
+		expect(dialog.textContent).not.toContain(MAC_A);
+		fireEvent.change(text, { target: { value: "hi" } });
+		fireEvent.click(within(dialog).getByRole("button", { name: "Send" }));
+		expect(await within(dialog).findByText("Delivered to Alpha on Studio Mac.")).toBeTruthy();
+	});
+});
+
 describe("message composer", () => {
 	it("sends with Ctrl+Enter and shows that the message was delivered", async () => {
 		const server = createFakeServer({ online: [onlineSession("s-a", { name: "Alpha" })] });

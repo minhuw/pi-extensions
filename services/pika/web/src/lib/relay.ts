@@ -1,6 +1,7 @@
 // Relay on the web: availability, the shared queries, and labels for sessions and messages (docs/RELAY.md).
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { ApiError, useApi } from "./api";
+import { deviceLabel } from "./devices";
 import { formatDuration } from "./format";
 import type { Health, OnlineSession, RelayRejection, RelaySender, RelayTarget } from "./types";
 
@@ -103,16 +104,19 @@ export function sessionLabel(session: { id?: string; sessionId?: string; name?: 
 }
 
 export function senderLabel(sender: RelaySender): string {
-	return sender.kind === "web" ? "You (web)" : `${sessionLabel(sender)} on ${sender.device}`;
+	return sender.kind === "web" ? "You (web)" : `${sessionLabel(sender)} on ${deviceLabel(sender)}`;
 }
 
 export function targetLabel(target: RelayTarget): string {
 	const label = sessionLabel(target);
-	return target.device ? `${label} on ${target.device}` : label;
+	return target.device ? `${label} on ${deviceLabel({ device: target.device, deviceName: target.deviceName })}` : label;
 }
 
-/** Online sessions by device, devices by name, and within one the oldest connection first, so newcomers append. */
-export function groupByDevice(items: readonly OnlineSession[]): { device: string; sessions: OnlineSession[] }[] {
+/**
+ * Online sessions by device id, devices by name (case-insensitively, then id), and within one the oldest connection
+ * first, so newcomers append. A group's name is its newest session's, in case a rename lands between them.
+ */
+export function groupByDevice(items: readonly OnlineSession[]): { device: string; name: string; sessions: OnlineSession[] }[] {
 	const groups = new Map<string, OnlineSession[]>();
 	for (const item of items) {
 		const group = groups.get(item.device);
@@ -120,11 +124,15 @@ export function groupByDevice(items: readonly OnlineSession[]): { device: string
 		else groups.set(item.device, [item]);
 	}
 	return [...groups.entries()]
-		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([device, sessions]) => ({
-			device,
-			sessions: sessions.sort((a, b) => Date.parse(a.connectedAt) - Date.parse(b.connectedAt) || a.id.localeCompare(b.id)),
-		}));
+		.map(([device, sessions]) => {
+			sessions.sort((a, b) => Date.parse(a.connectedAt) - Date.parse(b.connectedAt) || a.id.localeCompare(b.id));
+			return { device, name: deviceLabel(sessions[sessions.length - 1]), sessions };
+		})
+		.sort((a, b) => {
+			const x = a.name.toLowerCase();
+			const y = b.name.toLowerCase();
+			return x < y ? -1 : x > y ? 1 : a.device < b.device ? -1 : a.device > b.device ? 1 : 0;
+		});
 }
 
 /** How long ago `since` was, to the minute: "<1m", "12m", "1h 5m". */

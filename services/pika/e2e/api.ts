@@ -61,7 +61,9 @@ export interface Entry {
 
 export interface SessionSummary {
 	id: string;
+	/** The device id; `deviceName` is its display name. */
 	device: string;
+	deviceName: string;
 	project: string;
 	title: string;
 	entryCount: number;
@@ -94,12 +96,17 @@ export interface ModelRequest {
 }
 
 export interface RunDetail {
-	run: { runId: string; device: string; repo: string; title: string; status: string; stepCount: number };
+	run: { runId: string; device: string; deviceName: string; repo: string; title: string; status: string; stepCount: number };
 	goal?: string;
 	plan?: string;
 	events: { seq: number; t: string }[];
 	steps: { key: string; id: string; role: string; status: string; sessionId?: string }[];
 }
+
+/** A device with a token, as `GET devices` lists it. */
+export interface Device { id: string; name: string; createdAt: string; createdVia: string; lastSeenAt?: string; lastHost?: string; hasKey: boolean }
+
+export const devices = async (api: ReadApi): Promise<Device[]> => (await api.get<{ items: Device[] }>("devices"))?.items ?? [];
 
 /** Every entry of a session, paged by seq. */
 export async function allEntries(api: ReadApi, sessionId: string): Promise<Entry[] | undefined> {

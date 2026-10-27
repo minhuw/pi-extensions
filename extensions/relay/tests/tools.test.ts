@@ -57,6 +57,32 @@ it("lists the other online sessions, with filters", async () => {
 	expect(relay.sessionRequests.every((request) => request.authorization === "Bearer relay-test-token")).toBe(true);
 });
 
+it("shows each device by its name, and filters by the device name or id, ignoring case", async () => {
+	relay.device = "7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47";
+	relay.deviceName = "Minhu's MacBook Pro";
+	const a = await online();
+	const b = await online();
+	callTool(a, "relay_list", {});
+	callTool(a, "relay_list", { device: "minhu's macbook PRO" });
+	callTool(a, "relay_list", { device: "7F9C2BA4-E88F-4A1B-9A3C-0D2F6E1B5C47" });
+	callTool(a, "relay_list", { device: "Minhu" });
+	for (const prompt of ["all", "by name", "by id", "by part of the name"]) await a.session.prompt(prompt);
+	const line = new RegExp(`^${b.session.sessionId} · Minhu's MacBook Pro · project project · untitled · idle · relay-test/test · online \\d+s$`);
+	const [all, byName, byId, partial] = results(a, "relay_list");
+	expect(all!.text.split("\n")[1]).toMatch(line);
+	expect(byName!.text.split("\n")).toEqual(["1 online pi session matching:", expect.stringMatching(line)]);
+	expect(byId!.text.split("\n")).toEqual(["1 online pi session matching:", expect.stringMatching(line)]);
+	expect(partial).toEqual({ text: "No other pi session is online that matches.", isError: false });
+
+	callTool(a, "relay_send", { to: b.session.sessionId, text: "hello" });
+	b.faux.setResponses([fauxAssistantMessage("b got it")]);
+	await a.session.prompt("send");
+	expect(results(a, "relay_send")[0]!.text).toMatch(new RegExp(`^Delivered message msg-1 to pi session ${b.session.sessionId} on Minhu's MacBook Pro\\. `));
+	await waitFor(() => texts(b.session, "assistant").includes("b got it"), 5_000, "b's turn");
+	const received = b.session.messages.find((message) => message.role === "custom") as { content: string } | undefined;
+	expect(received?.content.split("\n")[0]).toBe(`[relay] Message msg-1 from pi session ${a.session.sessionId} ("all") on Minhu's MacBook Pro, project project:`);
+});
+
 it("reports every outcome of relay_send and keeps them for relay_status", async () => {
 	const a = await online();
 	const b = await online();

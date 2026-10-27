@@ -105,6 +105,25 @@ describe("Herder runs", () => {
 		expect(within(failed).getByText("1 step")).toBeTruthy();
 	});
 
+	it("shows the device's name, else its id", async () => {
+		const named = runDetail();
+		named.run = { ...named.run, device: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", deviceName: "Studio Mac" };
+		const unnamed = runDetail();
+		unnamed.run = { ...unnamed.run, runId: "r-2", title: "Old server run", device: "mini", deviceName: undefined };
+		const first = renderApp("/runs", createFakeServer({ runs: [named, unnamed] }).fetch);
+		const row = (await screen.findByText("Add pika search")).closest<HTMLElement>("[data-run-row]")!;
+		expect(within(row).getByText("Studio Mac")).toBeTruthy();
+		expect(within(row).queryByText("4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a")).toBeNull();
+		const old = screen.getByText("Old server run").closest<HTMLElement>("[data-run-row]")!;
+		expect(within(old).getByText("mini")).toBeTruthy();
+		first.unmount();
+
+		renderApp(`/runs/${RUN}`, createFakeServer({ runs: [named] }).fetch);
+		await screen.findByRole("heading", { name: "Add pika search" });
+		const device = screen.getByText("Device", { selector: "dt span" }).closest("dt")!.nextElementSibling as HTMLElement;
+		expect(device.textContent).toBe("Studio Mac");
+	});
+
 	it("shows a run's properties, goal, plan, timeline, checks, integrations, verification, decisions, and delivery", async () => {
 		renderApp(`/runs/${RUN}`, createFakeServer({ runs: [runDetail()] }).fetch);
 		expect(await screen.findByRole("heading", { name: "Add pika search" })).toBeTruthy();

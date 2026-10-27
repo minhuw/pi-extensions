@@ -1,4 +1,4 @@
-// Helpers for the devices page: pairing codes, device names, and browser descriptions.
+// Helpers for devices: pairing codes, device names and labels, and browser descriptions.
 
 /** Pairing codes match case-insensitively, with or without the hyphen. */
 export function normalizePairingCode(code: string): string {
@@ -20,11 +20,40 @@ export function orderPairings<T extends { code: string; requestedAt: string }>(
 	return { pinned, others: sorted.filter((item) => item !== pinned) };
 }
 
-const DEVICE_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+export const DEVICE_NAME_MAX = 64;
 
-/** The server's rule for device names: 1–64 characters of `[A-Za-z0-9._-]`. */
+// Control characters (Cc, which includes U+0085), the line and paragraph separators, and lone surrogates, which are
+// not Unicode scalar values and so cannot be sent.
+const NAME_FORBIDDEN = /[\p{Cc}\u2028\u2029\p{Cs}]/u;
+
+export const DEVICE_NAME_RULE = "Use 1-64 characters, without control characters.";
+
+/**
+ * The server's rule for device names: after trimming whitespace at both ends, 1–64 characters (code points, not
+ * UTF-16 units or bytes), none of them control characters or U+2028/U+2029.
+ */
 export function isValidDeviceName(name: string): boolean {
-	return DEVICE_NAME.test(name);
+	const trimmed = name.trim();
+	const length = [...trimmed].length;
+	return length >= 1 && length <= DEVICE_NAME_MAX && !NAME_FORBIDDEN.test(trimmed);
+}
+
+/** What to call a device: its name, or its id when the server sent none (servers older than 0.4). */
+export function deviceLabel(item: { device: string; deviceName?: string | null }): string {
+	return item.deviceName || item.device;
+}
+
+/**
+ * Filter options for devices: the id as value, the name as label, with the first 8 characters of the id appended in
+ * parentheses when two devices share a name.
+ */
+export function deviceOptions(devices: readonly { id: string; name: string }[]): { value: string; label: string }[] {
+	const counts = new Map<string, number>();
+	for (const item of devices) counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+	return devices.map((item) => ({
+		value: item.id,
+		label: (counts.get(item.name) ?? 0) > 1 ? `${item.name} (${item.id.slice(0, 8)})` : item.name || item.id,
+	}));
 }
 
 /** Time left as `m:ss`, never below zero. */

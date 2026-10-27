@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, line_text, page};
+use super::{DeviceNames, Page, Params, ReadError, ReadResult, cursor_int, cursor_str, iso, line_text, page};
 use crate::blobs::BlobStore;
 use crate::util::parse_json_lenient;
 
@@ -14,6 +14,8 @@ pub const MAX_RUN_LIMIT: i64 = 500;
 pub struct RunSummary {
     pub run_id: String,
     pub device: String,
+    /// Filled from the device's row after the query; see `DeviceNames`.
+    pub device_name: String,
     pub repo: String,
     pub title: String,
     /// `running` until `run.finished`, then that event's status.
@@ -79,6 +81,7 @@ fn run_summary(r: &Row) -> rusqlite::Result<RunSummary> {
     Ok(RunSummary {
         run_id: r.get(0)?,
         device: r.get(1)?,
+        device_name: String::new(),
         repo: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
         title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
         status: r.get::<_, Option<String>>(4)?.unwrap_or_else(|| "running".into()),
@@ -107,6 +110,8 @@ pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<RunSummary>> {
             .query_map([limit + 1], run_summary)?
             .collect::<rusqlite::Result<Vec<_>>>()?,
     };
+    let names = DeviceNames::load(conn)?;
+    let items = items.into_iter().map(|r| RunSummary { device_name: names.of(&r.device), ..r }).collect();
     Ok(page(items, limit, |r| vec![json!(r.last_at_ms), json!(r.run_id)]))
 }
 
@@ -120,6 +125,7 @@ pub fn detail(conn: &Connection, blobs: &BlobStore, run_id: &str) -> ReadResult<
         .query_row([run_id], |r| Ok((r.get::<_, i64>(10)?, run_summary(r)?)))
         .optional()?
         .ok_or(ReadError::NotFound)?;
+    let run = RunSummary { device_name: DeviceNames::load(conn)?.of(&run.device), ..run };
 
     let rows = conn
         .prepare_cached(

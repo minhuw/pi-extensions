@@ -8,7 +8,10 @@ pika stores every pi trajectory from several machines on one self-hosted service
 Single user, homelab, plain HTTP behind a reverse proxy.
 
 ## Identity
-- **Device:** authenticated by a bearer token; the server maps token → device name and stores only the token's SHA-256 hash. A device gets its token by pairing (see "Pairing"), or from `pika token create <name>`, which prints a new token once. `pika token list` and `pika token revoke <name>` manage them, as do the UI's Devices page and "Devices" routes.
+- **Device:** authenticated by a bearer token; the server maps token → device id and stores only the token's SHA-256 hash. A device gets its token by pairing (see "Pairing"), or from `pika token create <name>`, which creates a new device and prints its token once. `pika token list`, `revoke`, and `rename` manage them, as do the UI's Devices page and "Devices" routes.
+  - **Device id:** the identity, which never changes. Every `device` field and column (streams, requests, documents, sessions, Herder runs, relay) holds it. Devices from before 0.4 keep their old name as their id; new devices get a random UUID v4, lowercase and hyphenated. Every id matches `^[A-Za-z0-9._-]{1,64}$`, which ids in URLs and the CLI must match.
+  - **Device name:** a display label. Valid when, after trimming whitespace at both ends, it is 1–64 Unicode scalar values and contains no control characters (general category Cc, including U+0085) and no U+2028 or U+2029. Names need not be unique; the trimmed form is stored and returned. Responses carry it as `deviceName` next to `device`; a device without a `devices` row is named by its id.
+  - **Device key:** 32 random bytes as 64 lowercase hex characters, which the pi extension keeps per agent dir, so that a later pairing from the same install can continue its device. The server stores only `sha256(key)` (hex) and never logs or returns a key.
 - **Session:** the pi session header `id`. Its stream key is `session:<sessionId>`.
 - **Herder run:** stream key `herder:<runId>`. Its documents are keyed `herder:<runId>:goal.md` and `herder:<runId>:plan.md`.
 
@@ -116,10 +119,10 @@ Additions to the Herder journal (all optional fields, so old journals stay valid
 ## Read API (JSON; used by the web UI)
 Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` defaults to 50. Times in responses are ISO 8601 strings in UTC; time parameters accept ISO 8601, `YYYY-MM-DD`, or Unix milliseconds.
 
-- **`GET facets`** returns `{ devices: string[], projects: string[], models: string[] }`.
-- **`GET sessions`** accepts `device`, `project`, `model`, `from`, `to` (inclusive bounds on `lastAt`), `root` (`true` lists only sessions without a parent), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest `lastAt` first. `SessionSummary` is:
+- **`GET facets`** returns `{ devices: { id, name }[], projects: string[], models: string[] }`. `devices` are the devices of recorded sessions, sorted by name case-insensitively, then by id.
+- **`GET sessions`** accepts `device` (an id), `project`, `model`, `from`, `to` (inclusive bounds on `lastAt`), `root` (`true` lists only sessions without a parent), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest `lastAt` first. `SessionSummary` is:
   ```
-  { id, device, project, cwd, title, startedAt, lastAt, durationMs, entryCount,
+  { id, device, deviceName, project, cwd, title, startedAt, lastAt, durationMs, entryCount,
     models: string[],
     tokens: { input, output, cacheRead, cacheWrite }, cost,
     parentSessionId?, link?, childCount, herderRunId? }
@@ -157,9 +160,9 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **`GET sessions/:id/export`** returns the verbatim JSONL, byte-identical to the original file.
 - **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request. Block text is spliced in verbatim, so escapes of unpaired UTF-16 surrogates in context messages come back exactly as the client split them.
 - **Herder runs:**
-  - `GET herder/runs` accepts `cursor` and `limit`, and returns `{ items: RunSummary[], nextCursor }`. `RunSummary` is `{ runId, device, repo, title, status, verdict?, startedAt, lastAt, stepCount }`.
+  - `GET herder/runs` accepts `cursor` and `limit`, and returns `{ items: RunSummary[], nextCursor }`. `RunSummary` is `{ runId, device, deviceName, repo, title, status, verdict?, startedAt, lastAt, stepCount }`.
   - `GET herder/runs/:id` returns `{ run: RunSummary, goal?, plan?, events: [{ seq, t, at, data }], steps: [{ key, id, task?, role, label?, phase?, status, attempts, sessionId?, commit?, startedAt?, endedAt? }] }`.
-- **`GET search`** accepts `q`, `device`, `project`, `sort`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
+- **`GET search`** accepts `q`, `device` (an id), `project`, `sort`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
   - Every word of `q`, or `"quoted phrase"`, must match; operators and special characters are plain text.
   - `sort` is `newest` (default, by entry time, keyset-paged with `cursor`) or `relevance`.
   - `sort=relevance` returns a single page: the best `limit` (at most 100) matches by bm25 among the 20,000 newest matches that pass the `device` and `project` filters, with `nextCursor: null`. It does not page because bm25 scores change as documents are indexed; a `cursor` with `sort=relevance` is a 400.
@@ -209,7 +212,7 @@ Passwords are verified with argon2id: the `argon2` crate's default parameters, a
   - `DELETE auth/sessions/:id` → 204, or 404. Deleting the current session also clears the cookie.
   - `POST auth/sessions/revoke-all` deletes every session including the current one, clears the cookie, and returns 200 `{}`.
   - `GET me` → `{ authenticated, passwordRequired, authMode: "password" | "proxy" | "none" }`. In `proxy` and `none` modes `authenticated` is true and `passwordRequired` false.
-- **CSRF:** state-changing `/api/v1` routes use only POST with a JSON body (`{}` when there is nothing to send) or DELETE, and never GET. The JSON extractor rejects form posts with 415.
+- **CSRF:** state-changing `/api/v1` routes use only POST or PATCH with a JSON body (`{}` when there is nothing to send) or DELETE, and never GET. The JSON extractor rejects form posts with 415.
 
 ### Login rate limiting
 Kept in memory, so a restart resets it.
@@ -221,36 +224,46 @@ Kept in memory, so a restart resets it.
 - **Password checks:** at most 2 run at once. A login waits up to 5 s for one, then gets 429 `too_many_attempts` with `retryAfter: 1`. A check whose request was cancelled keeps its slot until argon2 finishes.
 
 ## Devices
-- **`tokens` table:** `name`, `hash`, `created_at`, `created_via` (`cli` | `pairing`, default `cli`), `last_seen_at`, and `last_host`. Ingest updates the last two at most once a minute per device, from the batch's `client.host`.
+- **`devices` table:** `id` (primary key), `name`, `key_hash` (unique, nullable), and `created_at`. Every path that creates a device inserts its row in the same transaction as its token. Revoking a device deletes its token only; the row, with its name and key, stays. The version 5 migration creates a row for every existing token (`id` and `name` = the token's name) and for every other distinct `streams.device` (`created_at` = its earliest stream), without a reindex.
+- **`tokens` table:** `name` (the device id; at most one token per device), `hash`, `created_at`, `created_via` (`cli` | `pairing`, default `cli`), `last_seen_at`, and `last_host`. Ingest updates the last two at most once a minute per device, from the batch's `client.host`.
 - **Routes** under `{base}/api/v1/`, authenticated:
-  - `GET devices` → `{ items: [{ name, createdAt, createdVia, lastSeenAt?, lastHost? }] }`, sorted by name.
-  - `DELETE devices/:name` → 204, or 404. Ingest refuses a revoked token immediately, and the device's relay connections close with 4401 at once.
-- **CLI:** `pika token list` prints one tab-separated line per device: name, creation time, `created_via`, last-seen time (`never`), and last host (`-`).
+  - `GET devices` → `{ items: [{ id, name, createdAt, createdVia, lastSeenAt?, lastHost?, hasKey }] }`, the devices with a token, sorted by name case-insensitively, then by id. `createdAt` and `createdVia` describe the token; `hasKey` says whether a device key is bound to the device.
+  - `PATCH devices/:id` with body `{ name }` → 200 `{ id, name }` (the stored, trimmed name), 400 `{ error: "invalid_name" }`, or 404 `{ error: "unknown_device" }`. It renames devices with or without a token.
+  - `DELETE devices/:id` → 204, or 404. Ingest refuses a revoked token immediately, and the device's relay connections close with 4401 at once.
+- **CLI:**
+  - `pika token create <name>` creates a new device with a new id; stdout is the token only, and stderr says `created device <id> (<name>)`.
+  - `pika token list` prints one tab-separated line per device with a token: id, name, creation time, `created_via`, last-seen time (`never`), and last host (`-`), sorted like `GET devices`.
+  - `pika token revoke <device>` and `pika token rename <device> <name>` take a device id (exact), or else a name that exactly one device has (for `revoke`, only devices with a token count). Several matches fail with an error naming their ids; none fails with `pika: no device "<device>"`. Revoke prints `revoked <name> (<id>)`.
 
 ## Pairing
 Device authorization, like OAuth's device flow. The unauthenticated routes live under `{base}/api/pair/v1/`; a proxy that authenticates must leave `/api/pair/` open, as it does `/api/ingest/`.
 
-- **`POST start`** with body `{ device: string, host?: string, pikaVersion?: string }`.
-  - **Validation:** `device` is 1–64 characters of `[A-Za-z0-9._-]`; `host` is at most 255 characters. Otherwise, or for a body that is not such JSON, 400 `{ error: "invalid_device" }`. `pikaVersion` is cut to 64 characters.
+- **`POST start`** with body `{ device: string, host?: string, pikaVersion?: string, key?: string }`, and optionally `Authorization: Bearer <token>`.
+  - **Validation:** `device` is the requested name and follows the name rule (see "Identity"); `host` is at most 255 characters. Otherwise, or for a body that is not such JSON, 400 `{ error: "invalid_device" }`. A `key` that is not 64 lowercase hex characters is 400 `{ error: "invalid_key" }`. `pikaVersion` is cut to 64 characters.
+  - **Recognition:** a bearer token that belongs to a device matches that device (`token`); otherwise a `key` whose hash is some device's `key_hash` matches that device (`key`). A bearer token that belongs to no device is ignored, without a 401: re-pairing usually happens because the token is gone. The match and the key's hash are stored with the pairing; the response never reveals a match.
   - **Response:** 200 `{ pairingId, code, expiresAt, expiresIn: 600, interval: 2 }`.
     - `pairingId` is a random 32-byte base64url secret known only to the device; the server stores its SHA-256.
     - `code` is 8 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, formatted `XXXX-XXXX`, unique among stored pairings. Codes match case-insensitively, with or without the hyphen.
   - **Limits:**
     - at most 10 pending, unexpired pairings at a time, otherwise 429 `{ error: "too_many_pairings" }`. Expired pairings do not count; each start deletes those that expired more than 10 minutes ago;
     - at most 5 starts per client IP per 10 minutes, otherwise 429 `{ error: "too_many_attempts", retryAfter }` with `Retry-After`. Every valid start counts, except one refused for `too_many_pairings`, which is checked first.
-  - **Recorded:** the request's client IP, device, host, and pikaVersion.
+  - **Recorded:** the request's client IP, requested name, host, pikaVersion, key hash, and match.
 - **`POST poll`** with body `{ pairingId }` answers 200 with `status`, except an unknown id, which answers 404 `{ error: "unknown_pairing" }` (a body that is not JSON gets 400):
   - `{ status: "pending" }` until it's decided;
-  - `{ status: "approved", device, token }`, only once. The server creates the device token at this moment: it stores the hash with `created_via = 'pairing'`, revoking the old token of that name first if approval set `replace`. Then it deletes the pairing. **No plaintext token is ever stored.** If a token of that name appeared after an approval without `replace`, the answer is `{ status: "denied" }` instead;
+  - `{ status: "approved", device: <id>, name, token, continued: boolean }`, only once. The server creates the device token at this moment, in one transaction: if the approved device has a `devices` row (`continued: true`), it sets its name and revokes its current token, whose relay connections close with 4401 at once; otherwise it inserts the row. It stores the new token's hash with `created_via = 'pairing'`. If the pairing carried a key, the key moves to this device: it is cleared from any other device and set on this one, so a machine's key points at the device it was last paired as. Then it deletes the pairing. **No plaintext token is ever stored.**
   - `{ status: "denied" }`, after which the pairing is deleted;
   - `{ status: "expired" }`, after which the pairing is deleted. An expired pairing is kept for this answer until the next start deletes it (see the limits above); after that its poll gets 404.
+- **`POST bind`** with `Authorization: Bearer <token>` and body `{ key }` binds a device key to a device that has none, so that devices paired before keys existed, and pasted-token logins, become recognizable:
+  - 401 `{ error: "unauthorized" }` without a valid token; 400 `{ error: "invalid_key" }` for a malformed key;
+  - 204 when the token's device already has this key, or when it has no key and no other device has this one (then it is set);
+  - otherwise 409 `{ error: "key_conflict" }`. Bind never overwrites or moves a key.
 - **Authenticated `/api/v1` routes:**
-  - `GET pairings` → `{ items: [{ code, device, host?, ip?, pikaVersion?, requestedAt, expiresAt, deviceExists }] }`, pending and unexpired only, newest first.
-  - `POST pairings/:code/approve` with body `{ name?: string, replace?: boolean }`:
-    - `name` defaults to the requested device name and follows the same rules (400 `{ error: "invalid_device" }`);
-    - 409 `{ error: "device_exists" }` when the name is taken and `replace` is not true;
+  - `GET pairings` → `{ items: [{ code, name, host?, ip?, pikaVersion?, requestedAt, expiresAt, match? }] }`, pending and unexpired only, newest first. `name` is the requested name. `match` is `{ id, name, by: "token" | "key", active }` when the request was recognized: the device, its current name, how it was recognized, and whether it has a token.
+  - `POST pairings/:code/approve` with body `{ name?: string, continues?: string | null }`:
+    - `continues` chooses the device: omitted, the match (a new device when there is none); `null`, a new device; a string, that existing device id, with or without a token, else 404 `{ error: "unknown_device" }`;
+    - `name` defaults to the continued device's current name, or the requested name for a new device, and follows the name rule (400 `{ error: "invalid_name" }`);
     - 404 `{ error: "unknown_pairing" }` when the pairing is missing, expired, or no longer pending;
-    - 200 `{ device: <name> }` on success, marking the pairing approved.
+    - 200 `{ device: <id>, name, continued: boolean }` on success, marking the pairing approved with that device (a fresh UUID for a new device) and name. Nothing else changes until the device polls.
   - `POST pairings/:code/deny` with a JSON body → 204, or 404 `{ error: "unknown_pairing" }`.
 - **Approval page:** the UI route `{base}/devices?pair=<code>`. The extension builds this URL from its configured server URL.
 
@@ -263,8 +276,8 @@ Relay lets running pi sessions send text messages to each other through the serv
   - Under the authenticated `{base}/api/v1/`: `GET relay/sessions`, `POST relay/messages`, and `GET relay/events?limit=`.
   - `GET {base}/api/health` lists `"relay"` in `features` when relay is on.
 - **Settings:** `--relay` / `PIKA_RELAY`: `on` (default) or `off`, with the same spellings as `PIKA_TRUST_PROXY`; empty means on. When off, every relay route answers 404 `{ error: "relay_disabled" }`, before any authentication. `PIKA_RELAY_TTL_SECS` (default 300) and `PIKA_RELAY_HEARTBEAT_SECS` (default 20) exist for tests and the end-to-end script only, and are hidden from `--help`.
-- **State:** online sessions, the mailbox, and the event ring live in memory; a restart drops them. Ownership checks and `recorded` use the `sessions` table.
-- **Revocation:** revoking a token closes every relay connection made with it with 4401 at once, both from `DELETE devices/:name` and when a pairing approved with `replace` deletes the old token. A token revoked by another process (`pika token revoke`) is noticed within one heartbeat, because each connection re-checks its token every heartbeat; it is also checked again at `hello`.
+- **State:** online sessions, the mailbox, and the event ring live in memory; a restart drops them. Ownership checks and `recorded` use the `sessions` table. Ownership, addressing, limits, and revocation are keyed by device id; `deviceName` fields are looked up when an object is serialized, so a rename shows in the next list and in every frame sent after it.
+- **Revocation:** revoking a token closes every relay connection made with it with 4401 at once, both from `DELETE devices/:id` and when a pairing that continues a device deletes its old token. A token revoked by another process (`pika token revoke`) is noticed within one heartbeat, because each connection re-checks its token every heartbeat; it is also checked again at `hello`.
 - **Shutdown:** stopping the server closes every relay connection with 1001.
 
 ## Server configuration
@@ -285,7 +298,7 @@ Relay lets running pi sessions send text messages to each other through the serv
   - `blobs/<h[0..2]>/<h[2..4]>/<h>.zst`: zstd-compressed content-addressed blobs.
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
-  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone.
+  - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `devices`, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone.
   - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 
@@ -295,10 +308,11 @@ Relay lets running pi sessions send text messages to each other through the serv
   { "url": "https://host/pika", "token": "…", "enabled": true, "exclude": ["<cwd prefix or glob>"] }
   ```
 - **Environment overrides:** `PIKA_URL` and `PIKA_TOKEN` override the file. `PIKA_DISABLED=1` always disables pika.
-- **Local state:** kept under `<agentDir>/pika/`: per-stream cursors, a disk spool for pending requests and blobs, and the set of hashes the server has acknowledged.
+- **Local state:** kept under `<agentDir>/pika/`: per-stream cursors, a disk spool for pending requests and blobs, the set of hashes the server has acknowledged, and the device key in `device-key.json` (`{ "v": 1, "key", "machine" }`, mode 0600; a file copied from another machine is replaced, and `/pika logout` keeps it).
 - **Login command:** `/pika login` asks for the server URL, then `ctx.ui.select("How should this machine log in?", ["Pair with the pika web UI (recommended)", "Paste a token"])`; cancelling changes nothing.
-  - **Pairing:** it asks for the device name (default: the hostname sanitized to `[A-Za-z0-9._-]`, at most 64 characters) and calls `POST start`. A 404 (a pika older than 0.2) means the server cannot pair: it says so and continues with the token prompt. It shows the code and `<url>/devices?pair=<code>` (in the TUI with the remaining time and "Esc cancels"; elsewhere as a notification, waiting until the pairing ends or `ctx.signal` aborts), and polls every `interval` seconds until approved, denied, expired, unknown, cancelled, or 10 minutes have passed.
+  - **Pairing:** it asks for the device name (any name per the rule in "Identity"; default: the hostname without a trailing `.local`, cut to 64 characters, else `pi`) and calls `POST start` with the device key, and with the configured token as the bearer only when the configured URL is the one being logged in to. A 404 (a pika older than 0.2) means the server cannot pair: it says so and continues with the token prompt. It shows the code and `<url>/devices?pair=<code>` (in the TUI with the remaining time and "Esc cancels"; elsewhere as a notification, waiting until the pairing ends or `ctx.signal` aborts), and polls every `interval` seconds until approved, denied, expired, unknown, cancelled, or 10 minutes have passed.
   - On approval the token is validated and saved exactly like a pasted one, and the login takes effect at once. Denied, expired, or cancelled changes nothing.
+  - After every successful login, and once per pi process when pika is enabled with a URL and token, it calls `POST bind` with the device key and ignores every failure.
   - Messages never include the `pairingId` or the token.
 - **Status command:** `/pika` shows whether pika is enabled, the server URL, queued items and bytes, the last successful upload, and the last error.
 - **Load order:** the extension is listed last in this repository's `package.json` `pi.extensions`, so its `before_provider_request` handler runs after every other extension's.

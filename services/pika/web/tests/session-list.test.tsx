@@ -14,6 +14,9 @@ const sessions = [
 	session("c", { title: "Recon subagent", device: "mini", project: "api", parentSessionId: "a", link: { kind: "subagent" } }),
 ];
 
+const STUDIO_ID = "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a";
+const OTHER_ID = "0a9b8c7d-1111-4222-8333-444455556666";
+
 let restore: () => void;
 beforeEach(() => {
 	restore = mockLayout({ viewport: 2000, rowHeight: 72 });
@@ -57,6 +60,53 @@ describe("session list", () => {
 		expect(screen.queryByText("Refactor auth")).toBeNull();
 		expect(server.calls).toContain("/api/v1/sessions?device=laptop&root=true&limit=50");
 		expect(screen.getByRole("button", { name: /Device: laptop/ })).toBeTruthy();
+	});
+
+	it("shows device names, and ids for sessions from servers that send no name", async () => {
+		const server = createFakeServer({
+			sessions: [
+				session("a", { title: "Named", device: STUDIO_ID, deviceName: "Studio Mac" }),
+				session("b", { title: "Unnamed", device: "mini", deviceName: undefined }),
+			],
+		});
+		renderApp("/", server.fetch);
+		const named = (await screen.findByText("Named")).closest("a")!;
+		expect(within(named).getByText("Studio Mac").dataset.deviceLabel).toBe(STUDIO_ID);
+		expect(within(named).queryByText(STUDIO_ID)).toBeNull();
+		const unnamed = screen.getByText("Unnamed").closest("a")!;
+		expect(within(unnamed).getByText("mini")).toBeTruthy();
+	});
+
+	it("labels device filters by name, filters by id, and tells devices with the same name apart", async () => {
+		const server = createFakeServer({
+			sessions: [
+				session("a", { title: "On the first MacBook", device: STUDIO_ID, deviceName: "MacBook" }),
+				session("b", { title: "On the second MacBook", device: OTHER_ID, deviceName: "MacBook" }),
+				session("c", { title: "On the mini", device: "mini", deviceName: "mini" }),
+			],
+		});
+		renderApp("/", server.fetch);
+		await screen.findByText("On the mini");
+		fireEvent.click(screen.getByRole("button", { name: /^Device/ }));
+		const options = (await screen.findAllByRole("menuitemradio")).map((option) => option.textContent);
+		expect(options).toEqual(["✓Any device", `MacBook (${OTHER_ID.slice(0, 8)})`, `MacBook (${STUDIO_ID.slice(0, 8)})`, "mini"]);
+		fireEvent.click(screen.getByRole("menuitemradio", { name: `MacBook (${STUDIO_ID.slice(0, 8)})` }));
+		expect(await screen.findByRole("button", { name: `Device: MacBook (${STUDIO_ID.slice(0, 8)})` })).toBeTruthy();
+		await waitFor(() => expect(screen.queryByText("On the mini")).toBeNull());
+		expect(screen.getByText("On the first MacBook")).toBeTruthy();
+		expect(screen.queryByText("On the second MacBook")).toBeNull();
+		expect(server.calls).toContain(`/api/v1/sessions?device=${STUDIO_ID}&root=true&limit=50`);
+
+		// The sidebar lists the same labels and links by id.
+		const sidebar = screen.getByRole("complementary", { name: "Sidebar" });
+		const link = within(sidebar).getByRole("link", { name: `MacBook (${OTHER_ID.slice(0, 8)})` });
+		expect(link.getAttribute("href")).toBe(`/?device=${OTHER_ID}`);
+		expect(within(sidebar).getByRole("link", { name: "mini" }).getAttribute("href")).toBe("/?device=mini");
+	});
+
+	it("shows a device filter's id until the facets name it", async () => {
+		renderApp("/?device=gone-device", createFakeServer({ sessions }).fetch);
+		expect(await screen.findByRole("button", { name: "Device: gone-device" })).toBeTruthy();
 	});
 
 	it("sends a date range as ISO bounds", async () => {

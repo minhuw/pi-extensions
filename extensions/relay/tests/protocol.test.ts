@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { headerField, messageContent, sanitize } from "../protocol.ts";
+import { headerField, messageContent, sanitize, targetLabel } from "../protocol.ts";
 
 it.each([
 	["CSI", "a\x1b[31mred\x1b[0mb", "aredb"],
@@ -58,4 +58,14 @@ it("strips zero-width characters and bidi controls from header fields, and keeps
 	});
 	expect(content.split("\n")[0]).toBe(`[relay] Message msg-1 from pi session s-1 ("Mallory") on desktop, project api:`);
 	expect(content).toContain("\n\nkeep\u200bthis\u202e\n\n");
+});
+
+it("names a device by its name, else by its id, on one line", () => {
+	const message = (from: Record<string, unknown>) => messageContent({ type: "message", id: "m-1", text: "hi", urgent: false, hops: 1, sentAt: "", from: { kind: "session", sessionId: "s-1", device: "7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47", ...from } }).split("\n")[0];
+	expect(message({ deviceName: "Minhu's MacBook Pro" })).toBe(`[relay] Message m-1 from pi session s-1 on Minhu's MacBook Pro:`);
+	expect(message({ deviceName: "Work \"laptop\"\n\u202e2" })).toBe(`[relay] Message m-1 from pi session s-1 on Work laptop 2:`);
+	expect(message({})).toBe(`[relay] Message m-1 from pi session s-1 on 7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47:`);
+	expect(message({ deviceName: " " })).toBe(`[relay] Message m-1 from pi session s-1 on 7f9c2ba4-e88f-4a1b-9a3c-0d2f6e1b5c47:`);
+	expect(targetLabel({ sessionId: "s-2", device: "desktop", deviceName: "Desk top", name: "Docs" })).toBe(`pi session s-2 ("Docs") on Desk top`);
+	expect(targetLabel({ sessionId: "s-2", device: "desktop" })).toBe("pi session s-2 on desktop");
 });

@@ -12,6 +12,7 @@ import type {
 	Page,
 	OnlineSession,
 	Pairing,
+	PairingApproval,
 	RelayEvent,
 	RelaySendResult,
 	RunDetail,
@@ -121,8 +122,8 @@ export class PikaApi {
 		return (text ? JSON.parse(text) : undefined) as T;
 	}
 
-	/** A state-changing call: DELETE, or POST with a JSON body (the server rejects form posts). */
-	private send<T>(path: string, method: "POST" | "DELETE", body?: unknown): Promise<T> {
+	/** A state-changing call: DELETE, or POST or PATCH with a JSON body (the server rejects form posts). */
+	private send<T>(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown): Promise<T> {
 		if (method === "DELETE") return this.request(path, {}, { method });
 		return this.request(path, {}, {
 			method,
@@ -213,16 +214,24 @@ export class PikaApi {
 		return this.request("devices");
 	}
 
-	revokeDevice(name: string): Promise<void> {
-		return this.send(`devices/${encodeURIComponent(name)}`, "DELETE");
+	/** Revokes a device's token, by id. */
+	revokeDevice(id: string): Promise<void> {
+		return this.send(`devices/${encodeURIComponent(id)}`, "DELETE");
+	}
+
+	renameDevice(id: string, name: string): Promise<{ id: string; name: string }> {
+		return this.send(`devices/${encodeURIComponent(id)}`, "PATCH", { name });
 	}
 
 	pairings(): Promise<{ items: Pairing[] }> {
 		return this.request("pairings");
 	}
 
-	/** Approves a pending pairing; `replace` revokes an existing device of that name. */
-	approvePairing(code: string, body: { name?: string; replace?: boolean }): Promise<{ device: string }> {
+	/**
+	 * Approves a pending pairing. `continues` is the id of the existing device the machine continues (its current token
+	 * stops working), or `null` for a new device.
+	 */
+	approvePairing(code: string, body: { name: string; continues: string | null }): Promise<PairingApproval> {
 		return this.send(`pairings/${encodeURIComponent(code)}/approve`, "POST", body);
 	}
 

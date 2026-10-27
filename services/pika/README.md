@@ -27,9 +27,10 @@ pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--pass
            [--relay on|off]
 pika password set
 pika password clear
-pika token create <device>
+pika token create <name>
 pika token list
 pika token revoke <device>
+pika token rename <device> <name>
 pika reindex
 pika export <sessionId>
 ```
@@ -39,11 +40,14 @@ pika export <sessionId>
 | `serve` | Serves ingest, pairing, the read API, and the web UI. Stops cleanly on Ctrl-C or SIGTERM. In `password` mode (the default) it exits with status 2 when no password is configured. |
 | `password set` | Stores a new UI password (at least 12 characters) as an argon2id hash and signs every browser out. Reads it twice without echo from the terminal, or once from stdin. |
 | `password clear` | Removes the stored password and signs every browser out. |
-| `token create <device>` | Creates a token for a device and prints it once. Only its SHA-256 is stored. Device names use 1–64 characters from `[A-Za-z0-9._-]`; an existing name must be revoked first. Pairing (see [First run](#first-run)) is the easier way to add a machine. |
-| `token list` | Lists devices, tab-separated: name, creation time, how the token was made (`cli` or `pairing`), last upload (`never`), and the host it came from (`-`). |
-| `token revoke <device>` | Revokes a device's token at once. Its uploaded data stays. |
+| `token create <name>` | Creates a new device named `<name>` and prints its token once on stdout; stderr says `created device <id> (<name>)`. Only the token's SHA-256 is stored. A name is any text of 1–64 characters without control characters (quote it in the shell); names need not be unique. The device gets a new random id. Pairing (see [First run](#first-run)) is the easier way to add a machine. |
+| `token list` | Lists devices with a token, tab-separated: id, name, creation time, how the token was made (`cli` or `pairing`), last upload (`never`), and the host it came from (`-`), sorted by name. |
+| `token revoke <device>` | Revokes a device's token at once and prints `revoked <name> (<id>)`. Its uploaded data, name, and id stay. |
+| `token rename <device> <name>` | Renames a device, with or without a token, and prints `renamed <id> to <name>`. Its id, and everything recorded under it, stay. |
 | `reindex` | Rebuilds every derived table (sessions, entries, turns, model and tool calls, links, Herder runs, search index) from the stored verbatim lines. |
 | `export <sessionId>` | Writes a session's JSONL to stdout, byte-identical to the original file. |
+
+`<device>` is a device id, or a name that exactly one device has; when several share it, the command fails and lists their ids, so use one of those. `revoke` considers only devices that have a token.
 
 Every command opens the data directory and creates it if needed. `password`, `token`, `reindex`, and `export` can run while the server is running; a new stored password and revoked tokens apply at once.
 
@@ -68,7 +72,7 @@ Every route is under the base path:
 
 - `GET api/health` returns `{ "ok": true, "version", "basePath", "features", "revision" }`, without authentication. `features` lists `"relay"` when relay is on; `revision` is the commit the server was built from, which the published images record and a plain `cargo build` leaves out (set `PIKA_REVISION` to record one).
 - `POST api/ingest/v1/batch` takes uploads from devices with `Authorization: Bearer <token>`.
-- `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI.
+- `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
 - `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
@@ -88,10 +92,12 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 
 2. Add each machine by pairing. In pi on that machine, run `/pika login`, enter the public URL including the base path, and choose **Pair with the pika web UI**. pi shows a code such as `K7PM-2QXD` and a link to the UI's Devices page (`<url>/devices?pair=<code>`); open it, log in, check the code, and approve. pi receives its token within a few seconds and uploads start right away. The code is valid for 10 minutes. `/pika logout` removes the token again.
 
+   Logging in again from the same pi install continues the same device: pika recognizes it by its current token or by its device key (a random key the extension keeps in `<agentDir>/pika/device-key.json`; the server stores only its hash), and the approval card offers to continue it, which keeps its history together and makes its old token stop working. You can choose a new device instead, or continue any other device.
+
    Alternatively, create a token on the server and paste it at the **Paste a token** prompt of `/pika login`, or write it into `~/.pi/agent/pika.json` by hand and start a new pi session. The token is printed once:
 
    ```bash
-   PIKA_DATA_DIR=/srv/pika pika token create laptop
+   PIKA_DATA_DIR=/srv/pika pika token create "Ana's laptop"
    ```
 
    ```json
@@ -106,7 +112,7 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 - **`Secure` cookies:** with the default `--cookie-secure auto`, the cookie is `Secure` when a trusted proxy (`PIKA_TRUST_PROXY=1`) reports `X-Forwarded-Proto: https`. Set `PIKA_COOKIE_SECURE=always` if the proxy does not send that header; `never` is for plain-HTTP setups.
 - **Rate limits:** after 5 failed logins from one client address in 15 minutes, that address gets `429 Too Many Requests` with `Retry-After` until the oldest failure is 15 minutes old; a successful login clears its count. After 100 failed logins in an hour from all addresses together, every login is refused until the hour frees up. Pairing allows 5 starts per address in 10 minutes and 10 pending pairings at a time. An IPv6 client counts by its /64, since one client usually holds a whole /64. The counts live in memory and reset when the server restarts. Behind a reverse proxy, set `PIKA_TRUST_PROXY=1`, or every client shares the proxy's address and its limits.
 - **If logins are blocked:** because of the global limit, anyone who can reach the login page can block new logins for up to an hour by sending wrong passwords from many addresses. Browsers that are already logged in keep working, and devices keep uploading. To get back in, use a browser that is still logged in, or restart pika (`docker restart pika`, or stop and start `pika serve`), which clears every limit. Then block the offending addresses at the reverse proxy, or put an authenticating proxy in front with `PIKA_AUTH=proxy` if it keeps happening.
-- **Devices:** the UI's Devices page lists each device with how its token was made, when it last uploaded, and from which host (updated at most once a minute), and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. `pika token list` and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
+- **Devices:** each device has an id, which never changes and keys everything it uploaded, and a name, a free label of up to 64 characters that you can change at any time; two devices may share a name. The UI's Devices page lists each device with its name and id, how its token was made, when it last uploaded, and from which host (updated at most once a minute), renames devices, and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. A revoked device keeps its name and history, and a later pairing can continue it. `pika token list`, `pika token rename`, and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
 
 ### Relay
 
@@ -118,6 +124,13 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 - **Behind a proxy:** `/api/relay/` must stay open to devices and needs WebSocket upgrades (see [Reverse proxy](#reverse-proxy)).
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
+
+### Upgrading from 0.3
+
+- Existing devices keep their names as their ids, so their history, filters, and relay ownership are unchanged. Names are now separate, editable labels: rename a device on the Devices page or with `pika token rename`. Devices known only from their uploads (their token is gone) get a row too, so a pairing can continue them.
+- The database migrates when the server opens it, without a reindex. The migration is one-way: a 0.3 binary refuses the migrated database (`database schema version 5 is newer than this pika (4)`), so to go back to 0.3, restore a [backup](#backup) taken before upgrading.
+- Older pika extensions still pair and upload as before. Their pairing requests carry neither a device key nor the current token, so pika does not recognize them: to keep a re-paired machine's history together, choose its device under "Continue an existing device instead" on the approval card. Names with spaces or other characters outside `[A-Za-z0-9._-]` need the new extension, since older ones check names themselves.
+- Pairing approval no longer has a **replace** option: continuing an existing device takes its place, and its old token stops working when the device collects the new one.
 
 ### Upgrading from 0.2
 

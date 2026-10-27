@@ -1,10 +1,11 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { FilterChip, MenuOption } from "../components/FilterChip";
+import { FilterChip, MenuOption, optionLabel, plainOptions } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
 import { EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
+import { deviceOptions } from "../lib/devices";
 import { formatRelative } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
 import { parseSnippet } from "../lib/snippet";
@@ -76,11 +77,11 @@ function SearchFilters() {
 		<div className="flex flex-wrap items-center gap-2" aria-label="Filters">
 			{(
 				[
-					["device", "Device", "device", facets.data?.devices ?? []],
-					["project", "Project", "folder", facets.data?.projects ?? []],
+					["device", "Device", "device", deviceOptions(facets.data?.devices ?? [])],
+					["project", "Project", "folder", plainOptions(facets.data?.projects ?? [])],
 				] as const
 			).map(([key, title, icon, options]) => (
-				<FilterChip key={key} icon={icon} label={title} value={params.get(key) ?? undefined}>
+				<FilterChip key={key} icon={icon} label={title} value={optionLabel(options, params.get(key))}>
 					{(close) => (
 						<>
 							<MenuOption
@@ -94,14 +95,14 @@ function SearchFilters() {
 							</MenuOption>
 							{options.map((option) => (
 								<MenuOption
-									key={option}
-									selected={params.get(key) === option}
+									key={option.value}
+									selected={params.get(key) === option.value}
 									onSelect={() => {
-										set(key, option);
+										set(key, option.value);
 										close();
 									}}
 								>
-									{option}
+									{option.label}
 								</MenuOption>
 							))}
 						</>

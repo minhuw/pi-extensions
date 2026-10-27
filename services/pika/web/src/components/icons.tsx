@@ -219,6 +219,17 @@ export const Icons = {
 			<path d="M2.5 4c0-.6.4-1 1-1h9c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H7l-3 2.5V11h-.5c-.6 0-1-.4-1-1z" />
 		</Svg>
 	),
+	copy: (p: IconProps) => (
+		<Svg {...p}>
+			<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+			<path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5" />
+		</Svg>
+	),
+	check: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="m3 8.5 3.2 3L13 4.5" />
+		</Svg>
+	),
 	sparkle: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M8 1.8 9.4 6.6 14.2 8 9.4 9.4 8 14.2 6.6 9.4 1.8 8l4.8-1.4z" />

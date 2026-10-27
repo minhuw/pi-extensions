@@ -57,7 +57,7 @@ enum Command {
         #[arg(long, env = "PIKA_RELAY_HEARTBEAT_SECS", hide = true, value_parser = clap::value_parser!(u64).range(1..))]
         relay_heartbeat_secs: Option<u64>,
     },
-    /// Manage device tokens.
+    /// Manage devices and their tokens.
     Token {
         #[command(subcommand)]
         action: TokenAction,
@@ -75,12 +75,14 @@ enum Command {
 
 #[derive(Subcommand)]
 enum TokenAction {
-    /// Create a token for a device and print it once.
+    /// Create a new device named NAME (1-64 characters; quote it in the shell) and print its token once.
     Create { name: String },
-    /// List devices with their creation time, origin, and last upload.
+    /// List devices with tokens: id, name, creation time, origin, last upload, and last host.
     List,
-    /// Revoke a device's token.
-    Revoke { name: String },
+    /// Revoke a device's token. DEVICE is a device id, or a name that only one device has.
+    Revoke { device: String },
+    /// Rename a device. DEVICE is a device id, or a name that only one device has.
+    Rename { device: String, name: String },
 }
 
 #[derive(Subcommand)]
@@ -163,20 +165,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Token { action } => {
             let store = Store::open(&cli.data_dir)?;
             match action {
-                TokenAction::Create { name } => println!("{}", crate::auth::create_token(&store, &name)?),
+                TokenAction::Create { name } => {
+                    let device = crate::auth::create_device(&store, &name)?;
+                    println!("{}", device.token);
+                    eprintln!("created device {} ({})", device.id, device.name);
+                }
                 TokenAction::List => {
                     for d in crate::auth::list_devices(&store)? {
                         let seen = d.last_seen_at.map_or_else(|| "never".into(), crate::util::format_iso_ms);
                         let created = crate::util::format_iso_ms(d.created_at);
-                        println!("{}\t{created}\t{}\t{seen}\t{}", d.name, d.created_via, d.last_host.as_deref().unwrap_or("-"));
+                        let host = d.last_host.as_deref().unwrap_or("-");
+                        println!("{}\t{}\t{created}\t{}\t{seen}\t{host}", d.id, d.name, d.created_via);
                     }
                 }
-                TokenAction::Revoke { name } => {
-                    if !crate::auth::revoke_token(&store, &name)? {
-                        eprintln!("pika: no token for {name:?}");
-                        return Ok(ExitCode::FAILURE);
+                TokenAction::Revoke { device } => {
+                    let id = crate::auth::resolve_device(&store, &device, true)?;
+                    let name = store.read(|conn| crate::auth::name_of(conn, &id))?.unwrap_or_else(|| id.clone());
+                    if !crate::auth::revoke_token(&store, &id)? {
+                        bail!("no device {device:?}");
                     }
-                    eprintln!("revoked {name}");
+                    eprintln!("revoked {name} ({id})");
+                }
+                TokenAction::Rename { device, name } => {
+                    if crate::auth::device_name(&name).is_none() {
+                        bail!("device names use 1-64 characters, without control characters");
+                    }
+                    let id = crate::auth::resolve_device(&store, &device, false)?;
+                    match crate::auth::rename_device(&store, &id, &name)? {
+                        Some(name) => eprintln!("renamed {id} to {name}"),
+                        None => bail!("no device {device:?}"),
+                    }
                 }
             }
         }

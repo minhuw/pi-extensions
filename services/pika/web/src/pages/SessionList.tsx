@@ -2,11 +2,12 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router";
-import { FilterChip, MenuOption } from "../components/FilterChip";
+import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
 import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
 import { EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { useApi, type SessionFilters } from "../lib/api";
+import { deviceLabel, deviceOptions } from "../lib/devices";
 import { formatCost, formatCount, formatDuration, formatRelative, totalTokens } from "../lib/format";
 import type { SessionSummary } from "../lib/types";
 import { useScrollMargin } from "../lib/virtual";
@@ -64,7 +65,7 @@ function SessionRow({ session }: { session: SessionSummary }) {
 				</span>
 				<span className="flex items-center gap-1">
 					<Icon name="device" size={13} />
-					{session.device}
+					<span data-device-label={session.device}>{deviceLabel(session)}</span>
 				</span>
 				<span className="flex items-center gap-1">
 					<Icon name="clock" size={13} />
@@ -104,8 +105,8 @@ function Filters() {
 		setParams(next, { replace: true });
 	};
 
-	const facet = (key: "device" | "project" | "model", label: string, icon: "device" | "folder" | "model", options: string[]) => (
-		<FilterChip key={key} icon={icon} label={label} value={params.get(key) ?? undefined}>
+	const facet = (key: "device" | "project" | "model", label: string, icon: "device" | "folder" | "model", options: FilterOption[]) => (
+		<FilterChip key={key} icon={icon} label={label} value={optionLabel(options, params.get(key))}>
 			{(close) => (
 				<>
 					<MenuOption
@@ -119,14 +120,14 @@ function Filters() {
 					</MenuOption>
 					{options.map((option) => (
 						<MenuOption
-							key={option}
-							selected={params.get(key) === option}
+							key={option.value}
+							selected={params.get(key) === option.value}
 							onSelect={() => {
-								set(key, option);
+								set(key, option.value);
 								close();
 							}}
 						>
-							{option}
+							{option.label}
 						</MenuOption>
 					))}
 					{facets.isLoading && <div className="px-2 py-1 text-[13px] text-muted">Loading…</div>}
@@ -143,9 +144,9 @@ function Filters() {
 
 	return (
 		<div className="flex flex-wrap items-center gap-2" aria-label="Filters">
-			{facet("device", "Device", "device", facets.data?.devices ?? [])}
-			{facet("project", "Project", "folder", facets.data?.projects ?? [])}
-			{facet("model", "Model", "model", facets.data?.models ?? [])}
+			{facet("device", "Device", "device", deviceOptions(facets.data?.devices ?? []))}
+			{facet("project", "Project", "folder", plainOptions(facets.data?.projects ?? []))}
+			{facet("model", "Model", "model", plainOptions(facets.data?.models ?? []))}
 			<FilterChip icon="calendar" label="Date" value={dateValue}>
 				{() => (
 					<div className="space-y-2 p-2 text-[13px]">

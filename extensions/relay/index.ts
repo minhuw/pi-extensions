@@ -5,7 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type ConnectionState, RelayConnection } from "./connection.ts";
 import {
-	cut, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
+	cut, deviceLabel, expiredContent, headerField, type HelloSession, MAX_HOPS, MESSAGE_TYPE, type MessageFrame, messageContent, NOTICE_TYPE, type OnlineSession, RECEIVED_TYPE,
 	RELAY_VERSION, sanitize, type SentFrame, type SessionState, since, type StatusFrame, type Target, targetLabel, timing, ttlText,
 } from "./protocol.ts";
 import { credentials, join, leave, shared, syncHook } from "./shared.ts";
@@ -400,7 +400,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	function sessionLine(session: OnlineSession): string {
 		const name = headerField(session.name) || headerField(session.title);
 		return [
-			headerField(session.id), headerField(session.device), `project ${headerField(session.project)}`, name ? `"${name}"` : "untitled", headerField(session.state),
+			headerField(session.id), deviceLabel(session), `project ${headerField(session.project)}`, name ? `"${name}"` : "untitled", headerField(session.state),
 			headerField(session.model) || "no model", `online ${since(session.connectedAt)}`,
 		].join(" · ");
 	}
@@ -457,10 +457,10 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			name: "relay_list", label: "Relay List",
 			description: "List the other pi sessions that are online on pika relay right now, on this machine and on your user's other machines. "
 				+ "Each line shows the session id (the address relay_send needs), the device, the project, the name or title, idle or busy, the model, and how long it has been online. "
-				+ "Optional filters: device and project match exactly; query matches the id, name, title, or working directory, ignoring case.",
+				+ "Optional filters: device matches the device name or id and project the project, exactly but ignoring case; query matches the id, name, title, or working directory, ignoring case.",
 			promptSnippet: "List other running pi sessions reachable through pika relay",
 			parameters: Type.Object({
-				device: Type.Optional(Type.String({ description: "Only sessions on this device" })),
+				device: Type.Optional(Type.String({ description: "Only sessions on this device (its name or id)" })),
 				project: Type.Optional(Type.String({ description: "Only sessions in this project (the basename of the working directory)" })),
 				query: Type.Optional(Type.String({ description: "Text to find in the session id, name, title, or working directory" })),
 			}),
@@ -469,7 +469,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 				const lower = (value: string | undefined) => value?.toLowerCase() ?? "";
 				const query = lower(params.query);
 				const matches = all.filter((session) =>
-					(!params.device || lower(session.device) === lower(params.device))
+					(!params.device || [session.deviceName, session.device].some((value) => lower(value) === lower(params.device)))
 					&& (!params.project || lower(session.project) === lower(params.project))
 					&& (!query || [session.id, session.name, session.title, session.cwd].some((value) => lower(value).includes(query))));
 				const filtered = params.device || params.project || params.query;
@@ -529,7 +529,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const project = sender.kind === "web" ? "" : headerField(sender.project);
 		const from = sender.kind === "web"
 			? "your user, from the pika web UI"
-			: `${headerField(sender.name) || headerField(sender.title) || headerField(sender.sessionId)} on ${headerField(sender.device)}${project ? ` · ${project}` : ""}`;
+			: `${headerField(sender.name) || headerField(sender.title) || headerField(sender.sessionId)} on ${deviceLabel(sender)}${project ? ` · ${project}` : ""}`;
 		const replyTo = headerField(details.replyTo);
 		const tags = [details.urgent ? theme.fg("warning", "urgent") : "", replyTo ? theme.fg("dim", `reply to ${replyTo}`) : ""].filter(Boolean);
 		const lines = sanitize(details.text).split("\n");
@@ -552,7 +552,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const reason = offlineReason();
 		const state = connection?.state;
 		const lines = [
-			reason ? `Relay is offline: ${reason}.` : `Relay is online${state?.kind === "online" ? ` as device ${state.welcome.device}` : ""}.`,
+			reason ? `Relay is offline: ${reason}.` : `Relay is online${state?.kind === "online" ? ` as device ${deviceLabel(state.welcome)}` : ""}.`,
 			`Server: ${current ? current.url : "none (pika is not logged in)"}`,
 			`This session: ${sessionId ?? context.sessionManager.getSessionId()}`,
 		];

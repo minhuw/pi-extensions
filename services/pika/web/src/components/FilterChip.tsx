@@ -64,6 +64,23 @@ export function FilterChip({
 	);
 }
 
+/** A filter choice: `value` goes in the URL, `label` is what the menu and the chip show. */
+export interface FilterOption {
+	value: string;
+	label: string;
+}
+
+/** Options whose label is their value, as for projects and models. */
+export function plainOptions(values: readonly string[]): FilterOption[] {
+	return values.map((value) => ({ value, label: value }));
+}
+
+/** The label of the selected value, or the value itself when the options do not list it (yet). */
+export function optionLabel(options: readonly FilterOption[], value: string | null | undefined): string | undefined {
+	if (!value) return undefined;
+	return options.find((option) => option.value === value)?.label ?? value;
+}
+
 export function MenuOption({ selected, onSelect, children }: { selected?: boolean; onSelect: () => void; children: ReactNode }) {
 	return (
 		<button

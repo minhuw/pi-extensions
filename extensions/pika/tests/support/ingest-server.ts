@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { gunzipSync } from "node:zlib";
@@ -24,7 +24,15 @@ interface BatchBody {
 export type Mode = "ok" | "hang" | "redirect" | "fail" | "unauthorized";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const DEVICE = /^[A-Za-z0-9._-]{1,64}$/;
+/** The names a pika server older than 0.4 accepted. */
+const LEGACY_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const KEY = /^[0-9a-f]{64}$/;
+/** The contract's name rule: 1 to 64 characters after trimming, without control characters or U+2028/U+2029. */
+export const validName = (name: unknown): name is string => {
+	if (typeof name !== "string") return false;
+	const length = [...name.trim()].length;
+	return length >= 1 && length <= 64 && !/[\p{Cc}\u2028\u2029]/u.test(name.trim());
+};
 const hashId = (id: string) => createHash("sha256").update(id).digest("hex");
 const normalizeCode = (code: string) => code.toUpperCase().replace(/-/g, "");
 
@@ -33,6 +41,7 @@ export interface PollAnswer { status: number; body: Record<string, unknown> }
 
 export interface MockPairing {
 	code: string;
+	/** The requested name. */
 	device: string;
 	host?: string;
 	pikaVersion?: string;
@@ -40,9 +49,24 @@ export interface MockPairing {
 	requestedAt: number;
 	expiresAt: number;
 	state: "pending" | "approved" | "denied";
-	/** The device name approval chose, and whether it replaces an existing device of that name. */
-	approved?: { name: string; replace: boolean };
+	/** The SHA-256 of the device key the request sent. */
+	keyHash?: string;
+	/** The device the request was recognized as at start, and by what. */
+	match?: { id: string; by: "token" | "key" };
+	/** What approval decided: the device id the token will belong to, its name, and whether it continues an existing device. */
+	approved?: { target: string; name: string; continued: boolean };
 }
+
+export interface MockDevice {
+	name: string;
+	/** Absent once revoked; the device itself stays. */
+	token?: string;
+	keyHash?: string;
+	createdVia: "pairing" | "cli";
+}
+
+/** A `POST /api/pair/v1/bind` the server answered. */
+export interface MockBind { authorization?: string; body: Record<string, unknown>; status: number }
 
 /**
  * An in-memory ingest server with the spec's append, duplicate, gap, conflict, and idempotency rules,
@@ -66,11 +90,19 @@ export class MockIngest {
 	readonly headers: IncomingMessage["headers"][] = [];
 	/** Tokens ingest accepts; pairing adds the tokens it creates. */
 	readonly tokens = new Set([TOKEN]);
-	/** Device tokens created by pairing, by device name. */
-	readonly devices = new Map<string, { token: string; createdVia: "pairing" }>();
+	/** Devices by id, as pairing created or continued them. */
+	readonly devices = new Map<string, MockDevice>();
 	readonly pairings = new Map<string, MockPairing>();
-	/** Every pairing request: its path and body. */
-	readonly pairRequests: { path: string; body: Record<string, unknown> }[] = [];
+	/** Every pairing request: its path, body, and the Authorization header when it had one. */
+	readonly pairRequests: { path: string; body: Record<string, unknown>; authorization?: string }[] = [];
+	/** Every bind request with its answer; they are not counted in `responses`. */
+	readonly binds: MockBind[] = [];
+	/** Bind requests get no answer; each one is counted in `hungBinds`, and in `closedBinds` once the client gives up on it. */
+	hangBinds = false;
+	hungBinds = 0;
+	closedBinds = 0;
+	/** Answers `start` like a pika server older than 0.4: names limited to the old characters, and no recognition. */
+	legacyNames = false;
 	/** Every `pairingId` handed out, so tests can check that none is shown. */
 	readonly pairingIds: string[] = [];
 	/** Without pairing, the server answers 404 under `/api/pair/`, like a pika older than 0.2. */
@@ -136,19 +168,46 @@ export class MockIngest {
 		return [...this.pairings.values()].filter((pairing) => pairing.state === "pending" && pairing.expiresAt > Date.now()).sort((a, b) => b.requestedAt - a.requestedAt);
 	}
 
+	/** The id of the only device called `name`; throws unless exactly one is. */
+	deviceId(name: string): string {
+		const ids = [...this.devices].filter(([, device]) => device.name === name).map(([id]) => id);
+		if (ids.length !== 1) throw new Error(`${ids.length} devices are called ${name}`);
+		return ids[0]!;
+	}
+
+	/** The only device called `name`. */
+	deviceNamed(name: string): MockDevice {
+		return this.devices.get(this.deviceId(name))!;
+	}
+
+	/** Adds a device with a token, as `pika token create` does; returns its id. */
+	addDevice(name: string, options: { id?: string; keyHash?: string } = {}): { id: string; token: string } {
+		const id = options.id ?? randomUUID();
+		const token = `pika_${randomBytes(32).toString("hex")}`;
+		this.devices.set(id, { name, token, createdVia: "cli", ...(options.keyHash ? { keyHash: options.keyHash } : {}) });
+		this.tokens.add(token);
+		return { id, token };
+	}
+
 	private findPending(code: string): MockPairing | undefined {
 		return this.pendingPairings().find((pairing) => normalizeCode(pairing.code) === normalizeCode(code));
 	}
 
-	/** `POST /api/v1/pairings/:code/approve`: the HTTP status it answers. */
-	approve(code: string, options: { name?: string; replace?: boolean } = {}): 200 | 400 | 404 | 409 {
+	/**
+	 * `POST /api/v1/pairings/:code/approve`: the HTTP status it answers. `continues` omitted takes
+	 * the pairing's match, `null` makes a new device, and an id continues that device.
+	 */
+	approve(code: string, options: { name?: string; continues?: string | null } = {}): 200 | 400 | 404 {
 		const pairing = this.findPending(code);
 		if (!pairing) return 404;
-		const name = options.name ?? pairing.device;
-		if (!DEVICE.test(name)) return 400;
-		if (this.devices.has(name) && !options.replace) return 409;
+		const continues = options.continues === undefined ? pairing.match?.id ?? null : options.continues;
+		if (continues !== null && !this.devices.has(continues)) return 404;
+		const name = options.name ?? (continues !== null ? this.devices.get(continues)!.name : pairing.device);
+		if (!validName(name)) return 400;
+		// A server older than 0.4 has no ids: the device id is its name.
+		const target = continues ?? (this.legacyNames ? name : randomUUID());
 		pairing.state = "approved";
-		pairing.approved = { name, replace: options.replace === true };
+		pairing.approved = { target, name: name.trim(), continued: continues !== null || (this.legacyNames && this.devices.has(target)) };
 		return 200;
 	}
 
@@ -166,14 +225,45 @@ export class MockIngest {
 		if (pairing) pairing.expiresAt = Date.now() - 1;
 	}
 
-	private async pair(path: string, body: Record<string, unknown>, ip: string | undefined, response: ServerResponse): Promise<void> {
-		this.pairRequests.push({ path, body });
+	/** The id of the device `token` belongs to. */
+	private tokenDevice(token: string | undefined): string | undefined {
+		return token === undefined ? undefined : [...this.devices].find(([, device]) => device.token === token)?.[0];
+	}
+
+	private bind(body: Record<string, unknown>, authorization: string | undefined, response: ServerResponse): void {
+		if (this.hangBinds) {
+			this.hungBinds++;
+			response.on("close", () => { this.closedBinds++; });
+			return;
+		}
+		const answer = (status: number, json?: unknown) => {
+			this.binds.push({ ...(authorization ? { authorization } : {}), body, status });
+			response.writeHead(status, json ? { "content-type": "application/json" } : {});
+			response.end(json ? JSON.stringify(json) : undefined);
+		};
+		const id = this.tokenDevice(authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined);
+		if (!id) return answer(401, { error: "unauthorized" });
+		if (typeof body.key !== "string" || !KEY.test(body.key)) return answer(400, { error: "invalid_key" });
+		const hash = hashId(body.key);
+		const device = this.devices.get(id)!;
+		if (device.keyHash === hash) return answer(204);
+		if (!device.keyHash && ![...this.devices.values()].some((other) => other.keyHash === hash)) {
+			device.keyHash = hash;
+			return answer(204);
+		}
+		answer(409, { error: "key_conflict" });
+	}
+
+	private async pair(path: string, body: Record<string, unknown>, ip: string | undefined, authorization: string | undefined, response: ServerResponse): Promise<void> {
+		if (path === "bind" && !this.legacyNames) return this.bind(body, authorization, response);
+		this.pairRequests.push({ path, body, ...(authorization ? { authorization } : {}) });
 		const now = Date.now();
 		if (path === "start") {
-			const { device, host, pikaVersion } = body;
-			if (typeof device !== "string" || !DEVICE.test(device) || (host !== undefined && (typeof host !== "string" || host.length > 255))) {
+			const { device, host, pikaVersion, key } = body;
+			if (!validName(device) || (this.legacyNames && !LEGACY_NAME.test(device)) || (host !== undefined && (typeof host !== "string" || host.length > 255))) {
 				return this.reply(response, 400, { error: "invalid_device" });
 			}
+			if (key !== undefined && !this.legacyNames && (typeof key !== "string" || !KEY.test(key))) return this.reply(response, 400, { error: "invalid_key" });
 			for (const [id, pairing] of this.pairings) if (pairing.state === "pending" && pairing.expiresAt <= now) this.pairings.delete(id);
 			if (this.pendingPairings().length >= 10) return this.reply(response, 429, { error: "too_many_pairings" });
 			while (this.pairStarts.length && this.pairStarts[0]! <= now - 10 * 60_000) this.pairStarts.shift();
@@ -190,9 +280,14 @@ export class MockIngest {
 			const pairingId = randomBytes(32).toString("base64url");
 			this.pairingIds.push(pairingId);
 			const expiresAt = now + this.pairExpiresIn * 1000;
+			const keyHash = typeof key === "string" && !this.legacyNames ? hashId(key) : undefined;
+			const byToken = this.legacyNames ? undefined : this.tokenDevice(authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined);
+			const byKey = keyHash === undefined ? undefined : [...this.devices].find(([, known]) => known.keyHash === keyHash)?.[0];
+			const match = byToken ? { id: byToken, by: "token" as const } : byKey ? { id: byKey, by: "key" as const } : undefined;
 			this.pairings.set(hashId(pairingId), {
-				code, device, requestedAt: now, expiresAt, state: "pending", ip,
+				code, device: device.trim(), requestedAt: now, expiresAt, state: "pending", ip,
 				...(typeof host === "string" ? { host } : {}), ...(typeof pikaVersion === "string" ? { pikaVersion } : {}),
+				...(keyHash ? { keyHash } : {}), ...(match ? { match } : {}),
 			});
 			this.reply(response, 200, { pairingId, code, expiresAt: new Date(expiresAt).toISOString(), expiresIn: this.pairExpiresIn, interval: this.pairInterval });
 			this.onPairingStart?.(code);
@@ -210,14 +305,20 @@ export class MockIngest {
 		if (!id || !pairing) return { status: 404, body: { error: "unknown_pairing" } };
 		if (pairing.state === "approved") {
 			// The token exists only from this answer on; the server keeps only its hash.
-			const name = pairing.approved!.name;
+			const { target, name, continued } = pairing.approved!;
 			const token = `pika_${randomBytes(32).toString("hex")}`;
-			const old = this.devices.get(name);
-			if (old) this.tokens.delete(old.token);
-			this.devices.set(name, { token, createdVia: "pairing" });
+			const old = this.devices.get(target);
+			if (old?.token) this.tokens.delete(old.token);
+			const device: MockDevice = old ? Object.assign(old, { name, token }) : { name, token, createdVia: "pairing" };
+			this.devices.set(target, device);
 			this.tokens.add(token);
+			// A machine's key points at the device it was last paired as.
+			if (pairing.keyHash) {
+				for (const other of this.devices.values()) if (other.keyHash === pairing.keyHash) delete other.keyHash;
+				device.keyHash = pairing.keyHash;
+			}
 			this.pairings.delete(id);
-			return { status: 200, body: { status: "approved", device: name, token } };
+			return { status: 200, body: this.legacyNames ? { status: "approved", device: target, token } : { status: "approved", device: target, name, token, continued } };
 		}
 		if (pairing.state === "denied") {
 			this.pairings.delete(id);
@@ -253,7 +354,7 @@ export class MockIngest {
 			let body: unknown;
 			try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* refused below */ }
 			if (!body || typeof body !== "object" || Array.isArray(body)) return this.reply(response, 400, { error: "invalid_json" });
-			return this.pair(path.slice("/pika/api/pair/v1/".length), body as Record<string, unknown>, request.socket.remoteAddress, response);
+			return this.pair(path.slice("/pika/api/pair/v1/".length), body as Record<string, unknown>, request.socket.remoteAddress, request.headers.authorization, response);
 		}
 		if (request.method !== "POST" || path !== "/pika/api/ingest/v1/batch") return this.reply(response, 404, { error: "not found" });
 		const bearer = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice("Bearer ".length) : undefined;

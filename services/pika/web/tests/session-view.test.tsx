@@ -125,6 +125,22 @@ describe("session view", () => {
 		expect(screen.getByText("Fixed: the base path now ends without a slash.", { selector: "[data-final-answer] p" })).toBeTruthy();
 	});
 
+	it("shows the device's name, else its id", async () => {
+		const named = sessionFixture();
+		named.detail = { ...named.detail, device: "4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a", deviceName: "Studio Mac" };
+		const first = renderApp("/s/s1", createFakeServer({ sessions: [named] }).fetch);
+		const device = () => screen.getByText("Device", { selector: "dt span" }).closest("dt")!.nextElementSibling as HTMLElement;
+		await screen.findByRole("heading", { name: "Fix the failing test" });
+		expect(device().textContent).toBe("Studio Mac");
+		first.unmount();
+
+		const unnamed = sessionFixture();
+		unnamed.detail = { ...unnamed.detail, device: "mini", deviceName: undefined };
+		renderApp("/s/s1", createFakeServer({ sessions: [unnamed] }).fetch);
+		await screen.findByRole("heading", { name: "Fix the failing test" });
+		expect(device().textContent).toBe("mini");
+	});
+
 	it("expands a turn into a timeline loaded from that turn's entries", async () => {
 		const server = createFakeServer({ sessions: [sessionFixture()] });
 		renderApp("/s/s1", server.fetch);

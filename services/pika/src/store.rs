@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v2.sql"),
     include_str!("schema_v3.sql"),
     include_str!("schema_v4.sql"),
+    include_str!("schema_v5.sql"),
 ];
 /// The first schema version whose derived tables an older database lacks or derives differently; opening such a
 /// database reindexes it.

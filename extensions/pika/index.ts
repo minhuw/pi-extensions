@@ -3,6 +3,7 @@ import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, 
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
 import { publishCredentials } from "./credentials.ts";
+import { abortBinds, bindOnce } from "./device-key.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
 
@@ -31,6 +32,8 @@ interface Shared {
 	login?: LoginTicket;
 	/** Counts logins, so a replaced one can tell it is no longer current. */
 	logins: number;
+	/** pika instances whose session has started and not shut down, enabled or not; the last to shut down aborts pending binds. */
+	open: Set<object>;
 }
 interface LoginTicket extends LoginControl {
 	generation: number;
@@ -39,7 +42,7 @@ interface LoginTicket extends LoginControl {
 	cancel(reason: string): void;
 }
 const global = globalThis as { [SHARED]?: Shared; [CHILD_SESSION_HOOKS]?: Set<ChildSessionHook> };
-const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: new Map(), captures: new Map(), excluded: new Set(), logins: 0 };
+const shared = (): Shared => global[SHARED] ??= { members: new Map(), detached: new Map(), captures: new Map(), excluded: new Set(), logins: 0, open: new Set() };
 const hooks = (): Set<ChildSessionHook> => global[CHILD_SESSION_HOOKS] ??= new Set();
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -167,6 +170,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		config = loadConfig(getAgentDir());
 		publishCredentials(config);
 		if (!config.enabled) return;
+		// Once per process for each URL and token, in the background; it never holds up the session.
+		bindOnce(config.config.url, config.config.token, join(getAgentDir(), "pika"));
 		attachedCtx = ctx;
 		shared().detached.delete(self);
 		sessionId = ctx.sessionManager.getSessionId();
@@ -180,7 +185,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		start(ctx, enroll());
 	}
 
-	pi.on("session_start", (_event, ctx) => { ended = false; guard(() => attach(ctx)); });
+	pi.on("session_start", (_event, ctx) => { ended = false; shared().open.add(self); guard(() => attach(ctx)); });
 
 	pi.on("context_with_system", (event, ctx) => {
 		guard(() => owned(ctx)?.onContext(event.messages, modelInfo(ctx)));
@@ -216,6 +221,9 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		ended = true;
 		const pending = shared().login;
 		if (pending?.owner === self) pending.cancel("the session ended");
+		// A bind still running must not keep a short-lived process, such as `pi -p`, alive after its last session.
+		shared().open.delete(self);
+		if (shared().open.size === 0) abortBinds();
 		guard(() => {
 			for (const key of excludedKeys) shared().excluded.delete(key);
 			excludedKeys = [];
@@ -300,7 +308,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 			}
 		});
 		if (ended) return;
-		const lines = [`Logged in to ${saved.url}${saved.device ? ` as ${saved.device}` : ""}; saved to ${saved.file}.${saved.reenabled ? ' Removed "enabled": false, so uploads are on again.' : ""}`];
+		const continued = saved.device?.continued ? " This continues the existing device." : "";
+		const lines = [`Logged in to ${saved.url}${saved.device ? ` as ${saved.device.name}` : ""}; saved to ${saved.file}.${continued}${saved.reenabled ? ' Removed "enabled": false, so uploads are on again.' : ""}`];
 		const warnings: string[] = [];
 		if (isPlainRemote(saved.url)) warnings.push("The URL is plain http to another host, so the token travels unencrypted.");
 		const overridden = ["PIKA_URL", "PIKA_TOKEN"].filter((name) => process.env[name]);

@@ -78,3 +78,18 @@ export function isExcluded(cwd: string, patterns: readonly string[]): boolean {
 	}
 	return false;
 }
+
+/**
+ * The server URL as pika stores it: http(s) only, without credentials, a query, or a fragment, and
+ * with the server's base path kept but no trailing slash. Messages never repeat the input, which
+ * may be a mistyped token.
+ */
+export function normalizeUrl(input: string): string {
+	const text = input.trim();
+	let url: URL;
+	try { url = new URL(text); } catch { throw new Error("the server URL is not a valid URL"); }
+	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("the server URL must start with http:// or https://");
+	if (url.username || url.password) throw new Error("the server URL must not contain credentials");
+	if (url.search || url.hash || /[?#]/.test(text)) throw new Error("the server URL must not have a query or fragment");
+	return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}

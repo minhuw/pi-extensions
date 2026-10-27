@@ -12,6 +12,7 @@ Deferred, not in v1: addressing subagent and Herder child sessions, a same-machi
 
 - **Session id:** pi's session header `id` (a UUID), the same id pika uses for uploaded sessions. It is the only address; names and titles are for display.
 - **Online session:** a session holding an open relay connection that has passed `hello`.
+- **Device:** every `device` field is the device's id, which never changes; every object that carries `device` also carries `deviceName`, the device's current display name (its id when it has none; see "Identity" in `SPEC.md`). Ownership, addressing, limits, and revocation are keyed by the id. The server looks names up when it serializes an object, so a rename shows in the next `relay/sessions` or `relay/events` answer and in every frame sent after it.
 - **Message:** UTF-8 text from a session, or from the user in the web UI, to one session id.
 - **Delivered:** the target's pi process accepted the message into its session (`pi.sendMessage` returned and the receipt entry was appended) and acknowledged it. It does not mean the model has read it.
 
@@ -76,12 +77,12 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
 
 #### Server → client
 
-- `welcome`: `{ type: "welcome", device, serverVersion, limits: { ttlSeconds, heartbeatSeconds, maxTextBytes, maxHops } }`.
-- `message`: `{ type: "message", id, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
+- `welcome`: `{ type: "welcome", device, deviceName, serverVersion, limits: { ttlSeconds, heartbeatSeconds, maxTextBytes, maxHops } }`.
+- `message`: `{ type: "message", id, from: Sender, text, urgent, replyTo?, hops, sentAt }`, where `Sender` is `{ kind: "session", sessionId, device, deviceName, name?, title?, project? }` or `{ kind: "web" }`. Pushed again after a reconnect while unacknowledged; the client deduplicates by `id`.
 - `status`: `{ type: "status", id, status: "delivered" | "expired", to: Target, at }` for messages this session sent. Sent to the sender's current connection; if the sender is offline it is dropped.
 - `ping`: `{ type: "ping", at }` every heartbeat interval.
 
-`Target` is `{ sessionId, device?, name?, title?, project? }`, filled from the online entry or pika's records when known.
+`Target` is `{ sessionId, device?, deviceName?, name?, title?, project? }`, filled from the online entry or pika's records when known; `deviceName` is present exactly when `device` is. Servers older than 0.4 send no `deviceName` anywhere, so clients treat it as optional.
 
 Message ids are server-generated, URL-safe, and unique for the server's lifetime.
 
@@ -94,16 +95,16 @@ Message ids are server-generated, URL-safe, and unique for the server's lifetime
 - **Timers:** expiry and the 2 s ack wait are cancelled or ignored once a message is acknowledged; the number of pending timers never exceeds the number of queued messages plus sends in their 2 s ack wait.
 - **Stopping the server** (SIGTERM or Ctrl+C) closes every relay connection with 1001 and waits up to 3 s for them to finish. A closing connection reads the peer's answer to its close frame for up to 2 s, because a socket closed with that answer unread is reset and the peer never sees the close frame.
 - **Dead connections:** the server closes a connection after 45 s without any frame and marks the session offline. Unacknowledged messages stay queued for their remaining TTL.
-- **Revoking a token** closes every relay connection made with it with 4401 at once: from the Devices route, and when a pairing approved with `replace` revokes the old token. `pika token revoke` runs in another process, so the server also checks each connection's token every heartbeat and closes it within one heartbeat.
+- **Revoking a token** closes every relay connection made with it with 4401 at once: from the Devices route, and when a pairing that continues a device revokes its old token. `pika token revoke` runs in another process, so the server also checks each connection's token every heartbeat and closes it within one heartbeat.
 - `PIKA_RELAY=off` at startup disables everything. There is no runtime toggle in v1.
 
 ### Device HTTP route
 
 - `GET {base}/api/relay/v1/sessions` with the bearer token → `{ items: OnlineSession[] }`.
   ```
-  OnlineSession = { id, device, host, name?, title?, cwd, project, model?, state, piVersion?, connectedAt, stateSince, lastSeenAt, recorded: boolean }
+  OnlineSession = { id, device, deviceName, host, name?, title?, cwd, project, model?, state, piVersion?, connectedAt, stateSince, lastSeenAt, recorded: boolean }
   ```
-  `recorded` says whether pika has the session's transcript. Items are sorted by device, then by `connectedAt` with the newest first.
+  `recorded` says whether pika has the session's transcript. Items are sorted by `deviceName` case-insensitively, then by `device`, then by `connectedAt` with the newest first.
 
 ### Browser routes (authenticated like the rest of `{base}/api/v1/`)
 
@@ -126,7 +127,8 @@ Use a WebSocket client (for example `tokio-tungstenite`) against the real router
 - deduplicated re-push after a dropped connection;
 - every rejection reason, the rate limit, and the per-target and global queue limits;
 - the heartbeat timeout marking a session offline;
-- revoking a device, which closes with 4401;
+- revoking a device, and continuing it by pairing, which close with 4401;
+- `deviceName` in every object that carries `device`, the sort order of the session lists, and renames showing at once;
 - `PIKA_RELAY=off`, health `features`, and the browser routes, including web sends.
 
 ## Credentials registry (`extensions/pika/`, additive)
@@ -192,7 +194,7 @@ Seen ids are the `relay-received` entries of the current session (scanned on con
 
 **Content** for a session sender:
 ```
-[relay] Message <id> from pi session <sessionId> ("<name or title>") on <device>, project <project>[, replying to <replyTo>][, marked urgent]:
+[relay] Message <id> from pi session <sessionId> ("<name or title>") on <deviceName, else device>, project <project>[, replying to <replyTo>][, marked urgent]:
 
 <text>
 
@@ -206,7 +208,7 @@ For the web UI:
 ```
 Register a message renderer for `relay-message` that shows the sender line and the text compactly.
 
-**Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device` and `project` and remove double quotes, so a field cannot forge a second header line.
+**Untrusted fields:** every field of a message comes from another device or the web UI. Before rendering, strip ESC sequences and C0/C1 control characters except `\n` and `\t` from the text and every sender field. In the model-facing header, also collapse whitespace (including newlines) in `name`, `title`, `device`, `deviceName`, and `project` and remove double quotes, so a field cannot forge a second header line.
 
 ### Hops
 
@@ -214,7 +216,7 @@ The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `mes
 
 ### Tools (registered in top-level sessions only)
 
-- **`relay_list`** `{ device?, project?, query? }` → the online sessions from `GET /api/relay/v1/sessions`, excluding this session, filtered (`query` matches id, name, title, cwd, case-insensitively). Each line shows the id, device, project, name or title, state, model, and how long it has been online.
+- **`relay_list`** `{ device?, project?, query? }` → the online sessions from `GET /api/relay/v1/sessions`, excluding this session, filtered (`device` matches the device name or id, `query` matches id, name, title, cwd, case-insensitively). Each line shows the id, device (its name, else its id), project, name or title, state, model, and how long it has been online.
 - **`relay_send`** `{ to, text, urgent?, replyTo? }` → sends over the connection and waits for `sent` (up to 10 s):
   - `delivered` → "Delivered message <id> to <label>.";
   - `queued` → "Queued message <id> for <label>: it has not been delivered yet. If it is not delivered within 5 minutes it is dropped and you will get a notice.";
@@ -256,7 +258,7 @@ On `status: expired`, the extension sends `pi.sendMessage({ customType: "relay-n
 ## Web (`services/pika/web/`)
 
 - **"Active sessions" page** at `/active`, linked in the sidebar above Devices, with a count badge of online sessions.
-  - Online sessions are grouped by device. Each row shows the name or title, project, cwd, an idle or busy indicator, the model, how long it has been online, and the last activity.
+  - Online sessions are grouped by device id, each group headed by the device name. Each row shows the name or title, project, cwd, an idle or busy indicator, the model, how long it has been online, and the last activity.
   - When `recorded`, the row links to the session page.
   - Each row has a "Message" action that opens a composer: text, an "urgent" checkbox, and Send. Send posts `relay/messages` and shows the resulting status.
   - The page polls `relay/sessions` and `relay/events` every 3 s while visible.

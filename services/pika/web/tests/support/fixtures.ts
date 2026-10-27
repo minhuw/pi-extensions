@@ -102,10 +102,16 @@ export function toolResultMessage(
 	};
 }
 
+/** The name a fixture's device gets: an explicit `deviceName` (even undefined, as from old servers), else its id. */
+function nameOf(extra: { device?: string; deviceName?: string }): string | undefined {
+	return "deviceName" in extra ? extra.deviceName : (extra.device ?? "mini");
+}
+
 export function summary(id: string, extra: Partial<SessionDetail> = {}): SessionDetail {
 	return {
 		id,
 		device: "mini",
+		deviceName: nameOf(extra),
 		project: "pika",
 		cwd: "/home/me/code/pika",
 		title: `Session ${id}`,
@@ -140,17 +146,19 @@ export function turn(index: number, startSeq: number, endSeq: number, extra: Par
 	};
 }
 
-export function device(name: string, extra: Partial<Device> = {}): Device {
-	return { name, createdAt: iso(0), createdVia: "cli", lastSeenAt: iso(3_600_000), lastHost: `${name}.lan`, ...extra };
+/** A device with a token; its name defaults to its id, as for a device from before ids. */
+export function device(id: string, extra: Partial<Device> = {}): Device {
+	const name = extra.name ?? id;
+	return { id, name, createdAt: iso(0), createdVia: "cli", lastSeenAt: iso(3_600_000), lastHost: `${name}.lan`, hasKey: false, ...extra };
 }
 
-/** A pending pairing requested `agoMs` before now; it expires ten minutes after that. */
-export function pairing(code: string, deviceName: string, agoMs = 30_000, extra: Partial<FakePairing> = {}): FakePairing {
+/** A pending pairing requesting `name`, requested `agoMs` before now; it expires ten minutes after that. */
+export function pairing(code: string, name: string, agoMs = 30_000, extra: Partial<FakePairing> = {}): FakePairing {
 	const requested = Date.now() - agoMs;
 	return {
 		code,
-		device: deviceName,
-		host: `${deviceName}.local`,
+		name,
+		host: `${name}.local`,
 		ip: "192.168.1.20",
 		pikaVersion: "0.2.0",
 		requestedAt: new Date(requested).toISOString(),
@@ -183,6 +191,7 @@ export function onlineSession(id: string, extra: Partial<OnlineSession> & { onli
 	return {
 		id,
 		device: "mini",
+		deviceName: nameOf(rest),
 		host: "mini.lan",
 		name: `Session ${id}`,
 		cwd: "/home/me/code/pika",
@@ -204,8 +213,8 @@ export function relayEvent(id: string, agoMs = 60_000, extra: Partial<RelayEvent
 	return {
 		id,
 		at,
-		from: { kind: "session", sessionId: "s-a", device: "mini", name: "Planner", project: "pika" },
-		to: { sessionId: "s-b", device: "laptop", name: "Reviewer", project: "pika" },
+		from: { kind: "session", sessionId: "s-a", device: "mini", deviceName: "mini", name: "Planner", project: "pika" },
+		to: { sessionId: "s-b", device: "laptop", deviceName: "laptop", name: "Reviewer", project: "pika" },
 		status: "delivered",
 		deliveredAt: at,
 		urgent: false,
