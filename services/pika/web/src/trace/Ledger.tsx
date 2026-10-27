@@ -7,6 +7,7 @@ import { formatCount, plural } from "../lib/format";
 import type { TraceChild, TraceRecord, TraceTurn } from "../lib/types";
 import type { Interval } from "./axis";
 import { useLoadedEntry } from "./data";
+import { LedgerHelp } from "./Help";
 import { formatBytes, formatClockTime, formatElapsed, formatFineCost, formatInstant, formatSpan, plainLine, spanBetween } from "./format";
 import {
 	cacheHit,
@@ -480,7 +481,7 @@ function StatusRow({ row, columns }: { row: Extract<LedgerRow, { type: "status" 
 				) : row.status === "empty" ? (
 					<span className="italic">No records yet</span>
 				) : (
-					<span className="italic">Nested too deeply to show inline · open it as a page</span>
+					<span className="italic">Nested too deeply</span>
 				)}
 			</span>
 		</div>
@@ -627,6 +628,7 @@ function FilterBar({
 				>
 					{anyExpanded ? "Collapse all" : "Expand all"}
 				</button>
+				<LedgerHelp />
 			</div>
 		</div>
 	);

@@ -17,9 +17,7 @@ import { useEntry } from "./data";
 import { formatClockTime, formatElapsed, formatFineCost, formatInstant, formatSpan, spanBetween } from "./format";
 import {
 	cacheHit,
-	FAMILIES,
 	FAMILY_CLASSES,
-	FAMILY_LABELS,
 	recordDuration,
 	recordFamily,
 	recordIsError,
@@ -393,44 +391,12 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 	);
 }
 
+/** Shown only in the narrow slide-over, and only for a moment; on wide screens the pane is hidden while empty. */
 function EmptyInspector({ trace }: { trace?: SessionTrace }) {
-	const keys: [string, string][] = [
-		["↑ ↓", "move"],
-		["← →", "fold a turn"],
-		["[ ]", "previous / next turn"],
-		["Enter", "focus here"],
-		["/", "filter"],
-		["Esc", "clear range, stop replay"],
-	];
 	return (
-		<div className="px-5 py-6 text-[13px]" data-inspector-empty="">
-			<div className="font-medium">Select a record</div>
-			<p className="mt-1 text-muted">Click a row in the ledger or a bar in the timeline to see its input, output, and what the model saw.</p>
-			<dl className="mt-5 grid grid-cols-[72px_1fr] gap-y-1.5 text-[12.5px]">
-				{keys.map(([key, what]) => (
-					<div key={key} className="contents">
-						<dt>
-							<kbd className="mono rounded-[3px] border border-line px-1.5 py-px text-[11px] text-muted">{key}</kbd>
-						</dt>
-						<dd className="text-muted">{what}</dd>
-					</div>
-				))}
-			</dl>
-			<div className="mt-6 text-[11px] font-semibold tracking-[0.06em] text-muted uppercase">Legend</div>
-			<div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12.5px]">
-				{FAMILIES.map((family) => (
-					<span key={family} className="flex items-center gap-2 text-muted">
-						<span className={cx("h-2 w-3.5 rounded-[2px] opacity-80", FAMILY_CLASSES[family].bar)} />
-						{FAMILY_LABELS[family]}
-					</span>
-				))}
-				<span className="flex items-center gap-2 text-muted">
-					<span className="h-2 w-3.5 rounded-[2px] bg-k-error" />
-					Error
-				</span>
-			</div>
-			{trace && trace.records.length === 0 && <p className="mt-6 text-muted italic">This session has no model calls yet.</p>}
-		</div>
+		<p className="px-5 py-6 text-[13px] text-muted" data-inspector-empty="">
+			{trace && trace.records.length === 0 ? "This session has no model calls yet." : "Select a record to inspect it."}
+		</p>
 	);
 }
 
@@ -465,15 +431,14 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 	else if (target.kind === "child") {
 		body = (
 			<div className="space-y-4 px-4 py-4">
-				<p className="text-[13px] text-muted">Expand the row in the ledger to read this subagent’s records here, or open its session as a page.</p>
 				<ChildList items={[target.child]} />
 			</div>
 		);
 	} else if (target.kind === "turn") {
 		body = (
 			<div className="px-4 py-4">
-				<Markdown text={target.turn.userText || "(empty prompt)"} className="text-[14px]" />
-				{target.turn.userText.length >= 200 && <p className="mt-2 text-[12px] text-muted italic">The prompt is shortened here; the transcript view shows it in full.</p>}
+				{/* The trace cuts prompts to 200 characters. */}
+				<Markdown text={target.turn.userText ? `${target.turn.userText}${target.turn.userText.length >= 200 ? "…" : ""}` : "(empty prompt)"} className="text-[14px]" />
 			</div>
 		);
 	} else if (preview) {
@@ -521,12 +486,7 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 			else if (current === "input") {
 				const message = entry.data?.raw.message as AssistantMessage | undefined;
 				content = (
-					<div className="space-y-3">
-						<p className="text-[12.5px] text-muted">
-							The model read {formatCount(record.input + record.cacheRead + record.cacheWrite)} tokens. The Context tab shows the full request.
-						</p>
-						<JsonTree value={{ model: message?.model, provider: message?.provider, api: message?.api, thinkingLevel: message?.thinkingLevel, usage: message?.usage }} />
-					</div>
+					<JsonTree value={{ model: message?.model, provider: message?.provider, api: message?.api, thinkingLevel: message?.thinkingLevel, usage: message?.usage }} />
 				);
 			} else content = <JsonTree value={blocksOf(entry.data)} />;
 		} else if (record.kind === "tool") {

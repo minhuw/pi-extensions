@@ -510,7 +510,13 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 				fn();
 			};
 			if (event.key === "/") return handle(() => filterInput.current?.focus());
+			if (event.key === "?") return handle(() => document.querySelector<HTMLElement>("[data-ledger-help] button")?.focus());
 			if (event.key === "Escape") {
+				// Esc in the help closes it and keeps everything else.
+				if (event.target instanceof HTMLElement && event.target.closest("[data-ledger-help]")) {
+					const help = event.target;
+					return handle(() => help.blur());
+				}
 				if (replay.status !== "stopped") return handle(() => dispatch({ type: "stop" }));
 				if (overlayOpen) return handle(closeInspector);
 				if (range) return handle(() => setRange(undefined));
@@ -618,7 +624,6 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 			<section className="shrink-0 border-b border-line px-6 pt-1 pb-3" aria-label="Timeline">
 				<div className="mb-1.5 flex h-8 items-center gap-3">
 					<h2 className="text-[12px] font-semibold tracking-[0.06em] text-muted uppercase">Timeline</h2>
-					<span className="hidden text-[12px] text-muted md:inline">Drag to filter a time range · click a bar to inspect it</span>
 					<div className="ml-auto">
 						<ReplayControls state={replay} dispatch={dispatch} origin={formatClock(replay.position)} />
 					</div>
@@ -675,12 +680,15 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 						// The shadow only while open: off screen it would still darken the page's right edge.
 						overlayOpen ? "translate-x-0 shadow-[-8px_0_24px_rgba(15,15,15,0.08)]" : "pointer-events-none translate-x-full",
 						"min-[1200px]:pointer-events-auto min-[1200px]:static min-[1200px]:z-auto min-[1200px]:w-[40%] min-[1200px]:max-w-[680px] min-[1200px]:min-w-[420px] min-[1200px]:translate-x-0 min-[1200px]:shadow-none",
+						// With nothing to inspect, the ledger takes the whole width.
+						!inspected && "min-[1200px]:hidden",
 					)}
 					aria-label="Inspector"
 					// Off screen as a closed slide-over: out of the tab order and the accessibility tree.
 					inert={overlay && !overlayOpen}
 					aria-hidden={overlay && !overlayOpen ? true : undefined}
 					data-slide-over={overlay ? (overlayOpen ? "open" : "closed") : undefined}
+					data-inspector-pane={inspected ? "shown" : "hidden"}
 				>
 					<Inspector
 						ref={inspector}

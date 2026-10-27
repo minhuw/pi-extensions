@@ -96,6 +96,34 @@ describe("trajectory ledger", () => {
 		expect(within(listbox).getAllByRole("option").every((option) => option.getAttribute("aria-selected") === "false")).toBe(true);
 	});
 
+	it("keeps the shortcuts and colors in the toolbar's help, and the inspector hidden until something is inspected", async () => {
+		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
+		const shell = await waitFor(() => row("[data-kind='shell']"));
+		const pane = slideOver()!;
+		expect(pane.dataset.inspectorPane).toBe("hidden");
+		expect(pane.className).toContain("min-[1200px]:hidden");
+		expect(pane.textContent).not.toContain("fold a turn");
+		expect(document.querySelector("[data-trajectory]")?.textContent).not.toContain("Drag to filter");
+
+		const help = document.querySelector<HTMLElement>("[data-ledger-help]")!;
+		const tip = within(help).getByRole("tooltip");
+		const button = within(help).getByRole("button", { name: "Keyboard shortcuts and colors" });
+		expect(button.getAttribute("aria-describedby")).toBe(tip.id);
+		for (const text of ["filter the timeline by time", "fold a turn", "Model call", "Error"]) expect(tip.textContent).toContain(text);
+
+		fireEvent.click(shell);
+		expect(pane.dataset.inspectorPane).toBe("shown");
+		expect(pane.className).not.toContain("min-[1200px]:hidden");
+
+		// `?` opens the help; Esc there closes it and keeps the selection.
+		fireEvent.keyDown(document.body, { key: "?" });
+		expect(document.activeElement).toBe(button);
+		fireEvent.keyDown(button, { key: "Escape" });
+		expect(document.activeElement).not.toBe(button);
+		expect(selected()).toBe(row("[data-kind='shell']"));
+		expect(pane.dataset.inspectorPane).toBe("shown");
+	});
+
 	it("inspects a record, loading only its entries, with Rendered, Input, Output, and Raw tabs", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);
