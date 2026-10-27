@@ -140,7 +140,8 @@ jobs:
           fi
           token=$(docker exec pika-root pika token create smoke)
           grep -q '^pika_' <<<"$token"
-          docker exec pika-root pika token list | grep -q '^smoke'
+          devices=$(docker exec pika-root pika token list)
+          grep -qE $'^[0-9a-f-]{36}\tsmoke\t' <<<"$devices"
           code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7171/api/relay/v1/sessions)
           if [[ "$code" != 401 ]]; then
             echo "::error::GET /api/relay/v1/sessions without a token answered $code instead of 401"
