@@ -219,6 +219,7 @@ The extension tracks `runHops`. It resets to 0 at `before_agent_start` with `mes
   - `queued` → "Queued message <id> for <label>: it has not been delivered yet. If it is not delivered within 5 minutes it is dropped and you will get a notice.";
   - `rejected` → an error result naming the reason.
   - If the session is not connected, an error result explaining why.
+  - The `delivered` and `queued` results end with: "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps." The tool descriptions of `relay_send` and `relay_status` say the same. In a live test a model otherwise kept sleeping and polling `relay_status` inside its turn, while pi held the answer until that turn ended. `/relay send` shows the results without this sentence.
 - **`relay_status`** `{ id? }` → the state of messages this session sent in this process (`queued` | `delivered` | `expired` | `rejected`), newest first, at most 50.
 
 ### Notices to the sender

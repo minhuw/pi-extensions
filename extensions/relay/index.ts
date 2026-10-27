@@ -446,6 +446,9 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	}
 
 	const TOOLS = ["relay_list", "relay_send", "relay_status"] as const;
+	// A real model kept sleeping and polling relay_status for an answer, which pi queues until its turn ends.
+	const ANSWER_HINT = "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. "
+		+ "End your turn now, telling your user what you are waiting for if that helps.";
 
 	function registerTools(): void {
 		if (toolsRegistered) return;
@@ -481,7 +484,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			description: "Send a text message to another running pi session through pika relay. "
 				+ "`to` is a session id from relay_list, or the sender of a [relay] message you are answering; when answering, set `replyTo` to that message's id. "
 				+ "The message starts a turn in the target session, or joins the turn it is running; `urgent` steers it into that turn at once. "
-				+ "Delivered means the target session received it, not that its model has read or answered it; answers arrive later as [relay] messages. "
+				+ "Delivered means the target session received it, not that its model has read or answered it. "
+				+ "An answer arrives as a new [relay] message in this session only after your current turn ends, never during it, so do not sleep, poll relay_status, or call relay_list to wait for one: end your turn instead. "
 				+ "Messages that cannot be delivered within 5 minutes are dropped, and you get a notice.",
 			promptSnippet: "Send a text message to another running pi session through pika relay",
 			parameters: Type.Object({
@@ -492,12 +496,13 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			}),
 			async execute(_id, params) {
 				const { text, answer } = await send(params.to, params.text, { urgent: params.urgent, replyTo: params.replyTo, hops: runHops + 1 });
-				return { content: [{ type: "text", text }], details: answer };
+				return { content: [{ type: "text", text: `${text} ${ANSWER_HINT}` }], details: answer };
 			},
 		});
 		pi.registerTool({
 			name: "relay_status", label: "Relay Status",
-			description: "Show the delivery state (queued, delivered, expired, or rejected) of the relay messages this session sent in this process, newest first, at most 50. Pass `id` for one message.",
+			description: "Show the delivery state (queued, delivered, expired, or rejected) of the relay messages this session sent in this process, newest first, at most 50. Pass `id` for one message. "
+				+ "It never shows answers: those arrive as [relay] messages after your turn ends.",
 			parameters: Type.Object({ id: Type.Optional(Type.String({ description: "A message id from relay_send" })) }),
 			async execute(_id, params) {
 				return { content: [{ type: "text", text: statusLines(params.id) }], details: { messages: sent.filter((record) => !params.id || record.id === params.id).slice(-SENT_SHOWN).reverse() } };

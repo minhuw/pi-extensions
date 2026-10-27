@@ -4,6 +4,8 @@ import { NOTICE_TYPE, timing } from "../protocol.ts";
 import { FakeRelay } from "./support/relay-server.ts";
 import { Notes, setCredentials, sleep, startSession, texts, waitFor, waitOnline, Workspace, type Harness } from "./support/runtime.ts";
 
+const ANSWER_HINT = "Any answer arrives as a new [relay] message after your current turn ends, never during it: do not sleep or poll for it. End your turn now, telling your user what you are waiting for if that helps.";
+
 let workspace: Workspace;
 let relay: FakeRelay;
 const harnesses: Harness[] = [];
@@ -67,12 +69,12 @@ it("reports every outcome of relay_send and keeps them for relay_status", async 
 	b.faux.setResponses([fauxAssistantMessage("b got it")]);
 	await a.session.prompt("ask b");
 	await waitFor(() => texts(b.session, "assistant").includes("b got it"), 5_000, "b's turn");
-	expect(results(a, "relay_send")[0]).toEqual({ text: `Delivered message msg-1 to pi session ${target} on laptop.`, isError: false });
+	expect(results(a, "relay_send")[0]).toEqual({ text: `Delivered message msg-1 to pi session ${target} on laptop. ${ANSWER_HINT}`, isError: false });
 
 	callTool(a, "relay_send", { to: "offline-session", text: "later" });
 	await a.session.prompt("queue one");
 	expect(results(a, "relay_send")[1]).toEqual({
-		text: "Queued message msg-2 for pi session offline-session: it has not been delivered yet. If it is not delivered within 5 minutes it is dropped and you will get a notice.",
+		text: "Queued message msg-2 for pi session offline-session: it has not been delivered yet. If it is not delivered within 5 minutes it is dropped and you will get a notice. " + ANSWER_HINT,
 		isError: false,
 	});
 

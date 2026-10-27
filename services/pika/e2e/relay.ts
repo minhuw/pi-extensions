@@ -175,7 +175,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		// 2. A asks B with relay_send; B's turn starts with the message, and B's relay_send answer reaches A.
 		await a.prompt(PROMPTS.ask(B.sessionId));
 		const asked = toolResults(await a.entries(), "relay_send").at(-1);
-		const delivered = /^Delivered message (\S+) to (.+)\.$/.exec(lastText(asked));
+		const delivered = /^Delivered message (\S+) to (.+?)\. Any answer arrives as a new \[relay\] message after your current turn ends/.exec(lastText(asked));
 		check(delivered && !asked?.message?.isError && delivered[2]!.includes(B.sessionId), `A's relay_send answered ${JSON.stringify(lastText(asked))}`);
 		const askId = delivered[1]!;
 		const reply = await waitFor(async () => custom(await a.entries(), "relay-received").find((entry) => entry.data?.replyTo === askId), 20_000, "B's answer to reach A");
@@ -230,7 +230,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		check(status.startsWith("Relay is offline: relay is off for this session (/relay off)"), `/relay after /relay off says ${JSON.stringify(status)}`);
 		await a.prompt(PROMPTS.late(B.sessionId));
 		const queuedText = lastText(toolResults(await a.entries(), "relay_send").at(-1));
-		const queued = new RegExp(`^Queued message (\\S+) for (.+): it has not been delivered yet\\. If it is not delivered within ${ttl} seconds it is dropped and you will get a notice\\.$`).exec(queuedText);
+		const queued = new RegExp(`^Queued message (\\S+) for (.+): it has not been delivered yet\\. If it is not delivered within ${ttl} seconds it is dropped and you will get a notice\\. Any answer arrives`).exec(queuedText);
 		check(queued && queued[2]!.includes(B.sessionId), `A's relay_send to the offline B answered ${JSON.stringify(queuedText)}`);
 		const [lateId, lateLabel] = [queued[1]!, queued[2]!];
 		const acceptedAt = Date.parse((await events()).find((event) => event.id === lateId)?.at ?? "");
