@@ -150,7 +150,9 @@ export class RelayConnection {
 			}
 		};
 		socket.onmessage = (event) => { if (mine()) this.receive(event.data); };
-		socket.onerror = () => { /* the close event follows */ };
+		// Node 22 reports a refused upgrade with an error event and no close event, and leaves the socket connecting;
+		// later versions send both. On an open socket the close event follows.
+		socket.onerror = () => { if (mine() && !opened) void this.closed(1006, "", false); };
 		socket.onclose = (event) => {
 			if (!mine()) return;
 			this.socket = undefined;
