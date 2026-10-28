@@ -22,6 +22,14 @@ function Svg({ size = 16, children, ...props }: IconProps & { children: ReactNod
 }
 
 export const Icons = {
+	settings: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M2 4h12M2 8h12M2 12h12" />
+			<circle cx="5" cy="4" r="1.5" fill="var(--color-page)" />
+			<circle cx="11" cy="8" r="1.5" fill="var(--color-page)" />
+			<circle cx="7" cy="12" r="1.5" fill="var(--color-page)" />
+		</Svg>
+	),
 	sessions: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M3 3.5h10M3 8h10M3 12.5h6" />

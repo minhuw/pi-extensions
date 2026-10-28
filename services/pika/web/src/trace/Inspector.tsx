@@ -1,5 +1,5 @@
 import { forwardRef, useMemo, useState, type ReactNode } from "react";
-import { Link } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { CodeBlock, OutputBlock } from "../components/code";
 import { Icon } from "../components/icons";
 import { JsonTree } from "../components/JsonTree";
@@ -414,7 +414,8 @@ export interface InspectorProps {
 
 export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Inspector({ target, trace, tab, onTab, preview, live, onClose, onSelectCall }, ref) {
 	const [pane, setPane] = useState<HTMLDivElement | null>(null);
-	const tabs = tabsFor(target);
+	const api = useApi();
+	const tabs = tabsFor(target).filter((tab) => !api.publicView || tab !== "context");
 	const current: InspectorTab = tabs.includes(tab) ? tab : (tabs[0] ?? "rendered");
 	const record = target?.kind === "record" ? target.record : undefined;
 	const sessionId = target?.kind === "record" ? target.sessionId : "";

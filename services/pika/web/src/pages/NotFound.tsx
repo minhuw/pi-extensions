@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { cx, PAGE_COLUMN } from "../components/ui";
 
 export function NotFoundPage({ what = "page" }: { what?: string }) {

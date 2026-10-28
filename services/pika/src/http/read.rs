@@ -1,4 +1,4 @@
-//! Read API routes under `{base}/api/v1/`. Every route here sits behind the login check.
+//! Shared read handlers for the authenticated API and the opt-in public session namespace.
 
 use std::collections::BTreeMap;
 
@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Serialize;
 use serde_json::json;
 
@@ -16,7 +16,12 @@ use crate::export;
 use crate::read::{self, Params, ReadError, ReadResult};
 use crate::store::Store;
 
-pub fn routes() -> Router<AppState> {
+#[derive(Clone, Copy)]
+struct Scope {
+    public: bool,
+}
+
+fn session_routes() -> Router<AppState> {
     Router::new()
         .route("/facets", get(facets))
         .route("/sessions", get(sessions))
@@ -27,11 +32,87 @@ pub fn routes() -> Router<AppState> {
         .route("/sessions/{id}/entries/{seq}/image/{index}", get(image))
         .route("/sessions/{id}/updates", get(updates))
         .route("/sessions/{id}/trace", get(trace))
+}
+
+pub fn routes() -> Router<AppState> {
+    session_routes()
+        .layer(Extension(Scope { public: false }))
+        .route("/settings/publishing", get(publishing).patch(publish))
         .route("/sessions/{id}/export", get(export_session))
         .route("/requests/{id}", get(request))
         .route("/herder/runs", get(herder_runs))
         .route("/herder/runs/{id}", get(herder_run))
         .route("/search", get(search))
+}
+
+/// An explicit allowlist: unknown public endpoints never reach the SPA fallback.
+pub fn public_routes() -> Router<AppState> {
+    session_routes()
+        .layer(Extension(Scope { public: true }))
+        .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
+        .layer(axum::middleware::from_fn(no_store))
+}
+
+async fn no_store(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn publishing(State(state): State<AppState>) -> Response {
+    json(&state, |_, conn| {
+        let tx = conn.unchecked_transaction()?;
+        read::publishing::settings(&tx)
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct Publish {
+    project: String,
+    published: bool,
+}
+
+async fn publish(State(state): State<AppState>, Json(body): Json<Publish>) -> Response {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || store.write(|tx| read::publishing::update(tx, &body.project, body.published))).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => read_error(e),
+        Err(e) => internal_error(e),
+    }
+}
+
+/// Public authorization and the resource read share a SQLite snapshot, including blob lookups.
+async fn scoped_query<T: Send + 'static>(
+    state: &AppState,
+    scope: Scope,
+    id: Option<String>,
+    f: impl FnOnce(&Store, &rusqlite::Connection) -> ReadResult<T> + Send + 'static,
+) -> ReadResult<T> {
+    query(state, move |store, conn| {
+        if scope.public {
+            let tx = conn.unchecked_transaction()?;
+            if let Some(id) = id {
+                read::publishing::require(&tx, &id)?;
+            }
+            f(store, &tx)
+        } else {
+            f(store, conn)
+        }
+    })
+    .await
+}
+
+async fn scoped_json<T: Serialize + Send + 'static>(
+    state: &AppState,
+    scope: Scope,
+    id: Option<String>,
+    f: impl FnOnce(&Store, &rusqlite::Connection) -> ReadResult<T> + Send + 'static,
+) -> Response {
+    match scoped_query(state, scope, id, f).await {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => read_error(e),
+    }
 }
 
 type QueryParams = Query<BTreeMap<String, String>>;
@@ -130,29 +211,57 @@ fn seq_param(raw: &str) -> ReadResult<i64> {
     raw.parse().map_err(|_| read::bad("seq must be an integer"))
 }
 
-async fn facets(State(state): State<AppState>) -> Response {
-    json(&state, |_, conn| read::sessions::facets(conn)).await
+async fn facets(State(state): State<AppState>, Extension(scope): Extension<Scope>) -> Response {
+    scoped_json(&state, scope, None, move |_, conn| read::sessions::facets_scoped(conn, scope.public)).await
 }
 
-async fn sessions(State(state): State<AppState>, Query(params): QueryParams) -> Response {
-    json(&state, move |_, conn| read::sessions::list(conn, &Params(params))).await
+async fn sessions(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
+    scoped_json(&state, scope, None, move |_, conn| read::sessions::list_scoped(conn, &Params(params), scope.public)).await
 }
 
-async fn session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    json(&state, move |_, conn| read::sessions::detail(conn, &id)).await
+async fn session(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
+        let mut detail = read::sessions::detail(conn, &id)?;
+        if scope.public {
+            read::publishing::detail(conn, &mut detail)?;
+        }
+        Ok(detail)
+    })
+    .await
 }
 
-async fn turns(State(state): State<AppState>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
-    json(&state, move |_, conn| read::sessions::turns(conn, &id, &Params(params))).await
+async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| read::sessions::turns(conn, &id, &Params(params))).await
 }
 
-async fn updates(State(state): State<AppState>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
-    json(&state, move |_, conn| read::sessions::updates(conn, &id, &Params(params))).await
+async fn updates(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| {
+        let mut updates = read::sessions::updates(conn, &id, &Params(params))?;
+        if scope.public {
+            if let Some(session) = &mut updates.session {
+                read::publishing::summary(conn, session)?;
+            }
+        }
+        Ok(updates)
+    })
+    .await
 }
 
 /// Live views poll the trace, so it is revalidated by `ETag` and only built when it changed.
-async fn trace(State(state): State<AppState>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+async fn trace(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, headers: HeaderMap) -> Response {
     let gzip = accepts_gzip(&headers);
+    if scope.public {
+        let trace = match scoped_query(&state, scope, Some(id.clone()), move |store, conn| {
+            let mut trace = read::trace::trace(conn, &store.blobs, &id)?;
+            read::publishing::trace(conn, &mut trace)?;
+            Ok(trace)
+        }).await {
+            Ok(trace) => trace,
+            Err(e) => return read_error(e),
+        };
+        return tokio::task::spawn_blocking(move || json_maybe_gzip(&trace, gzip)).await
+            .unwrap_or_else(|e| internal_error(e));
+    }
     let unchanged = move |fingerprint: &str| none_match(&headers, &trace_etag(fingerprint, gzip));
     let (fingerprint, trace) =
         match query(&state, move |store, conn| read::trace::trace_if_changed(conn, &store.blobs, &id, unchanged)).await {
@@ -175,17 +284,17 @@ async fn trace(State(state): State<AppState>, Path(id): Path<String>, headers: H
     response
 }
 
-async fn entries(State(state): State<AppState>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
+async fn entries(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {
     let prefix = state.config.prefix().to_owned();
-    json(&state, move |store, conn| read::entries::list(conn, &store.blobs, &prefix, &id, &Params(params))).await
+    scoped_json(&state, scope, Some(id.clone()), move |store, conn| read::entries::list_scoped(conn, &store.blobs, &prefix, &id, &Params(params), scope.public)).await
 }
 
-async fn raw_entry(State(state): State<AppState>, Path((id, seq)): Path<(String, String)>) -> Response {
+async fn raw_entry(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path((id, seq)): Path<(String, String)>) -> Response {
     let seq = match seq_param(&seq) {
         Ok(seq) => seq,
         Err(e) => return read_error(e),
     };
-    match query(&state, move |store, conn| read::entries::raw(conn, &store.blobs, &id, seq)).await {
+    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| read::entries::raw(conn, &store.blobs, &id, seq)).await {
         Ok(line) => (
             [(header::CONTENT_TYPE, "application/json; charset=utf-8"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
             line,
@@ -195,13 +304,13 @@ async fn raw_entry(State(state): State<AppState>, Path((id, seq)): Path<(String,
     }
 }
 
-async fn image(State(state): State<AppState>, Path((id, seq, index)): Path<(String, String, String)>) -> Response {
+async fn image(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path((id, seq, index)): Path<(String, String, String)>) -> Response {
     let seq = match seq_param(&seq) {
         Ok(seq) => seq,
         Err(e) => return read_error(e),
     };
     let Ok(index) = index.parse::<usize>() else { return read_error(read::bad("index must be an integer")) };
-    match query(&state, move |store, conn| read::entries::image(conn, &store.blobs, &id, seq, index)).await {
+    match scoped_query(&state, scope, Some(id.clone()), move |store, conn| read::entries::image(conn, &store.blobs, &id, seq, index)).await {
         // Stored lines never change, so neither do their images.
         Ok((content_type, bytes)) => (
             [

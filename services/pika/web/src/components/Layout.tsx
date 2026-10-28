@@ -11,7 +11,7 @@ import { plainOptions, type FilterOption } from "./FilterChip";
 import { Icon, PikaLogo, type IconName } from "./icons";
 import { cx, Pill } from "./ui";
 
-const ScrollRootContext = createContext<HTMLElement | null>(null);
+export const ScrollRootContext = createContext<HTMLElement | null>(null);
 
 /** The main pane's scroll element; page virtualizers scroll with it. */
 export function useScrollRoot(): HTMLElement | null {
@@ -148,6 +148,9 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 				</NavItem>
 				<NavItem to="/search" icon="search">
 					Search
+				</NavItem>
+				<NavItem to="/settings" icon="settings">
+					Settings
 				</NavItem>
 				<SidebarSection title="Projects" items={plainOptions(facets.data?.projects ?? [])} param="project" icon="folder" />
 				<SidebarSection title="Devices" items={deviceOptions(facets.data?.devices ?? [])} param="device" icon="device" />

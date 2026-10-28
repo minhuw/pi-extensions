@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { PikaLink as Link } from "../../components/PikaLink";
 import { CodeBlock, OutputBlock } from "../../components/code";
 import { Icon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";

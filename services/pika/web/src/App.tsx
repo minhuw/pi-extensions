@@ -3,6 +3,7 @@ import { lazy, Suspense, useState, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 import { AuthGate } from "./components/AuthGate";
 import { Layout } from "./components/Layout";
+import { PublicLayout } from "./components/PublicLayout";
 import { Skeleton, SkeletonLines } from "./components/ui";
 import { ApiContext, ApiError, PikaApi } from "./lib/api";
 import { ActiveSessionsPage } from "./pages/ActiveSessions";
@@ -12,6 +13,7 @@ import { HerderRunPage, HerderRunsPage } from "./pages/HerderRuns";
 import { LoginPage } from "./pages/Login";
 import { SearchPage } from "./pages/Search";
 import { SessionListPage } from "./pages/SessionList";
+import { SettingsPage } from "./pages/Settings";
 
 // The session page, with its trajectory, transcript renderers, and context viewer, loads on demand in its own chunk.
 const SessionViewPage = lazy(() => import("./pages/SessionView").then((module) => ({ default: module.SessionViewPage })));
@@ -51,6 +53,11 @@ export function AppRoutes() {
 	return (
 		<Routes>
 			<Route path="login" element={<LoginPage />} />
+			<Route path="public" element={<PublicLayout />}>
+				<Route index element={<SessionListPage />} />
+				<Route path="s/:id" element={<Suspense fallback={<SessionPageLoading />}><SessionViewPage /></Suspense>} />
+				<Route path="*" element={<NotFoundPage />} />
+			</Route>
 			<Route element={<AuthGate />}>
 				<Route element={<Layout />}>
 					<Route index element={<SessionListPage />} />
@@ -68,6 +75,7 @@ export function AppRoutes() {
 					<Route path="herder/:id" element={<LegacyRunRedirect />} />
 					<Route path="active" element={<ActiveSessionsPage />} />
 					<Route path="devices" element={<DevicesPage />} />
+					<Route path="settings" element={<SettingsPage />} />
 					<Route path="search" element={<SearchPage />} />
 					<Route path="*" element={<NotFoundPage />} />
 				</Route>

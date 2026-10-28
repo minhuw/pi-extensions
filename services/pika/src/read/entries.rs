@@ -79,6 +79,10 @@ pub(crate) const LIST_SQL: &str = "SELECT e.seq, e.offset, e.entry_id, e.parent_
 
 /// Entries `from..=to` by seq. `prefix` is the base path prefix for image URLs (empty for `/`).
 pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params) -> ReadResult<Entries> {
+    list_scoped(conn, blobs, prefix, id, p, false)
+}
+
+pub fn list_scoped(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Params, public: bool) -> ReadResult<Entries> {
     let sid = session_sid(conn, id)?;
     let limit = p.limit(ENTRY_LIMIT, MAX_ENTRY_LIMIT)?;
     let from = p.int("from")?.unwrap_or(0);
@@ -103,7 +107,8 @@ pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Pa
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let images = format!("{prefix}/api/v1/sessions/{}/entries", encode_path_segment(id));
+    let namespace = if public { "public/v1" } else { "v1" };
+    let images = format!("{prefix}/api/{namespace}/sessions/{}/entries", encode_path_segment(id));
     let mut items = Vec::with_capacity(rows.len());
     for (mut entry, data, blob) in rows {
         let mut raw = parse(line_text(blobs, data, blob)?);
@@ -114,6 +119,9 @@ pub fn list(conn: &Connection, blobs: &BlobStore, prefix: &str, id: &str, p: &Pa
         });
         entry.truncated = truncate_strings(&mut raw);
         entry.raw = raw;
+        if public {
+            entry.request_id = None;
+        }
         items.push(entry);
     }
     Ok(Entries { items })

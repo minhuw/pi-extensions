@@ -568,19 +568,23 @@ pub fn trace_if_changed(
     id: &str,
     unchanged: impl FnOnce(&str) -> bool,
 ) -> ReadResult<(String, Option<Trace>)> {
-    let tx = conn.unchecked_transaction()?;
-    let fingerprint = fingerprint(&tx, id)?;
+    // Reuse the caller's snapshot when publication was checked in it.
+    let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let tx = conn;
+    let fingerprint = fingerprint(tx, id)?;
     if unchanged(&fingerprint) {
         return Ok((fingerprint, None));
     }
-    let trace = build(&tx, blobs, id)?;
+    let trace = build(tx, blobs, id)?;
     Ok((fingerprint, Some(trace)))
 }
 
 pub fn trace(conn: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
     // One snapshot for every table.
-    let tx = conn.unchecked_transaction()?;
-    build(&tx, blobs, id)
+    // Reuse the caller's snapshot when publication was checked in it.
+    let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let tx = conn;
+    build(tx, blobs, id)
 }
 
 fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {

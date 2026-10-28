@@ -25,7 +25,7 @@ homelab.example {
 		# with PIKA_AUTH=proxy. Devices use bearer tokens for ingest and relay, pairing
 		# devices have no login yet, and health checks are anonymous, so leave those out.
 		# Hash with `caddy hash-password`. (Caddy < 2.8 calls the directive basicauth.)
-		# @browser not path /pika/api/ingest/* /pika/api/pair/* /pika/api/relay/* /pika/api/health
+		# @browser not path /pika/api/ingest/* /pika/api/pair/* /pika/api/relay/* /pika/api/health /pika/api/public/* /pika/public /pika/public/* /pika/assets/*
 		# basic_auth @browser {
 		# 	me $2a$14$replace-with-the-hash
 		# }

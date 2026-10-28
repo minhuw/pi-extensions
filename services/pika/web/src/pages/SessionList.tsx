@@ -1,7 +1,8 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
 import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
@@ -233,7 +234,7 @@ export function SessionListPage() {
 
 	return (
 		<Page className="pb-24">
-			<PageTitle>Sessions</PageTitle>
+			<PageTitle>{api.publicView ? "Published trajectories" : "Sessions"}</PageTitle>
 			<div className="mt-5">
 				<Filters />
 			</div>
@@ -250,7 +251,7 @@ export function SessionListPage() {
 				<EmptyState title="No sessions">Nothing matches these filters.</EmptyState>
 			) : items.length === 0 ? (
 				<EmptyState title="No sessions yet" visual={<PikaLogo size={40} />}>
-					Run <code className="code-chip">/pika login</code> in pi on each machine. Sessions appear here as they run.
+					{api.publicView ? "No projects have been published yet." : <>Run <code className="code-chip">/pika login</code> in pi on each machine. Sessions appear here as they run.</>}
 				</EmptyState>
 			) : (
 				<div ref={listRef} className="relative" style={{ height: virtualizer.getTotalSize() }} data-session-list="">

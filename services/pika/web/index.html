@@ -9,7 +9,7 @@
 			// Relative asset URLs must resolve against the base path, not the current route.
 			(function () {
 				var meta = document.querySelector('meta[name="pika-base"]');
-				var base = meta ? meta.getAttribute("content") || "/" : location.pathname.replace(/\/(s|runs|herder|search|login)(\/.*)?$/, "");
+				var base = meta ? meta.getAttribute("content") || "/" : location.pathname.replace(/\/(s|runs|herder|search|login|public|settings|devices|active)(\/.*)?$/, "");
 				var el = document.createElement("base");
 				el.href = ("/" + base).replace(/\/+/g, "/").replace(/\/$/, "") + "/";
 				document.head.appendChild(el);

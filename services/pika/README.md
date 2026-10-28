@@ -75,6 +75,7 @@ Every route is under the base path:
 - `POST api/pair/v1/start` and `poll` let a device ask for a token, without authentication; you approve it in the UI. `POST api/pair/v1/bind` lets a device with a token register its device key.
 - `GET api/relay/v1/connect` (a WebSocket) and `GET api/relay/v1/sessions` are the relay's device routes, with `Authorization: Bearer <token>`.
 - `api/v1/*` is the read API used by the UI, plus login, browser sessions (`auth/sessions`), devices, pairing approval, and the relay dashboard (`relay/sessions`, `relay/messages`, `relay/events`).
+- `api/public/v1/*` provides anonymous read access to published projects only (see [Publishing projects](#publishing-projects)).
 - Every other path serves the UI. The server injects `<meta name="pika-base">` into `index.html`, so one build works under any base path.
 
 The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
@@ -113,6 +114,16 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 - **Rate limits:** after 5 failed logins from one client address in 15 minutes, that address gets `429 Too Many Requests` with `Retry-After` until the oldest failure is 15 minutes old; a successful login clears its count. After 100 failed logins in an hour from all addresses together, every login is refused until the hour frees up. Pairing allows 5 starts per address in 10 minutes and 10 pending pairings at a time. An IPv6 client counts by its /64, since one client usually holds a whole /64. The counts live in memory and reset when the server restarts. Behind a reverse proxy, set `PIKA_TRUST_PROXY=1`, or every client shares the proxy's address and its limits.
 - **If logins are blocked:** because of the global limit, anyone who can reach the login page can block new logins for up to an hour by sending wrong passwords from many addresses. Browsers that are already logged in keep working, and devices keep uploading. To get back in, use a browser that is still logged in, or restart pika (`docker restart pika`, or stop and start `pika serve`), which clears every limit. Then block the offending addresses at the reverse proxy, or put an authenticating proxy in front with `PIKA_AUTH=proxy` if it keeps happening.
 - **Devices:** each device has an id, which never changes and keys everything it uploaded, and a name, a free label of up to 64 characters that you can change at any time; two devices may share a name. The UI's Devices page lists each device with its name and id, how its token was made, when it last uploaded, and from which host (updated at most once a minute), renames devices, and revokes tokens; ingest refuses a revoked token at once, and the device's relay connections close at once. A revoked device keeps its name and history, and a later pairing can continue it. `pika token list`, `pika token rename`, and `pika token revoke` do the same from the command line; a running server notices a token revoked by `pika token revoke` within one relay heartbeat (20 s) and closes that device's relay connections then.
+
+### Publishing projects
+
+Open **Settings → Published projects** and publish the projects you want to share. Every project starts private. Publishing includes all existing and future trajectories with that project name, across machines and directories; pika currently identifies projects by the repository or working directory basename.
+
+The public gallery is at `<url>/public`, a project's gallery at `<url>/public?project=<name>`, and an individual trajectory at `<url>/public/s/<sessionId>`. Visitors need no login and can replay trajectories, inspect model and tool records, and read transcripts. Publishing exposes the session's prompts, responses, thinking, tool inputs and outputs, images, raw entries, and metadata without automatic redaction. Captured provider request payloads remain private, and the public UI has no relay or management controls.
+
+**Unpublish** removes access on subsequent requests, including direct image and raw-entry links. Public API responses disable caching; copies already saved by visitors cannot be recalled. Settings survive server restarts and `pika reindex`.
+
+With proxy authentication, leave `/public`, `/public/*`, `/api/public/*`, and `/assets/*` open (including your base path), while keeping `/api/v1/*` and owner pages authenticated. The [deployment examples](deploy/) include these rules. With pika's built-in password, no proxy changes are needed.
 
 ### Relay
 
@@ -190,7 +201,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.4.0`, `0.4` | a `pika-v0.4.0` release tag |
+| `latest`, `0.5.0`, `0.5` | a `pika-v0.5.0` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -199,7 +210,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.4.0 && git push origin pika-v0.4.0
+git tag pika-v0.5.0 && git push origin pika-v0.5.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
@@ -319,7 +330,7 @@ homelab.example {
 }
 ```
 
-The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt four paths from the proxy's login (for example `/pika/api/ingest/`): `api/ingest/` and `api/relay/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; and `api/health`, for monitoring. Everything else, the UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
+The proxy may handle authentication instead of the built-in password: basic auth, or forward auth with Authelia, Authentik, or a VPN. Then start pika with `PIKA_AUTH=proxy`, and exempt the following paths from the proxy's login (including your base path, for example `/pika/api/ingest/`): `api/ingest/` and `api/relay/`, because devices send their own `Authorization: Bearer` token there; `api/pair/`, because a device pairing with the server has no login yet; `api/health`, for monitoring; and `public`, `public/*`, `api/public/*`, and `assets/*`, for the public gallery. Everything else, the owner UI and `api/v1/` included, must go through the proxy's login: with `PIKA_AUTH=proxy`, pika itself lets every request in. The examples include commented-out basic-auth lines that do this. Set the devices' `url` to the `https://` address: pika does not follow redirects, so an `http://` URL that the proxy redirects never uploads.
 
 ## Development
 

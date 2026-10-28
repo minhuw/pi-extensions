@@ -3,6 +3,7 @@
 
 pub mod entries;
 pub mod herder;
+pub mod publishing;
 pub mod search;
 pub mod sessions;
 pub mod trace;

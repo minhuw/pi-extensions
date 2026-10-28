@@ -1476,3 +1476,229 @@ async fn trace_children_kinds_and_order() {
     assert_eq!(children, [("c-timed", "subagent", true), ("b-step", "herder-step", true), ("a-timeless", "subagent", false)]);
     assert_eq!(trace["records"][1]["childSessionId"], "c-timed");
 }
+
+async fn public(app: &App, path: &str) -> Reply {
+    let reply = app.get_abs(&format!("{BASE}/api/public/v1/{path}"), None).await;
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store", "{path}");
+    reply
+}
+
+async fn public_json(app: &App, path: &str) -> Value {
+    let reply = public(app, path).await;
+    assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.text());
+    reply.json()
+}
+
+async fn publish(app: &App, project: &str, published: bool, cookie: Option<&str>) -> Reply {
+    let mut request = Request::patch(format!("{BASE}/api/v1/settings/publishing")).header(header::CONTENT_TYPE, "application/json");
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+    app.send(request.body(Body::from(json!({ "project": project, "published": published }).to_string())).unwrap()).await
+}
+
+#[tokio::test]
+async fn publication_is_opt_in_and_settings_require_login() {
+    let app = app(Some("publishing-password"));
+    load(&app).await;
+    assert_eq!(app.get("settings/publishing").await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(public_json(&app, "sessions").await, json!({ "items": [], "nextCursor": null }));
+    assert_eq!(public_json(&app, "facets").await, json!({ "devices": [], "projects": [], "models": [] }));
+    for id in [SESSION_ID, "missing"] {
+        for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
+            let reply = public(&app, &format!("sessions/{id}{suffix}")).await;
+            assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
+        }
+    }
+    let reply = app
+        .send(
+            Request::post(format!("{BASE}/api/v1/login"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "password": "publishing-password" }).to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap();
+    let settings = app.get_abs(&format!("{BASE}/api/v1/settings/publishing"), Some(cookie)).await;
+    assert_eq!(
+        settings.json(),
+        json!({ "projects": [
+        { "project": "gadgets", "sessionCount": 1, "published": false },
+        { "project": "widgets", "sessionCount": 5, "published": false }
+    ] })
+    );
+    let private_model = lines(&[json!({ "type": "message", "id": "private-model", "parentId": "d0000004",
+        "timestamp": "2026-10-22T08:00:07Z", "message": assistant("hidden", "private-model", 5) })]);
+    app.append(DESKTOP, &skey(DESK_SESSION), "session", byte_len(&desk_session()), &private_model).await;
+    assert_eq!(publish(&app, "widgets", true, Some(cookie)).await.status, StatusCode::OK);
+    assert_eq!(
+        public_json(&app, "facets").await,
+        json!({
+            "devices": [{ "id": DEVICE, "name": DEVICE_NAME }],
+            "projects": ["widgets"], "models": ["claude-haiku-4-5", "claude-sonnet-4-5", "gpt-5"]
+        })
+    );
+    for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
+        assert_eq!(public(&app, &format!("sessions/{SESSION_ID}{suffix}")).await.status, StatusCode::OK);
+        assert_eq!(public(&app, &format!("sessions/{DESK_SESSION}{suffix}")).await.status, StatusCode::NOT_FOUND);
+    }
+    // There is no provider context route or any other private API in this namespace.
+    for path in ["requests/req-1", "sessions/nope/export", "herder/runs", "search?q=test", "devices", "relay", "settings/publishing"] {
+        let reply = public(&app, path).await;
+        assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })), "{path}");
+    }
+    let entries = public_json(&app, &format!("sessions/{SESSION_ID}/entries")).await;
+    assert!(entries["items"].as_array().unwrap().iter().all(|e| e.get("requestId").is_none()));
+    let image = entries["items"][13]["raw"]["message"]["content"][1]["src"].as_str().unwrap();
+    assert_eq!(image, format!("{BASE}/api/public/v1/sessions/{SESSION_ID}/entries/13/image/0"));
+    let reply = app.get_abs(image, None).await;
+    assert_eq!(reply.body, b"hello");
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    // Published raw session content is retained, including its original relationship entry.
+    assert_eq!(public(&app, &format!("sessions/{SESSION_ID}/entries/1/raw")).await.text(), fixture("session.jsonl")[1]);
+    let trace = public_json(&app, &format!("sessions/{SESSION_ID}/trace")).await;
+    assert!(trace["records"].as_array().unwrap().iter().all(|r| r.get("requestId").is_none()));
+    let reply = app
+        .send(
+            Request::get(format!("{BASE}/api/public/v1/sessions/{SESSION_ID}/trace"))
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .header(header::IF_NONE_MATCH, "*")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    let mut decoder = flate2::read::GzDecoder::new(reply.body.as_slice());
+    let decoded: Value = serde_json::from_reader(&mut decoder).unwrap();
+    assert_eq!(decoded, trace);
+    assert_eq!(publish(&app, "widgets", false, Some(cookie)).await.status, StatusCode::OK);
+    assert_eq!(app.get_abs(image, None).await.status, StatusCode::NOT_FOUND);
+    for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
+        assert_eq!(public(&app, &format!("sessions/{SESSION_ID}{suffix}")).await.status, StatusCode::NOT_FOUND);
+    }
+    let reply = app
+        .send(
+            Request::get(format!("{BASE}/api/public/v1/sessions/{SESSION_ID}/trace"))
+                .header(header::IF_NONE_MATCH, "*")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+}
+
+#[tokio::test]
+async fn public_pagination_filters_before_limiting_and_preserves_private_read_behavior() {
+    let app = world().await;
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::OK);
+    let private = app.json("sessions?limit=1").await;
+    assert_eq!(private["items"][0]["id"], DESK_SESSION);
+    let expected = [REVIEW_SESSION, STEP_SESSION, HEADER_CHILD, SESSION_ID, LINKED_CHILD];
+    let mut got = Vec::new();
+    let mut cursor = None;
+    loop {
+        let path = match cursor {
+            Some(ref c) => format!("sessions?limit=1&cursor={c}"),
+            None => "sessions?limit=1".to_owned(),
+        };
+        let page = public_json(&app, &path).await;
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        got.push(page["items"][0]["id"].as_str().unwrap().to_owned());
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(got, expected);
+    assert_eq!(public_json(&app, "sessions?project=gadgets").await["items"], json!([]));
+    assert_eq!(public_json(&app, &format!("sessions?device={DESKTOP}")).await["items"], json!([]));
+    assert_eq!(ids(public_json(&app, "sessions?model=gpt-5").await["items"].as_array().unwrap(), "id"), [SESSION_ID]);
+    assert_eq!(public_json(&app, "sessions?from=2026-10-22").await["items"], json!([]));
+    let roots = public_json(&app, "sessions?root=true").await;
+    assert_eq!(ids(roots["items"].as_array().unwrap(), "id"), [REVIEW_SESSION, STEP_SESSION, SESSION_ID]);
+    for summary in roots["items"].as_array().unwrap() {
+        for field in ["parentSessionId", "link", "herderRunId"] {
+            assert!(summary.get(field).is_none(), "{field}: {summary}");
+        }
+    }
+    let reply = public(&app, "sessions?cursor=bad").await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    let reply = app.send(Request::patch(format!("{BASE}/api/public/v1/sessions/{SESSION_ID}")).body(Body::empty()).unwrap()).await;
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+}
+
+#[tokio::test]
+async fn public_relationships_include_only_published_targets() {
+    let app = app(None);
+    app.upload(DEVICE, &skey(SESSION_ID), "session", &fixture("session.jsonl")).await;
+    let child: Vec<String> = linked_child().into_iter().map(|s| s.replace("/home/me/code/widgets", "/home/me/code/secret")).collect();
+    app.upload(DEVICE, &skey(LINKED_CHILD), "session", &child).await;
+    app.upload(DEVICE, &skey(HEADER_CHILD), "session", &header_child()).await;
+    let parent = lines(&[json!({ "type": "session", "version": 3, "id": "parent-0001",
+        "timestamp": "2026-10-20T08:00:00Z", "cwd": "/private" })]);
+    app.upload(DEVICE, &skey("parent-0001"), "session", &parent).await;
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::OK);
+    let detail = public_json(&app, &format!("sessions/{SESSION_ID}")).await;
+    assert_eq!(detail["childCount"], 1);
+    assert_eq!(ids(detail["children"].as_array().unwrap(), "id"), [HEADER_CHILD]);
+    assert!(detail.get("parentSessionId").is_none());
+    assert!(detail.get("link").is_none());
+    let trace = public_json(&app, &format!("sessions/{SESSION_ID}/trace")).await;
+    assert_eq!(ids(trace["children"].as_array().unwrap(), "sessionId"), [HEADER_CHILD]);
+    assert!(trace["records"].as_array().unwrap().iter().all(|r| r.get("childSessionId").is_none()));
+    let updates = public_json(&app, &format!("sessions/{SESSION_ID}/updates")).await;
+    assert_eq!(updates["session"]["childCount"], 1);
+    assert!(updates["session"].get("parentSessionId").is_none());
+    let private = app.json(&format!("sessions/{SESSION_ID}")).await;
+    assert_eq!(private["childCount"], 2);
+    assert_eq!(private["parentSessionId"], "parent-0001");
+    assert!(private.get("link").is_some());
+    assert_eq!(publish(&app, "private", true, None).await.status, StatusCode::OK);
+    assert_eq!(public_json(&app, &format!("sessions/{SESSION_ID}")).await["parentSessionId"], "parent-0001");
+    let roots = public_json(&app, "sessions?root=true").await;
+    assert_eq!(ids(roots["items"].as_array().unwrap(), "id"), ["parent-0001"]);
+    assert_eq!(publish(&app, "secret", true, None).await.status, StatusCode::OK);
+    let detail = public_json(&app, &format!("sessions/{SESSION_ID}")).await;
+    assert_eq!(detail["childCount"], 2);
+    let trace = public_json(&app, &format!("sessions/{SESSION_ID}/trace")).await;
+    assert!(trace["records"].as_array().unwrap().iter().any(|r| r["childSessionId"] == LINKED_CHILD));
+}
+
+#[tokio::test]
+async fn publishing_settings_are_atomic_persistent_and_keep_missing_selections() {
+    let app = world().await;
+    for project in ["", " ", ".", "..", "a/b", "a\\b", "x\n", "unknown", &"x".repeat(1025)] {
+        assert_eq!(publish(&app, project, true, None).await.status, StatusCode::BAD_REQUEST, "{project:?}");
+    }
+    let (a, b) = tokio::join!(publish(&app, "widgets", true, None), publish(&app, "gadgets", true, None));
+    assert_eq!(a.status, StatusCode::OK);
+    assert_eq!(b.status, StatusCode::OK);
+    assert!(app.json("settings/publishing").await["projects"].as_array().unwrap().iter().all(|p| p["published"] == true));
+    // The same basename on another device belongs to the same publication selection.
+    let another = lines(&[json!({ "type": "session", "version": 3, "id": "another-widget",
+        "timestamp": "2026-10-23T08:00:00Z", "cwd": "/other/widgets" })]);
+    app.upload(DESKTOP, &skey("another-widget"), "session", &another).await;
+    assert_eq!(public(&app, "sessions/another-widget").await.status, StatusCode::OK);
+    pika::reindex::reindex(&app.env.store).unwrap();
+    let reopened = pika::store::Store::open(app.env.dir.path().join("data")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reopened.setting("published_projects").unwrap().unwrap()).unwrap(),
+        json!(["gadgets", "widgets"])
+    );
+    assert_eq!(public(&app, &format!("sessions/{SESSION_ID}")).await.status, StatusCode::OK);
+    // A selection remains manageable after all its current derived sessions disappear.
+    app.env.store.write(|tx| tx.execute("DELETE FROM sessions WHERE project = 'gadgets'", [])).unwrap();
+    assert_eq!(app.json("settings/publishing").await["projects"][0], json!({ "project": "gadgets", "sessionCount": 0, "published": true }));
+    assert_eq!(publish(&app, "gadgets", false, None).await.status, StatusCode::OK);
+    assert_eq!(app.json("settings/publishing").await["projects"].as_array().unwrap().len(), 1);
+    let (a, b) = tokio::join!(publish(&app, "widgets", false, None), publish(&app, "widgets", false, None));
+    assert_eq!(a.status, StatusCode::OK);
+    assert_eq!(b.status, StatusCode::OK);
+    assert_eq!(public_json(&app, "sessions").await["items"], json!([]));
+}

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Link } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { Icon, type IconName } from "../components/icons";
 import { cx } from "../components/ui";
 import { deviceLabel } from "../lib/devices";

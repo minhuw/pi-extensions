@@ -58,7 +58,7 @@ export function useHealth(): UseQueryResult<Health> {
 export function useOnlineSessions(pollMs: number | false) {
 	const api = useApi();
 	const health = useHealth();
-	const enabled = health.data?.features?.includes("relay") === true;
+	const enabled = !api.publicView && health.data?.features?.includes("relay") === true;
 	const sessions = useQuery({
 		queryKey: RELAY_SESSIONS_KEY,
 		queryFn: () => api.relaySessions(),

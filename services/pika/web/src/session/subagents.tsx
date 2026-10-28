@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, type ReactNode } from "react";
-import { Link } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { CodeBlock } from "../components/code";
 import { Icon } from "../components/icons";
 import { Markdown } from "../components/Markdown";

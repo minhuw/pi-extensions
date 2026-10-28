@@ -1,6 +1,6 @@
 import { defaultRangeExtractor, useVirtualizer, type Range } from "@tanstack/react-virtual";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { Icon } from "../components/icons";
 import { cx, Skeleton } from "../components/ui";
 import { formatCount, plural } from "../lib/format";

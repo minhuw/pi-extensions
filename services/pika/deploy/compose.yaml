@@ -24,8 +24,8 @@ services:
       # secret, then run once:
       #   docker compose -f services/pika/deploy/compose.yaml run --rm pika password set
       PIKA_PASSWORD_FILE: /run/secrets/pika_password
-      # Or let the reverse proxy authenticate (leave /pika/api/ingest/, /pika/api/pair/, /pika/api/relay/, and
-      # /pika/api/health open):
+      # Or let the reverse proxy authenticate. Leave device endpoints, health, the public gallery and
+      # its API/assets open; see nginx-path.conf or Caddyfile.path for the exact paths:
       # PIKA_AUTH: proxy
       # PIKA_MAX_BODY: 32MiB
       # Relay between pi sessions is on by default; any device token may use it.

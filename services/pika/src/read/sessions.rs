@@ -192,25 +192,39 @@ impl SessionSummary {
 
 /// The devices of recorded sessions, by name case-insensitively, then id.
 pub fn facets(conn: &Connection) -> ReadResult<Facets> {
+    facets_scoped(conn, false)
+}
+
+pub fn facets_scoped(conn: &Connection, public: bool) -> ReadResult<Facets> {
+    let scope = if public { format!(" WHERE {}", super::publishing::SESSION_FILTER) } else { String::new() };
     let names = DeviceNames::load(conn)?;
-    let mut devices: Vec<FacetDevice> = distinct(conn, "SELECT DISTINCT device FROM sessions ORDER BY device")?
+    let mut devices: Vec<FacetDevice> = distinct(conn, &format!("SELECT DISTINCT s.device FROM sessions s{scope} ORDER BY s.device"))?
         .into_iter()
         .map(|id| FacetDevice { name: names.of(&id), id })
         .collect();
     devices.sort_by(|a, b| crate::auth::by_name((&a.id, &a.name), (&b.id, &b.name)));
     Ok(Facets {
         devices,
-        projects: distinct(conn, "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project")?,
-        models: distinct(conn, "SELECT DISTINCT model FROM session_models ORDER BY model")?,
+        projects: distinct(conn, &format!(
+            "SELECT DISTINCT s.project FROM sessions s{scope}{} s.project IS NOT NULL ORDER BY s.project",
+            if public { " AND" } else { " WHERE" },
+        ))?,
+        models: distinct(conn, &format!(
+            "SELECT DISTINCT m.model FROM session_models m JOIN sessions s USING (sid){scope} ORDER BY m.model",
+        ))?,
     })
 }
 
 /// The session list statement and its arguments. `from` and `to` bound `lastAt` (inclusive). Each combination of the
 /// device, project, and root filters walks an index in `lastAt` order; `model` and the time bounds filter along it.
 pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>)> {
+    list_query_scoped(p, limit, false)
+}
+
+fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String, Vec<Sql>)> {
     let (root, device, project) = (p.bool("root")?, p.get("device"), p.get("project"));
     // Without statistics SQLite may prefer sessions_parent for `root` and then sort, so name the index.
-    let index = match (root, device.is_some(), project.is_some()) {
+    let index = match (root && !public, device.is_some(), project.is_some()) {
         (false, false, false) => "sessions_last",
         (false, true, false) => "sessions_device",
         (false, false, true) => "sessions_project",
@@ -222,8 +236,19 @@ pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>
     };
     let mut sql = format!("SELECT {SUMMARY_COLUMNS} FROM sessions s INDEXED BY {index} WHERE 1");
     let mut args: Vec<Sql> = Vec::new();
+    if public {
+        sql.push_str(&format!(" AND {}", super::publishing::SESSION_FILTER));
+    }
     if root {
-        sql.push_str(" AND s.parent_session_id IS NULL");
+        if public {
+            sql.push_str(&format!(
+                " AND NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id \
+                 AND parent.project IN ({}))",
+                super::publishing::PROJECTS_SQL,
+            ));
+        } else {
+            sql.push_str(" AND s.parent_session_id IS NULL");
+        }
     }
     if let Some(device) = device {
         sql.push_str(" AND s.device = ?");
@@ -257,14 +282,27 @@ pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>
 
 /// The session list, newest `lastAt` first.
 pub fn list(conn: &Connection, p: &Params) -> ReadResult<Page<SessionSummary>> {
+    list_scoped(conn, p, false)
+}
+
+pub fn list_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<SessionSummary>> {
     let limit = p.limit(LIST_LIMIT, MAX_LIST_LIMIT)?;
-    let (sql, args) = list_query(p, limit)?;
+    let (sql, args) = if public { list_query_scoped(p, limit, true)? } else { list_query(p, limit)? };
     let items = conn
         .prepare_cached(&sql)?
         .query_map(params_from_iter(args), summary)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let names = DeviceNames::load(conn)?;
-    let items = items.into_iter().map(|s| s.named(&names)).collect();
+    let items = items
+        .into_iter()
+        .map(|s| s.named(&names))
+        .map(|mut s| {
+            if public {
+                super::publishing::summary(conn, &mut s)?;
+            }
+            Ok(s)
+        })
+        .collect::<ReadResult<Vec<_>>>()?;
     Ok(page(items, limit, |s| vec![json!(s.last_at_ms), json!(s.id)]))
 }
 
@@ -319,12 +357,14 @@ pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> 
 pub fn updates(conn: &Connection, id: &str, p: &Params) -> ReadResult<Updates> {
     let since = p.int("since").ok().flatten().unwrap_or(-1);
     // One snapshot for the summary and the turns.
-    let tx = conn.unchecked_transaction()?;
+    // The public HTTP scope may already hold a snapshot for authorization.
+    let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let tx = conn;
     let (session, sid) = tx
         .prepare_cached(&format!("SELECT {SUMMARY_COLUMNS}, s.sid FROM sessions s WHERE s.id = ?1"))?
         .query_row([id], |r| Ok((summary(r)?, r.get::<_, i64>(18)?)))
         .map_err(not_found)?;
-    let session = session.named(&DeviceNames::load(&tx)?);
+    let session = session.named(&DeviceNames::load(tx)?);
     let last_seq = session.entry_count - 1;
     let last_at = iso((session.entry_count > 0 && session.last_at_ms != 0).then_some(session.last_at_ms));
     if last_seq <= since {

@@ -58,6 +58,10 @@ const BROWSER_SESSIONS = "auth/sessions";
 
 type Params = Record<string, string | number | boolean | null | undefined>;
 
+export interface PublishingSettings {
+	projects: { project: string; sessionCount: number; published: boolean }[];
+}
+
 export interface SessionFilters {
 	device?: string;
 	project?: string;
@@ -83,7 +87,13 @@ export class PikaApi {
 	constructor(
 		readonly base: string,
 		private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
+		readonly publicView = false,
 	) {}
+
+	/** A separate client for anonymous browsing, retaining the configured base path and transport. */
+	forPublic(): PikaApi {
+		return new PikaApi(this.base, this.fetchImpl, true);
+	}
 
 	/** Called on every 401 except a failed login. Returns an unsubscribe function. */
 	onUnauthorized(listener: () => void): () => void {
@@ -93,7 +103,7 @@ export class PikaApi {
 
 	/** Absolute URL path of a read API route, e.g. `url("sessions")`. */
 	url(path: string, params: Params = {}): string {
-		return withBase(this.base, `api/v1/${path.replace(/^\/+/, "")}`) + query(params);
+		return withBase(this.base, `${this.publicView ? "api/public/v1" : "api/v1"}/${path.replace(/^\/+/, "")}`) + query(params);
 	}
 
 	private request<T>(path: string, params: Params = {}, init?: RequestInit): Promise<T> {
@@ -102,7 +112,8 @@ export class PikaApi {
 
 	private async fetchJson<T>(url: string, path: string, init?: RequestInit): Promise<T> {
 		const response = await this.fetchImpl(url, {
-			credentials: "same-origin",
+			credentials: this.publicView ? "omit" : "same-origin",
+			...(this.publicView ? { cache: "no-store" as const } : {}),
 			...init,
 			headers: { Accept: "application/json", ...(init?.headers ?? {}) },
 		});
@@ -136,6 +147,14 @@ export class PikaApi {
 	/** `{base}/api/health`, outside the read API; it is always open. */
 	health(): Promise<Health> {
 		return this.fetchJson(withBase(this.base, "api/health"), "health");
+	}
+
+	publishing(): Promise<PublishingSettings> {
+		return this.request("settings/publishing");
+	}
+
+	setPublished(project: string, published: boolean): Promise<PublishingSettings> {
+		return this.send("settings/publishing", "PATCH", { project, published });
 	}
 
 	facets(): Promise<Facets> {

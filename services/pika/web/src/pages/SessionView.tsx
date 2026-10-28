@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { lazy, Suspense, useCallback, useMemo, useState, type ReactNode } from "react";
-import { Link, useParams, useSearchParams } from "react-router";
+import { useParams, useSearchParams } from "react-router";
+import { PikaLink as Link } from "../components/PikaLink";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Icon } from "../components/icons";
 import { MessageDialog } from "../components/MessageDialog";
@@ -60,6 +61,7 @@ function HeaderSkeleton() {
 }
 
 const slots: SessionSlots = { ModelCallExtra: ContextButton, AgentChild: InlineAgentChild };
+const publicSlots: SessionSlots = { AgentChild: InlineAgentChild };
 
 // The trajectory view and its canvas overview load on demand, in their own chunk.
 const Trajectory = lazy(() => import("../trace/Trajectory").then((module) => ({ default: module.Trajectory })));
@@ -96,11 +98,12 @@ function TrajectorySkeleton() {
 }
 
 export function SessionViewPage() {
+	const api = useApi();
 	const { id = "" } = useParams();
 	return (
 		<ViewStateProvider key={id}>
 			<ContextDrawerProvider>
-				<SessionSlotsContext.Provider value={slots}>
+				<SessionSlotsContext.Provider value={api.publicView ? publicSlots : slots}>
 					<SessionPage id={id} />
 				</SessionSlotsContext.Provider>
 			</ContextDrawerProvider>
@@ -237,7 +240,7 @@ function SessionPage({ id }: { id: string }) {
 							Show hidden entries
 						</label>
 					)}
-					<a
+					{!api.publicView && <a
 						href={api.exportUrl(id)}
 						className="inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-[12.5px] text-muted hover:bg-hover hover:text-ink"
 						download
@@ -245,7 +248,7 @@ function SessionPage({ id }: { id: string }) {
 					>
 						<Icon name="download" size={13} />
 						Export JSONL
-					</a>
+					</a>}
 					{online && (
 						<ActionButton onClick={() => setMessaging(online)} aria-label="Message this session">
 							<Icon name="message" size={13} />

@@ -132,6 +132,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pair/v1/bind", post(devices::bind))
         .merge(relay::device_routes(&state))
         .nest("/api/v1", v1)
+        .nest("/api/public/v1", read::public_routes())
         .fallback(ui::serve)
         .with_state(state.clone());
     if state.config.base_path == "/" {

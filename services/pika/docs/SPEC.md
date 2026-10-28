@@ -193,11 +193,27 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
 - **Auth, sessions, devices, and pairings:** `login`, `logout`, `me`, `auth/sessions`, `devices`, and `pairings` are specified in "Authentication" and the sections after it. In `password` mode every `/api/v1/*` route except `login` and `me` requires a session cookie.
 - **Static UI:** served at `{base}/`. Unknown non-API paths under the base return `index.html`. The server injects `<meta name="pika-base" content="{base}">` into `index.html`, and the UI uses it for API calls and router paths. The UI build uses relative asset URLs.
 
-## Authentication
-`--auth` / `PIKA_AUTH` selects who authenticates viewers of the UI and the read API: `password` (default), `proxy`, or `none`. Ingest (`{base}/api/ingest/`) and the relay's device routes (`{base}/api/relay/`) always use device tokens; pairing (`{base}/api/pair/`) and `{base}/api/health` are always open.
+## Project publishing
 
-- **`password`:** the UI's data and every `/api/v1/*` route except `login` and `me` require a valid session cookie. **The server refuses to start when no password is configured:** it exits with status 2 and prints `pika: no password configured. Run 'pika password set', set PIKA_PASSWORD_FILE or PIKA_PASSWORD, or set PIKA_AUTH=proxy if your reverse proxy authenticates (PIKA_AUTH=none disables authentication).`
-- **`proxy`:** pika does no viewer authentication; the reverse proxy must authenticate every path except `/api/ingest/`, `/api/pair/`, `/api/relay/`, and `/api/health`. The server logs one warning at startup.
+Publication is opt-in and uses the existing `sessions.project` name (the working directory basename, or a Herder step's repository name). The same name across devices or directories shares one publication selection. Selecting a project publishes all its existing and future sessions; new project names default to private.
+
+- **Settings**, under the authenticated `{base}/api/v1/`:
+  - `GET settings/publishing` → `{ projects: [{ project, sessionCount, published }] }`, sorted by project. Counts include child sessions. Saved selections with no current sessions remain listed with count zero.
+  - `PATCH settings/publishing` with JSON `{ project: string, published: boolean }` → the updated settings response. Updates are atomic per project. Enabling requires a recorded project with a nonempty name of at most 1024 bytes, without control characters or path separators, and other than `.` or `..`; invalid or unknown names return 400. Disabling also works for saved selections whose sessions are gone.
+  - Stored as a JSON array of names in the `published_projects` settings BLOB; defaults to `[]` and survives restart and reindex.
+- **Anonymous read API**, under `{base}/api/public/v1/`: only `GET facets`, `sessions`, `sessions/:id`, `sessions/:id/turns`, `sessions/:id/entries`, `sessions/:id/entries/:seq/raw`, `sessions/:id/entries/:seq/image/:index`, `sessions/:id/trace`, and `sessions/:id/updates`. Shapes, filters, limits, and cursors match their authenticated counterparts.
+  - Lists and facets filter selected projects in SQL before pagination. `root=true` includes a published child whose parent is private or missing.
+  - Each direct session resource checks publication in the same database snapshot as its read. Private and missing sessions both return 404 `not_found`, even to a signed-in visitor using this namespace. No public request payload, export, search, Herder run, device management, or relay routes exist.
+  - Public metadata omits captured `requestId`, `link`, and `herderRunId`; parent, child, tool-child links and child counts include only published targets. Entry and raw-line content is the published session's content, without automatic redaction, and may itself mention private paths or other sessions.
+  - All public API responses, including images, errors, and unknown routes, use `Cache-Control: no-store`. Traces accept gzip but have no ETag or 304 response. Unpublishing blocks subsequent reads; previously downloaded content cannot be recalled.
+- **Web UI:** `{base}/settings` controls publication, `{base}/public?project=<name>` browses published trajectories, and `{base}/public/s/:id` opens replay, inspection, or transcript (`?view=transcript`) without login. Public pages have a separate anonymous API client and query cache and offer no messaging, captured provider context, or JSONL export.
+- **Authenticating proxies:** allow `{base}/public`, `{base}/public/*`, `{base}/api/public/*`, and `{base}/assets/*` anonymously for public browsing. Keep `{base}/api/v1/*` and the owner UI behind proxy authentication in `proxy` mode.
+
+## Authentication
+`--auth` / `PIKA_AUTH` selects who authenticates viewers of the UI and the read API: `password` (default), `proxy`, or `none`. Ingest (`{base}/api/ingest/`) and the relay's device routes (`{base}/api/relay/`) always use device tokens; pairing (`{base}/api/pair/`), `{base}/api/health`, and the selected-project read API (`{base}/api/public/`) are always open.
+
+- **`password`:** the owner's UI data and every `/api/v1/*` route except `login` and `me` require a valid session cookie. **The server refuses to start when no password is configured:** it exits with status 2 and prints `pika: no password configured. Run 'pika password set', set PIKA_PASSWORD_FILE or PIKA_PASSWORD, or set PIKA_AUTH=proxy if your reverse proxy authenticates (PIKA_AUTH=none disables authentication).`
+- **`proxy`:** pika does no viewer authentication; the reverse proxy must authenticate every path except `/api/ingest/`, `/api/pair/`, `/api/relay/`, `/api/health`, and the public gallery, API, and static assets listed in "Project publishing". The server logs one warning at startup.
 - **`none`:** no authentication at all, for local development and benchmarks. The server logs one warning at startup.
 
 ### Passwords
