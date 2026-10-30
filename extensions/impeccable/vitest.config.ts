@@ -10,6 +10,7 @@ export default defineConfig({
 	test: {
 		include: ["extensions/impeccable/tests/**/*.test.ts"],
 		exclude: [
+			"extensions/impeccable/tests/package/**",
 			"extensions/impeccable/tests/e2e/**",
 			"extensions/impeccable/vendor/**",
 			"**/node_modules/**",

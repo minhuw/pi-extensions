@@ -119,9 +119,14 @@ describe("root package registration", () => {
 			"vitest run --config extensions/impeccable/vitest.config.ts",
 		);
 		expect(manifest.scripts.test.split(" && ")).toContain("npm run test:impeccable");
-		// Later tasks own runtime/e2e/package checks; T1 must not fake them.
-		expect(manifest.scripts).not.toHaveProperty("test:impeccable:e2e");
-		expect(manifest.scripts).not.toHaveProperty("test:impeccable:package");
+		expect(manifest.scripts["test:impeccable:package"]).toBe(
+			"vitest run --config extensions/impeccable/vitest.package.config.ts",
+		);
+		const { default: packageConfig } = await import("../vitest.package.config.ts");
+		expect(packageConfig.test?.include).toEqual(["extensions/impeccable/tests/package/**/*.test.ts"]);
+		expect(packageConfig.test?.passWithNoTests).toBe(false);
+		const { default: scopedConfig } = await import("../vitest.config.ts");
+		expect(scopedConfig.test?.exclude).toContain("extensions/impeccable/tests/package/**");
 	});
 
 	it("introduces no command-name collision with the rest of the collection", async () => {
