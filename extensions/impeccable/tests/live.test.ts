@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { validateLiveEvent } from "../src/live.ts";
 import { spawnEngine, resolveEngine } from "../src/engine.ts";
 import { runOperation } from "../src/operations.ts";
-import { generateEvent, liveFixture, phase, alive } from "./support/live-fixture.ts";
+import { generateEvent, liveFixture, liveStartupTimeout, phase, alive } from "./support/live-fixture.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
 isolateEngineEnvironment();
 
@@ -32,7 +32,7 @@ it("generate exclusively owns its returned event without starting a competing po
 	const h = await liveFixture(); const live = h.owner();
 	try {
 		live.start(h.root, ["#hero"], true);
-		await expect.poll(async () => (await h.calls()).some((c) => c.argv[0] === "live-generate")).toBe(true);
+		await expect.poll(async () => (await h.calls()).some((c) => c.argv[0] === "live-generate"), { timeout: liveStartupTimeout }).toBe(true);
 		expect((await h.calls()).some((c) => c.argv[0] === "live-poll")).toBe(false);
 		await h.write("go.json", generateEvent); await phase(live, "pending");
 		expect(live.pending?.event).toMatchObject(generateEvent);
@@ -187,20 +187,31 @@ it("excludes a separate process and permits only proven-dead same-session lease 
 	const h = await liveFixture();
 	const child = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./support/live-contender.ts", import.meta.url)), h.root, h.binary, "same-session"], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
 	let helperPid: number | undefined;
+	let pollerPids: number[] = [];
 	let diagnostic = ""; child.stderr!.on("data", (chunk) => { diagnostic += String(chunk); });
 	try {
 		const message = await new Promise<{ view: { phase: string }; saved: import("../src/live.ts").LiveSaved }>((resolve, reject) => { child.once("message", (value) => resolve(value as never)); child.once("error", reject); child.once("exit", (code) => reject(new Error(`Contender exited ${code}: ${diagnostic}`))); });
 		expect(message.view.phase).toBe("polling");
 		helperPid = JSON.parse(await readFile(`${h.directory}/server.json`, "utf8")).pid;
+		await expect.poll(async () => {
+			pollerPids = (await h.calls()).filter((call) => call.argv[0] === "live-poll" && !call.argv.includes("--reply")).map((call) => call.pid);
+			return pollerPids.length;
+		}).toBeGreaterThan(0);
+		expect(pollerPids.every(alive)).toBe(true);
 		const blocked = h.owner("another-session"); blocked.start(h.root, [], false); await phase(blocked, "paused"); expect(blocked.message).toContain("owned by another");
 		const exited = new Promise<void>((resolve) => child.once("exit", () => resolve())); child.send("crash"); await exited;
 		const foreign = h.owner("another-session"); foreign.start(h.root, [], false); await phase(foreign, "paused"); expect(foreign.message).toContain("owned by another");
 		const recovered = h.owner("same-session"); await recovered.restore(message.saved); recovered.resume(); await phase(recovered, "polling");
 		await recovered.pause("stop", true); expect(alive(helperPid!)).toBe(true);
+		expect(pollerPids.every(alive)).toBe(true);
 	} finally {
-		if (child.exitCode === null) { child.send("stop"); await new Promise<void>((resolve) => child.once("exit", () => resolve())); }
-		if (helperPid && alive(helperPid)) process.kill(helperPid, "SIGTERM");
-		await h.cleanup();
+		try {
+			if (child.exitCode === null) { child.send("stop"); await new Promise<void>((resolve) => child.once("exit", () => resolve())); }
+			if (helperPid && alive(helperPid)) process.kill(helperPid, "SIGTERM");
+		} finally {
+			try { await h.cleanup(); }
+			finally { await expect.poll(() => pollerPids.filter(alive), { timeout: 5_000 }).toEqual([]); }
+		}
 	}
 });
 

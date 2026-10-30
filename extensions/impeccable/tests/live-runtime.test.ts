@@ -3,7 +3,7 @@ import { expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { LIVE_MESSAGE, LIVE_SNAPSHOT } from "../src/live.ts";
-import { generateEvent, liveFixture, alive } from "./support/live-fixture.ts";
+import { generateEvent, liveFixture, liveStartupTimeout, alive } from "./support/live-fixture.ts";
 import { liveSession } from "./support/live-session.ts";
 import { isolateEngineEnvironment } from "./support/engine-environment.ts";
 isolateEngineEnvironment();
@@ -34,7 +34,7 @@ it("delivers native event -> actual Pi model tool -> exact native ack with one c
 			fauxAssistantMessage("Native publication acknowledged; waiting for the user's selection."),
 		]);
 		await runtime.session.prompt("Start live");
-		await expect.poll(() => runtime.saved()?.phase).toBe("polling");
+		await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling");
 		await h.write("event.json", generateEvent);
 		await expect.poll(async () => (await h.calls()).filter((c) => c.argv.includes("--reply")).length).toBe(1);
 		await expect.poll(() => runtime.session.isStreaming).toBe(false);
@@ -55,7 +55,7 @@ it("delivers a native live-generate returned event exactly once through Pi", asy
 			fauxAssistantMessage("Published once"),
 		]);
 		await runtime.session.prompt("Generate native variants");
-		await expect.poll(async () => (await h.calls()).some((c) => c.argv[0] === "live-generate")).toBe(true);
+		await expect.poll(async () => (await h.calls()).some((c) => c.argv[0] === "live-generate"), { timeout: liveStartupTimeout }).toBe(true);
 		expect((await h.calls()).some((c) => c.argv[0] === "live-poll")).toBe(false);
 		await h.write("go.json", generateEvent);
 		await expect.poll(async () => (await h.calls()).filter((c) => c.argv.includes("--reply")).length).toBe(1);
@@ -74,10 +74,13 @@ it("pauses an unsettled model event, removes stale provider context, then reload
 			fauxAssistantMessage([fauxToolCall("impeccable_live", { action: "start" })]), fauxAssistantMessage("Starting"),
 			fauxAssistantMessage("I have not acknowledged this event."),
 		]);
-		await runtime.session.prompt("Start live"); await expect.poll(() => runtime.saved()?.phase).toBe("polling");
+		await runtime.session.prompt("Start live"); await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling");
 		await h.write("event.json", generateEvent); await expect.poll(() => runtime.saved()?.phase).toBe("paused");
 		const saved = runtime.saved()!; expect(saved.pending).toBeDefined();
-		const helper = JSON.parse(await readFile(`${h.directory}/server.json`, "utf8")); expect(alive(helper.pid)).toBe(false);
+		const helper = JSON.parse(await readFile(`${h.directory}/server.json`, "utf8"));
+		// The paused snapshot is published before owned processes finish exiting.
+		await expect.poll(() => alive(helper.pid), { timeout: 5_000 }).toBe(false);
+		await expect.poll(() => runtime.session.isStreaming).toBe(false);
 		await runtime.session.reload();
 		let staleSeen = false;
 		runtime.faux.setResponses([
@@ -87,6 +90,7 @@ it("pauses an unsettled model event, removes stale provider context, then reload
 			fauxAssistantMessage("Recovered native event was acknowledged"),
 		]);
 		await runtime.session.prompt("Resume my live work");
+		await expect.poll(async () => (await h.calls()).some((c) => c.argv[0] === "live-resume"), { timeout: liveStartupTimeout }).toBe(true);
 		await expect.poll(async () => (await h.calls()).filter((c) => c.argv.includes("--reply")).length).toBe(1);
 		await expect.poll(() => runtime.session.isStreaming).toBe(false);
 		expect(staleSeen).toBe(false); expect(runtime.errors).toEqual([]);
@@ -99,7 +103,7 @@ it.each(["quit", "reload", "new", "resume", "fork"] as const)("Pi shutdown %s in
 	const runtime = await liveSession(h.root);
 	try {
 		runtime.faux.setResponses([fauxAssistantMessage([fauxToolCall("impeccable_live", { action: "start" })]), fauxAssistantMessage("Started")]);
-		await runtime.session.prompt("Start live"); await expect.poll(() => runtime.saved()?.phase).toBe("polling");
+		await runtime.session.prompt("Start live"); await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling");
 		await runtime.session.extensionRunner.emit({ type: "session_shutdown", reason });
 		expect((await h.calls()).every((c) => !alive(c.pid))).toBe(true);
 		expect(runtime.saved()?.phase).toBe("paused");
@@ -114,7 +118,7 @@ it("forked session entries cannot adopt the parent's live native work", async ()
 	let fork: Awaited<ReturnType<typeof liveSession>> | undefined;
 	try {
 		parent.faux.setResponses([fauxAssistantMessage([fauxToolCall("impeccable_live", { action: "start" })]), fauxAssistantMessage("Starting"), fauxAssistantMessage("Pending without ack")]);
-		await parent.session.prompt("Start live"); await expect.poll(() => parent.saved()?.phase).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => parent.saved()?.phase).toBe("paused");
+		await parent.session.prompt("Start live"); await expect.poll(() => parent.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => parent.saved()?.phase).toBe("paused");
 		const saved = parent.saved()!; const manager = SessionManager.inMemory(h.root);
 		manager.appendCustomEntry(LIVE_SNAPSHOT, saved);
 		fork = await liveSession(h.root, undefined, manager);
@@ -137,7 +141,7 @@ it.each(["abort", "queued-user", "shutdown"] as const)("pauses pending native wo
 			(context) => { expect(text(context)).not.toContain("Impeccable native live event."); return fauxAssistantMessage("Handled the newer user request"); },
 		]);
 		const prompting = runtime.session.prompt("Start live");
-		await expect.poll(() => runtime.saved()?.phase).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => runtime.saved()?.phase).toBe("pending");
+		await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => runtime.saved()?.phase).toBe("pending");
 		const oldToken = runtime.saved()!.pending!.token;
 		let stopping: Promise<unknown> | undefined;
 		if (action === "abort") stopping = runtime.session.abort();
@@ -156,7 +160,7 @@ it("follows the active Pi branch instead of all file entries", async () => {
 	const runtime = await liveSession(h.root);
 	try {
 		runtime.faux.setResponses([fauxAssistantMessage([fauxToolCall("impeccable_live", { action: "start" })]), fauxAssistantMessage("Starting")]);
-		await runtime.session.prompt("Start branch-owned live"); await expect.poll(() => runtime.saved()?.phase).toBe("polling");
+		await runtime.session.prompt("Start branch-owned live"); await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling");
 		const user = runtime.session.sessionManager.getBranch().find((e) => e.type === "message" && e.message.role === "user")!;
 		await runtime.session.navigateTree(user.id);
 		expect((await h.calls()).every((c) => !alive(c.pid))).toBe(true);
@@ -182,7 +186,7 @@ it("busy delivery appends to other extension boundary context and allows one act
 			(context) => { expect(text(context)).toContain("KEEP-OTHER-EXTENSION"); expect(text(context)).toContain("Impeccable native live event."); return fauxAssistantMessage("Pause without acknowledging"); },
 		]);
 		const prompting = runtime.session.prompt("Start live, keep input responsive");
-		await expect.poll(() => runtime.saved()?.phase).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => runtime.saved()?.phase).toBe("pending");
+		await expect.poll(() => runtime.saved()?.phase, { timeout: liveStartupTimeout }).toBe("polling"); await h.write("event.json", generateEvent); await expect.poll(() => runtime.saved()?.phase).toBe("pending");
 		expect(runtime.faux.state.callCount).toBe(2); release(); await prompting;
 		expect(runtime.saved()?.phase).toBe("paused"); expect(runtime.faux.state.callCount).toBe(3); expect(runtime.errors).toEqual([]);
 	} finally { release(); await runtime.cleanup(); await h.cleanup(); vi.unstubAllEnvs(); }

@@ -47,6 +47,7 @@ else if (verb === "live-complete") {
 	}
 } else if (verb === "live-poll" || verb === "live-generate") {
 	const timer = setInterval(() => {
+		if (!fs.existsSync(dir)) { clearInterval(timer); return; }
 		const flags = control();
 		if (flags.raw !== undefined) { clearInterval(timer); process.stdout.write(flags.raw, () => process.exit(flags.exitCode ?? 0)); }
 		const event = read(verb === "live-generate" ? "go.json" : "event.json");

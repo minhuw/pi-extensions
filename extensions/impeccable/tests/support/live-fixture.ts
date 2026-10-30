@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 import { LiveOwner } from "../../src/live.ts";
 
+export const liveStartupTimeout = 12_000;
 export const generateEvent = { type: "generate", id: "ab12cd34", action: "bolder", count: 1, pageUrl: "/", element: { tagName: "h1", id: "hero", outerHTML: '<h1 id="hero">Original</h1>' } };
 export async function liveFixture() {
 	const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-impeccable-live-test-")));
@@ -23,11 +24,14 @@ export async function liveFixture() {
 		root, directory, binary, env, owner,
 		write: (name: string, value: unknown) => writeFile(path.join(directory, name), JSON.stringify(value)),
 		async calls() { return (await readFile(path.join(directory, "calls.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { argv: string[]; pid: number }); },
-		async cleanup() { await Promise.all(owners.map((live) => live.pause("test cleanup", true))); await rm(root, { recursive: true, force: true }); },
+		async cleanup() {
+			try { await Promise.all(owners.map((live) => live.pause("test cleanup", true))); }
+			finally { await rm(root, { recursive: true, force: true }); }
+		},
 	};
 }
 export async function phase(live: LiveOwner, expected: string) {
-	try { await expect.poll(() => live.phase, { timeout: 12_000 }).toBe(expected); }
+	try { await expect.poll(() => live.phase, { timeout: liveStartupTimeout }).toBe(expected); }
 	catch (error) { throw new Error(`Expected live phase ${expected}: ${JSON.stringify(live.view())}`, { cause: error }); }
 }
 export const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };

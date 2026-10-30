@@ -102,7 +102,7 @@ function createHarness(sessionId: string, mode: "tui" | "print", options: Harnes
 	const ctx = {
 		mode,
 		hasUI: mode === "tui",
-		cwd: options.cwd ?? process.cwd(),
+		cwd: options.cwd ?? "/tmp/project",
 		model: options.model === null
 			? undefined
 			: options.model ?? { id: "k3", provider: "moonshot", reasoning: true },
