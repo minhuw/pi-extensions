@@ -19,7 +19,10 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:relay",
+		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:relay && npm run test:impeccable",
+		"test:impeccable": "vitest run --config extensions/impeccable/vitest.config.ts",
+		"test:impeccable:engine": "vitest run --config extensions/impeccable/vitest.engine.config.ts",
+		"test:impeccable:contracts": "vitest run --config extensions/impeccable/vitest.config.ts extensions/impeccable/tests/contracts.test.ts",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
 		"test:magpie-provider": "vitest run extensions/magpie-provider",
 		"test:commit": "node --experimental-strip-types --test extensions/commit/tests/*.test.ts",
@@ -63,7 +66,7 @@
 	},
 	"pi": {
 		"themes": ["./themes"],
-		"skills": ["./extensions/herder/skills"],
+		"skills": ["./extensions/herder/skills", "./extensions/impeccable/skills"],
 		"prompts": [
 			"./extensions/commit/prompts/commit.md",
 			"./extensions/quality/prompts/simplify.md",
@@ -77,7 +80,33 @@
 			"./extensions/writer/prompts/polish.md",
 			"./extensions/writer/prompts/selection.md",
 			"./extensions/writer/prompts/summary.md",
-			"./extensions/writer/prompts/validation.md"
+			"./extensions/writer/prompts/validation.md",
+			"./extensions/impeccable/prompts/design.md",
+			"./extensions/impeccable/prompts/design-adapt.md",
+			"./extensions/impeccable/prompts/design-animate.md",
+			"./extensions/impeccable/prompts/design-audit.md",
+			"./extensions/impeccable/prompts/design-bolder.md",
+			"./extensions/impeccable/prompts/design-clarify.md",
+			"./extensions/impeccable/prompts/design-colorize.md",
+			"./extensions/impeccable/prompts/design-craft.md",
+			"./extensions/impeccable/prompts/design-critique.md",
+			"./extensions/impeccable/prompts/design-delight.md",
+			"./extensions/impeccable/prompts/design-distill.md",
+			"./extensions/impeccable/prompts/design-document.md",
+			"./extensions/impeccable/prompts/design-extract.md",
+			"./extensions/impeccable/prompts/design-generate.md",
+			"./extensions/impeccable/prompts/design-harden.md",
+			"./extensions/impeccable/prompts/design-init.md",
+			"./extensions/impeccable/prompts/design-layout.md",
+			"./extensions/impeccable/prompts/design-live.md",
+			"./extensions/impeccable/prompts/design-onboard.md",
+			"./extensions/impeccable/prompts/design-optimize.md",
+			"./extensions/impeccable/prompts/design-overdrive.md",
+			"./extensions/impeccable/prompts/design-polish.md",
+			"./extensions/impeccable/prompts/design-quieter.md",
+			"./extensions/impeccable/prompts/design-shape.md",
+			"./extensions/impeccable/prompts/design-typeset.md",
+			"./extensions/impeccable/prompts/impeccable.md"
 		],
 		"extensions": [
 			"./extensions/orca-bridge/index.ts",
@@ -88,6 +117,7 @@
 			"./extensions/autoresearch/index.ts",
 			"./extensions/subagents/src/index.ts",
 			"./extensions/herder/index.ts",
+			"./extensions/impeccable/index.ts",
 			"./extensions/relay/index.ts",
 			"./extensions/pika/index.ts"
 		]
