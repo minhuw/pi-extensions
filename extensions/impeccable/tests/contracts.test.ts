@@ -132,6 +132,20 @@ describe("root package registration", () => {
 			"vitest run --config extensions/impeccable/vitest.visual-foundations.config.ts",
 		);
 		expect(manifest.scripts.test).not.toContain("visual-foundations");
+		expect(manifest.scripts["test:impeccable:e2e"]).toBe("vitest run --config extensions/impeccable/vitest.e2e.config.ts");
+		expect(manifest.scripts.test).not.toContain("impeccable:e2e");
+		const { default: e2eConfig } = await import("../vitest.e2e.config.ts");
+		expect(e2eConfig.test?.include).toEqual([
+			"extensions/impeccable/tests/e2e/engine-parity.test.ts",
+			"extensions/impeccable/tests/e2e/live-engine.test.ts",
+			"extensions/impeccable/tests/e2e/visual-foundations.test.ts",
+			"extensions/impeccable/tests/e2e/live-browser.test.ts",
+		]);
+		expect(e2eConfig.test?.fileParallelism).toBe(false);
+		expect(e2eConfig.test?.passWithNoTests).toBe(false);
+		const { RequiredCoverage } = await import("./e2e/required-coverage.ts");
+		expect(e2eConfig.test?.reporters).toEqual(["default", expect.any(RequiredCoverage)]);
+		expect(() => new RequiredCoverage().onTestRunEnd([])).toThrow("Required Impeccable E2E phase missing, empty, skipped or failed");
 		const { default: visualConfig } = await import("../vitest.visual-foundations.config.ts");
 		expect(visualConfig.test?.include).toEqual(["extensions/impeccable/tests/e2e/visual-foundations.test.ts"]);
 		const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));

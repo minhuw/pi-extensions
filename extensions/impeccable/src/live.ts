@@ -360,6 +360,13 @@ export class LiveOwner {
 			const status = await this.native(["live-status", "--target", this.root!], this.root!);
 			if (!Array.isArray(status.activeSessions) || status.activeSessions.some((s) => !object(s) || !this.ids.includes(String(s.id)))) throw new Error("Foreign or malformed recoverable work; this session cannot adopt it");
 			await this.ensureHelper(); await this.checkIdentity(); this.controller.signal.throwIfAborted();
+			// A restarted native helper has a new auth token. Refresh the native script tag
+			// before delivering recovery so a page reload can reconnect without another Go.
+			if (this.helper) {
+				const injection = await this.native(["live-inject", "--port", String(this.helperInfo!.port), "--target", this.root!], this.root!);
+				if (injection.ok !== true) throw new Error("Native recovery injection refused; reload cannot reconnect safely");
+				await this.checkIdentity();
+			}
 			if (this.pending) {
 				const id = this.pending.event.sessionId ?? this.pending.event.id;
 				if (id) {
