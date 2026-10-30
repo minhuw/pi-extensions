@@ -67,7 +67,7 @@ describe("agent type registry", () => {
     it("case-insensitive lookup works for getAgentConfig", () => {
       const config = getAgentConfig("recon");
       expect(config?.name).toBe("recon");
-      expect(config?.model).toBe("deepseek/deepseek-flash");
+      expect(config?.model).toBe("openai/gpt-6-luna");
     });
 
     it("resolveType returns canonical key or undefined", () => {
@@ -91,11 +91,11 @@ describe("agent type registry", () => {
       expect(config.builtinToolNames).not.toContain("write");
     });
 
-    it("recon uses DeepSeek Flash with high thinking and no priority-tier override", () => {
+    it("recon uses GPT-6 Luna with max thinking and fast tier", () => {
       const cfg = getAgentConfig("recon");
-      expect(cfg?.model).toBe("deepseek/deepseek-flash");
-      expect(cfg?.thinking).toBe("high");
-      expect(cfg?.serviceTier).toBeUndefined();
+      expect(cfg?.model).toBe("openai/gpt-6-luna");
+      expect(cfg?.thinking).toBe("max");
+      expect(cfg?.serviceTier).toBe("fast");
     });
 
     it("expert pins Astra with xhigh thinking and read-only built-ins", () => {

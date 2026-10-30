@@ -57,7 +57,7 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only reconnaissance; compressed handoff | read-only | `deepseek/deepseek-flash`, thinking `high`, normal tier (no override) |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, fast tier |
 | `worker` | Bounded implementation and verification | coding tools | inherit parent |
 | `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
 | `expert` | Read-only advice on plans, designs, tradeoffs, and complicated technical questions; selected by user/parent for difficult judgment, not routine questions | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
@@ -68,7 +68,7 @@ The embedded fleet keeps Pi's built-in `grep`/`find` and inherits installed sear
 
 ### Service tier
 
-Recon leaves the service tier unset to use DeepSeek's normal/default service without sending an OpenAI priority-tier field. Agent frontmatter is authoritative when set; for example, an OpenAI-compatible agent can opt into fast tier:
+Recon defaults to fast tier, which requests OpenAI priority service. Agent frontmatter is authoritative when set; for example:
 
 ```yaml
 model: openai/gpt-6-luna

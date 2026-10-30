@@ -20,8 +20,9 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
-      model: "deepseek/deepseek-flash",
-      thinking: "high",
+      model: "openai/gpt-6-luna",
+      thinking: "max",
+      serviceTier: "fast",
       systemPrompt: `# READ-ONLY RECON
 
 You are a codebase reconnaissance specialist. You locate and explain existing code.
