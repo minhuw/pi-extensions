@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeContext, createModels, createAssistantMessageEventStream, type AssistantMessage, type ModelsPublication, type RefreshModelsContext, type Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { MagpieAliasRouteError } from "../model-aliases.ts";
 import magpie, { createMagpieProvider, discoverModels, parseModels, readConfig, DISCOVERY_TIMEOUT_MS } from "../index.ts";
 
 const delegates = vi.hoisted(() => ({
@@ -194,7 +195,7 @@ describe("discovery and lifecycle", () => {
 		await magpie({ registerProvider: vi.fn(), on: vi.fn(), registerCommand: vi.fn() } as unknown as ExtensionAPI);
 		expect(fetch).toHaveBeenCalledOnce();
 	});
-	it("awaits initial discovery before registration, but registers empty when unavailable", async () => {
+	it("retains a live same-scope catalog across extension loads, but registers empty for an unavailable new connection", async () => {
 		vi.stubEnv("PI_OFFLINE", undefined);
 		vi.stubEnv("MAGPIE_BASE_URL", "http://127.0.0.1:3425");
 		vi.stubEnv("MAGPIE_API_KEY", "");
@@ -205,7 +206,8 @@ describe("discovery and lifecycle", () => {
 		expect(registered[0].getModels()[0].id).toBe("group/foo");
 		vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 		await magpie(pi);
-		expect(registered[1].getModels()).toEqual([]);
+		expect(registered[1].getModels()).toBe(registered[0].getModels());
+		expect(registered[1].getModels()[0].id).toBe("group/foo");
 		vi.stubEnv("MAGPIE_BASE_URL", "https://remote.example");
 		await magpie(pi);
 		expect(registered).toHaveLength(3);
@@ -316,7 +318,7 @@ it.each(["stream", "streamSimple"] as const)("rejects disappeared, changed-owner
 		http({ data: rows });
 		await provider.refreshModels!(refresh());
 		delegates.messages[method].mockClear();
-		expect(() => provider[method](saved, normalizeContext({ messages: [] }))).toThrow(/Start a new session or select an explicit provider route/);
+		expect(() => provider[method](saved, normalizeContext({ messages: [] }))).toThrow(MagpieAliasRouteError);
 		expect(delegates.messages[method]).not.toHaveBeenCalled();
 	}
 	// Reloading can select the new short alias; normalized history still proves its previous source.

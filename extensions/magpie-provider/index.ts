@@ -4,7 +4,8 @@ import {
 	type Provider,
 	type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, readStoredCredential, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { emptyMagpieCatalog, sharedMagpieCatalogs, type MagpieCatalogs } from "./catalog.ts";
 import { registerMagpieCompaction } from "./compaction.ts";
 import { addMagpieModelAliases, assertMagpieAliasRoute, magpieRequestContext, resolveMagpieAlias, type MagpieModel } from "./model-aliases.ts";
 import { assertNativeCatalog } from "./models-config.ts";
@@ -121,6 +122,7 @@ export function createMagpieProvider(
 	publishConnection?: (connection: MagpieSearchConnection | undefined) => void,
 	recordPricing?: (pricing: MagpiePricing) => void,
 	preserveScope: () => boolean = () => false,
+	catalogs?: MagpieCatalogs,
 ): Provider<MagpieApi> {
 	// Keep raw ambient values separate from saved credentials and loopback defaults.
 	const ambient = { MAGPIE_BASE_URL: env.MAGPIE_BASE_URL, MAGPIE_API_KEY: env.MAGPIE_API_KEY };
@@ -130,7 +132,14 @@ export function createMagpieProvider(
 	});
 	let current = connection();
 	let storedIdentity: string | undefined;
-	let models: Model<MagpieApi>[] = [];
+	let catalog = catalogs?.(current.origin, current.apiKey, storedIdentity) ?? emptyMagpieCatalog();
+	let epoch = 0;
+	const adoptCatalog = (config: Config, identity: string | undefined) => {
+		current = config;
+		storedIdentity = identity;
+		catalog = catalogs?.(config.origin, config.apiKey, identity) ?? emptyMagpieCatalog();
+		epoch++;
+	};
 	const requestModel = (selected: Model<MagpieApi>) => {
 		const model = resolveMagpieAlias(selected);
 		return model.api === "anthropic-messages"
@@ -170,7 +179,7 @@ export function createMagpieProvider(
 					env: { MAGPIE_BASE_URL: config.origin }, source: "Magpie API key" };
 			},
 		} },
-		getModels: () => models,
+		getModels: () => catalog.models,
 		filterModels: models => selectMagpiePickerModels(models, preserveScope()),
 		filterAllModels: models => selectMagpiePickerModels(models, preserveScope()),
 		async refreshModels(context) {
@@ -185,33 +194,42 @@ export function createMagpieProvider(
 				// never enable MCP, and must not clear a retained effective-key catalog.
 				if (identity !== storedIdentity) {
 					await context.publish({ update: () => {
-						storedIdentity = identity;
-						current = config;
-						models = [];
+						adoptCatalog(config, identity);
 						publishConnection?.(credential && config.apiKey ? { origin: config.origin, apiKey: config.apiKey } : undefined);
 					} });
 				}
 				return;
 			}
 			if (config.origin !== current.origin || config.apiKey !== current.apiKey) {
+				const before = epoch;
+				let adopted = false;
 				const accepted = await context.publish({ update: () => {
-					current = config;
-					models = [];
+					if (epoch !== before) return;
+					adoptCatalog(config, storedIdentity);
+					adopted = true;
 					if (storedIdentity !== undefined) publishConnection?.(config.apiKey ? { origin: config.origin, apiKey: config.apiKey } : undefined);
 				} });
-				if (!accepted) return;
+				if (!accepted || !adopted) return;
 			}
 			if (!config.apiKey) return;
+			const pending = catalog;
+			const before = epoch;
+			const generation = ++pending.generation;
 			const next = await discoverModels(config, context.signal);
 			context.signal.throwIfAborted();
-			await context.publish({ update: () => { current = config; models = next; } });
+			await context.publish({ update: () => {
+				// Bootstrap publishers are outside Pi's refresh generation checks.
+				// A later discovery or credential change must supersede this result.
+				if (context.signal.aborted || epoch !== before || catalog !== pending || pending.generation !== generation) return;
+				pending.models = next;
+			} });
 		},
 		stream: (model, context, options) => {
-			assertMagpieAliasRoute(model, models, context.messages);
+			assertMagpieAliasRoute(model, catalog.models, context.messages);
 			return withMagpiePricing(apis[model.api].stream(requestModel(model), magpieRequestContext(context), options), model, recordPricing);
 		},
 		streamSimple: (model, context, options) => {
-			assertMagpieAliasRoute(model, models, context.messages);
+			assertMagpieAliasRoute(model, catalog.models, context.messages);
 			return withMagpiePricing(apis[model.api].streamSimple(requestModel(model), magpieRequestContext(context), options), model, recordPricing);
 		},
 	};
@@ -227,7 +245,7 @@ export default async function magpie(pi: ExtensionAPI): Promise<void> {
 		// Pi's split-summary usage merger drops extension fields. Keep provenance
 		// on the session branch as well, without counting the usage twice.
 		pi.appendEntry("magpie-pricing", { pricing });
-	}, preserveScope);
+	}, preserveScope, sharedMagpieCatalogs(getAgentDir()));
 	const credential = readStoredCredential("magpie");
 	// Validate saved configuration outside the best-effort network refresh.
 	if (credential?.type === "api_key") readConfig({ ...process.env, ...credential.env, MAGPIE_API_KEY: credential.key ?? process.env.MAGPIE_API_KEY });

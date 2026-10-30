@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseModels } from "../index.ts";
-import { addMagpieModelAliases, assertMagpieAliasRoute, resolveMagpieAlias, type MagpieModel } from "../model-aliases.ts";
+import { addMagpieModelAliases, assertMagpieAliasRoute, MagpieAliasRouteError, resolveMagpieAlias, type MagpieAliasFailure, type MagpieModel } from "../model-aliases.ts";
 
 const name = "claude-opus-5-5";
 const raw = { owned_by: "claude1", native_endpoints: ["/v1/messages"], context_window: 100000,
@@ -124,14 +124,25 @@ describe("local alias resolution and dispatch guards", () => {
 		expect(() => assertMagpieAliasRoute(alias, models, [])).not.toThrow();
 	});
 
-	it("rejects disappeared targets, changed owners, changed group routes, and newly ambiguous sources", () => {
+	it("distinguishes unavailable catalogs, missing targets, conflicting metadata, and competing sources", () => {
 		const models = single();
 		const alias = aliasOf(models);
-		for (const next of [[], parse([{ ...raw, owned_by: "claude2", id: `claude1/${name}` }]),
-			[{ ...models[0], magpieRoute: { ...models[0].magpieRoute!, group: true } }],
-			parse([{ ...raw, id: `claude1/${name}` }, { ...raw, owned_by: "claude2", id: `claude2/${name}` }]),
-			[alias],
-		]) expect(() => assertMagpieAliasRoute(alias, next, [])).toThrow(/Start a new session or select an explicit provider route/);
+		const cases: [MagpieAliasFailure, MagpieModel[], RegExp][] = [
+			["catalog_unavailable", [], /catalog is unavailable.*\/magpie-refresh/],
+			["target_missing", [alias], /target is missing.*\/magpie-refresh/],
+			["metadata_conflict", parse([{ ...raw, owned_by: "claude2", id: `claude1/${name}` }]), /metadata conflicts.*reselect/],
+			["metadata_conflict", [{ ...models[0], magpieRoute: { ...models[0].magpieRoute!, group: true } }], /metadata conflicts.*reselect/],
+			["metadata_conflict", [{ ...models[0], magpieRoute: undefined }], /metadata conflicts.*reselect/],
+			["ambiguous", parse([{ ...raw, id: `claude1/${name}` }, { ...raw, owned_by: "claude2", id: `claude2/${name}` }]), /competing sources.*explicit provider route/],
+		];
+		for (const [code, next, advice] of cases) {
+			let failure: unknown;
+			try { assertMagpieAliasRoute(alias, next, []); } catch (error) { failure = error; }
+			expect(failure).toBeInstanceOf(MagpieAliasRouteError);
+			expect(failure).toMatchObject({ code, message: expect.stringMatching(advice) });
+		}
+		const invalid: MagpieModel = { ...alias, magpieRoute: undefined };
+		expect(() => assertMagpieAliasRoute(invalid, models, [])).toThrow(/metadata conflicts/);
 	});
 
 	it("rejects silent rebinding after reload by inspecting the last matching Magpie assistant", () => {
@@ -164,6 +175,6 @@ describe("local alias resolution and dispatch guards", () => {
 	it("does not expose route values or transcript text in errors", () => {
 		const models = single();
 		expect(() => assertMagpieAliasRoute(aliasOf(models), models, [{ role: "assistant", provider: "magpie", model: `SECRET/${name}`, content: "SECRET" }]))
-			.toThrow(/^Magpie's short Claude alias no longer has the same unambiguous source\. Start a new session or select an explicit provider route\.$/);
+			.toThrow(/^Magpie's short Claude alias conflicts with the physical source recorded in this session\. Start a new session or select the explicit provider route previously used by this session\.$/);
 	});
 });

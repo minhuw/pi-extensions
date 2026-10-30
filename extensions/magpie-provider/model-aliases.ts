@@ -102,20 +102,41 @@ export function resolveMagpieAlias<T extends Model<any>>(model: T): T {
 	return typeof target === "string" ? { ...model, id: target } : model;
 }
 
+export type MagpieAliasFailure = "catalog_unavailable" | "target_missing" | "metadata_conflict" | "ambiguous" | "history_conflict";
+const aliasErrors: Record<MagpieAliasFailure, string> = {
+	catalog_unavailable: "Magpie's model catalog is unavailable, so the short Claude alias cannot be validated. Check the gateway and credentials, then run /magpie-refresh and retry.",
+	target_missing: "Magpie's short Claude alias target is missing from the current model catalog. Run /magpie-refresh; if it remains missing, select an available explicit provider route.",
+	metadata_conflict: "Magpie's short Claude alias route metadata conflicts with the selected source. Run /magpie-refresh and reselect the model, or select an explicit provider route.",
+	ambiguous: "Magpie's short Claude alias has competing sources in the current model catalog. Select an explicit provider route to disambiguate the source.",
+	history_conflict: "Magpie's short Claude alias conflicts with the physical source recorded in this session. Start a new session or select the explicit provider route previously used by this session.",
+};
+export class MagpieAliasRouteError extends Error {
+	readonly code: MagpieAliasFailure;
+	constructor(code: MagpieAliasFailure) {
+		super(aliasErrors[code]);
+		this.name = "MagpieAliasRouteError";
+		this.code = code;
+	}
+}
+
 /** Fail closed when a saved local short selection would silently change its physical source. */
 export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Model<any>[], messages: readonly unknown[]): void {
 	const alias = model as Model<any> & MagpieRouteMetadata;
 	if (typeof alias.magpieAliasTarget !== "string") return;
 	const targetId = alias.magpieAliasTarget;
-	const fail = () => { throw new Error("Magpie's short Claude alias no longer has the same unambiguous source. Start a new session or select an explicit provider route."); };
+	const fail: (code: MagpieAliasFailure) => never = code => { throw new MagpieAliasRouteError(code); };
 	const name = magpieModelName(alias.id);
-	const target = catalog.find(row => row.id === targetId && (row as MagpieRouteMetadata).magpieAliasTarget === undefined) as MagpieModel | undefined;
 	if (!name || !alias.magpieRoute || alias.magpieRoute.group || alias.magpieRoute.canonicalId !== targetId ||
-		!owner(alias.magpieRoute.owner) || !target?.magpieRoute || target.magpieRoute.group ||
-		target.magpieRoute.canonicalId !== targetId || target.magpieRoute.owner !== alias.magpieRoute.owner) fail();
+		!owner(alias.magpieRoute.owner)) fail("metadata_conflict");
+	if (!catalog.length) fail("catalog_unavailable");
+	const target = catalog.find(row => row.id === targetId) as MagpieModel | undefined;
+	if (!target) fail("target_missing");
+	if (target.magpieAliasTarget !== undefined || !target.magpieRoute || target.magpieRoute.group ||
+		target.magpieRoute.canonicalId !== targetId || target.magpieRoute.owner !== alias.magpieRoute!.owner) fail("metadata_conflict");
 	for (const row of catalog as readonly MagpieModel[]) {
 		if (row.magpieAliasTarget !== undefined || magpieModelName(row.id) !== name || row.magpieRoute?.group) continue;
-		if (row.magpieRoute?.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute!.owner) fail();
+		if (!row.magpieRoute || !owner(row.magpieRoute.owner)) fail("metadata_conflict");
+		if (row.magpieRoute.canonicalId !== targetId || row.magpieRoute.owner !== alias.magpieRoute!.owner) fail("ambiguous");
 	}
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
@@ -127,7 +148,7 @@ export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Mode
 		if (prior.model === alias.id && typeof prior.magpiePhysicalModel !== "string" &&
 			(prior.stopReason === "error" || prior.stopReason === "aborted")) continue;
 		const physicalId = typeof prior.magpiePhysicalModel === "string" ? prior.magpiePhysicalModel : prior.model;
-		if (physicalId !== targetId) fail();
+		if (physicalId !== targetId) fail("history_conflict");
 		break;
 	}
 }
