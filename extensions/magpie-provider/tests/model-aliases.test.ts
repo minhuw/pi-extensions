@@ -147,6 +147,20 @@ describe("local alias resolution and dispatch guards", () => {
 		expect(() => assertMagpieAliasRoute(models[0], [], [message("magpie", `claude2/${name}`)])).not.toThrow();
 	});
 
+	it.each(["error", "aborted"])("looks past unmarked %s entries while preserving the last known source", stopReason => {
+		const models = single();
+		const alias = aliasOf(models);
+		const failure = { role: "assistant", provider: "magpie", model: name, stopReason };
+		const failures = [failure, { ...failure, stopReason: "error" }];
+		const prior = { role: "assistant", provider: "magpie", model: name, magpiePhysicalModel: `claude1/${name}`, stopReason: "toolUse" };
+		expect(() => assertMagpieAliasRoute(alias, models, failures)).not.toThrow();
+		expect(() => assertMagpieAliasRoute(alias, models, [prior, ...failures])).not.toThrow();
+		expect(() => assertMagpieAliasRoute(alias, models, [{ ...prior, magpiePhysicalModel: `claude2/${name}` }, ...failures])).toThrow();
+		expect(() => assertMagpieAliasRoute(alias, models, [{ ...prior, magpiePhysicalModel: undefined }, ...failures])).toThrow();
+		expect(() => assertMagpieAliasRoute(alias, models, [{ ...failure, magpiePhysicalModel: `claude2/${name}` }])).toThrow();
+		expect(() => assertMagpieAliasRoute(alias, models, [{ ...failure, model: `claude2/${name}` }])).toThrow();
+	});
+
 	it("does not expose route values or transcript text in errors", () => {
 		const models = single();
 		expect(() => assertMagpieAliasRoute(aliasOf(models), models, [{ role: "assistant", provider: "magpie", model: `SECRET/${name}`, content: "SECRET" }]))

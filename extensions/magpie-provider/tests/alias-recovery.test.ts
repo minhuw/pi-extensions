@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,6 +14,41 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 const usage = () => ({ input: 20, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 25,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+
+it("retries a local Claude alias after Pi records an unmarked request failure", async () => {
+	const physicalId = "claude1/claude-opus-5-5";
+	vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{
+		id: physicalId, owned_by: "claude1", native_endpoints: ["/v1/messages"],
+	}] })));
+	const provider = createMagpieProvider({ MAGPIE_BASE_URL: "http://127.0.0.1:3425", MAGPIE_API_KEY: "fixture-key" });
+	await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal,
+		publish: async ({ update }) => { update?.(); return true; },
+	});
+	const alias = provider.getModels().find(model => model.id === "claude-opus-5-5")!;
+	let attempts = 0;
+	delegates.streamSimple.mockImplementation((model: Model<any>) => {
+		expect(model.id).toBe(physicalId);
+		if (++attempts === 1) throw new Error("This operation was aborted");
+		const message: AssistantMessage = { role: "assistant", provider: "magpie", model: model.id, api: model.api,
+			content: [{ type: "text", text: "recovered" }], timestamp: Date.now(), usage: usage(), stopReason: "stop" };
+		const stream = createAssistantMessageEventStream();
+		stream.push({ type: "done", reason: "stop", message });
+		return stream;
+	});
+	const agent = new Agent({ initialState: { model: alias }, streamFn: (model, context, options) => {
+		expect(model).toBe(alias);
+		return provider.streamSimple!(alias, context, options);
+	} });
+	await agent.prompt("First attempt.");
+	const failed = agent.state.messages.findLast(message => message.role === "assistant");
+	expect(failed).toMatchObject({ model: alias.id, stopReason: "error", errorMessage: "This operation was aborted" });
+	expect(failed).not.toHaveProperty("magpiePhysicalModel");
+	await agent.prompt("Retry.");
+	expect(attempts).toBe(2);
+	expect(agent.state.messages.findLast(message => message.role === "assistant")).toMatchObject({
+		model: alias.id, magpiePhysicalModel: physicalId, stopReason: "stop", content: [{ type: "text", text: "recovered" }],
+	});
+});
 
 it.each(["overflow", "length"] as const)("Pi automatically compacts and retries a local Claude alias after %s", async failure => {
 	const directory = mkdtempSync(join(tmpdir(), "magpie-alias-recovery-"));

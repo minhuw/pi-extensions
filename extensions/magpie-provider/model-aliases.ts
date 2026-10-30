@@ -122,6 +122,10 @@ export function assertMagpieAliasRoute(model: Model<any>, catalog: readonly Mode
 		if (typeof message !== "object" || message === null) continue;
 		const prior = message as Record<string, unknown>;
 		if (prior.role !== "assistant" || prior.provider !== "magpie" || typeof prior.model !== "string" || magpieModelName(prior.model) !== name) continue;
+		// Pi can synthesize failures before the provider records a physical route.
+		// These short-ID entries carry no source evidence; keep looking backwards.
+		if (prior.model === alias.id && typeof prior.magpiePhysicalModel !== "string" &&
+			(prior.stopReason === "error" || prior.stopReason === "aborted")) continue;
 		const physicalId = typeof prior.magpiePhysicalModel === "string" ? prior.magpiePhysicalModel : prior.model;
 		if (physicalId !== targetId) fail();
 		break;
