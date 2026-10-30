@@ -127,6 +127,17 @@ describe("root package registration", () => {
 		expect(packageConfig.test?.passWithNoTests).toBe(false);
 		const { default: scopedConfig } = await import("../vitest.config.ts");
 		expect(scopedConfig.test?.exclude).toContain("extensions/impeccable/tests/package/**");
+		expect(scopedConfig.test?.exclude).toContain("extensions/impeccable/tests/e2e/**");
+		expect(manifest.scripts["test:impeccable:visual-foundations"]).toBe(
+			"vitest run --config extensions/impeccable/vitest.visual-foundations.config.ts",
+		);
+		expect(manifest.scripts.test).not.toContain("visual-foundations");
+		const { default: visualConfig } = await import("../vitest.visual-foundations.config.ts");
+		expect(visualConfig.test?.include).toEqual(["extensions/impeccable/tests/e2e/visual-foundations.test.ts"]);
+		const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+		expect(packageJson.devDependencies["playwright-core"]).toBe("1.56.1");
+		expect(packageJson.dependencies).not.toHaveProperty("playwright-core");
+		expect(packageJson.scripts).not.toHaveProperty("postinstall");
 	});
 
 	it("introduces no command-name collision with the rest of the collection", async () => {

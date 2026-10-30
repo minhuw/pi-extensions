@@ -22,6 +22,7 @@
 		"test": "npm run test:orca-bridge && npm run test:magpie-provider && npm run test:commit && npm run test:quality && npm run test:statusline && npm run test:loop && npm run test:molt && npm run test:autoresearch && npm run test:subagents && npm run test:herder && npm run test:writer && npm run test:pika && npm run test:relay && npm run test:impeccable",
 		"test:impeccable": "vitest run --config extensions/impeccable/vitest.config.ts",
 		"test:impeccable:package": "vitest run --config extensions/impeccable/vitest.package.config.ts",
+		"test:impeccable:visual-foundations": "vitest run --config extensions/impeccable/vitest.visual-foundations.config.ts",
 		"test:impeccable:engine": "vitest run --config extensions/impeccable/vitest.engine.config.ts",
 		"test:impeccable:contracts": "vitest run --config extensions/impeccable/vitest.config.ts extensions/impeccable/tests/contracts.test.ts",
 		"test:orca-bridge": "vitest run extensions/orca-bridge",
@@ -54,6 +55,7 @@
 		"@types/node": "^24.12.0",
 		"@types/ws": "^8.18.2",
 		"typebox": "^1.3.27",
+		"playwright-core": "1.56.1",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.11",
 		"ws": "^8.22.0"

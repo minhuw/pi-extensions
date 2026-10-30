@@ -6,15 +6,15 @@ import impeccableExtension from "../../index.ts";
 import { LIVE_SNAPSHOT, type LiveSaved } from "../../src/live.ts";
 
 /** Actual AgentSession + resource loader, with in-memory credentials and only the faux provider. */
-export async function liveSession(root: string, extra?: (pi: ExtensionAPI) => void, manager = SessionManager.inMemory(root)) {
+export async function liveSession(root: string, extra?: (pi: ExtensionAPI) => void, manager = SessionManager.inMemory(root), nativeTools = false, agentDir = root) {
 	const faux = fauxProvider({ api: "impeccable-live-test-api", provider: "impeccable-live-test", models: [{ id: "test" }] });
 	let api!: ExtensionAPI;
 	const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
-	const resources = new DefaultResourceLoader({ cwd: root, agentDir: root, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+	const resources = new DefaultResourceLoader({ cwd: root, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
 		extensionFactories: [(pi) => { api = pi; pi.registerProvider(faux.provider); impeccableExtension(pi); extra?.(pi); }],
 	});
 	await resources.reload(); expect(resources.getExtensions().errors).toEqual([]);
-	const { session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime, model: faux.getModel("test")!, resourceLoader: resources, sessionManager: manager, settingsManager: SettingsManager.inMemory({ defaultTools: [], retry: { enabled: false } }) });
+	const { session } = await createAgentSession({ cwd: root, agentDir, modelRuntime, model: faux.getModel("test")!, resourceLoader: resources, sessionManager: manager, settingsManager: SettingsManager.inMemory({ ...(nativeTools ? {} : { defaultTools: [] }), retry: { enabled: false } }) });
 	const errors: unknown[] = [];
 	await session.bindExtensions({ mode: "rpc", onError: (error) => errors.push(error) });
 	return {
