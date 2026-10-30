@@ -26,6 +26,7 @@ fn session_routes() -> Router<AppState> {
         .route("/facets", get(facets))
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", get(session))
+        .route("/sessions/{id}/tree", get(tree))
         .route("/sessions/{id}/turns", get(turns))
         .route("/sessions/{id}/entries", get(entries))
         .route("/sessions/{id}/entries/{seq}/raw", get(raw_entry))
@@ -228,6 +229,10 @@ async fn session(State(state): State<AppState>, Extension(scope): Extension<Scop
         Ok(detail)
     })
     .await
+}
+
+async fn tree(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>) -> Response {
+    scoped_json(&state, scope, Some(id.clone()), move |_, conn| read::sessions::tree_scoped(conn, &id, scope.public)).await
 }
 
 async fn turns(State(state): State<AppState>, Extension(scope): Extension<Scope>, Path(id): Path<String>, Query(params): QueryParams) -> Response {

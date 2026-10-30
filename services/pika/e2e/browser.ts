@@ -196,6 +196,14 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	check(roots.includes(t.mainId) && roots.includes(t.largeId), `the session list shows ${JSON.stringify(roots)}`);
 	check(!roots.includes(t.childId) && !roots.includes(t.stepId), "the session list shows child sessions without the subagent filter");
 	await shot("02-sessions");
+	// Shown, the subagent and the Herder step nest under the main session, and the list keeps the same root sessions.
+	await click("[aria-label=Filters] input[type=checkbox]");
+	await visible(`[data-family="${t.mainId}"] [data-family-node="${t.childId}"][data-depth='1']`);
+	await visible(`[data-family="${t.mainId}"] [data-family-node="${t.stepId}"][data-depth='1']`);
+	checkEqual(await listed(), roots, "the root sessions with subagents shown");
+	await shot("02b-sessions-families");
+	await click("[aria-label=Filters] input[type=checkbox]");
+	await page.waitForSelector("[data-family]", { hidden: true });
 	await click("[aria-label=Filters] button[aria-haspopup]::-p-text(Device)");
 	await click("[role=menu] [role=menuitemradio]::-p-text(desktop)");
 	await waitFor(async () => {
@@ -275,6 +283,22 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await visible(`[data-inline-session="${t.childId}"] [data-tool='read']`);
 	await shot("07-subagent");
 	log("browser: inline subagent");
+
+	// 5b. The Agents view shows the whole family from the subagent's page, root first, with the subagent marked, and
+	// its rows open the other sessions' Agents views. The URL picks the view, so the remembered transcript view stays.
+	await go(`/s/${encodeURIComponent(t.childId)}?view=agents`);
+	await visible(`[data-agent-tree] [data-tree-node="${t.childId}"][data-current]`);
+	const tree = await page.$$eval("[data-tree-node]", (nodes) => nodes.map((node) => [node.getAttribute("data-tree-node"), node.getAttribute("data-depth")]));
+	checkEqual(tree[0], [t.mainId, "0"], "the Agents view's first row");
+	const depths = Object.fromEntries(tree);
+	checkEqual([depths[t.childId], depths[t.stepId]], ["1", "1"], "the depths of the subagent and the Herder step in the Agents view");
+	check((await textOf(`[data-tree-node="${t.childId}"]`)).includes("worker"), "the Agents view does not name the subagent's type");
+	check((await textOf(`[data-tree-node="${t.stepId}"]`)).includes("explorer step"), "the Agents view does not name the Herder step's role");
+	await shot("07b-agents");
+	await click(`[data-tree-node="${t.mainId}"] [data-tree-link]`);
+	await waitFor(() => page.url().endsWith(`/s/${t.mainId}?view=agents`), 10_000, "the main session's Agents view");
+	await visible(`[data-session-page='agents'] [data-tree-node="${t.mainId}"][data-current]`);
+	log(`browser: Agents view lists ${tree.length} sessions`);
 
 	// 6. The Herder run lists its step, which links to the step's session.
 	await go("/runs");
@@ -366,6 +390,9 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await click(`[data-inline-toggle="${t.childId}"] button`);
 	await visible(`[data-inline-session="${t.childId}"] [data-turn='0']`);
 	await shot("07-subagent");
+	await go(`/s/${encodeURIComponent(t.childId)}?view=agents`);
+	await visible(`[data-agent-tree] [data-tree-node="${t.childId}"][data-current]`);
+	await shot("07b-agents");
 	await checkTrajectory(ui, trajectory, false);
 	await checkTrajectoryNavigation(ui, { ...trajectory, searchSeq: t.trace.bash.resultSeq! }, false);
 	await checkLargeTrajectory(ui, t.largeId, false);

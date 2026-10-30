@@ -1,19 +1,13 @@
 import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { ApiError, useApi } from "../lib/api";
+import { isLive, TRACE_REFRESH_MS } from "../lib/liveness";
 import type { Entry, Page, SessionDetail, SessionUpdates, Turn } from "../lib/types";
 import { traceKey } from "../trace/data";
 import { entriesKey } from "./TurnList";
 
-export const LIVE_WINDOW_MS = 120_000;
+export { isLive, LIVE_WINDOW_MS, TRACE_REFRESH_MS } from "../lib/liveness";
 export const LIVE_POLL_MS = 3_000;
-/** A live session's trace refetches at most this often; an unchanged one revalidates cheaply with its ETag. */
-export const TRACE_REFRESH_MS = 10_000;
-
-export function isLive(lastAt: string | undefined, now: number = Date.now()): boolean {
-	const time = lastAt ? Date.parse(lastAt) : Number.NaN;
-	return Number.isFinite(time) && now - time < LIVE_WINDOW_MS;
-}
 
 function knownLastSeq(queryClient: QueryClient, session: SessionDetail): number {
 	const turns = queryClient.getQueryData<InfiniteData<Page<Turn>>>(["turns", session.id]);

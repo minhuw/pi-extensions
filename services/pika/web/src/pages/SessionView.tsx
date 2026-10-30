@@ -18,12 +18,13 @@ import { InlineAgentChild, sessionContextFor } from "../session/subagents";
 import { TurnList } from "../session/TurnList";
 import { useTrace } from "../trace/data";
 import { KpiStrip, SessionChips, ViewSwitch, type SessionViewMode } from "../trace/Header";
+import { AgentTreeSkeleton } from "../tree/Skeleton";
 import { NotFoundPage } from "./NotFound";
 
 export const VIEW_STORAGE_KEY = "pika-session-view";
 const HIDDEN_STORAGE_KEY = "pika-show-hidden";
 
-/** The session page's two layouts: the full-width trajectory, and the transcript's reading column. */
+/** The session page's two layouts: the full-width trajectory and agent tree, and the transcript's reading column. */
 export const TRAJECTORY_COLUMN = "w-full px-6";
 export const TRANSCRIPT_COLUMN = "mx-auto w-full max-w-[1100px] px-8";
 
@@ -44,7 +45,7 @@ function store(key: string, value: string) {
 }
 
 function parseView(value: string | null): SessionViewMode | undefined {
-	return value === "trajectory" || value === "transcript" ? value : undefined;
+	return value === "trajectory" || value === "transcript" || value === "agents" ? value : undefined;
 }
 
 function HeaderSkeleton() {
@@ -66,6 +67,7 @@ const publicSlots: SessionSlots = { AgentChild: InlineAgentChild };
 // The trajectory view and its canvas overview load on demand, in their own chunk.
 const Trajectory = lazy(() => import("../trace/Trajectory").then((module) => ({ default: module.Trajectory })));
 const Overview = lazy(() => import("../trace/Overview").then((module) => ({ default: module.Overview })));
+const AgentTree = lazy(() => import("../tree/AgentTree").then((module) => ({ default: module.AgentTree })));
 
 /** What a crashed trajectory shows: the transcript reads the same session without it. */
 function TrajectoryError({ id, reset }: { id: string; reset: () => void }) {
@@ -78,6 +80,24 @@ function TrajectoryError({ id, reset }: { id: string; reset: () => void }) {
 						<Link to={`/s/${encodeURIComponent(id)}?view=transcript`} className="text-accent hover:underline" data-open-transcript="">
 							Open the transcript
 						</Link>
+						<button type="button" onClick={reset} className="text-muted hover:text-ink">
+							Try again
+						</button>
+					</div>
+				</div>
+			</Callout>
+		</div>
+	);
+}
+
+/** What a crashed agent tree shows. */
+function AgentTreeError({ reset }: { reset: () => void }) {
+	return (
+		<div className="px-6 pt-6" data-agent-tree-error="">
+			<Callout title="The agent tree could not be shown">
+				<div className="text-[13px]">
+					Something in this family’s records could not be drawn. The Subagents tile still lists the direct children.
+					<div className="mt-2">
 						<button type="button" onClick={reset} className="text-muted hover:text-ink">
 							Try again
 						</button>
@@ -172,7 +192,10 @@ function SessionPage({ id }: { id: string }) {
 
 	const trace = useTrace(id, Boolean(session.data));
 	const traceMissing = trace.error instanceof ApiError && trace.error.status === 404;
-	const shown: SessionViewMode = view === "trajectory" && traceMissing ? "transcript" : view;
+	// Only a session with a parent or children has a family to show; the others fall back to the trajectory.
+	const family = Boolean(session.data && (session.data.parentSessionId || session.data.childCount > 0 || session.data.children.length > 0));
+	const wanted: SessionViewMode = view === "agents" && !family ? "trajectory" : view;
+	const shown: SessionViewMode = wanted === "trajectory" && traceMissing ? "transcript" : wanted;
 
 	const seqParam = params.get("seq");
 	const focusSeq = seqParam !== null && /^\d+$/.test(seqParam) ? Number(seqParam) : undefined;
@@ -204,7 +227,7 @@ function SessionPage({ id }: { id: string }) {
 	if (session.error instanceof ApiError && session.error.status === 404) return <NotFoundPage what="session" />;
 
 	const live = session.data ? isLive(session.data.lastAt) : false;
-	const column = shown === "trajectory" ? TRAJECTORY_COLUMN : TRANSCRIPT_COLUMN;
+	const column = shown === "transcript" ? TRANSCRIPT_COLUMN : TRAJECTORY_COLUMN;
 
 	const header = session.data && (
 		<header className={cx(column, "pt-4")} data-session-header="">
@@ -256,11 +279,11 @@ function SessionPage({ id }: { id: string }) {
 						</ActionButton>
 					)}
 					<div className="ml-2">
-						<ViewSwitch view={shown} onChange={setView} />
+						<ViewSwitch view={shown} onChange={setView} agents={family} />
 					</div>
 				</div>
 			</div>
-			<KpiStrip session={session.data} trace={trace.data} />
+			<KpiStrip session={session.data} trace={trace.data} onOpenTree={family ? () => setView("agents") : undefined} />
 		</header>
 	);
 
@@ -303,11 +326,22 @@ function SessionPage({ id }: { id: string }) {
 						)}
 					</div>
 				</div>
+			) : shown === "agents" ? (
+				<div className="pb-32" data-session-page="agents">
+					{header}
+					<div className="mt-3 border-t border-line">
+						<ErrorBoundary label="the agent tree" resetKey={id} fallback={({ reset }) => <AgentTreeError reset={reset} />}>
+							<Suspense fallback={<AgentTreeSkeleton />}>
+								<AgentTree key={id} sessionId={id} />
+							</Suspense>
+						</ErrorBoundary>
+					</div>
+				</div>
 			) : (
 				<div className="pb-32" data-session-page="transcript">
 					{header}
 					<div className={cx(TRANSCRIPT_COLUMN, "mt-4")}>
-						{traceMissing && view === "trajectory" && (
+						{traceMissing && wanted === "trajectory" && (
 							<div className="mb-4">
 								<Callout title="Transcript only">
 									<div className="text-[13px]">This server does not serve session traces yet, so the trajectory view is unavailable.</div>
@@ -343,7 +377,7 @@ function SessionPage({ id }: { id: string }) {
 					{messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
 				</div>
 			)}
-			{shown === "trajectory" && messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
+			{shown !== "transcript" && messaging && <MessageDialog session={messaging} onClose={() => setMessaging(null)} />}
 		</SessionViewContext.Provider>
 	);
 }

@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use rusqlite::types::Value as Sql;
-use rusqlite::{Connection, Row, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, params_from_iter};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -11,6 +13,10 @@ pub const TURN_LIMIT: i64 = 100;
 pub const MAX_TURN_LIMIT: i64 = 1000;
 /// `updates` lists at most this many turns.
 pub const UPDATE_TURN_LIMIT: usize = 50;
+/// `tree` lists at most this many sessions, apart from the path to the requested one.
+pub const MAX_TREE_NODES: usize = 2000;
+/// `tree` lists sessions at most this deep below the root, and walks at most this many hops up to it.
+pub const MAX_TREE_DEPTH: usize = 32;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +84,26 @@ pub struct SessionDetail {
     #[serde(flatten)]
     pub summary: SessionSummary,
     pub children: Vec<ChildSession>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeNode {
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_tool_call_id: Option<String>,
+    pub depth: usize,
+}
+
+/// A session's whole family: `nodes` are the root and its descendants in pre-order.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTree {
+    pub root_id: String,
+    pub nodes: Vec<TreeNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,7 +242,9 @@ pub fn facets_scoped(conn: &Connection, public: bool) -> ReadResult<Facets> {
 }
 
 /// The session list statement and its arguments. `from` and `to` bound `lastAt` (inclusive). Each combination of the
-/// device, project, and root filters walks an index in `lastAt` order; `model` and the time bounds filter along it.
+/// device and project filters walks an index in `lastAt` order; `root`, `model`, and the time bounds filter along it.
+/// `root` looks each session's parent up by id, so it also lists a child whose parent is not recorded (or, in public,
+/// not published): stepping over the children between root sessions costs a lookup each.
 pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>)> {
     list_query_scoped(p, limit, false)
 }
@@ -224,15 +252,11 @@ pub(crate) fn list_query(p: &Params, limit: i64) -> ReadResult<(String, Vec<Sql>
 fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String, Vec<Sql>)> {
     let (root, device, project) = (p.bool("root")?, p.get("device"), p.get("project"));
     // Without statistics SQLite may prefer sessions_parent for `root` and then sort, so name the index.
-    let index = match (root && !public, device.is_some(), project.is_some()) {
-        (false, false, false) => "sessions_last",
-        (false, true, false) => "sessions_device",
-        (false, false, true) => "sessions_project",
-        (false, true, true) => "sessions_device_project",
-        (true, false, false) => "sessions_root",
-        (true, true, false) => "sessions_root_device",
-        (true, false, true) => "sessions_root_project",
-        (true, true, true) => "sessions_root_device_project",
+    let index = match (device.is_some(), project.is_some()) {
+        (false, false) => "sessions_last",
+        (true, false) => "sessions_device",
+        (false, true) => "sessions_project",
+        (true, true) => "sessions_device_project",
     };
     let mut sql = format!("SELECT {SUMMARY_COLUMNS} FROM sessions s INDEXED BY {index} WHERE 1");
     let mut args: Vec<Sql> = Vec::new();
@@ -240,15 +264,11 @@ fn list_query_scoped(p: &Params, limit: i64, public: bool) -> ReadResult<(String
         sql.push_str(&format!(" AND {}", super::publishing::SESSION_FILTER));
     }
     if root {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id");
         if public {
-            sql.push_str(&format!(
-                " AND NOT EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = s.parent_session_id \
-                 AND parent.project IN ({}))",
-                super::publishing::PROJECTS_SQL,
-            ));
-        } else {
-            sql.push_str(" AND s.parent_session_id IS NULL");
+            sql.push_str(&format!(" AND parent.project IN ({})", super::publishing::PROJECTS_SQL));
         }
+        sql.push(')');
     }
     if let Some(device) = device {
         sql.push_str(" AND s.device = ?");
@@ -337,6 +357,123 @@ pub fn detail(conn: &Connection, id: &str) -> ReadResult<SessionDetail> {
     Ok(SessionDetail { summary: session.named(&names), children })
 }
 
+fn tree_scope(public: bool) -> String {
+    if public { format!(" AND {}", super::publishing::SESSION_FILTER) } else { String::new() }
+}
+
+fn tree_node_sql(public: bool) -> String {
+    format!(
+        "SELECT {SUMMARY_COLUMNS}, l.parent_tool_call_id FROM sessions s LEFT JOIN session_links l USING (sid)
+         WHERE s.id = ?1{}",
+        tree_scope(public),
+    )
+}
+
+/// A session's children in the trace's order: by `startedAt`, those without one last, then by id.
+fn tree_children_sql(public: bool) -> String {
+    format!(
+        "SELECT {SUMMARY_COLUMNS}, l.parent_tool_call_id FROM sessions s LEFT JOIN session_links l USING (sid)
+         WHERE s.parent_session_id = ?1{} ORDER BY s.started_at IS NULL, s.started_at, s.id",
+        tree_scope(public),
+    )
+}
+
+fn tree_node(r: &Row, depth: usize) -> rusqlite::Result<TreeNode> {
+    Ok(TreeNode { summary: summary(r)?, parent_tool_call_id: r.get(18)?, depth })
+}
+
+pub fn tree(conn: &Connection, id: &str) -> ReadResult<SessionTree> {
+    tree_scoped(conn, id, false)
+}
+
+pub fn tree_scoped(conn: &Connection, id: &str, public: bool) -> ReadResult<SessionTree> {
+    tree_limited(conn, id, public, MAX_TREE_NODES, MAX_TREE_DEPTH)
+}
+
+/// `tree` with its limits as parameters. The path from the root to `id` is always listed, even past `max_nodes`.
+pub fn tree_limited(conn: &Connection, id: &str, public: bool, max_nodes: usize, max_depth: usize) -> ReadResult<SessionTree> {
+    // One snapshot for the whole walk. The public HTTP scope may already hold one for authorization.
+    let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let mut stmt = conn.prepare_cached(&tree_node_sql(public))?;
+    let mut root = stmt.query_row([id], |r| tree_node(r, 0)).map_err(not_found)?;
+    let mut path = HashSet::from([root.summary.id.clone()]);
+    let mut truncated = false;
+    // Up to the topmost recorded (and, in public, published) ancestor, stopping at a cycle.
+    while let Some(parent) = root.summary.parent_session_id.clone() {
+        if path.contains(&parent) {
+            break;
+        }
+        let Some(row) = stmt.query_row([&parent], |r| tree_node(r, 0)).optional()? else { break };
+        if path.len() > max_depth {
+            truncated = true;
+            break;
+        }
+        path.insert(parent);
+        root = row;
+    }
+    drop(stmt);
+    let mut walk = TreeWalk {
+        conn,
+        public,
+        names: DeviceNames::load(conn)?,
+        path,
+        visited: HashSet::new(),
+        nodes: Vec::new(),
+        truncated,
+        max_nodes,
+        max_depth,
+    };
+    let root_id = root.summary.id.clone();
+    walk.visit(root)?;
+    Ok(SessionTree { root_id, nodes: walk.nodes, truncated: walk.truncated.then_some(true) })
+}
+
+struct TreeWalk<'a> {
+    conn: &'a Connection,
+    public: bool,
+    names: DeviceNames,
+    /// The sessions from the root to the requested one, listed whatever the node limit.
+    path: HashSet<String>,
+    visited: HashSet<String>,
+    nodes: Vec<TreeNode>,
+    truncated: bool,
+    max_nodes: usize,
+    max_depth: usize,
+}
+
+impl TreeWalk<'_> {
+    /// Lists `node`, then its subtree. Recursion is bounded by `max_depth`.
+    fn visit(&mut self, mut node: TreeNode) -> ReadResult<()> {
+        let (id, depth) = (node.summary.id.clone(), node.depth);
+        self.visited.insert(id.clone());
+        node.summary.device_name = self.names.of(&node.summary.device);
+        if self.public {
+            super::publishing::summary(self.conn, &mut node.summary)?;
+            // A tool call of an unpublished parent is not published either.
+            if node.summary.parent_session_id.is_none() {
+                node.parent_tool_call_id = None;
+            }
+        }
+        self.nodes.push(node);
+        let children = self
+            .conn
+            .prepare_cached(&tree_children_sql(self.public))?
+            .query_map([&id], |r| tree_node(r, depth + 1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for child in children {
+            if self.visited.contains(&child.summary.id) {
+                continue;
+            }
+            if !self.path.contains(&child.summary.id) && (child.depth > self.max_depth || self.nodes.len() >= self.max_nodes) {
+                self.truncated = true;
+                continue;
+            }
+            self.visit(child)?;
+        }
+        Ok(())
+    }
+}
+
 pub fn turns(conn: &Connection, id: &str, p: &Params) -> ReadResult<Page<Turn>> {
     let sid = session_sid(conn, id)?;
     let limit = p.limit(TURN_LIMIT, MAX_TURN_LIMIT)?;
@@ -409,6 +546,24 @@ mod tests {
             ["SEARCH t USING PRIMARY KEY (sid=?)", "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN"],
             "{plan:?}"
         );
+    }
+
+    /// `tree` finds each session's children through `sessions_parent`, in both scopes: no full scan of sessions.
+    #[test]
+    fn tree_children_search_the_parent_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        for public in [false, true] {
+            let plan: Vec<String> = store
+                .read(|conn| {
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {}", tree_children_sql(public)))?
+                        .query_map(["x"], |r| r.get::<_, String>(3))?
+                        .collect()
+                })
+                .unwrap();
+            assert!(plan.iter().any(|p| p == "SEARCH s USING INDEX sessions_parent (parent_session_id=?)"), "{plan:?}");
+            assert!(!plan.iter().any(|p| p.starts_with("SCAN s")), "{plan:?}");
+        }
     }
 
     /// Every filter combination walks an index in `lastAt` order: no full scan and no sort.

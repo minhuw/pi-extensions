@@ -16,8 +16,11 @@ import type {
 	RunDetail,
 	SearchHit,
 	SessionDetail,
+	ChildSession,
 	SessionTrace,
+	SessionTree,
 	TraceRecord,
+	TreeNode,
 	Turn,
 } from "../../src/lib/types";
 
@@ -237,6 +240,65 @@ export function traceOf(session: FakeSession): SessionTrace {
 	};
 }
 
+/** The contract's tree limits. */
+const TREE_MAX_NODES = 2000;
+const TREE_MAX_DEPTH = 32;
+
+/**
+ * `GET sessions/:id/tree`, simplified: the topmost recorded ancestor of `id`, then its descendants
+ * depth-first in pre-order, siblings by start (timeless last) then id. A parent is a session's
+ * `parentSessionId` or the session whose `children` list it; cycles are cut. Unlike the server, it
+ * neither limits the walk up nor keeps the path to `id` past the node limit, and it filters nothing for
+ * the public namespace; tests of those give their own trees, through `trees` or their own fetch.
+ */
+export function treeOf(sessions: readonly FakeSession[], id: string, limits = { nodes: TREE_MAX_NODES, depth: TREE_MAX_DEPTH }): SessionTree {
+	const summaries = new Map<string, ChildSession>();
+	const parents = new Map<string, string>();
+	for (const session of sessions) {
+		for (const child of session.detail.children) {
+			if (!summaries.has(child.id)) summaries.set(child.id, child);
+			if (!parents.has(child.id)) parents.set(child.id, session.detail.id);
+		}
+	}
+	for (const session of sessions) {
+		const { children: _children, ...summary } = session.detail;
+		const listed = summaries.get(summary.id);
+		summaries.set(summary.id, { ...summary, ...(listed?.parentToolCallId ? { parentToolCallId: listed.parentToolCallId } : {}) });
+		if (summary.parentSessionId) parents.set(summary.id, summary.parentSessionId);
+	}
+	const children = new Map<string, string[]>();
+	for (const [child, parent] of parents) {
+		if (!summaries.has(parent)) continue;
+		children.set(parent, [...(children.get(parent) ?? []), child]);
+	}
+	const startOf = (key: string) => {
+		const time = Date.parse(summaries.get(key)?.startedAt ?? "");
+		return Number.isNaN(time) ? Number.POSITIVE_INFINITY : time;
+	};
+	for (const list of children.values()) list.sort((a, b) => startOf(a) - startOf(b) || (a < b ? -1 : a > b ? 1 : 0));
+	let rootId = id;
+	const walked = new Set([id]);
+	for (let parent = parents.get(id); parent && summaries.has(parent) && !walked.has(parent); parent = parents.get(parent)) {
+		walked.add(parent);
+		rootId = parent;
+	}
+	const nodes: TreeNode[] = [];
+	const seen = new Set<string>();
+	let truncated = false;
+	const visit = (key: string, depth: number) => {
+		if (seen.has(key)) return;
+		if (nodes.length >= limits.nodes || depth > limits.depth) {
+			truncated = true;
+			return;
+		}
+		seen.add(key);
+		nodes.push({ ...summaries.get(key)!, depth });
+		for (const child of children.get(key) ?? []) visit(child, depth + 1);
+	};
+	visit(rootId, 0);
+	return { rootId, nodes, ...(truncated ? { truncated: true } : {}) };
+}
+
 export function createFakeServer({
 	base = "/",
 	sessions = [],
@@ -261,6 +323,8 @@ export function createFakeServer({
 	relayEvents = [],
 	trace = true,
 	traces,
+	tree = true,
+	trees,
 }: {
 	base?: string;
 	sessions?: FakeSession[];
@@ -301,6 +365,10 @@ export function createFakeServer({
 	trace?: boolean;
 	/** Traces served as given instead of derived, by session id: malformed or partial ones. */
 	traces?: Record<string, unknown>;
+	/** Serves `sessions/:id/tree`; older servers answer 404. */
+	tree?: boolean;
+	/** Trees served as given instead of derived, by session id. */
+	trees?: Record<string, unknown>;
 }) {
 	const calls: string[] = [];
 	const byId = new Map(sessions.map((session) => [session.detail.id, session]));
@@ -541,7 +609,8 @@ export function createFakeServer({
 		}
 		if (parts[0] === "sessions" && parts.length === 1) {
 			let list = sessions.map((s) => s.detail);
-			if (params.get("root") === "true") list = list.filter((s) => !s.parentSessionId);
+			// Root sessions have no recorded parent: none at all, or one the server does not have.
+			if (params.get("root") === "true") list = list.filter((s) => !s.parentSessionId || !sessions.some((p) => p.detail.id === s.parentSessionId));
 			for (const key of ["device", "project"] as const) {
 				const value = params.get(key);
 				if (value) list = list.filter((s) => s[key] === value);
@@ -555,6 +624,7 @@ export function createFakeServer({
 			if (!session) return json(404, { error: "not found" });
 			if (parts.length === 2) return json(200, session.detail);
 			if (parts[2] === "turns") return json(200, page(session.turns, params, 100));
+			if (parts[2] === "tree" && tree) return json(200, trees?.[session.detail.id] ?? treeOf(sessions, session.detail.id));
 			if (parts[2] === "trace" && trace) return json(200, traces?.[session.detail.id] ?? traceOf(session));
 			if (parts[2] === "updates" && updates) {
 				const raw = params.get("since");

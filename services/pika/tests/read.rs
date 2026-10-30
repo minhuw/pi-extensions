@@ -299,7 +299,8 @@ async fn facets_and_session_list_filters() {
 
     let newest_first = [DESK_SESSION, REVIEW_SESSION, STEP_SESSION, HEADER_CHILD, SESSION_ID, LINKED_CHILD];
     assert_eq!(session_ids(&app, "").await, newest_first);
-    assert_eq!(session_ids(&app, "?root=true").await, [DESK_SESSION]);
+    // Root sessions include children whose parent is not recorded: `parent-0001` and the steps' `orch-1`.
+    assert_eq!(session_ids(&app, "?root=true").await, [DESK_SESSION, REVIEW_SESSION, STEP_SESSION, SESSION_ID]);
     assert_eq!(session_ids(&app, "?root=false").await, newest_first);
     assert_eq!(session_ids(&app, &format!("?device={DESKTOP}")).await, [DESK_SESSION]);
     assert_eq!(session_ids(&app, &format!("?device={DEVICE}")).await, newest_first[1..]);
@@ -312,7 +313,7 @@ async fn facets_and_session_list_filters() {
     let from_ms = pika::util::parse_iso_ms("2026-10-20T09:01:00Z").unwrap();
     assert_eq!(session_ids(&app, &format!("?from={from_ms}&to=2026-10-20T12:00:00%2B02:00")).await, [HEADER_CHILD, SESSION_ID]);
     assert_eq!(session_ids(&app, &format!("?device={DEVICE}&project=widgets&model=gpt-5")).await, [SESSION_ID]);
-    assert_eq!(session_ids(&app, &format!("?root=true&device={DEVICE}")).await, Vec::<String>::new());
+    assert_eq!(session_ids(&app, &format!("?root=true&device={DEVICE}")).await, [REVIEW_SESSION, STEP_SESSION, SESSION_ID]);
     assert_eq!(session_ids(&app, "?root=true&project=gadgets&model=gpt-5&from=2026-10-22").await, [DESK_SESSION]);
     assert_eq!(session_ids(&app, "?device=nobody").await, Vec::<String>::new());
     assert_eq!(session_ids(&app, "?device=&project=").await, newest_first);
@@ -1506,7 +1507,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
     assert_eq!(public_json(&app, "sessions").await, json!({ "items": [], "nextCursor": null }));
     assert_eq!(public_json(&app, "facets").await, json!({ "devices": [], "projects": [], "models": [] }));
     for id in [SESSION_ID, "missing"] {
-        for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
+        for suffix in ["", "/tree", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
             let reply = public(&app, &format!("sessions/{id}{suffix}")).await;
             assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })));
         }
@@ -1701,4 +1702,236 @@ async fn publishing_settings_are_atomic_persistent_and_keep_missing_selections()
     assert_eq!(a.status, StatusCode::OK);
     assert_eq!(b.status, StatusCode::OK);
     assert_eq!(public_json(&app, "sessions").await["items"], json!([]));
+}
+
+/// A session in `cwd`, linked to `parent` by the tool call `call` when given; without `at` it has no time.
+fn family_member(id: &str, at: Option<&str>, cwd: &str, parent: Option<&str>, call: Option<&str>) -> Vec<String> {
+    let mut header = json!({ "type": "session", "version": 3, "id": id, "cwd": cwd });
+    if let Some(at) = at {
+        header["timestamp"] = json!(at);
+    }
+    let mut values = vec![header];
+    if let Some(parent) = parent {
+        let mut data = json!({ "kind": "subagent", "parentSessionId": parent });
+        if let Some(call) = call {
+            data["parentToolCallId"] = json!(call);
+        }
+        values.push(json!({ "type": "custom", "id": "l1", "parentId": null, "customType": "pi-extensions.session-link", "data": data }));
+    }
+    lines(&values)
+}
+
+/// `(id, at, cwd, parent, call)`, as `family_member` takes them.
+type Member<'a> = (&'a str, Option<&'a str>, &'a str, Option<&'a str>, Option<&'a str>);
+
+async fn upload_family(app: &App, members: &[Member<'_>]) {
+    for &(id, at, cwd, parent, call) in members {
+        app.upload(DEVICE, &skey(id), "session", &family_member(id, at, cwd, parent, call)).await;
+    }
+}
+
+fn tree_nodes(tree: &Value) -> Vec<(String, i64)> {
+    tree["nodes"].as_array().unwrap().iter().map(|n| (n["id"].as_str().unwrap().to_owned(), n["depth"].as_i64().unwrap())).collect()
+}
+
+fn tree_of(app: &App, id: &str, public: bool, max_nodes: usize, max_depth: usize) -> Value {
+    let tree = app.env.store.read(|conn| pika::read::sessions::tree_limited(conn, id, public, max_nodes, max_depth)).unwrap();
+    serde_json::to_value(tree).unwrap()
+}
+
+/// A child whose parent is not recorded is a root session until its parent arrives, in every filter combination.
+#[tokio::test]
+async fn a_child_is_a_root_session_until_its_parent_is_recorded() {
+    let app = app(None);
+    upload_family(&app, &[
+        ("orphan", Some("2026-10-24T08:05:00.000Z"), "/w/widgets", Some("late"), Some("k-o")),
+        ("orphan-child", Some("2026-10-24T08:06:00.000Z"), "/w/widgets", Some("orphan"), Some("k-c")),
+        ("main", Some("2026-10-24T08:00:00.000Z"), "/w/widgets", None, None),
+    ]).await;
+    for query in ["?root=true", &format!("?root=true&device={DEVICE}"), "?root=true&project=widgets"] {
+        assert_eq!(session_ids(&app, query).await, ["orphan", "main"], "{query}");
+    }
+    let tree = app.json("sessions/orphan-child/tree").await;
+    assert_eq!(tree["rootId"], "orphan");
+    assert_eq!(tree_nodes(&tree), [("orphan".to_owned(), 0), ("orphan-child".to_owned(), 1)]);
+
+    upload_family(&app, &[("late", Some("2026-10-24T07:59:00.000Z"), "/w/widgets", None, None)]).await;
+    assert_eq!(session_ids(&app, "?root=true").await, ["main", "late"]);
+    assert_eq!(app.json("sessions/orphan-child/tree").await["rootId"], "late");
+}
+
+#[tokio::test]
+async fn tree_lists_the_whole_family_in_pre_order() {
+    let app = app(None);
+    upload_family(&app, &[
+        ("root", Some("2026-10-24T08:00:00.000Z"), "/w/widgets", None, None),
+        // Without a time, so listed last, though its id sorts first.
+        ("a-timeless", None, "/w/widgets", Some("root"), Some("k-t")),
+        ("child-b", Some("2026-10-24T08:03:00.000Z"), "/w/widgets", Some("root"), None),
+        ("child-a", Some("2026-10-24T08:01:00.000Z"), "/w/widgets", Some("root"), Some("k-a")),
+        ("grand-a1", Some("2026-10-24T08:02:00.000Z"), "/w/widgets", Some("child-a"), Some("k-a1")),
+    ]).await;
+    let expected = [("root", 0), ("child-a", 1), ("grand-a1", 2), ("child-b", 1), ("a-timeless", 1)]
+        .map(|(id, depth)| (id.to_owned(), depth));
+    for id in ["grand-a1", "root", "child-b"] {
+        let tree = app.json(&format!("sessions/{id}/tree")).await;
+        assert_eq!(tree["rootId"], "root", "{id}");
+        assert_eq!(tree_nodes(&tree), expected, "{id}");
+        assert!(tree.get("truncated").is_none(), "{id}");
+    }
+    let tree = app.json("sessions/grand-a1/tree").await;
+    let nodes = tree["nodes"].as_array().unwrap();
+    assert!(nodes[0].get("parentToolCallId").is_none() && nodes[0].get("parentSessionId").is_none());
+    assert_eq!((&nodes[1]["parentToolCallId"], &nodes[1]["parentSessionId"]), (&json!("k-a"), &json!("root")));
+    assert_eq!(nodes[2]["parentToolCallId"], "k-a1");
+    assert!(nodes[3].get("parentToolCallId").is_none());
+    assert_eq!((&nodes[4]["parentToolCallId"], &nodes[4]["startedAt"]), (&json!("k-t"), &Value::Null));
+    assert_eq!((&nodes[0]["childCount"], &nodes[0]["deviceName"], &nodes[1]["link"]["kind"]), (&json!(3), &json!(DEVICE_NAME), &json!("subagent")));
+    // The nodes are the sessions' summaries, as `GET sessions/:id` lists its children.
+    let detail = app.json("sessions/root").await;
+    let mut child = detail["children"].as_array().unwrap().iter().find(|c| c["id"] == "child-a").unwrap().clone();
+    child["depth"] = json!(1);
+    assert_eq!(nodes[1], child);
+
+    upload_family(&app, &[("alone", Some("2026-10-24T09:00:00.000Z"), "/w/widgets", None, None)]).await;
+    assert_eq!(app.json("sessions/alone/tree").await["rootId"], "alone");
+    assert_eq!(tree_nodes(&app.json("sessions/alone/tree").await), [("alone".to_owned(), 0)]);
+    // A recorded parent that is missing stops the walk below it.
+    upload_family(&app, &[("orphan", Some("2026-10-24T09:00:00.000Z"), "/w/widgets", Some("gone"), Some("k"))]).await;
+    let tree = app.json("sessions/orphan/tree").await;
+    assert_eq!((&tree["rootId"], &tree["nodes"][0]["parentSessionId"]), (&json!("orphan"), &json!("gone")));
+    assert_eq!(tree_nodes(&tree), [("orphan".to_owned(), 0)]);
+    assert_eq!(app.status("sessions/nope/tree").await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn tree_lists_each_session_of_a_cycle_once() {
+    let app = app(None);
+    upload_family(&app, &[
+        ("cycle-x", Some("2026-10-24T08:00:00.000Z"), "/w/widgets", Some("cycle-y"), None),
+        ("cycle-y", Some("2026-10-24T08:01:00.000Z"), "/w/widgets", Some("cycle-x"), None),
+        ("cycle-z", Some("2026-10-24T08:02:00.000Z"), "/w/widgets", Some("cycle-x"), None),
+    ]).await;
+    let tree = app.json("sessions/cycle-x/tree").await;
+    assert_eq!(tree["rootId"], "cycle-y");
+    assert_eq!(tree_nodes(&tree), [("cycle-y".to_owned(), 0), ("cycle-x".to_owned(), 1), ("cycle-z".to_owned(), 2)]);
+    let tree = app.json("sessions/cycle-z/tree").await;
+    assert_eq!(tree["rootId"], "cycle-y");
+    assert_eq!(tree_nodes(&tree).len(), 3);
+    let tree = app.json("sessions/cycle-y/tree").await;
+    assert_eq!(tree["rootId"], "cycle-x");
+    assert_eq!(tree_nodes(&tree), [("cycle-x".to_owned(), 0), ("cycle-y".to_owned(), 1), ("cycle-z".to_owned(), 1)]);
+}
+
+#[tokio::test]
+async fn tree_limits_keep_the_path_to_the_session() {
+    let app = app(None);
+    let at = |minute: u32| format!("2026-10-24T08:{minute:02}:00.000Z");
+    let times: Vec<String> = (0..8).map(at).collect();
+    upload_family(&app, &[
+        ("root", Some(&times[0]), "/w/widgets", None, None),
+        ("c1", Some(&times[1]), "/w/widgets", Some("root"), None),
+        ("c2", Some(&times[2]), "/w/widgets", Some("root"), None),
+        ("c3", Some(&times[3]), "/w/widgets", Some("root"), None),
+        ("c4", Some(&times[4]), "/w/widgets", Some("root"), None),
+        ("c5", Some(&times[5]), "/w/widgets", Some("root"), None),
+        ("g4", Some(&times[6]), "/w/widgets", Some("c4"), None),
+        ("gg4", Some(&times[7]), "/w/widgets", Some("g4"), None),
+    ]).await;
+    let names = |ids: &[(&str, i64)]| ids.iter().map(|&(id, depth)| (id.to_owned(), depth)).collect::<Vec<_>>();
+
+    // The node limit: past it only the path from the root to the session is walked.
+    let tree = tree_of(&app, "g4", false, 2, 32);
+    assert_eq!(tree_nodes(&tree), names(&[("root", 0), ("c1", 1), ("c4", 1), ("g4", 2)]));
+    assert_eq!(tree["truncated"], true);
+    let tree = tree_of(&app, "root", false, 3, 32);
+    assert_eq!(tree_nodes(&tree), names(&[("root", 0), ("c1", 1), ("c2", 1)]));
+    assert_eq!(tree["truncated"], true);
+    let tree = tree_of(&app, "root", false, 8, 32);
+    assert_eq!(tree_nodes(&tree).len(), 8);
+    assert!(tree.get("truncated").is_none());
+
+    // The depth limit, downward and on the walk up.
+    let tree = tree_of(&app, "root", false, 100, 1);
+    assert_eq!(tree_nodes(&tree), names(&[("root", 0), ("c1", 1), ("c2", 1), ("c3", 1), ("c4", 1), ("c5", 1)]));
+    assert_eq!(tree["truncated"], true);
+    let tree = tree_of(&app, "gg4", false, 100, 2);
+    assert_eq!(tree["rootId"], "c4");
+    assert_eq!(tree_nodes(&tree), names(&[("c4", 0), ("g4", 1), ("gg4", 2)]));
+    assert_eq!(tree["truncated"], true);
+    let tree = tree_of(&app, "g4", false, 100, 2);
+    assert_eq!(tree["rootId"], "root");
+    assert_eq!(tree_nodes(&tree).len(), 7);
+    assert_eq!(tree["truncated"], true);
+    let tree = tree_of(&app, "g4", false, 100, 3);
+    assert_eq!(tree_nodes(&tree).len(), 8);
+    assert!(tree.get("truncated").is_none());
+
+    // The default depth limit of 32, through the API.
+    let chain: Vec<String> = (0..34).map(|i| format!("deep-{i:02}")).collect();
+    for (i, id) in chain.iter().enumerate() {
+        let parent = i.checked_sub(1).map(|p| chain[p].as_str());
+        app.upload(DEVICE, &skey(id), "session", &family_member(id, Some(&times[0]), "/w/widgets", parent, None)).await;
+    }
+    let tree = app.json("sessions/deep-00/tree").await;
+    assert_eq!(tree_nodes(&tree).len(), 33);
+    assert_eq!((&tree["nodes"][32]["id"], &tree["nodes"][32]["depth"], &tree["truncated"]), (&json!("deep-32"), &json!(32), &json!(true)));
+    let tree = app.json("sessions/deep-33/tree").await;
+    assert_eq!((&tree["rootId"], &tree["truncated"]), (&json!("deep-01"), &json!(true)));
+    assert_eq!(tree_nodes(&tree).len(), 33);
+}
+
+#[tokio::test]
+async fn public_tree_includes_only_published_sessions() {
+    let app = app(None);
+    upload_family(&app, &[
+        ("top", Some("2026-10-24T07:00:00.000Z"), "/w/private", None, None),
+        ("root", Some("2026-10-24T08:00:00.000Z"), "/w/widgets", Some("top"), Some("k-r")),
+        ("child-a", Some("2026-10-24T08:01:00.000Z"), "/w/widgets", Some("root"), Some("k-a")),
+        ("grand-a1", Some("2026-10-24T08:02:00.000Z"), "/w/widgets", Some("child-a"), Some("k-a1")),
+        ("child-b", Some("2026-10-24T08:03:00.000Z"), "/w/secret", Some("root"), None),
+        // Published, but below an unpublished child.
+        ("grand-b1", Some("2026-10-24T08:04:00.000Z"), "/w/widgets", Some("child-b"), None),
+    ]).await;
+    let step = lines(&[
+        json!({ "type": "session", "version": 3, "id": "step-c", "timestamp": "2026-10-24T08:05:00.000Z", "cwd": "/w/x" }),
+        json!({ "type": "custom", "id": "l1", "parentId": null, "customType": "pi-extensions.session-link",
+                "data": { "kind": "herder-step", "parentSessionId": "root",
+                          "herder": { "runId": RUN_ID, "stepKey": "impl-T1", "stepId": "impl-T1", "repo": "widgets" } } }),
+    ]);
+    app.upload(DEVICE, &skey("step-c"), "session", &step).await;
+    let private = app.json("sessions/grand-a1/tree").await;
+    assert_eq!(private["rootId"], "top");
+    assert_eq!(
+        tree_nodes(&private).into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        ["top", "root", "child-a", "grand-a1", "child-b", "grand-b1", "step-c"]
+    );
+    assert_eq!(private["nodes"][6]["herderRunId"], RUN_ID);
+
+    for id in ["grand-a1", "top", "nope"] {
+        let reply = public(&app, &format!("sessions/{id}/tree")).await;
+        assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })), "{id}");
+    }
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::OK);
+    for id in ["grand-a1", "root", "step-c"] {
+        let tree = public_json(&app, &format!("sessions/{id}/tree")).await;
+        assert_eq!(tree["rootId"], "root", "{id}");
+        assert_eq!(
+            tree_nodes(&tree),
+            [("root", 0), ("child-a", 1), ("grand-a1", 2), ("step-c", 1)].map(|(id, depth)| (id.to_owned(), depth)),
+            "{id}"
+        );
+        let nodes = tree["nodes"].as_array().unwrap();
+        assert!(nodes.iter().all(|n| n.get("link").is_none() && n.get("herderRunId").is_none()), "{id}");
+        // The root's parent `top` is unpublished, so neither it nor its tool call is named.
+        assert!(nodes[0].get("parentSessionId").is_none() && nodes[0].get("parentToolCallId").is_none(), "{id}");
+        assert_eq!(nodes[0]["childCount"], json!(2));
+        assert_eq!((&nodes[1]["parentSessionId"], &nodes[1]["parentToolCallId"]), (&json!("root"), &json!("k-a")));
+    }
+    let reply = public(&app, "sessions/grand-b1/tree").await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let tree = reply.json();
+    assert_eq!(tree["rootId"], "grand-b1");
+    assert!(tree["nodes"][0].get("parentSessionId").is_none() && tree["nodes"][0].get("parentToolCallId").is_none());
+    assert_eq!(public(&app, "sessions/child-b/tree").await.status, StatusCode::NOT_FOUND);
 }

@@ -5,11 +5,11 @@ import { cx } from "../components/ui";
 import { deviceLabel } from "../lib/devices";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
 import type { ChildSession, SessionDetail, SessionTrace, Tokens } from "../lib/types";
-import { childLabel } from "../session/subagents";
+import { childLabel } from "../lib/labels";
 import { formatSpan, middleTruncate } from "./format";
 import { contextTokens, FAMILIES, FAMILY_CLASSES, FAMILY_LABELS, recordDuration, recordFamily, recordIsError, type Family } from "./kinds";
 
-export type SessionViewMode = "trajectory" | "transcript";
+export type SessionViewMode = "trajectory" | "transcript" | "agents";
 
 function Chip({ icon, children, title, className }: { icon: IconName; children: ReactNode; title?: string; className?: string }) {
 	return (
@@ -259,7 +259,7 @@ function SubagentLinks({ items }: { items: ChildSession[] }) {
 }
 
 /** Dense key numbers, each with a tiny graphic. */
-export function KpiStrip({ session, trace }: { session: SessionDetail; trace?: SessionTrace }) {
+export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetail; trace?: SessionTrace; onOpenTree?: () => void }) {
 	const records = trace?.records ?? [];
 	const llm = records.filter((record) => record.kind === "llm");
 	const tools = records.filter((record) => record.kind === "tool");
@@ -292,7 +292,21 @@ export function KpiStrip({ session, trace }: { session: SessionDetail; trace?: S
 			<Tile
 				kpi="subagents"
 				label="Subagents"
-				value={formatCount(children.length)}
+				value={
+					children.length > 0 && onOpenTree ? (
+						<button
+							type="button"
+							onClick={onOpenTree}
+							className="-mx-1 rounded-sm px-1 hover:bg-hover hover:text-accent"
+							title="Show the agent tree"
+							data-open-agent-tree=""
+						>
+							{formatCount(children.length)}
+						</button>
+					) : (
+						formatCount(children.length)
+					)
+				}
 				visual={children.length > 0 ? <SubagentLinks items={children} /> : undefined}
 			/>
 			<Tile
@@ -306,10 +320,12 @@ export function KpiStrip({ session, trace }: { session: SessionDetail; trace?: S
 	);
 }
 
-export function ViewSwitch({ view, onChange }: { view: SessionViewMode; onChange: (view: SessionViewMode) => void }) {
+/** The view choice; "Agents" is offered only for a session with a parent or children. */
+export function ViewSwitch({ view, onChange, agents = false }: { view: SessionViewMode; onChange: (view: SessionViewMode) => void; agents?: boolean }) {
 	const options: [SessionViewMode, string][] = [
 		["trajectory", "Trajectory"],
 		["transcript", "Transcript"],
+		...(agents ? [["agents", "Agents"] as [SessionViewMode, string]] : []),
 	];
 	return (
 		<div className="flex h-7 items-center rounded-md bg-hover p-0.5" role="radiogroup" aria-label="View" data-view-switch={view}>

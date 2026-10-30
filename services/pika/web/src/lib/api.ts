@@ -21,6 +21,7 @@ import type {
 	SessionDetail,
 	SessionSummary,
 	SessionTrace,
+	SessionTree,
 	SessionUpdates,
 	Turn,
 } from "./types";
@@ -180,6 +181,11 @@ export class PikaApi {
 	/** The session's records for the trajectory view, without raw entries. */
 	trace(id: string): Promise<SessionTrace> {
 		return this.request(`sessions/${encodeURIComponent(id)}/trace`);
+	}
+
+	/** The session's whole family: its topmost recorded ancestor and every descendant. */
+	tree(id: string): Promise<SessionTree> {
+		return this.request(`sessions/${encodeURIComponent(id)}/tree`);
 	}
 
 	updates(id: string, since: number): Promise<SessionUpdates> {

@@ -93,6 +93,13 @@ export const Icons = {
 			<path d="M10.5 5.2C10 4.4 9.1 4 8 4c-1.5 0-2.5.8-2.5 1.9 0 2.6 5 1.4 5 4.1 0 1.1-1 2-2.5 2-1.2 0-2.1-.5-2.6-1.3M8 2.5V4M8 12v1.5" />
 		</Svg>
 	),
+	// A stack of coins, for amounts already written with a currency sign.
+	coins: (p: IconProps) => (
+		<Svg {...p}>
+			<ellipse cx="8" cy="4.6" rx="4.6" ry="1.9" />
+			<path d="M3.4 4.6v3.3c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9V4.6M3.4 7.9v3.3c0 1.05 2.06 1.9 4.6 1.9s4.6-.85 4.6-1.9V7.9" />
+		</Svg>
+	),
 	model: (p: IconProps) => (
 		<Svg {...p}>
 			<rect x="4" y="4" width="8" height="8" rx="1.2" />

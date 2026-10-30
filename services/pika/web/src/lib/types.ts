@@ -59,6 +59,17 @@ export interface SessionDetail extends SessionSummary {
 	children: ChildSession[];
 }
 
+/** A session in its family tree, `depth` hops below the root. */
+export type TreeNode = ChildSession & { depth: number };
+
+/** `GET sessions/:id/tree`: the root and its descendants, depth-first in pre-order. */
+export interface SessionTree {
+	rootId: string;
+	nodes: TreeNode[];
+	/** Set when the server left sessions out at its node or depth limit. */
+	truncated?: boolean;
+}
+
 export interface Page<T> {
 	items: T[];
 	nextCursor?: string | null;

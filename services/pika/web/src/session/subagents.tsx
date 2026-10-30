@@ -7,6 +7,7 @@ import { Markdown } from "../components/Markdown";
 import { Pill, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
 import { formatDuration, formatRelative, plural } from "../lib/format";
+import { childLabel } from "../lib/labels";
 import type { ChildSession, SessionDetail } from "../lib/types";
 import { useViewState } from "../lib/viewState";
 import { SessionViewContext, useSessionView, type SessionViewContextValue } from "./context";
@@ -37,12 +38,6 @@ export function sessionContextFor(
 		else childGroups.set(toolCallId, [child]);
 	}
 	return { sessionId: id, childrenByToolCall, childGroups, ancestors: extra.ancestors ?? [id], showHidden: extra.showHidden };
-}
-
-export function childLabel(child: ChildSession): { type: string; description: string } {
-	const link = child.link;
-	const type = link?.herder ? `${link.herder.role} step` : (link?.agentType ?? (link?.kind === "herder-step" ? "herder step" : "subagent"));
-	return { type, description: link?.description ?? link?.herder?.task ?? child.title ?? "Untitled session" };
 }
 
 /** A child session's turns and timeline, nested inline under the call that spawned it. */

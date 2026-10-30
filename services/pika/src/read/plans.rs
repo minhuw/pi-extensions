@@ -44,23 +44,20 @@ fn session_lookups_use_the_id_index() {
     });
 }
 
-/// Every root/device/project combination walks its own index, with and without a `model` filter and a time range;
-/// `model` looks each session up by the `session_models` primary key. No sort, and no scan beyond the index walk.
+/// Every device/project combination walks its own index, with and without `root`, a `model` filter, and a time range;
+/// `root` looks each session's parent up by id and `model` looks each session up by the `session_models` primary
+/// key. No sort, and no scan beyond the index walk.
 #[test]
 fn session_lists_walk_the_index_of_their_filters() {
     with_conn(|conn| {
         let cursor = encode_cursor(&[json!(5), json!("x")]);
-        for (root, device, project, index) in [
-            (false, false, false, "sessions_last"),
-            (false, true, false, "sessions_device"),
-            (false, false, true, "sessions_project"),
-            (false, true, true, "sessions_device_project"),
-            (true, false, false, "sessions_root"),
-            (true, true, false, "sessions_root_device"),
-            (true, false, true, "sessions_root_project"),
-            (true, true, true, "sessions_root_device_project"),
+        for (device, project, index) in [
+            (false, false, "sessions_last"),
+            (true, false, "sessions_device"),
+            (false, true, "sessions_project"),
+            (true, true, "sessions_device_project"),
         ] {
-            for model in [false, true] {
+            for (root, model) in [(false, false), (false, true), (true, false), (true, true)] {
                 for (range, bound) in [
                     (vec![], None),
                     (vec![("from", "2026-01-01")], Some("last_at>?")),
@@ -89,6 +86,10 @@ fn session_lists_walk_the_index_of_their_filters() {
                     } else {
                         format!("SEARCH s USING INDEX {index} ({})", columns.join(" AND "))
                     }];
+                    if root {
+                        want.push("CORRELATED SCALAR SUBQUERY 1".into());
+                        want.push("SEARCH parent USING COVERING INDEX sqlite_autoindex_sessions_1 (id=?)".into());
+                    }
                     if model {
                         want.push("SEARCH m EXISTS USING PRIMARY KEY (model=? AND sid=?)".into());
                     }

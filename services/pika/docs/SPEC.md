@@ -120,7 +120,7 @@ Additions to the Herder journal (all optional fields, so old journals stay valid
 Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` defaults to 50. Times in responses are ISO 8601 strings in UTC; time parameters accept ISO 8601, `YYYY-MM-DD`, or Unix milliseconds.
 
 - **`GET facets`** returns `{ devices: { id, name }[], projects: string[], models: string[] }`. `devices` are the devices of recorded sessions, sorted by name case-insensitively, then by id.
-- **`GET sessions`** accepts `device` (an id), `project`, `model`, `from`, `to` (inclusive bounds on `lastAt`), `root` (`true` lists only sessions without a parent), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest `lastAt` first. `SessionSummary` is:
+- **`GET sessions`** accepts `device` (an id), `project`, `model`, `from`, `to` (inclusive bounds on `lastAt`), `root` (`true` lists only sessions without a recorded parent: those without a parent, and children whose parent session is not recorded), `cursor`, and `limit`. It returns `{ items: SessionSummary[], nextCursor }`, newest `lastAt` first. `SessionSummary` is:
   ```
   { id, device, deviceName, project, cwd, title, startedAt, lastAt, durationMs, entryCount,
     models: string[],
@@ -131,6 +131,11 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - `title` is the `session_info` name if set, otherwise the first user prompt cut to 120 characters.
   - Pages are keyset-paged on `lastAt`, so later pages never repeat a session. A session that gains entries between page fetches moves to the top of the list: it appears on a fresh first page and not on the later pages of the old walk.
 - **`GET sessions/:id`** returns a `SessionSummary` plus `{ children: (SessionSummary & { parentToolCallId? })[] }`.
+- **`GET sessions/:id/tree`** returns the session's whole subagent family in one response: `{ rootId, nodes: (SessionSummary & { parentToolCallId?, depth })[], truncated? }`. An unknown session id returns 404.
+  - `rootId` is the topmost recorded ancestor: the walk follows `parentSessionId` upward and stops at a parent that is not recorded, at a session already visited (a cycle), or after 32 hops. A session without a recorded parent is its own root.
+  - `nodes` lists the root and its descendants depth-first in pre-order, each session followed by its whole subtree. Siblings are ordered as the trace's `children`: by `startedAt`, those without one last, then by id. `depth` is 0 for the root, 1 for its children, and so on. Each session is listed once, even if links form a cycle. `parentToolCallId` is the link's, as in `GET sessions/:id`'s `children`.
+  - At most 2,000 nodes are listed, at most 32 deep. When either limit leaves out a session, `truncated: true` is set. The sessions on the path from the root to `:id`, and `:id` itself, are always listed at their pre-order positions, even past the node limit.
+  - In the public namespace, the upward walk stops below an unpublished parent, the downward walk skips unpublished children and their subtrees, and every node is a public `SessionSummary`. A node whose parent is unpublished has neither `parentSessionId` nor `parentToolCallId`.
 - **`GET sessions/:id/turns`** accepts `cursor` and `limit` (default 100). It returns `{ items: Turn[], nextCursor }`, with one `Turn` per user prompt, or per displayed extension message (a `custom_message` with `display: true`) that starts a run while the session is idle:
   ```
   { index, startSeq, endSeq, userText, at, durationMs,
@@ -201,7 +206,7 @@ Publication is opt-in and uses the existing `sessions.project` name (the working
   - `GET settings/publishing` → `{ projects: [{ project, sessionCount, published }] }`, sorted by project. Counts include child sessions. Saved selections with no current sessions remain listed with count zero.
   - `PATCH settings/publishing` with JSON `{ project: string, published: boolean }` → the updated settings response. Updates are atomic per project. Enabling requires a recorded project with a nonempty name of at most 1024 bytes, without control characters or path separators, and other than `.` or `..`; invalid or unknown names return 400. Disabling also works for saved selections whose sessions are gone.
   - Stored as a JSON array of names in the `published_projects` settings BLOB; defaults to `[]` and survives restart and reindex.
-- **Anonymous read API**, under `{base}/api/public/v1/`: only `GET facets`, `sessions`, `sessions/:id`, `sessions/:id/turns`, `sessions/:id/entries`, `sessions/:id/entries/:seq/raw`, `sessions/:id/entries/:seq/image/:index`, `sessions/:id/trace`, and `sessions/:id/updates`. Shapes, filters, limits, and cursors match their authenticated counterparts.
+- **Anonymous read API**, under `{base}/api/public/v1/`: only `GET facets`, `sessions`, `sessions/:id`, `sessions/:id/tree`, `sessions/:id/turns`, `sessions/:id/entries`, `sessions/:id/entries/:seq/raw`, `sessions/:id/entries/:seq/image/:index`, `sessions/:id/trace`, and `sessions/:id/updates`. Shapes, filters, limits, and cursors match their authenticated counterparts.
   - Lists and facets filter selected projects in SQL before pagination. `root=true` includes a published child whose parent is private or missing.
   - Each direct session resource checks publication in the same database snapshot as its read. Private and missing sessions both return 404 `not_found`, even to a signed-in visitor using this namespace. No public request payload, export, search, Herder run, device management, or relay routes exist.
   - Public metadata omits captured `requestId`, `link`, and `herderRunId`; parent, child, tool-child links and child counts include only published targets. Entry and raw-line content is the published session's content, without automatic redaction, and may itself mention private paths or other sessions.
