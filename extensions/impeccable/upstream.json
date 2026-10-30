@@ -1,0 +1,56 @@
+{
+  "upstream": {
+    "repository": "https://github.com/pbakaus/impeccable",
+    "tag": "skill-v4.8.0",
+    "release": "4.8.0",
+    "commit": "414603bf14c7a344edb466bb1f85690c77ce8b7d",
+    "commitMessage": "Release 4.8.0 (#1192)",
+    "engineVersion": "0.1.18",
+    "license": "Apache-2.0",
+    "releaseAssets": [
+      { "name": "universal.zip", "bytes": 18116588 },
+      { "name": "universal.zip.sig.json", "bytes": 348 }
+    ]
+  },
+  "vendored": {
+    "snapshot": "vendor/impeccable-4.8.0",
+    "manifest": "vendor/impeccable-4.8.0/MANIFEST.sha256",
+    "sources": [
+      {
+        "upstreamPath": ".pi/skills/impeccable",
+        "vendoredPath": "vendor/impeccable-4.8.0/pi-dist",
+        "note": "Generated Pi distribution committed upstream: SKILL.md, reference/ playbooks, and supporting scripts (command-metadata.json, engine launcher, engine checksums, live browser helpers, font index, VERSION). Vendored byte-for-byte from the tagged commit's git tree."
+      },
+      {
+        "upstreamPath": "skill/agents",
+        "vendoredPath": "vendor/impeccable-4.8.0/source/agents",
+        "note": "Canonical agent-role instructions (impeccable-asset-producer, impeccable-documenter, impeccable-finish-reviewer, impeccable-manual-edit-applier). Upstream's Pi generator does not emit native Subagents definitions, so these are preserved verbatim and also exposed through the installed skill."
+      },
+      {
+        "upstreamPath": "skill/SKILL.src.md",
+        "vendoredPath": "vendor/impeccable-4.8.0/source/SKILL.src.md",
+        "note": "Upstream generator source template, kept for provenance of the generated SKILL.md."
+      },
+      {
+        "upstreamPath": "LICENSE",
+        "vendoredPath": "LICENSE",
+        "note": "Apache License 2.0, copied verbatim."
+      },
+      {
+        "upstreamPath": "NOTICE.md",
+        "vendoredPath": "NOTICE.md",
+        "note": "Upstream third-party notices (platform-design-skills attribution), copied verbatim."
+      }
+    ]
+  },
+  "excluded": {
+    "note": "These upstream trees are intentionally not imported. Everything else about the skill/role distribution is vendored in full.",
+    "paths": [
+      "website, documentation site, and browser extension trees (docs/, ui/, extension/, browser-bundle/)",
+      "Rust workspace and CLI (crates/, cli/, Cargo.toml, Cargo.lock, rust-toolchain.toml)",
+      "other-harness build trees and plugin trees (.agent/, .agents/, .claude/, .claude-plugin/, .codex/, .cursor/, .cursor-plugin/, .devin/, .dsh/, .gemini/, .grok/, .hermes/, .impeccable/, .kiro/, .omp/, .opencode/, .qoder/, .rovodev/, .trae/, .trae-cn/, .veto/, .vibe/, plugin/, vscode/)",
+      "skill/reference/ and skill/scripts/ (generator inputs/outputs; their generated equivalents are vendored as pi-dist/reference and pi-dist/scripts)",
+      "native engine binaries and test fixtures (downloaded at runtime by scripts/impeccable and verified against scripts/engine-checksums.txt)"
+    ]
+  }
+}

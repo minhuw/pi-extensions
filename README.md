@@ -9,6 +9,7 @@ A collection of extensions for [Pi](https://github.com/earendil-works/pi-coding-
 | [Commit](extensions/commit/README.md) | A lightweight native prompt for committing current changes as a self-contained patch series. |
 | [Quality](extensions/quality/README.md) | Native `/simplify`, `/review`, `/verify`, and `/deslop` prompts for cleanup, bug review, evidence-based verification, and AI-slop removal. |
 | [Writer](extensions/writer/README.md) | Eight native academic writing prompt templates for top-tier CS conference papers, ported from claude-writer. |
+| [Impeccable](extensions/impeccable/README.md) | Complete design skill, `/impeccable`, `/design` and 24 `/design-*` prompts for new visual systems, refinement and critique, with managed native engine, opt-in checks and session-owned live browser work. |
 | [Subagents](extensions/subagents/README.md) | Vendored autonomous subagents (`@tintinweb/pi-subagents` v0.22.0), with a local fleet and integrations; scripted workflows are disabled by default pending reliability fixes. |
 | [Herder](extensions/herder/README.md) | `/herder <goal>` runs coding work to delivery as a durable, verified run: an approved goal with checks, agent steps in disposable git worktrees, runtime verification, and delivery after your confirmation. `/herder-improve` and `/herder-simplify` audit the repository read-only and start a run for the findings you pick. |
 | [Orca Bridge](extensions/orca-bridge/README.md) | Orca pane activity, prompt-aware titles, background-work tracking, file/diff navigation, and `/orca-status` diagnostics. |
@@ -44,7 +45,9 @@ For a local checkout:
 pi install /absolute/path/to/pi-extensions
 ```
 
-Installing the collection loads all registered extensions, `/commit`, the Quality prompts (`/simplify`, `/review`, `/verify`, `/deslop`), the eight Writer prompts, Herder's `/herder` command and `herder` skill, its `/herder-improve` and `/herder-simplify` audits, and themes. Quality commands run independently: `/simplify` applies bounded cleanup, `/review` reports bugs without fixes, `/verify` executes checks without repairs, and `/deslop` removes AI code slop with evidence-gated fixes. Subagents exposes its `Agent` tools; scripted workflows (`SubagentWorkflow`) are disabled by default pending reliability fixes. An existing explicit `workflowsEnabled: true` setting still enables them; set it to `false` and reload to disable that opt-in. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
+Installing the collection loads all registered extensions, the Impeccable skill and its `/impeccable`, `/design` and 24 `/design-*` prompts, `/commit`, the Quality prompts (`/simplify`, `/review`, `/verify`, `/deslop`), the eight Writer prompts, Herder's `/herder` command and `herder` skill, its `/herder-improve` and `/herder-simplify` audits, and themes. Quality commands run independently: `/simplify` applies bounded cleanup, `/review` reports bugs without fixes, `/verify` executes checks without repairs, and `/deslop` removes AI code slop with evidence-gated fixes. Subagents exposes its `Agent` tools; scripted workflows (`SubagentWorkflow`) are disabled by default pending reliability fixes. An existing explicit `workflowsEnabled: true` setting still enables them; set it to `false` and reload to disable that opt-in. Subagents is a vendored pin of `@tintinweb/pi-subagents` — do not also install the npm package in the same Pi profile. See each extension's README for setup, activation conditions, and usage.
+
+Impeccable supports freeform design requests and named playbooks: try `/impeccable redesign this app with a replacement visual identity`, `/design-shape onboarding`, or `/design-critique src/settings.tsx`. Writer retains `/polish`; use `/design-polish` for UI work. Engine 0.1.18 is downloaded and verified lazily when needed; automatic detector hooks default off and live browser work needs a runnable app/browser. Activation and safe tests download no engine/browser. See the [install/use/configuration guide](extensions/impeccable/README.md) and [complete feature/prerequisite/evidence map](extensions/impeccable/FEATURES.md).
 
 The CLIProxyAPI provider and native-compaction extensions are no longer bundled. Remove any explicit references to their old paths from your Pi settings; this change does not remove saved credentials or legacy configuration files.
 
@@ -64,9 +67,11 @@ Development uses Node >=22.19.0 for supported Pi versions, built-in `node:sqlite
 
 ```bash
 npm ci
-npm test        # full suite; includes the full TypeScript check
-# or, for a quick standalone check: npm run typecheck
+npm test        # safe offline collection suite, including Impeccable
+npm run typecheck  # separate strict TypeScript check
 ```
+
+Impeccable's offline checks are `npm run test:impeccable:contracts`, `npm run test:impeccable` and `npm run test:impeccable:package`. Explicit network/native checks use `npm run test:impeccable:engine`; actual Chromium/detector/direction/live coverage uses `npm run test:impeccable:e2e` (or the narrower `npm run test:impeccable:visual-foundations`). These opt-in commands may download the pinned engine/browser and require host prerequisites; they do not make paid model/image calls. See [checks and evidence](extensions/impeccable/README.md#checks-and-evidence) for simulated catalog/model boundaries and tested scope.
 
 For editable provider development, install the local checkout as above and edit `extensions/magpie-provider/`, not `node_modules`. Pi loads the local TypeScript on extension load; current sessions are not automatically reloaded after edits. Run `npm run test:magpie-provider` for the offline provider and native-compaction checks.
 
@@ -74,4 +79,4 @@ The pika server and web UI have their own toolchains (stable Rust and the web pa
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) for this collection's original code. Vendored Impeccable skill/resources retain their [Apache-2.0 license](extensions/impeccable/LICENSE) and [notice](extensions/impeccable/NOTICE.md); see its [provenance and patch ledger](extensions/impeccable/LOCAL-PATCHES.md).
