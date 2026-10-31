@@ -265,9 +265,9 @@ fn session_list_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
     (format!("sessions?{}", params.join("&")), tags)
 }
 
-/// A random search and its subclasses: the kind of query with its sort, and its filters.
-fn search_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
-    let (q_text, kind) = match rng.below(4) {
+/// A random search term: common, rare, or mid words, alone, two together, or a quoted phrase; with its kind.
+fn search_terms(rng: &mut Rng, plan: &Plan) -> (String, &'static str) {
+    match rng.below(4) {
         0 => (rng.pick(&plan.common).clone(), "common"),
         1 => (rng.pick(&plan.rare).clone(), "rare"),
         2 => {
@@ -281,9 +281,26 @@ fn search_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
                 (format!("\"{} {}\"", rng.pick(&plan.common[..30]), rng.pick(&plan.common[..30])), "phrase")
             }
         }
+    }
+}
+
+/// A word being typed: the first three or more characters of a common, mid, or rare word, alone or after a whole
+/// word; with its kind.
+fn typed_terms(rng: &mut Rng, plan: &Plan) -> (String, &'static str) {
+    let (word, kind) = match rng.below(3) {
+        0 => (rng.pick(&plan.common), "common"),
+        1 => (rng.pick(&plan.mid), "mid"),
+        _ => (rng.pick(&plan.rare), "rare"),
     };
-    let mut params = vec![format!("q={}", q(&q_text))];
-    let filter = match rng.below(4) {
+    let chars: Vec<char> = word.chars().collect();
+    let cut = if chars.len() <= 3 { chars.len() } else { 3 + rng.below(chars.len() - 3) };
+    let typed: String = chars[..cut].iter().collect();
+    if rng.chance(0.3) { (format!("{} {typed}", rng.pick(&plan.mid)), kind) } else { (typed, kind) }
+}
+
+/// Adds random device and project filters to `params`; returns the filter subclass.
+fn search_filters(rng: &mut Rng, plan: &Plan, params: &mut Vec<String>) -> &'static str {
+    match rng.below(4) {
         0 => "all",
         1 => {
             params.push(format!("device={}", q(rng.pick(&plan.devices))));
@@ -298,13 +315,53 @@ fn search_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
             params.push(format!("project={}", q(rng.pick(&plan.projects))));
             "device+project"
         }
-    };
+    }
+}
+
+/// A random search and its subclasses: the kind of query with its sort, and its filters.
+fn search_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
+    let (q_text, kind) = search_terms(rng, plan);
+    let mut params = vec![format!("q={}", q(&q_text))];
+    let filter = search_filters(rng, plan, &mut params);
     let sort = if rng.chance(0.35) {
         params.push("sort=relevance".into());
         "relevance"
     } else {
         "newest"
     };
+    (format!("search?{}", params.join("&")), vec![format!("{kind} {sort}"), format!("filter {filter}")])
+}
+
+/// A random search for a word being typed, with `prefix=true`, and its subclasses.
+fn prefix_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
+    let (q_text, kind) = typed_terms(rng, plan);
+    let mut params = vec![format!("q={}", q(&q_text)), "prefix=true".into()];
+    let filter = search_filters(rng, plan, &mut params);
+    let sort = if rng.chance(0.35) {
+        params.push("sort=relevance".into());
+        "relevance"
+    } else {
+        "newest"
+    };
+    (format!("search?{}", params.join("&")), vec![format!("{kind} {sort}"), format!("filter {filter}")])
+}
+
+/// A random `group=session` search and its subclasses: whole terms, or as the web UI sends while typing, a word
+/// being typed with `prefix=true`.
+fn grouped_query(rng: &mut Rng, plan: &Plan) -> (String, Vec<String>) {
+    let ((q_text, kind), typed) = if rng.chance(0.25) { (typed_terms(rng, plan), true) } else { (search_terms(rng, plan), false) };
+    let mut params = vec![format!("q={}", q(&q_text)), "group=session".into()];
+    if typed {
+        params.push("prefix=true".into());
+    }
+    let filter = search_filters(rng, plan, &mut params);
+    let sort = if rng.chance(0.5) {
+        params.push("sort=relevance".into());
+        "relevance"
+    } else {
+        "newest"
+    };
+    let kind = if typed { format!("typed {kind}") } else { kind.to_owned() };
     (format!("search?{}", params.join("&")), vec![format!("{kind} {sort}"), format!("filter {filter}")])
 }
 
@@ -378,6 +435,8 @@ pub fn run(options: Options) -> Result<bool> {
     // The raw and gzipped size of the first large session's trace, and its record count.
     let mut trace_sizes = Value::Null;
     let mut search = Class::new("search", Some(300.0));
+    let mut prefix = Class::new("prefix search", Some(300.0));
+    let mut grouped = Class::new("grouped search", Some(300.0));
 
     // Session list, with a second page through the cursor after some first pages.
     for i in 0..if run_section("list") { WARMUP + samples } else { 0 } {
@@ -468,13 +527,30 @@ pub fn run(options: Options) -> Result<bool> {
         }
     }
 
+    for (class, query) in [(&mut prefix, prefix_query as fn(&mut Rng, &Plan) -> _), (&mut grouped, grouped_query)] {
+        for i in 0..if run_section("search") { WARMUP + samples } else { 0 } {
+            let (path, tags) = query(&mut rng, &plan);
+            let reply = client.get(&path)?;
+            if i >= WARMUP {
+                let broad = tags[0].starts_with("common") && tags[1] == "filter all";
+                class.samples.push((tags, reply.elapsed.as_secs_f64() * 1e3));
+                if items(&reply)? == 0 {
+                    class.empty += 1;
+                    if broad {
+                        failures.push(format!("{path} found nothing"));
+                    }
+                }
+            }
+        }
+    }
+
     stop.store(true, Ordering::Relaxed);
     if let Some(watcher) = watcher {
         let _ = watcher.join();
     }
 
     let classes =
-        [&list, &detail, &turns, &entries, &trace, &huge_detail, &huge_turns, &huge_entries, &huge_trace, &search];
+        [&list, &detail, &turns, &entries, &trace, &huge_detail, &huge_turns, &huge_entries, &huge_trace, &search, &prefix, &grouped];
     println!();
     println!("{:<28} {:>5} {:>9} {:>9} {:>9} {:>9}  result", "query class", "n", "p50 ms", "p95 ms", "max ms", "limit");
     let mut summaries = serde_json::Map::new();
@@ -497,12 +573,12 @@ pub fn run(options: Options) -> Result<bool> {
         summaries.insert(class.name.to_owned(), s);
     }
     println!();
-    println!("{:<34} {:>5} {:>9} {:>9} {:>9}", "subclass", "n", "p50 ms", "p95 ms", "max ms");
-    for class in [&list, &search] {
+    println!("{:<44} {:>5} {:>9} {:>9} {:>9}", "subclass", "n", "p50 ms", "p95 ms", "max ms");
+    for class in [&list, &search, &prefix, &grouped] {
         if let Some(sub) = summaries.get(class.name).and_then(|s| s["subclasses"].as_object()) {
             for (name, s) in sub {
                 println!(
-                    "{:<34} {:>5} {:>9.1} {:>9.1} {:>9.1}",
+                    "{:<44} {:>5} {:>9.1} {:>9.1} {:>9.1}",
                     format!("{}: {name}", class.name),
                     s["n"],
                     s["p50"].as_f64().unwrap_or(0.0),

@@ -2,8 +2,8 @@
 
 `bash services/pika/scripts/perf.sh` checks AC-7: with one year of data from five machines, the filtered session
 list answers in p95 < 100 ms, the first page of a 5,000-entry session in p95 < 200 ms per request, the session's
-trace in p95 < 200 ms, and search in p95 < 300 ms. It needs about 12 GiB of free disk in `$TMPDIR` and takes about 12 minutes on an Apple Silicon Mac,
-most of it loading.
+trace in p95 < 200 ms, and search, search for a word being typed, and search grouped by session each in p95 < 300 ms.
+It needs about 14 GiB of free disk in `$TMPDIR` and takes about 16 minutes on an Apple Silicon Mac, most of it loading.
 
 The script:
 
@@ -51,6 +51,8 @@ from a fixed seed. Times run from the first request byte to the last response by
 | session list | `sessions?limit=50`: no filter, root only, device, project, model, a date range, and combinations; some followed by their second page | < 100 ms |
 | 5,000-entry session | `sessions/:id`, `sessions/:id/turns`, `sessions/:id/entries?from=0&limit=200`, and `sessions/:id/trace` with `Accept-Encoding: gzip`, each a class | < 200 ms each |
 | search | common words, rare words, two words, and quoted phrases; with no filter, device, project, or both; newest first and by relevance | < 300 ms |
+| prefix search | `prefix=true` with the first 3 or more characters of a common, mid-frequency, or rare word, alone or after a whole word; the filters and sorts of search | < 300 ms |
+| grouped search | `group=session` with the terms of search, or for a quarter of them a word being typed with `prefix=true`; the filters of search; newest first and by relevance | < 300 ms |
 
 The same requests for the 20,000-entry sessions are reported for information. The report also gives the raw and
 gzipped size of one 5,000-entry session's trace, the load time and rate, the database and blob store sizes, and the
@@ -72,6 +74,26 @@ ranking in two passes, and SQLite drove the final join from the full-text index 
 - Relevance scores the newest 20,000 filtered matches in one pass and joins and snippets only the best `limit`,
   each looked up by rowid (`CROSS JOIN` keeps that order).
 - A filter that no session passes returns an empty page without searching.
+
+Search for a word being typed first ran without a prefix index. FTS5 answers a prefix by merging the matches of every
+term it starts before it returns any, and again for every evaluation of the query: `the*` took about 1.4 s, and the
+bench timed out after 60 s on a request that evaluated it for each hit it looked up. Now:
+
+- The index holds every 3-character prefix (`prefix = '3'`), so a 3-character prefix is one term. On a 10% sample of
+  the dataset, `the*` went from 85 ms to 0.1 ms and the index grew by 63% (a trigram index of the same text was 5.6
+  times its size, and finds no word of fewer than 3 characters, which most Chinese words are).
+- Longer prefixes still merge their terms, so a prefix query looks all its hits up in one statement over their rowid
+  range, which evaluates it once; other queries look each hit up by rowid.
+- Relevance selects the best ids from its window without joins, and only those are looked up. Grouped search reads
+  only ids (and bm25 scores) for its window, groups them by root session in Rust, and looks up at most 3 hits for each
+  session it returns.
+
+With the prefix index and the `pika_cjk` tokenizer, which splits text by script before the base tokenizer sees it, the
+database grew from 10.5 to 11.8 GB (12.6%) and loading took 17% longer (826 s against 705 s for the same dataset on
+the same machine and day). The dataset has no Chinese, Japanese, or Korean text, whose pairs of characters cost about
+as much as a trigram index of that text. Opening a version 6 database rebuilds the index in its migration: on the
+0.2-scale dataset (512,113 entries, a 2.1 GB database) that took 84 s, grew the database by 267 MiB, and the WAL
+peaked at 688 MiB.
 
 The trace reads every model call, tool call, and turn of the session by primary key, and the line of each assistant
 message, for its first text, thinking, and `durationMs`, with a typed parse that skips tool arguments without building
@@ -95,51 +117,80 @@ HTTP with gzip, on a 0.04-scale dataset whose large sessions are full size).
 
 ## Latest results
 
-On an Apple Silicon Mac mini (10 cores) on 2026-10-27, while another build ran on the machine, the whole script took
-14.5 minutes; loading was slower than in earlier runs (762 s against 492 s):
+On an Apple Silicon Mac mini (10 cores) on 2026-11-01, the whole script took 16 minutes:
 
 ```
 query class                      n    p50 ms    p95 ms    max ms     limit  result
-session list                 480       0.2       0.8       5.4     < 100  ok
-5k session: sessions/:id     400       0.2       0.3       1.7     < 200  ok
-5k session: turns            400       0.5       0.7       9.5     < 200  ok
-5k session: entries          400       1.3       1.8      64.3     < 200  ok
-5k session: trace            400      34.0      43.2     187.1     < 200  ok
-20k session: sessions/:id    100       0.4       0.5       1.8         -  info
-20k session: turns           100       0.6       0.9       5.7         -  info
-20k session: entries         100       1.4       2.1      10.7         -  info
-20k session: trace           100     143.1     171.3     238.6         -  info
-search                       400      14.2     131.7     427.7     < 300  ok
+session list                 480       0.2       0.7       2.2     < 100  ok
+5k session: sessions/:id     400       0.2       0.4       2.6     < 200  ok
+5k session: turns            400       0.4       1.1       5.6     < 200  ok
+5k session: entries          400       1.3       2.5       6.8     < 200  ok
+5k session: trace            400      33.4      51.2     178.0     < 200  ok
+20k session: sessions/:id    100       0.4       1.5      20.0         -  info
+20k session: turns           100       0.5       1.4      23.2         -  info
+20k session: entries         100       1.4       3.8       6.2         -  info
+20k session: trace           100     143.2     344.7     550.1         -  info
+search                       400      11.9     125.9     403.0     < 300  ok
+prefix search                400       9.5      95.4     257.5     < 300  ok
+grouped search               400      16.5     111.0     353.0     < 300  ok
 
-subclass                               n    p50 ms    p95 ms    max ms
-session list: combination          225       0.2       0.9       2.0
-session list: dates                134       0.3       1.1       1.3
-session list: device               152       0.2       0.9       2.0
-session list: model                112       0.3       1.2       2.0
-session list: no filter            41       0.2       0.3       0.4
-session list: project              137       0.2       0.5       0.8
-session list: root                 164       0.2       0.9       1.3
-session list: second page          80       0.2       0.8       5.4
-search: common newest              62       2.8      28.9      57.9
-search: common relevance           26      42.7     114.3     119.7
-search: filter all                 113      15.8     133.7     427.7
-search: filter device              93      14.9     136.1     306.6
-search: filter device+project      87       3.8     119.7     181.9
-search: filter project             107      19.1     138.2     302.5
-search: phrase newest              60      17.8      91.7     181.9
-search: phrase relevance           47     119.7     302.5     427.7
-search: rare newest                64       9.7      15.3      24.3
-search: rare relevance             37      13.4      25.2      28.3
-search: two-word newest            69      16.5      41.5     131.7
-search: two-word relevance         35      30.1      69.6     149.7
+subclass                                         n    p50 ms    p95 ms    max ms
+session list: combination                    225       0.2       0.9       2.0
+session list: dates                          134       0.2       0.9       1.6
+session list: device                         152       0.2       0.8       2.0
+session list: model                          112       0.3       1.2       2.0
+session list: no filter                      41       0.2       0.2       0.2
+session list: project                        137       0.2       0.5       0.7
+session list: root                           164       0.2       0.9       2.0
+session list: second page                    80       0.2       0.7       2.2
+search: common newest                        62       2.8      23.8     110.6
+search: common relevance                     26      37.9     121.3     124.8
+search: filter all                           113      11.9     127.3     403.0
+search: filter device                        93      12.9     143.5     283.0
+search: filter device+project                87       3.7     115.5     175.4
+search: filter project                       107      17.1     125.9     341.3
+search: phrase newest                        60      13.8      90.3     175.4
+search: phrase relevance                     47     111.4     283.0     403.0
+search: rare newest                          64       7.7      14.4      27.4
+search: rare relevance                       37      13.0      23.3      28.7
+search: two-word newest                      69      12.2      51.7     156.5
+search: two-word relevance                   35      27.3      67.0     143.5
+prefix search: common newest                 98       5.8      81.0     182.7
+prefix search: common relevance              54      61.5     225.4     257.5
+prefix search: filter all                    101      12.6      79.6     225.4
+prefix search: filter device                 108      10.1     133.7     257.5
+prefix search: filter device+project         104       4.2      80.4     182.7
+prefix search: filter project                87      10.2      86.8     238.9
+prefix search: mid newest                    88       6.6      25.6      53.0
+prefix search: mid relevance                 46      19.5      59.3     250.1
+prefix search: rare newest                   75       5.4      15.6      33.4
+prefix search: rare relevance                39      10.9      67.3     162.7
+grouped search: common newest                39      20.6      79.7      99.4
+grouped search: common relevance             48      40.4     107.2     121.2
+grouped search: filter all                   98      13.0     107.0     268.8
+grouped search: filter device                103      17.1     117.7     270.9
+grouped search: filter device+project        102       5.4      93.4     353.0
+grouped search: filter project               97      28.6     143.1     224.8
+grouped search: phrase newest                35      64.8     107.0     126.2
+grouped search: phrase relevance             41     100.7     268.7     353.0
+grouped search: rare newest                  34       5.7       9.0      10.2
+grouped search: rare relevance               40       8.7      12.5      16.9
+grouped search: two-word newest              28      10.7      33.5      38.0
+grouped search: two-word relevance           36      13.6      84.0      87.6
+grouped search: typed common newest          10      15.7      53.0      53.0
+grouped search: typed common relevance       18      42.3     268.8     268.8
+grouped search: typed mid newest             25      10.1      41.3     103.0
+grouped search: typed mid relevance          13      12.8      78.5      78.5
+grouped search: typed rare newest            15       5.7     110.4     110.4
+grouped search: typed rare relevance         18       8.6      94.2      94.2
 
-load: 762.4 s, 2560663 entries, 3359 entries/s, 3425 MiB of lines
+load: 826.2 s, 2560663 entries, 3099 entries/s, 3425 MiB of lines
 5k session trace: 4498 records, 1473 KiB raw, 371 KiB gzipped
-database: 10497 MiB, blob store: 12 MiB, server peak RSS: 344 MiB
+database: 11824 MiB, blob store: 12 MiB, server peak RSS: 254 MiB
 ```
 
 The generated text is random words with random call ids, so the trace compresses about 4x here; real sessions
-repeat more. The peak RSS rose from 50 MiB to 344 MiB with the 20,000-entry traces (about 6 MB of JSON each): macOS's
+repeat more. The peak RSS (254 MiB here, 344 MiB in an earlier run) comes from the 20,000-entry traces (about 6 MB of JSON each): macOS's
 allocator keeps the freed large buffers (`Malloc Large (empty)` in `vmmap`) and returns them later, and a run of other
 large responses brought the server back to about 65 MiB in a separate check. Traces of 5,000-entry sessions alone kept
 it near 60 MiB.
@@ -147,4 +198,5 @@ it near 60 MiB.
 Before the search changes, one filtered search of a common word took 38 s, and the first full run had not finished
 its searches after 10 minutes; the other classes were already well within their limits. The slowest searches are
 relevance-sorted quoted phrases of common words: the window's 20,000 newest matches need position checks over many
-candidate documents and a bm25 score each, so that subclass alone sits near the class limit.
+candidate documents and a bm25 score each, so that subclass alone sits near the class limit, in plain and grouped
+search alike.

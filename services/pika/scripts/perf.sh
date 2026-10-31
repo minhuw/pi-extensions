@@ -40,11 +40,11 @@ step() {
   step_pid=""
 }
 
-# The full dataset takes about 10 GiB on disk.
+# The full dataset takes about 12 GiB on disk, with its WAL.
 if [[ -z "${PIKA_PERF_SCALE:-}" ]]; then
   free_kib="$(df -Pk "$work" | awk 'NR == 2 { print $4 }')"
-  if (( free_kib < 12 * 1024 * 1024 )); then
-    echo "perf: $work has $((free_kib / 1024 / 1024)) GiB free; the dataset needs about 12 GiB" >&2
+  if (( free_kib < 14 * 1024 * 1024 )); then
+    echo "perf: $work has $((free_kib / 1024 / 1024)) GiB free; the dataset needs about 14 GiB" >&2
     exit 1
   fi
 fi
