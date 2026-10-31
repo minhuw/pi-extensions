@@ -197,6 +197,16 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		return undefined;
 	});
 
+	// Older Pi versions without these events keep the handlers and never call them.
+	pi.on("after_provider_response", (_event, ctx) => {
+		guard(() => owned(ctx)?.onResponse());
+	});
+
+	// Runs for every streamed token, so it skips `guard`'s closure.
+	pi.on("message_update", (event, ctx) => {
+		try { owned(ctx)?.onUpdate(event.message, event.assistantMessageEvent.type); } catch (error) { currentUploader()?.noteError(`capture: ${errorText(error)}`); }
+	});
+
 	pi.on("message_start", (event, ctx) => {
 		guard(() => { if (isAssistant(event.message)) owned(ctx)?.onAssistantStart(event.message); });
 	});

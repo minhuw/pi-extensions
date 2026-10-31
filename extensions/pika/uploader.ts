@@ -83,7 +83,7 @@ export interface StreamDescriptor {
 
 export type RequestInput = Omit<RequestRecord, "skeleton" | "blocks">;
 /** What the assistant message adds to a spooled request. */
-export type RequestCompletion = Pick<RequestRecord, "assistant" | "provider" | "api" | "model">;
+export type RequestCompletion = Pick<RequestRecord, "assistant" | "timing" | "provider" | "api" | "model">;
 /** The payload as JSON text taken in the handler, or a value serialized later on the spool queue. */
 export type PayloadSource = { json: string } | { value: unknown };
 

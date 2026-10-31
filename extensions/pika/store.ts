@@ -20,6 +20,14 @@ export interface StreamState {
 	updatedAt: string;
 }
 
+/** When a model call reached each stage, in Unix epoch ms on the capturing machine; each key only when known. */
+export interface RequestTiming {
+	sentAt?: number;
+	responseAt?: number;
+	firstTokenAt?: number;
+	firstToken?: "text" | "thinking" | "toolCall";
+}
+
 export interface RequestRecord {
 	id: string;
 	sessionId: string;
@@ -30,6 +38,7 @@ export interface RequestRecord {
 	api?: string;
 	model?: string;
 	assistant?: { timestamp: number; responseId?: string };
+	timing?: RequestTiming;
 	skeleton: unknown;
 	blocks: string[];
 }

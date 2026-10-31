@@ -2,7 +2,7 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitPayload } from "../blocks.ts";
 import { SessionCapture } from "../capture.ts";
@@ -126,7 +126,7 @@ it("never blocks a turn when the server accepts connections but never answers", 
 
 it("does not fail a turn when pika's internals throw", async () => {
 	await workspace.enable(ingest.url);
-	for (const method of ["onContext", "onPayload", "onAssistantStart", "onAssistant", "settle"] as const) {
+	for (const method of ["onContext", "onPayload", "onResponse", "onUpdate", "onAssistantStart", "onAssistant", "settle"] as const) {
 		vi.spyOn(SessionCapture.prototype, method).mockImplementation(() => { throw new Error(`simulated ${method} failure`); });
 	}
 	vi.spyOn(Uploader.prototype, "poke").mockImplementation(() => { throw new Error("simulated poke failure"); });
@@ -140,6 +140,98 @@ it("does not fail a turn when pika's internals throw", async () => {
 	} finally { await h.shutdown(); }
 	// Shutdown still releases everything.
 	expect(currentUploader()).toBeUndefined();
+}, 20_000);
+
+it("records when the payload was sent, the response came back, and the first token arrived", async () => {
+	const provider = await new MockProvider().start();
+	await workspace.enable(ingest.url);
+	const h = await startSession({ workspace, extensions: [pikaExtension], openAiBaseUrl: provider.baseUrl });
+	try {
+		const before = Date.now();
+		await h.session.prompt("question");
+		const after = Date.now();
+		await waitFor(() => ingest.sessionRequests(h.session.sessionId).length === 1, 5_000, "the request");
+		const [request] = ingest.sessionRequests(h.session.sessionId);
+		const timing = request!.timing as { sentAt: number; responseAt: number; firstTokenAt: number; firstToken: string };
+		expect(timing).toEqual({ sentAt: expect.any(Number), responseAt: expect.any(Number), firstTokenAt: expect.any(Number), firstToken: "text" });
+		for (const value of [timing.sentAt, timing.responseAt, timing.firstTokenAt]) {
+			expect(Number.isInteger(value)).toBe(true);
+			expect(value).toBeGreaterThanOrEqual(before);
+			expect(value).toBeLessThanOrEqual(after);
+		}
+		expect(timing.sentAt).toBeLessThanOrEqual(timing.responseAt);
+		expect(timing.responseAt).toBeLessThanOrEqual(timing.firstTokenAt);
+		expect(h.errors).toEqual([]);
+	} finally { await h.shutdown(); await provider.stop(); }
+}, 20_000);
+
+it("names the first token's kind, and leaves out the send time of a call without a payload", async () => {
+	await workspace.enable(ingest.url);
+	const h = await startSession({ workspace, extensions: [noop, pikaExtension], tools: ["noop"] });
+	try {
+		h.faux.setResponses([
+			fauxAssistantMessage([fauxThinking("let me think"), fauxToolCall("noop", {})]),
+			fauxAssistantMessage([fauxToolCall("noop", {})]),
+			fauxAssistantMessage([fauxText("the answer"), fauxThinking("afterthought")]),
+		]);
+		await h.session.prompt("think, then call a tool");
+		await waitFor(() => ingest.sessionRequests(h.session.sessionId).length === 3, 5_000, "three requests");
+		const requests = ingest.sessionRequests(h.session.sessionId);
+		expect(requests.map((request) => (request.timing as { firstToken?: string }).firstToken)).toEqual(["thinking", "toolCall", "text"]);
+		for (const request of requests) {
+			// The faux transport exposes no payload but does report its response.
+			expect(request.fidelity).toBe("context");
+			expect(Object.keys(request.timing as object).sort()).toEqual(["firstToken", "firstTokenAt", "responseAt"]);
+			const timing = request.timing as { responseAt: number; firstTokenAt: number };
+			expect(timing.responseAt).toBeLessThanOrEqual(timing.firstTokenAt);
+		}
+		expect(h.errors).toEqual([]);
+	} finally { await h.shutdown(); }
+}, 20_000);
+
+it("keeps only the first token and the first response, and adds no timing when no time is known", async () => {
+	await workspace.enable(ingest.url);
+	const uploader = new Uploader({ url: ingest.url, token: TOKEN, dir: workspace.pikaDir });
+	const now = vi.spyOn(Date, "now");
+	try {
+		const session = new SessionCapture("s1", "session:s1", () => uploader, {});
+		const assistant = { role: "assistant" as const, timestamp: 1 };
+		// No hook between the context and the assistant message.
+		session.onContext([{ role: "user", content: "first" }], { provider: "p", model: "m" });
+		session.onAssistant(assistant);
+
+		// Spooled with its context only at `message_end`, so the timing travels with the enqueue.
+		session.onContext([{ role: "user", content: "second" }], { provider: "p", model: "m" });
+		now.mockReturnValue(100);
+		session.onResponse();
+		now.mockReturnValue(150);
+		session.onResponse();
+		session.onUpdate(assistant, "start");
+		session.onUpdate(assistant, "text_start");
+		session.onUpdate({ role: "user", timestamp: 1 }, "text_delta");
+		now.mockReturnValue(200);
+		session.onUpdate(assistant, "thinking_delta");
+		now.mockReturnValue(300);
+		session.onUpdate(assistant, "text_delta");
+		session.onUpdate(assistant, "toolcall_delta");
+		session.onAssistant({ ...assistant, timestamp: 2 });
+
+		// A payload's send time, completed through the spooled record.
+		session.onContext([{ role: "user", content: "third" }], { provider: "p", model: "m" });
+		now.mockReturnValue(400);
+		session.onPayload({ model: "m", messages: [] }, { provider: "p", model: "m" });
+		session.onAssistant({ ...assistant, timestamp: 3 });
+		now.mockRestore();
+
+		await waitFor(() => ingest.sessionRequests("s1").length === 3, 5_000, "three requests");
+		const [first, second, third] = ingest.sessionRequests("s1");
+		expect(first).toMatchObject({ assistant: { timestamp: 1 } });
+		expect("timing" in first!).toBe(false);
+		expect(second).toMatchObject({ fidelity: "context", assistant: { timestamp: 2 } });
+		expect(second!.timing).toEqual({ responseAt: 100, firstTokenAt: 200, firstToken: "thinking" });
+		expect(third).toMatchObject({ fidelity: "payload", assistant: { timestamp: 3 } });
+		expect(third!.timing).toEqual({ sentAt: 400 });
+	} finally { now.mockRestore(); await uploader.stop(); }
 }, 20_000);
 
 it("splits payloads by the spec's block rules", () => {

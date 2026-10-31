@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { RequestTiming } from "./store.ts";
 import type { RequestCompletion, RequestInput, Uploader } from "./uploader.ts";
 
 interface ModelInfo { provider?: string; api?: string; model?: string }
 
-/** One model call: the context pi built for it and, once spooled, its request id and what was spooled. */
+/** One model call: the context pi built for it, once spooled its request id and what was spooled, and the times known so far. */
 interface Call {
 	at: string;
 	model: ModelInfo;
@@ -11,6 +12,17 @@ interface Call {
 	requestId?: string;
 	seq?: number;
 	spooled?: "payload" | "context";
+	timing?: RequestTiming;
+}
+
+/** The kind of first token an assistant stream event carries, if it carries one. */
+function tokenKind(type: string): RequestTiming["firstToken"] {
+	switch (type) {
+		case "text_delta": return "text";
+		case "thinking_delta": return "thinking";
+		case "toolcall_delta": return "toolCall";
+		default: return undefined;
+	}
 }
 
 interface AssistantLike {
@@ -40,6 +52,9 @@ const modelFields = (model: ModelInfo): ModelInfo => ({
  * gets one (a compaction or other side request) is released without it. A call without a
  * payload is spooled with its context, held the same way, when its response starts; a payload
  * that still arrives for it replaces that record. A call that ends before either is dropped.
+ * The call also notes when its payload was sent (`before_provider_request`), when the provider
+ * answered (`after_provider_response`), and when its first text, thinking, or tool-call token
+ * arrived (`message_update`); `message_end` adds them as `timing`.
  */
 export class SessionCapture {
 	owner: object;
@@ -63,6 +78,7 @@ export class SessionCapture {
 			this.call = { at: new Date().toISOString(), model };
 		}
 		const call = this.call;
+		(call.timing ??= {}).sentAt = Date.now();
 		call.requestId ??= randomUUID();
 		call.spooled = "payload";
 		void this.uploader()?.enqueueRequest(this.input(call, "payload", model), { json }, { awaiting: true });
@@ -78,17 +94,35 @@ export class SessionCapture {
 		void this.uploader()?.enqueueRequest(this.input(call, "context", model), { value: { messages: call.messages } }, { awaiting: true });
 	}
 
+	/** The provider answered the call's request; a transport that retries keeps the first answer. */
+	onResponse(): void {
+		const call = this.call;
+		if (call && call.timing?.responseAt === undefined) (call.timing ??= {}).responseAt = Date.now();
+	}
+
+	/** Records the call's first token. It runs for every streamed token, so it allocates nothing once that is known. */
+	onUpdate(message: unknown, type: string): void {
+		const call = this.call;
+		if (!call || call.timing?.firstToken !== undefined) return;
+		const kind = tokenKind(type);
+		if (!kind || !isAssistant(message)) return;
+		const timing = call.timing ??= {};
+		timing.firstTokenAt = Date.now();
+		timing.firstToken = kind;
+	}
+
 	onAssistant(message: AssistantLike): void {
 		const call = this.call;
 		if (!call) return;
 		this.call = undefined;
 		const model = { provider: message.provider ?? call.model.provider, api: message.api ?? call.model.api, model: message.model ?? call.model.model };
 		const assistant = { timestamp: message.timestamp, ...(message.responseId ? { responseId: message.responseId } : {}) };
+		const timing = call.timing ? { timing: call.timing } : {};
 		if (call.requestId !== undefined) {
-			const completion: RequestCompletion = { ...modelFields(model), assistant };
+			const completion: RequestCompletion = { ...modelFields(model), assistant, ...timing };
 			void this.uploader()?.completeRequest(call.requestId, completion);
 		} else if (call.messages) {
-			void this.uploader()?.enqueueRequest({ ...this.input(call, "context", model), assistant }, { value: { messages: call.messages } });
+			void this.uploader()?.enqueueRequest({ ...this.input(call, "context", model), assistant, ...timing }, { value: { messages: call.messages } });
 		}
 	}
 
