@@ -42,12 +42,14 @@ describe("login", () => {
 		expect(await screen.findByRole("button", { name: "Sign out" })).toBeTruthy();
 	});
 
-	it("queries nothing of the read API but `me` before a signed-out browser reaches the login page", async () => {
+	it("queries nothing of the owner's read API but `me` before a signed-out browser reaches the login page", async () => {
 		const server = createFakeServer({ sessions: [session()], password: "hunter2" });
 		renderApp("/", server.fetch);
 		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
-		// The login page asks the always-open health for the server's version.
-		expect(server.calls.filter((call) => call !== "/api/health")).toEqual(["/api/v1/me"]);
+		// The always-open health gives the server's version, and the public API says whether there is a gallery to offer.
+		expect(server.calls).toContain("/api/public/v1/sessions?limit=1");
+		expect(server.calls.filter((call) => call.startsWith("/api/v1/"))).toEqual(["/api/v1/me"]);
+		expect(screen.queryByRole("link", { name: "Browse public trajectories" })).toBeNull();
 	});
 
 	it("signs in on a card with the logo and the server's version", async () => {

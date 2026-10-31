@@ -21,6 +21,17 @@ function publicServer() {
 	return { fetch: fetchImpl, calls };
 }
 
+/** A password-protected server whose public API serves `published` sessions, as a signed-out visitor sees it. */
+function guestServer(published = [session()]) {
+	const owner = createFakeServer({ sessions: [session()], password: "hunter2" });
+	const gallery = createFakeServer({ sessions: published });
+	const fetchImpl: typeof fetch = async (input, init) => {
+		const url = String(input);
+		return url.startsWith("/api/public/v1/") ? gallery.fetch(url.replace("/api/public/v1/", "/api/v1/"), init) : owner.fetch(input, init);
+	};
+	return { fetch: fetchImpl, owner };
+}
+
 let restore: () => void;
 beforeEach(() => { restore = mockLayout({ viewport: 20_000, rowHeight: 80 }); });
 afterEach(() => restore());
@@ -111,5 +122,56 @@ describe("project publishing", () => {
 		expect(calls[0]?.init?.credentials).toBe("omit");
 		expect(calls[0]?.init?.cache).toBe("no-store");
 		expect(api.rawEntryUrl("a/b", 2)).toBe("/pika/api/public/v1/sessions/a%2Fb/entries/2/raw");
+	});
+});
+
+describe("signed-out visitors", () => {
+	it("open the gallery at home when a project is published", async () => {
+		renderApp("/?project=pika", guestServer().fetch);
+		expect(await screen.findByRole("heading", { name: "Published trajectories" })).toBeTruthy();
+		expect(await screen.findByRole("link", { name: /Fix the flaky test/ })).toBeTruthy();
+		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
+		expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login?next=%2F%3Fproject%3Dpika");
+	});
+
+	it("open a published session's link publicly, and signing in returns to the owner's page", async () => {
+		const server = guestServer();
+		renderApp("/s/t1", server.fetch);
+		expect(await screen.findByRole("heading", { name: "Fix the flaky test" })).toBeTruthy();
+		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
+		const signIn = screen.getByRole("link", { name: "Sign in" });
+		expect(signIn.getAttribute("href")).toBe("/login?next=%2Fs%2Ft1");
+		fireEvent.click(signIn);
+		fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "hunter2" } });
+		fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+		expect(await screen.findByRole("navigation", { name: "Main" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Fix the flaky test" })).toBeTruthy();
+		expect(server.owner.state.authenticated).toBe(true);
+	});
+
+	it("are asked for the password at a private session's link, with the gallery offered", async () => {
+		renderApp("/s/private", guestServer().fetch);
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect((await screen.findByRole("link", { name: "Browse public trajectories" })).getAttribute("href")).toBe("/public");
+	});
+
+	it("are asked for the password at home when nothing is published", async () => {
+		const server = guestServer([]);
+		renderApp("/", server.fetch);
+		expect(await screen.findByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
+		expect(screen.queryByRole("link", { name: "Browse public trajectories" })).toBeNull();
+	});
+
+	it("go straight on from a sign-in link when the browser is already signed in", async () => {
+		const server = createFakeServer({ sessions: [session()], password: "hunter2", authenticated: true });
+		const first = renderApp("/login?next=%2Fs%2Ft1", server.fetch);
+		expect(await screen.findByRole("navigation", { name: "Main" })).toBeTruthy();
+		expect(screen.queryByLabelText("Password")).toBeNull();
+		first.unmount();
+
+		// Without a destination, the login page stays.
+		renderApp("/login", server.fetch);
+		await waitFor(() => expect(server.calls).toContain("/api/v1/me"));
+		expect(screen.getByRole("heading", { name: "Sign in to pika" })).toBeTruthy();
 	});
 });

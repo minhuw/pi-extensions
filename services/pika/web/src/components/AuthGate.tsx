@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
-import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
+import { useEffect, useMemo, useRef } from "react";
+import { matchPath, Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
 import type { Me } from "../lib/types";
 
@@ -23,6 +23,51 @@ function loginPath(location: { pathname: string; search: string }): string {
 	return `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
 }
 
+/** The anonymous client, for asking what a signed-out visitor may see; it learns nothing the public API doesn't serve. */
+function usePublicApi() {
+	const api = useApi();
+	return useMemo(() => api.forPublic(), [api]);
+}
+
+/** Whether any project is published, so the public gallery has something to show. */
+export function useGalleryOpen(enabled = true) {
+	const publicApi = usePublicApi();
+	return useQuery({
+		queryKey: ["guest", "gallery"],
+		queryFn: () => publicApi.sessions({}, undefined, 1).then((page) => page.items.length > 0, () => false),
+		enabled,
+	});
+}
+
+/** Whether a session is published; the public API answers 404 alike for private and missing sessions. */
+function usePublishedSession(id: string | undefined) {
+	const publicApi = usePublicApi();
+	return useQuery({
+		queryKey: ["guest", "session", id],
+		queryFn: () => publicApi.session(id!).then(() => true, () => false),
+		enabled: id !== undefined,
+	});
+}
+
+/**
+ * Sends a signed-out visitor on: the home page opens the public gallery when a project is published, and a link to a
+ * published session opens its public page. Everything else asks for the password.
+ */
+function GuestRedirect() {
+	const location = useLocation();
+	const home = location.pathname === "/";
+	const sessionId = matchPath("/s/:id", location.pathname)?.params.id;
+	const gallery = useGalleryOpen(home);
+	const published = usePublishedSession(sessionId);
+	const probe = home ? gallery : sessionId !== undefined ? published : undefined;
+	if (probe?.isPending) return null;
+	if (probe?.data) {
+		const pathname = home ? "/public" : `/public/s/${encodeURIComponent(sessionId!)}`;
+		return <Navigate to={{ pathname, search: location.search }} replace />;
+	}
+	return <Navigate to={loginPath(location)} replace />;
+}
+
 const RELOAD_KEY = "pika-auth-reload";
 /** At most one reload this often, so a proxy that keeps answering 401 can't put the page in a reload loop. */
 const RELOAD_INTERVAL_MS = 10_000;
@@ -43,7 +88,8 @@ function reloadForProxy(): void {
 }
 
 /**
- * Sends the user to the login page when the server needs a password, or when any request gets a 401 in password mode.
+ * Sends a signed-out browser to the public pages it may see or to the login page when the server needs a password, and
+ * to the login page when any request gets a 401 in password mode.
  * Behind an authenticating proxy (or with no authentication) the 401 comes from the proxy, so the page reloads instead.
  */
 export function AuthGate() {
@@ -69,6 +115,6 @@ export function AuthGate() {
 
 	// Pages query the read API as they mount; before `me` first answers, a signed-out browser would get 401s.
 	if (!me.isFetched) return null;
-	if (needsLogin(me.data)) return <Navigate to={loginPath(location)} replace />;
+	if (needsLogin(me.data)) return <GuestRedirect />;
 	return <Outlet />;
 }

@@ -28,7 +28,7 @@ export function useSigningOut(): SigningOut {
 	return useContext(SigningOutContext);
 }
 
-const BAND_CONTROL = "flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-2 text-[13px] font-medium text-band-muted hover:bg-band-hover hover:text-band-ink";
+export const BAND_CONTROL = "flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-2 text-[13px] font-medium text-band-muted hover:bg-band-hover hover:text-band-ink";
 
 /**
  * The sign band: the app's frame, black with the thin white stripe of the transit manual's signs. It carries the

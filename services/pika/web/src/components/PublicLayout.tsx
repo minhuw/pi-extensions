@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
-import { Outlet } from "react-router";
+import { Link, Outlet, useLocation } from "react-router";
 import { ApiContext, ApiError, useApi } from "../lib/api";
 import { useTheme } from "../lib/theme";
-import { ScrollRootContext, SignBand, ThemeToggle } from "./Layout";
+import { BAND_CONTROL, ScrollRootContext, SignBand, ThemeToggle } from "./Layout";
 
 /** Anonymous pages have their own client and cache, even when the browser is also signed in. */
 export function PublicLayout() {
@@ -19,11 +19,24 @@ export function PublicLayout() {
 	}));
 	const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
 	const { theme, toggle } = useTheme();
+	// Signing in opens the owner's view of this page; a browser that is already signed in goes straight there.
+	const location = useLocation();
+	const ownerPage = (location.pathname.replace(/^\/public(?=\/|$)/, "") || "/") + location.search;
 	return (
 		<ApiContext.Provider value={api}>
 			<QueryClientProvider client={queryClient}>
 				<div className="flex h-full flex-col bg-page text-ink">
-					<SignBand home="/public" controls={<ThemeToggle theme={theme} onToggle={toggle} />}>
+					<SignBand
+						home="/public"
+						controls={
+							<>
+								<ThemeToggle theme={theme} onToggle={toggle} />
+								<Link to={`/login?next=${encodeURIComponent(ownerPage)}`} className={BAND_CONTROL}>
+									Sign in
+								</Link>
+							</>
+						}
+					>
 						<span className="text-[13.5px] font-medium whitespace-nowrap text-band-muted">Public trajectories</span>
 					</SignBand>
 					<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">

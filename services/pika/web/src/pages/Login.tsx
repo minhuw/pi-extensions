@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { Navigate, useNavigate, useSearchParams } from "react-router";
-import { useMe } from "../components/AuthGate";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
+import { useGalleryOpen, useMe } from "../components/AuthGate";
 import { PikaLogo } from "../components/icons";
 import { ServerVersion } from "../components/Layout";
 import { BUTTON, cx } from "../components/ui";
@@ -33,6 +33,9 @@ export function LoginPage() {
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const me = useMe();
+	const mode = authModeOf(me.data);
+	const next = params.get("next");
+	const gallery = useGalleryOpen(mode === "password" && me.data?.authenticated === false);
 
 	const submit = async (event: FormEvent) => {
 		event.preventDefault();
@@ -41,16 +44,16 @@ export function LoginPage() {
 		try {
 			await api.login(password);
 			queryClient.removeQueries();
-			navigate(safeNext(params.get("next")), { replace: true });
+			navigate(safeNext(next), { replace: true });
 		} catch (cause) {
 			setError(loginErrorMessage(cause));
 			setBusy(false);
 		}
 	};
 
-	// A reverse proxy or no authentication has nothing to sign in to.
-	const mode = authModeOf(me.data);
-	if (mode === "proxy" || mode === "none") return <Navigate to={safeNext(params.get("next"))} replace />;
+	// A reverse proxy or no authentication has nothing to sign in to. A browser that is already signed in and has
+	// somewhere to go, as when the owner follows the public pages' Sign in link, goes straight on.
+	if (mode === "proxy" || mode === "none" || (next !== null && me.data?.authenticated)) return <Navigate to={safeNext(next)} replace />;
 
 	return (
 		<main className="flex min-h-full flex-col items-center justify-center bg-page px-6 py-12 text-ink">
@@ -87,6 +90,11 @@ export function LoginPage() {
 					</button>
 				</div>
 			</form>
+			{gallery.data && (
+				<Link to="/public" className="mt-4 rounded-sm px-1 text-[13.5px] font-medium text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink">
+					Browse public trajectories
+				</Link>
+			)}
 			<ServerVersion className="mt-3 text-center text-muted" />
 		</main>
 	);
