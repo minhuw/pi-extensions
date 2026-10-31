@@ -105,6 +105,28 @@ function browserUi(browser: Browser, page: Page, options: { url: string; artifac
 	});
 
 	const visible = (selector: string, timeout = 15_000) => page.waitForSelector(selector, { visible: true, timeout });
+	/**
+	 * Waits, for at most two seconds, until the element lies whole inside its scrolled pane, stays put, and is what a
+	 * click on its centre would hit. Puppeteer aims where the element is when it starts, which misses once a neighbour
+	 * above finishes growing (as code does when its highlighting arrives), and at the part inside the window even where
+	 * the pane clips it and the footer covers it. After the two seconds the click goes ahead as Puppeteer aims it.
+	 */
+	const settle = async (selector: string) => {
+		const until = Date.now() + 2_000;
+		while (Date.now() < until) {
+			const ready = await page.$eval(selector, (node) => new Promise<boolean>((resolve) => {
+				node.scrollIntoView({ block: "nearest", inline: "nearest" });
+				const box = () => JSON.stringify(node.getBoundingClientRect());
+				const before = box();
+				setTimeout(() => {
+					const rect = node.getBoundingClientRect();
+					const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+					resolve(box() === before && hit !== null && node.contains(hit));
+				}, 80);
+			})).catch(() => false);
+			if (ready) return;
+		}
+	};
 	const ui: Ui = {
 		browser, page, theme: "light", shots: [],
 		async shot(name) {
@@ -125,6 +147,7 @@ function browserUi(browser: Browser, page: Page, options: { url: string; artifac
 			const deadline = Date.now() + 5_000;
 			for (;;) {
 				await visible(selector);
+				await settle(selector);
 				try {
 					await page.click(selector);
 					return;
@@ -178,7 +201,7 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	await visible(`[data-session-row="${t.mainId}"]`);
 	log("browser: signed in");
 
-	// The sign band names the server's version and the commit it was built from, as health does.
+	// The footer names the server's version and the commit it was built from, as health does.
 	const health = await page.evaluate(async () => {
 		const base = document.querySelector('meta[name="pika-base"]')?.getAttribute("content") ?? "/";
 		return (await fetch(`${base.replace(/\/?$/, "/")}api/health`)).json() as Promise<{ version: string; revision?: string }>;
@@ -186,8 +209,8 @@ export async function checkViewer(ui: Ui, t: BrowserTargets): Promise<void> {
 	const built = process.env.PIKA_REVISION?.slice(0, 7);
 	if (built) checkEqual(health.revision, built, "the commit health names");
 	const versionLine = await textOf("[data-server-version]");
-	checkEqual(versionLine, `pika ${health.version}${health.revision ? ` (${health.revision})` : ""}`, "the sign band's version line");
-	log(`browser: the sign band shows "${versionLine}"`);
+	checkEqual(versionLine, `pika ${health.version}${health.revision ? ` (${health.revision})` : ""}`, "the footer's version line");
+	log(`browser: the footer shows "${versionLine}"`);
 
 	// 2. The session list shows the root sessions; the device filter narrows it to the desktop's large session.
 	const listed = async () => page.$$eval("[data-session-row]", (nodes) => nodes.map((node) => node.getAttribute("data-session-row")));

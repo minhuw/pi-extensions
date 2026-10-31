@@ -3,23 +3,23 @@ import { describe, expect, it } from "vitest";
 import { renderApp } from "./support/render";
 import { createFakeServer } from "./support/server";
 
-/** The sign band's version line, once the health answer is in. */
+/** The footer's version line, once the health answer is in. */
 async function versionLine(): Promise<HTMLElement> {
-	const band = await screen.findByRole("banner");
-	await waitFor(() => expect(band.querySelector("[data-server-version]")).not.toBeNull());
-	return band.querySelector<HTMLElement>("[data-server-version]")!;
+	const footer = await screen.findByRole("contentinfo");
+	await waitFor(() => expect(footer.querySelector("[data-server-version]")).not.toBeNull());
+	return footer.querySelector<HTMLElement>("[data-server-version]")!;
 }
 
 describe("server version", () => {
-	it("shows the server's version and the commit it was built from at the right of the band", async () => {
+	it("shows the server's version and the commit it was built from in the footer, not the band", async () => {
 		renderApp("/", createFakeServer({ revision: "56b7f44" }).fetch);
 		const line = await versionLine();
 		expect(line.textContent).toBe("pika 0.3.0 (56b7f44)");
 		expect(line.title).toBe("pika 0.3.0, built from commit 56b7f44");
-		// It sits left of the band's buttons, in the group pushed to the band's right end, so it never moves them.
-		const controls = line.parentElement!;
-		expect(controls).toBe(controls.parentElement!.lastElementChild);
-		expect(line.compareDocumentPosition(within(controls).getByRole("button", { name: /theme/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		// The footer follows the page, at the bottom of the window.
+		const footer = screen.getByRole("contentinfo");
+		expect(footer.previousElementSibling?.tagName).toBe("MAIN");
+		expect(screen.getByRole("banner").querySelector("[data-server-version]")).toBeNull();
 	});
 
 	it("shows only the version when the server's build recorded no commit", async () => {
@@ -34,6 +34,6 @@ describe("server version", () => {
 		const band = await screen.findByRole("banner");
 		await within(band).findByRole("link", { name: "Sessions" });
 		await waitFor(() => expect(server.calls.filter((call) => call.endsWith("/api/health")).length).toBeGreaterThan(0));
-		expect(band.querySelector("[data-server-version]")).toBeNull();
+		expect(document.querySelector("[data-server-version]")).toBeNull();
 	});
 });

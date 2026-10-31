@@ -244,7 +244,7 @@ Instead of `password set`, mount the password as a file, such as a Docker or Com
 
 To upgrade, `docker pull` the tag and recreate the container with the same volume; the server migrates the database when it opens it. Coming from 0.1, read [Upgrading from 0.1](#upgrading-from-01) first.
 
-The right end of the UI's top band shows the version and commit the server runs, such as `pika 0.3.0 (a1b2c3d)`; `docker exec pika pika --version` and `curl …/api/health` say the same. `edge` keeps the version of the last release, so compare the commit with the latest one on `master` to tell whether it is up to date.
+The bottom right corner of the UI shows the version and commit the server runs, such as `pika 0.3.0 (a1b2c3d)`; `docker exec pika pika --version` and `curl …/api/health` say the same. `edge` keeps the version of the last release, so compare the commit with the latest one on `master` to tell whether it is up to date.
 
 ### Building it yourself
 

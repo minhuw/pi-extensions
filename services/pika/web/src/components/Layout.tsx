@@ -178,7 +178,6 @@ export function Layout({ children }: { children?: ReactNode }) {
 					home="/"
 					controls={
 						<>
-							<ServerVersion className="mr-2 text-band-muted max-xl:hidden" />
 							<ThemeToggle theme={theme} onToggle={toggle} />
 							<SignOutButton />
 						</>
@@ -206,6 +205,10 @@ export function Layout({ children }: { children?: ReactNode }) {
 				<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
 					<ScrollRootContext.Provider value={scrollRoot}>{children ?? <Outlet />}</ScrollRootContext.Provider>
 				</main>
+				{/* The colophon: a thin line under every page, with the server's build in its corner and out of the band. */}
+				<footer className="flex h-6 shrink-0 items-center justify-end border-t border-line px-4 text-muted">
+					<ServerVersion />
+				</footer>
 			</div>
 		</SigningOutContext.Provider>
 	);
