@@ -176,9 +176,10 @@ fn relevance_search_joins_only_the_best() {
 }
 
 
-/// The trace reads every table of one session by primary key or by its own index, and each line by its position. Its
-/// compactions walk the session's entries without a type index, which reads only the small derived rows. Its
-/// fingerprint counts the session's requests from a covering index and its children from the parent index.
+/// The trace reads every table of one session by primary key or by its own index, each line by its position, and each
+/// linked request by its id. Its compactions walk the session's entries without a type index, which reads only the
+/// small derived rows. Its fingerprint counts the session's requests from a covering index and its children from the
+/// parent index.
 #[test]
 fn the_trace_reads_primary_keys() {
     use super::trace::*;
@@ -194,6 +195,7 @@ fn the_trace_reads_primary_keys() {
                 "SEARCH m USING PRIMARY KEY (sid=?)",
                 "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
                 "SEARCH l USING INDEX lines_position (stream_id=? AND offset=?) LEFT-JOIN",
+                "SEARCH r USING INDEX sqlite_autoindex_requests_1 (id=?) LEFT-JOIN",
             ]
         );
         assert_eq!(plan(conn, TOOL_CALLS_SQL, None), ["SEARCH tool_calls USING PRIMARY KEY (sid=?)"]);

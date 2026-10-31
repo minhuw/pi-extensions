@@ -45,6 +45,8 @@ Request body:
     "fidelity": "payload | context",
     "provider": "…?", "api": "…?", "model": "…?",
     "assistant": { "timestamp": 1733234402000, "responseId": "…?" },
+    "timing": { "sentAt": 1733234402012, "responseAt": 1733234402410, "firstTokenAt": 1733234403150,
+                "firstToken": "text | thinking | toolCall" },
     "skeleton": {},
     "blocks": ["hash", "…"]
   }]
@@ -56,6 +58,7 @@ Field notes:
 - `offset` is the byte offset of the first line in the source file. Each line occupies `utf8Length(line) + 1` bytes.
 - `seq` counts requests per session. It is 1-based, informational, and may restart when pi restarts.
 - `assistant` is present when known. `timestamp` is the assistant message's `timestamp` field.
+- `timing` is optional, and so is each of its keys. Its times are Unix milliseconds from the client's clock, the clock of `assistant.timestamp`: `sentAt` when the request was handed to the transport (`before_provider_request`), `responseAt` when the response headers arrived (`after_provider_response`), and `firstTokenAt` when the first text, thinking, or tool-call delta streamed, with `firstToken` its kind. The server keeps the times that are integers from 0 to 253402300799999 (the end of year 9999) and a `firstToken` of `text`, `thinking`, or `toolCall`; it drops other values and unknown keys, and a `timing` with nothing valid, but never rejects the request for them. Schema version 6 stores it with the request, without a reindex; earlier requests have none.
 - `skeleton` is the payload with its split parts replaced by references (see "Request blocks").
 - `blocks` lists every hash the skeleton references, in order of first appearance.
 
@@ -74,7 +77,7 @@ Rules:
 - **Errors and limits:**
   - 401 for a missing or unknown token.
   - 413 above the maximum body size (default 32 MiB). The client keeps batches under 8 MiB.
-- **Idempotency:** resending a request id or a blob is a no-op. Documents are upserted by key; the newest `sha256` wins.
+- **Idempotency:** resending a request id (with any `timing`) or a blob is a no-op. Documents are upserted by key; the newest `sha256` wins.
 
 ## Request blocks (client splits, server reconstructs)
 Let `P` be the payload object from `before_provider_request` after a JSON round-trip. The client:
@@ -163,7 +166,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - When `lastSeq <= since`, `session`, `turns`, and `truncated` are omitted.
   - An unknown session id returns 404.
 - **`GET sessions/:id/trace`** returns the whole session as one compact list of records for the trajectory view, built from the derived tables, so the UI needs no raw entries for its overview and ledger. Unlike the other routes, its times are Unix milliseconds. Absent values are omitted, never `null` or invented. An unknown session id returns 404. The JSON is gzipped (`Content-Encoding: gzip`) when `Accept-Encoding` gives `gzip`, `x-gzip`, or `*` a non-zero quality (an explicit `gzip;q=0` wins over `*`); every response has `Vary: accept-encoding`.
-  - Responses carry an `ETag`, different for the gzipped and the plain body, and `Cache-Control: no-cache`, so a live view's browser revalidates each poll. A request whose `If-None-Match` lists the current tag (or `*`) gets `304 Not Modified` without the trace being built. The tag is a hash of the session's entry count and last time, the number of captured requests of the session (a request that arrives after its model call sets `requestId`), the number of its children with their total entry count and latest time, the `derived_generation` setting, which every reindex replaces, and a random value per server process, since another build may derive a different trace from the same rows.
+  - Responses carry an `ETag`, different for the gzipped and the plain body, and `Cache-Control: no-cache`, so a live view's browser revalidates each poll. A request whose `If-None-Match` lists the current tag (or `*`) gets `304 Not Modified` without the trace being built. The tag is a hash of the session's entry count and last time, the number of captured requests of the session (a request that arrives after its model call sets `requestId` and its timing; a request's timing is stored only with the request, so it changes only with that number), the number of its children with their total entry count and latest time, the `derived_generation` setting, which every reindex replaces, and a random value per server process, since another build may derive a different trace from the same rows.
   ```
   { sessionId, startedAt?, lastAt?,
     turns: [{ index, startSeq, endSeq, at?, durationMs, userText, customType?,
@@ -171,7 +174,8 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
     records: (Llm | Tool | Compaction | BranchSummary)[],
     children: [{ sessionId, parentToolCallId?, agentType?, description?, kind, startedAt?, lastAt?,
                  entryCount, tokens, cost, title }] }
-  Llm           = { kind: "llm", seq, turn?, start?, end?, model?, provider?, stopReason?, error?,
+  Llm           = { kind: "llm", seq, turn?, start?, end?, sentAt?, responseAt?, firstTokenAt?, firstToken?,
+                    model?, provider?, stopReason?, error?,
                     input, output, cacheRead, cacheWrite, cost, requestId?, text?, thinking?, toolCalls }
   Tool          = { kind: "tool", seq, resultSeq?, turn?, callId, name?, start?, end?, durationMs?, isError, summary,
                     outputSize?, childSessionId? }
@@ -181,6 +185,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - `turns` are the session's turns as `GET sessions/:id/turns` gives them, without `finalText`, with `userText` cut to 200 characters.
   - `records` are sorted by `seq`. A tool call has its assistant message's seq and follows it, in the message's order; a tool result without its call has the result's seq.
   - An `llm` record is an assistant message. `start` is its `timestamp`, which pi sets when the request starts. `end` is `start + durationMs` when the message has pi's `durationMs` (the time to the end of the response), otherwise the entry's `timestamp`, which pi writes once the response has ended. Times outside the years 1970 to 9999 and a `durationMs` that is negative, not finite, or over 7 days are left out. A line in the blob store is read only when it decompresses to at most 4 MiB; a longer or unreadable one (logged once per request) gives its record no `text`, `thinking`, `durationMs`, or `tokensBefore`. `text` is its first non-empty text block and `thinking: true` marks a thinking block; `error` is its `errorMessage`; `toolCalls` counts its tool calls.
+  - `sentAt`, `responseAt`, `firstTokenAt`, and `firstToken` are the `timing` of the captured request the call links to (the one `requestId` names), as stored. A time more than 60,000 ms before `start` or more than 1,000 ms after `end`, when they are known, is left out, and `firstToken` is left out with `firstTokenAt`. A call without a linked request, or whose request has no timing, has none of them.
   - A `tool` record's `start` and `end` are the times of the entries of its call and result, and `durationMs` is their difference; a call without a result has no `end`. `summary` comes from the arguments: for `bash`, `shell`, and `powershell`, the command's first line; for `read`, the path, plus `:offset-limit`, `:offset`, or `:-limit` for the arguments given; for `write` and `edit`, the path; for `grep`, `find`, `ls`, and `glob`, `<pattern> in <path>`, or whichever is given; for `web_search`, the query; for `web_fetch`, the URL; for `Agent`, `<subagent_type>: <description>`. For any other tool, such as `mcp__server__tool`, and when those arguments are missing, it is the first string argument of at most 160 characters, else the first line of the first string argument, else `""`. Tool names match case-insensitively. Arguments that are not a JSON object give `""`. Control characters become spaces, and `summary` and `text` are trimmed and cut to 160 characters. `childSessionId` is the first child (by `startedAt`, children without one last, then by id) whose `parentToolCallId` is the call's id.
   - `compaction` and `branch-summary` records are those entries; `tokensBefore` is the compaction's.
   - `children` are the child sessions as `GET sessions/:id` lists them, except that those without `startedAt` come last, with the link's `agentType` and `description`. `kind` is `herder-step` for a Herder step session (link kind `herder-step` or a Herder run id), otherwise `subagent`.
@@ -209,7 +214,7 @@ Publication is opt-in and uses the existing `sessions.project` name (the working
 - **Anonymous read API**, under `{base}/api/public/v1/`: only `GET facets`, `sessions`, `sessions/:id`, `sessions/:id/tree`, `sessions/:id/turns`, `sessions/:id/entries`, `sessions/:id/entries/:seq/raw`, `sessions/:id/entries/:seq/image/:index`, `sessions/:id/trace`, and `sessions/:id/updates`. Shapes, filters, limits, and cursors match their authenticated counterparts.
   - Lists and facets filter selected projects in SQL before pagination. `root=true` includes a published child whose parent is private or missing.
   - Each direct session resource checks publication in the same database snapshot as its read. Private and missing sessions both return 404 `not_found`, even to a signed-in visitor using this namespace. No public request payload, export, search, Herder run, device management, or relay routes exist.
-  - Public metadata omits captured `requestId`, `link`, and `herderRunId`; parent, child, tool-child links and child counts include only published targets. Entry and raw-line content is the published session's content, without automatic redaction, and may itself mention private paths or other sessions.
+  - Public metadata omits captured `requestId`, `link`, and `herderRunId`, but keeps a trace's `sentAt`, `responseAt`, `firstTokenAt`, and `firstToken`; parent, child, tool-child links and child counts include only published targets. Entry and raw-line content is the published session's content, without automatic redaction, and may itself mention private paths or other sessions.
   - All public API responses, including images, errors, and unknown routes, use `Cache-Control: no-store`. Traces accept gzip but have no ETag or 304 response. Unpublishing blocks subsequent reads; previously downloaded content cannot be recalled.
 - **Web UI:** `{base}/settings` controls publication, `{base}/public?project=<name>` browses published trajectories, and `{base}/public/s/:id` opens replay, inspection, or transcript (`?view=transcript`) without login. Public pages have a separate anonymous API client and query cache and offer no messaging, captured provider context, or JSONL export.
 - **Authenticating proxies:** allow `{base}/public`, `{base}/public/*`, `{base}/api/public/*`, and `{base}/assets/*` anonymously for public browsing. Keep `{base}/api/v1/*` and the owner UI behind proxy authentication in `proxy` mode.

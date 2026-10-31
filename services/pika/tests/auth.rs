@@ -1241,7 +1241,7 @@ fn upgrading_from_version_3_keeps_tokens_and_does_not_reindex() {
         common::device(&store, DEVICE);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
-    conn.execute_batch(&format!("{UNDO_V5} {UNDO_V4} PRAGMA user_version = 3;")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 3;")).unwrap();
     drop(conn);
     let store = pika::store::Store::open(&data).unwrap();
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
@@ -1249,7 +1249,7 @@ fn upgrading_from_version_3_keeps_tokens_and_does_not_reindex() {
     assert_eq!((&row["name"], &row["created_via"], &row["last_seen_at"]), (&json!(DEVICE), &json!("cli"), &Value::Null));
     assert_eq!(one(&store, "SELECT id, name FROM devices"), one(&store, "SELECT name AS id, name FROM tokens"));
     let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 }
 
 #[tokio::test]
@@ -1267,7 +1267,7 @@ async fn upgrading_from_version_4_keeps_device_names_as_ids() {
     };
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     conn.execute_batch(&format!(
-        "{UNDO_V5} PRAGMA user_version = 4;
+        "{UNDO_V6} {UNDO_V5} PRAGMA user_version = 4;
          INSERT INTO tokens (name, hash, created_at, created_via) VALUES ('{DEVICE}', '{}', 100, 'pairing'), ('phone', '{}', 200, 'cli');
          UPDATE streams SET created_at = 50 WHERE device = 'old-desk';
          INSERT INTO pairings (id_hash, code, device, requested_at, expires_at)
@@ -1288,7 +1288,7 @@ async fn upgrading_from_version_4_keeps_device_names_as_ids() {
 
     let env = Env { store: pika::store::Store::open(&data).unwrap(), dir };
     let version: i64 = env.store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     // No reindex: the derived tables are untouched.
     assert_eq!(env.store.setting("needs_reindex").unwrap(), None);
     assert_eq!(dump_derived(&env.store), derived);

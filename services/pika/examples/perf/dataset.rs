@@ -358,6 +358,8 @@ pub struct RequestOut {
     pub model: usize,
     pub assistant_ts: i64,
     pub response_id: String,
+    /// The request's `timing`, consistent with its model call.
+    pub timing: Value,
     pub skeleton: Value,
     /// Every block the skeleton references, in order of first appearance.
     pub hashes: Vec<String>,
@@ -421,6 +423,34 @@ fn tool_defs(vocab: &Vocab, rng: &mut Rng) -> Vec<Value> {
                     "input_schema": { "type": "object", "properties": { "command": { "type": "string", "description": vocab.phrase(rng, 6) } } } })
         })
         .collect()
+}
+
+/// A captured call's `timing` and its message's `durationMs`, from a generator seeded by its response id, so that every
+/// other generated value stays as it was: sent a few ms after `ts`, response headers 150 to 900 ms later (missing for
+/// about 1 in 10), the first token 0.3 to 8 s after sending (longer with thinking), and the end after streaming the rest.
+fn call_timing(content: &[Value], bytes: usize, ts: i64, response_id: &str) -> (Value, i64) {
+    let seed = u64::from_str_radix(&response_id[5..21], 16).expect("hex response id");
+    let mut rng = Rng::fork(seed, 0x7151);
+    let has = |ty: &str| content.iter().any(|b| b["type"] == ty);
+    let first_token = if has("thinking") {
+        "thinking"
+    } else if has("text") {
+        "text"
+    } else {
+        "toolCall"
+    };
+    let sent = ts + rng.range(2, 50);
+    let response = sent + rng.range(150, 900);
+    let median = if first_token == "thinking" { 2_500.0 } else { 900.0 };
+    let ttft = (rng.lognormal(median, 0.6) as i64).clamp(300, 8_000);
+    let first = (sent + ttft).max(response + rng.range(5, 120));
+    // About 60 tokens a second of 4 bytes each, plus the end of the stream.
+    let end = first + bytes as i64 / 4 * 1_000 / 60 + rng.range(50, 600);
+    let mut timing = json!({ "sentAt": sent, "responseAt": response, "firstTokenAt": first, "firstToken": first_token });
+    if rng.chance(0.1) {
+        timing.as_object_mut().expect("an object").remove("responseAt");
+    }
+    (timing, end - ts)
 }
 
 /// Request capture for one session: the model context so far and the system prompt and tools of the payload.
@@ -490,10 +520,16 @@ impl SessionGen<'_> {
     }
 
     fn message(&mut self, message: Value) {
+        let bytes = message.to_string().len();
+        self.message_counted(message, bytes);
+    }
+
+    /// `message`, counting `bytes` toward the context.
+    fn message_counted(&mut self, message: Value, bytes: usize) {
         if self.full() {
             return;
         }
-        self.context_tokens += message.to_string().len() as i64 / 4;
+        self.context_tokens += bytes as i64 / 4;
         if let Some(capture) = &mut self.capture {
             capture.context.push(message.clone());
         }
@@ -519,7 +555,7 @@ impl SessionGen<'_> {
     }
 
     /// Captures the request for the assistant message about to be written at `ts`.
-    fn capture_request(&mut self, ts: i64, response_id: &str) {
+    fn capture_request(&mut self, ts: i64, response_id: &str, timing: Value) {
         let Some(capture) = &mut self.capture else { return };
         capture.seq += 1;
         let fidelity = if capture.seq % 5 == 0 { "context" } else { "payload" };
@@ -543,6 +579,7 @@ impl SessionGen<'_> {
             model: self.model,
             assistant_ts: ts,
             response_id: response_id.to_owned(),
+            timing,
             skeleton,
             hashes,
             blocks: new_blocks,
@@ -570,10 +607,20 @@ impl SessionGen<'_> {
         let usage = self.usage(bytes);
         let response_id = format!("resp_{}", self.rng.hex(24));
         let ts = self.t;
-        self.capture_request(ts, &response_id);
+        let timed = self.capture.is_some().then(|| call_timing(&content, bytes, ts, &response_id));
+        let duration_ms = timed.as_ref().map(|(_, duration_ms)| *duration_ms);
+        if let Some((timing, _)) = timed {
+            self.capture_request(ts, &response_id, timing);
+        }
         let m = &MODELS[self.model];
-        self.message(json!({ "role": "assistant", "content": content, "api": m.api, "provider": m.provider, "model": m.id,
-                             "usage": usage, "stopReason": stop, "timestamp": ts, "responseId": response_id }));
+        let mut message = json!({ "role": "assistant", "content": content, "api": m.api, "provider": m.provider, "model": m.id,
+                                  "usage": usage, "stopReason": stop, "timestamp": ts, "responseId": response_id });
+        // Counted without `durationMs`, which only sessions with captured requests have, so usage stays as it was.
+        let counted = message.to_string().len();
+        if let Some(duration_ms) = duration_ms {
+            message["durationMs"] = json!(duration_ms);
+        }
+        self.message_counted(message, counted);
     }
 
     fn thinking(&mut self) -> Option<Value> {

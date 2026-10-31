@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use super::sessions::Tokens;
 use super::{ReadError, ReadResult};
 use crate::blobs::BlobStore;
+use crate::requests::{FIRST_TOKEN_KINDS, MAX_TIME_MS};
 use crate::util::{cut_chars, parse_json_lenient};
 
 /// `userText` is cut to this many characters.
@@ -27,8 +28,10 @@ pub const SUMMARY_CHARS: usize = 160;
 /// A line in the blob store (over 1 MiB) is read only when it decompresses to at most this many bytes; a longer one
 /// gives its record no text, thinking, duration, or `tokensBefore`.
 pub const BLOB_LINE_BYTES: u64 = 4 << 20;
-/// Model call times outside years 1970 to 9999 are left out.
-const MAX_TIME_MS: i64 = 253_402_300_799_999;
+/// A request's timing is left out more than this long before its model call's start ...
+const TIMING_BEFORE_MS: i64 = 60_000;
+/// ... or after its end.
+const TIMING_AFTER_MS: i64 = 1_000;
 /// A model call's `durationMs` over a week is left out.
 const MAX_DURATION_MS: f64 = 7.0 * 24.0 * 3600.0 * 1000.0;
 
@@ -96,6 +99,14 @@ pub struct LlmRecord {
     pub start: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_token_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,10 +196,11 @@ pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq, substr
      WHERE t.sid = ?1 ORDER BY t.idx";
 
 pub(crate) const MODEL_CALLS_SQL: &str = "SELECT m.seq, m.turn, m.ts, m.at, m.model, m.provider, m.stop_reason, m.error_message,
-         m.input, m.output, m.cache_read, m.cache_write, m.cost, m.request_id, l.data, l.blob, e.tool_call_ids
+         m.input, m.output, m.cache_read, m.cache_write, m.cost, m.request_id, l.data, l.blob, e.tool_call_ids, r.timing
      FROM model_calls m
      LEFT JOIN entries e ON e.sid = m.sid AND e.seq = m.seq
      LEFT JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+     LEFT JOIN requests r ON r.id = m.request_id
      WHERE m.sid = ?1 ORDER BY m.seq";
 
 pub(crate) const TOOL_CALLS_SQL: &str = "SELECT call_id, name, arguments, turn, call_seq, result_seq, is_error, started_at, ended_at,
@@ -207,9 +219,10 @@ pub(crate) const CHILDREN_SQL: &str = "SELECT s.id, s.started_at, s.last_at, s.e
      WHERE s.parent_session_id = ?1 ORDER BY s.started_at IS NULL, s.started_at, s.id";
 
 /// What the trace is built from, changing whenever the trace can: the session's rows grow with its entries (`entry_count`
-/// and `last_at`), except for `requestId`, which a request arriving after its model call sets (requests are only
-/// inserted); the children's rows grow with their entries, and a new child adds one; and a reindex, which can change
-/// derived rows without changing any count, records a new `derived_generation`.
+/// and `last_at`), except for `requestId` and the request's timing, which a request arriving after its model call
+/// sets (requests are only inserted, with their timing; a resend is a no-op); the children's rows grow with their
+/// entries, and a new child adds one; and a reindex, which can change derived rows without changing any count, records
+/// a new `derived_generation`.
 pub(crate) const FINGERPRINT_SQL: &str = "SELECT s.sid, s.entry_count, s.last_at,
          (SELECT COUNT(*) FROM requests r WHERE r.session_id = s.id),
          c.n, c.entries, c.last_at,
@@ -462,6 +475,34 @@ fn llm_times(ts: Option<i64>, at: Option<i64>, duration_ms: Option<f64>) -> (Opt
     (start, end)
 }
 
+/// A request's stored `timing` (see `requests::timing`).
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Timing {
+    sent_at: Option<i64>,
+    response_at: Option<i64>,
+    first_token_at: Option<i64>,
+    first_token: Option<String>,
+}
+
+/// The timing of a model call's request, without times implausible for the call: those more than `TIMING_BEFORE_MS`
+/// before its start or `TIMING_AFTER_MS` after its end, when known. `firstToken` goes with `firstTokenAt`.
+fn llm_timing(timing: Option<&str>, start: Option<i64>, end: Option<i64>) -> Timing {
+    let Some(t) = timing.and_then(|t| serde_json::from_str::<Timing>(t).ok()) else { return Timing::default() };
+    let plausible = |t: &i64| {
+        (0..=MAX_TIME_MS).contains(t)
+            && start.is_none_or(|start| *t >= start.saturating_sub(TIMING_BEFORE_MS))
+            && end.is_none_or(|end| *t <= end.saturating_add(TIMING_AFTER_MS))
+    };
+    let first_token_at = t.first_token_at.filter(plausible);
+    Timing {
+        sent_at: t.sent_at.filter(plausible),
+        response_at: t.response_at.filter(plausible),
+        first_token_at,
+        first_token: t.first_token.filter(|k| first_token_at.is_some() && FIRST_TOKEN_KINDS.contains(&k.as_str())),
+    }
+}
+
 fn tokens_before(line: &str) -> Option<i64> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -656,11 +697,16 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
         }
         let facts = line_text(r, 14, blobs, &mut failed)?.map(|line| assistant_facts(&line)).unwrap_or_default();
         let (start, end) = llm_times(r.get(2)?, r.get(3)?, facts.duration_ms);
+        let timing = llm_timing(text_ref(r, 17)?, start, end);
         records.push(Record::Llm(LlmRecord {
             seq,
             turn: r.get(1)?,
             start,
             end,
+            sent_at: timing.sent_at,
+            response_at: timing.response_at,
+            first_token_at: timing.first_token_at,
+            first_token: timing.first_token,
             model: r.get(4)?,
             provider: r.get(5)?,
             stop_reason: r.get(6)?,
@@ -786,6 +832,30 @@ mod tests {
         assert_eq!(one_line(&s), format!("{} ", "a".repeat(SUMMARY_CHARS - 1)));
         let s = format!("{} \u{1}\t ", "a".repeat(SUMMARY_CHARS - 1));
         assert_eq!(one_line(&s), "a".repeat(SUMMARY_CHARS - 1));
+    }
+
+    #[test]
+    fn implausible_request_times_are_left_out() {
+        let all = r#"{"sentAt":1010,"responseAt":1400,"firstTokenAt":2000,"firstToken":"text"}"#;
+        let full = Timing { sent_at: Some(1010), response_at: Some(1400), first_token_at: Some(2000), first_token: Some("text".into()) };
+        assert_eq!(llm_timing(Some(all), Some(1_000), Some(3_000)), full);
+        assert_eq!(llm_timing(Some(all), None, None), full);
+        // Up to a minute before the start and a second after the end are kept.
+        let (start, end) = (Some(100_000), Some(103_000));
+        let edges = r#"{"sentAt":40000,"responseAt":39999,"firstTokenAt":104000,"firstToken":"toolCall"}"#;
+        assert_eq!(
+            llm_timing(Some(edges), start, end),
+            Timing { sent_at: Some(40_000), first_token_at: Some(104_000), first_token: Some("toolCall".into()), ..Timing::default() }
+        );
+        let late = r#"{"sentAt":100005,"firstTokenAt":104001,"firstToken":"thinking"}"#;
+        assert_eq!(llm_timing(Some(late), start, end), Timing { sent_at: Some(100_005), ..Timing::default() });
+        // Without an end, only the start bounds them.
+        assert_eq!(llm_timing(Some(late), start, None).first_token.as_deref(), Some("thinking"));
+        // Only a known kind, and only with its time.
+        assert_eq!(llm_timing(Some(r#"{"firstToken":"text"}"#), None, None), Timing::default());
+        assert_eq!(llm_timing(Some(r#"{"firstTokenAt":5,"firstToken":"image"}"#), None, None).first_token, None);
+        assert_eq!(llm_timing(None, Some(1), Some(2)), Timing::default());
+        assert_eq!(llm_timing(Some("not json"), None, None), Timing::default());
     }
 
     #[test]

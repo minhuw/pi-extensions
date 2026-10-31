@@ -82,6 +82,23 @@ pub fn run(data_dir: &Path, config: &Config, full: bool) -> Result<Value> {
     check("requests", requests, requests > 0, "> 0".into());
     let linked_calls = int(&conn, "SELECT COUNT(*) FROM model_calls WHERE request_id IS NOT NULL")?;
     check("modelCallsWithRequests", linked_calls, linked_calls == requests, format!("{requests}"));
+    // Every request's timing falls inside its call, from its `timestamp` to `timestamp + durationMs`, in order.
+    let untimed = int(
+        &conn,
+        "SELECT COUNT(*) FROM requests r LEFT JOIN model_calls m ON m.request_id = r.id
+             LEFT JOIN entries e ON e.sid = m.sid AND e.seq = m.seq
+             LEFT JOIN lines l ON l.stream_id = e.sid AND l.offset = e.offset
+         WHERE NOT COALESCE(
+             json_extract(r.timing, '$.sentAt') > m.ts
+             AND COALESCE(json_extract(r.timing, '$.responseAt'), json_extract(r.timing, '$.sentAt') + 1)
+                 > json_extract(r.timing, '$.sentAt')
+             AND json_extract(r.timing, '$.firstTokenAt')
+                 > COALESCE(json_extract(r.timing, '$.responseAt'), json_extract(r.timing, '$.sentAt'))
+             AND json_extract(r.timing, '$.firstTokenAt') < m.ts + json_extract(l.data, '$.message.durationMs'), 0)",
+    )?;
+    check("requestsTimedOutsideTheirCall", untimed, untimed == 0, "0".into());
+    let partial = int(&conn, "SELECT COUNT(*) FROM requests WHERE json_extract(timing, '$.responseAt') IS NULL")?;
+    check("requestsWithoutResponseAt", partial, partial > 0 && partial * 4 < requests, "> 0 and < 25%".into());
 
     for ty in ["message", "model_change", "compaction", "session_info", "custom", "custom_message", "usage", "label"] {
         let n = int(&conn, &format!("SELECT COUNT(*) FROM entries WHERE type = '{ty}'"))?;

@@ -125,6 +125,7 @@ impl Loader<'_> {
                 assistant: Some(Assistant { timestamp: Some(r.assistant_ts), response_id: Some(r.response_id) }),
                 skeleton: r.skeleton,
                 blocks: r.hashes,
+                timing: Some(r.timing),
             });
             self.totals.requests += 1;
             if bytes >= MAX_BATCH_BYTES / 2 {

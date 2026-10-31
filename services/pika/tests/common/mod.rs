@@ -12,6 +12,8 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+/// SQL that removes what schema version 6 added, for tests that rewind `user_version`.
+pub const UNDO_V6: &str = "ALTER TABLE requests DROP COLUMN timing;";
 /// SQL that removes what schema version 5 added, for tests that rewind `user_version`.
 pub const UNDO_V5: &str = "DROP TABLE devices; ALTER TABLE pairings DROP COLUMN key_hash;
     ALTER TABLE pairings DROP COLUMN matched; ALTER TABLE pairings DROP COLUMN matched_by;

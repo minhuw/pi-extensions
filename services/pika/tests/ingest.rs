@@ -224,6 +224,82 @@ fn missing_blobs_complete_the_request_when_they_arrive() {
 }
 
 /// Deterministic prose so that blocks compress like real text.
+/// `request` with a `timing` field.
+fn timed(id: &str, skeleton: &Value, blocks: &[(String, String)], timing: Value) -> Value {
+    let mut r = request(id, "s1", skeleton, blocks, 1);
+    r["timing"] = timing;
+    r
+}
+
+#[test]
+fn request_timing_is_stored_and_invalid_keys_are_dropped() {
+    let env = env();
+    let (skeleton, blocks) = requests::split(&nested_payload());
+    let full = json!({ "sentAt": 1792486802510_i64, "responseAt": 1792486802900_i64, "firstTokenAt": 1792486803400_i64,
+                       "firstToken": "thinking", "ttfb": 3 });
+    let mixed = json!({ "sentAt": "1792486802510", "responseAt": 1792486802900.5, "firstTokenAt": 1792486803400_i64,
+                        "firstToken": "audio" });
+    let batch = json!({
+        "blobs": blobs(&blocks),
+        "requests": [
+            timed("req-full", &skeleton, &blocks, full),
+            timed("req-mixed", &skeleton, &blocks, mixed),
+            timed("req-invalid", &skeleton, &blocks, json!({ "sentAt": -1, "responseAt": 253_402_300_800_000_i64, "firstToken": null })),
+            timed("req-array", &skeleton, &blocks, json!([1792486802510_i64])),
+            timed("req-null", &skeleton, &blocks, Value::Null),
+            request("req-none", "s1", &skeleton, &blocks, 1),
+        ],
+    });
+    // Invalid timing never rejects its request.
+    assert!(ingest(&env.store, batch).unwrap().missing_blobs.is_empty());
+    let timing = |store| -> Vec<(String, Value)> {
+        query(store, "SELECT id, timing FROM requests ORDER BY id")
+            .into_iter()
+            .map(|r| (r["id"].as_str().unwrap().to_owned(), r["timing"].as_str().map_or(Value::Null, |t| serde_json::from_str(t).unwrap())))
+            .collect()
+    };
+    let stored = vec![
+        ("req-array".into(), Value::Null),
+        ("req-full".into(), json!({ "sentAt": 1792486802510_i64, "responseAt": 1792486802900_i64, "firstTokenAt": 1792486803400_i64, "firstToken": "thinking" })),
+        ("req-invalid".into(), Value::Null),
+        ("req-mixed".into(), json!({ "firstTokenAt": 1792486803400_i64 })),
+        ("req-none".into(), Value::Null),
+        ("req-null".into(), Value::Null),
+    ];
+    assert_eq!(timing(&env.store), stored);
+
+    // A resend is a no-op, timing included, as for every other request field.
+    let resend = json!({ "requests": [timed("req-none", &skeleton, &blocks, json!({ "sentAt": 5 })),
+                                      timed("req-full", &skeleton, &blocks, json!({ "sentAt": 6 }))] });
+    ingest(&env.store, resend).unwrap();
+    assert_eq!(timing(&env.store), stored);
+}
+
+#[test]
+fn upgrading_from_version_5_adds_request_timing_without_a_reindex() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (skeleton, blocks) = requests::split(&nested_payload());
+    let derived = {
+        let store = pika::store::Store::open(&data).unwrap();
+        upload(&store, KEY, "session", &fixture("session.jsonl"), 50);
+        ingest(&store, json!({ "blobs": blobs(&blocks), "requests": [request("req-old", "s1", &skeleton, &blocks, 1)] })).unwrap();
+        dump_derived(&store)
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(&format!("{UNDO_V6} PRAGMA user_version = 5;")).unwrap();
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
+    assert_eq!(version, 6);
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(dump_derived(&store), derived);
+    assert_eq!(one(&store, "SELECT timing FROM requests")["timing"], Value::Null);
+    ingest(&store, json!({ "requests": [timed("req-new", &skeleton, &blocks, json!({ "sentAt": 7 }))] })).unwrap();
+    assert_eq!(one(&store, "SELECT timing FROM requests WHERE id = 'req-new'")["timing"], r#"{"sentAt":7}"#);
+}
+
 fn prose(seed: u64, words: usize) -> String {
     const WORDS: &[&str] = &[
         "the", "session", "agent", "tool", "returned", "file", "error", "function", "test", "build", "value", "branch",

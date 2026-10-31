@@ -14,6 +14,10 @@ use crate::blobs::BlobStore;
 use crate::util::{is_hash, sha256_hex};
 
 const STRING_THRESHOLD: usize = 2048;
+/// Times after the year 9999 are not times.
+pub const MAX_TIME_MS: i64 = 253_402_300_799_999;
+/// The kinds of a request's first streamed delta.
+pub const FIRST_TOKEN_KINDS: &[&str] = &["text", "thinking", "toolCall"];
 
 /// A spec-format ref: `{"$pika": h}` or `{"$pika": h, "$type": "string"}`.
 fn as_ref(v: &Value) -> Option<(&Value, bool)> {
@@ -186,6 +190,22 @@ fn write_expanded(v: &Value, out: &mut String, block: &mut impl FnMut(i64, bool,
     Ok(())
 }
 
+/// A request's `timing` as stored: its times that are integers from 0 to `MAX_TIME_MS` and a known `firstToken`, as
+/// a JSON object, or none when no key is valid. Invalid and unknown keys are dropped, never rejected.
+pub fn timing(v: &Value) -> Option<String> {
+    let obj = v.as_object()?;
+    let mut out = Map::new();
+    for key in ["sentAt", "responseAt", "firstTokenAt"] {
+        if let Some(t) = obj.get(key).and_then(Value::as_i64).filter(|t| (0..=MAX_TIME_MS).contains(t)) {
+            out.insert(key.to_owned(), t.into());
+        }
+    }
+    if let Some(kind) = obj.get("firstToken").and_then(Value::as_str).filter(|k| FIRST_TOKEN_KINDS.contains(k)) {
+        out.insert("firstToken".to_owned(), kind.into());
+    }
+    (!out.is_empty()).then(|| Value::Object(out).to_string())
+}
+
 pub struct NewRequest<'a> {
     pub id: &'a str,
     pub session_id: &'a str,
@@ -198,6 +218,8 @@ pub struct NewRequest<'a> {
     pub model: Option<&'a str>,
     pub assistant_ts: Option<i64>,
     pub response_id: Option<&'a str>,
+    /// See `timing`.
+    pub timing: Option<&'a str>,
     pub skeleton: &'a Value,
 }
 
@@ -248,8 +270,8 @@ pub fn store(tx: &Transaction, r: &NewRequest, now: i64) -> Result<Vec<String>> 
     let at_ms = r.at.and_then(crate::util::parse_iso_ms);
     tx.prepare_cached(
         "INSERT INTO requests (id, session_id, rs, device, seq, at, at_ms, fidelity, provider, api, model, assistant_ts,
-             response_id, skeleton, block_count, complete, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             response_id, skeleton, block_count, complete, received_at, timing)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )?
     .execute(params![
         r.id,
@@ -269,6 +291,7 @@ pub fn store(tx: &Transaction, r: &NewRequest, now: i64) -> Result<Vec<String>> 
         referenced.len() as i64,
         missing.is_empty(),
         now,
+        r.timing,
     ])?;
     if let Some(ts) = r.assistant_ts {
         crate::derive::link_requests(tx, r.session_id, ts)?;
@@ -365,6 +388,23 @@ pub fn load(conn: &Connection, blobs: &BlobStore, id: &str) -> Result<Option<Sto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_timing_keys_are_dropped() {
+        let t = |v: Value| timing(&v);
+        assert_eq!(
+            t(json!({ "sentAt": 5, "responseAt": 6, "firstTokenAt": 7, "firstToken": "thinking", "extra": 1 })),
+            Some(r#"{"sentAt":5,"responseAt":6,"firstTokenAt":7,"firstToken":"thinking"}"#.into())
+        );
+        assert_eq!(t(json!({ "sentAt": 1.5, "responseAt": "6", "firstTokenAt": -1, "firstToken": "image" })), None);
+        assert_eq!(
+            t(json!({ "sentAt": MAX_TIME_MS + 1, "responseAt": u64::MAX, "firstTokenAt": MAX_TIME_MS, "firstToken": 1 })),
+            Some(format!(r#"{{"firstTokenAt":{MAX_TIME_MS}}}"#))
+        );
+        for v in [json!(null), json!([1]), json!("x"), json!({})] {
+            assert_eq!(t(v.clone()), None, "{v}");
+        }
+    }
 
     #[test]
     fn compact_runs_and_expand() {

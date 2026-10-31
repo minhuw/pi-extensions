@@ -956,7 +956,7 @@ fn opening_a_version_1_database_builds_the_search_index() {
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -1044,7 +1044,7 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
-         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
+         DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
     ))
     .unwrap();
     drop(conn);
@@ -1378,6 +1378,62 @@ async fn trace_is_revalidated_by_etag() {
     assert_eq!(after, before.json());
 
     assert_eq!(get_trace(&app, "nope", false, Some("*")).await.status, StatusCode::NOT_FOUND);
+}
+
+const TIMING_KEYS: [&str; 4] = ["sentAt", "responseAt", "firstTokenAt", "firstToken"];
+
+/// The timing keys of a trace record that has any.
+fn timing_of(record: &Value) -> Value {
+    TIMING_KEYS.iter().filter_map(|k| record.get(*k).map(|v| (k.to_string(), v.clone()))).collect::<serde_json::Map<_, _>>().into()
+}
+
+#[tokio::test]
+async fn trace_shows_the_linked_request_timing() {
+    let app = world().await;
+    let (start, end) = (1792486802500_i64, pika::util::parse_iso_ms("2026-10-20T09:00:05Z").unwrap());
+    // `req-1` has no timing, and the other model calls no request.
+    let first = get_trace(&app, SESSION_ID, false, None).await;
+    let records = first.json()["records"].as_array().unwrap().clone();
+    assert_eq!((&records[0]["requestId"], &records[0]["start"], &records[0]["end"]), (&json!("req-1"), &json!(start), &json!(end)));
+    assert!(records.iter().all(|r| timing_of(r) == json!({})), "{records:?}");
+
+    // A later request for the call, which the call now links to, brings its timing and a new tag.
+    let timing = json!({ "sentAt": start + 12, "responseAt": start + 400, "firstTokenAt": start + 900, "firstToken": "thinking" });
+    let (mut batch, _) = request_batch("req-9", start, &payload(), None);
+    batch["requests"][0]["timing"] = timing.clone();
+    app.ingest(DEVICE, batch).await;
+    let timed = get_trace(&app, SESSION_ID, false, Some(&etag(&first))).await;
+    assert_eq!(timed.status, StatusCode::OK);
+    assert_ne!(etag(&timed), etag(&first));
+    let records = timed.json()["records"].as_array().unwrap().clone();
+    assert_eq!((&records[0]["requestId"], timing_of(&records[0])), (&json!("req-9"), timing.clone()));
+    assert!(records[1..].iter().all(|r| timing_of(r) == json!({})));
+
+    // A resend with other timing is a no-op: neither the trace nor its tag changes.
+    let (mut batch, _) = request_batch("req-9", start, &payload(), None);
+    batch["requests"][0]["timing"] = json!({ "sentAt": start + 1 });
+    app.ingest(DEVICE, batch).await;
+    assert_eq!(get_trace(&app, SESSION_ID, false, Some(&etag(&timed))).await.status, StatusCode::NOT_MODIFIED);
+
+    // Times more than a minute before the start or a second after the end are left out; `firstToken` goes with its time.
+    let (mut batch, _) = request_batch("req-z", start, &payload(), None);
+    batch["requests"][0]["timing"] =
+        json!({ "sentAt": start - 60_000, "responseAt": start - 60_001, "firstTokenAt": end + 1_001, "firstToken": "text" });
+    app.ingest(DEVICE, batch).await;
+    let trace = get_trace(&app, SESSION_ID, false, Some(&etag(&timed))).await;
+    assert_eq!(trace.status, StatusCode::OK);
+    let record = &trace.json()["records"][0];
+    assert_eq!((&record["requestId"], timing_of(record)), (&json!("req-z"), json!({ "sentAt": start - 60_000 })));
+    let (mut batch, _) = request_batch("req-zz", start, &payload(), None);
+    batch["requests"][0]["timing"] = json!({ "sentAt": start, "firstTokenAt": end + 1_000, "firstToken": "toolCall" });
+    app.ingest(DEVICE, batch).await;
+    let record = &app.json(&format!("sessions/{SESSION_ID}/trace")).await["records"][0];
+    assert_eq!(timing_of(record), json!({ "sentAt": start, "firstTokenAt": end + 1_000, "firstToken": "toolCall" }));
+
+    // A published trace keeps the timing and drops the request id.
+    assert_eq!(publish(&app, "widgets", true, None).await.status, StatusCode::OK);
+    let record = &public_json(&app, &format!("sessions/{SESSION_ID}/trace")).await["records"][0];
+    assert_eq!((record.get("requestId"), timing_of(record)), (None, json!({ "sentAt": start, "firstTokenAt": end + 1_000, "firstToken": "toolCall" })));
 }
 
 #[tokio::test]

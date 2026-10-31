@@ -79,6 +79,9 @@ pub struct Request {
     pub skeleton: Value,
     #[serde(default)]
     pub blocks: Vec<String>,
+    /// Kept as a `Value` so that invalid keys are dropped rather than rejecting the request (see `requests::timing`).
+    #[serde(default)]
+    pub timing: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,6 +219,7 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
         }
         let mut missing = BTreeSet::new();
         for r in &batch.requests {
+            let timing = r.timing.as_ref().and_then(crate::requests::timing);
             let new = crate::requests::NewRequest {
                 id: &r.id,
                 session_id: &r.session_id,
@@ -228,6 +232,7 @@ pub fn apply(store: &Store, device: &str, batch: &Batch) -> Result<BatchResponse
                 model: r.model.as_deref(),
                 assistant_ts: r.assistant.as_ref().and_then(|a| a.timestamp),
                 response_id: r.assistant.as_ref().and_then(|a| a.response_id.as_deref()),
+                timing: timing.as_deref(),
                 skeleton: &r.skeleton,
             };
             let lacking = crate::requests::store(tx, &new, now).map_err(|e| match e.downcast::<rusqlite::Error>() {
