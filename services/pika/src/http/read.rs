@@ -344,7 +344,7 @@ async fn herder_run(State(state): State<AppState>, Path(id): Path<String>) -> Re
 }
 
 async fn search(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
-    scoped_json(&state, scope, None, move |_, conn| read::search::search_scoped(conn, &Params(params), scope.public)).await
+    scoped_json(&state, scope, None, move |_, conn| read::search::results_scoped(conn, &Params(params), scope.public)).await
 }
 
 async fn export_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {

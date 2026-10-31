@@ -814,6 +814,45 @@ async fn search_snippets_kinds_filters_and_odd_input() {
 }
 
 #[tokio::test]
+async fn search_groups_sessions_and_matches_prefixes() {
+    let app = world().await;
+    let key = |id: &str, seq: i64, kind: &str| (id.to_owned(), seq, kind.to_owned());
+    let entries = search(&app, "spin").await;
+
+    // The linked child's matches count for the main session, which carries its newest hits in the entry shape.
+    let grouped = app.json("search?q=spin&group=session").await;
+    assert_eq!(grouped["nextCursor"], Value::Null);
+    let items = grouped["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (&items[0]["sessionId"], &items[0]["sessionTitle"], &items[0]["matches"]),
+        (&json!(SESSION_ID), &json!("Fix flaky widget test"), &json!(5))
+    );
+    assert_eq!(items[0]["hits"], json!(entries[..3]));
+    let relevance = app.json("search?q=spin&group=session&sort=relevance&limit=1").await;
+    assert_eq!((&relevance["items"][0]["sessionId"], &relevance["items"][0]["matches"]), (&json!(SESSION_ID), &json!(5)));
+    let gadgets = app.json(&format!("search?q=gadgets&group=session&device={DESKTOP}")).await;
+    assert_eq!(
+        gadgets["items"].as_array().unwrap().iter().map(|g| (&g["sessionId"], &g["matches"])).collect::<Vec<_>>(),
+        [(&json!(DESK_SESSION), &json!(3))]
+    );
+    assert_eq!(app.json(&format!("search?q=gadgets&group=session&device={DEVICE}")).await["items"], json!([]));
+
+    // The word being typed matches as a prefix with `prefix=true`, in both shapes.
+    assert_eq!(search(&app, "spi").await, Vec::<Value>::new());
+    assert_eq!(search(&app, "spi&prefix=true").await, entries);
+    assert_eq!(search(&app, &format!("{}&prefix=true", q("spi "))).await, Vec::<Value>::new());
+    assert_eq!(hit_keys(&search(&app, "pinned%20the%20clo&prefix=true").await), [key(SESSION_ID, 10, "assistant")]);
+    assert_eq!(hit_keys(&search(&app, &format!("{}&prefix=true", q("\"pinned the clo"))).await), [key(SESSION_ID, 10, "assistant")]);
+    assert_eq!(app.json("search?q=spi&prefix=true&group=session").await, grouped);
+
+    for bad in ["q=spin&group=turn", "q=spin&group=session&cursor=abc", "q=spin&prefix=maybe", "q=spin&group=session&sort=oldest"] {
+        assert_eq!(app.status(&format!("search?{bad}")).await, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(app.json("search?q=%20&group=session").await, json!({ "items": [], "nextCursor": null }));
+}
+
+#[tokio::test]
 async fn pages_stay_stable_while_data_arrives() {
     let app = world().await;
     let before = ids(&app.all_pages("sessions", 2).await, "id");
@@ -998,6 +1037,9 @@ async fn search_finds_words_in_cjk_text() {
     assert_eq!(hit_keys(&search(&app, &q("命中 widgets")).await), [key(2, "assistant")]);
     assert_eq!(hit_keys(&search(&app, &q("连接失败")).await), []);
     assert_eq!(hit_keys(&search(&app, &q("缓")).await), []);
+    assert_eq!(hit_keys(&search(&app, &format!("{}&prefix=true", q("缓存测"))).await), [key(1, "user")]);
+    let grouped = app.json(&format!("search?q={}&group=session", q("缓存"))).await;
+    assert_eq!((&grouped["items"][0]["sessionId"], &grouped["items"][0]["matches"]), (&json!(CJK_SESSION), &json!(2)));
 }
 
 /// Opening a version 6 database rebuilds the full-text index with the prefix index and the CJK tokenizer: it finds
@@ -1033,6 +1075,7 @@ fn opening_a_version_6_database_rebuilds_the_search_index() {
     assert!(sql.contains("prefix = '3'") && sql.contains("pika_cjk"), "{sql}");
     assert_eq!(["flaky", "spin", "pytest"].map(|q| search(&store, &[("q", q)])), before);
     assert_eq!(search(&store, &[("q", "缓存")]), [(CJK_SESSION.to_owned(), 2), (CJK_SESSION.to_owned(), 1)]);
+    assert_eq!(search(&store, &[("q", "spi"), ("prefix", "true")]), before[1]);
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
 }
 
@@ -1676,6 +1719,13 @@ async fn publication_is_opt_in_and_settings_require_login() {
     assert_eq!(published["items"].as_array().unwrap().len(), owner["items"].as_array().unwrap().len() - 1);
     let relevance = public_json(&app, "search?q=spin&sort=relevance").await;
     assert_eq!(sessions_of(&relevance), [SESSION_ID, LINKED_CHILD]);
+    // Grouped, the published child folds into its published parent, and the private session is left out.
+    let grouped = public_json(&app, "search?q=spi&prefix=true&group=session").await;
+    let groups = grouped["items"].as_array().unwrap();
+    assert_eq!(groups.iter().map(|g| (&g["sessionId"], &g["matches"])).collect::<Vec<_>>(), [(&json!(SESSION_ID), &json!(5))]);
+    let owner_grouped = app.get_abs(&format!("{BASE}/api/v1/search?q=spin&group=session"), Some(cookie)).await.json();
+    assert!(owner_grouped["items"].as_array().unwrap().iter().any(|g| g["sessionId"] == DESK_SESSION));
+    assert_eq!(public_json(&app, "search?q=hidden&group=session").await, empty);
     assert_eq!(public_json(&app, "search?q=hidden").await, empty);
     assert_eq!(public_json(&app, "search?q=spin&project=gadgets").await, empty);
     assert_eq!(

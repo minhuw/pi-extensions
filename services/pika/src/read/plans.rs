@@ -176,18 +176,16 @@ fn public_search_checks_publication_without_sorting() {
     });
 }
 
-/// Relevance scores the newest filtered matches in one pass without joins, then joins only the best ones, looking
-/// each up by rowid.
+/// Relevance scores the newest filtered matches in one pass without joins and selects the best ids; only those are
+/// looked up.
 #[test]
-fn relevance_search_joins_only_the_best() {
+fn relevance_search_scores_the_window_without_joins() {
     with_conn(|conn| {
         let p = params(&[("q", "x"), ("project", "p"), ("sort", "relevance")]);
         let statement = super::search::statement(&p, false, false).unwrap().unwrap();
-        let plan = plan(conn, &statement.sql, Some(statement.args));
         assert_eq!(
-            plan,
+            plan(conn, &statement.sql, Some(statement.args)),
             [
-                "CO-ROUTINE best",
                 "CO-ROUTINE ranked",
                 "SCAN search_fts VIRTUAL TABLE INDEX 192:M1",
                 "LIST SUBQUERY 1",
@@ -195,8 +193,38 @@ fn relevance_search_joins_only_the_best() {
                 "CREATE BLOOM FILTER",
                 "SCAN ranked",
                 "USE TEMP B-TREE FOR ORDER BY",
-                "SCAN best",
+            ]
+        );
+    });
+}
+
+/// A hit is looked up by its rowid; a prefix query's hits by their range, evaluating the query once, with each match in
+/// the range tested against the ids before it is joined.
+#[test]
+fn hits_are_looked_up_by_rowid_or_by_their_range() {
+    use super::search::Lookup;
+    with_conn(|conn| {
+        let p = params(&[("q", "x"), ("project", "p")]);
+        let one = Lookup::new("\"x\"", &p, false);
+        let args = vec![Sql::Text("\"x\"".into()), Sql::Integer(5), Sql::Text("p".into())];
+        assert_eq!(
+            plan(conn, &one.sql(), Some(args)),
+            [
                 "SCAN search_fts VIRTUAL TABLE INDEX 0:=M1",
+                "SEARCH d USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
+            ]
+        );
+        let range = Lookup::new("\"x\"*", &p, false);
+        let args = vec![Sql::Text("\"x\"*".into()), Sql::Integer(5), Sql::Integer(9), Sql::Text("[5,9]".into()), Sql::Text("p".into())];
+        assert_eq!(
+            plan(conn, &range.sql(), Some(args)),
+            [
+                "SCAN search_fts VIRTUAL TABLE INDEX 0:M1><",
+                "LIST SUBQUERY 1",
+                "SCAN json_each VIRTUAL TABLE INDEX 1:",
+                "CREATE BLOOM FILTER",
                 "SEARCH d USING INTEGER PRIMARY KEY (rowid=?)",
                 "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
                 "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
@@ -205,6 +233,44 @@ fn relevance_search_joins_only_the_best() {
     });
 }
 
+/// Grouped search reads the window newest first from the index alone, testing the sid bits against the filtered
+/// sessions with no join and no sort; it walks each session's parents by primary key and the id index.
+#[test]
+fn grouped_search_reads_the_window_without_joins() {
+    use super::search::{Grouped, parent_sql};
+    with_conn(|conn| {
+        for sort in ["newest", "relevance"] {
+            let p = params(&[("q", "x"), ("device", "d"), ("project", "p"), ("sort", sort), ("prefix", "true")]);
+            let (sql, args) = Grouped::new(&p).unwrap().unwrap().window(&p, false, false);
+            assert_eq!(
+                plan(conn, &sql, Some(args)),
+                [
+                    "SCAN search_fts VIRTUAL TABLE INDEX 192:M1",
+                    "LIST SUBQUERY 1",
+                    "SEARCH s USING COVERING INDEX sessions_device_project (device=? AND project=?)",
+                    "CREATE BLOOM FILTER",
+                ],
+                "{sort}"
+            );
+        }
+        assert_eq!(
+            plan(conn, &parent_sql(false), None),
+            ["SEARCH c USING INTEGER PRIMARY KEY (rowid=?)", "SEARCH s USING COVERING INDEX sqlite_autoindex_sessions_1 (id=?)"]
+        );
+        assert_eq!(
+            plan(conn, &parent_sql(true), None),
+            [
+                "SEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH s USING INDEX sqlite_autoindex_sessions_1 (id=?)",
+                "LIST SUBQUERY 2",
+                "SCAN json_each VIRTUAL TABLE INDEX 1:",
+                "SCALAR SUBQUERY 1",
+                "SEARCH settings USING PRIMARY KEY (key=?)",
+                "CREATE BLOOM FILTER",
+            ]
+        );
+    });
+}
 
 /// The trace reads every table of one session by primary key or by its own index, each line by its position, and each
 /// linked request by its id. Its compactions walk the session's entries without a type index, which reads only the
