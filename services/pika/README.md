@@ -121,7 +121,7 @@ Open **Settings → Published projects** and publish the projects you want to sh
 
 The public gallery is at `<url>/public`, a project's gallery at `<url>/public?project=<name>`, and an individual trajectory at `<url>/public/s/<sessionId>`. Visitors need no login and can replay trajectories, inspect model and tool records, and read transcripts. Publishing exposes the session's prompts, responses, thinking, tool inputs and outputs, images, raw entries, and metadata without automatic redaction. Captured provider request payloads remain private, and the public UI has no relay or management controls.
 
-With pika's built-in password, visitors who aren't signed in find the gallery on their own: the server's address opens it once any project is published, a link to a published trajectory (`<url>/s/<sessionId>`) opens its public page, and the login page links to it. Everything else still asks for the password. **Sign in** in the public pages' top band opens the same page in your own view.
+With pika's built-in password, visitors who aren't signed in find the gallery on their own: the server's address opens it once any project is published, a link to a published trajectory (`<url>/s/<sessionId>`) opens its public page, and the login page links to it. Everything else still asks for the password. **Sign in** in the public pages' top band opens the same page in your own view. Signed in, **View as guest** in the top band opens the page you're on as a visitor sees it, and **Exit guest view** brings you back.
 
 **Unpublish** removes access on subsequent requests, including direct image and raw-entry links. Public API responses disable caching; copies already saved by visitors cannot be recalled. Settings survive server restarts and `pika reindex`.
 

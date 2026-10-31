@@ -11,6 +11,7 @@ Element.prototype.scrollTo = function scrollTo(this: Element, options?: ScrollTo
 
 beforeEach(() => {
 	localStorage.clear();
+	sessionStorage.clear();
 	installMatchMedia(false);
 	delete document.documentElement.dataset.theme;
 });

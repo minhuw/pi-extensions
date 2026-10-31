@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
+import { guestPath, setGuestView } from "../lib/guestView";
 import { useShortcuts } from "../lib/keyboard";
 import { RELAY_BADGE_POLL_MS, useHealth, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
@@ -37,12 +38,13 @@ export const BAND_CONTROL = "flex h-8 shrink-0 items-center gap-1.5 rounded-sm p
 export function SignBand({ home, children, controls }: { home: string; children?: ReactNode; controls?: ReactNode }) {
 	return (
 		<header
-			className="relative flex h-12 shrink-0 items-center gap-2 bg-band pr-3 pl-4 text-band-ink before:absolute before:inset-x-0 before:top-[5px] before:h-px before:bg-band-ink/85 dark:border-b dark:border-band-ink/30"
+			className="relative flex h-12 shrink-0 items-center gap-1 bg-band pr-3 pl-4 text-band-ink sm:gap-2 before:absolute before:inset-x-0 before:top-[5px] before:h-px before:bg-band-ink/85 dark:border-b dark:border-band-ink/30"
 			data-sign-band=""
 		>
-			<Link to={home} className="mr-3 flex h-8 shrink-0 items-center gap-2 rounded-sm pr-1 text-[17px] font-semibold tracking-[-0.01em]">
+			<Link to={home} className="mr-1 flex h-8 shrink-0 items-center gap-2 rounded-sm pr-1 text-[17px] font-semibold tracking-[-0.01em] sm:mr-3">
 				<PikaLogo size={22} className="shrink-0" />
-				pika
+				{/* Phones keep the logo alone, leaving the band's width to the navigation and controls. */}
+				<span className="max-sm:sr-only">pika</span>
 			</Link>
 			{children}
 			<div className="ml-auto flex shrink-0 items-center gap-1">{controls}</div>
@@ -72,8 +74,8 @@ function NavItem({ to, icon, children, end, badge, hint }: { to: string; icon: I
 			end={end}
 			className={({ isActive }) =>
 				cx(
-					"relative flex h-12 shrink-0 items-center gap-2 px-2.5 text-[13.5px] font-medium whitespace-nowrap",
-					"after:absolute after:inset-x-2.5 after:bottom-0 after:h-[3px]",
+					"relative flex h-12 shrink-0 items-center gap-2 px-2 text-[13.5px] font-medium whitespace-nowrap sm:px-2.5",
+					"after:absolute after:inset-x-2 after:bottom-0 after:h-[3px] sm:after:inset-x-2.5",
 					isActive ? "text-band-ink after:bg-band-ink" : "text-band-muted hover:text-band-ink",
 				)
 			}
@@ -119,6 +121,24 @@ function ActiveSessionsItem() {
 	);
 }
 
+/** Opens this page as a visitor who isn't signed in sees it: published trajectories only, loaded anonymously. */
+function GuestViewLink() {
+	const { pathname, search } = useLocation();
+	return (
+		<Link
+			to={guestPath(pathname, search)}
+			onClick={() => setGuestView(true)}
+			className={BAND_CONTROL}
+			title="See this page as a visitor who isn't signed in sees it"
+			data-guest-view=""
+		>
+			{/* The name only on wide screens: below them the band's width goes to the navigation's names. */}
+			<Icon name="eye" />
+			<span className="max-lg:sr-only">View as guest</span>
+		</Link>
+	);
+}
+
 function SignOutButton() {
 	const api = useApi();
 	const me = useMe();
@@ -137,8 +157,8 @@ function SignOutButton() {
 	};
 	return (
 		<button type="button" onClick={() => void signOut()} className={BAND_CONTROL}>
-			<Icon name="external" className="max-md:hidden" />
-			Sign out
+			<Icon name="external" className="md:max-lg:hidden" />
+			<span className="max-md:sr-only">Sign out</span>
 		</button>
 	);
 }
@@ -179,6 +199,7 @@ export function Layout({ children }: { children?: ReactNode }) {
 					controls={
 						<>
 							<ThemeToggle theme={theme} onToggle={toggle} />
+							<GuestViewLink />
 							<SignOutButton />
 						</>
 					}
