@@ -59,7 +59,7 @@
 	--color-band-muted: rgba(255, 255, 255, 0.7);
 	--color-band-hover: rgba(255, 255, 255, 0.12);
 
-	/* Actions and selection are black and white; colour is reserved for record kinds and errors. */
+	/* Actions and selection are black and white; colour is reserved for record kinds, errors, and model makers' marks. */
 	--color-accent: #0b0b0b;
 	--color-accent-soft: rgba(11, 11, 11, 0.06);
 	--color-red: #d52b1e;
@@ -92,6 +92,14 @@
 	--color-k-compaction-ink: #ffffff;
 	--color-k-error: #d52b1e;
 	--color-k-error-ink: #ffffff;
+
+	/*
+	 * Model makers' own colours, for a model's name beside its maker's mark: darkened here and lightened in the dark
+	 * theme for at least 4.5:1 against the page and a hovered row. Makers with black-and-white marks have none.
+	 */
+	--color-model-claude: #ad4e2c;
+	--color-model-gemini: #1a66d9;
+	--color-model-deepseek: #3a57e8;
 
 	--radius-sm: 2px;
 	--radius-md: 3px;
@@ -139,6 +147,9 @@
 	--color-k-compaction-ink: #0b0b0b;
 	--color-k-error: #ff6b5e;
 	--color-k-error-ink: #0b0b0b;
+	--color-model-claude: #d97757;
+	--color-model-gemini: #3186ff;
+	--color-model-deepseek: #8c9dff;
 	color-scheme: dark;
 }
 

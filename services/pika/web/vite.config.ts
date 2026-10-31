@@ -18,6 +18,8 @@ export default defineConfig(({ mode }) => ({
 		outDir: "dist",
 		emptyOutDir: true,
 		chunkSizeWarningLimit: 700,
+		// Minified builds drop license comments unless asked; keep them, such as the model marks' MIT notice.
+		rolldownOptions: { output: { comments: { legal: true } } },
 	},
 	test: {
 		environment: "jsdom",

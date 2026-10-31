@@ -64,6 +64,8 @@ describe("session list", () => {
 		expect(within(row).getByText("96.4k tokens")).toBeTruthy();
 		expect(within(row).getByText("$0.31")).toBeTruthy();
 		expect(within(row).getByText("gpt-5")).toBeTruthy();
+		// Each model carries its maker's mark.
+		expect([...row.querySelectorAll("[data-model-mark]")].map((mark) => mark.getAttribute("data-model-mark"))).toEqual(["claude", "openai"]);
 		expect(within(row).getByTitle("Child sessions").textContent).toBe("2 subagents");
 		// 80,000 of the 93,000 prompt tokens came from the cache.
 		expect(within(row).getByText("86% cached")).toBeTruthy();

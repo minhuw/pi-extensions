@@ -6,6 +6,7 @@ import { PikaLink as Link } from "../components/PikaLink";
 import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
 import { PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
+import { ModelName } from "../components/ModelName";
 import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { ApiError, useApi, type SessionFilters } from "../lib/api";
 import { deviceLabel, deviceOptions } from "../lib/devices";
@@ -200,9 +201,7 @@ function SessionCard({ session, depth = 0, lines, tones, parent, tree, toggle, s
 						</Context>
 					)}
 					{session.models.slice(0, 2).map((model) => (
-						<Context key={model} className="mono text-[11.5px]">
-							{model}
-						</Context>
+						<ModelName key={model} model={model} className="mono text-[11.5px]" />
 					))}
 					{session.models.length > 2 && <Context title={session.models.slice(2).join(", ")}>+{session.models.length - 2}</Context>}
 					{session.childCount > 0 && (
