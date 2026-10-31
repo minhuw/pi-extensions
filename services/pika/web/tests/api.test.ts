@@ -47,7 +47,7 @@ describe("PikaApi", () => {
 		await api.entries("abc", { from: 3, to: 9, limit: 200 });
 		await api.modelRequest("r1");
 		await api.herderRuns();
-		await api.search({ q: "hello world" });
+		await api.searchSessions({ q: "hello world" });
 		const urls = fetchImpl.mock.calls.map(([input]) => String(input));
 		expect(urls).toEqual([
 			"/pika/api/v1/facets",
@@ -57,7 +57,7 @@ describe("PikaApi", () => {
 			"/pika/api/v1/sessions/abc/entries?from=3&to=9&limit=200",
 			"/pika/api/v1/requests/r1",
 			"/pika/api/v1/herder/runs",
-			"/pika/api/v1/search?q=hello+world",
+			"/pika/api/v1/search?q=hello+world&group=session&prefix=true",
 		]);
 		expect(api.exportUrl("abc")).toBe("/pika/api/v1/sessions/abc/export");
 		expect(api.rawEntryUrl("abc", 4)).toBe("/pika/api/v1/sessions/abc/entries/4/raw");

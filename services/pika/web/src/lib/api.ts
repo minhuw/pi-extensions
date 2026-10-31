@@ -17,8 +17,8 @@ import type {
 	RelaySendResult,
 	RunDetail,
 	RunSummary,
-	SearchHit,
 	SessionDetail,
+	SessionMatches,
 	SessionSummary,
 	SessionTrace,
 	SessionTree,
@@ -212,8 +212,10 @@ export class PikaApi {
 		return this.request(`herder/runs/${encodeURIComponent(id)}`);
 	}
 
-	search(params: { q: string; device?: string; project?: string; cursor?: string; limit?: number }): Promise<Page<SearchHit>> {
-		return this.request("search", params);
+	/** Sessions matching `q`, with their newest hits; the word being typed also matches as a prefix. One page. */
+	searchSessions(params: { q: string; device?: string; project?: string; limit?: number }): Promise<Page<SessionMatches>> {
+		const { q, device, project, limit } = params;
+		return this.request("search", { q, device, project, group: "session", prefix: true, limit });
 	}
 
 	me(): Promise<Me> {

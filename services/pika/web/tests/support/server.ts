@@ -15,6 +15,7 @@ import type {
 	RelayTarget,
 	RunDetail,
 	SearchHit,
+	SessionMatches,
 	SessionDetail,
 	ChildSession,
 	SessionTrace,
@@ -661,7 +662,7 @@ export function createFakeServer({
 			return run ? json(200, run) : json(404, { error: "not found" });
 		}
 		if (parts[0] === "search") {
-			const q = (params.get("q") ?? "").toLowerCase();
+			const q = (params.get("q") ?? "").trim().toLowerCase();
 			const device = params.get("device");
 			const project = params.get("project");
 			const matching = hits.filter((hit) => {
@@ -670,6 +671,19 @@ export function createFakeServer({
 				if (project && session?.project !== project) return false;
 				return hit.snippet.toLowerCase().includes(q);
 			});
+			if (params.get("group") === "session") {
+				const groups = new Map<string, SessionMatches>();
+				for (const hit of matching) {
+					let group = groups.get(hit.sessionId);
+					if (!group) {
+						group = { sessionId: hit.sessionId, sessionTitle: hit.sessionTitle, matches: 0, hits: [] };
+						groups.set(hit.sessionId, group);
+					}
+					group.matches += 1;
+					if (group.hits.length < 3) group.hits.push(hit);
+				}
+				return json(200, { items: [...groups.values()].slice(0, Number(params.get("limit") ?? 20)), nextCursor: null });
+			}
 			return json(200, page(matching, params, 50));
 		}
 		return json(404, { error: "not found" });

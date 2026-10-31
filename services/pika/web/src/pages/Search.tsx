@@ -1,10 +1,10 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { FilterChip, MenuOption, optionLabel, plainOptions } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
 import { PikaLink as Link } from "../components/PikaLink";
-import { BUTTON, cx, EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
+import { EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { deviceOptions } from "../lib/devices";
 import { formatRelative } from "../lib/format";
@@ -13,7 +13,8 @@ import { parseSnippet } from "../lib/snippet";
 import type { SearchHit } from "../lib/types";
 
 export const SEARCH_DEBOUNCE_MS = 250;
-const PAGE_SIZE = 50;
+/** Sessions per search; the server ranks the newest matches, so more would mostly be older ones. */
+export const SESSION_LIMIT = 20;
 
 const KINDS: Record<SearchHit["kind"], { icon: IconName; label: string }> = {
 	user: { icon: "user", label: "Prompt" },
@@ -38,26 +39,6 @@ export function Snippet({ text }: { text: string }) {
 			)}
 		</span>
 	);
-}
-
-export interface HitGroup {
-	sessionId: string;
-	title: string;
-	hits: SearchHit[];
-}
-
-/** Groups hits by session, in the order each session first appears. */
-export function groupHits(hits: SearchHit[]): HitGroup[] {
-	const groups = new Map<string, HitGroup>();
-	for (const hit of hits) {
-		let group = groups.get(hit.sessionId);
-		if (!group) {
-			group = { sessionId: hit.sessionId, title: hit.sessionTitle, hits: [] };
-			groups.set(hit.sessionId, group);
-		}
-		group.hits.push(hit);
-	}
-	return [...groups.values()];
 }
 
 function hitLink(hit: SearchHit): string {
@@ -148,15 +129,14 @@ export function SearchPage() {
 		return () => clearTimeout(timer);
 	}, [input, q, setParams]);
 
-	const query = q.trim();
-	const results = useInfiniteQuery({
+	// A trailing space stays: it marks the last word finished, so it no longer matches as a prefix.
+	const query = q.trimStart();
+	const results = useQuery({
 		queryKey: ["search", query, device, project],
-		queryFn: ({ pageParam }) => api.search({ q: query, device, project, cursor: pageParam, limit: PAGE_SIZE }),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.nextCursor ?? undefined,
-		enabled: query.length > 0,
+		queryFn: () => api.searchSessions({ q: query, device, project, limit: SESSION_LIMIT }),
+		enabled: query.trim().length > 0,
 	});
-	const groups = useMemo(() => groupHits(results.data?.pages.flatMap((page) => page.items) ?? []), [results.data]);
+	const groups = results.data?.items ?? [];
 
 	return (
 		<Page className="pb-24">
@@ -179,7 +159,7 @@ export function SearchPage() {
 				<SearchFilters />
 			</div>
 			<hr className="mt-5 mb-1 border-0 border-t border-ink" />
-			{!query ? (
+			{!query.trim() ? (
 				<EmptyState title={api.publicView ? "Search published trajectories" : "Search every session"}>
 					Type to search prompts, answers, tool calls, results, and titles.
 				</EmptyState>
@@ -187,10 +167,10 @@ export function SearchPage() {
 				<div className="py-3">
 					<SkeletonLines lines={4} />
 				</div>
-			) : results.isError && groups.length === 0 ? (
+			) : results.isError ? (
 				<ErrorState error={results.error} onRetry={() => void results.refetch()} />
 			) : groups.length === 0 ? (
-				<EmptyState title="No results">Nothing matches “{query}”.</EmptyState>
+				<EmptyState title="No results">Nothing matches “{query.trim()}”.</EmptyState>
 			) : (
 				<div data-search-results="">
 					{groups.map((group) => (
@@ -199,9 +179,12 @@ export function SearchPage() {
 								to={`/s/${encodeURIComponent(group.sessionId)}`}
 								className="flex min-w-0 items-baseline gap-2 border-b border-line px-1.5 pb-1 text-[14px] hover:bg-hover"
 							>
-								<span className="min-w-0 truncate font-medium">{group.title || "Untitled session"}</span>
+								<span className="min-w-0 truncate font-medium">{group.sessionTitle || "Untitled session"}</span>
 								<span className="mono shrink-0 text-[11.5px] text-muted" aria-hidden="true">
 									{group.sessionId.slice(0, 8)}
+								</span>
+								<span className="tnum ml-auto shrink-0 text-[12px] text-muted" data-matches="">
+									{group.matches} {group.matches === 1 ? "match" : "matches"}
 								</span>
 							</Link>
 							<div>
@@ -209,7 +192,7 @@ export function SearchPage() {
 									const kind = KINDS[hit.kind] ?? KINDS.assistant;
 									return (
 										<Link
-											key={`${hit.seq}:${hit.kind}:${hit.entryId ?? ""}`}
+											key={`${hit.sessionId}:${hit.seq}:${hit.kind}:${hit.entryId ?? ""}`}
 											to={hitLink(hit)}
 											className="flex gap-3 border-b border-line px-1.5 py-1 text-[13px] leading-5 hover:bg-hover"
 											data-hit={hit.seq}
@@ -227,15 +210,10 @@ export function SearchPage() {
 							</div>
 						</section>
 					))}
-					{results.hasNextPage && (
-						<button
-							type="button"
-							disabled={results.isFetchingNextPage}
-							onClick={() => void results.fetchNextPage()}
-							className={cx(BUTTON.secondary, "mt-4")}
-						>
-							{results.isFetchingNextPage ? "Loading…" : "More results"}
-						</button>
+					{groups.length === SESSION_LIMIT && (
+						<p className="mt-4 px-1.5 text-[12px] text-muted">
+							Showing the {SESSION_LIMIT} most recent sessions. Add words or a filter to narrow the search.
+						</p>
 					)}
 				</div>
 			)}

@@ -182,6 +182,16 @@ export interface SearchHit {
 	at: string;
 }
 
+/** A session of `GET search?group=session`: its matches and those of its subagents and steps. */
+export interface SessionMatches {
+	sessionId: string;
+	sessionTitle: string;
+	/** How many of the newest matches are in the session or its descendants. */
+	matches: number;
+	/** The newest few, each naming the session it is in. */
+	hits: SearchHit[];
+}
+
 /** A turn as `GET sessions/:id/trace` lists it; times are epoch milliseconds, omitted when unknown. */
 export interface TraceTurn {
 	index: number;

@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSnippet } from "../src/lib/snippet";
 import type { Entry, SearchHit, Turn } from "../src/lib/types";
-import { groupHits, SEARCH_DEBOUNCE_MS, Snippet } from "../src/pages/Search";
+import { SEARCH_DEBOUNCE_MS, SESSION_LIMIT, Snippet } from "../src/pages/Search";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
@@ -64,13 +64,6 @@ describe("search snippets", () => {
 		expect(container.querySelectorAll("mark")).toHaveLength(1);
 		expect(container.textContent).toBe('<img src=x onerror="alert(1)">hit <script>alert(2)</script><b>bold</b>');
 	});
-
-	it("groups hits by session in first-appearance order", () => {
-		expect(groupHits(HITS).map((group) => [group.sessionId, group.hits.map((item) => item.seq)])).toEqual([
-			["s1", [4, 3]],
-			["s2", [1]],
-		]);
-	});
 });
 
 describe("search page", () => {
@@ -79,6 +72,7 @@ describe("search page", () => {
 		await screen.findAllByText("base", { selector: "mark" });
 		const groups = [...document.querySelectorAll<HTMLElement>("[data-result-group]")];
 		expect(groups.map((group) => group.getAttribute("data-result-group"))).toEqual(["s1", "s2"]);
+		expect(within(groups[0]).getByText("Fix the base path", { selector: "span" })).toBeTruthy();
 		expect([...groups[0].querySelectorAll("[data-hit]")].map((node) => [node.getAttribute("data-kind"), node.getAttribute("href")])).toEqual([
 			["assistant", "/s/s1?seq=4"],
 			["tool-result", "/s/s1?seq=3"],
@@ -87,6 +81,19 @@ describe("search page", () => {
 		const s2 = groups[1].querySelector("[data-snippet]")!;
 		expect(s2.textContent).toBe("rename the base <div>");
 		expect(s2.querySelector("div")).toBeNull();
+	});
+
+	it("shows each session's match count, keeps a trailing space, and says when sessions were left out", async () => {
+		const many = Array.from({ length: SESSION_LIMIT + 1 }, (_, i) => hit(`m${i}`, 1, "user", `<mark>base</mark> ${i}`));
+		const server = createFakeServer({ sessions: sessions(), hits: [...HITS, ...many] });
+		renderApp("/search?q=base+", server.fetch);
+		await screen.findAllByText("base", { selector: "mark" });
+		expect(server.calls).toContain("/api/v1/search?q=base+&group=session&prefix=true&limit=20");
+		const groups = [...document.querySelectorAll<HTMLElement>("[data-result-group]")];
+		expect(groups).toHaveLength(SESSION_LIMIT);
+		expect(groups.slice(0, 2).map((group) => group.querySelector("[data-matches]")?.textContent)).toEqual(["2 matches", "1 match"]);
+		expect(screen.getByText(/Showing the 20 most recent sessions/)).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "More results" })).toBeNull();
 	});
 
 	it("labels the device filter by name and searches by id", async () => {
@@ -100,7 +107,7 @@ describe("search page", () => {
 		fireEvent.click(screen.getByRole("menuitemradio", { name: "Studio Mac" }));
 		expect(await screen.findByRole("button", { name: "Device: Studio Mac" })).toBeTruthy();
 		await waitFor(() =>
-			expect(server.calls).toContain("/api/v1/search?q=base&device=4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a&limit=50"),
+			expect(server.calls).toContain("/api/v1/search?q=base&device=4f1c2b9e-0d7a-4c3e-9b8f-2a6d5e1c0b7a&group=session&prefix=true&limit=20"),
 		);
 		await waitFor(() => expect([...document.querySelectorAll("[data-result-group]")].map((g) => g.getAttribute("data-result-group"))).toEqual(["s2"]));
 	});
@@ -112,7 +119,7 @@ describe("search page", () => {
 		fireEvent.change(input, { target: { value: "sla" } });
 		fireEvent.change(input, { target: { value: "slash" } });
 		expect(server.calls.some((call) => call.includes("/search?"))).toBe(false);
-		await waitFor(() => expect(server.calls.filter((call) => call.includes("/search?"))).toEqual(["/api/v1/search?q=slash&limit=50"]));
+		await waitFor(() => expect(server.calls.filter((call) => call.includes("/search?"))).toEqual(["/api/v1/search?q=slash&group=session&prefix=true&limit=20"]));
 		expect(await screen.findByText("slash.", { exact: false, selector: "[data-snippet] span" })).toBeTruthy();
 
 		input.blur();
@@ -128,10 +135,10 @@ describe("search page", () => {
 		fireEvent.click(screen.getByRole("link", { name: "Search" }));
 		const input = await screen.findByRole("searchbox", { name: "Search" });
 		fireEvent.change(input, { target: { value: "base" } });
-		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&limit=50"));
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&group=session&prefix=true&limit=20"));
 		fireEvent.click(screen.getByRole("button", { name: /Device/ }));
 		fireEvent.click(await screen.findByRole("menuitemradio", { name: "laptop" }));
-		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&limit=50"));
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&group=session&prefix=true&limit=20"));
 		const searches = () => server.calls.filter((call) => call.includes("/search?"));
 		const before = searches().length;
 
@@ -157,13 +164,13 @@ describe("search page", () => {
 		await screen.findAllByText("base", { selector: "mark" });
 		fireEvent.click(screen.getByRole("button", { name: /Device/ }));
 		fireEvent.click(await screen.findByRole("menuitemradio", { name: "laptop" }));
-		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&limit=50"));
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&group=session&prefix=true&limit=20"));
 		await waitFor(() => expect(document.querySelectorAll("[data-result-group]")).toHaveLength(1));
 		expect(document.querySelector("[data-result-group]")?.getAttribute("data-result-group")).toBe("s2");
 
 		fireEvent.click(screen.getByRole("button", { name: /Project/ }));
 		fireEvent.click(await screen.findByRole("menuitemradio", { name: "pika" }));
-		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&project=pika&limit=50"));
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&device=laptop&project=pika&group=session&prefix=true&limit=20"));
 		expect(await screen.findByText("No results")).toBeTruthy();
 	});
 
@@ -246,7 +253,7 @@ describe("public search", () => {
 		expect(groups.map((group) => group.getAttribute("data-result-group"))).toEqual(["s1", "s2"]);
 		expect(within(groups[0]).getAllByRole("link")[0].getAttribute("href")).toBe("/public/s/s1");
 		expect([...groups[0].querySelectorAll("[data-hit]")].map((node) => node.getAttribute("href"))).toEqual(["/public/s/s1?seq=4", "/public/s/s1?seq=3"]);
-		expect(server.calls).toContain("/api/public/v1/search?q=base&limit=50");
+		expect(server.calls).toContain("/api/public/v1/search?q=base&group=session&prefix=true&limit=20");
 		expect(server.calls.some((call) => call.startsWith("/api/v1/"))).toBe(false);
 		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
 	});

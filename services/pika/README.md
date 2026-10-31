@@ -140,6 +140,7 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 ### Upgrading from 0.6
 
+- Search finds words inside Chinese, Japanese, and Korean text, which is written without spaces and so was found only where punctuation happened to set a word apart. The web UI's search groups results by session, with each session's match count, and matches the word being typed as a prefix.
 - The database migrates to schema version 7 when the server opens it, which rebuilds the full-text index (without a full reindex), so the server starts listening only after the rebuild: on the 20%-scale benchmark dataset (half a million entries) it took 84 seconds, and a year of data from five machines takes several minutes. The database grows by about an eighth, and its WAL grows by about a third of the database's size until the next checkpoint, so leave free disk space of about half the database's size. The migration is one-way: a 0.6 binary refuses the migrated database (`database schema version 7 is newer than this pika (6)`), so to go back to 0.6, restore a [backup](#backup) taken before upgrading.
 - The index uses pika's own tokenizer, so other SQLite tools, such as the `sqlite3` shell, can read every table except `search_fts`, which they reject with `no such tokenizer: pika_cjk`. Backups with `.backup` are unaffected.
 
