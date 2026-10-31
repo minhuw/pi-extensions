@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DESCRIPTION: Self-hosted store and Notion-style viewer for pi coding-agent trajectories
+  DESCRIPTION: Self-hosted store and viewer for pi coding-agent trajectories
 
 jobs:
   build:

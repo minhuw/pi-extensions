@@ -1,6 +1,6 @@
 # pika server
 
-`pika` is one Rust binary that stores every Pi trajectory from your machines and serves it back. It takes uploads from the [pika extension](../../extensions/pika/README.md), keeps each session line verbatim in SQLite, stores large content and request blocks once in a compressed blob store, and serves a read API and an embedded web UI: a filtered session list, which can show each session's subagents and steps as a tree under it; session views with per-tool rendering, inline subagents, and the exact request each model call received; an agent tree of each session's whole family of subagents, with their timing and costs; Herder run views; and full-text search. It also relays messages between running Pi sessions on any of your machines (see [Relay](#relay)).
+`pika` is one Rust binary that stores every Pi trajectory from your machines and serves it back. It takes uploads from the [pika extension](../../extensions/pika/README.md), keeps each session line verbatim in SQLite, stores large content and request blocks once in a compressed blob store, and serves a read API and an embedded web UI: a filtered session list, which can show each session's subagents and steps as a tree under it; session views with a zoomable timeline of every turn, model call, and tool call, per-tool rendering, inline subagents, the exact request each model call received, and how long each one waited for its first token; an agent tree of each session's whole family of subagents, with their timing and costs; Herder run views; and full-text search. It also relays messages between running Pi sessions on any of your machines (see [Relay](#relay)).
 
 It is built for one user in a homelab: plain HTTP, meant to sit behind a reverse proxy that terminates TLS. Devices authenticate with per-device tokens, which they get by pairing with the web UI. The UI is protected by one password with server-side sessions, or by the reverse proxy; the server refuses to start until one of them is set up.
 
@@ -136,6 +136,12 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
+### Upgrading from 0.5
+
+- The web UI is redesigned: the navigation moves from the sidebar to a band across the top, and the session page's timeline labels its rows, shows where each turn starts and ends, and zooms (⌘/Ctrl + scroll). Routes, links, and the API are unchanged.
+- The database migrates to schema version 6 when the server opens it, without a reindex, to keep each captured request's timing. The migration is one-way: a 0.5 binary refuses the migrated database (`database schema version 6 is newer than this pika (5)`), so to go back to 0.5, restore a [backup](#backup) taken before upgrading.
+- Time to first token needs the new pika extension, which records when each request was sent, when the response headers arrived, and when the first token streamed. Sessions uploaded earlier, or by older extensions, show no timing; everything else works as before.
+
 ### Upgrading from 0.3
 
 - Existing devices keep their names as their ids, so their history, filters, and relay ownership are unchanged. Names are now separate, editable labels: rename a device on the Devices page or with `pika token rename`. Devices known only from their uploads (their token is gone) get a row too, so a pairing can continue them.
@@ -201,7 +207,7 @@ The [`pika image`](../../.github/workflows/pika-image.yml) workflow publishes a 
 
 | Tag | Source |
 | --- | --- |
-| `latest`, `0.5.0`, `0.5` | a `pika-v0.5.0` release tag |
+| `latest`, `0.6.0`, `0.6` | a `pika-v0.6.0` release tag |
 | `edge` | the newest `master` commit that changed `services/pika/` |
 | `sha-<commit>` | that commit |
 
@@ -210,7 +216,7 @@ Prefer a version tag in production and `edge` to follow `master`.
 To release, set `version` in `Cargo.toml`, commit, then push a matching tag; the workflow refuses a tag that disagrees with `Cargo.toml`:
 
 ```bash
-git tag pika-v0.5.0 && git push origin pika-v0.5.0
+git tag pika-v0.6.0 && git push origin pika-v0.6.0
 ```
 
 Published from this public repository, the package is public, so servers pull it without logging in. A fork or a private copy of the repository may publish it as private; then make it public under the package's **Package settings → Change visibility**, or log in on the server with `docker login ghcr.io` and a token that has `read:packages`.
@@ -236,7 +242,7 @@ Instead of `password set`, mount the password as a file, such as a Docker or Com
 
 To upgrade, `docker pull` the tag and recreate the container with the same volume; the server migrates the database when it opens it. Coming from 0.1, read [Upgrading from 0.1](#upgrading-from-01) first.
 
-The bottom of the UI's sidebar shows the version and commit the server runs, such as `pika 0.3.0 (a1b2c3d)`; `docker exec pika pika --version` and `curl …/api/health` say the same. `edge` keeps the version of the last release, so compare the commit with the latest one on `master` to tell whether it is up to date.
+The right end of the UI's top band shows the version and commit the server runs, such as `pika 0.3.0 (a1b2c3d)`; `docker exec pika pika --version` and `curl …/api/health` say the same. `edge` keeps the version of the last release, so compare the commit with the latest one on `master` to tell whether it is up to date.
 
 ### Building it yourself
 
