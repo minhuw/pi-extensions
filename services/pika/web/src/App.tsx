@@ -56,6 +56,7 @@ export function AppRoutes() {
 			<Route path="public" element={<PublicLayout />}>
 				<Route index element={<SessionListPage />} />
 				<Route path="s/:id" element={<Suspense fallback={<SessionPageLoading />}><SessionViewPage /></Suspense>} />
+				<Route path="search" element={<SearchPage />} />
 				<Route path="*" element={<NotFoundPage />} />
 			</Route>
 			<Route element={<AuthGate />}>

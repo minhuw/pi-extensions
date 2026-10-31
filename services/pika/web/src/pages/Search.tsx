@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { FilterChip, MenuOption, optionLabel, plainOptions } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
+import { PikaLink as Link } from "../components/PikaLink";
 import { BUTTON, cx, EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { deviceOptions } from "../lib/devices";
@@ -179,7 +180,9 @@ export function SearchPage() {
 			</div>
 			<hr className="mt-5 mb-1 border-0 border-t border-ink" />
 			{!query ? (
-				<EmptyState title="Search every session">Type to search prompts, answers, tool calls, results, and titles.</EmptyState>
+				<EmptyState title={api.publicView ? "Search published trajectories" : "Search every session"}>
+					Type to search prompts, answers, tool calls, results, and titles.
+				</EmptyState>
 			) : results.isPending ? (
 				<div className="py-3">
 					<SkeletonLines lines={4} />

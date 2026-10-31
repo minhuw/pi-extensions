@@ -70,10 +70,14 @@ pub(crate) struct Statement {
     relevance: bool,
 }
 
-/// The `device` and `project` filters as conditions on `sessions s`, with their arguments.
-fn session_filters(p: &Params) -> (String, Vec<Sql>) {
+/// The `device` and `project` filters as conditions on `sessions s`, with their arguments; in the public namespace,
+/// also publication, so no snippet or title of an unpublished session can match.
+fn session_filters(p: &Params, public: bool) -> (String, Vec<Sql>) {
     let mut filters = String::new();
     let mut args = Vec::new();
+    if public {
+        filters.push_str(&format!(" AND {}", super::publishing::SESSION_FILTER));
+    }
     if let Some(device) = p.get("device") {
         filters.push_str(" AND s.device = ?");
         args.push(Sql::Text(device.to_owned()));
@@ -91,7 +95,7 @@ fn session_filters(p: &Params) -> (String, Vec<Sql>) {
 /// SQLite builds once: joining every match of a common word to its document and session reads most of the index's
 /// documents. The bits identify the session while every sid is below 2^20 (`wide_sids` is false); otherwise matches
 /// that pass them are joined for the exact check. Every hit passes the exact filters in its final join as well.
-pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statement>> {
+pub(crate) fn statement(p: &Params, wide_sids: bool, public: bool) -> ReadResult<Option<Statement>> {
     let relevance = match p.get("sort") {
         None | Some("newest") => false,
         Some("relevance") => true,
@@ -103,7 +107,7 @@ pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statem
         return Err(bad("sort=relevance returns one page"));
     }
     let Some(query) = p.get("q").and_then(fts_query) else { return Ok(None) };
-    let (filters, filter_args) = session_filters(p);
+    let (filters, filter_args) = session_filters(p, public);
     let mut prefilter = String::new();
     if !filters.is_empty() {
         prefilter = format!(
@@ -177,10 +181,10 @@ pub(crate) fn statement(p: &Params, wide_sids: bool) -> ReadResult<Option<Statem
     Ok(Some(Statement { sql, args, limit, relevance }))
 }
 
-/// Whether any session passes the `device` and `project` filters (a search with none finds nothing), and whether a
+/// Whether any session passes the filters (a search with none finds nothing), and whether a
 /// sid reaches past the sid bits of document ids.
-fn sessions_for_filters(conn: &Connection, p: &Params) -> ReadResult<(bool, bool)> {
-    let (filters, args) = session_filters(p);
+fn sessions_for_filters(conn: &Connection, p: &Params, public: bool) -> ReadResult<(bool, bool)> {
+    let (filters, args) = session_filters(p, public);
     Ok(conn
         .prepare_cached(&format!(
             "SELECT EXISTS (SELECT 1 FROM sessions s WHERE 1{filters}), COALESCE((SELECT MAX(sid) FROM sessions), 0) > {SID_MASK}"
@@ -192,8 +196,14 @@ fn sessions_for_filters(conn: &Connection, p: &Params) -> ReadResult<(bool, bool
 /// stops at `limit`; `sort=relevance` returns the best `limit` by bm25 of the newest `RELEVANCE_WINDOW` filtered
 /// matches as one page. Relevance does not page because bm25 scores change with every indexed document.
 pub fn search(conn: &Connection, p: &Params) -> ReadResult<Page<Hit>> {
-    let (any, wide_sids) = sessions_for_filters(conn, p)?;
-    match statement(p, wide_sids)? {
+    search_scoped(conn, p, false)
+}
+
+/// `search`, in the public namespace only over published sessions. Run it in one snapshot: publication is read with
+/// the matches.
+pub fn search_scoped(conn: &Connection, p: &Params, public: bool) -> ReadResult<Page<Hit>> {
+    let (any, wide_sids) = sessions_for_filters(conn, p, public)?;
+    match statement(p, wide_sids, public)? {
         Some(statement) if any => run(conn, statement),
         _ => Ok(Page { items: Vec::new(), next_cursor: None }),
     }
@@ -286,7 +296,7 @@ mod tests {
                         }
                         let mut found = Vec::new();
                         for wide_sids in [false, true] {
-                            let hits = run(conn, statement(&p, wide_sids)?.unwrap())?.items;
+                            let hits = run(conn, statement(&p, wide_sids, false)?.unwrap())?.items;
                             let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
                             ids.sort();
                             ids.dedup();
@@ -404,7 +414,7 @@ mod tests {
                                 p.0.insert(k.into(), v.into());
                             }
                             for wide_sids in [false, true] {
-                                let hits = run(conn, statement(&p, wide_sids)?.unwrap())?.items;
+                                let hits = run(conn, statement(&p, wide_sids, false)?.unwrap())?.items;
                                 assert_eq!(hits.len(), want, "{filters:?} {q} {sort} {wide_sids}");
                                 if !unfiltered {
                                     assert!(hits.iter().all(|h| h.session_id == "s1"), "{filters:?} {q} {sort} {wide_sids}");
@@ -418,6 +428,72 @@ mod tests {
             .unwrap();
     }
 
+    /// Public search finds only published sessions' matches, with every filter, sort, and sid-bit path, including a
+    /// document whose id carries a published session's sid bits but belongs to an unpublished one.
+    #[test]
+    fn public_search_finds_only_published_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path()).unwrap();
+        let sessions = [("s0", "a", "/x/p"), ("s1", "b", "/x/p"), ("s2", "a", "/x/q"), ("s3", "b", "/x/q")];
+        for (id, device, cwd) in sessions {
+            let lines = session(id, cwd, &["alpha beta", "gamma alpha", "beta only", "alpha"]);
+            let batch = serde_json::from_value(json!({ "streams": [{ "key": format!("session:{id}"), "kind": "session", "offset": 0, "lines": lines }] }));
+            crate::ingest::apply(&store, device, &batch.unwrap()).unwrap();
+        }
+        let hits = |public: bool, filters: &[(&str, &str)], sort: &str, wide_sids: Option<bool>| {
+            let mut p = Params::default();
+            for (k, v) in filters.iter().copied().chain([("q", "alpha"), ("sort", sort)]) {
+                p.0.insert(k.into(), v.into());
+            }
+            store
+                .read(|conn| match wide_sids {
+                    Some(wide_sids) => Ok(run(conn, statement(&p, wide_sids, public)?.unwrap())?.items),
+                    None => Ok::<_, ReadError>(search_scoped(conn, &p, public)?.items),
+                })
+                .unwrap()
+                .into_iter()
+                .map(|h| h.session_id)
+                .collect::<Vec<_>>()
+        };
+        // Nothing is published yet: the owner finds every session, a visitor none.
+        assert_eq!(hits(false, &[], "newest", None).len(), 12);
+        assert!(hits(true, &[], "newest", None).is_empty());
+
+        store
+            .write(|tx| {
+                crate::read::publishing::update(tx, "q", true)?;
+                let sid = |id: &str| tx.query_row("SELECT sid FROM sessions WHERE id = ?1", [id], |r| r.get::<_, i64>(0));
+                let forged = 1 << 32 | (sid("s2")? & SID_MASK) << SID_SHIFT | 5;
+                tx.execute(
+                    "INSERT INTO search_docs (id, sid, seq, kind, at, text) VALUES (?1, ?2, 1, 'user', 1000, 'alpha forged')",
+                    [forged, sid("s0")?],
+                )?;
+                tx.execute("INSERT INTO search_fts (rowid, text) VALUES (?1, 'alpha forged')", [forged])?;
+                Ok::<_, ReadError>(())
+            })
+            .unwrap();
+        for filters in [vec![], vec![("device", "a")], vec![("project", "q")], vec![("project", "p")], vec![("device", "b"), ("project", "q")]] {
+            let want: Vec<&str> = sessions
+                .iter()
+                .filter(|(_, device, cwd)| {
+                    cwd.ends_with('q') && filters.iter().all(|(k, v)| if *k == "device" { device == v } else { cwd.ends_with(v) })
+                })
+                .map(|(id, ..)| *id)
+                .collect();
+            for sort in ["newest", "relevance"] {
+                for wide_sids in [None, Some(false), Some(true)] {
+                    let mut ids = hits(true, &filters, sort, wide_sids);
+                    assert_eq!(ids.len(), want.len() * 3, "{filters:?} {sort} {wide_sids:?}");
+                    ids.sort();
+                    ids.dedup();
+                    assert_eq!(ids, want, "{filters:?} {sort} {wide_sids:?}");
+                }
+            }
+        }
+        // The owner's search is unchanged, the forged document included.
+        assert_eq!(hits(false, &[], "newest", None).len(), 13);
+    }
+
     /// Newest-first search reads the index in rowid order and stops at the limit: no sort.
     #[test]
     fn newest_first_needs_no_sort() {
@@ -427,7 +503,7 @@ mod tests {
         for (key, value) in [("q", "x"), ("device", "d"), ("project", "p"), ("cursor", &crate::read::encode_cursor(&[json!(5)]))] {
             p.0.insert(key.into(), value.into());
         }
-        let Statement { sql, args, .. } = statement(&p, false).unwrap().unwrap();
+        let Statement { sql, args, .. } = statement(&p, false, false).unwrap().unwrap();
         let plan: Vec<String> = store
             .read(|conn| {
                 conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?

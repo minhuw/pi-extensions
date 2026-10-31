@@ -33,6 +33,7 @@ fn session_routes() -> Router<AppState> {
         .route("/sessions/{id}/entries/{seq}/image/{index}", get(image))
         .route("/sessions/{id}/updates", get(updates))
         .route("/sessions/{id}/trace", get(trace))
+        .route("/search", get(search))
 }
 
 pub fn routes() -> Router<AppState> {
@@ -43,7 +44,6 @@ pub fn routes() -> Router<AppState> {
         .route("/requests/{id}", get(request))
         .route("/herder/runs", get(herder_runs))
         .route("/herder/runs/{id}", get(herder_run))
-        .route("/search", get(search))
 }
 
 /// An explicit allowlist: unknown public endpoints never reach the SPA fallback.
@@ -343,8 +343,8 @@ async fn herder_run(State(state): State<AppState>, Path(id): Path<String>) -> Re
     json(&state, move |store, conn| read::herder::detail(conn, &store.blobs, &id)).await
 }
 
-async fn search(State(state): State<AppState>, Query(params): QueryParams) -> Response {
-    json(&state, move |_, conn| read::search::search(conn, &Params(params))).await
+async fn search(State(state): State<AppState>, Extension(scope): Extension<Scope>, Query(params): QueryParams) -> Response {
+    scoped_json(&state, scope, None, move |_, conn| read::search::search_scoped(conn, &Params(params), scope.public)).await
 }
 
 async fn export_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {

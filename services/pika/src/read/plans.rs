@@ -129,7 +129,7 @@ fn newest_first_search_filters_before_joining() {
     with_conn(|conn| {
         let cursor = encode_cursor(&[json!(5)]);
         let p = params(&[("q", "x"), ("device", "d"), ("project", "p"), ("cursor", &cursor)]);
-        let statement = super::search::statement(&p, false).unwrap().unwrap();
+        let statement = super::search::statement(&p, false, false).unwrap().unwrap();
         let plan = plan(conn, &statement.sql, Some(statement.args));
         assert_eq!(
             plan,
@@ -146,13 +146,43 @@ fn newest_first_search_filters_before_joining() {
     });
 }
 
+/// Public search builds the published sessions' sid bits once from the project index and checks each hit's session
+/// against publication; it still reads the index newest first, with no sort.
+#[test]
+fn public_search_checks_publication_without_sorting() {
+    with_conn(|conn| {
+        let statement = super::search::statement(&params(&[("q", "x")]), false, true).unwrap().unwrap();
+        assert_eq!(
+            plan(conn, &statement.sql, Some(statement.args)),
+            [
+                "SCAN search_fts VIRTUAL TABLE INDEX 192:M1",
+                "LIST SUBQUERY 3",
+                "SEARCH s USING COVERING INDEX sessions_project (project=?)",
+                "LIST SUBQUERY 2",
+                "SCAN json_each VIRTUAL TABLE INDEX 1:",
+                "SCALAR SUBQUERY 1",
+                "SEARCH settings USING PRIMARY KEY (key=?)",
+                "CREATE BLOOM FILTER",
+                "SEARCH d USING INTEGER PRIMARY KEY (rowid=?)",
+                "SEARCH s USING INTEGER PRIMARY KEY (rowid=?)",
+                "LIST SUBQUERY 5",
+                "SCAN json_each VIRTUAL TABLE INDEX 1:",
+                "SCALAR SUBQUERY 4",
+                "SEARCH settings USING PRIMARY KEY (key=?)",
+                "CREATE BLOOM FILTER",
+                "SEARCH e USING PRIMARY KEY (sid=? AND seq=?) LEFT-JOIN",
+            ]
+        );
+    });
+}
+
 /// Relevance scores the newest filtered matches in one pass without joins, then joins only the best ones, looking
 /// each up by rowid.
 #[test]
 fn relevance_search_joins_only_the_best() {
     with_conn(|conn| {
         let p = params(&[("q", "x"), ("project", "p"), ("sort", "relevance")]);
-        let statement = super::search::statement(&p, false).unwrap().unwrap();
+        let statement = super::search::statement(&p, false, false).unwrap().unwrap();
         let plan = plan(conn, &statement.sql, Some(statement.args));
         assert_eq!(
             plan,

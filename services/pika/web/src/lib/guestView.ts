@@ -21,9 +21,10 @@ export function setGuestView(on: boolean): void {
 	}
 }
 
-/** The public page in place of an owner's page: the gallery or a session's public page, keeping the query string. */
+/** The public page in place of an owner's page: the gallery, search, or a session's public page, keeping the query. */
 export function guestPath(pathname: string, search: string): string {
 	if (pathname === "/") return `/public${search}`;
+	if (pathname === "/search") return `/public/search${search}`;
 	const session = /^\/s\/([^/]+)$/.exec(pathname);
 	if (session) return `/public/s/${session[1]}${search}`;
 	return "/public";

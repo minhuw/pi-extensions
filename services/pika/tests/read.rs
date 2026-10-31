@@ -1587,9 +1587,27 @@ async fn publication_is_opt_in_and_settings_require_login() {
     ] })
     );
     let private_model = lines(&[json!({ "type": "message", "id": "private-model", "parentId": "d0000004",
-        "timestamp": "2026-10-22T08:00:07Z", "message": assistant("hidden", "private-model", 5) })]);
+        "timestamp": "2026-10-22T08:00:07Z", "message": assistant("hidden spin", "private-model", 5) })]);
     app.append(DESKTOP, &skey(DESK_SESSION), "session", byte_len(&desk_session()), &private_model).await;
+    let empty = json!({ "items": [], "nextCursor": null });
+    assert_eq!(public_json(&app, "search?q=spin").await, empty);
     assert_eq!(publish(&app, "widgets", true, Some(cookie)).await.status, StatusCode::OK);
+    // Public search finds only published sessions' matches; the owner's search still finds the private one.
+    let sessions_of = |hits: &Value| {
+        let mut ids: Vec<String> = hits["items"].as_array().unwrap().iter().map(|h| h["sessionId"].as_str().unwrap().to_owned()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let owner = app.get_abs(&format!("{BASE}/api/v1/search?q=spin"), Some(cookie)).await.json();
+    assert!(sessions_of(&owner).contains(&DESK_SESSION.to_owned()));
+    let published = public_json(&app, "search?q=spin").await;
+    assert_eq!(sessions_of(&published), [SESSION_ID, LINKED_CHILD]);
+    assert_eq!(published["items"].as_array().unwrap().len(), owner["items"].as_array().unwrap().len() - 1);
+    let relevance = public_json(&app, "search?q=spin&sort=relevance").await;
+    assert_eq!(sessions_of(&relevance), [SESSION_ID, LINKED_CHILD]);
+    assert_eq!(public_json(&app, "search?q=hidden").await, empty);
+    assert_eq!(public_json(&app, "search?q=spin&project=gadgets").await, empty);
     assert_eq!(
         public_json(&app, "facets").await,
         json!({
@@ -1602,7 +1620,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
         assert_eq!(public(&app, &format!("sessions/{DESK_SESSION}{suffix}")).await.status, StatusCode::NOT_FOUND);
     }
     // There is no provider context route or any other private API in this namespace.
-    for path in ["requests/req-1", "sessions/nope/export", "herder/runs", "search?q=test", "devices", "relay", "settings/publishing"] {
+    for path in ["requests/req-1", "sessions/nope/export", "herder/runs", "devices", "relay", "settings/publishing"] {
         let reply = public(&app, path).await;
         assert_eq!((reply.status, reply.json()), (StatusCode::NOT_FOUND, json!({ "error": "not_found" })), "{path}");
     }
@@ -1634,6 +1652,7 @@ async fn publication_is_opt_in_and_settings_require_login() {
     assert_eq!(decoded, trace);
     assert_eq!(publish(&app, "widgets", false, Some(cookie)).await.status, StatusCode::OK);
     assert_eq!(app.get_abs(image, None).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(public_json(&app, "search?q=spin").await, empty);
     for suffix in ["", "/turns", "/entries", "/entries/0/raw", "/entries/13/image/0", "/trace", "/updates"] {
         assert_eq!(public(&app, &format!("sessions/{SESSION_ID}{suffix}")).await.status, StatusCode::NOT_FOUND);
     }

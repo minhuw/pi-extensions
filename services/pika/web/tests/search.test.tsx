@@ -222,3 +222,47 @@ describe("search page", () => {
 		expect(screen.queryByText("Question 0")).toBeNull();
 	});
 });
+
+describe("public search", () => {
+	/** Only the public namespace reaches the fixture's data; anything else is recorded and refused. */
+	function publicServer() {
+		const source = createFakeServer({ sessions: sessions(), hits: HITS });
+		const calls: string[] = [];
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = String(input);
+			calls.push(url);
+			if (url.startsWith("/api/public/v1/")) return source.fetch(url.replace("/api/public/v1/", "/api/v1/"), init);
+			if (url === "/api/health") return source.fetch(input, init);
+			return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { "Content-Type": "application/json" } });
+		};
+		return { fetch: fetchImpl, calls };
+	}
+
+	it("searches published trajectories anonymously and keeps their links public", async () => {
+		const server = publicServer();
+		renderApp("/public/search?q=base", server.fetch);
+		await screen.findAllByText("base", { selector: "mark" });
+		const groups = [...document.querySelectorAll<HTMLElement>("[data-result-group]")];
+		expect(groups.map((group) => group.getAttribute("data-result-group"))).toEqual(["s1", "s2"]);
+		expect(within(groups[0]).getAllByRole("link")[0].getAttribute("href")).toBe("/public/s/s1");
+		expect([...groups[0].querySelectorAll("[data-hit]")].map((node) => node.getAttribute("href"))).toEqual(["/public/s/s1?seq=4", "/public/s/s1?seq=3"]);
+		expect(server.calls).toContain("/api/public/v1/search?q=base&limit=50");
+		expect(server.calls.some((call) => call.startsWith("/api/v1/"))).toBe(false);
+		expect(screen.queryByRole("navigation", { name: "Main" })).toBeNull();
+	});
+
+	it("is in the public band, with its shortcut, and says what it searches", async () => {
+		renderApp("/public", publicServer().fetch);
+		const band = await screen.findByRole("navigation", { name: "Public" });
+		expect(within(band).getByRole("link", { name: /Search/ }).getAttribute("href")).toBe("/public/search");
+		await screen.findByRole("heading", { name: "Published trajectories" });
+		fireEvent.keyDown(window, { key: "/" });
+		expect(await screen.findByText("Search published trajectories")).toBeTruthy();
+		expect(screen.getByRole("searchbox", { name: "Search" })).toBeTruthy();
+	});
+
+	it("is where the owner's guest view of search goes, with the query", async () => {
+		renderApp("/search?q=base", createFakeServer({ sessions: sessions(), hits: HITS }).fetch);
+		expect((await screen.findByRole("link", { name: "View as guest" })).getAttribute("href")).toBe("/public/search?q=base");
+	});
+});

@@ -67,7 +67,7 @@ export function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () =>
 	);
 }
 
-function NavItem({ to, icon, children, end, badge, hint }: { to: string; icon: IconName; children: ReactNode; end?: boolean; badge?: ReactNode; hint?: string }) {
+export function NavItem({ to, icon, children, end, badge, hint }: { to: string; icon: IconName; children: ReactNode; end?: boolean; badge?: ReactNode; hint?: string }) {
 	return (
 		<NavLink
 			to={to}

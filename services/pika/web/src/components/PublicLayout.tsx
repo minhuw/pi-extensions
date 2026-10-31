@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, Outlet, useLocation } from "react-router";
+import { Link, Outlet, useLocation, useNavigate } from "react-router";
 import { ApiContext, ApiError, useApi } from "../lib/api";
 import { inGuestView, setGuestView } from "../lib/guestView";
+import { useShortcuts } from "../lib/keyboard";
 import { useTheme } from "../lib/theme";
 import { Icon } from "./icons";
-import { BAND_CONTROL, ScrollRootContext, SignBand, ThemeToggle } from "./Layout";
+import { BAND_CONTROL, NavItem, ScrollRootContext, SignBand, ThemeToggle } from "./Layout";
 
 /** Anonymous pages have their own client and cache, even when the browser is also signed in. */
 export function PublicLayout() {
@@ -26,6 +27,9 @@ export function PublicLayout() {
 	const location = useLocation();
 	const ownerPage = (location.pathname.replace(/^\/public(?=\/|$)/, "") || "/") + location.search;
 	const [guestView] = useState(inGuestView);
+	const navigate = useNavigate();
+	// As in the owner's band, `/` opens search; the search page handles it itself by focusing its input.
+	useShortcuts(location.pathname === "/public/search" ? {} : { "/": () => navigate("/public/search") });
 	return (
 		<ApiContext.Provider value={api}>
 			<QueryClientProvider client={queryClient}>
@@ -48,7 +52,14 @@ export function PublicLayout() {
 							</>
 						}
 					>
-						<span className="text-[13.5px] font-medium whitespace-nowrap text-band-muted">Public trajectories</span>
+						<nav className="flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none]" aria-label="Public">
+							<NavItem to="/public" icon="sessions" end>
+								Public trajectories
+							</NavItem>
+							<NavItem to="/public/search" icon="search" hint="/">
+								Search
+							</NavItem>
+						</nav>
 					</SignBand>
 					<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
 						<ScrollRootContext.Provider value={scrollRoot}><Outlet /></ScrollRootContext.Provider>
