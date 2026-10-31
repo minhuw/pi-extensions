@@ -292,7 +292,7 @@ fn upgrading_from_version_5_adds_request_timing_without_a_reindex() {
 
     let store = pika::store::Store::open(&data).unwrap();
     let version: i64 = store.read(|c| c.pragma_query_value(None, "user_version", |r| r.get(0))).unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert_eq!(store.setting("needs_reindex").unwrap(), None);
     assert_eq!(dump_derived(&store), derived);
     assert_eq!(one(&store, "SELECT timing FROM requests")["timing"], Value::Null);

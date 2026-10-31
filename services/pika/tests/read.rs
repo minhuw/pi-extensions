@@ -954,6 +954,8 @@ fn opening_a_version_1_database_builds_the_search_index() {
         upload(&store, &skey(SESSION_ID), "session", &fixture("session.jsonl"), 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    // Dropping the full-text index needs its tokenizer.
+    pika::tokenizer::register(&conn).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
          DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"
@@ -966,6 +968,72 @@ fn opening_a_version_1_database_builds_the_search_index() {
     let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
     assert_eq!(hits.items.len(), 1);
     assert_eq!(hits.items[0].seq, 4);
+}
+
+const CJK_SESSION: &str = "c0000000-0000-0000-0000-00000000000c";
+
+/// A session in Chinese, with some English: a prompt and an answer.
+fn cjk_session() -> Vec<String> {
+    lines(&[
+        json!({ "type": "session", "version": 3, "id": CJK_SESSION, "timestamp": "2026-10-23T10:00:00.000Z", "cwd": "/home/me/code/widgets" }),
+        json!({ "type": "message", "id": "z0000001", "parentId": null, "timestamp": "2026-10-23T10:00:01.000Z",
+                "message": { "role": "user", "content": "请检查缓存测试为什么失败，跑一下 pytest", "timestamp": 1 } }),
+        json!({ "type": "message", "id": "z0000002", "parentId": "z0000001", "timestamp": "2026-10-23T10:00:05.000Z",
+                "message": assistant("数据库连接超时，缓存未命中。Fixed in widgets.py", "gpt-5", 2) }),
+    ])
+}
+
+/// Words inside Chinese text match wherever their characters appear together, alone or with English words, and are
+/// marked in snippets; a single character matches only where it stands alone.
+#[tokio::test]
+async fn search_finds_words_in_cjk_text() {
+    let app = world().await;
+    app.upload(DEVICE, &skey(CJK_SESSION), "session", &cjk_session()).await;
+    let key = |seq: i64, kind: &str| (CJK_SESSION.to_owned(), seq, kind.to_owned());
+    assert_eq!(hit_keys(&search(&app, &q("缓存")).await), [key(2, "assistant"), key(1, "user")]);
+    let hits = search(&app, &q("数据库连接")).await;
+    assert_eq!(hits[0]["snippet"], "<mark>数据库连接</mark>超时，缓存未命中。Fixed in widgets.py");
+    assert_eq!(search(&app, &q("缓存测试")).await[0]["snippet"], "请检查<mark>缓存测试</mark>为什么失败，跑一下 pytest");
+    assert_eq!(hit_keys(&search(&app, &q("检查 pytest")).await), [key(1, "user")]);
+    assert_eq!(hit_keys(&search(&app, &q("命中 widgets")).await), [key(2, "assistant")]);
+    assert_eq!(hit_keys(&search(&app, &q("连接失败")).await), []);
+    assert_eq!(hit_keys(&search(&app, &q("缓")).await), []);
+}
+
+/// Opening a version 6 database rebuilds the full-text index with the prefix index and the CJK tokenizer: it finds
+/// what the old index found, and words inside CJK text, which the old index could not.
+#[test]
+fn opening_a_version_6_database_rebuilds_the_search_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let search = |store: &pika::store::Store, pairs: &[(&str, &str)]| -> Vec<(String, i64)> {
+        let mut params = pika::read::Params::default();
+        for (k, v) in pairs {
+            params.0.insert((*k).into(), (*v).into());
+        }
+        let hits = store.read(|conn| pika::read::search::search(conn, &params)).unwrap();
+        hits.items.into_iter().map(|h| (h.session_id, h.seq)).collect()
+    };
+    let before = {
+        let store = pika::store::Store::open(&data).unwrap();
+        upload(&store, &skey(SESSION_ID), "session", &fixture("session.jsonl"), 100);
+        upload(&store, &skey(CJK_SESSION), "session", &cjk_session(), 100);
+        ["flaky", "spin", "pytest"].map(|q| search(&store, &[("q", q)]))
+    };
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    pika::tokenizer::register(&conn).unwrap();
+    conn.execute_batch(&format!("{UNDO_V7} PRAGMA user_version = 6;")).unwrap();
+    let count = |q: &str| conn.query_row("SELECT count(*) FROM search_fts WHERE search_fts MATCH ?1", [q], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!((count("\"缓存\""), count("\"spin\"")), (0, before[1].len() as i64));
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    let sql: String =
+        store.read(|conn| conn.query_row("SELECT sql FROM sqlite_master WHERE name = 'search_fts'", [], |r| r.get(0))).unwrap();
+    assert!(sql.contains("prefix = '3'") && sql.contains("pika_cjk"), "{sql}");
+    assert_eq!(["flaky", "spin", "pytest"].map(|q| search(&store, &[("q", q)])), before);
+    assert_eq!(search(&store, &[("q", "缓存")]), [(CJK_SESSION.to_owned(), 2), (CJK_SESSION.to_owned(), 1)]);
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
 }
 
 /// More than `RELEVANCE_WINDOW` newer matches on another device do not hide a device's own matches.
@@ -1042,6 +1110,8 @@ fn an_interrupted_upgrade_reindexes_on_the_next_open() {
         upload(&store, &skey(SESSION_ID), "session", &source, 100);
     }
     let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    // Dropping the full-text index needs its tokenizer.
+    pika::tokenizer::register(&conn).unwrap();
     conn.execute_batch(&format!(
         "DROP TABLE search_fts; DROP TABLE search_docs; DROP INDEX sessions_device_project; DROP INDEX sessions_root_device;
          DROP INDEX sessions_root_project; DROP INDEX sessions_root_device_project; {UNDO_V6} {UNDO_V5} {UNDO_V4} PRAGMA user_version = 1;"

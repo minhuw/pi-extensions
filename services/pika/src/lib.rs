@@ -15,6 +15,7 @@ pub mod reindex;
 pub mod relay;
 pub mod requests;
 pub mod store;
+pub mod tokenizer;
 pub mod util;
 
 /// The commit this binary was built from, as 7 hex digits, or empty when the build did not say (see `build.rs`).

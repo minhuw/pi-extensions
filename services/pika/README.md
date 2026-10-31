@@ -138,6 +138,11 @@ Relay lets a running Pi session send a text message to any other running Pi sess
 
 `PIKA_RELAY_TTL_SECS` and `PIKA_RELAY_HEARTBEAT_SECS` shorten the message lifetime and the heartbeat. They exist for tests and the end-to-end script only; do not set them in production.
 
+### Upgrading from 0.6
+
+- The database migrates to schema version 7 when the server opens it, which rebuilds the full-text index (without a full reindex), so the server starts listening only after the rebuild: on the 20%-scale benchmark dataset (half a million entries) it took 84 seconds, and a year of data from five machines takes several minutes. The database grows by about an eighth, and its WAL grows by about a third of the database's size until the next checkpoint, so leave free disk space of about half the database's size. The migration is one-way: a 0.6 binary refuses the migrated database (`database schema version 7 is newer than this pika (6)`), so to go back to 0.6, restore a [backup](#backup) taken before upgrading.
+- The index uses pika's own tokenizer, so other SQLite tools, such as the `sqlite3` shell, can read every table except `search_fts`, which they reject with `no such tokenizer: pika_cjk`. Backups with `.backup` are unaffected.
+
 ### Upgrading from 0.5
 
 - The web UI is redesigned: the navigation moves from the sidebar to a band across the top, and the session page's timeline labels its rows, shows where each turn starts and ends, and zooms (⌘/Ctrl + scroll). Routes, links, and the API are unchanged.

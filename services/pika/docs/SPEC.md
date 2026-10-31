@@ -196,6 +196,7 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   - `GET herder/runs/:id` returns `{ run: RunSummary, goal?, plan?, events: [{ seq, t, at, data }], steps: [{ key, id, task?, role, label?, phase?, status, attempts, sessionId?, commit?, startedAt?, endedAt? }] }`.
 - **`GET search`** accepts `q`, `device` (an id), `project`, `sort`, `cursor`, and `limit`. It returns `{ items: [{ sessionId, sessionTitle, seq, entryId, kind, snippet, at }], nextCursor }`.
   - Every word of `q`, or `"quoted phrase"`, must match; operators and special characters are plain text.
+  - Chinese, Japanese, and Korean text, written without spaces between words, is indexed as overlapping pairs of characters: a word of two or more such characters matches wherever they appear together, also inside a longer run, and a single one matches only where it stands alone.
   - `sort` is `newest` (default, by entry time, keyset-paged with `cursor`) or `relevance`.
   - `sort=relevance` returns a single page: the best `limit` (at most 100) matches by bm25 among the 20,000 newest matches that pass the `device` and `project` filters, with `nextCursor: null`. It does not page because bm25 scores change as documents are indexed; a `cursor` with `sort=relevance` is a 400.
   - `kind` is one of `user`, `assistant`, `tool-call`, `tool-result`, or `title` (a `session_info` name).
@@ -347,7 +348,7 @@ Relay lets running pi sessions send text messages to each other through the serv
 - **Storage model:**
   - Verbatim lines are kept in SQLite as the source of truth. Lines over 1 MiB go to the blob store, referenced by hash.
   - All typed tables are derived from the verbatim lines, so `pika reindex` can rebuild them. The settings, tokens, `devices`, `auth_sessions`, and `pairings` tables are not derived, and `reindex` leaves them alone, except that it replaces the `derived_generation` setting with random bytes, which the trace's `ETag` includes.
-  - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start.
+  - A schema migration that adds derived tables or changes how they are derived records the `needs_reindex` setting in its own transaction; opening the database reindexes while it is set, and the reindex transaction clears it, so an interrupted upgrade reindexes on the next start. A migration that changes only the full-text index (version 7) rebuilds it from the indexed documents in its own transaction instead, without a reindex.
 - **Embedded UI:** the binary embeds `services/pika/web/dist` when present. `cargo test` and debug builds must work without it, serving a placeholder page.
 
 ## Extension configuration

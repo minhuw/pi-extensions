@@ -12,6 +12,12 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
+/// SQL that puts back the full-text index that schema version 7 replaced, for tests that rewind `user_version`. Dropping
+/// the index needs `pika::tokenizer::register` on the connection.
+pub const UNDO_V7: &str = "DROP TABLE search_fts;
+    CREATE VIRTUAL TABLE search_fts USING fts5(text, content = 'search_docs', content_rowid = 'id',
+        tokenize = \"unicode61 remove_diacritics 2 categories 'L* N* Co So'\");
+    INSERT INTO search_fts (search_fts) VALUES ('rebuild');";
 /// SQL that removes what schema version 6 added, for tests that rewind `user_version`.
 pub const UNDO_V6: &str = "ALTER TABLE requests DROP COLUMN timing;";
 /// SQL that removes what schema version 5 added, for tests that rewind `user_version`.

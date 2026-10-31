@@ -14,6 +14,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v4.sql"),
     include_str!("schema_v5.sql"),
     include_str!("schema_v6.sql"),
+    include_str!("schema_v7.sql"),
 ];
 /// The first schema version whose derived tables an older database lacks or derives differently; opening such a
 /// database reindexes it.
@@ -55,7 +56,9 @@ pub struct Store {
     pub blobs: BlobStore,
 }
 
+/// Sets up a connection: its pragmas and the full-text index's tokenizer, which every use of the index needs.
 fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    crate::tokenizer::register(conn)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -71,6 +74,9 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         bail!("database schema version {version} is newer than this pika ({})", MIGRATIONS.len());
     }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version) {
+        if version > 0 {
+            tracing::info!("applying schema migration {}", index + 1);
+        }
         let tx = conn.transaction()?;
         tx.execute_batch(sql).with_context(|| format!("applying migration {}", index + 1))?;
         if version > 0 && version < REINDEX_BELOW && index + 1 >= REINDEX_BELOW {
