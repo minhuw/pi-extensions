@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import { PikaLink as Link } from "../components/PikaLink";
 import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
-import { PikaLogo } from "../components/icons";
+import { Icon, PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
 import { ModelName } from "../components/ModelName";
 import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
@@ -190,10 +190,17 @@ function SessionCard({ session, depth = 0, lines, tones, parent, tree, toggle, s
 				</span>
 				<span className={cx("flex min-w-0 items-center gap-x-3 text-[12px] text-muted", tree && "pl-6")}>
 					{/* Below the top, a row leaves out where it ran when that is where its parent ran. */}
+					{/* The project sits in a box with the Project filter's folder, so it reads apart from the device and models;
+					    phones keep the box alone and give the folder's room to the name. */}
 					{showProject && (
-						<Context title={session.cwd} className="text-ink/80">
-							{session.project || "—"}
-						</Context>
+						<span
+							className="flex h-[18px] min-w-0 shrink items-center gap-1 rounded-sm border border-ink/20 px-1.5 text-ink/80"
+							title={session.cwd}
+							data-project-label={session.project}
+						>
+							<Icon name="folder" size={11} className="shrink-0 opacity-70 max-sm:hidden" />
+							<span className="min-w-0 truncate">{session.project || "—"}</span>
+						</span>
 					)}
 					{showDevice && (
 						<Context title={session.device}>

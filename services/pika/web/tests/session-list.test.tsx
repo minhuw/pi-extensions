@@ -60,6 +60,10 @@ describe("session list", () => {
 		expect(row.getAttribute("href")).toBe("/s/a");
 		expect(within(row).getByText("mini")).toBeTruthy();
 		expect(within(row).getByText("api")).toBeTruthy();
+		// The project sits in its own box, with the Project filter's folder icon.
+		const project = within(row).getByText("api").closest("[data-project-label]")!;
+		expect(project.getAttribute("data-project-label")).toBe("api");
+		expect(project.querySelector("svg")).not.toBeNull();
 		expect(within(row).getByText("10m")).toBeTruthy();
 		expect(within(row).getByText("96.4k tokens")).toBeTruthy();
 		expect(within(row).getByText("$0.31")).toBeTruthy();
