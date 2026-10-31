@@ -50,7 +50,7 @@ export function BashOutput({
 		<div className="mb-1 flex items-center gap-2 text-[13px] text-muted">
 			<span>Output</span>
 			{exitCode !== null ? (
-				<Pill tone={exitCode === 0 ? "green" : "red"}>exit {exitCode}</Pill>
+				<Pill tone={exitCode === 0 ? "neutral" : "red"}>exit {exitCode}</Pill>
 			) : isError ? (
 				<Pill tone="red">failed</Pill>
 			) : null}

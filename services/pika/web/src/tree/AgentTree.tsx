@@ -8,7 +8,8 @@ import { formatCost, formatCount, formatDateTime, formatDuration, plural, totalT
 import { useViewState } from "../lib/viewState";
 import { useFamily } from "./data";
 import { continuesAt, defaultExpanded, expandAll, familyTotals, visibleRows, type FamilyNode, type FamilyTree } from "./model";
-import { Caret, KIND_CLASSES, KindPill, rowLabel, TreeLines, TreeStub, type Kind } from "./parts";
+import { CostDot, KindBullet } from "../trace/parts";
+import { Caret, KIND_CLASSES, KindPill, lineTones, rowLabel, TreeLines, TreeStub, type Kind } from "./parts";
 import { AgentTreeSkeleton } from "./Skeleton";
 
 /** Narrower pages drop the tokens column, then the timeline and subtree columns; see `WIDE` and `WIDEST`. */
@@ -34,9 +35,9 @@ function TimelineBar({ node, family, kind }: { node: FamilyNode; family: FamilyT
 	const width = Math.max(0.6, ((node.end - node.start) / length) * 100);
 	const title = `${formatDateTime(node.start)} – ${formatDateTime(node.end)} · ${formatDuration(node.end - node.start)}${node.live ? " · live" : ""}`;
 	return (
-		<span className="relative hidden h-[6px] rounded-full bg-hover lg:block" title={title} data-tree-bar="">
+		<span className="relative hidden h-[6px] bg-hover lg:block" title={title} data-tree-bar="">
 			<span
-				className={cx("absolute inset-y-0 rounded-full opacity-80", KIND_CLASSES[kind].bar)}
+				className={cx("absolute inset-y-0", KIND_CLASSES[kind].bar)}
 				style={{ left: `${Math.min(left, 99.4)}%`, width: `${Math.min(width, 100 - Math.min(left, 99.4))}%` }}
 			/>
 		</span>
@@ -68,6 +69,7 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 	const { kind, type, description } = rowLabel(node);
 	const expandable = node.children.length > 0;
 	const tokens = totalTokens(node.session.tokens);
+	const tones = lineTones(family, node);
 	return (
 		<div
 			ref={(element) => register(node.id, element)}
@@ -80,8 +82,8 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 			onFocus={() => onFocus(node.id)}
 			className={cx(
 				GRID,
-				"group h-8 rounded-sm px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-accent",
-				current ? "bg-accent-soft" : "hover:bg-hover",
+				"group h-8 border-b border-line px-2 text-[13px] outline-none focus-visible:ring-1 focus-visible:ring-ink",
+				current ? "bg-hover font-medium" : "hover:bg-hover",
 			)}
 			data-tree-node={node.id}
 			data-depth={node.depth}
@@ -89,12 +91,13 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 		>
 			<span className="flex h-full min-w-0 items-center gap-1.5">
 				<span className="flex h-full shrink-0">
-					<TreeLines continues={lines} elbow={ROW_ELBOW} reach={expandable ? CARET_REACH : LEAF_REACH} />
+					<TreeLines continues={lines} elbow={ROW_ELBOW} reach={expandable ? CARET_REACH : LEAF_REACH} tones={tones} />
 					<span className="relative flex w-[18px] items-center">
 						{expandable && <Caret open={open} onClick={() => onToggle(node.id)} />}
-						{expandable && open && <TreeStub from={ROW_ELBOW + 7} />}
+						{expandable && open && <TreeStub from={ROW_ELBOW + 7} tone={tones.stub} />}
 					</span>
 				</span>
+				{kind === "subagent" && <KindBullet family="agent" />}
 				<KindPill kind={kind}>{type}</KindPill>
 				{current ? (
 					<span className="min-w-0 truncate font-medium" title={node.session.title || description}>
@@ -104,7 +107,7 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 					<Link
 						to={sessionPath(node.id, "agents")}
 						tabIndex={-1}
-						className="min-w-0 truncate hover:underline"
+						className="min-w-0 truncate underline decoration-transparent underline-offset-[3px] hover:decoration-ink"
 						title={node.session.title || description}
 						data-tree-link=""
 					>
@@ -117,7 +120,7 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 					</span>
 				)}
 				{current && (
-					<span className="shrink-0 text-[11px] text-accent" data-this-session="">
+					<span className="shrink-0 text-[11.5px] text-muted" data-this-session="">
 						this session
 					</span>
 				)}
@@ -142,7 +145,10 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 			<Num title={tokens.toLocaleString("en-US")} className={WIDEST}>
 				{formatCount(tokens)}
 			</Num>
-			<Num>{formatCost(node.session.cost)}</Num>
+			<span className="flex min-w-0 items-center justify-end gap-1.5">
+				<CostDot cost={node.session.cost} scale="session" />
+				<Num>{formatCost(node.session.cost)}</Num>
+			</span>
 			<span className={cx("tnum truncate text-right text-[12.5px] text-muted", WIDE)} data-tree-subtree="">
 				{expandable ? formatCost(node.subtreeCost) : ""}
 			</span>
@@ -272,7 +278,7 @@ function TreeView({ sessionId, family }: { sessionId: string; family: FamilyTree
 			)}
 			{/* The header scrolls with the rows when even the narrowest grid does not fit. */}
 			<div className="mt-2 overflow-x-auto">
-				<div className={cx(GRID, "h-7 border-b border-line px-2 text-[11px] font-medium tracking-[0.04em] text-muted uppercase")} aria-hidden="true">
+				<div className={cx(GRID, "h-7 border-b border-ink px-2 text-[12px] font-medium text-muted")} aria-hidden="true">
 					<span>Session</span>
 					<span className={WIDE}>Timeline</span>
 					<span className="text-right">Duration</span>
@@ -280,7 +286,7 @@ function TreeView({ sessionId, family }: { sessionId: string; family: FamilyTree
 					<span className="text-right">Cost</span>
 					<span className={cx("text-right", WIDE)}>Subtree</span>
 				</div>
-				<div role="tree" aria-label="Agent tree" className="mt-1" onKeyDown={onKeyDown}>
+				<div role="tree" aria-label="Agent tree" onKeyDown={onKeyDown}>
 					{rows.map((node) => (
 						<TreeRow
 							key={node.id}

@@ -1,9 +1,11 @@
-import { cx } from "../components/ui";
-import { FAMILIES, FAMILY_CLASSES, FAMILY_LABELS } from "./kinds";
+import { FAMILIES, FAMILY_LABELS } from "./kinds";
+import { KindBullet } from "./parts";
 
 const KEYS: [string, string][] = [
 	["Click", "inspect a row or bar"],
 	["Drag", "filter the timeline by time"],
+	["⌘/Ctrl + scroll", "zoom the timeline"],
+	["Shift + scroll", "pan"],
 	["↑ ↓", "move"],
 	["← →", "fold a turn"],
 	["[ ]", "previous / next turn"],
@@ -22,7 +24,7 @@ export function LedgerHelp() {
 		<div className="group relative" data-ledger-help="">
 			<button
 				type="button"
-				className="inline-flex size-5 items-center justify-center rounded-full border border-line text-[11px] leading-none text-muted transition-colors duration-150 hover:border-muted hover:text-ink focus-visible:border-accent focus-visible:text-ink focus-visible:outline-none"
+				className="inline-flex size-6 items-center justify-center rounded-full border border-line text-[12px] leading-none font-medium text-muted transition-colors duration-150 hover:border-ink hover:text-ink focus-visible:border-ink focus-visible:text-ink"
 				aria-label="Keyboard shortcuts and colors"
 				aria-describedby="ledger-help"
 			>
@@ -34,12 +36,12 @@ export function LedgerHelp() {
 				role="tooltip"
 				className="invisible absolute top-full right-0 z-30 pt-1.5 opacity-0 transition-opacity duration-150 group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100"
 			>
-				<div className="w-[300px] rounded-md border border-line bg-page px-3.5 py-3 text-[12.5px] shadow-[0_4px_16px_rgba(15,15,15,0.12)]">
-					<dl className="grid grid-cols-[64px_1fr] gap-y-1">
+				<div className="w-[330px] rounded-sm border border-ink bg-page px-3.5 py-3 text-[13px] shadow-[0_8px_24px_rgba(0,0,0,0.14)]">
+					<dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
 						{KEYS.map(([key, what]) => (
 							<div key={key} className="contents">
 								<dt>
-									<kbd className="mono rounded-[3px] border border-line px-1.5 py-px text-[11px] text-muted">{key}</kbd>
+									<kbd className="mono rounded-sm border border-line px-1.5 py-px text-[11px] text-ink">{key}</kbd>
 								</dt>
 								<dd className="text-muted">{what}</dd>
 							</div>
@@ -48,12 +50,12 @@ export function LedgerHelp() {
 					<div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-line pt-2.5">
 						{FAMILIES.map((family) => (
 							<span key={family} className="flex items-center gap-2 text-muted">
-								<span className={cx("h-2 w-3.5 rounded-[2px] opacity-80", FAMILY_CLASSES[family].bar)} />
+								<KindBullet family={family} size={14} />
 								{FAMILY_LABELS[family]}
 							</span>
 						))}
 						<span className="flex items-center gap-2 text-muted">
-							<span className="h-2 w-3.5 rounded-[2px] bg-k-error" />
+							<span aria-hidden="true" className="size-3.5 rounded-full border-2 border-k-error" />
 							Error
 						</span>
 					</div>

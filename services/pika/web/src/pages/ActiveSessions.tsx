@@ -33,8 +33,8 @@ const LONG_TEXT = 280;
 
 function H2({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
 	return (
-		<div className="mt-10 mb-2 flex items-center gap-2">
-			<h2 className="text-[20px] font-semibold">{children}</h2>
+		<div className="mt-9 mb-2 flex items-center gap-2">
+			<h2 className="text-[16px] font-semibold">{children}</h2>
 			{aside}
 		</div>
 	);
@@ -49,15 +49,15 @@ function StateIndicator({ state, since }: { state: RelaySessionState; since: str
 	const busy = state === "busy";
 	return (
 		<span
-			className="mt-[3px] flex w-[52px] shrink-0 items-center gap-1.5 text-[12px]"
+			className="flex h-5 w-[52px] shrink-0 items-center gap-1.5 text-[12px]"
 			data-session-state={state}
 			title={`${busy ? "Busy" : "Idle"} since ${formatDateTime(since)}`}
 		>
 			<span
 				aria-hidden="true"
-				className={cx("h-2 w-2 shrink-0 rounded-full", busy ? "animate-pulse bg-accent motion-reduce:animate-none" : "bg-green")}
+				className={cx("h-2 w-2 shrink-0 rounded-full", busy ? "animate-pulse bg-ink motion-reduce:animate-none" : "border border-ink/45")}
 			/>
-			<span className={busy ? "text-accent" : "text-muted"}>{busy ? "Busy" : "Idle"}</span>
+			<span className={busy ? "font-medium text-ink" : "text-muted"}>{busy ? "Busy" : "Idle"}</span>
 		</span>
 	);
 }
@@ -79,14 +79,18 @@ function SessionRow({
 	const labelClass = cx("min-w-0 truncate font-medium", !named && "mono");
 	return (
 		<li
-			className="flex items-start gap-3 border-b border-line px-2 py-2.5 last:border-b-0 hover:bg-soft"
+			className="flex items-start gap-3 border-b border-line px-1.5 py-1.5 last:border-b-0 hover:bg-hover"
 			data-online-session={session.id}
 		>
 			<StateIndicator state={session.state} since={session.stateSince} />
 			<div className="min-w-0 flex-1">
-				<div className="flex min-w-0 items-center gap-2 text-[15px]">
+				<div className="flex min-w-0 items-center gap-2 text-[13.5px] leading-5">
 					{session.recorded ? (
-						<Link to={`/s/${encodeURIComponent(session.id)}`} className={cx(labelClass, "hover:underline")} title={session.id}>
+						<Link
+							to={`/s/${encodeURIComponent(session.id)}`}
+							className={cx(labelClass, "underline decoration-transparent underline-offset-[3px] hover:decoration-ink")}
+							title={session.id}
+						>
 							{label}
 						</Link>
 					) : (
@@ -94,25 +98,24 @@ function SessionRow({
 							{label}
 						</span>
 					)}
+					{named && <span className="mono shrink-0 text-[11.5px] text-muted">{session.id.slice(0, 8)}</span>}
 				</div>
-				<div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-muted">
-					<span className="flex min-w-0 items-center gap-1" data-project="">
-						<Icon name="folder" size={13} className="shrink-0" />
+				<div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-muted">
+					<span className="flex min-w-0 items-center gap-1 text-ink/80" data-project="">
 						<span className="truncate">{session.project || "—"}</span>
 					</span>
-					<span className="mono min-w-0 truncate !text-[12px]" title={session.cwd} data-cwd="">
+					<span className="mono min-w-0 truncate !text-[11.5px]" title={session.cwd} data-cwd="">
 						{session.cwd}
 					</span>
 					{session.model && (
 						<span className="flex min-w-0 items-center gap-1" data-model="">
-							<Icon name="model" size={13} className="shrink-0" />
-							<span className="truncate">{session.model}</span>
+							<span className="mono truncate text-[11.5px]">{session.model}</span>
 						</span>
 					)}
-					<span className="whitespace-nowrap" title={`Connected ${formatDateTime(session.connectedAt)}`} data-online-for="">
+					<span className="tnum whitespace-nowrap" title={`Connected ${formatDateTime(session.connectedAt)}`} data-online-for="">
 						Online {formatSince(session.connectedAt, now)}
 					</span>
-					<span className="whitespace-nowrap" title={formatDateTime(session.stateSince)} data-last-activity="">
+					<span className="tnum whitespace-nowrap" title={formatDateTime(session.stateSince)} data-last-activity="">
 						Last activity {formatRelative(session.stateSince, now)}
 					</span>
 				</div>
@@ -121,7 +124,7 @@ function SessionRow({
 				type="button"
 				onClick={() => onMessage(session)}
 				disabled={settling}
-				className={cx(BUTTON.secondary, "shrink-0 gap-1.5")}
+				className={cx(BUTTON.secondary, "h-7 shrink-0 gap-1.5")}
 				aria-label={`Message ${label}`}
 			>
 				<Icon name="message" size={14} />
@@ -134,16 +137,16 @@ function SessionRow({
 function DeviceGroup({ device, name, sessions, children }: { device: string; name: string; sessions: OnlineSession[]; children: ReactNode }) {
 	const hosts = [...new Set(sessions.map((session) => session.host).filter((host) => host && host !== name && host !== device))];
 	return (
-		<section aria-label={`Sessions on ${name}`} data-relay-device={device} data-device-name={name} className="mt-5 first:mt-3">
-			<h3 className="flex min-w-0 items-center gap-2 px-2 pb-1 text-[14px] font-medium">
+		<section aria-label={`Sessions on ${name}`} data-relay-device={device} data-device-name={name} className="mt-5 first:mt-2">
+			<h3 className="flex min-h-7 min-w-0 items-center gap-2 border-b border-ink px-1.5 pb-1 text-[13px] font-semibold">
 				<Icon name="device" className="shrink-0 text-muted" />
 				<span className="break-words" title={device}>
 					{name}
 				</span>
 				{hosts.length > 0 && <span className="min-w-0 truncate font-normal text-muted">{hosts.join(", ")}</span>}
-				<span className="ml-auto shrink-0 text-[13px] font-normal text-muted">{plural(sessions.length, "session")}</span>
+				<span className="tnum ml-auto shrink-0 text-[12px] font-normal text-muted">{plural(sessions.length, "session")}</span>
 			</h3>
-			<ul className="border-y border-line">{children}</ul>
+			<ul className="border-b border-line">{children}</ul>
 		</section>
 	);
 }
@@ -201,8 +204,8 @@ function EventItem({
 	const bareSender = from.kind === "session" && !from.name && !from.title;
 	const bareTarget = !event.to.name && !event.to.title;
 	return (
-		<li className="border-b border-line px-2 py-3 last:border-b-0" data-relay-event={event.id} data-status={event.status}>
-			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px]">
+		<li className="border-b border-line px-1.5 py-2 last:border-b-0" data-relay-event={event.id} data-status={event.status}>
+			<div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
 				<span
 					className="flex max-w-full min-w-0 items-center gap-1.5 font-medium"
 					data-sender=""
@@ -230,7 +233,7 @@ function EventItem({
 				)}
 				<span className="ml-auto flex shrink-0 items-center gap-2">
 					<StatusBadge event={event} />
-					<span className="text-[13px] whitespace-nowrap text-muted" title={formatDateTime(event.at)} data-at="">
+					<span className="tnum text-[12px] whitespace-nowrap text-muted" title={formatDateTime(event.at)} data-at="">
 						{formatRelative(event.at, now)}
 					</span>
 				</span>
@@ -238,7 +241,7 @@ function EventItem({
 			<div
 				ref={textRef}
 				id={textId}
-				className={cx("mt-1 text-[14px] break-words whitespace-pre-wrap", !expanded && "line-clamp-3")}
+				className={cx("mt-0.5 text-[13.5px] break-words whitespace-pre-wrap", !expanded && "line-clamp-3")}
 				data-event-text=""
 				data-expanded={expanded ? "" : undefined}
 			>
@@ -352,12 +355,12 @@ export function ActiveSessionsPage() {
 				) : events.isError && !events.data ? (
 					<ErrorState error={events.error} onRetry={() => void events.refetch()} />
 				) : eventItems.length === 0 ? (
-					<p className="text-[14px] text-muted">
+					<p className="text-[13px] text-muted">
 						No messages yet. Messages between sessions, and the ones you send from here, show up until pika restarts; it keeps
 						the last 500.
 					</p>
 				) : (
-					<ul className="border-y border-line" data-relay-events="">
+					<ul className="border-t border-ink border-b border-b-line" data-relay-events="">
 						{eventItems.map((event) => (
 							<EventItem
 								key={event.id}
@@ -376,7 +379,7 @@ export function ActiveSessionsPage() {
 	return (
 		<Page className="pb-24">
 			<PageTitle>Active sessions</PageTitle>
-			<p className="mt-2 text-[15px] text-pretty text-muted">
+			<p className="mt-2 max-w-[72ch] text-[14px] text-pretty text-muted">
 				pi sessions running right now on machines logged into pika. Send one a message, or follow what sessions send each other.
 			</p>
 			{body}

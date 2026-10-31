@@ -1,22 +1,23 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import { PikaLink as Link } from "../components/PikaLink";
 import { FilterChip, MenuOption, optionLabel, plainOptions, type FilterOption } from "../components/FilterChip";
-import { Icon, PikaLogo } from "../components/icons";
+import { PikaLogo } from "../components/icons";
 import { useScrollRoot } from "../components/Layout";
-import { cx, EmptyState, ErrorState, Page, PageTitle, Skeleton } from "../components/ui";
+import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../components/ui";
 import { ApiError, useApi, type SessionFilters } from "../lib/api";
 import { deviceLabel, deviceOptions } from "../lib/devices";
-import { colorOf, modelColor, Tag } from "../components/Tag";
+import { Tag } from "../components/Tag";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
 import { isLive } from "../lib/liveness";
 import type { SessionSummary, Tokens } from "../lib/types";
 import { useScrollMargin } from "../lib/virtual";
 import { useFamily } from "../tree/data";
 import { continuesAt, defaultExpanded, visibleRows, type FamilyNode } from "../tree/model";
-import { Caret, KindIcon, KindPill, sessionLabel, TreeLines, TreeStub } from "../tree/parts";
+import { CostDot } from "../trace/parts";
+import { Caret, KindIcon, KindPill, lineTones, sessionLabel, TreeLines, TreeStub, type LineTone } from "../tree/parts";
 
 const PAGE_SIZE = 50;
 /** A family up to this size opens fully under its session; a larger one shows its direct children. */
@@ -30,11 +31,19 @@ const FAMILY_REFRESH_MS = 30_000;
  * The anonymous client caches nothing by default; it still revalidates the family as it comes back.
  */
 const FAMILY_GC_MS = 60_000;
-/** How far below a card's top its title line sits, past its border: its caret and its branch meet there. */
-const CARD_ELBOW = 17;
-/** A branch ends at its card's caret, or past a leaf's empty caret column, at its card's border. */
+/** How far below a row's top its title line's middle sits: its caret and its branch meet there. */
+const CARD_ELBOW = 16;
+/** A branch ends at its row's caret, or past a leaf's empty caret column, at its row's left edge. */
 const CARET_REACH = 2;
 const LEAF_REACH = 18;
+/**
+ * The list's columns: the name plate, then tokens, cost, duration, and start, at fixed widths on the right so they line
+ * up down the list at any depth of the tree. Narrow screens drop tokens and duration.
+ */
+const COLUMNS = "grid grid-cols-[minmax(0,1fr)_88px_76px] gap-x-4 md:grid-cols-[minmax(0,1fr)_128px_88px_64px_104px]";
+const WIDE = "max-md:hidden";
+/** The project and device shortcuts list this many of each. */
+const BROWSE_ITEMS = 8;
 
 function dayStart(value: string | null): string | undefined {
 	if (!value) return undefined;
@@ -64,38 +73,45 @@ interface CardProps {
 	session: SessionSummary;
 	/** Levels below the top of the list. */
 	depth?: number;
-	/** A nested card's lines, from `continuesAt`. */
+	/** A nested card's lines, from `continuesAt`, and their tones, from `lineTones`. */
 	lines?: boolean[];
+	tones?: { trunks: LineTone[]; own: LineTone };
 	/** A nested card's parent, whose project and device the card need not repeat. */
 	parent?: SessionSummary;
 	/** Whether the list shows the tree: every card says what it is and has room for a caret. */
 	tree: boolean;
 	/** The caret of a card whose children the tree lists. */
-	toggle?: { open: boolean; onToggle: () => void };
+	toggle?: { open: boolean; onToggle: () => void; stub: LineTone };
 	/** With the tree, the cost and size of the card's session together with every session below it. */
 	subtree?: { cost: number; sessions: number };
 }
 
+/** Token kinds as ink steps, lightest to darkest: what the prompt cache served, what was new, and what the model wrote. */
 const TOKEN_PARTS: [keyof Tokens, string, string][] = [
-	["cacheRead", "cache read", "bg-k-read"],
-	["cacheWrite", "cache write", "bg-k-compaction"],
-	["input", "input", "bg-k-user"],
-	["output", "output", "bg-k-llm"],
+	["cacheRead", "cache read", "bg-ink/20"],
+	["cacheWrite", "cache write", "bg-ink/45"],
+	["input", "input", "bg-ink/70"],
+	["output", "output", "bg-ink"],
 ];
 
-/** Tokens, with a small bar of their kinds: what the prompt cache served, what was new, and what the model wrote. */
+/** Tokens, with a small bar of their kinds, and the share the cache served under them. */
 function TokenMeter({ tokens }: { tokens: Tokens }) {
 	const total = totalTokens(tokens);
 	const breakdown = TOKEN_PARTS.map(([key, label]) => `${tokens[key].toLocaleString("en-US")} ${label}`).join(" · ");
+	const cached = cacheShare(tokens);
 	return (
-		<span className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted" title={breakdown}>
-			<Icon name="tokens" size={11} className="opacity-70" />
-			<span>{formatCount(total)} tokens</span>
-			{total > 0 && (
-				<span className="flex h-[5px] w-9 overflow-hidden rounded-full bg-hover" aria-hidden="true">
-					{TOKEN_PARTS.map(([key, , color]) =>
-						tokens[key] ? <span key={key} className={cx(color, "opacity-80")} style={{ width: `${(tokens[key] / total) * 100}%` }} /> : null,
-					)}
+		<span className={cx("flex min-w-0 flex-col items-end gap-0.5", WIDE)}>
+			<span className="flex items-center gap-1.5" title={breakdown}>
+				<span className="tnum whitespace-nowrap">{formatCount(total)} tokens</span>
+				{total > 0 && (
+					<span className="flex h-[5px] w-8 overflow-hidden bg-hover" aria-hidden="true">
+						{TOKEN_PARTS.map(([key, , color]) => (tokens[key] ? <span key={key} className={color} style={{ width: `${(tokens[key] / total) * 100}%` }} /> : null))}
+					</span>
+				)}
+			</span>
+			{cached !== undefined && (
+				<span className="tnum text-[11.5px] whitespace-nowrap text-muted" title="The share of the prompt tokens the prompt cache served">
+					{Math.round(cached * 100)}% cached
 				</span>
 			)}
 		</span>
@@ -108,127 +124,122 @@ function cacheShare(tokens: Tokens): number | undefined {
 	return prompt > 0 && tokens.cacheRead > 0 ? tokens.cacheRead / prompt : undefined;
 }
 
+/** Context in the name plate's second line: muted text, separated by thin gaps. */
+function Context({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
+	return (
+		<span className={cx("min-w-0 shrink truncate", className)} title={title}>
+			{children}
+		</span>
+	);
+}
+
 /**
- * A session's card, the same at every level of the list: its page icon, title, and status; how long it ran, what it
- * cost, and when; and its properties as Notion-style tags. At the top it is a main session, or a child whose parent pika
- * has not recorded; below, a subagent or step under its parent.
+ * A session's row, the same at every level of the list: a name plate (its title, short id, and state; then where it
+ * ran and with which models), and its tokens, cost, duration, and start in aligned columns. At the top it is a main
+ * session, or a child whose parent pika has not recorded; below, a subagent or step under its parent.
  */
-function SessionCard({ session, depth = 0, lines, parent, tree, toggle, subtree }: CardProps) {
+function SessionCard({ session, depth = 0, lines, tones, parent, tree, toggle, subtree }: CardProps) {
 	const nested = depth > 0;
 	// Public summaries leave out unpublished parents, so a published child reads as a main session there.
 	const orphan = !nested && Boolean(session.parentSessionId);
 	const { kind, type, description: title } = sessionLabel(session, !nested && !orphan);
 	const herder = session.link?.herder;
-	const cached = cacheShare(session.tokens);
+	const showProject = !parent || session.project !== parent.project;
+	const showDevice = !parent || session.device !== parent.device;
 	const card = (
 		<Link
 			to={`/s/${encodeURIComponent(session.id)}`}
-			className="block min-w-0 flex-1 rounded-lg border border-line bg-page px-3 py-1.5 transition-[background-color,box-shadow] duration-150 hover:bg-soft hover:shadow-[0_1px_4px_rgba(15,15,15,0.08)]"
+			className={cx(COLUMNS, "min-w-0 flex-1 items-start py-1.5 pr-2 pl-1.5 text-[13px] leading-5 hover:bg-hover")}
 			title={session.title && session.title !== title ? session.title : undefined}
 			data-session-row={nested ? undefined : session.id}
 		>
-			<div className="flex min-w-0 items-center gap-2 text-[14px] leading-5">
-				<KindIcon kind={kind} type={type} />
-				<span className="min-w-0 truncate font-medium">{title}</span>
-				{isLive(session.lastAt) && (
-					<span className="flex shrink-0 items-center gap-1 text-[11.5px] font-medium text-green" data-live="">
-						<span className="relative flex size-1.5">
-							<span className="absolute inline-flex size-full animate-ping rounded-full bg-green opacity-60" />
-							<span className="relative inline-flex size-1.5 rounded-full bg-green" />
+			<span className="flex min-w-0 flex-col">
+				<span className="flex min-w-0 items-center gap-2">
+					{tree && <KindIcon kind={kind} />}
+					<span className="min-w-0 text-[13.5px] font-medium text-ink max-md:line-clamp-2 max-md:[overflow-wrap:anywhere] md:truncate">{title}</span>
+					<span className="mono shrink-0 text-[11.5px] leading-5 text-muted max-md:hidden">{session.id.slice(0, 8)}</span>
+					{isLive(session.lastAt) && (
+						<span className="flex shrink-0" data-live="">
+							<Pill tone="green">Live</Pill>
 						</span>
-						Live
-					</span>
-				)}
-				{/* Fixed widths, so the numbers line up down the list. */}
-				<span className="tnum ml-auto flex shrink-0 items-center gap-3 pl-3 text-[12.5px] text-muted">
-					<span className="flex w-[70px] items-center justify-end gap-1" title="Duration">
-						<Icon name="clock" size={12} className="shrink-0 opacity-60" />
-						{formatDuration(session.durationMs)}
-					</span>
-					<span className="flex w-[66px] items-center justify-end gap-1 font-medium text-ink/80" title="Cost">
-						<Icon name="coins" size={12} className="shrink-0 text-muted opacity-60" />
-						{formatCost(session.cost)}
-					</span>
-					<span className="flex w-[114px] items-center justify-end gap-1" title={formatDateTime(session.startedAt)}>
-						<Icon name="calendar" size={12} className="shrink-0 opacity-60" />
-						{formatRelative(session.startedAt)}
-					</span>
-				</span>
-			</div>
-			<div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-7">
-				{(tree || orphan) && <KindPill kind={kind}>{type}</KindPill>}
-				{orphan && (
-					<span data-parent-missing="">
-						<Tag color="yellow" icon="alert" title="pika has no record of the session that started this one: it was not uploaded, or not yet">
-							parent not recorded
+					)}
+					{(tree || orphan) && <KindPill kind={kind}>{type}</KindPill>}
+					{orphan && (
+						<span className="flex shrink-0" data-parent-missing="">
+							<Tag color="yellow" icon="alert" title="pika has no record of the session that started this one: it was not uploaded, or not yet">
+								parent not recorded
+							</Tag>
+						</span>
+					)}
+					{herder?.task && (
+						<Tag icon="tag" title="Herder task">
+							{herder.task}
 						</Tag>
-					</span>
-				)}
-				{herder?.task && (
-					<Tag icon="tag" title="Herder task">
-						{herder.task}
-					</Tag>
-				)}
-				{herder && herder.attempt > 1 && (
-					<Tag color="yellow" title="Herder ran this step again after an earlier attempt">
-						attempt {herder.attempt}
-					</Tag>
-				)}
-				{session.link?.workflowId && (
-					<Tag icon="branch" title={`Workflow ${session.link.workflowId}`}>
-						workflow
-					</Tag>
-				)}
-				{/* Below the top, a card leaves out where it ran when that is where its parent ran. */}
-				{(!parent || session.project !== parent.project) && (
-					<Tag color={colorOf(session.project || "—")} icon="folder" title={session.cwd}>
-						{session.project || "—"}
-					</Tag>
-				)}
-				{(!parent || session.device !== parent.device) && (
-					<Tag icon="device" title={session.device}>
-						<span data-device-label={session.device}>{deviceLabel(session)}</span>
-					</Tag>
-				)}
-				{session.models.slice(0, 2).map((model) => (
-					<Tag key={model} color={modelColor(model)} icon="model">
-						{model}
-					</Tag>
-				))}
-				{session.models.length > 2 && <Tag title={session.models.slice(2).join(", ")}>+{session.models.length - 2}</Tag>}
-				{session.childCount > 0 && (
-					<Tag icon="children" title="Child sessions">
-						{plural(session.childCount, "subagent")}
-					</Tag>
-				)}
-				{subtree && (
-					<Tag title="The cost of this session and every session below it">
-						{`Σ ${formatCost(subtree.cost)} · ${plural(subtree.sessions, "session")}`}
-					</Tag>
-				)}
-				<span className="ml-1 flex items-center gap-3">
-					<TokenMeter tokens={session.tokens} />
-					{cached !== undefined && (
-						<span className="flex items-center gap-1 text-[11.5px] text-muted" title="The share of the prompt tokens the prompt cache served">
-							<Icon name="compress" size={11} className="opacity-70" />
-							{Math.round(cached * 100)}% cached
+					)}
+					{herder && herder.attempt > 1 && (
+						<Tag color="yellow" title="Herder ran this step again after an earlier attempt">
+							attempt {herder.attempt}
+						</Tag>
+					)}
+					{session.link?.workflowId && (
+						<Tag icon="branch" title={`Workflow ${session.link.workflowId}`}>
+							workflow
+						</Tag>
+					)}
+				</span>
+				<span className={cx("flex min-w-0 items-center gap-x-3 text-[12px] text-muted", tree && "pl-6")}>
+					{/* Below the top, a row leaves out where it ran when that is where its parent ran. */}
+					{showProject && (
+						<Context title={session.cwd} className="text-ink/80">
+							{session.project || "—"}
+						</Context>
+					)}
+					{showDevice && (
+						<Context title={session.device}>
+							<span data-device-label={session.device}>{deviceLabel(session)}</span>
+						</Context>
+					)}
+					{session.models.slice(0, 2).map((model) => (
+						<Context key={model} className="mono text-[11.5px]">
+							{model}
+						</Context>
+					))}
+					{session.models.length > 2 && <Context title={session.models.slice(2).join(", ")}>+{session.models.length - 2}</Context>}
+					{session.childCount > 0 && (
+						<span className="shrink-0" title="Child sessions">
+							{plural(session.childCount, "subagent")}
+						</span>
+					)}
+					{subtree && (
+						<span className="tnum shrink-0" title="The cost of this session and every session below it">
+							{`Σ ${formatCost(subtree.cost)} · ${plural(subtree.sessions, "session")}`}
 						</span>
 					)}
 				</span>
-			</div>
+			</span>
+			<TokenMeter tokens={session.tokens} />
+			<span className="flex items-center justify-end gap-1.5" title="Cost">
+				<CostDot cost={session.cost} scale="session" />
+				<span className="tnum font-medium">{formatCost(session.cost)}</span>
+			</span>
+			<span className={cx("tnum text-right text-muted", WIDE)} title="Duration">
+				{formatDuration(session.durationMs)}
+			</span>
+			<span className="tnum truncate text-right text-muted" title={formatDateTime(session.startedAt)}>
+				{formatRelative(session.startedAt)}
+			</span>
 		</Link>
 	);
 	if (!tree) return card;
 	return (
 		<div className="flex min-w-0">
-			{lines && <TreeLines continues={lines} elbow={CARD_ELBOW} reach={toggle ? CARET_REACH : LEAF_REACH} />}
-			{/* The caret sits in line with the title; an open card's line runs from it down to its first child. */}
-			<span className="relative flex w-[18px] shrink-0 justify-center self-stretch pt-[8px]">
+			{lines && tones && <TreeLines continues={lines} elbow={CARD_ELBOW} reach={toggle ? CARET_REACH : LEAF_REACH} tones={tones} />}
+			{/* The caret sits in line with the title; an open row's line runs from it down to its first child. */}
+			<span className="relative flex w-[18px] shrink-0 justify-center self-stretch pt-[7px]">
 				{toggle && <Caret open={toggle.open} onClick={toggle.onToggle} label={title} focusable />}
-				{toggle?.open && <TreeStub from={CARD_ELBOW + 7} />}
+				{toggle?.open && <TreeStub from={CARD_ELBOW + 7} tone={toggle.stub} />}
 			</span>
-			{/* The gap below the card belongs to the row, so its lines and caret column run through it to the next card. */}
-			<div className="min-w-0 flex-1 pb-1.5">{card}</div>
+			{card}
 		</div>
 	);
 }
@@ -249,7 +260,7 @@ function FamilyCards({ root, expanded, onExpand, full, onFull }: FamilyProps) {
 	useEffect(() => {
 		if (family && !expanded) onExpand([...defaultExpanded(family, family.rootId, OPEN_FAMILY_LIMIT)]);
 	}, [family, expanded, onExpand]);
-	// Under the first level's caret, in line with the nested cards' text.
+	// Under the first level's caret, in line with the nested rows' text.
 	const note = "flex min-h-7 items-center gap-2 pl-[46px] text-[12.5px] text-muted";
 	if (!family) {
 		const status =
@@ -260,14 +271,14 @@ function FamilyCards({ root, expanded, onExpand, full, onFull }: FamilyProps) {
 			) : tree.isError ? (
 				<div className={note}>
 					The subagents could not be loaded.
-					<button type="button" onClick={() => void tree.refetch()} className="rounded-sm px-1 hover:bg-hover hover:text-ink">
+					<button type="button" onClick={() => void tree.refetch()} className="rounded-sm px-1 text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink">
 						Try again
 					</button>
 				</div>
 			) : (
 				<div className="pb-2 pl-[46px]" aria-busy="true" aria-label="Loading subagents">
 					{Array.from({ length: Math.min(root.childCount, 3) }, (_, i) => (
-						<Skeleton key={i} className="my-3 h-4 w-1/2" />
+						<Skeleton key={i} className="my-2 h-4 w-1/2" />
 					))}
 				</div>
 			);
@@ -285,12 +296,13 @@ function FamilyCards({ root, expanded, onExpand, full, onFull }: FamilyProps) {
 		else next.add(id);
 		onExpand([...next]);
 	};
-	const caret = (node: FamilyNode | undefined) => (node && node.children.length > 0 ? { open: open.has(node.id), onToggle: () => toggle(node.id) } : undefined);
+	const caret = (node: FamilyNode | undefined) =>
+		node && node.children.length > 0 ? { open: open.has(node.id), onToggle: () => toggle(node.id), stub: lineTones(family, node).stub } : undefined;
 	const subtree = (node: FamilyNode | undefined) => (node && node.descendants > 0 ? { cost: node.subtreeCost, sessions: node.descendants + 1 } : undefined);
 	const top = family.byId.get(family.rootId);
 	const rows = visibleRows(family, open).filter((node) => node.depth > 0);
 	const shown = full ? rows : rows.slice(0, FAMILY_ROWS);
-	const button = "rounded-sm px-1 hover:bg-hover hover:text-ink";
+	const button = "rounded-sm px-1 text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink";
 	return (
 		<>
 			<SessionCard session={root} tree toggle={caret(top)} subtree={subtree(top)} />
@@ -302,6 +314,7 @@ function FamilyCards({ root, expanded, onExpand, full, onFull }: FamilyProps) {
 								session={node.session}
 								depth={node.depth}
 								lines={continuesAt(family, node)}
+								tones={lineTones(family, node)}
 								parent={node.parentId ? family.byId.get(node.parentId)?.session : undefined}
 								tree
 								toggle={caret(node)}
@@ -328,10 +341,50 @@ function FamilyCards({ root, expanded, onExpand, full, onFull }: FamilyProps) {
 
 function RowSkeleton() {
 	return (
-		<div className="px-3 py-3">
+		<div className="border-b border-line px-1.5 py-2">
 			<Skeleton className="h-4 w-1/2" />
-			<Skeleton className="mt-2 h-3 w-3/4" />
+			<Skeleton className="mt-1.5 h-3 w-1/3" />
 		</div>
+	);
+}
+
+/** The project and device shortcuts the sidebar used to list: each links to the list filtered by it. */
+function BrowseSection({ title, items, param }: { title: string; items: FilterOption[]; param: string }) {
+	const [params] = useSearchParams();
+	if (items.length === 0) return null;
+	return (
+		<section className="min-w-0">
+			<h2 className="border-b border-ink pb-1 text-[13px] font-semibold">{title}</h2>
+			<ul className="mt-0.5">
+				{items.slice(0, BROWSE_ITEMS).map((item) => {
+					const current = params.get(param) === item.value;
+					return (
+						<li key={item.value}>
+							<Link
+								to={`/?${param}=${encodeURIComponent(item.value)}`}
+								className={cx("flex h-7 min-w-0 items-center rounded-sm px-1.5 text-[13px] text-ink hover:bg-hover", current && "bg-hover font-medium")}
+								title={item.label}
+								aria-current={current ? "true" : undefined}
+							>
+								<span className="truncate">{item.label}</span>
+							</Link>
+						</li>
+					);
+				})}
+			</ul>
+		</section>
+	);
+}
+
+/** The owner's index of projects and devices: a column left of the list on wide screens, above it on narrow ones. */
+function BrowseIndex() {
+	const api = useApi();
+	const facets = useQuery({ queryKey: ["facets"], queryFn: () => api.facets(), staleTime: 60_000 });
+	return (
+		<nav aria-label="Browse" className="grid grid-cols-2 max-md:hidden gap-x-8 gap-y-5 max-[1099px]:mb-6 min-[1100px]:grid-cols-1 min-[1100px]:content-start" data-browse="">
+			<BrowseSection title="Projects" items={plainOptions(facets.data?.projects ?? [])} param="project" />
+			<BrowseSection title="Devices" items={deviceOptions(facets.data?.devices ?? [])} param="device" />
+		</nav>
 	);
 }
 
@@ -399,7 +452,7 @@ function Filters() {
 								value={from}
 								max={to || undefined}
 								onChange={(event) => set("from", event.target.value || undefined)}
-								className="rounded-sm border border-line bg-page px-1.5 py-0.5"
+								className="h-7 rounded-sm border border-line bg-page px-1.5 focus:border-ink focus:outline-none"
 							/>
 						</label>
 						<label className="flex items-center justify-between gap-3">
@@ -409,18 +462,18 @@ function Filters() {
 								value={to}
 								min={from || undefined}
 								onChange={(event) => set("to", event.target.value || undefined)}
-								className="rounded-sm border border-line bg-page px-1.5 py-0.5"
+								className="h-7 rounded-sm border border-line bg-page px-1.5 focus:border-ink focus:outline-none"
 							/>
 						</label>
 					</div>
 				)}
 			</FilterChip>
-			<label className="ml-1 flex h-7 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-[13px] text-muted hover:bg-hover">
+			<label className="ml-1 flex h-7 cursor-pointer items-center gap-2 rounded-sm px-1.5 text-[13px] text-ink hover:bg-hover">
 				<input
 					type="checkbox"
 					checked={includeChildren}
 					onChange={(event) => set("children", event.target.checked ? "1" : undefined)}
-					className="accent-[#2383e2]"
+					className="accent-ink"
 				/>
 				Show subagents and steps
 			</label>
@@ -432,7 +485,7 @@ function Filters() {
 						if (includeChildren) next.set("children", "1");
 						setParams(next, { replace: true });
 					}}
-					className="h-7 rounded-sm px-1.5 text-[13px] text-muted hover:bg-hover"
+					className="h-7 rounded-sm px-1.5 text-[13px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink"
 				>
 					Clear filters
 				</button>
@@ -477,67 +530,78 @@ export function SessionListPage() {
 		if (lastIndex >= items.length - 1 && hasNextPage && !isFetchingNextPage && !isFetchNextPageError) void fetchNextPage();
 	}, [lastIndex, items.length, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
 
+	const list = sessions.isPending ? (
+		<div aria-busy="true" aria-label="Loading sessions">
+			{Array.from({ length: 8 }, (_, i) => (
+				<RowSkeleton key={i} />
+			))}
+		</div>
+	) : sessions.isError && items.length === 0 ? (
+		<ErrorState error={sessions.error} onRetry={() => void sessions.refetch()} />
+	) : items.length === 0 && params.toString() ? (
+		<EmptyState title="No sessions">Nothing matches these filters.</EmptyState>
+	) : items.length === 0 ? (
+		<EmptyState title="No sessions yet" visual={<PikaLogo size={40} />}>
+			{api.publicView ? "No projects have been published yet." : <>Run <code className="code-chip">/pika login</code> in pi on each machine. Sessions appear here as they run.</>}
+		</EmptyState>
+	) : (
+		<div ref={listRef} className="relative" style={{ height: virtualizer.getTotalSize() }} data-session-list="">
+			{virtualItems.map((row) => {
+				const session = items[row.index];
+				return (
+					<div
+						key={row.key}
+						ref={virtualizer.measureElement}
+						data-index={row.index}
+						className="absolute top-0 left-0 w-full"
+						style={{ transform: `translateY(${row.start - scrollMargin}px)` }}
+					>
+						{session ? (
+							// The hairline below a session is part of its measured row. With the tree, it sets each session and its
+							// subagents apart from the next.
+							<div className={cx("border-b border-line", showFamilies && "pb-1")} data-family-divider={showFamilies && row.index > 0 ? "" : undefined}>
+								{showFamilies && session.childCount > 0 ? (
+									<FamilyCards
+										root={session}
+										expanded={expanded[session.id]}
+										onExpand={(ids) => setExpanded((all) => ({ ...all, [session.id]: ids }))}
+										full={full[session.id] ?? false}
+										onFull={() => setFull((all) => ({ ...all, [session.id]: true }))}
+									/>
+								) : (
+									<SessionCard session={session} tree={showFamilies} />
+								)}
+							</div>
+						) : (
+							<RowSkeleton />
+						)}
+					</div>
+				);
+			})}
+		</div>
+	);
+
 	return (
 		<Page className="pb-24">
 			<PageTitle>{api.publicView ? "Published trajectories" : "Sessions"}</PageTitle>
 			<div className="mt-5">
 				<Filters />
 			</div>
-			<hr className="mt-4 mb-2 border-0 border-t border-line" />
-			{sessions.isPending ? (
-				<div aria-busy="true" aria-label="Loading sessions">
-					{Array.from({ length: 6 }, (_, i) => (
-						<RowSkeleton key={i} />
-					))}
+			<div className={cx("mt-6", !api.publicView && "min-[1100px]:grid min-[1100px]:grid-cols-[184px_minmax(0,1fr)] min-[1100px]:gap-x-10")}>
+				{!api.publicView && <BrowseIndex />}
+				<div className="min-w-0">
+					{/* The columns' names over the header rule; the rows below share their widths. */}
+					<div className={cx(COLUMNS, "h-7 items-end border-b border-ink pr-2 pb-1 pl-1.5 text-[12px] font-medium text-muted", showFamilies && "ml-[18px]")} aria-hidden="true">
+						<span>Session</span>
+						<span className={cx("text-right", WIDE)}>Tokens</span>
+						<span className="text-right">Cost</span>
+						<span className={cx("text-right", WIDE)}>Duration</span>
+						<span className="text-right">Started</span>
+					</div>
+					{list}
+					{sessions.isFetchNextPageError && <ErrorState error={sessions.error} onRetry={() => void sessions.fetchNextPage()} />}
 				</div>
-			) : sessions.isError && items.length === 0 ? (
-				<ErrorState error={sessions.error} onRetry={() => void sessions.refetch()} />
-			) : items.length === 0 && params.toString() ? (
-				<EmptyState title="No sessions">Nothing matches these filters.</EmptyState>
-			) : items.length === 0 ? (
-				<EmptyState title="No sessions yet" visual={<PikaLogo size={40} />}>
-					{api.publicView ? "No projects have been published yet." : <>Run <code className="code-chip">/pika login</code> in pi on each machine. Sessions appear here as they run.</>}
-				</EmptyState>
-			) : (
-				<div ref={listRef} className="relative" style={{ height: virtualizer.getTotalSize() }} data-session-list="">
-					{virtualItems.map((row) => {
-						const session = items[row.index];
-						return (
-							<div
-								key={row.key}
-								ref={virtualizer.measureElement}
-								data-index={row.index}
-								className="absolute top-0 left-0 w-full"
-								style={{ transform: `translateY(${row.start - scrollMargin}px)` }}
-							>
-								{session ? (
-									// The space around a session is part of its measured row. With the tree, a divider sets each
-									// session and its subagents apart from the one above.
-									<div
-										className={showFamilies ? cx("pb-3.5", row.index > 0 && "border-t border-line pt-4") : "pb-1.5"}
-										data-family-divider={showFamilies && row.index > 0 ? "" : undefined}
-									>
-										{showFamilies && session.childCount > 0 ? (
-											<FamilyCards
-												root={session}
-												expanded={expanded[session.id]}
-												onExpand={(ids) => setExpanded((all) => ({ ...all, [session.id]: ids }))}
-												full={full[session.id] ?? false}
-												onFull={() => setFull((all) => ({ ...all, [session.id]: true }))}
-											/>
-										) : (
-											<SessionCard session={session} tree={showFamilies} />
-										)}
-									</div>
-								) : (
-									<RowSkeleton />
-								)}
-							</div>
-						);
-					})}
-				</div>
-			)}
-			{sessions.isFetchNextPageError && <ErrorState error={sessions.error} onRetry={() => void sessions.fetchNextPage()} />}
+			</div>
 		</Page>
 	);
 }

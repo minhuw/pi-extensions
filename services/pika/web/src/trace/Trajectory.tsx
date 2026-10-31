@@ -10,9 +10,11 @@ import { foldGaps, makeScale, traceIntervals, type Interval, type OverviewItem }
 import { fetchTrace, traceKey } from "./data";
 import { formatClock } from "./format";
 import { Inspector, type InspectorTab, type InspectorTarget } from "./Inspector";
-import { isSubagentTool, recordKey, recordSpan } from "./kinds";
+import { COST_DIAMETERS, COST_STEPS, formatCost, formatCount, plural } from "../lib/format";
+import { FAMILIES, FAMILY_LABELS, hasProviderTiming, isSubagentTool, recordFamily, recordIsError, recordKey, recordSpan, type Family } from "./kinds";
 import { Ledger, type LedgerHandle } from "./Ledger";
 import { Overview } from "./Overview";
+import { KindBullet, PhaseSwatch } from "./parts";
 import { currentStop, initialReplay, REPLAY_SPEEDS, replayReducer, type ReplayState } from "./replay";
 import {
 	buildLedger,
@@ -84,8 +86,8 @@ function ReplayControls({ state, dispatch, origin }: { state: ReplayState; dispa
 				type="button"
 				onClick={() => dispatch({ type: "toggle" })}
 				className={cx(
-					"inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-[12.5px] transition-colors duration-150",
-					playing ? "bg-ink text-page" : "border border-line hover:bg-hover",
+					"inline-flex h-7 items-center gap-1.5 rounded-sm border border-ink px-2.5 text-[13px] font-medium transition-colors duration-150",
+					playing ? "bg-ink text-page hover:bg-ink/82" : "bg-page text-ink hover:bg-hover",
 				)}
 				aria-label={playing ? "Pause replay" : "Replay the session"}
 				data-replay-toggle=""
@@ -102,7 +104,7 @@ function ReplayControls({ state, dispatch, origin }: { state: ReplayState; dispa
 				)}
 				{playing ? "Pause" : state.status === "paused" && state.position < state.duration ? "Resume" : "Replay"}
 			</button>
-			<div className="flex h-7 items-center rounded-sm border border-line p-0.5" role="group" aria-label="Replay speed">
+			<div className="flex h-7 items-center gap-px rounded-sm border border-line p-0.5" role="group" aria-label="Replay speed">
 				{REPLAY_SPEEDS.map((speed) => (
 					<button
 						key={speed}
@@ -110,8 +112,8 @@ function ReplayControls({ state, dispatch, origin }: { state: ReplayState; dispa
 						onClick={() => dispatch({ type: "speed", speed })}
 						aria-pressed={state.speed === speed}
 						className={cx(
-							"mono tnum h-full rounded-[3px] px-1.5 text-[11px] transition-colors duration-150",
-							state.speed === speed ? "bg-hover font-semibold text-ink" : "text-muted hover:text-ink",
+							"tnum h-full rounded-sm px-1.5 text-[12px] font-medium transition-colors duration-150",
+							state.speed === speed ? "bg-ink text-page" : "text-muted hover:bg-hover hover:text-ink",
 						)}
 						data-speed={speed}
 					>
@@ -121,8 +123,8 @@ function ReplayControls({ state, dispatch, origin }: { state: ReplayState; dispa
 			</div>
 			{state.status !== "stopped" && (
 				<>
-					<span className="mono tnum px-1 text-[11.5px] text-muted" data-replay-clock="">
-						{formatClock(state.position)} <span className="opacity-60">/ {formatClock(state.duration)}</span>
+					<span className="tnum px-1 text-[12px] text-ink" data-replay-clock="">
+						{formatClock(state.position)} <span className="text-muted">/ {formatClock(state.duration)}</span>
 					</span>
 					<button
 						type="button"
@@ -347,6 +349,18 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 		[trace, turnOverrides, setTurnOverrides, filter, range, sessionId],
 	);
 
+	// On a wide screen the inspector is part of the first view, so the session opens with a record in it: the latest one
+	// while it runs, else its first failure, else its last record. A deep link, or a choice already made, wins.
+	const opened = useRef(false);
+	useEffect(() => {
+		if (opened.current || !wide || focusSeq !== undefined) return;
+		opened.current = true;
+		if (selectedKey !== undefined) return;
+		const records = trace.records.filter((record) => record.kind === "llm" || record.kind === "tool");
+		const target = (live ? undefined : records.find(recordIsError)) ?? records.at(-1);
+		if (target) reveal(target, { align: "center" });
+	}, [wide, focusSeq, selectedKey, trace, live, reveal]);
+
 	// `?seq=`: select and scroll to the record, once.
 	const handledSeq = useRef<number | undefined>(undefined);
 	const [pendingSeq, setPendingSeq] = useState<number | undefined>();
@@ -512,6 +526,8 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 			if (event.key === "/") return handle(() => filterInput.current?.focus());
 			if (event.key === "?") return handle(() => document.querySelector<HTMLElement>("[data-ledger-help] button")?.focus());
 			if (event.key === "Escape") {
+				// Esc in an open filter menu only closes the menu, which handles it itself.
+				if (event.target instanceof Element && event.target.closest("[data-filter-menu]")) return;
 				// Esc in the help closes it and keeps everything else.
 				if (event.target instanceof HTMLElement && event.target.closest("[data-ledger-help]")) {
 					const help = event.target;
@@ -585,6 +601,8 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 		return () => window.removeEventListener("keydown", onKeyDown, true);
 	}, [select, toggleExpand, toggleTurn, turnsByIndex, sessionId, setFilter, closeInspector]);
 
+	const timed = useMemo(() => hasProviderTiming(trace), [trace]);
+
 	const primaryModel = useMemo(() => {
 		const tally = new Map<string, number>();
 		for (const record of trace.records) if (record.kind === "llm" && record.model) tally.set(record.model, (tally.get(record.model) ?? 0) + 1);
@@ -595,6 +613,16 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 		() => ({ shown: rows.filter((row) => row.type === "record" && row.depth === 0).length, total: trace.records.length }),
 		[rows, trace.records.length],
 	);
+	// Records of each kind and failed records, for the ledger's kind menu and errors toggle.
+	const { familyCounts, errorCount } = useMemo(() => {
+		const byFamily = new Map<Family, number>();
+		let failed = 0;
+		for (const record of trace.records) {
+			byFamily.set(recordFamily(record), (byFamily.get(recordFamily(record)) ?? 0) + 1);
+			if (recordIsError(record)) failed++;
+		}
+		return { familyCounts: byFamily, errorCount: failed };
+	}, [trace.records]);
 	const rangeLabel = range ? `${formatClock(range.start - axis.origin)}–${formatClock(range.end - axis.origin)}` : undefined;
 	const selectedTopKey = selectedKey && recordsByKey.has(selectedKey) ? selectedKey : undefined;
 	const onSelectCall = useCallback(
@@ -621,10 +649,50 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col" data-trajectory="">
-			<section className="shrink-0 border-b border-line px-6 pt-1 pb-3" aria-label="Timeline">
-				<div className="mb-1.5 flex h-8 items-center gap-3">
-					<h2 className="text-[12px] font-semibold tracking-[0.06em] text-muted uppercase">Timeline</h2>
-					<div className="ml-auto">
+			<section className="shrink-0 border-y border-line px-6 pt-2 pb-3" aria-label="Timeline">
+				<div className="mb-1.5 flex h-8 min-w-0 items-center gap-3 whitespace-nowrap">
+					<h2 className="text-[13px] font-semibold">Trajectory</h2>
+					<span className="tnum text-[12px] text-muted" data-trajectory-counts="">
+						{plural(trace.turns.length, "turn")} · {formatCount(trace.records.length)} {trace.records.length === 1 ? "record" : "records"}
+					</span>
+					<ul
+						className={cx("ml-auto flex min-w-0 items-center gap-3 overflow-hidden text-[12px] max-lg:hidden", timed && "max-[1439px]:gap-2.5")}
+						aria-label="Record kinds"
+						data-kind-legend=""
+					>
+						{FAMILIES.map((family) => (
+							<li key={family} className="flex shrink-0 items-center gap-1.5">
+								<KindBullet family={family} size={14} />
+								{FAMILY_LABELS[family]}
+							</li>
+						))}
+						<li
+							className="flex shrink-0 items-center gap-1.5 border-l border-line pl-3"
+							title={`A model call's bar is as thick as it cost: up to ${COST_STEPS.record.map(formatCost).join(", ")}, and more`}
+							data-cost-key=""
+						>
+							Cost
+							<span className="flex items-center gap-1" aria-hidden="true">
+								{COST_DIAMETERS.map((thickness) => (
+									<span key={thickness} className="w-[10px] bg-k-llm" style={{ height: thickness }} />
+								))}
+							</span>
+						</li>
+						{timed && (
+							<li
+								className="flex shrink-0 items-center gap-1.5 border-l border-line pl-3"
+								title="On the provider row, a timed model call is hatched while it waits for its first token and solid while it streams"
+								data-phase-key=""
+							>
+								{/* Below 1440 px there is room only for the swatches; the words stay for screen readers. */}
+								<PhaseSwatch phase="waiting" />
+								<span className="max-[1439px]:sr-only">Waiting</span>
+								<PhaseSwatch phase="streaming" className="min-[1440px]:ml-1.5" />
+								<span className="max-[1439px]:sr-only">Streaming</span>
+							</li>
+						)}
+					</ul>
+					<div className="ml-auto shrink-0 border-l border-line pl-3 lg:ml-0">
 						<ReplayControls state={replay} dispatch={dispatch} origin={formatClock(replay.position)} />
 					</div>
 				</div>
@@ -669,16 +737,18 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 						onClearRange={clearRange}
 						onCollapseAll={collapseAll}
 						filterRef={filterInput}
+						familyCounts={familyCounts}
+						errorCount={errorCount}
 						primaryModel={primaryModel}
 					/>
 				</div>
 				<aside
 					ref={aside}
 					className={cx(
-						"flex flex-col border-l border-line bg-page",
+						"flex flex-col border-l border-ink bg-page min-[1200px]:border-line",
 						"fixed inset-y-0 right-0 z-30 w-[min(560px,100vw)] transition-transform duration-150",
 						// The shadow only while open: off screen it would still darken the page's right edge.
-						overlayOpen ? "translate-x-0 shadow-[-8px_0_24px_rgba(15,15,15,0.08)]" : "pointer-events-none translate-x-full",
+						overlayOpen ? "translate-x-0 shadow-[0_8px_24px_rgba(0,0,0,0.14)]" : "pointer-events-none translate-x-full",
 						"min-[1200px]:pointer-events-auto min-[1200px]:static min-[1200px]:z-auto min-[1200px]:w-[40%] min-[1200px]:max-w-[680px] min-[1200px]:min-w-[420px] min-[1200px]:translate-x-0 min-[1200px]:shadow-none",
 						// With nothing to inspect, the ledger takes the whole width.
 						!inspected && "min-[1200px]:hidden",
@@ -709,7 +779,7 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 
 function OverviewError() {
 	return (
-		<div className="flex h-[96px] items-center justify-center rounded-md border border-dashed border-line text-[12.5px] text-muted" data-overview-error="">
+		<div className="flex h-[96px] items-center justify-center border-y border-line text-[13px] text-muted" data-overview-error="">
 			The timeline could not be drawn. The ledger below lists every record.
 		</div>
 	);

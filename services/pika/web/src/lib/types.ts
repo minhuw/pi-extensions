@@ -219,6 +219,13 @@ export interface TraceLlmRecord {
 	text?: string;
 	thinking?: boolean;
 	toolCalls?: number;
+	/** Epoch ms the request was handed to the transport; absent for older sessions and uncaptured calls, as are the next three. */
+	sentAt?: number;
+	/** Epoch ms the response headers arrived. */
+	responseAt?: number;
+	/** Epoch ms the first streamed text, thinking, or tool-call delta arrived. */
+	firstTokenAt?: number;
+	firstToken?: "text" | "thinking" | "toolCall";
 }
 
 /** A tool call; `seq` is the assistant entry that made it and `resultSeq` its result's. */

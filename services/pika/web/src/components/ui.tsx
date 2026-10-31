@@ -7,12 +7,16 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 
 type Tone = "neutral" | "accent" | "red" | "green" | "yellow";
 
+/**
+ * Pills carry state, never a line colour: `green` (live, online, delivered) and `accent` read as an inverted black sign,
+ * `yellow` (waiting, a caveat) as an outlined notice, and only `red` is coloured.
+ */
 const PILL_TONES: Record<Tone, string> = {
 	neutral: "bg-hover text-ink",
-	accent: "bg-accent-soft text-accent",
+	accent: "bg-ink text-page",
 	red: "bg-red-soft text-red",
-	green: "bg-green-soft text-green",
-	yellow: "bg-yellow-soft text-yellow",
+	green: "bg-ink text-page",
+	yellow: "text-ink shadow-[inset_0_0_0_1px_var(--color-ink)]",
 };
 
 export function Pill({ children, tone = "neutral", title }: { children: ReactNode; tone?: Tone; title?: string }) {
@@ -20,7 +24,7 @@ export function Pill({ children, tone = "neutral", title }: { children: ReactNod
 		<span
 			title={title}
 			className={cx(
-				"inline-flex max-w-full items-center truncate rounded-sm px-1.5 text-[12px] leading-5 whitespace-nowrap",
+				"inline-flex max-w-full items-center truncate rounded-sm px-1.5 text-[11.5px] leading-[18px] font-medium whitespace-nowrap",
 				PILL_TONES[tone],
 			)}
 		>
@@ -29,11 +33,12 @@ export function Pill({ children, tone = "neutral", title }: { children: ReactNod
 	);
 }
 
+/** Callouts are notices: a soft panel, a red one for failures, and a black-framed one (`yellow`) for warnings. */
 const CALLOUT_TONES: Record<Exclude<Tone, "accent">, { box: string; icon: IconName }> = {
 	neutral: { box: "bg-soft", icon: "info" },
 	red: { box: "bg-red-soft", icon: "alert" },
-	green: { box: "bg-green-soft", icon: "info" },
-	yellow: { box: "bg-yellow-soft", icon: "info" },
+	green: { box: "bg-soft", icon: "info" },
+	yellow: { box: "border border-ink bg-page", icon: "info" },
 };
 
 export function Callout({
@@ -51,10 +56,10 @@ export function Callout({
 	return (
 		<div
 			role={tone === "red" ? "alert" : "note"}
-			className={cx("flex gap-3 rounded-md px-4 py-3", style.box)}
+			className={cx("flex gap-3 rounded-sm px-4 py-3", style.box)}
 			data-callout={tone}
 		>
-			<Icon name={icon ?? style.icon} className={cx("mt-1 shrink-0", tone === "red" ? "text-red" : "text-muted")} />
+			<Icon name={icon ?? style.icon} className={cx("mt-0.5 shrink-0", tone === "red" ? "text-red" : tone === "yellow" ? "text-ink" : "text-muted")} />
 			<div className="min-w-0 flex-1">
 				{title && <div className={cx("font-medium", tone === "red" && "text-red")}>{title}</div>}
 				{children && <div className={cx(title ? "mt-1" : undefined, "min-w-0")}>{children}</div>}
@@ -152,22 +157,22 @@ export function Divider({ className }: { className?: string }) {
 }
 
 /** Every top-level page's column, so page titles start at the same x on every page. */
-export const PAGE_COLUMN = "mx-auto w-full max-w-[900px] px-12";
+export const PAGE_COLUMN = "mx-auto w-full max-w-[1240px] px-8 max-sm:px-4";
 
 /** A top-level page: the shared column and top padding; `className` adds the bottom padding. */
 export function Page({ children, className }: { children: ReactNode; className?: string }) {
-	return <div className={cx(PAGE_COLUMN, "pt-16", className)}>{children}</div>;
+	return <div className={cx(PAGE_COLUMN, "pt-9", className)}>{children}</div>;
 }
 
 /** The page's title; `badges` (status pills) follow its last word inline, at the cap height. */
 export function PageTitle({ children, badges }: { children: ReactNode; badges?: ReactNode }) {
-	const title = "font-semibold tracking-[-0.01em]";
-	if (!badges) return <h1 className={cx("text-[36px] leading-tight break-words", title)}>{children}</h1>;
+	const title = "font-semibold tracking-[-0.02em]";
+	if (!badges) return <h1 className={cx("text-[28px] leading-[1.15] break-words text-balance", title)}>{children}</h1>;
 	// No wrap between the title's last word and the badges, so they move to the next line together.
 	return (
-		<div className="text-[36px] leading-tight break-words whitespace-nowrap">
+		<div className="text-[28px] leading-[1.15] break-words whitespace-nowrap">
 			<h1 className={cx("inline whitespace-normal", title)}>{children}</h1>
-			<span className="ml-3 inline-flex gap-1.5 align-[8px] text-[12px] leading-5" data-title-badges="">
+			<span className="ml-3 inline-flex gap-1.5 align-[5px] text-[12px] leading-5" data-title-badges="">
 				{badges}
 			</span>
 		</div>
@@ -204,12 +209,14 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 	);
 }
 
-const BUTTON_BASE = "inline-flex h-8 items-center rounded-sm px-3 text-[14px] disabled:cursor-default disabled:opacity-50";
+const BUTTON_BASE =
+	"inline-flex h-8 items-center gap-1.5 rounded-sm px-3 text-[13px] font-medium whitespace-nowrap transition-colors duration-150 disabled:cursor-default disabled:opacity-45";
 
+/** Actions are black and white; only a destructive action is red. */
 export const BUTTON = {
-	primary: `${BUTTON_BASE} bg-accent font-medium text-white hover:opacity-90`,
-	secondary: `${BUTTON_BASE} border border-line hover:bg-hover`,
-	danger: `${BUTTON_BASE} bg-red font-medium text-white hover:opacity-90`,
+	primary: `${BUTTON_BASE} bg-ink text-page hover:bg-ink/82`,
+	secondary: `${BUTTON_BASE} border border-ink bg-page text-ink hover:bg-hover`,
+	danger: `${BUTTON_BASE} bg-red text-white hover:bg-red/88`,
 	quiet: `${BUTTON_BASE} text-muted hover:bg-hover hover:text-ink`,
 };
 
@@ -246,7 +253,7 @@ export function Dialog({
 				aria-labelledby={titleId}
 				data-dialog={label}
 				onClick={(event) => event.stopPropagation()}
-				className="w-full max-w-[420px] rounded-md border border-line bg-page px-5 py-4 text-ink shadow-xl"
+				className="w-full max-w-[440px] rounded-sm border border-ink bg-page px-5 py-4 text-ink shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
 			>
 				<h2 id={titleId} className="text-[16px] font-semibold break-words">
 					{title}

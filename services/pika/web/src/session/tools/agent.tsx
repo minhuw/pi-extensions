@@ -1,9 +1,9 @@
 import { PikaLink as Link } from "../../components/PikaLink";
 import { CodeBlock, OutputBlock } from "../../components/code";
-import { Icon } from "../../components/icons";
 import { Markdown } from "../../components/Markdown";
 import { Pill, Toggle } from "../../components/ui";
 import { formatCount, formatDuration, totalTokens } from "../../lib/format";
+import { KindBullet } from "../../trace/parts";
 import { useSessionSlots, useSessionView } from "../context";
 import { argString, okResult, resultText, type ToolRenderProps } from "./shared";
 
@@ -26,10 +26,10 @@ function agentDetails(details: unknown): AgentDetails {
 	return details && typeof details === "object" ? (details as AgentDetails) : {};
 }
 
-function statusTone(status: string): "green" | "red" | "accent" | "neutral" {
-	if (status === "completed" || status === "steered") return "green";
+/** Running work is the inverted sign; finished work is neutral, and only a failure is red. */
+function statusTone(status: string): "red" | "green" | "neutral" {
 	if (status === "error" || status === "aborted" || status === "stopped") return "red";
-	if (status === "running" || status === "queued" || status === "background") return "accent";
+	if (status === "running" || status === "queued" || status === "background") return "green";
 	return "neutral";
 }
 
@@ -50,10 +50,10 @@ export function AgentTool({ call, result }: ToolRenderProps) {
 	const report = resultText(ok);
 
 	return (
-		<div className="rounded-md border border-line px-4 py-3" data-agent-card="">
+		<div className="border-l border-k-agent py-1 pl-3" data-agent-card="">
 			<div className="flex flex-wrap items-center gap-2">
-				<Icon name="agent" className="text-muted" />
-				<Pill tone="accent">{type}</Pill>
+				<KindBullet family="agent" />
+				<span className="mono shrink-0 text-[12.5px] text-ink">{type}</span>
 				<span className="min-w-0 flex-1 truncate font-medium">{description ?? "Subagent"}</span>
 				<Pill tone={statusTone(status)}>{status}</Pill>
 			</div>
@@ -63,7 +63,7 @@ export function AgentTool({ call, result }: ToolRenderProps) {
 				{durationMs !== undefined && <span>{formatDuration(durationMs)}</span>}
 				{details.toolUses !== undefined && <span>{details.toolUses} tool uses</span>}
 				{child && (
-					<Link to={`/s/${encodeURIComponent(child.id)}`} className="ml-auto text-accent hover:underline">
+					<Link to={`/s/${encodeURIComponent(child.id)}`} className="ml-auto text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink">
 						Open session →
 					</Link>
 				)}

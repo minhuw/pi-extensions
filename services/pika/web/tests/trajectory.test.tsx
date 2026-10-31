@@ -4,6 +4,7 @@ import type { ChildSession, Entry, SessionLink, Turn } from "../src/lib/types";
 import { VIEW_STORAGE_KEY } from "../src/pages/SessionView";
 import { LIVE_POLL_MS, TRACE_REFRESH_MS } from "../src/session/live";
 import { foldGaps, layoutOverview, makeScale, overviewLanes, traceIntervals } from "../src/trace/axis";
+import { formatPhase } from "../src/trace/format";
 import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { anthropicPayload, modelRequest } from "./support/requests";
@@ -75,7 +76,7 @@ describe("trajectory ledger", () => {
 			"1:11:llm:LLM",
 		]);
 		const head = document.querySelector<HTMLElement>("[data-turn='0'][data-turn-head]")!;
-		expect(head.textContent).toContain("#1");
+		expect(head.textContent).toContain("Turn 1");
 		// Markdown marks are dropped in the one-line prompt.
 		expect(head.textContent).toContain("Fix the flaky test");
 		expect(head.textContent).toContain("1 err");
@@ -176,6 +177,64 @@ describe("trajectory ledger", () => {
 		await waitFor(() => expect(inspector().textContent).toContain("No request was captured"));
 	});
 
+	it("shows a timed model call's provider row, key, tooltip, and ladder, and nothing new without timing", async () => {
+		const fixture = session();
+		const trace = traceOf(fixture);
+		const call = trace.records.find((record) => record.kind === "llm" && record.seq === 2)!;
+		if (call.kind !== "llm" || call.start === undefined || call.end === undefined) throw new Error("no timed call");
+		expect(call.end - call.start).toBeGreaterThanOrEqual(1000);
+		Object.assign(call, { sentAt: call.start + 20, responseAt: call.start + 330, firstTokenAt: call.start + 900, firstToken: "thinking" });
+		renderApp("/s/t1", createFakeServer({ sessions: [fixture], traces: { t1: trace } }).fetch);
+		const overview = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-overview]");
+			if (!node) throw new Error("no overview");
+			return node;
+		});
+		const labels = [...overview.querySelectorAll("[data-overview-rows] span")].map((node) => node.textContent);
+		expect(labels).toEqual(["Turns", "Provider", "Model calls", "Tools", "Subagents"]);
+		expect(document.querySelector("[data-phase-key]")?.textContent).toBe("WaitingStreaming");
+
+		// Hovering the call's provider bar shows the model call, with its time to first token.
+		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false, true));
+		const bar = items.find((item) => item.lane === "provider")!;
+		const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
+		fireEvent.pointerMove(plot, { clientX: (bar.x0 + bar.x1) / 2, clientY: (bar.y0 + bar.y1) / 2 });
+		const tooltip = within(overview).getByRole("tooltip");
+		expect(tooltip.textContent).toContain("LLM");
+		expect(tooltip.querySelector("[data-tooltip-ttft]")?.textContent).toBe(`TTFT 880 ms · streamed ${formatPhase(call.end - call.start - 900)} · first token: thinking`);
+
+		fireEvent.click(row("[data-seq='2'][data-kind='llm']"));
+		const ladder = await waitFor(() => {
+			const node = inspector().querySelector<HTMLElement>("[data-ladder]");
+			if (!node) throw new Error("no ladder");
+			return node;
+		});
+		expect(ladder.querySelector("[data-ladder-ttft]")?.textContent).toBe("880 ms");
+		expect([...ladder.querySelectorAll("[data-ladder-arrow]")].map((node) => node.getAttribute("data-ladder-arrow"))).toEqual(["request", "headers", "first token", "done"]);
+		expect(ladder.textContent).toContain("+310 ms");
+		expect(ladder.textContent).toContain("+880 ms");
+		expect(within(ladder).getByRole("img").getAttribute("aria-label")).toContain("first token after 880 ms");
+		// A call without timing shows nothing new.
+		fireEvent.click(row("[data-seq='9']"));
+		await waitFor(() => expect(inspector().textContent).toContain("Fixed the retry count."));
+		expect(inspector().querySelector("[data-ladder]")).toBeNull();
+	});
+
+	it("keeps the timeline as it was for a session without timing", async () => {
+		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
+		const overview = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-overview]");
+			if (!node) throw new Error("no overview");
+			return node;
+		});
+		const labels = [...overview.querySelectorAll("[data-overview-rows] span")].map((node) => node.textContent);
+		expect(labels).toEqual(["Turns", "Model calls", "Tools", "Subagents"]);
+		expect(document.querySelector("[data-phase-key]")).toBeNull();
+		fireEvent.click(row("[data-seq='2'][data-kind='llm']"));
+		await waitFor(() => expect(inspector().querySelector("[data-usage]")).not.toBeNull());
+		expect(inspector().querySelector("[data-ladder]")).toBeNull();
+	});
+
 	it("moves with j, k, and arrows, folds turns with ← and →, jumps with [ and ], and filters with /", async () => {
 		const server = createFakeServer({ sessions: [session()] });
 		renderApp("/s/t1", server.fetch);
@@ -219,9 +278,20 @@ describe("trajectory ledger", () => {
 		await waitFor(() => expect(rows().map((node) => node.dataset.kind)).toEqual(["read", "write"]));
 		expect(count()).toBe("2 of 9");
 		fireEvent.change(screen.getByRole("searchbox", { name: "Filter records" }), { target: { value: "" } });
-		fireEvent.click(document.querySelector<HTMLElement>("[data-family-filter='llm']")!);
+		// Kinds are picked in a menu, each with its full name and count; it stays open while they are toggled.
+		fireEvent.click(screen.getByRole("button", { name: "Kinds" }));
+		const llm = screen.getByRole("menuitemcheckbox", { name: /Model call/ });
+		expect(llm.textContent).toContain("5");
+		fireEvent.click(llm);
 		await waitFor(() => expect(rows().every((node) => node.dataset.kind === "llm")).toBe(true));
 		expect(rows()).toHaveLength(5);
+		expect(llm.getAttribute("aria-checked")).toBe("true");
+		expect(screen.getByRole("button", { name: "Kinds: Model call" })).toBeTruthy();
+		// Esc in the menu closes it and keeps the filter.
+		fireEvent.keyDown(llm, { key: "Escape" });
+		await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+		expect(rows()).toHaveLength(5);
+		fireEvent.click(screen.getByRole("button", { name: "Kinds: Model call" }));
 		fireEvent.click(document.querySelector<HTMLElement>("[data-family-filter='llm']")!);
 		fireEvent.click(document.querySelector<HTMLElement>("[data-errors-filter]")!);
 		await waitFor(() => expect(rows().map((node) => node.dataset.kind)).toEqual(["shell"]));
@@ -288,6 +358,66 @@ describe("trajectory overview", () => {
 		key("Escape");
 		await waitFor(() => expect(rows()).toHaveLength(9));
 		expect(document.querySelector("[data-clear-range]")).toBeNull();
+	});
+
+	it("zooms with the buttons and ⌘/Ctrl + wheel, leaves a plain wheel to the page, and zooms to a dragged range", async () => {
+		const fixture = session();
+		renderApp("/s/t1", createFakeServer({ sessions: [fixture] }).fetch);
+		const overview = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-overview]");
+			if (!node) throw new Error("no overview");
+			return node;
+		});
+		const plot = overview.querySelector<HTMLElement>("[data-overview-plot]")!;
+		const button = (name: string) => within(overview).queryByRole("button", { name }) as HTMLButtonElement | null;
+		const whole = button("Show the whole session")!;
+		// The full view: nothing to zoom out of, no navigator, and no range to zoom to.
+		expect(whole.disabled).toBe(true);
+		expect(button("Zoom out")!.disabled).toBe(true);
+		expect(button("Zoom to the selected range")).toBeNull();
+		expect(overview.dataset.zoomed).toBeUndefined();
+		expect(overview.querySelector("[data-overview-navigator]")).toBeNull();
+
+		fireEvent.click(button("Zoom in")!);
+		await waitFor(() => expect(overview.dataset.zoomed).toBe("true"));
+		expect(overview.querySelector("[data-overview-navigator]")).not.toBeNull();
+		expect(whole.disabled).toBe(false);
+		fireEvent.click(whole);
+		await waitFor(() => expect(overview.dataset.zoomed).toBeUndefined());
+		expect(whole.disabled).toBe(true);
+		expect(overview.querySelector("[data-overview-navigator]")).toBeNull();
+
+		// A plain wheel scrolls the page; ⌘/Ctrl + wheel zooms and is the overview's alone.
+		expect(fireEvent.wheel(plot, { deltaY: 120, clientX: 400 })).toBe(true);
+		expect(overview.dataset.zoomed).toBeUndefined();
+		expect(fireEvent.wheel(plot, { deltaY: -120, ctrlKey: true, clientX: 400 })).toBe(false);
+		await waitFor(() => expect(overview.dataset.zoomed).toBe("true"));
+		// Zoomed, Shift + wheel pans and a plain wheel still scrolls the page.
+		expect(fireEvent.wheel(plot, { deltaY: 120, shiftKey: true, clientX: 400 })).toBe(false);
+		expect(fireEvent.wheel(plot, { deltaY: 120, clientX: 400 })).toBe(true);
+		fireEvent.click(whole);
+		await waitFor(() => expect(overview.dataset.zoomed).toBeUndefined());
+
+		// Dragging still filters the ledger, and offers to zoom to the range, which keeps the filter.
+		const trace = traceOf(fixture);
+		const llm = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false)).find((item) => item.key === "l:t1:11")!;
+		fireEvent.pointerDown(plot, { clientX: llm.x0 - 4, clientY: 30, button: 0 });
+		fireEvent.pointerMove(plot, { clientX: llm.x1 + 4, clientY: 30 });
+		fireEvent.pointerUp(plot, { clientX: llm.x1 + 4, clientY: 30 });
+		await waitFor(() => expect(rows().map((node) => node.dataset.seq)).toEqual(["11"]));
+		expect(overview.dataset.zoomed).toBeUndefined();
+		const rangeWidth = () => parseFloat(overview.querySelector<HTMLElement>("[data-range]")!.style.width);
+		const before = rangeWidth();
+		fireEvent.click(button("Zoom to the selected range")!);
+		await waitFor(() => expect(overview.dataset.zoomed).toBe("true"));
+		expect(rows().map((node) => node.dataset.seq)).toEqual(["11"]);
+		// The range is drawn larger, and at least a narrowest window's share of the plot.
+		expect(rangeWidth()).toBeGreaterThan(before * 4);
+		key("Escape");
+		await waitFor(() => expect(rows()).toHaveLength(9));
+		expect(button("Zoom to the selected range")).toBeNull();
+		// The window stays where it was; only the filter is gone.
+		expect(overview.dataset.zoomed).toBe("true");
 	});
 
 	it("replays: plays, pauses, changes speed, and stops with Esc", async () => {

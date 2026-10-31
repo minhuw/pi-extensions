@@ -1,5 +1,5 @@
 import type { IconName } from "../components/icons";
-import type { SessionTrace, TraceChild, TraceRecord, TraceToolRecord, TraceTurn } from "../lib/types";
+import type { SessionTrace, TraceChild, TraceLlmRecord, TraceRecord, TraceToolRecord, TraceTurn } from "../lib/types";
 import { parseToolName } from "../session/tools/registry";
 
 /** The categorical palette: every family has a `--color-k-<family>` theme token. */
@@ -18,18 +18,33 @@ export const FAMILY_LABELS: Record<Family, string> = {
 	compaction: "Compaction",
 };
 
-/** Utility classes per family; written out in full so Tailwind sees them. */
+/** The letter in each family's round bullet, as on a subway route sign. */
+export const FAMILY_LETTERS: Record<Family, string> = {
+	user: "P",
+	llm: "M",
+	shell: "S",
+	read: "R",
+	write: "W",
+	other: "O",
+	agent: "A",
+	compaction: "C",
+};
+
+/**
+ * Utility classes per family; written out in full so Tailwind sees them. `badge` is the bullet: the line colour with
+ * its letter colour. `text` stays neutral, since several line colours are too light to set text in.
+ */
 export const FAMILY_CLASSES: Record<Family, { text: string; badge: string; bar: string; rail: string; dot: string }> = {
-	user: { text: "text-k-user", badge: "bg-k-user/12 text-k-user", bar: "bg-k-user", rail: "before:bg-k-user", dot: "bg-k-user" },
-	llm: { text: "text-k-llm", badge: "bg-k-llm/12 text-k-llm", bar: "bg-k-llm", rail: "before:bg-k-llm", dot: "bg-k-llm" },
-	shell: { text: "text-k-shell", badge: "bg-k-shell/14 text-k-shell", bar: "bg-k-shell", rail: "before:bg-k-shell", dot: "bg-k-shell" },
-	read: { text: "text-k-read", badge: "bg-k-read/12 text-k-read", bar: "bg-k-read", rail: "before:bg-k-read", dot: "bg-k-read" },
-	write: { text: "text-k-write", badge: "bg-k-write/12 text-k-write", bar: "bg-k-write", rail: "before:bg-k-write", dot: "bg-k-write" },
-	other: { text: "text-k-other", badge: "bg-k-other/14 text-k-other", bar: "bg-k-other", rail: "before:bg-k-other", dot: "bg-k-other" },
-	agent: { text: "text-k-agent", badge: "bg-k-agent/12 text-k-agent", bar: "bg-k-agent", rail: "before:bg-k-agent", dot: "bg-k-agent" },
+	user: { text: "text-muted", badge: "bg-k-user text-k-user-ink", bar: "bg-k-user", rail: "before:bg-k-user", dot: "bg-k-user" },
+	llm: { text: "text-muted", badge: "bg-k-llm text-k-llm-ink", bar: "bg-k-llm", rail: "before:bg-k-llm", dot: "bg-k-llm" },
+	shell: { text: "text-muted", badge: "bg-k-shell text-k-shell-ink", bar: "bg-k-shell", rail: "before:bg-k-shell", dot: "bg-k-shell" },
+	read: { text: "text-muted", badge: "bg-k-read text-k-read-ink", bar: "bg-k-read", rail: "before:bg-k-read", dot: "bg-k-read" },
+	write: { text: "text-muted", badge: "bg-k-write text-k-write-ink", bar: "bg-k-write", rail: "before:bg-k-write", dot: "bg-k-write" },
+	other: { text: "text-muted", badge: "bg-k-other text-k-other-ink", bar: "bg-k-other", rail: "before:bg-k-other", dot: "bg-k-other" },
+	agent: { text: "text-muted", badge: "bg-k-agent text-k-agent-ink", bar: "bg-k-agent", rail: "before:bg-k-agent", dot: "bg-k-agent" },
 	compaction: {
-		text: "text-k-compaction",
-		badge: "bg-k-compaction/16 text-k-compaction",
+		text: "text-muted",
+		badge: "bg-k-compaction text-k-compaction-ink",
 		bar: "bg-k-compaction",
 		rail: "before:bg-k-compaction",
 		dot: "bg-k-compaction",
@@ -231,6 +246,43 @@ export function recordDuration(record: TraceRecord): number | undefined {
 	// duration; no model answers in 0 ms.
 	if (record.kind === "llm" && end <= start) return undefined;
 	return Math.max(0, end - start);
+}
+
+/** A model call's network phases, in epoch ms, with the waiting and streaming spans between them. */
+export interface LlmPhases {
+	/** When the request went out: `sentAt`, else when pi started it. */
+	request: number;
+	headers?: number;
+	firstToken: number;
+	end: number;
+	/** First token minus request. */
+	ttft: number;
+	/** End minus first token. */
+	streaming: number;
+	kind?: TraceLlmRecord["firstToken"];
+}
+
+const finite = (value: number | undefined): number | undefined => (value !== undefined && Number.isFinite(value) ? value : undefined);
+
+/** A model call's phases, or undefined when its first token was not timed. Times stay within the call's span when it is known. */
+export function llmPhases(record: TraceRecord): LlmPhases | undefined {
+	if (record.kind !== "llm") return undefined;
+	const start = finite(record.start);
+	const end = finite(record.end);
+	const clamp = (t: number) => (start !== undefined && end !== undefined && start <= end ? Math.min(end, Math.max(start, t)) : t);
+	const first = finite(record.firstTokenAt);
+	if (first === undefined) return undefined;
+	const request = clamp(finite(record.sentAt) ?? start ?? first);
+	const firstToken = Math.max(request, clamp(first));
+	const done = Math.max(firstToken, end ?? firstToken);
+	const received = finite(record.responseAt);
+	const headers = received === undefined ? undefined : Math.min(done, Math.max(request, clamp(received)));
+	return { request, headers, firstToken, end: done, ttft: firstToken - request, streaming: done - firstToken, kind: record.firstToken };
+}
+
+/** Whether any model call in the trace has its first token timed, which is when the overview shows the provider row. */
+export function hasProviderTiming(trace: Pick<SessionTrace, "records">): boolean {
+	return trace.records.some((record) => record.kind === "llm" && finite(record.firstTokenAt) !== undefined);
 }
 
 /** Context size of a model call: everything it read, cached or not. */

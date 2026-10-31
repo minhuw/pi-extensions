@@ -1,5 +1,7 @@
 /target/
 /pika-data/
+# Impeccable's local design state: decision sketches, surface briefs, review captures
+/.impeccable/
 *.db
 *.db-shm
 *.db-wal

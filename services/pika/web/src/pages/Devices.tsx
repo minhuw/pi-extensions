@@ -40,8 +40,8 @@ function messageOf(cause: unknown): string {
 
 function H2({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
 	return (
-		<div className="mt-10 mb-2 flex items-center gap-2">
-			<h2 className="text-[20px] font-semibold">{children}</h2>
+		<div className="mt-9 mb-2 flex items-center gap-2">
+			<h2 className="text-[16px] font-semibold">{children}</h2>
 			{aside}
 		</div>
 	);
@@ -51,8 +51,8 @@ function Code({ children }: { children: ReactNode }) {
 	return <code className="code-chip">{children}</code>;
 }
 
-const TH = "px-2 py-1.5 text-left text-[13px] font-normal whitespace-nowrap text-muted";
-const TD = "px-2 py-2 align-middle";
+const TH = "h-7 px-2 pb-1 text-left align-bottom text-[12px] font-medium whitespace-nowrap text-muted";
+const TD = "px-2 py-1.5 align-middle";
 
 /** The error code in an `ApiError`'s body, such as `unknown_device`. */
 function errorCode(cause: unknown): string | undefined {
@@ -61,8 +61,8 @@ function errorCode(cause: unknown): string | undefined {
 	return typeof error === "string" ? error : undefined;
 }
 
-const INPUT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2.5 text-[14px] outline-none focus:border-accent/60";
-const SELECT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2 text-[14px] outline-none focus:border-accent/60";
+const INPUT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2.5 text-[14px] outline-none focus:border-ink";
+const SELECT = "mt-1 h-8 w-full max-w-[320px] rounded-sm border border-line bg-page px-2 text-[14px] outline-none focus:border-ink";
 
 function PairingCard({
 	pairing,
@@ -169,7 +169,7 @@ function PairingCard({
 			data-pairing={pairing.code}
 			data-pairing-match={match?.id}
 			data-highlighted={highlighted ? "" : undefined}
-			className={cx("rounded-md border px-4 py-3", highlighted ? "border-accent bg-accent-soft ring-2 ring-accent/30" : "border-line")}
+			className={cx("rounded-sm border px-4 py-3", highlighted ? "border-ink bg-accent-soft shadow-[inset_0_0_0_1px_var(--color-ink)]" : "border-line")}
 		>
 			<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
 				<span className="font-mono text-[28px] leading-tight font-semibold tracking-[0.08em]" data-pairing-code="">
@@ -211,7 +211,7 @@ function PairingCard({
 								name={choiceName}
 								checked={continues === match.id}
 								onChange={() => choose(match.id)}
-								className="mt-1"
+								className="mt-1 accent-ink"
 							/>
 							<span className="min-w-0 break-words">
 								Continue {match.name}
@@ -221,7 +221,7 @@ function PairingCard({
 							</span>
 						</label>
 						<label className="mt-1 flex items-start gap-2 text-[14px]">
-							<input type="radio" name={choiceName} checked={continues === null} onChange={() => choose(null)} className="mt-1" />
+							<input type="radio" name={choiceName} checked={continues === null} onChange={() => choose(null)} className="mt-1 accent-ink" />
 							<span>Add as a new device</span>
 						</label>
 					</fieldset>
@@ -361,7 +361,7 @@ function PairingSection({
 					<div className="space-y-3" data-pairing-list="">
 						{pinned && card(pinned)}
 						{pinned && others.length > 0 && (
-							<h3 className="pt-3 text-[15px] font-semibold" data-other-requests="">
+							<h3 className="pt-4 text-[14px] font-semibold" data-other-requests="">
 								Other requests
 							</h3>
 						)}
@@ -507,7 +507,7 @@ function DeviceId({ id, name }: { id: string; name: string }) {
 	}, [copied]);
 	const short = [...id].length > DEVICE_ID_SHOWN ? `${[...id].slice(0, DEVICE_ID_SHOWN).join("")}…` : id;
 	return (
-		<span className="flex items-center gap-1 text-[11px] text-muted">
+		<span className="flex items-center gap-1 text-[11.5px] text-muted">
 			<span className="font-mono text-muted" title={id} data-device-id={id}>
 				{short}
 			</span>
@@ -568,9 +568,9 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 				</EmptyState>
 			) : (
 				<div className="overflow-x-auto">
-					<table className="w-full border-collapse text-[14px]" data-device-list="">
+					<table className="w-full border-collapse text-[13px]" data-device-list="">
 						<thead>
-							<tr className="border-b border-line">
+							<tr className="border-b border-ink">
 								<th className={TH}>Name</th>
 								<th className={TH}>Added</th>
 								<th className={TH}>Last seen</th>
@@ -584,13 +584,12 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 							{items.map((device) => (
 								<tr
 									key={device.id}
-									className="border-b border-line last:border-b-0 hover:bg-soft"
+									className="border-b border-line hover:bg-hover"
 									data-device={device.id}
 									data-device-name={device.name}
 								>
 									<td className={TD}>
 										<span className="flex min-w-0 items-start gap-2">
-											<Icon name="device" className="mt-0.5 shrink-0 text-muted" />
 											<span className="min-w-0">
 												<span className="block font-medium break-words" data-device-label="">
 													{device.name}
@@ -601,11 +600,11 @@ function DeviceSection({ devices, onNotice }: { devices: UseQueryResult<{ items:
 									</td>
 									<td className={cx(TD, "whitespace-nowrap text-muted")}>
 										{formatDateTime(device.createdAt)}{" "}
-										<Pill tone={device.createdVia === "pairing" ? "accent" : "neutral"}>
+										<Pill>
 											{device.createdVia === "pairing" ? "paired" : "CLI"}
 										</Pill>
 									</td>
-									<td className={cx(TD, "whitespace-nowrap text-muted")} title={device.lastSeenAt ? formatDateTime(device.lastSeenAt) : undefined}>
+									<td className={cx(TD, "tnum whitespace-nowrap text-muted")} title={device.lastSeenAt ? formatDateTime(device.lastSeenAt) : undefined}>
 										{device.lastSeenAt ? formatRelative(device.lastSeenAt) : "never"}
 									</td>
 									{/* Wraps at hyphens and dots first; only a host that does not fit at all breaks inside a word. */}
@@ -717,9 +716,9 @@ function BrowserSessionSection({ onNotice }: { onNotice: (notice: Notice) => voi
 				<ErrorState error={sessions.error} onRetry={() => void sessions.refetch()} />
 			) : (
 				<div className="overflow-x-auto">
-					<table className="w-full border-collapse text-[14px]" data-browser-sessions="">
+					<table className="w-full border-collapse text-[13px]" data-browser-sessions="">
 						<thead>
-							<tr className="border-b border-line">
+							<tr className="border-b border-ink">
 								<th className={TH}>Browser</th>
 								<th className={TH}>IP</th>
 								<th className={TH}>Signed in</th>
@@ -731,14 +730,14 @@ function BrowserSessionSection({ onNotice }: { onNotice: (notice: Notice) => voi
 						</thead>
 						<tbody>
 							{items.map((session) => (
-								<tr key={session.id} className="border-b border-line last:border-b-0 hover:bg-soft" data-browser-session={session.id}>
+								<tr key={session.id} className="border-b border-line hover:bg-hover" data-browser-session={session.id}>
 									<td className={TD} title={session.userAgent}>
 										<span className="flex min-w-0 flex-wrap items-center gap-2 break-all">
 											{shortUserAgent(session.userAgent)}
-											{session.current && <Pill tone="accent">This browser</Pill>}
+											{session.current && <Pill tone="green">This browser</Pill>}
 										</span>
 									</td>
-									<td className={cx(TD, "font-mono text-[13px] text-muted")}>{session.ip || "—"}</td>
+									<td className={cx(TD, "font-mono text-[12px] text-muted")}>{session.ip || "—"}</td>
 									<td className={cx(TD, "whitespace-nowrap text-muted")}>{formatDateTime(session.createdAt)}</td>
 									<td className={cx(TD, "whitespace-nowrap text-muted")} title={formatDateTime(session.lastSeenAt)}>
 										{formatRelative(session.lastSeenAt)}
@@ -822,7 +821,7 @@ export function DevicesPage() {
 	return (
 		<Page className="pb-24">
 			<PageTitle>Devices</PageTitle>
-			<p className="mt-2 text-[15px] text-muted">Machines that upload to pika, and requests from new ones to join.</p>
+			<p className="mt-2 text-[14px] text-muted">Machines that upload to pika, and requests from new ones to join.</p>
 			{mode === "none" && (
 				<div className="mt-6">
 					<Callout tone="yellow" icon="alert" title="pika has no authentication">

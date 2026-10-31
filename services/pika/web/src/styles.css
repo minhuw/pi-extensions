@@ -3,73 +3,142 @@
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
+/*
+ * pika's type: Aileron (CC0, see assets/fonts/LICENSE-Aileron.txt), a neo-grotesque after Helvetica, served from the
+ * app's own files so it works offline and under any base path. Its semibold also answers weight 500, so `font-medium`
+ * gets the heavier voice the system uses for labels and titles.
+ */
+@font-face {
+	font-family: "Aileron";
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url("./assets/fonts/aileron-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Aileron";
+	font-style: italic;
+	font-weight: 400;
+	font-display: swap;
+	src: url("./assets/fonts/aileron-latin-400-italic.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Aileron";
+	font-style: normal;
+	font-weight: 500 600;
+	font-display: swap;
+	src: url("./assets/fonts/aileron-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Aileron";
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url("./assets/fonts/aileron-latin-700-normal.woff2") format("woff2");
+}
+
 @theme {
-	--font-sans: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+	--font-sans: "Aileron", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	--font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
+	/* Ground, ink, and hairlines. */
 	--color-page: #ffffff;
-	--color-sidebar: #f7f7f5;
-	--color-ink: #37352f;
-	--color-muted: #787774;
-	--color-line: rgba(55, 53, 47, 0.09);
-	--color-hover: rgba(55, 53, 47, 0.06);
-	--color-soft: rgba(55, 53, 47, 0.04);
-	--color-code: rgba(135, 131, 120, 0.15);
-	--color-chip: #eb5757;
-	--color-accent: #2383e2;
-	--color-accent-soft: rgba(35, 131, 226, 0.1);
-	--color-red: #e03e3e;
-	--color-red-soft: rgba(224, 62, 62, 0.08);
-	--color-green: #0f7b6c;
-	--color-green-soft: rgba(15, 123, 108, 0.1);
-	--color-yellow: #b7791f;
-	--color-yellow-soft: rgba(223, 171, 1, 0.12);
-	--color-skeleton: rgba(55, 53, 47, 0.08);
+	--color-sidebar: #f6f6f6;
+	--color-ink: #0b0b0b;
+	--color-muted: #5e5e5e;
+	--color-line: #e1e1e1;
+	--color-hover: #f1f1f1;
+	--color-soft: #f7f7f7;
+	--color-code: #f1f1f1;
+	--color-chip: #0b0b0b;
+	--color-skeleton: #ebebeb;
 
-	/* The categorical palette of the trajectory view: one hue per kind of record. */
-	--color-k-user: #2e7bc4;
-	--color-k-llm: #8058c8;
-	--color-k-thinking: #b9a4e6;
-	--color-k-shell: #c47f12;
-	--color-k-read: #16897c;
-	--color-k-write: #3d8b47;
-	--color-k-other: #6c7684;
-	--color-k-agent: #c44b8c;
-	--color-k-compaction: #b38a12;
-	--color-k-error: #d4453c;
+	/* The sign band: navigation lives on black, with the manual's thin white stripe. */
+	--color-band: #0b0b0b;
+	--color-band-ink: #ffffff;
+	--color-band-muted: rgba(255, 255, 255, 0.7);
+	--color-band-hover: rgba(255, 255, 255, 0.12);
 
-	--radius-sm: 4px;
-	--radius-md: 6px;
+	/* Actions and selection are black and white; colour is reserved for record kinds and errors. */
+	--color-accent: #0b0b0b;
+	--color-accent-soft: rgba(11, 11, 11, 0.06);
+	--color-red: #d52b1e;
+	--color-red-soft: rgba(213, 43, 30, 0.08);
+	--color-green: #0b0b0b;
+	--color-green-soft: #ededed;
+	--color-yellow: #0b0b0b;
+	--color-yellow-soft: #f4f4f4;
+
+	/*
+	 * The line colours: one per kind of record, and nothing else uses them. Each kind's bullet sets its letter in
+	 * `--color-k-<kind>-ink`, chosen for at least 4.5:1 against the fill.
+	 */
+	--color-k-user: #3a78ac;
+	--color-k-user-ink: #ffffff;
+	--color-k-llm: #b933ad;
+	--color-k-llm-ink: #ffffff;
+	--color-k-thinking: #dcadd7;
+	--color-k-shell: #fcc64d;
+	--color-k-shell-ink: #0b0b0b;
+	--color-k-read: #00853b;
+	--color-k-read-ink: #ffffff;
+	--color-k-write: #f9856d;
+	--color-k-write-ink: #0b0b0b;
+	--color-k-other: #6d6e71;
+	--color-k-other-ink: #ffffff;
+	--color-k-agent: #ff6319;
+	--color-k-agent-ink: #0b0b0b;
+	--color-k-compaction: #996633;
+	--color-k-compaction-ink: #ffffff;
+	--color-k-error: #d52b1e;
+	--color-k-error-ink: #ffffff;
+
+	--radius-sm: 2px;
+	--radius-md: 3px;
 }
 
 [data-theme="dark"] {
-	--color-page: #191919;
-	--color-sidebar: #202020;
-	--color-ink: rgba(255, 255, 255, 0.81);
-	--color-muted: rgba(255, 255, 255, 0.46);
-	--color-line: rgba(255, 255, 255, 0.094);
-	--color-hover: rgba(255, 255, 255, 0.055);
-	--color-soft: rgba(255, 255, 255, 0.03);
-	--color-code: rgba(255, 255, 255, 0.07);
-	--color-chip: #ff7369;
-	--color-accent-soft: rgba(35, 131, 226, 0.2);
-	--color-red: #ff7369;
-	--color-red-soft: rgba(255, 115, 105, 0.1);
-	--color-green: #4dab9a;
-	--color-green-soft: rgba(77, 171, 154, 0.12);
-	--color-yellow: #ffdc49;
-	--color-yellow-soft: rgba(255, 220, 73, 0.1);
-	--color-skeleton: rgba(255, 255, 255, 0.07);
-	--color-k-user: #62a6ec;
-	--color-k-llm: #a98af0;
-	--color-k-thinking: #6d5a9c;
-	--color-k-shell: #e2a84a;
-	--color-k-read: #3fbcab;
-	--color-k-write: #6cbf75;
-	--color-k-other: #97a1ae;
-	--color-k-agent: #ea7fba;
-	--color-k-compaction: #dcbd4f;
-	--color-k-error: #f2675e;
+	--color-page: #121212;
+	--color-sidebar: #1a1a1a;
+	--color-ink: #ededed;
+	--color-muted: #a3a3a3;
+	--color-line: #2b2b2b;
+	--color-hover: #222222;
+	--color-soft: #181818;
+	--color-code: #232323;
+	--color-chip: #ededed;
+	--color-skeleton: #262626;
+	--color-band: #000000;
+	--color-band-ink: #ffffff;
+	--color-band-muted: rgba(255, 255, 255, 0.66);
+	--color-band-hover: rgba(255, 255, 255, 0.12);
+	--color-accent: #ededed;
+	--color-accent-soft: rgba(237, 237, 237, 0.08);
+	--color-red: #ff6b5e;
+	--color-red-soft: rgba(255, 107, 94, 0.12);
+	--color-green: #ededed;
+	--color-green-soft: #2b2b2b;
+	--color-yellow: #ededed;
+	--color-yellow-soft: #1e1e1e;
+	--color-k-user: #6aa9dd;
+	--color-k-user-ink: #0b0b0b;
+	--color-k-llm: #d06bc6;
+	--color-k-llm-ink: #0b0b0b;
+	--color-k-thinking: #7a4a76;
+	--color-k-shell: #fcc64d;
+	--color-k-shell-ink: #0b0b0b;
+	--color-k-read: #34b76a;
+	--color-k-read-ink: #0b0b0b;
+	--color-k-write: #f9856d;
+	--color-k-write-ink: #0b0b0b;
+	--color-k-other: #9c9da1;
+	--color-k-other-ink: #0b0b0b;
+	--color-k-agent: #ff7a3a;
+	--color-k-agent-ink: #0b0b0b;
+	--color-k-compaction: #c08a4e;
+	--color-k-compaction-ink: #0b0b0b;
+	--color-k-error: #ff6b5e;
+	--color-k-error-ink: #0b0b0b;
 	color-scheme: dark;
 }
 
@@ -83,14 +152,27 @@
 	body {
 		background: var(--color-page);
 		color: var(--color-ink);
+		caret-color: var(--color-ink);
 		font-family: var(--font-sans);
-		font-size: 16px;
-		line-height: 1.65;
+		font-size: 14px;
+		line-height: 1.5;
+		font-variant-numeric: tabular-nums;
 		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
 	}
 
 	::selection {
-		background: rgba(35, 131, 226, 0.28);
+		background: var(--color-ink);
+		color: var(--color-page);
+	}
+
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: color-mix(in srgb, var(--color-ink) 28%, transparent) transparent;
+	}
+
+	a {
+		text-underline-offset: 3px;
 	}
 
 	button {
@@ -98,23 +180,47 @@
 	}
 
 	:focus-visible {
-		outline: 2px solid var(--color-accent);
-		outline-offset: 1px;
+		outline: 2px solid var(--color-ink);
+		outline-offset: 2px;
 		border-radius: var(--radius-sm);
+	}
+
+	/* The search field's clear button is the browser's blue cross unless it is drawn here, in the muted ink of a control. */
+	input[type="search"]::-webkit-search-cancel-button {
+		-webkit-appearance: none;
+		appearance: none;
+		width: 10px;
+		height: 10px;
+		margin-left: 4px;
+		background-color: var(--color-muted);
+		-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1 1l8 8M9 1l-8 8' stroke='black' stroke-width='1.6'/%3E%3C/svg%3E") center / contain no-repeat;
+		mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1 1l8 8M9 1l-8 8' stroke='black' stroke-width='1.6'/%3E%3C/svg%3E") center / contain no-repeat;
+		cursor: pointer;
+	}
+
+	input[type="search"]::-webkit-search-cancel-button:hover {
+		background-color: var(--color-ink);
+	}
+
+	/* On the black sign band an ink ring would vanish, so it is white there, and inside the control, because the
+	   band's scrolling navigation clips anything drawn outside it. */
+	[data-sign-band] :focus-visible {
+		outline-color: var(--color-band-ink);
+		outline-offset: -3px;
 	}
 }
 
 @layer components {
 	.mono {
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: 12.5px;
 		line-height: 1.55;
 	}
 
 	.code-chip {
 		font-family: var(--font-mono);
 		font-size: 85%;
-		padding: 0.15em 0.35em;
+		padding: 0.1em 0.35em;
 		border-radius: var(--radius-sm);
 		background: var(--color-code);
 		color: var(--color-chip);
@@ -122,9 +228,10 @@
 
 	.prose-pika {
 		overflow-wrap: anywhere;
+		line-height: 1.6;
 	}
 	.prose-pika > * + * {
-		margin-top: 0.75em;
+		margin-top: 0.7em;
 	}
 	.prose-pika h1,
 	.prose-pika h2,
@@ -135,21 +242,21 @@
 		margin-top: 1.2em;
 	}
 	.prose-pika h1 {
-		font-size: 1.5em;
+		font-size: 1.4em;
 	}
 	.prose-pika h2 {
-		font-size: 1.3em;
+		font-size: 1.22em;
 	}
 	.prose-pika h3 {
-		font-size: 1.15em;
+		font-size: 1.08em;
 	}
 	.prose-pika ul {
 		list-style: disc;
-		padding-left: 1.5em;
+		padding-left: 1.4em;
 	}
 	.prose-pika ol {
 		list-style: decimal;
-		padding-left: 1.5em;
+		padding-left: 1.4em;
 	}
 	.prose-pika li + li {
 		margin-top: 0.2em;
@@ -158,14 +265,14 @@
 		color: inherit;
 		text-decoration: underline;
 		text-decoration-color: var(--color-muted);
-		text-underline-offset: 2px;
 	}
 	.prose-pika a:hover {
 		text-decoration-color: var(--color-ink);
 	}
 	.prose-pika blockquote {
-		border-left: 3px solid currentColor;
+		border-left: 1px solid var(--color-ink);
 		padding-left: 0.9em;
+		color: var(--color-muted);
 	}
 	.prose-pika hr {
 		border: 0;
@@ -173,7 +280,7 @@
 	}
 	.prose-pika table {
 		border-collapse: collapse;
-		font-size: 0.92em;
+		font-size: 0.93em;
 		display: block;
 		overflow-x: auto;
 	}
@@ -189,16 +296,17 @@
 	}
 	.prose-pika input[type="checkbox"] {
 		margin-right: 0.4em;
+		accent-color: var(--color-ink);
 	}
 
 	.code-block {
 		font-family: var(--font-mono);
-		font-size: 13px;
+		font-size: 12.5px;
 		line-height: 1.55;
 		background: var(--color-soft);
 		border: 1px solid var(--color-line);
-		border-radius: var(--radius-md);
-		padding: 0.75rem 0.9rem;
+		border-radius: var(--radius-sm);
+		padding: 0.7rem 0.85rem;
 		overflow: auto;
 		white-space: pre;
 		tab-size: 4;
@@ -214,7 +322,7 @@
 
 	/* A ledger row that just arrived in a live session. */
 	.row-in {
-		animation: pika-row-in 150ms ease-out;
+		animation: pika-row-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
 
 	.skeleton {
@@ -231,9 +339,21 @@
 	}
 }
 
+/* A menu drops a few pixels from its button as it appears. */
+.menu-in {
+	animation: pika-menu-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pika-menu-in {
+	from {
+		opacity: 0;
+		translate: 0 -4px;
+	}
+}
+
 @keyframes pika-running {
 	50% {
-		opacity: 0.35;
+		opacity: 0.3;
 	}
 }
 
@@ -243,6 +363,7 @@
 
 @media (prefers-reduced-motion: reduce) {
 	.row-in,
+	.menu-in,
 	.running-dot,
 	.skeleton {
 		animation: none;
@@ -258,81 +379,72 @@
 	}
 }
 
-/* highlight.js tokens */
+/* highlight.js tokens: a quiet scheme that stays clear of the line colours. */
 .hljs-comment,
 .hljs-quote {
-	color: #9b9a97;
+	color: var(--color-muted);
 	font-style: italic;
 }
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
 .hljs-built_in {
-	color: #a626a4;
+	color: #4b3f99;
 }
 .hljs-string,
 .hljs-addition,
 .hljs-regexp {
-	color: #0f7b6c;
+	color: #2f5d7a;
 }
 .hljs-number,
 .hljs-symbol {
-	color: #d9730d;
+	color: #8a4b1f;
 }
 .hljs-title,
 .hljs-section,
 .hljs-title.function_ {
-	color: #2383e2;
+	color: var(--color-ink);
+	font-weight: 600;
 }
 .hljs-attr,
 .hljs-attribute,
 .hljs-variable,
 .hljs-template-variable,
 .hljs-property {
-	color: #b35488;
+	color: #6b4e2e;
 }
 .hljs-type,
 .hljs-class .hljs-title {
-	color: #c18401;
+	color: #4b3f99;
 }
 .hljs-deletion {
-	color: #e03e3e;
+	color: var(--color-red);
 }
 .hljs-meta {
-	color: #787774;
+	color: var(--color-muted);
 }
 
 [data-theme="dark"] .hljs-keyword,
 [data-theme="dark"] .hljs-selector-tag,
 [data-theme="dark"] .hljs-literal,
-[data-theme="dark"] .hljs-built_in {
-	color: #c678dd;
+[data-theme="dark"] .hljs-built_in,
+[data-theme="dark"] .hljs-type,
+[data-theme="dark"] .hljs-class .hljs-title {
+	color: #b3a8f0;
 }
 [data-theme="dark"] .hljs-string,
 [data-theme="dark"] .hljs-addition,
 [data-theme="dark"] .hljs-regexp {
-	color: #98c379;
+	color: #93c1dc;
 }
 [data-theme="dark"] .hljs-number,
 [data-theme="dark"] .hljs-symbol {
-	color: #d19a66;
-}
-[data-theme="dark"] .hljs-title,
-[data-theme="dark"] .hljs-section,
-[data-theme="dark"] .hljs-title.function_ {
-	color: #61afef;
+	color: #e0a77a;
 }
 [data-theme="dark"] .hljs-attr,
 [data-theme="dark"] .hljs-attribute,
 [data-theme="dark"] .hljs-variable,
 [data-theme="dark"] .hljs-template-variable,
 [data-theme="dark"] .hljs-property {
-	color: #e5a5c8;
-}
-[data-theme="dark"] .hljs-type,
-[data-theme="dark"] .hljs-class .hljs-title {
-	color: #e5c07b;
-}
-[data-theme="dark"] .hljs-deletion {
-	color: #ff7369;
+	color: #d4b48c;
 }

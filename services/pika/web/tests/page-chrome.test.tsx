@@ -44,13 +44,16 @@ describe("logo", () => {
 		expect(logoShapes(SOURCE)).toHaveLength(4);
 	});
 
-	it("leads the sidebar's home link, which is still named pika", async () => {
+	it("leads the sign band's home link, which is still named pika", async () => {
 		renderApp("/", createFakeServer({}).fetch);
-		const sidebar = await screen.findByRole("complementary", { name: "Sidebar" });
-		const home = within(sidebar).getByRole("link", { name: "pika" });
+		const band = await screen.findByRole("banner");
+		expect(band.hasAttribute("data-sign-band")).toBe(true);
+		const home = within(band).getByRole("link", { name: "pika" });
 		expect(home.getAttribute("href")).toBe("/");
 		expect(home.querySelector("svg[data-pika-logo]")?.getAttribute("width")).toBe("22");
-		expect(within(sidebar).getByRole("button", { name: "Collapse sidebar" })).toBeTruthy();
+		// The home link comes first, ahead of the band's navigation.
+		const nav = within(band).getByRole("navigation", { name: "Main" });
+		expect(home.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
 	it("is the favicon, inline so any base path works", () => {
@@ -84,7 +87,9 @@ describe("page width", () => {
 		const page = document.querySelector<HTMLElement>("[data-scroll-root] > div")!;
 		expect(page.contains(heading)).toBe(true);
 		for (const name of PAGE_COLUMN.split(" ")) expect(page.classList).toContain(name);
-		expect(page.className).not.toMatch(/max-w-\[(?!900px)/);
+		// No width of its own besides the shared column's.
+		const column = /max-w-\[[^\]]+\]/.exec(PAGE_COLUMN)![0];
+		expect(page.className.match(/max-w-\[[^\]]+\]/g)).toEqual([column]);
 	});
 
 	it("gives the session page the full width, and the transcript a wider reading column", async () => {

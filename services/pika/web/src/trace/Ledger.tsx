@@ -1,9 +1,10 @@
 import { defaultRangeExtractor, useVirtualizer, type Range } from "@tanstack/react-virtual";
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { FilterChip, MenuCheck } from "../components/FilterChip";
 import { PikaLink as Link } from "../components/PikaLink";
 import { Icon } from "../components/icons";
 import { cx, Skeleton } from "../components/ui";
-import { formatCount, plural } from "../lib/format";
+import { formatCount, formatCost, plural } from "../lib/format";
 import type { TraceChild, TraceRecord, TraceTurn } from "../lib/types";
 import type { Interval } from "./axis";
 import { useLoadedEntry } from "./data";
@@ -30,7 +31,7 @@ import {
 	type Family,
 } from "./kinds";
 import { filterActive, type LedgerFilter, type LedgerRow } from "./rows";
-import { callIn, Chip, diffStatOf, DiffStat, KindBadge, PathChip, Ring, RunningDot, WaterfallBar } from "./parts";
+import { callIn, Chip, CostDot, diffStatOf, DiffStat, KindBadge, KindBullet, PathChip, RunningDot, WaterfallBar } from "./parts";
 
 export const ROW_HEIGHT = 28;
 
@@ -38,20 +39,11 @@ export const ROW_HEIGHT = 28;
 export function ledgerRowId(key: string): string {
 	return `ledger-${key}`;
 }
-export const TURN_ROW_HEIGHT = 34;
+export const TURN_ROW_HEIGHT = 30;
 const COLUMN_HEADER = 28;
 const INDENT = 14;
-
-const FAMILY_SHORT: Record<Family, string> = {
-	user: "Prompt",
-	llm: "LLM",
-	shell: "Shell",
-	read: "Read",
-	write: "Write",
-	other: "Other",
-	agent: "Agents",
-	compaction: "Compaction",
-};
+/** The Time and Kind columns together, where a turn's label sits. */
+const TURN_LABEL_SPAN = "span 2";
 
 interface Columns {
 	template: string;
@@ -60,23 +52,26 @@ interface Columns {
 	cost: boolean;
 }
 
+/**
+ * Time, Kind, Record, Duration, Tokens, Cost. A wide ledger, with the inspector closed, also gets a waterfall of each
+ * record on its turn's time scale; the strip map carries the timing otherwise.
+ */
 function columnsFor(width: number): Columns {
-	const waterfall = width >= 620;
+	const waterfall = width >= 1100;
 	const tokens = width >= 520;
 	const cost = width >= 580;
-	const parts = ["62px", "46px", "minmax(0,1fr)"];
-	if (waterfall) parts.push(width >= 1000 ? "150px" : width >= 820 ? "108px" : "84px");
+	const parts = ["64px", "64px", "minmax(0,1fr)"];
+	if (waterfall) parts.push("140px");
 	// Room for a turn's `24m 59s`.
-	parts.push("56px");
-	if (tokens) parts.push("86px");
-	if (cost) parts.push("50px");
-	parts.push("74px");
+	parts.push("62px");
+	if (tokens) parts.push("92px");
+	if (cost) parts.push("74px");
 	return { template: parts.join(" "), waterfall, tokens, cost };
 }
 
 function Num({ children, className, title }: { children: ReactNode; className?: string; title?: string }) {
 	return (
-		<span className={cx("mono tnum truncate text-right text-[11.5px]", className)} title={title}>
+		<span className={cx("tnum truncate text-right text-[12.5px]", className)} title={title}>
 			{children}
 		</span>
 	);
@@ -166,15 +161,15 @@ function Status({ record, sessionId, running }: { record: TraceRecord; sessionId
 	const resultEntry = useLoadedEntry(sessionId, family === "shell" && failed && record.kind === "tool" ? record.resultSeq : undefined);
 	if (record.kind === "llm") {
 		// Only the unusual endings; a normal stop or tool use says nothing.
-		if (record.stopReason === "aborted") return <Chip tone="red">aborted</Chip>;
-		if (recordIsError(record)) return <Chip tone="red">error</Chip>;
+		if (record.stopReason === "aborted") return <span className="text-[12px] font-normal text-red">aborted</span>;
+		if (recordIsError(record)) return <span className="text-[12px] font-normal text-red">error</span>;
 		if (record.stopReason === "length") return <Chip tone="muted">length</Chip>;
 		return null;
 	}
 	if (record.kind !== "tool") return null;
 	if (record.resultSeq === undefined && record.end === undefined) {
 		return running ? (
-			<span className="inline-flex items-center gap-1.5 text-[11px] text-accent">
+			<span className="inline-flex items-center gap-1.5 text-[12px] text-ink">
 				<RunningDot />
 				running
 			</span>
@@ -191,9 +186,9 @@ function Status({ record, sessionId, running }: { record: TraceRecord; sessionId
 		if (!record.isError) return <Chip tone="muted">exit 0</Chip>;
 		const text = JSON.stringify(resultEntry?.raw.message ?? "");
 		const code = /Command exited with code (-?\d+)/.exec(text)?.[1];
-		return <Chip tone="red">{code !== undefined ? `exit ${code}` : "failed"}</Chip>;
+		return <span className="tnum text-[12px] font-normal text-red">{code !== undefined ? `exit ${code}` : "failed"}</span>;
 	}
-	if (record.isError) return <Chip tone="red">error</Chip>;
+	if (record.isError) return <span className="text-[12px] font-normal text-red">error</span>;
 	return null;
 }
 
@@ -202,7 +197,7 @@ function Rails({ depth }: { depth: number }) {
 	return (
 		<>
 			{Array.from({ length: depth }, (_, i) => (
-				<span key={i} aria-hidden="true" className="absolute top-0 bottom-0 w-[2px] rounded-full bg-k-agent/45" style={{ left: 3 + i * INDENT }} />
+				<span key={i} aria-hidden="true" className="absolute top-0 bottom-0 w-px bg-k-agent" style={{ left: 4 + i * INDENT }} />
 			))}
 		</>
 	);
@@ -217,12 +212,12 @@ interface RowState {
 	fresh: boolean;
 }
 
-const rowBase = "group relative grid h-full items-center gap-x-1.5 pr-3 text-[12.5px] leading-none";
+const rowBase = "group relative grid h-full items-center gap-x-2 border-b border-line/60 pr-4 text-[12.5px] leading-none";
 
 function rowTone(state: RowState): string {
 	if (state.highlighted) return "bg-yellow-soft";
-	// The replay's current record looks selected without being the selection.
-	if (state.selected || state.replaying) return "bg-accent-soft";
+	// The replay's current record looks selected without being the selection: a grey row, set heavier, with a hairline.
+	if (state.selected || state.replaying) return "bg-hover font-medium shadow-[inset_1px_0_0_var(--color-ink)]";
 	if (state.hovered) return "bg-hover";
 	return "hover:bg-hover";
 }
@@ -269,15 +264,15 @@ const RecordRow = memo(function RecordRow({
 			aria-selected={state.selected}
 			id={ledgerRowId(row.key)}
 		>
-			{(state.selected || state.replaying) && <span aria-hidden="true" className={cx("absolute inset-y-0 left-0 w-[2px]", error ? "bg-k-error" : FAMILY_CLASSES[family].bar)} />}
-			<Num className="pl-3 text-left text-muted">{window && start !== undefined ? formatElapsed(start - window.start) : ""}</Num>
-			<KindBadge record={record} family={family} className={cx(error && "!bg-red-soft !text-red")} />
+			<Num className="pl-4 text-left font-normal text-muted">{window && start !== undefined ? formatElapsed(start - window.start) : ""}</Num>
+			<KindBadge record={record} family={family} error={error} />
 			<span className="relative flex h-full min-w-0 items-center gap-1.5" style={{ paddingLeft: depth * INDENT }}>
 				<Rails depth={depth} />
 				{subagent ? (
 					<Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />
 				) : (
-					<Icon name={recordIcon(record)} size={14} className={cx("shrink-0", error ? "text-red" : FAMILY_CLASSES[family].text)} />
+					// Muted: the bullet carries the kind; the icon tells a read from a grep or an ls.
+					<Icon name={recordIcon(record)} size={13} className={cx("shrink-0", error ? "text-red" : "text-muted")} />
 				)}
 				{subagent && record.kind === "tool" && record.summary?.includes(":") ? (
 					<>
@@ -288,13 +283,16 @@ const RecordRow = memo(function RecordRow({
 					<>
 						{showsToolName(record) && <span className="max-w-[40%] shrink-0 truncate font-medium">{recordName(record)}</span>}
 						{record.kind === "llm" && record.thinking && (
-							<span title="Thought before answering" className="-mx-0.5 shrink-0 text-[10.5px] text-k-llm/70 italic">
+							<span title="Thought before answering" className="-mx-0.5 shrink-0 text-[11px] font-normal text-muted italic">
 								thinking
 							</span>
 						)}
 						<SummaryText record={record} calls={row.calls} />
+						<span className="flex shrink-0 items-center">
+							<Status record={record} sessionId={row.sessionId} running={running} />
+						</span>
 						{record.kind === "llm" && record.model && record.model !== primaryModel && (
-							<span className="mono ml-auto shrink-0 truncate pl-1 text-[11px] text-muted">{record.model}</span>
+							<span className="mono ml-auto shrink-0 truncate pl-1 text-[11.5px] font-normal text-muted">{record.model}</span>
 						)}
 					</>
 				)}
@@ -303,7 +301,7 @@ const RecordRow = memo(function RecordRow({
 					<Link
 						to={`/s/${encodeURIComponent(firstChild.sessionId)}`}
 						onClick={(event) => event.stopPropagation()}
-						className="ml-auto hidden shrink-0 items-center gap-1 rounded-sm px-1 text-[11.5px] text-muted group-hover:flex hover:bg-hover hover:text-ink"
+						className="ml-auto hidden shrink-0 items-center gap-1 rounded-sm px-1 text-[12px] font-normal text-ink underline decoration-ink/30 underline-offset-[3px] group-hover:flex hover:decoration-ink"
 						title="Open the subagent's session as a page"
 					>
 						<Icon name="external" size={12} />
@@ -316,27 +314,34 @@ const RecordRow = memo(function RecordRow({
 					<WaterfallBar record={record} window={window} running={running} />
 				</span>
 			)}
-			<Num className={cx(running ? "text-accent" : "text-ink/80")}>{running ? "…" : formatSpan(recordDuration(record)).replace("—", "")}</Num>
+			<Num className="text-ink">{running ? "…" : formatSpan(recordDuration(record)).replace("—", "")}</Num>
 			{columns.tokens && (
 				<span className="flex min-w-0 items-center justify-end gap-1.5">
 					{record.kind === "llm" ? (
 						<>
-							<Num className="text-ink/80" title={`${formatCount(record.input)} input · ${formatCount(record.cacheRead)} cache read · ${formatCount(record.cacheWrite)} cache write → ${formatCount(record.output)} output`}>
+							<Num className="text-ink" title={`${formatCount(record.input)} input · ${formatCount(record.cacheRead)} cache read · ${formatCount(record.cacheWrite)} cache write → ${formatCount(record.output)} output${hit !== undefined ? ` · ${Math.round(hit * 100)}% cached` : ""}`}>
 								{formatCount(record.input + record.cacheRead + record.cacheWrite)}
 								<span className="text-muted">→</span>
 								{formatCount(record.output)}
 							</Num>
-							{hit !== undefined && <Ring value={hit} className="text-k-read" title={`Cache hit ${Math.round(hit * 100)}%`} />}
 						</>
 					) : record.kind === "tool" && record.outputSize !== undefined ? (
-						<Num className="text-muted">{formatBytes(record.outputSize)}</Num>
+						<Num className="font-normal text-muted">{formatBytes(record.outputSize)}</Num>
 					) : null}
 				</span>
 			)}
-			{columns.cost && <Num className="text-muted">{record.kind === "llm" ? formatFineCost(record.cost) : ""}</Num>}
-			<span className="flex min-w-0 justify-end">
-				<Status record={record} sessionId={row.sessionId} running={running} />
-			</span>
+			{columns.cost && (
+				<span className="flex min-w-0 items-center justify-end gap-1.5">
+					{record.kind === "llm" && (
+						<>
+							<Num className="text-ink" title={formatCost(record.cost)}>
+								{formatFineCost(record.cost)}
+							</Num>
+							<CostDot cost={record.cost} scale="record" />
+						</>
+					)}
+				</span>
+			)}
 		</div>
 	);
 });
@@ -367,8 +372,7 @@ const ChildRow = memo(function ChildRow({
 			aria-selected={state.selected}
 			id={ledgerRowId(row.key)}
 		>
-			{state.selected && <span aria-hidden="true" className="absolute inset-y-0 left-0 w-[2px] bg-k-agent" />}
-			<Num className="pl-3 text-left text-muted" title={formatInstant(child.startedAt)}>
+			<Num className="pl-4 text-left font-normal text-muted" title={formatInstant(child.startedAt)}>
 				{formatClockTime(child.startedAt, false)}
 			</Num>
 			<KindBadge family="agent" label={child.kind === "herder-step" ? "STEP" : "AGENT"} />
@@ -376,23 +380,28 @@ const ChildRow = memo(function ChildRow({
 				<Rails depth={depth} />
 				<Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />
 				<span className="shrink-0 font-medium">{child.agentType ?? (child.kind === "herder-step" ? "step" : "subagent")}</span>
-				<span className="min-w-0 truncate text-muted">{child.description ?? child.title}</span>
+				<span className="min-w-0 truncate font-normal text-muted">{child.description ?? child.title}</span>
+				<span className="shrink-0 font-normal">
+					<Chip tone="muted">{formatCount(child.entryCount)} entries</Chip>
+				</span>
 				<Link
 					to={`/s/${encodeURIComponent(child.sessionId)}`}
 					onClick={(event) => event.stopPropagation()}
-					className="ml-auto hidden shrink-0 items-center gap-1 rounded-sm px-1 text-[11.5px] text-muted group-hover:flex hover:bg-hover hover:text-ink"
+					className="ml-auto hidden shrink-0 items-center gap-1 rounded-sm px-1 text-[12px] font-normal text-ink underline decoration-ink/30 underline-offset-[3px] group-hover:flex hover:decoration-ink"
 				>
 					<Icon name="external" size={12} />
 					Open as page
 				</Link>
 			</span>
 			{columns.waterfall && <span />}
-			<Num className="text-ink/80">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</Num>
-			{columns.tokens && <Num className="text-ink/80">{tokens ? formatCount(tokens) : ""}</Num>}
-			{columns.cost && <Num className="text-muted">{formatFineCost(child.cost)}</Num>}
-			<span className="flex justify-end">
-				<Chip tone="muted">{formatCount(child.entryCount)} entries</Chip>
-			</span>
+			<Num className="text-ink">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</Num>
+			{columns.tokens && <Num className="text-ink">{tokens ? formatCount(tokens) : ""}</Num>}
+			{columns.cost && (
+				<span className="flex min-w-0 items-center justify-end gap-1.5">
+					<Num className="text-ink">{formatFineCost(child.cost)}</Num>
+					{child.cost > 0 && <CostDot cost={child.cost} scale="session" />}
+				</span>
+			)}
 		</div>
 	);
 });
@@ -412,11 +421,12 @@ const TurnRow = memo(function TurnRow({
 	const start = turnStart(turn);
 	const tokens = turn.tokens.input + turn.tokens.output + turn.tokens.cacheRead + turn.tokens.cacheWrite;
 	const firstLine = plainLine(turn.userText);
+	const records = turn.modelCalls + turn.toolCalls;
 	return (
 		<div
 			className={cx(
-				"relative grid h-full cursor-default items-center gap-x-2 border-y border-line bg-sidebar pr-3 text-[12.5px] leading-none",
-				selected && "bg-accent-soft",
+				"relative grid h-full cursor-default items-center gap-x-2 border-b border-line bg-page pr-4 text-[12.5px] leading-none",
+				selected && "bg-hover shadow-[inset_1px_0_0_var(--color-ink)]",
 			)}
 			style={{ gridTemplateColumns: columns.template }}
 			data-turn={turn.index}
@@ -426,40 +436,32 @@ const TurnRow = memo(function TurnRow({
 			aria-label={`Turn ${turn.index + 1}${row.expanded ? "" : ", collapsed"}: ${firstLine || "empty prompt"}`}
 			id={ledgerRowId(row.key)}
 		>
-			<span className="flex items-center gap-1 pl-2">
+			<span className="flex min-w-0 items-center gap-1 pl-2" style={{ gridColumn: TURN_LABEL_SPAN }}>
 				<Chevron open={row.expanded} onClick={() => onToggle(turn)} label={row.expanded ? `Collapse turn ${turn.index + 1}` : `Expand turn ${turn.index + 1}`} />
-				<span className="mono tnum text-[11.5px] font-semibold text-k-user">#{turn.index + 1}</span>
-			</span>
-			<span className="mono tnum truncate text-[11px] text-muted" title={formatInstant(turn.at)}>
-				{formatClockTime(turn.at, false)}
-			</span>
-			{/* The prompt takes the waterfall's column too; the overview's Turns lane shows each turn's shape. */}
-			<span className="flex min-w-0 items-center gap-1.5" style={columns.waterfall ? { gridColumn: "span 2" } : undefined}>
-				<span title={turn.customType ?? start.label} className="shrink-0 text-k-user" data-turn-start={turn.customType ?? "prompt"}>
-					<Icon name={start.icon} size={13} />
+				<span className="shrink-0 text-[13px] font-semibold text-ink" title={turn.customType ?? start.label} data-turn-start={turn.customType ?? "prompt"}>
+					Turn {turn.index + 1}
 				</span>
-				<span className="min-w-0 flex-1 truncate font-medium" title={turn.userText}>
+				<span className="tnum ml-1 truncate text-[12px] text-muted" title={formatInstant(turn.at)}>
+					{formatClockTime(turn.at, false)}
+				</span>
+			</span>
+			{/* The prompt takes the waterfall's column too; the strip map shows each turn's shape. */}
+			<span className="flex min-w-0 items-center gap-2" style={columns.waterfall ? { gridColumn: "span 2" } : undefined}>
+				<span className="min-w-0 flex-1 truncate text-ink" title={turn.userText}>
 					{firstLine || <span className="text-muted italic">(empty prompt)</span>}
 				</span>
 				<span
-					className="mono tnum ml-2 flex shrink-0 items-center gap-2 text-[11px] text-muted"
+					className="tnum shrink-0 text-[12px] text-muted"
 					title={`${plural(turn.modelCalls, "model call")} · ${plural(turn.toolCalls, "tool call")}`}
 					data-turn-counts=""
 				>
-					<span className="flex items-center gap-0.5">
-						<Icon name="sparkle" size={11} className="text-k-llm" />
-						{turn.modelCalls}
-					</span>
-					<span className="flex items-center gap-0.5">
-						<Icon name="tool" size={11} />
-						{turn.toolCalls}
-					</span>
+					{plural(records, "record")}
 				</span>
+				{turn.toolErrors > 0 && <span className="tnum shrink-0 text-[12px] text-red">{turn.toolErrors} err</span>}
 			</span>
-			<Num className="font-medium text-ink/90">{formatSpan(turn.durationMs)}</Num>
-			{columns.tokens && <Num className="text-ink/80">{tokens ? formatCount(tokens) : ""}</Num>}
-			{columns.cost && <Num className="text-ink/80">{formatFineCost(turn.cost)}</Num>}
-			<span className="flex justify-end">{turn.toolErrors > 0 && <Chip tone="red">{turn.toolErrors} err</Chip>}</span>
+			<Num className="font-medium text-ink">{formatSpan(turn.durationMs)}</Num>
+			{columns.tokens && <Num className="text-muted">{tokens ? formatCount(tokens) : ""}</Num>}
+			{columns.cost && <Num className="text-muted">{formatFineCost(turn.cost)}</Num>}
 		</div>
 	);
 });
@@ -520,26 +522,111 @@ export interface LedgerProps {
 	onClearRange: () => void;
 	onCollapseAll: (collapse: boolean) => void;
 	filterRef?: React.Ref<HTMLInputElement>;
+	/** Records of each kind, for the kind menu. */
+	familyCounts?: ReadonlyMap<Family, number>;
+	/** Failed records, for the errors toggle. */
+	errorCount?: number;
 	/** The session's usual model; model calls name theirs only when it differs. */
 	primaryModel?: string;
 }
 
-function FamilyToggle({ family, active, compact, onClick }: { family: Family; active: boolean; compact: boolean; onClick: () => void }) {
+/** The kinds the ledger filters by; prompts and compactions are turns and markers, not records to pick. */
+const KIND_FILTERS = FAMILIES.filter((family) => family !== "user" && family !== "compaction");
+
+/** The kind menu's button text: up to two kinds by name, more by number. */
+function kindsValue(families: readonly Family[]): string | undefined {
+	const chosen = KIND_FILTERS.filter((family) => families.includes(family));
+	if (chosen.length === 0) return undefined;
+	return chosen.length <= 2 ? chosen.map((family) => FAMILY_LABELS[family]).join(", ") : String(chosen.length);
+}
+
+/**
+ * The kind button's marks: a dot for each kind the session has; once kinds are chosen, their bullets, overlapping like
+ * stacked signs, and the name too when there is only one.
+ */
+function KindGlyph({ families, familyCounts }: { families: readonly Family[]; familyCounts?: ReadonlyMap<Family, number> }) {
+	const chosen = KIND_FILTERS.filter((family) => families.includes(family));
+	if (chosen.length === 1) {
+		return (
+			<span className="flex items-center gap-1.5 font-medium">
+				<KindBullet family={chosen[0]} size={15} />
+				{FAMILY_LABELS[chosen[0]]}
+			</span>
+		);
+	}
+	if (chosen.length > 1) {
+		return (
+			<span className="flex items-center pl-0.5">
+				{chosen.map((family) => (
+					<KindBullet key={family} family={family} size={15} className="-ml-0.5 ring-[1.5px] ring-ink first:ml-0" />
+				))}
+			</span>
+		);
+	}
+	const present = KIND_FILTERS.filter((family) => familyCounts?.get(family));
+	if (!present.length) return null;
 	return (
-		<button
-			type="button"
-			onClick={onClick}
-			aria-pressed={active}
-			title={FAMILY_LABELS[family]}
-			className={cx(
-				"inline-flex h-6 items-center gap-1.5 rounded-sm px-1.5 text-[12px] transition-colors duration-150",
-				active ? "bg-hover text-ink" : "text-muted hover:bg-hover hover:text-ink",
-			)}
-			data-family-filter={family}
-		>
-			<span aria-hidden="true" className={cx("size-2 rounded-[2px]", FAMILY_CLASSES[family].dot, !active && "opacity-70")} />
-			{compact ? <span className="sr-only">{FAMILY_LABELS[family]}</span> : FAMILY_SHORT[family]}
-		</button>
+		<span className="flex items-center gap-[3px] pl-0.5">
+			{present.map((family) => (
+				<span key={family} className={cx("size-[7px] rounded-full", FAMILY_CLASSES[family].dot)} />
+			))}
+		</span>
+	);
+}
+
+/** The kind menu: the session's kinds as a small table, each with its share of the records, ticked to show only those. */
+function KindMenu({ filter, onFilter, familyCounts, close }: Pick<LedgerProps, "filter" | "onFilter" | "familyCounts"> & { close: () => void }) {
+	const total = familyCounts ? [...familyCounts.values()].reduce((a, b) => a + b, 0) : 0;
+	const toggle = (family: Family) =>
+		onFilter({ ...filter, families: filter.families.includes(family) ? filter.families.filter((f) => f !== family) : [...filter.families, family] });
+	return (
+		<div className="w-[292px]">
+			<div className="flex h-7 items-center justify-between border-b border-line px-2 text-[11.5px] text-muted" aria-hidden="true">
+				<span>Record kind</span>
+				{familyCounts && <span>Records</span>}
+			</div>
+			<div role="group" aria-label="Record kinds" className="py-1">
+				{KIND_FILTERS.map((family) => {
+					const count = familyCounts?.get(family) ?? 0;
+					const checked = filter.families.includes(family);
+					const empty = familyCounts !== undefined && count === 0;
+					return (
+						<MenuCheck key={family} checked={checked} onToggle={() => toggle(family)} data-family-filter={family}>
+							<KindBullet family={family} size={16} className={empty ? "opacity-40" : undefined} />
+							<span className={cx("min-w-0 flex-1 truncate", checked && "font-medium", empty && "text-muted")}>{FAMILY_LABELS[family]}</span>
+							{familyCounts && (
+								<>
+									{/* The kind's share of the session, in its own line colour. */}
+									<span className="h-1.5 w-14 shrink-0 bg-hover" aria-hidden="true">
+										{count > 0 && (
+											<span className={cx("block h-full", FAMILY_CLASSES[family].bar)} style={{ width: `max(2px, ${(count / Math.max(1, total)) * 100}%)` }} />
+										)}
+									</span>
+									<span className="tnum w-9 shrink-0 text-right text-[12px] text-muted">{formatCount(count)}</span>
+								</>
+							)}
+						</MenuCheck>
+					);
+				})}
+			</div>
+			<div className="flex h-9 items-end border-t border-line">
+				{filter.families.length > 0 ? (
+					<button
+						type="button"
+						role="menuitem"
+						onClick={() => {
+							onFilter({ ...filter, families: [] });
+							close();
+						}}
+						className="flex h-7 w-full items-center rounded-sm px-2 text-left text-[13px] text-ink hover:bg-hover"
+					>
+						Show every kind
+					</button>
+				) : (
+					<p className="flex h-7 items-center px-2 text-[12px] text-muted">Tick kinds to show only their records.</p>
+				)}
+			</div>
+		</div>
 	);
 }
 
@@ -552,18 +639,24 @@ function FilterBar({
 	onClearRange,
 	onCollapseAll,
 	filterRef,
+	familyCounts,
+	errorCount,
 	compact,
 	anyExpanded,
-}: Pick<LedgerProps, "filter" | "onFilter" | "counts" | "range" | "rangeLabel" | "onClearRange" | "onCollapseAll" | "filterRef"> & {
+}: Pick<LedgerProps, "filter" | "onFilter" | "counts" | "range" | "rangeLabel" | "onClearRange" | "onCollapseAll" | "filterRef" | "familyCounts" | "errorCount"> & {
 	compact: boolean;
 	anyExpanded: boolean;
 }) {
-	const toggleFamily = (family: Family) =>
-		onFilter({ ...filter, families: filter.families.includes(family) ? filter.families.filter((f) => f !== family) : [...filter.families, family] });
 	const active = filterActive(filter) || range !== undefined;
 	return (
-		<div className="flex h-10 shrink-0 items-center gap-1 border-b border-line px-2" data-ledger-filter="">
-			<label className="flex h-7 w-[200px] shrink-0 items-center gap-1.5 rounded-sm border border-line px-2 text-muted focus-within:border-accent/60">
+		// One line where it fits; on a phone the counts and controls wrap under the filters rather than leave the screen.
+		<div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-line px-4 py-1.5" data-ledger-filter="">
+			<label
+				className={cx(
+					"flex h-8 shrink-0 items-center gap-1.5 rounded-sm border border-line px-2 text-muted focus-within:border-ink",
+					compact ? "w-[150px]" : "w-[200px]",
+				)}
+			>
 				<Icon name="search" size={13} />
 				<input
 					ref={filterRef}
@@ -581,26 +674,30 @@ function FilterBar({
 					}}
 					placeholder="Filter records"
 					aria-label="Filter records"
-					className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-muted"
+					className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-muted"
 				/>
-				<kbd className="mono rounded-[3px] border border-line px-1 text-[10px] leading-4 text-muted">/</kbd>
+				<kbd className="mono rounded-sm border border-line px-1 text-[10.5px] leading-4 text-muted">/</kbd>
 			</label>
-			<div className="ml-1 flex min-w-0 items-center gap-0.5 overflow-hidden">
-				{FAMILIES.filter((family) => family !== "user" && family !== "compaction").map((family) => (
-					<FamilyToggle key={family} family={family} active={filter.families.includes(family)} compact={compact} onClick={() => toggleFamily(family)} />
-				))}
+			<div className="ml-1 flex shrink-0 items-center gap-1">
+				{/* One menu for the kinds, so each gets a full row with its name and count instead of a squeezed chip. */}
+				<FilterChip label="Kinds" value={kindsValue(filter.families)} glyph={<KindGlyph families={filter.families} familyCounts={familyCounts} />}>
+					{(close) => <KindMenu filter={filter} onFilter={onFilter} familyCounts={familyCounts} close={close} />}
+				</FilterChip>
 				<button
 					type="button"
 					onClick={() => onFilter({ ...filter, errorsOnly: !filter.errorsOnly })}
 					aria-pressed={filter.errorsOnly}
 					className={cx(
-						"inline-flex h-6 items-center gap-1.5 rounded-sm px-1.5 text-[12px] transition-colors duration-150",
-						filter.errorsOnly ? "bg-red-soft text-red" : "text-muted hover:bg-hover hover:text-ink",
+						"inline-flex h-7 items-center gap-1.5 rounded-sm border px-2 text-[13px] transition-colors duration-150",
+						filter.errorsOnly ? "border-ink bg-ink text-page hover:bg-ink/82" : "border-line text-ink hover:border-ink hover:bg-hover",
 					)}
 					data-errors-filter=""
 				>
-					<Icon name="alert" size={12} />
+					<Icon name="alert" size={12} className={filter.errorsOnly ? undefined : "text-red"} />
 					{compact ? <span className="sr-only">Errors only</span> : "Errors"}
+					{errorCount !== undefined && (
+						<span className={cx("tnum text-[12px]", filter.errorsOnly ? "text-page/70" : "text-muted")}>{formatCount(errorCount)}</span>
+					)}
 				</button>
 			</div>
 			<div className="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-[12px] text-muted">
@@ -608,11 +705,11 @@ function FilterBar({
 					<button
 						type="button"
 						onClick={onClearRange}
-						className="inline-flex h-6 items-center gap-1 rounded-sm bg-accent-soft px-1.5 text-accent hover:opacity-80"
+						className="inline-flex h-7 items-center gap-1 rounded-sm border border-ink px-1.5 text-ink hover:bg-hover"
 						title="Clear the time range (Esc)"
 						data-clear-range=""
 					>
-						<span className="mono tnum text-[11px]">{rangeLabel}</span>
+						<span className="tnum text-[12px]">{rangeLabel}</span>
 						<span aria-hidden="true">×</span>
 						<span className="sr-only">Clear range</span>
 					</button>
@@ -623,7 +720,7 @@ function FilterBar({
 				<button
 					type="button"
 					onClick={() => onCollapseAll(anyExpanded)}
-					className="inline-flex h-6 items-center rounded-sm px-1.5 whitespace-nowrap hover:bg-hover hover:text-ink"
+					className="inline-flex h-7 items-center rounded-sm px-1.5 whitespace-nowrap hover:bg-hover hover:text-ink"
 					data-collapse-all={anyExpanded ? "collapse" : "expand"}
 				>
 					{anyExpanded ? "Collapse all" : "Expand all"}
@@ -635,21 +732,20 @@ function FilterBar({
 }
 
 function ColumnHeader({ columns }: { columns: Columns }) {
-	const cell = "truncate text-[11px] font-medium text-muted";
+	const cell = "truncate text-[12px] font-medium text-muted";
 	return (
 		<div
-			className="sticky top-0 z-[3] grid h-7 items-center gap-x-2 border-b border-line bg-page pr-3"
+			className="sticky top-0 z-[3] grid h-7 items-center gap-x-2 border-b border-ink bg-page pr-4"
 			style={{ gridTemplateColumns: columns.template }}
 			aria-hidden="true"
 		>
-			<span className={cx(cell, "pl-3")}>Time</span>
-			<span className={cell}>Type</span>
-			<span className={cell}>Name</span>
+			<span className={cx(cell, "pl-4")}>Time</span>
+			<span className={cell}>Kind</span>
+			<span className={cell}>Record</span>
 			{columns.waterfall && <span className={cx(cell, "px-1")}>Waterfall</span>}
-			<span className={cx(cell, "text-right")}>Dur</span>
+			<span className={cx(cell, "text-right")}>Duration</span>
 			{columns.tokens && <span className={cx(cell, "text-right")}>Tokens</span>}
 			{columns.cost && <span className={cx(cell, "text-right")}>Cost</span>}
-			<span className={cx(cell, "text-right")}>Status</span>
 		</div>
 	);
 }
@@ -673,13 +769,25 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 	}, [pane]);
 	const columns = useMemo(() => columnsFor(width), [width]);
 
-	const turnHeads = useMemo(() => rows.flatMap((row, index) => (row.type === "turn" ? [index] : [])), [rows]);
+	// Each turn row's index and where it starts in the pane; rows have fixed heights, so this is their layout.
+	const turnHeads = useMemo(() => {
+		const heads: { index: number; start: number }[] = [];
+		let start = COLUMN_HEADER;
+		rows.forEach((row, index) => {
+			if (row.type === "turn") heads.push({ index, start });
+			start += rowSize(row);
+		});
+		return heads;
+	}, [rows]);
 	const activeSticky = useRef(-1);
 	const rangeExtractor = useCallback(
 		(range: Range) => {
+			// The stuck turn is the one of the first row below the column header, which covers the top of the pane; the
+			// range starts at the row under the header, which may still be the previous turn's last.
+			const top = (pane?.scrollTop ?? 0) + COLUMN_HEADER;
 			let active = -1;
-			for (const index of turnHeads) {
-				if (index <= range.startIndex) active = index;
+			for (const { index, start } of turnHeads) {
+				if (start <= top) active = index;
 				else break;
 			}
 			activeSticky.current = active;
@@ -687,7 +795,7 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 			if (active >= 0 && !indexes.includes(active)) indexes.unshift(active);
 			return indexes;
 		},
-		[turnHeads],
+		[turnHeads, pane],
 	);
 
 	const virtualizer = useVirtualizer({
@@ -707,7 +815,18 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 		() => ({
 			scrollToKey: (key, align = "auto") => {
 				const index = rows.findIndex((row) => row.key === key);
-				if (index >= 0) virtualizer.scrollToIndex(index, { align });
+				if (index < 0) return;
+				if (align !== "center") return virtualizer.scrollToIndex(index, { align });
+				// Centred, the view lands at any offset and can leave a row half under the stuck turn header, so it moves on to the
+				// next row boundary (back to the previous one at the end of the list): the first row below the header is whole.
+				const [offset] = virtualizer.getOffsetForIndex(index, "center") ?? [];
+				if (offset === undefined) return;
+				const covered = COLUMN_HEADER + TURN_ROW_HEIGHT;
+				const under = virtualizer.getVirtualItemForOffset(offset + covered);
+				const cut = under && under.start < offset + covered ? under : undefined;
+				if (!cut) return virtualizer.scrollToOffset(offset);
+				const last = virtualizer.getTotalSize() - (pane?.clientHeight ?? 0);
+				virtualizer.scrollToOffset(cut.end - covered <= last ? cut.end - covered : Math.max(0, cut.start - covered));
 			},
 			focus: () => pane?.focus(),
 		}),
@@ -797,7 +916,9 @@ export const Ledger = memo(forwardRef<LedgerHandle, LedgerProps>(function Ledger
 				onClearRange={props.onClearRange}
 				onCollapseAll={props.onCollapseAll}
 				filterRef={props.filterRef}
-				compact={width < 860}
+				familyCounts={props.familyCounts}
+				errorCount={props.errorCount}
+				compact={width < 560}
 				anyExpanded={rows.some((row) => row.type === "turn" && row.expanded)}
 			/>
 			<div

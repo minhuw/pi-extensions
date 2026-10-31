@@ -17,7 +17,6 @@ import { useEntry } from "./data";
 import { formatClockTime, formatElapsed, formatFineCost, formatInstant, formatSpan, spanBetween } from "./format";
 import {
 	cacheHit,
-	FAMILY_CLASSES,
 	recordDuration,
 	recordFamily,
 	recordIsError,
@@ -28,7 +27,9 @@ import {
 	toolName,
 	turnStart,
 } from "./kinds";
-import { callIn, Chip, DiffStat, diffStatOf, KindBadge, PathChip, Ring, RunningDot } from "./parts";
+import { useLoadedEntry } from "./data";
+import { Ladder } from "./Ladder";
+import { callIn, Chip, CostDot, DiffStat, diffStatOf, KindBadge, KindBullet, PathChip, RunningDot } from "./parts";
 
 export type InspectorTab = "rendered" | "input" | "output" | "context" | "raw";
 
@@ -62,9 +63,9 @@ function MetaItem({ icon, children, title }: { icon?: Parameters<typeof Icon>[0]
 function Section({ title, children, right }: { title: string; children: ReactNode; right?: ReactNode }) {
 	return (
 		<section className="mt-5 first:mt-0">
-			<h3 className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold tracking-[0.06em] text-muted uppercase">
+			<h3 className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-muted">
 				{title}
-				{right && <span className="ml-auto font-normal tracking-normal normal-case">{right}</span>}
+				{right && <span className="ml-auto font-normal">{right}</span>}
 			</h3>
 			{children}
 		</section>
@@ -74,32 +75,34 @@ function Section({ title, children, right }: { title: string; children: ReactNod
 function UsageTable({ record }: { record: Extract<TraceRecord, { kind: "llm" }> }) {
 	const prompt = record.input + record.cacheRead + record.cacheWrite;
 	const rows: [string, number, string][] = [
-		["Cache read", record.cacheRead, "bg-k-read"],
-		["Cache write", record.cacheWrite, "bg-k-compaction"],
-		["Input", record.input, "bg-k-user"],
-		["Output", record.output, "bg-k-llm"],
+		["Cache read", record.cacheRead, "bg-ink/20"],
+		["Cache write", record.cacheWrite, "bg-ink/45"],
+		["Input", record.input, "bg-ink/70"],
+		["Output", record.output, "bg-ink"],
 	];
 	const total = prompt + record.output;
 	return (
 		<div data-usage="">
-			<div className="flex h-2 overflow-hidden rounded-full bg-hover" aria-hidden="true">
-				{rows.map(([label, value, color]) => (value > 0 ? <span key={label} className={cx(color, "opacity-80")} style={{ width: `${(value / Math.max(1, total)) * 100}%` }} /> : null))}
+			<div className="flex h-2 gap-px overflow-hidden rounded-sm bg-hover" aria-hidden="true">
+				{rows.map(([label, value, color]) => (value > 0 ? <span key={label} className={color} style={{ width: `${(value / Math.max(1, total)) * 100}%` }} /> : null))}
 			</div>
 			<dl className="tnum mt-2 grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 text-[12.5px]">
 				{rows.map(([label, value, color]) => (
 					<div key={label} className="contents">
 						<dt className="flex items-center gap-1.5 text-muted">
-							<span className={cx("size-2 rounded-[2px] opacity-80", color)} />
+							<span className={cx("size-2 rounded-[1px]", color)} />
 							{label}
 						</dt>
-						<dd className="mono text-right text-[12px]">{value.toLocaleString("en-US")}</dd>
-						<dd className="mono text-right text-[12px] text-muted">{total ? `${Math.round((value / total) * 100)}%` : ""}</dd>
+						<dd className="text-right">{value.toLocaleString("en-US")}</dd>
+						<dd className="text-right text-muted">{total ? `${Math.round((value / total) * 100)}%` : ""}</dd>
 					</div>
 				))}
 				<div className="contents font-medium">
 					<dt className="text-muted">Cost</dt>
-					<dd className="mono text-right text-[12px]">{formatFineCost(record.cost) || "$0"}</dd>
-					<dd />
+					<dd className="text-right">{formatFineCost(record.cost) || "$0"}</dd>
+					<dd className="flex items-center justify-end">
+						<CostDot cost={record.cost} scale="record" />
+					</dd>
 				</div>
 			</dl>
 		</div>
@@ -142,7 +145,7 @@ function LlmRendered({ record, entry, onSelectCall }: { record: Extract<TraceRec
 									onClick={() => onSelectCall?.(call.id)}
 									className="flex w-full min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-left text-[12.5px] hover:bg-hover"
 								>
-									<span className={cx("size-2 shrink-0 rounded-[2px]", FAMILY_CLASSES[toolFamily(call.name)].dot)} />
+									<KindBullet family={toolFamily(call.name)} size={14} />
 									<span className="shrink-0 font-medium">{call.name}</span>
 									<span className="mono min-w-0 truncate text-[12px] text-muted">{findToolRenderer(call.name).summary?.(call) ?? ""}</span>
 									<Icon name="external" size={12} className="ml-auto shrink-0 text-muted" />
@@ -199,17 +202,17 @@ function ToolRendered({
 
 function ChildList({ items }: { items: TraceChild[] }) {
 	return (
-		<div className="divide-y divide-line rounded-md border border-line" data-inspector-children="">
+		<div className="divide-y divide-line border-y border-line" data-inspector-children="">
 			{items.map((child) => (
 				<Link
 					key={child.sessionId}
 					to={`/s/${encodeURIComponent(child.sessionId)}`}
-					className="flex min-w-0 items-center gap-2 px-2.5 py-1.5 text-[12.5px] hover:bg-hover"
+					className="flex h-8 min-w-0 items-center gap-2 px-1 text-[13px] hover:bg-hover"
 				>
 					<KindBadge family="agent" label={child.kind === "herder-step" ? "STEP" : "AGENT"} />
 					<span className="shrink-0 font-medium">{child.agentType ?? "subagent"}</span>
 					<span className="min-w-0 truncate text-muted">{child.description ?? child.title}</span>
-					<span className="mono tnum ml-auto shrink-0 text-[11.5px] text-muted">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</span>
+					<span className="tnum ml-auto shrink-0 text-[12px] text-muted">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</span>
 				</Link>
 			))}
 		</div>
@@ -254,7 +257,7 @@ function RawTab({ sessionId, entries }: { sessionId: string; entries: (Entry | n
 						key={entry.seq}
 						title={i === 0 ? `Entry #${entry.seq}` : `Result entry #${entry.seq}`}
 						right={
-							<a className="text-[12px] text-accent hover:underline" href={api.rawEntryUrl(sessionId, entry.seq)} target="_blank" rel="noreferrer">
+							<a className="text-[12px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink" href={api.rawEntryUrl(sessionId, entry.seq)} target="_blank" rel="noreferrer">
 								{entry.truncated ? "View the verbatim entry" : "Open raw"}
 							</a>
 						}
@@ -267,18 +270,28 @@ function RawTab({ sessionId, entries }: { sessionId: string; entries: (Entry | n
 	);
 }
 
+/** A failed shell command's exit status, once its result entry is loaded. */
+function useExitLabel(target: InspectorTarget): string | undefined {
+	const record = target.kind === "record" ? target.record : undefined;
+	const shell = record?.kind === "tool" && record.isError && toolFamily(toolName(record)) === "shell";
+	const result = useLoadedEntry(target.kind === "record" ? target.sessionId : "", shell && record?.kind === "tool" ? record.resultSeq : undefined);
+	if (!shell) return undefined;
+	const code = /Command exited with code (-?\d+)/.exec(JSON.stringify(result?.raw.message ?? ""))?.[1];
+	return code !== undefined ? `exit ${code}` : "failed";
+}
+
 function Header({ target, live, stat, onClose }: { target: InspectorTarget; live: boolean; stat?: ReturnType<typeof diffStatOf>; onClose?: () => void }) {
+	const exitLabel = useExitLabel(target);
 	let badge: ReactNode;
 	let name: ReactNode;
 	let summary: ReactNode = null;
 	let meta: ReactNode = null;
-	let rail = "bg-line";
+	let status: ReactNode = null;
 	if (target.kind === "record") {
 		const { record } = target;
 		const family = recordFamily(record);
 		const error = recordIsError(record);
-		rail = error ? "bg-k-error" : FAMILY_CLASSES[family].bar;
-		badge = <KindBadge record={record} className={cx(error && "!bg-red-soft !text-red")} />;
+		badge = <KindBadge record={record} error={error} />;
 		const text = recordSummary(record);
 		if (record.kind === "tool" && text) {
 			// A tool's title is what it worked on: the path, command, pattern, or URL.
@@ -298,6 +311,19 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 		const { start } = recordSpan(record);
 		const running = live && record.kind === "tool" && record.resultSeq === undefined && record.end === undefined;
 		const hit = cacheHit(record);
+		const duration = recordDuration(record);
+		status = (
+			<>
+				{error && <span className="tnum shrink-0 text-[13px] font-medium text-red">{exitLabel ?? "error"}</span>}
+				{running ? (
+					<span className="inline-flex shrink-0 items-center gap-1.5 text-[13px] text-muted">
+						<RunningDot /> running
+					</span>
+				) : (
+					duration !== undefined && <span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">{formatSpan(duration)}</span>
+				)}
+			</>
+		);
 		meta = (
 			<Meta>
 				{record.kind === "tool" && <span className="mono text-[11.5px] text-ink/70">{toolName(record)}</span>}
@@ -305,13 +331,6 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 					{formatClockTime(start)}
 					{start !== undefined && target.turn?.at !== undefined && <span className="mono text-[11px]">{formatElapsed(start - target.turn.at)}</span>}
 				</MetaItem>
-				{running ? (
-					<MetaItem>
-						<RunningDot /> running
-					</MetaItem>
-				) : (
-					recordDuration(record) !== undefined && <MetaItem title="Duration">{formatSpan(recordDuration(record))}</MetaItem>
-				)}
 				{record.kind === "llm" && (
 					<>
 						<MetaItem icon="tokens" title="Prompt → output tokens">
@@ -319,15 +338,18 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 						</MetaItem>
 						{hit !== undefined && (
 							<MetaItem title="Share of the prompt read from cache">
-								<Ring value={hit} className="text-k-read" />
 								{Math.round(hit * 100)}% cached
 							</MetaItem>
 						)}
-						{record.cost > 0 && <MetaItem icon="cost">{formatFineCost(record.cost)}</MetaItem>}
+						{record.cost > 0 && (
+							<MetaItem title="Cost">
+								<CostDot cost={record.cost} scale="record" />
+								{formatFineCost(record.cost)}
+							</MetaItem>
+						)}
 						{record.stopReason && <MetaItem>{record.stopReason}</MetaItem>}
 					</>
 				)}
-				{record.kind === "tool" && record.isError && <Chip tone="red">error</Chip>}
 				{stat && <DiffStat value={stat} />}
 				{record.kind === "compaction" && record.tokensBefore !== undefined && <MetaItem icon="compress">{formatCount(record.tokensBefore)} tokens before</MetaItem>}
 				<span className="mono text-[11px]">#{record.seq}</span>
@@ -335,7 +357,6 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 		);
 	} else if (target.kind === "child") {
 		const { child } = target;
-		rail = "bg-k-agent";
 		badge = <KindBadge family="agent" label={child.kind === "herder-step" ? "STEP" : "AGENT"} />;
 		name = child.agentType ?? "subagent";
 		summary = <div className="text-[13px] text-ink/80">{child.description ?? child.title}</div>;
@@ -346,14 +367,18 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 				</MetaItem>
 				<MetaItem title="Duration">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</MetaItem>
 				<MetaItem icon="tokens">{formatCount(child.tokens.input + child.tokens.output + child.tokens.cacheRead + child.tokens.cacheWrite)}</MetaItem>
-				{child.cost > 0 && <MetaItem icon="cost">{formatFineCost(child.cost)}</MetaItem>}
+				{child.cost > 0 && (
+					<MetaItem title="Cost">
+						<CostDot cost={child.cost} scale="session" />
+						{formatFineCost(child.cost)}
+					</MetaItem>
+				)}
 				<MetaItem>{plural(child.entryCount, "entry", "entries")}</MetaItem>
 			</Meta>
 		);
 	} else {
 		const { turn } = target;
 		const start = turnStart(turn);
-		rail = "bg-k-user";
 		badge = <KindBadge family="user" label={`#${turn.index + 1}`} />;
 		name = start.label;
 		meta = (
@@ -364,21 +389,21 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 					{turn.modelCalls} LLM · {plural(turn.toolCalls, "tool")}
 				</MetaItem>
 				{turn.cost > 0 && <MetaItem icon="cost">{formatFineCost(turn.cost)}</MetaItem>}
-				{turn.toolErrors > 0 && <Chip tone="red">{plural(turn.toolErrors, "error")}</Chip>}
+				{turn.toolErrors > 0 && <span className="text-red">{plural(turn.toolErrors, "error")}</span>}
 			</Meta>
 		);
 	}
 	return (
-		<div className="relative shrink-0 border-b border-line px-4 pt-3 pb-3">
-			<span aria-hidden="true" className={cx("absolute top-0 left-0 h-[2px] w-full", rail)} />
-			<div className="flex min-w-0 items-center gap-2">
+		<div className="relative shrink-0 px-5 pt-3.5 pb-1">
+			<div className="flex min-w-0 items-center gap-2.5">
 				{badge}
-				<h2 className="flex min-w-0 items-center truncate text-[14px] font-semibold">{name}</h2>
+				<h2 className="flex min-w-0 items-center truncate text-[15px] font-semibold">{name}</h2>
+				{status}
 				{onClose && (
 					<button
 						type="button"
 						onClick={onClose}
-						className="ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-[12px] text-muted hover:bg-hover min-[1200px]:hidden"
+						className="ml-auto inline-flex h-7 shrink-0 items-center rounded-sm px-2 text-[13px] font-medium text-muted hover:bg-hover hover:text-ink min-[1200px]:hidden"
 						aria-label="Close the inspector"
 					>
 						Close
@@ -431,20 +456,20 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 	if (!target) body = <EmptyInspector trace={trace} />;
 	else if (target.kind === "child") {
 		body = (
-			<div className="space-y-4 px-4 py-4">
+			<div className="space-y-4 px-5 py-4">
 				<ChildList items={[target.child]} />
 			</div>
 		);
 	} else if (target.kind === "turn") {
 		body = (
-			<div className="px-4 py-4">
+			<div className="px-5 py-4">
 				{/* The trace cuts prompts to 200 characters. */}
 				<Markdown text={target.turn.userText ? `${target.turn.userText}${target.turn.userText.length >= 200 ? "…" : ""}` : "(empty prompt)"} className="text-[14px]" />
 			</div>
 		);
 	} else if (preview) {
 		body = (
-			<div className="px-4 py-4 text-[13px]" data-inspector-preview="">
+			<div className="px-5 py-4 text-[13px]" data-inspector-preview="">
 				<div className="mb-2 inline-flex items-center gap-1.5 text-[12px] text-muted">
 					<RunningDot /> Replaying
 				</div>
@@ -459,13 +484,13 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 		);
 	} else if (entry.isPending && current !== "context") {
 		body = (
-			<div className="px-4 py-4" aria-busy="true">
+			<div className="px-5 py-4" aria-busy="true">
 				<SkeletonLines lines={5} />
 			</div>
 		);
 	} else if (entry.isError) {
 		body = (
-			<div className="px-4">
+			<div className="px-5">
 				<ErrorState error={entry.error} onRetry={() => void entry.refetch()} />
 			</div>
 		);
@@ -508,14 +533,16 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 				</div>
 			);
 		}
-		body = <div className="px-4 py-4">{content}</div>;
+		body = <div className="px-5 py-4">{content}</div>;
 	}
 
 	return (
 		<div ref={ref} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" data-inspector="" data-tab={target?.kind === "record" ? current : undefined}>
 			{target && <Header target={target} live={live} stat={stat} onClose={onClose} />}
+			{record?.kind === "llm" && <Ladder record={record} />}
+			{target && (tabs.length === 0 || preview) && <div aria-hidden="true" className="mt-2 shrink-0 border-b border-line" />}
 			{tabs.length > 0 && !preview && (
-				<div role="tablist" aria-label="Record details" className="flex shrink-0 items-center gap-0.5 border-b border-line px-3">
+				<div role="tablist" aria-label="Record details" className="mt-2 flex shrink-0 items-center gap-5 border-b border-line px-5">
 					{tabs.map((name) => (
 						<button
 							key={name}
@@ -524,13 +551,13 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 							aria-selected={name === current}
 							onClick={() => onTab(name)}
 							className={cx(
-								"relative h-9 px-2 text-[12.5px] transition-colors duration-150",
-								name === current ? "font-medium text-ink" : "text-muted hover:text-ink",
+								"relative h-9 text-[13px] font-medium transition-colors duration-150",
+								name === current ? "text-ink" : "text-muted hover:text-ink",
 							)}
 							data-tab-button={name}
 						>
 							{TAB_LABELS[name]}
-							{name === current && <span aria-hidden="true" className="absolute inset-x-2 bottom-[-1px] h-[2px] rounded-full bg-ink" />}
+							{name === current && <span aria-hidden="true" className="absolute inset-x-0 bottom-[-1px] h-[2px] bg-ink" />}
 						</button>
 					))}
 				</div>

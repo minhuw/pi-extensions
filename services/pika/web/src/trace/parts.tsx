@@ -1,25 +1,56 @@
 import type { ReactNode } from "react";
 import { cx } from "../components/ui";
 import { unifiedDiff } from "../lib/diff";
+import { COST_DIAMETERS, costStep, formatCost, type CostScale } from "../lib/format";
 import type { Entry, ToolCall, TraceRecord } from "../lib/types";
 import { editPairs } from "../session/tools/files";
 import { argString } from "../session/tools/shared";
 import type { Interval } from "./axis";
-import { extensionColor, FAMILY_CLASSES, recordBadge, recordFamily, recordIsError, recordSpan, type Family } from "./kinds";
+import { extensionColor, FAMILY_CLASSES, FAMILY_LETTERS, FAMILY_LABELS, recordBadge, recordFamily, recordIsError, recordSpan, type Family } from "./kinds";
 
-export function KindBadge({ record, family, label, className }: { record?: TraceRecord; family?: Family; label?: string; className?: string }) {
-	const kind = family ?? (record ? recordFamily(record) : "other");
-	const text = label ?? (record ? recordBadge(record) : "");
+/** A family's round bullet with its letter, as on a subway route sign; red when the record failed. */
+export function KindBullet({ family, error = false, size = 16, className }: { family: Family; error?: boolean; size?: number; className?: string }) {
 	return (
 		<span
+			aria-hidden="true"
 			className={cx(
-				"inline-flex h-[18px] w-[44px] shrink-0 items-center justify-center rounded-[3px] text-[10px] leading-none font-semibold tracking-[0.04em]",
-				FAMILY_CLASSES[kind].badge,
+				"inline-flex shrink-0 items-center justify-center rounded-full leading-none font-semibold",
+				error ? "bg-k-error text-k-error-ink" : FAMILY_CLASSES[family].badge,
 				className,
 			)}
-			data-badge={kind}
+			style={{ width: size, height: size, fontSize: Math.round(size * 0.62) }}
+			data-bullet={family}
+			title={FAMILY_LABELS[family]}
 		>
-			{text}
+			{FAMILY_LETTERS[family]}
+		</span>
+	);
+}
+
+/** The kind of a record: its family's bullet and a short type label such as `BASH`, `READ`, or `LLM`. */
+export function KindBadge({
+	record,
+	family,
+	label,
+	error,
+	className,
+}: {
+	record?: TraceRecord;
+	family?: Family;
+	label?: string;
+	error?: boolean;
+	className?: string;
+}) {
+	const kind = family ?? (record ? recordFamily(record) : "other");
+	const text = label ?? (record ? recordBadge(record) : "");
+	const failed = error ?? (record ? recordIsError(record) : false);
+	return (
+		<span className={cx("inline-flex w-[64px] shrink-0 items-center gap-1.5", className)}>
+			<KindBullet family={kind} error={failed} />
+			{/* The bullet names the kind; the text beside it is the stop's own name (the tool), so it is set as a quiet label. */}
+			<span className={cx("mono min-w-0 truncate text-[11px] leading-none lowercase", failed ? "text-red" : "text-muted")} data-badge={kind}>
+				{text}
+			</span>
 		</span>
 	);
 }
@@ -38,29 +69,6 @@ export function PathChip({ path, className }: { path: string; className?: string
 				<span className="text-ink">{file}</span>
 			</span>
 		</span>
-	);
-}
-
-/** A tiny ring showing a fraction, such as the cache-hit share of a prompt. */
-export function Ring({ value, size = 12, title, className }: { value: number; size?: number; title?: string; className?: string }) {
-	const r = size / 2 - 1.5;
-	const c = 2 * Math.PI * r;
-	const clamped = Math.max(0, Math.min(1, value));
-	return (
-		<svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className={cx("shrink-0", className)} aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
-			{title && <title>{title}</title>}
-			<circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="currentColor" strokeOpacity={0.18} strokeWidth={2.5} />
-			<circle
-				cx={size / 2}
-				cy={size / 2}
-				r={r}
-				fill="none"
-				stroke="currentColor"
-				strokeWidth={2.5}
-				strokeDasharray={`${clamped * c} ${c}`}
-				transform={`rotate(-90 ${size / 2} ${size / 2})`}
-			/>
-		</svg>
 	);
 }
 
@@ -137,6 +145,24 @@ export function RunningDot({ className }: { className?: string }) {
 	return <span aria-hidden="true" className={cx("running-dot inline-block size-1.5 rounded-full bg-accent", className)} />;
 }
 
+/** A model call's phase as the timeline draws it: hatched and pale while waiting for the first token, solid while streaming. */
+export function PhaseSwatch({ phase, className }: { phase: "waiting" | "streaming"; className?: string }) {
+	return (
+		<span
+			aria-hidden="true"
+			className={cx("inline-block h-[8px] w-[14px]", phase === "streaming" && "bg-k-llm", className)}
+			style={
+				phase === "waiting"
+					? {
+							backgroundColor: "color-mix(in srgb, var(--color-k-llm) 22%, transparent)",
+							backgroundImage: "repeating-linear-gradient(135deg, var(--color-k-llm) 0 1px, transparent 1px 3.5px)",
+						}
+					: undefined
+			}
+		/>
+	);
+}
+
 /** The record's bar on its turn's time scale. */
 export function WaterfallBar({ record, window, running }: { record: TraceRecord; window?: Interval; running?: boolean }) {
 	const { start, end } = recordSpan(record);
@@ -167,4 +193,15 @@ export function callIn(entry: Entry | null | undefined, callId: string): ToolCal
 	const message = entry?.raw.message as { content?: unknown } | undefined;
 	if (!message || !Array.isArray(message.content)) return undefined;
 	return message.content.find((block): block is ToolCall => typeof block === "object" && block !== null && block.type === "toolCall" && block.id === callId);
+}
+
+/** A cost as a dot on the fixed four-step magnitude ramp, the same sizes on the strip map, the tree, and the lists. */
+export function CostDot({ cost, scale, className }: { cost: number | null | undefined; scale: CostScale; className?: string }) {
+	const step = costStep(cost, scale);
+	const size = COST_DIAMETERS[step];
+	return (
+		<span className={cx("inline-flex size-[10px] shrink-0 items-center justify-center", className)} title={formatCost(cost)} aria-hidden="true" data-cost-step={step}>
+			<span className={cx("rounded-full", cost ? "bg-ink" : "border border-ink/40")} style={{ width: size, height: size }} />
+		</span>
+	);
 }

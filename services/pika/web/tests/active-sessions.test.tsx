@@ -547,7 +547,7 @@ describe("recent messages", () => {
 	});
 });
 
-describe("active sessions in the sidebar", () => {
+describe("active sessions in the band", () => {
 	it("sits above Devices with a count of online sessions, refreshed on other pages", async () => {
 		vi.useFakeTimers({ shouldAdvanceTime: true });
 		const server = createFakeServer({ online: [onlineSession("s-a"), onlineSession("s-b", { device: "laptop" })] });
@@ -607,7 +607,7 @@ describe("active sessions in the sidebar", () => {
 		const server = createFakeServer({ password: "secret", authenticated: true, online: [onlineSession("s-a")] });
 		renderApp("/active", server.fetch);
 		await waitFor(() => expect(rowIds()).toEqual(["s-a"]));
-		fireEvent.click(within(await screen.findByRole("complementary", { name: "Sidebar" })).getByRole("button", { name: /Sign out/ }));
+		fireEvent.click(within(await screen.findByRole("banner")).getByRole("button", { name: /Sign out/ }));
 		expect(await screen.findByLabelText(/password/i)).toBeTruthy();
 		const before = relayCalls(server).length;
 		await advance(RELAY_POLL_MS * 3);

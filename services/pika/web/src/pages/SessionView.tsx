@@ -5,7 +5,7 @@ import { PikaLink as Link } from "../components/PikaLink";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Icon } from "../components/icons";
 import { MessageDialog } from "../components/MessageDialog";
-import { Callout, cx, ErrorState, Pill, Skeleton, SkeletonLines } from "../components/ui";
+import { BUTTON, Callout, cx, ErrorState, Pill, Skeleton, SkeletonLines } from "../components/ui";
 import { ContextButton, ContextDrawerProvider } from "../context/ContextDrawer";
 import { ApiError, useApi } from "../lib/api";
 import { formatCount } from "../lib/format";
@@ -151,11 +151,7 @@ function Breadcrumb({ session }: { session?: SessionDetail }) {
 
 function ActionButton({ children, ...props }: { children: ReactNode } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
 	return (
-		<button
-			type="button"
-			{...props}
-			className="inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-[12.5px] text-muted transition-colors duration-150 hover:bg-hover hover:text-ink"
-		>
+		<button type="button" {...props} className={BUTTON.primary}>
 			{children}
 		</button>
 	);
@@ -232,17 +228,23 @@ function SessionPage({ id }: { id: string }) {
 	const header = session.data && (
 		<header className={cx(column, "pt-4")} data-session-header="">
 			<Breadcrumb session={session.data} />
-			<div className="mt-1 flex items-start gap-4">
+			<div className="mt-1.5 flex items-start gap-4 max-md:flex-col">
 				<div className="min-w-0 flex-1">
-					<div className="flex min-w-0 items-start gap-2.5">
-						<h1 className="line-clamp-2 text-[21px] leading-[1.3] font-semibold tracking-[-0.012em] break-words" title={session.data.title || "Untitled session"}>
+					<div className="flex min-w-0 items-start gap-3">
+						<h1
+							className="line-clamp-2 text-[28px] leading-[1.15] font-semibold tracking-[-0.02em] text-balance break-words max-sm:text-[22px]"
+							title={session.data.title || "Untitled session"}
+						>
 							{session.data.title || "Untitled session"}
 						</h1>
 						{(live || online) && (
-							<span className="mt-[5px] inline-flex shrink-0 gap-1.5 text-[12px] leading-5" data-title-badges="">
+							<span className="mt-[7px] inline-flex shrink-0 gap-1.5 text-[12px] leading-5" data-title-badges="">
 								{live && (
 									<span data-live="">
-										<Pill tone="green">live</Pill>
+										<Pill tone="green">
+											<span aria-hidden="true" className="running-dot mr-1.5 size-1.5 rounded-full bg-page" />
+											live
+										</Pill>
 									</span>
 								)}
 								{online && (
@@ -255,17 +257,17 @@ function SessionPage({ id }: { id: string }) {
 					</div>
 					<SessionChips session={session.data} />
 				</div>
-				<div className="flex shrink-0 items-center gap-0.5 pt-0.5">
+				<div className="flex shrink-0 flex-wrap items-center gap-2 pt-1">
 					{shown === "transcript" && (
-						<label className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-sm px-2 text-[12.5px] text-muted hover:bg-hover hover:text-ink">
-							<input type="checkbox" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} className="accent-[#2383e2]" />
+						<label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-sm px-2 text-[13px] text-muted hover:bg-hover hover:text-ink">
+							<input type="checkbox" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} className="accent-ink" />
 							<Icon name="eye" size={13} />
 							Show hidden entries
 						</label>
 					)}
 					{!api.publicView && <a
 						href={api.exportUrl(id)}
-						className="inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-[12.5px] text-muted hover:bg-hover hover:text-ink"
+						className={BUTTON.secondary}
 						download
 						title={`Export all ${formatCount(session.data.entryCount)} entries as JSONL`}
 					>
@@ -278,7 +280,7 @@ function SessionPage({ id }: { id: string }) {
 							Message
 						</ActionButton>
 					)}
-					<div className="ml-2">
+					<div className="ml-1">
 						<ViewSwitch view={shown} onChange={setView} agents={family} />
 					</div>
 				</div>
@@ -349,7 +351,7 @@ function SessionPage({ id }: { id: string }) {
 							</div>
 						)}
 						{trace.data && trace.data.records.length > 0 && (
-							<div className="mb-4 min-h-[84px] rounded-md border border-line px-2 pt-2 pb-1.5" data-transcript-overview="">
+							<div className="mb-4 min-h-[84px] border-y border-line pt-2 pb-1.5" data-transcript-overview="">
 								<ErrorBoundary
 									label="the transcript's timeline"
 									resetKey={trace.data}

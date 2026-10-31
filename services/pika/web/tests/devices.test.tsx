@@ -54,14 +54,14 @@ afterEach(() => {
 });
 
 describe("devices page", () => {
-	it("is linked from the sidebar between Active sessions and Search", async () => {
+	it("is linked from the band between Active sessions and Search", async () => {
 		renderApp("/", createFakeServer({}).fetch);
 		const nav = await screen.findByRole("navigation", { name: "Main" });
 		await within(nav).findByRole("link", { name: "Active sessions" });
-		const links = within(nav)
-			.getAllByRole("link")
-			.map((link) => link.textContent);
-		expect(links.slice(0, 5)).toEqual(["Sessions", "Herder runs", "Active sessions", "Devices", "Search"]);
+		// By accessible name: the Search link also shows its `/` shortcut, hidden from assistive technology.
+		const links = within(nav).getAllByRole("link");
+		const order = ["Sessions", "Herder runs", "Active sessions", "Devices", "Search"].map((name) => links.indexOf(within(nav).getByRole("link", { name })));
+		expect(order).toEqual([0, 1, 2, 3, 4]);
 		fireEvent.click(within(nav).getByRole("link", { name: "Devices" }));
 		expect(await screen.findByRole("heading", { name: "Devices", level: 1 })).toBeTruthy();
 	});
@@ -741,7 +741,7 @@ describe("browser sessions", () => {
 	});
 
 	it.each([
-		["signing out in the sidebar", "/api/v1/logout", () => fireEvent.click(screen.getByRole("button", { name: "Sign out" }))],
+		["signing out in the band", "/api/v1/logout", () => fireEvent.click(within(screen.getByRole("banner")).getByRole("button", { name: "Sign out" }))],
 		["signing out this browser", "/api/v1/auth/sessions/aaaaaaaaaaaa", () => fireEvent.click(screen.getByRole("button", { name: "Sign out this browser" }))],
 		[
 			"signing out everywhere",

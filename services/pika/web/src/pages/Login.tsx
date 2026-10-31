@@ -4,6 +4,7 @@ import { Navigate, useNavigate, useSearchParams } from "react-router";
 import { useMe } from "../components/AuthGate";
 import { PikaLogo } from "../components/icons";
 import { ServerVersion } from "../components/Layout";
+import { BUTTON, cx } from "../components/ui";
 import { ApiError, authModeOf, useApi } from "../lib/api";
 import { formatWait } from "../lib/format";
 
@@ -52,41 +53,41 @@ export function LoginPage() {
 	if (mode === "proxy" || mode === "none") return <Navigate to={safeNext(params.get("next"))} replace />;
 
 	return (
-		<div className="flex min-h-full flex-col items-center justify-center bg-sidebar px-6 py-12 text-ink dark:bg-page">
-			<form
-				onSubmit={(event) => void submit(event)}
-				className="w-full max-w-[360px] rounded-md border border-line bg-page dark:bg-sidebar px-8 pt-8 pb-7 shadow-[0_1px_2px_rgba(15,15,15,0.04),0_12px_32px_rgba(15,15,15,0.06)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.35)]"
-				aria-label="Sign in"
-			>
-				<PikaLogo size={52} className="mx-auto" />
-				<h1 className="mt-4 text-center text-[22px] leading-tight font-semibold">Sign in to pika</h1>
-				<p className="mt-1.5 text-center text-[14px] text-muted">This server is password protected.</p>
-				<label className="mt-6 block text-[13px] text-muted" htmlFor="pika-password">
-					Password
-				</label>
-				<input
-					id="pika-password"
-					type="password"
-					autoComplete="current-password"
-					autoFocus
-					value={password}
-					onChange={(event) => setPassword(event.target.value)}
-					className="mt-1 h-9 w-full rounded-sm border border-line bg-page px-2.5 text-[15px] outline-none focus:border-accent/60"
-				/>
-				{error && (
-					<div role="alert" className="mt-2 text-[13px] text-red">
-						{error}
-					</div>
-				)}
-				<button
-					type="submit"
-					disabled={busy || password === ""}
-					className="mt-4 h-9 w-full rounded-sm bg-accent text-[14px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-				>
-					{busy ? "Signing in…" : "Continue"}
-				</button>
+		<main className="flex min-h-full flex-col items-center justify-center bg-page px-6 py-12 text-ink">
+			<form onSubmit={(event) => void submit(event)} className="w-full max-w-[340px] rounded-sm border border-ink bg-page" aria-label="Sign in">
+				{/* A small sign band: the app's black frame, with the manual's thin white stripe. */}
+				<div className="relative flex h-12 items-center gap-2 bg-band px-4 text-band-ink before:absolute before:inset-x-0 before:top-[5px] before:h-px before:bg-band-ink/85">
+					<PikaLogo size={22} className="shrink-0" />
+					<span className="text-[17px] font-semibold tracking-[-0.01em]" aria-hidden="true">
+						pika
+					</span>
+				</div>
+				<div className="px-6 pt-5 pb-6">
+					<h1 className="text-[21px] leading-tight font-semibold tracking-[-0.01em]">Sign in to pika</h1>
+					<p className="mt-1 text-[13.5px] text-muted">This server is password protected.</p>
+					<label className="mt-5 block text-[13px] font-medium" htmlFor="pika-password">
+						Password
+					</label>
+					<input
+						id="pika-password"
+						type="password"
+						autoComplete="current-password"
+						autoFocus
+						value={password}
+						onChange={(event) => setPassword(event.target.value)}
+						className="mt-1 h-10 w-full rounded-sm border border-line bg-page px-2.5 text-[14px] outline-none focus:border-ink"
+					/>
+					{error && (
+						<div role="alert" className="mt-2 text-[13px] text-red">
+							{error}
+						</div>
+					)}
+					<button type="submit" disabled={busy || password === ""} className={cx(BUTTON.primary, "mt-4 h-9 w-full justify-center")}>
+						{busy ? "Signing in…" : "Continue"}
+					</button>
+				</div>
 			</form>
-			<ServerVersion className="mt-4 text-center" />
-		</div>
+			<ServerVersion className="mt-3 text-center text-muted" />
+		</main>
 	);
 }

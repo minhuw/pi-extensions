@@ -65,7 +65,7 @@ export function OutputBlock({ text, className, empty = "(no output)" }: { text: 
 			{tooLong && (
 				<button
 					type="button"
-					className="mt-1 rounded-sm px-1 text-[13px] text-muted hover:bg-hover"
+					className="mt-1 rounded-sm px-1 text-[13px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink"
 					onClick={() => setShowAll(!showAll)}
 				>
 					{showAll ? "Show less" : `Show all ${text.length.toLocaleString("en-US")} characters`}

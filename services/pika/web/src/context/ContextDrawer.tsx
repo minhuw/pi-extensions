@@ -3,7 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../components/icons";
 import { JsonTree } from "../components/JsonTree";
-import { Callout, cx, ErrorState, Pill, SkeletonLines, Toggle } from "../components/ui";
+import { BUTTON, Callout, cx, ErrorState, Pill, SkeletonLines, Toggle } from "../components/ui";
 import { useApi, type PikaApi } from "../lib/api";
 import { formatCount, formatDateTime, plural } from "../lib/format";
 import type { Entry, ModelRequest } from "../lib/types";
@@ -88,13 +88,14 @@ async function previousRequestId(api: PikaApi, queryClient: QueryClient, session
 	return null;
 }
 
+/** The provider payload is the plain case; pi's own context is a caveat. */
 function fidelityTone(fidelity: string) {
-	return fidelity === "payload" ? "green" : "yellow";
+	return fidelity === "payload" ? "neutral" : "yellow";
 }
 
-function roleTone(role: string): "neutral" | "accent" | "green" | "yellow" | "red" {
+/** Roles are not states: the model's turns are the inverted sign, instructions are outlined, the rest neutral. */
+function roleTone(role: string): "neutral" | "accent" | "yellow" | "red" {
 	if (role === "assistant" || role === "model") return "accent";
-	if (role === "tool" || role === "toolResult" || role === "function") return "green";
 	if (role === "system" || role === "developer") return "yellow";
 	if (role === "missing") return "red";
 	return "neutral";
@@ -118,13 +119,13 @@ function LongText({ text, mono = false }: { text: string; mono?: boolean }) {
 			<div
 				className={cx(
 					"whitespace-pre-wrap [overflow-wrap:anywhere]",
-					mono ? "mono max-h-[32rem] overflow-auto rounded-md border border-line bg-soft px-3 py-2" : "text-[14px]",
+					mono ? "mono max-h-[32rem] overflow-auto rounded-sm border border-line bg-soft px-3 py-2" : "text-[14px]",
 				)}
 			>
 				{shown || <span className="text-muted italic">(empty)</span>}
 			</div>
 			{long && (
-				<button type="button" onClick={() => setFull(!full)} className="mt-0.5 rounded-sm px-1 text-[12px] text-muted hover:bg-hover">
+				<button type="button" onClick={() => setFull(!full)} className="mt-0.5 rounded-sm px-1 text-[12px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink">
 					{full ? "Show less" : `Show all ${text.length.toLocaleString("en-US")} characters`}
 				</button>
 			)}
@@ -171,14 +172,14 @@ function BlockView({ block }: { block: Block }) {
 			);
 		case "image":
 			return (
-				<div className="inline-flex items-center gap-1.5 rounded-sm bg-soft px-2 py-0.5 text-[13px] text-muted">
+				<div className="inline-flex items-center gap-1.5 rounded-sm border border-line px-2 py-0.5 text-[13px] text-muted">
 					<Icon name="file" size={13} />
 					{block.label}
 				</div>
 			);
 		case "missing":
 			return (
-				<div className="text-[13px] text-yellow" data-block="missing">
+				<div className="text-[13px] text-muted italic" data-block="missing">
 					Block not uploaded yet · <span className="mono">{block.hash.slice(0, 12)}</span>
 				</div>
 			);
@@ -194,14 +195,14 @@ function BlockView({ block }: { block: Block }) {
 const MessageRow = memo(function MessageRow({ message, index, isNew }: { message: NormalMessage; index: number; isNew: boolean }) {
 	return (
 		<div
-			className={cx("mb-2 rounded-md border px-3 py-2", isNew ? "border-accent/30 bg-accent-soft" : "border-line")}
+			className={cx("border-b border-line px-3 py-2.5", isNew && "bg-accent-soft shadow-[inset_1px_0_0_var(--color-ink)]")}
 			data-context-message={index}
 			data-new={isNew || undefined}
 		>
 			<div className="mb-1 flex items-center gap-2 text-[12px] text-muted">
 				<Pill tone={roleTone(message.role)}>{message.role}</Pill>
-				<span>#{index + 1}</span>
-				{isNew && <span className="ml-auto text-accent">new</span>}
+				<span className="tnum">#{index + 1}</span>
+				{isNew && <span className="ml-auto font-medium text-ink">new</span>}
 			</div>
 			<div className="space-y-2">
 				{message.blocks.length === 0 ? (
@@ -319,7 +320,7 @@ function RawJson({ payload }: { payload: unknown }) {
 		<div data-raw-json="">
 			<div className="mb-1 flex items-center gap-2 text-[12px] text-muted">
 				<span>{formatCount(text.length)} characters</span>
-				<button type="button" onClick={() => void copy()} className="ml-auto rounded-sm border border-line px-2 py-0.5 hover:bg-hover">
+				<button type="button" onClick={() => void copy()} className={cx(BUTTON.secondary, "ml-auto h-7")}>
 					{copied ? "Copied" : "Copy JSON"}
 				</button>
 			</div>
@@ -327,7 +328,7 @@ function RawJson({ payload }: { payload: unknown }) {
 				<code>{shown}</code>
 			</pre>
 			{shown.length < text.length && (
-				<button type="button" onClick={() => setAll(true)} className="mt-1 rounded-sm px-1 text-[12px] text-muted hover:bg-hover">
+				<button type="button" onClick={() => setAll(true)} className="mt-1 rounded-sm px-1 text-[12px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink">
 					Show all {text.length.toLocaleString("en-US")} characters
 				</button>
 			)}
@@ -338,7 +339,7 @@ function RawJson({ payload }: { payload: unknown }) {
 function Section({ title, children, meta }: { title: string; children: ReactNode; meta?: ReactNode }) {
 	return (
 		<section className="mt-6">
-			<h3 className="mb-2 flex items-center gap-2 text-[13px] font-medium text-muted">
+			<h3 className="mb-2 flex items-center gap-2 border-b border-line pb-1.5 text-[14px] font-semibold text-ink">
 				{title}
 				{meta}
 			</h3>
@@ -370,7 +371,7 @@ function RequestBody({
 				<Pill>{SHAPE_LABELS[normal.shape]}</Pill>
 				{!request.complete && <Pill tone="red">incomplete</Pill>}
 			</div>
-			<dl className="mt-3 grid grid-cols-[96px_1fr] gap-y-1 text-[14px]">
+			<dl className="mt-3 grid grid-cols-[96px_1fr] gap-y-1 text-[13.5px]">
 				{(
 					[
 						["Provider", request.provider],
@@ -513,15 +514,15 @@ export function ContextDrawer({ target, onClose }: { target: ContextTarget; onCl
 
 	return (
 		<aside
-			className="fixed inset-y-0 right-0 z-30 flex w-[min(680px,100vw)] flex-col border-l border-line bg-page shadow-[-8px_0_24px_rgba(15,15,15,0.06)]"
+			className="fixed inset-y-0 right-0 z-30 flex w-[min(680px,100vw)] flex-col border-l border-ink bg-page shadow-[0_8px_24px_rgba(0,0,0,0.14)]"
 			aria-label="What the model saw"
 			role="dialog"
 			data-context-drawer={target.requestId}
 		>
 			<div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-5">
 				<Icon name="eye" className="text-muted" />
-				<h2 className="font-medium">What the model saw</h2>
-				<button type="button" onClick={onClose} className="ml-auto rounded-sm px-2 py-0.5 text-[13px] text-muted hover:bg-hover" aria-label="Close">
+				<h2 className="text-[16px] font-semibold">What the model saw</h2>
+				<button type="button" onClick={onClose} className={cx(BUTTON.quiet, "ml-auto")} aria-label="Close">
 					Close
 				</button>
 			</div>

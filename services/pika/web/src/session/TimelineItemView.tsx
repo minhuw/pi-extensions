@@ -7,8 +7,8 @@ import { useApi } from "../lib/api";
 import { formatCount, formatTime } from "../lib/format";
 import { useViewState } from "../lib/viewState";
 import { formatFineCost, formatSpan } from "../trace/format";
-import { FAMILY_CLASSES, firstStringArg, recordBadge, recordIcon, showsToolName, toolFamily } from "../trace/kinds";
-import { KindBadge, Ring } from "../trace/parts";
+import { firstStringArg, recordBadge, showsToolName, toolFamily } from "../trace/kinds";
+import { CostDot, KindBadge } from "../trace/parts";
 import type { Entry, ToolCall, ToolResultMessage } from "../lib/types";
 import { useSessionSlots, useSessionView } from "./context";
 import { contentImages, contentText, type TimelineItem } from "./timeline";
@@ -65,12 +65,11 @@ export function ToolView({
 				onClick={() => setOpen(!open)}
 				className="-mx-1.5 flex h-7 w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-sm px-1.5 text-left text-[13px] hover:bg-hover"
 			>
-				<KindBadge family={family} label={badge} className={cx(error && "!bg-red-soft !text-red")} />
-				<Icon name={recordIcon(record)} size={14} className={cx("shrink-0", error ? "text-red" : FAMILY_CLASSES[family].text)} />
+				<KindBadge family={family} label={badge} error={error} />
 				{showsToolName(record) && <span className="shrink-0 font-medium">{call.name}</span>}
 				{summary && <span className="mono min-w-0 flex-1 truncate text-[12px] text-ink/75">{summary}</span>}
 				<span className="ml-auto flex shrink-0 items-center gap-2">
-					{duration !== undefined && <span className="mono tnum text-[11.5px] text-muted">{formatSpan(duration)}</span>}
+					{duration !== undefined && <span className="tnum text-[12px] text-muted">{formatSpan(duration)}</span>}
 					{error && <Pill tone="red">error</Pill>}
 					{!result && <Pill>no result</Pill>}
 					<span aria-hidden="true" className={cx("w-3 text-center text-[10px] text-muted transition-transform duration-150", open && "rotate-90")}>
@@ -79,7 +78,7 @@ export function ToolView({
 				</span>
 			</button>
 			{open && (
-				<div className="mt-1 mb-2 pl-[52px]">
+				<div className="mt-1 mb-2 pl-[72px]">
 					<Component call={call} result={result} resultEntry={resultEntry} />
 					{result?.isError && !renderer.handlesErrors && (
 						<div className="mt-2">
@@ -111,18 +110,23 @@ function ModelCall({ item }: { item: Extract<TimelineItem, { kind: "model-call" 
 	const error = message.stopReason === "error" || message.stopReason === "aborted" || Boolean(message.errorMessage);
 	return (
 		<div className="flex h-7 items-center gap-2 text-[12px] text-muted" data-model-call="">
-			<KindBadge family="llm" label="LLM" className={cx(error && "!bg-red-soft !text-red")} />
+			<KindBadge family="llm" label="LLM" error={error} />
 			<span className="min-w-0 truncate text-ink/80">{message.model}</span>
 			{message.thinkingLevel && message.thinkingLevel !== "off" && <span className="shrink-0">thinking {message.thinkingLevel}</span>}
 			<span className="ml-auto flex shrink-0 items-center gap-2.5">
 				{usage && (
-					<span className="mono tnum text-[11.5px]" title={`${formatCount(usage.input)} input · ${formatCount(usage.cacheRead ?? 0)} cache read · ${formatCount(usage.output)} output`}>
+					<span className="tnum text-[12px]" title={`${formatCount(usage.input)} input · ${formatCount(usage.cacheRead ?? 0)} cache read · ${formatCount(usage.output)} output`}>
 						{formatCount(prompt)}→{formatCount(usage.output)}
 					</span>
 				)}
-				{hit !== undefined && <Ring value={hit} className="text-k-read" title={`Cache hit ${Math.round(hit * 100)}%`} />}
-				{usage?.cost?.total ? <span className="mono tnum text-[11.5px]">{formatFineCost(usage.cost.total)}</span> : null}
-				<span className="mono tnum text-[11.5px]">{formatTime(message.timestamp ?? item.entry.timestamp)}</span>
+				{hit !== undefined && <span className="tnum text-[12px] text-muted">{Math.round(hit * 100)}% cached</span>}
+				{usage?.cost?.total ? (
+					<span className="flex items-center gap-1.5">
+						<span className="tnum text-[12px]">{formatFineCost(usage.cost.total)}</span>
+						<CostDot cost={usage.cost.total} scale="record" />
+					</span>
+				) : null}
+				<span className="tnum text-[12px]">{formatTime(message.timestamp ?? item.entry.timestamp)}</span>
 				{ModelCallExtra && <ModelCallExtra sessionId={sessionId} entry={item.entry} />}
 			</span>
 		</div>
@@ -143,7 +147,7 @@ function RawEntry({ item }: { item: Extract<TimelineItem, { kind: "raw" }> }) {
 		>
 			<CodeBlock code={JSON.stringify(item.entry.raw, null, 2)} language="json" />
 			{item.entry.truncated && (
-				<a className="text-[13px] text-accent hover:underline" href={api.rawEntryUrl(sessionId, item.seq)}>
+				<a className="text-[13px] text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink" href={api.rawEntryUrl(sessionId, item.seq)}>
 					View the full entry
 				</a>
 			)}
@@ -158,7 +162,7 @@ function TruncatedNote({ entry }: { entry: Entry }) {
 	return (
 		<div className="mt-1 text-[12px] text-muted">
 			Long strings were shortened.{" "}
-			<a className="text-accent hover:underline" href={api.rawEntryUrl(sessionId, entry.seq)} target="_blank" rel="noreferrer">
+			<a className="text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink" href={api.rawEntryUrl(sessionId, entry.seq)} target="_blank" rel="noreferrer">
 				View the verbatim entry
 			</a>
 		</div>
@@ -175,7 +179,7 @@ function Images({ content }: { content: unknown }) {
 					key={index}
 					src={image.src ?? (image.data ? `data:${image.mimeType};base64,${image.data}` : undefined)}
 					alt={`Image ${index + 1}`}
-					className="max-h-80 max-w-full rounded-md border border-line"
+					className="max-h-80 max-w-full rounded-sm border border-line"
 				/>
 			))}
 		</div>
@@ -225,7 +229,7 @@ export function TimelineItemView({ item, highlighted = false }: { item: Timeline
 			);
 		case "user":
 			return (
-				<div className="rounded-md bg-soft px-3 py-2">
+				<div className="rounded-sm bg-soft px-3 py-2">
 					<div className="mb-1 flex items-center gap-1.5 text-[12px] text-muted">
 						<Icon name="user" size={13} /> User
 					</div>
@@ -275,7 +279,7 @@ export function TimelineItemView({ item, highlighted = false }: { item: Timeline
 			);
 		case "custom-message":
 			return (
-				<div className={cx("rounded-md border border-line px-3 py-2", item.hidden && "opacity-80")}>
+				<div className={cx("border-l border-line py-0.5 pl-3", item.hidden && "opacity-80")}>
 					<div className="mb-1 text-[12px] text-muted">
 						Extension message · <span className="mono">{item.customType}</span>
 					</div>

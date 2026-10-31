@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
 import type { SessionTrace, TraceChild, TraceRecord, TraceToolRecord, TraceTurn } from "../src/lib/types";
 import { normalizeTrace } from "../src/trace/data";
-import { axisTicks, foldGaps, GAP_MS, hitTest, layoutOverview, makeScale, overviewLanes, traceIntervals } from "../src/trace/axis";
-import { formatClock, formatElapsed, formatFineCost, formatGap, formatSpan, middleTruncate } from "../src/trace/format";
-import { cacheHit, childSpan, recordBadge, recordFamily, recordIcon, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName } from "../src/trace/kinds";
+import {
+	axisTicks,
+	centreWindow,
+	clampWindow,
+	foldGaps,
+	GAP_MS,
+	hitTest,
+	isFullWindow,
+	layoutOverview,
+	makeScale,
+	MIN_WINDOW_MS,
+	overviewLanes,
+	panWindow,
+	tickStep,
+	traceIntervals,
+	windowAxis,
+	windowScale,
+	zoomWindow,
+} from "../src/trace/axis";
+import { formatClock, formatElapsed, formatFineCost, formatGap, formatPhase, formatSpan, formatTick, middleTruncate } from "../src/trace/format";
+import { cacheHit, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordIcon, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName } from "../src/trace/kinds";
 import { currentStop, initialReplay, replayReducer, type ReplayState } from "../src/trace/replay";
 import { buildLedger, defaultTurnExpanded, matchesFilter, NO_FILTER, rowForSeq, type LedgerInput } from "../src/trace/rows";
 import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
@@ -113,6 +131,119 @@ describe("gap folding", () => {
 	});
 });
 
+describe("zoom window", () => {
+	// A minute of activity, an hour folded away, and another minute: 120 s of active time.
+	const axis = foldGaps([
+		{ start: T, end: T + 60_000 },
+		{ start: T + 3_600_000, end: T + 3_660_000 },
+	]);
+	const full = { start: 0, end: axis.activeMs };
+
+	it("clamps a window to the session and to the narrowest window", () => {
+		expect(axis.activeMs).toBe(120_000);
+		expect(clampWindow(axis, { start: -5_000, end: 10_000 })).toEqual({ start: 0, end: 15_000 });
+		expect(clampWindow(axis, { start: 115_000, end: 130_000 })).toEqual({ start: 105_000, end: 120_000 });
+		expect(clampWindow(axis, { start: -1, end: 1e9 })).toEqual(full);
+		expect(clampWindow(axis, { start: 50_000, end: 50_100 })).toEqual({ start: 50_000, end: 50_000 + MIN_WINDOW_MS });
+		expect(isFullWindow(axis, undefined)).toBe(true);
+		expect(isFullWindow(axis, full)).toBe(true);
+		expect(isFullWindow(axis, { start: 0, end: 60_000 })).toBe(false);
+	});
+
+	it("clips the axis to the window, keeping the gaps inside it and the origin", () => {
+		const clipped = windowAxis(axis, { start: 30_000, end: 90_000 });
+		expect(clipped.origin).toBe(T);
+		expect(clipped.segments).toEqual([
+			{ start: T + 30_000, end: T + 60_000, offset: 0 },
+			{ start: T + 3_600_000, end: T + 3_630_000, offset: 30_000 },
+		]);
+		expect(clipped.gaps).toEqual(axis.gaps);
+		expect(clipped.activeMs).toBe(60_000);
+		// A window inside one stretch has no break.
+		const inside = windowAxis(axis, { start: 10_000, end: 20_000 });
+		expect(inside.segments).toEqual([{ start: T + 10_000, end: T + 20_000, offset: 0 }]);
+		expect(inside.gaps).toEqual([]);
+		// The whole session is the axis itself.
+		expect(windowScale(axis, full, 1000).axis).toBe(axis);
+	});
+
+	it("keeps the anchor under the pointer, across a break too", () => {
+		for (const [window, x] of [
+			[full, 300],
+			[full, 700],
+			[{ start: 40_000, end: 80_000 }, 420],
+		] as const) {
+			const before = windowScale(axis, window, 1000);
+			const t = before.time(x);
+			const anchor = makeScale(axis, 1000).position(t);
+			const next = zoomWindow(axis, window, 3, anchor, 1000, x);
+			expect(next.end - next.start).toBeCloseTo((window.end - window.start) / 3);
+			expect(windowScale(axis, next, 1000).x(t)).toBeCloseTo(x, 0);
+		}
+		// Without a pixel, the anchor keeps its share of the window.
+		expect(zoomWindow(axis, full, 2, 60_000)).toEqual({ start: 30_000, end: 90_000 });
+	});
+
+	it("stops zooming at the session's ends and at the narrowest window", () => {
+		const left = zoomWindow(axis, { start: 0, end: 10_000 }, 0.25, 0, 1000, 0);
+		expect(left).toEqual({ start: 0, end: 40_000 });
+		const right = zoomWindow(axis, { start: 110_000, end: 120_000 }, 0.25, 120_000, 1000, 1000);
+		expect(right).toEqual({ start: 80_000, end: 120_000 });
+		expect(zoomWindow(axis, { start: 50_000, end: 60_000 }, 0.001, 55_000)).toEqual(full);
+		const deep = zoomWindow(axis, full, 1e6, 30_000, 1000, 250);
+		expect(deep.end - deep.start).toBe(MIN_WINDOW_MS);
+		expect(deep.start).toBeGreaterThanOrEqual(29_000);
+		expect(deep.end).toBeLessThanOrEqual(31_000);
+	});
+
+	it("pans in active time, stopping at the ends, and centres on a position", () => {
+		expect(panWindow(axis, { start: 0, end: 10_000 }, -5_000)).toEqual({ start: 0, end: 10_000 });
+		expect(panWindow(axis, { start: 0, end: 10_000 }, 1e9)).toEqual({ start: 110_000, end: 120_000 });
+		// Across the fold: 5 s of active time, not the hour of the gap.
+		const across = panWindow(axis, { start: 50_000, end: 60_000 }, 5_000);
+		expect(across).toEqual({ start: 55_000, end: 65_000 });
+		expect(windowAxis(axis, across).segments.map((segment) => [segment.start - T, segment.end - T])).toEqual([
+			[55_000, 60_000],
+			[3_600_000, 3_605_000],
+		]);
+		expect(centreWindow(axis, { start: 0, end: 10_000 }, 70_000)).toEqual({ start: 65_000, end: 75_000 });
+		expect(centreWindow(axis, { start: 0, end: 10_000 }, 1_000)).toEqual({ start: 0, end: 10_000 });
+	});
+
+	it("drops records outside the window and cuts those crossing its edges", () => {
+		const records: TraceRecord[] = [llm(2, T + 1_000, T + 4_000), tool(3, "bash", T + 4_000, T + 9_000), tool(4, "read", T + 9_500, T + 9_800)];
+		const t = trace(records, [traceTurn(0, 1, 6, T, 10_000)]);
+		const traceAxis = foldGaps(traceIntervals(t));
+		const scale = windowScale(traceAxis, { start: 5_000, end: 7_000 }, 1000);
+		const items = layoutOverview(t, scale, overviewLanes(false));
+		expect(items.map((item) => item.key).sort()).toEqual(["t:s:c3-bash", "turn:0"]);
+		for (const item of items) {
+			expect(item.x0).toBe(0);
+			expect(item.x1).toBe(1000);
+		}
+		// Nothing outside is hit.
+		expect(hitTest(items, 2, (overviewLanes(false)[1].y0 + overviewLanes(false)[1].y1) / 2)).toBeUndefined();
+		// The full view keeps every record.
+		expect(layoutOverview(t, windowScale(traceAxis, undefined, 1000), overviewLanes(false))).toHaveLength(4);
+	});
+
+	it("labels ticks in tenths of a second only below a second", () => {
+		expect(formatTick(2_530_500, 500)).toBe("42:10.5");
+		expect(formatTick(2_530_000, 500)).toBe("42:10");
+		expect(formatTick(3_725_200, 100)).toBe("1:02:05.2");
+		for (const ms of [0, 2_530_500, 3_725_200]) expect(formatTick(ms, 1_000)).toBe(formatClock(ms));
+		// Zoomed to two seconds over 1000 px: ticks every 200 ms, all on round steps.
+		const scale = windowScale(axis, { start: 1_234, end: 3_234 }, 1000);
+		expect(tickStep(scale, 72, 100)).toBe(200);
+		const ticks = axisTicks(scale, 72, 100);
+		expect(ticks.length).toBeGreaterThan(5);
+		for (const tick of ticks) expect(tick.elapsed % 200).toBe(0);
+		expect(ticks.map((tick) => formatTick(tick.elapsed, 200)).slice(0, 3)).toEqual(["0:01.4", "0:01.6", "0:01.8"]);
+		// The full view keeps whole-second steps.
+		expect(tickStep(makeScale(foldGaps([{ start: T, end: T + 1_000 }]), 800), 72)).toBe(1_000);
+	});
+});
+
 describe("overview layout and hit-testing", () => {
 	const records: TraceRecord[] = [
 		llm(2, T + 1000, T + 4000, { thinking: true }),
@@ -166,6 +297,76 @@ describe("overview layout and hit-testing", () => {
 		const turnItem = items.find((item) => item.key === "turn:0")!;
 		expect(hitTest(items, 900, (turnItem.y0 + turnItem.y1) / 2)?.key).toBe("turn:0");
 		expect(hitTest(items, 500, 500)).toBeUndefined();
+	});
+});
+
+describe("provider timing", () => {
+	it("derives a model call's phases from its timing", () => {
+		const record = llm(2, T, T + 6000, { sentAt: T + 20, responseAt: T + 330, firstTokenAt: T + 1440, firstToken: "thinking" });
+		expect(llmPhases(record)).toEqual({ request: T + 20, headers: T + 330, firstToken: T + 1440, end: T + 6000, ttft: 1420, streaming: 4560, kind: "thinking" });
+	});
+
+	it("falls back to the call's start without sentAt and leaves out unknown headers", () => {
+		const phases = llmPhases(llm(2, T, T + 3000, { firstTokenAt: T + 500 }))!;
+		expect(phases.request).toBe(T);
+		expect(phases.headers).toBeUndefined();
+		expect(phases.ttft).toBe(500);
+		expect(phases.streaming).toBe(2500);
+	});
+
+	it("has no phases without a first token, or for anything but a model call", () => {
+		expect(llmPhases(llm(2, T, T + 3000, { sentAt: T + 10, responseAt: T + 200 }))).toBeUndefined();
+		expect(llmPhases(tool(3, "bash", T, T + 100))).toBeUndefined();
+		expect(llmPhases(llm(2, T, T + 3000, { firstTokenAt: Number.NaN }))).toBeUndefined();
+	});
+
+	it("clamps times into the call's span and keeps them in order", () => {
+		const phases = llmPhases(llm(2, T, T + 3000, { sentAt: T - 50, responseAt: T + 9000, firstTokenAt: T + 4000 }))!;
+		expect(phases).toMatchObject({ request: T, headers: T + 3000, firstToken: T + 3000, end: T + 3000, ttft: 3000, streaming: 0 });
+		// A first token before the request still comes after it.
+		expect(llmPhases(llm(2, T, T + 3000, { sentAt: T + 800, firstTokenAt: T + 400 }))).toMatchObject({ request: T + 800, firstToken: T + 800, ttft: 0 });
+	});
+
+	it("formats phases finer than spans", () => {
+		expect(formatPhase(0)).toBe("0 ms");
+		expect(formatPhase(310)).toBe("310 ms");
+		expect(formatPhase(1420)).toBe("1.42 s");
+		expect(formatPhase(12_340)).toBe("12.3 s");
+		expect(formatPhase(90_000)).toBe("1m 30s");
+	});
+
+	const timed = trace([llm(2, T + 1000, T + 4000, { sentAt: T + 1020, firstTokenAt: T + 2000 }), llm(4, T + 5000, T + 8000)], [traceTurn(0, 1, 6, T, 10_000)]);
+	const untimed = trace([llm(2, T + 1000, T + 4000), llm(4, T + 5000, T + 8000)], [traceTurn(0, 1, 6, T, 10_000)]);
+
+	it("adds the provider row above the model calls only for sessions with timing", () => {
+		expect(hasProviderTiming(timed)).toBe(true);
+		expect(hasProviderTiming(untimed)).toBe(false);
+		for (const compact of [false, true]) {
+			const lanes = overviewLanes(compact, true);
+			expect(lanes.map((lane) => lane.lane)).toEqual(["turns", "provider", "llm", "tools", "agents"]);
+			expect(lanes[1].label).toBe("Provider");
+			// Rows never overlap, so a pointer always means one row.
+			for (let i = 1; i < lanes.length; i++) expect(lanes[i].y0).toBeGreaterThan(lanes[i - 1].y1);
+			// Without timing the layout is the one it always was.
+			expect(overviewLanes(compact, false)).toEqual(overviewLanes(compact));
+			expect(overviewLanes(compact).some((lane) => lane.lane === "provider")).toBe(false);
+		}
+	});
+
+	it("puts each timed call on the provider row, from its request to its end, under its model call's key", () => {
+		const scale = makeScale(foldGaps(traceIntervals(timed)), 1000);
+		const items = layoutOverview(timed, scale, overviewLanes(false, true));
+		const provider = items.filter((item) => item.lane === "provider");
+		expect(provider.map((item) => item.key)).toEqual(["l:s:2"]);
+		expect(provider[0].x0).toBeCloseTo(scale.x(T + 1020));
+		expect(provider[0].x1).toBeCloseTo(scale.x(T + 4000));
+		expect(provider[0].phases?.ttft).toBe(980);
+		// Hovering the provider bar means the model call.
+		const hit = hitTest(items, (provider[0].x0 + provider[0].x1) / 2, (provider[0].y0 + provider[0].y1) / 2);
+		expect(hit?.lane).toBe("provider");
+		expect(hit?.record?.seq).toBe(2);
+		// Without the row, nothing is placed on it.
+		expect(layoutOverview(timed, scale, overviewLanes(false)).some((item) => item.lane === "provider")).toBe(false);
 	});
 });
 

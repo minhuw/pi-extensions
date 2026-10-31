@@ -93,3 +93,22 @@ export function plural(n: number, word: string, pluralWord = `${word}s`): string
 export function truncateText(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
+
+/** What a cost is the cost of: one record, or a whole session or family. */
+export type CostScale = "record" | "session";
+
+/** The upper bounds of the lower three magnitude steps, per scale; everything above the last is the top step. */
+export const COST_STEPS: Record<CostScale, [number, number, number]> = {
+	record: [0.02, 0.08, 0.25],
+	session: [0.5, 2, 8],
+};
+
+/** The diameter of each magnitude step, in pixels: the one ramp every view sizes cost with. */
+export const COST_DIAMETERS = [4, 6, 8, 10] as const;
+
+/** A cost's step on the fixed four-step magnitude ramp: 0 (nothing or very little) to 3. */
+export function costStep(cost: number | null | undefined, scale: CostScale): 0 | 1 | 2 | 3 {
+	if (!cost || !Number.isFinite(cost) || cost <= 0) return 0;
+	const [a, b, c] = COST_STEPS[scale];
+	return cost <= a ? 0 : cost <= b ? 1 : cost <= c ? 2 : 3;
+}

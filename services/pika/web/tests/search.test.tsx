@@ -121,7 +121,7 @@ describe("search page", () => {
 		expect(document.activeElement).toBe(input);
 	});
 
-	it("focuses the input with / after opening search from the sidebar, keeping the filters", async () => {
+	it("focuses the input with / after opening search from the band, keeping the filters", async () => {
 		const server = createFakeServer({ sessions: sessions(), hits: HITS });
 		renderApp("/", server.fetch);
 		await screen.findByText("Fix the base path");
@@ -143,7 +143,7 @@ describe("search page", () => {
 		expect(screen.getByRole("button", { name: /Device/ }).textContent).toContain("laptop");
 		expect(input).toHaveProperty("value", "base");
 
-		// Opening search again from the sidebar starts over instead of restoring the old query.
+		// Opening search again from the band starts over instead of restoring the old query.
 		fireEvent.click(screen.getByRole("link", { name: "Search" }));
 		await waitFor(() => expect(input).toHaveProperty("value", ""));
 		await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS * 2));

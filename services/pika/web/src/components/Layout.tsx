@@ -1,15 +1,13 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { authModeOf, useApi } from "../lib/api";
-import { deviceOptions } from "../lib/devices";
 import { useShortcuts } from "../lib/keyboard";
 import { RELAY_BADGE_POLL_MS, useHealth, useOnlineSessions } from "../lib/relay";
 import { useTheme, type Theme } from "../lib/theme";
 import { useMe } from "./AuthGate";
-import { plainOptions, type FilterOption } from "./FilterChip";
 import { Icon, PikaLogo, type IconName } from "./icons";
-import { cx, Pill } from "./ui";
+import { cx } from "./ui";
 
 export const ScrollRootContext = createContext<HTMLElement | null>(null);
 
@@ -30,56 +28,73 @@ export function useSigningOut(): SigningOut {
 	return useContext(SigningOutContext);
 }
 
-const SIDEBAR_KEY = "pika-sidebar";
+const BAND_CONTROL = "flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-2 text-[13px] font-medium text-band-muted hover:bg-band-hover hover:text-band-ink";
 
-function initialSidebarOpen(): boolean {
-	try {
-		return localStorage.getItem(SIDEBAR_KEY) !== "closed";
-	} catch {
-		return true;
-	}
+/**
+ * The sign band: the app's frame, black with the thin white stripe of the transit manual's signs. It carries the
+ * wordmark, the navigation, and the few controls every page shares.
+ */
+export function SignBand({ home, children, controls }: { home: string; children?: ReactNode; controls?: ReactNode }) {
+	return (
+		<header
+			className="relative flex h-12 shrink-0 items-center gap-2 bg-band pr-3 pl-4 text-band-ink before:absolute before:inset-x-0 before:top-[5px] before:h-px before:bg-band-ink/85 dark:border-b dark:border-band-ink/30"
+			data-sign-band=""
+		>
+			<Link to={home} className="mr-3 flex h-8 shrink-0 items-center gap-2 rounded-sm pr-1 text-[17px] font-semibold tracking-[-0.01em]">
+				<PikaLogo size={22} className="shrink-0" />
+				pika
+			</Link>
+			{children}
+			<div className="ml-auto flex shrink-0 items-center gap-1">{controls}</div>
+		</header>
+	);
 }
 
-function NavItem({ to, icon, children, end, badge }: { to: string; icon: IconName; children: ReactNode; end?: boolean; badge?: ReactNode }) {
+export function ThemeToggle({ theme, onToggle }: { theme: Theme; onToggle: () => void }) {
+	return (
+		<button
+			type="button"
+			onClick={onToggle}
+			className={BAND_CONTROL}
+			aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+			title={theme === "dark" ? "Light theme" : "Dark theme"}
+			data-theme-toggle=""
+		>
+			<Icon name={theme === "dark" ? "sun" : "moon"} />
+		</button>
+	);
+}
+
+function NavItem({ to, icon, children, end, badge, hint }: { to: string; icon: IconName; children: ReactNode; end?: boolean; badge?: ReactNode; hint?: string }) {
 	return (
 		<NavLink
 			to={to}
 			end={end}
 			className={({ isActive }) =>
 				cx(
-					"flex h-[30px] items-center gap-2.5 rounded-sm px-2 text-[14px] hover:bg-hover",
-					isActive ? "bg-hover font-medium text-ink" : "text-muted",
+					"relative flex h-12 shrink-0 items-center gap-2 px-2.5 text-[13.5px] font-medium whitespace-nowrap",
+					"after:absolute after:inset-x-2.5 after:bottom-0 after:h-[3px]",
+					isActive ? "text-band-ink after:bg-band-ink" : "text-band-muted hover:text-band-ink",
 				)
 			}
 		>
-			<Icon name={icon} className="shrink-0" />
-			<span className="truncate">{children}</span>
+			{/* Phones keep only the icons; the names stay for assistive technology. */}
+			<Icon name={icon} size={15} className="shrink-0 md:max-lg:hidden" />
+			<span className="max-md:sr-only">{children}</span>
 			{badge}
+			{hint && (
+				<kbd
+					aria-hidden="true"
+					className="hidden h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-band-ink/35 px-1 font-sans text-[11px] leading-none lg:inline-flex"
+				>
+					{hint}
+				</kbd>
+			)}
 		</NavLink>
 	);
 }
 
-function SidebarSection({ title, items, param, icon }: { title: string; items: FilterOption[]; param: string; icon: IconName }) {
-	if (items.length === 0) return null;
-	return (
-		<div className="mt-5">
-			<div className="px-2 pb-1 text-[12px] font-medium text-muted">{title}</div>
-			{items.slice(0, 8).map((item) => (
-				<Link
-					key={item.value}
-					to={`/?${param}=${encodeURIComponent(item.value)}`}
-					className="flex h-[28px] items-center gap-2.5 rounded-sm px-2 text-[14px] text-muted hover:bg-hover"
-					title={item.label}
-				>
-					<Icon name={icon} className="shrink-0" size={14} />
-					<span className="truncate">{item.label}</span>
-				</Link>
-			))}
-		</div>
-	);
-}
-
-/** Online sessions in the sidebar; hidden when the server has no relay or it is off. */
+/** Online sessions in the band; hidden when the server has no relay or it is off. */
 function ActiveSessionsItem() {
 	const { sessions, availability } = useOnlineSessions(false);
 	if (availability !== "on") return null;
@@ -90,8 +105,10 @@ function ActiveSessionsItem() {
 			icon="pulse"
 			badge={
 				count > 0 && (
-					<span className="ml-auto shrink-0" data-online-count="">
-						<Pill tone="accent">{count}</Pill>
+					<span className="shrink-0" data-online-count="">
+						<span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-band-ink px-1 text-[11px] leading-none font-semibold text-band">
+							{count}
+						</span>
 						<span className="sr-only"> online</span>
 					</span>
 				)
@@ -102,13 +119,13 @@ function ActiveSessionsItem() {
 	);
 }
 
-function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme: Theme; onToggleTheme: () => void }) {
+function SignOutButton() {
 	const api = useApi();
-	const facets = useQuery({ queryKey: ["facets"], queryFn: () => api.facets(), staleTime: 60_000 });
 	const me = useMe();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const { setSigningOut } = useSigningOut();
+	if (authModeOf(me.data) !== "password" || !me.data?.authenticated) return null;
 	const signOut = async () => {
 		setSigningOut(true);
 		try {
@@ -119,66 +136,10 @@ function Sidebar({ onClose, theme, onToggleTheme }: { onClose: () => void; theme
 		}
 	};
 	return (
-		<aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-line bg-sidebar" aria-label="Sidebar">
-			<div className="flex h-12 items-center gap-2 px-3">
-				<Link to="/" className="flex h-7 items-center gap-1.5 rounded-sm pr-1.5 pl-1 font-semibold hover:bg-hover">
-					<PikaLogo size={22} className="shrink-0" />
-					pika
-				</Link>
-				<button
-					type="button"
-					onClick={onClose}
-					className="ml-auto rounded-sm p-1 text-muted hover:bg-hover"
-					aria-label="Collapse sidebar"
-					title="Collapse sidebar"
-				>
-					<Icon name="sidebar" />
-				</button>
-			</div>
-			<nav className="flex-1 overflow-y-auto px-2 pb-4" aria-label="Main">
-				<NavItem to="/" icon="sessions" end>
-					Sessions
-				</NavItem>
-				<NavItem to="/runs" icon="herder">
-					Herder runs
-				</NavItem>
-				<ActiveSessionsItem />
-				<NavItem to="/devices" icon="key">
-					Devices
-				</NavItem>
-				<NavItem to="/search" icon="search">
-					Search
-				</NavItem>
-				<NavItem to="/settings" icon="settings">
-					Settings
-				</NavItem>
-				<SidebarSection title="Projects" items={plainOptions(facets.data?.projects ?? [])} param="project" icon="folder" />
-				<SidebarSection title="Devices" items={deviceOptions(facets.data?.devices ?? [])} param="device" icon="device" />
-			</nav>
-			<div className="border-t border-line px-2 py-2">
-				<button
-					type="button"
-					onClick={onToggleTheme}
-					className="flex h-[30px] w-full items-center gap-2.5 rounded-sm px-2 text-[14px] text-muted hover:bg-hover"
-					aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-					data-theme-toggle=""
-				>
-					<Icon name={theme === "dark" ? "sun" : "moon"} />
-					{theme === "dark" ? "Light theme" : "Dark theme"}
-				</button>
-				{authModeOf(me.data) === "password" && me.data?.authenticated && (
-					<button
-						type="button"
-						onClick={() => void signOut()}
-						className="flex h-[30px] w-full items-center gap-2.5 rounded-sm px-2 text-[14px] text-muted hover:bg-hover"
-					>
-						<Icon name="external" />
-						Sign out
-					</button>
-				)}
-				<ServerVersion className="px-2 pt-1.5" />
-			</div>
-		</aside>
+		<button type="button" onClick={() => void signOut()} className={BAND_CONTROL}>
+			<Icon name="external" className="max-md:hidden" />
+			Sign out
+		</button>
 	);
 }
 
@@ -189,7 +150,7 @@ export function ServerVersion({ className }: { className?: string }) {
 	const build = data.revision ? `${data.version} (${data.revision})` : data.version;
 	return (
 		<div
-			className={cx("select-text text-[12px] text-muted", className)}
+			className={cx("select-text text-[11.5px] whitespace-nowrap", className)}
 			title={data.revision ? `pika ${data.version}, built from commit ${data.revision}` : `pika ${data.version}`}
 			data-server-version=""
 		>
@@ -199,43 +160,50 @@ export function ServerVersion({ className }: { className?: string }) {
 }
 
 export function Layout({ children }: { children?: ReactNode }) {
-	const [open, setOpen] = useState(initialSidebarOpen);
 	const { theme, toggle } = useTheme();
 	const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
 	const [signingOut, setSigningOut] = useState(false);
 	const signingOutValue = useMemo(() => ({ signingOut, setSigningOut }), [signingOut]);
 	const navigate = useNavigate();
 	const { pathname } = useLocation();
-	// Keeps the sidebar badge and the session page's Online badge fresh; the Active sessions page polls faster itself.
+	// Keeps the band's badge and the session page's Online badge fresh; the Active sessions page polls faster itself.
 	useOnlineSessions(signingOut || pathname === "/active" ? false : RELAY_BADGE_POLL_MS);
 	// The search page handles `/` itself by focusing its input.
 	useShortcuts(pathname === "/search" ? {} : { "/": () => navigate("/search") });
 
-	const setSidebar = (value: boolean) => {
-		setOpen(value);
-		try {
-			localStorage.setItem(SIDEBAR_KEY, value ? "open" : "closed");
-		} catch {
-			// Not persisted when storage is unavailable.
-		}
-	};
-
 	return (
 		<SigningOutContext.Provider value={signingOutValue}>
-			<div className="flex h-full bg-page text-ink">
-				{open && <Sidebar onClose={() => setSidebar(false)} theme={theme} onToggleTheme={toggle} />}
-				<main ref={setScrollRoot} className="relative h-full min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
-					{!open && (
-						<button
-							type="button"
-							onClick={() => setSidebar(true)}
-							className="fixed top-3 left-3 z-10 rounded-sm bg-page p-1 text-muted hover:bg-hover"
-							aria-label="Open sidebar"
-							title="Open sidebar"
-						>
-							<Icon name="sidebar" />
-						</button>
-					)}
+			<div className="flex h-full flex-col bg-page text-ink">
+				<SignBand
+					home="/"
+					controls={
+						<>
+							<ServerVersion className="mr-2 text-band-muted max-xl:hidden" />
+							<ThemeToggle theme={theme} onToggle={toggle} />
+							<SignOutButton />
+						</>
+					}
+				>
+					<nav className="flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none]" aria-label="Main">
+						<NavItem to="/" icon="sessions" end>
+							Sessions
+						</NavItem>
+						<NavItem to="/runs" icon="herder">
+							Herder runs
+						</NavItem>
+						<ActiveSessionsItem />
+						<NavItem to="/devices" icon="key">
+							Devices
+						</NavItem>
+						<NavItem to="/search" icon="search" hint="/">
+							Search
+						</NavItem>
+						<NavItem to="/settings" icon="settings">
+							Settings
+						</NavItem>
+					</nav>
+				</SignBand>
+				<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">
 					<ScrollRootContext.Provider value={scrollRoot}>{children ?? <Outlet />}</ScrollRootContext.Provider>
 				</main>
 			</div>

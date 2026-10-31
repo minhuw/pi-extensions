@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { FilterChip, MenuOption, optionLabel, plainOptions } from "../components/FilterChip";
 import { Icon, type IconName } from "../components/icons";
-import { EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
+import { BUTTON, cx, EmptyState, ErrorState, Page, PageTitle, SkeletonLines } from "../components/ui";
 import { useApi } from "../lib/api";
 import { deviceOptions } from "../lib/devices";
 import { formatRelative } from "../lib/format";
@@ -28,7 +28,7 @@ export function Snippet({ text }: { text: string }) {
 		<span className="[overflow-wrap:anywhere] whitespace-pre-wrap" data-snippet="">
 			{parts.map((part, index) =>
 				part.mark ? (
-					<mark key={index} className="rounded-sm bg-yellow-soft px-0.5 text-ink">
+					<mark key={index} className="rounded-sm bg-ink px-0.5 text-page">
 						{part.text}
 					</mark>
 				) : (
@@ -160,7 +160,7 @@ export function SearchPage() {
 	return (
 		<Page className="pb-24">
 			<PageTitle>Search</PageTitle>
-			<label className="mt-6 flex h-10 items-center gap-2 rounded-md border border-line px-3 focus-within:border-accent/50">
+			<label className="mt-6 flex h-10 items-center gap-2 rounded-sm border border-line px-3 focus-within:border-ink">
 				<Icon name="search" className="shrink-0 text-muted" />
 				<input
 					ref={inputRef}
@@ -170,14 +170,14 @@ export function SearchPage() {
 					onChange={(event) => setInput(event.target.value)}
 					placeholder="Search prompts, answers, and tool calls"
 					aria-label="Search"
-					className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-muted"
+					className="min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-muted"
 				/>
-				<kbd className="mono rounded-sm border border-line px-1 text-[11px] text-muted">/</kbd>
+				<kbd className="rounded-sm border border-line px-1 font-sans text-[11px] text-muted">/</kbd>
 			</label>
 			<div className="mt-3">
 				<SearchFilters />
 			</div>
-			<hr className="mt-4 mb-2 border-0 border-t border-line" />
+			<hr className="mt-5 mb-1 border-0 border-t border-ink" />
 			{!query ? (
 				<EmptyState title="Search every session">Type to search prompts, answers, tool calls, results, and titles.</EmptyState>
 			) : results.isPending ? (
@@ -191,30 +191,33 @@ export function SearchPage() {
 			) : (
 				<div data-search-results="">
 					{groups.map((group) => (
-						<section key={group.sessionId} className="mt-4" data-result-group={group.sessionId}>
+						<section key={group.sessionId} className="mt-5 first:mt-2" data-result-group={group.sessionId}>
 							<Link
 								to={`/s/${encodeURIComponent(group.sessionId)}`}
-								className="-mx-1 block truncate rounded-sm px-1 font-medium hover:bg-hover"
+								className="flex min-w-0 items-baseline gap-2 border-b border-line px-1.5 pb-1 text-[14px] hover:bg-hover"
 							>
-								{group.title || "Untitled session"}
+								<span className="min-w-0 truncate font-medium">{group.title || "Untitled session"}</span>
+								<span className="mono shrink-0 text-[11.5px] text-muted" aria-hidden="true">
+									{group.sessionId.slice(0, 8)}
+								</span>
 							</Link>
-							<div className="mt-1">
+							<div>
 								{group.hits.map((hit) => {
 									const kind = KINDS[hit.kind] ?? KINDS.assistant;
 									return (
 										<Link
 											key={`${hit.seq}:${hit.kind}:${hit.entryId ?? ""}`}
 											to={hitLink(hit)}
-											className="flex gap-3 rounded-md px-2 py-1.5 text-[14px] hover:bg-hover"
+											className="flex gap-3 border-b border-line px-1.5 py-1 text-[13px] leading-5 hover:bg-hover"
 											data-hit={hit.seq}
 											data-kind={hit.kind}
 										>
-											<Icon name={kind.icon} className="mt-1 shrink-0 text-muted" />
+											<Icon name={kind.icon} className="mt-[3px] shrink-0 text-muted" />
 											<span className="sr-only">{kind.label}</span>
 											<span className="min-w-0 flex-1">
 												<Snippet text={hit.snippet} />
 											</span>
-											<span className="shrink-0 text-[12px] text-muted">{formatRelative(hit.at)}</span>
+											<span className="tnum shrink-0 text-[12px] text-muted">{formatRelative(hit.at)}</span>
 										</Link>
 									);
 								})}
@@ -226,7 +229,7 @@ export function SearchPage() {
 							type="button"
 							disabled={results.isFetchingNextPage}
 							onClick={() => void results.fetchNextPage()}
-							className="mt-4 rounded-sm px-3 py-1 text-[14px] text-muted hover:bg-hover"
+							className={cx(BUTTON.secondary, "mt-4")}
 						>
 							{results.isFetchingNextPage ? "Loading…" : "More results"}
 						</button>

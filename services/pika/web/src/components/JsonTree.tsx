@@ -15,7 +15,7 @@ function Scalar({ value }: { value: unknown }) {
 	if (typeof value === "string") {
 		const long = value.length > STRING_PREVIEW;
 		return (
-			<span className="text-green [overflow-wrap:anywhere] whitespace-pre-wrap">
+			<span className="text-ink [overflow-wrap:anywhere] whitespace-pre-wrap">
 				“{long && !full ? `${value.slice(0, STRING_PREVIEW)}…` : value}”
 				{long && (
 					<button type="button" onClick={() => setFull(!full)} className="ml-1 rounded-sm px-1 font-sans text-[12px] text-muted hover:bg-hover">
@@ -26,14 +26,14 @@ function Scalar({ value }: { value: unknown }) {
 		);
 	}
 	if (value === null || value === undefined) return <span className="text-muted">{String(value)}</span>;
-	return <span className="text-accent">{String(value)}</span>;
+	return <span className="font-semibold text-ink">{String(value)}</span>;
 }
 
 function Node({ name, value, depth, defaultOpen }: { name?: string; value: unknown; depth: number; defaultOpen: boolean }) {
 	const [open, setOpen] = useState(defaultOpen);
 	const [shown, setShown] = useState(CHILD_PAGE);
 	const isContainer = value !== null && typeof value === "object";
-	const label = name !== undefined && <span className="text-ink">{name}: </span>;
+	const label = name !== undefined && <span className="text-muted">{name}: </span>;
 	if (!isContainer) {
 		return (
 			<div className="pl-4" data-json-node="">
@@ -80,7 +80,7 @@ function Node({ name, value, depth, defaultOpen }: { name?: string; value: unkno
 /** Collapsible JSON viewer; children render only when their parent is open. */
 export function JsonTree({ value, className }: { value: unknown; className?: string }) {
 	return (
-		<div className={cx("mono overflow-x-auto rounded-md border border-line bg-soft px-2 py-2", className)} data-json-tree="">
+		<div className={cx("mono overflow-x-auto rounded-sm border border-line bg-soft px-2 py-2", className)} data-json-tree="">
 			<Node value={value} depth={0} defaultOpen />
 		</div>
 	);

@@ -19,7 +19,7 @@ const components: Components = {
 			{children}
 		</a>
 	),
-	img: ({ src, alt }) => <img src={typeof src === "string" ? src : undefined} alt={alt ?? ""} className="max-w-full rounded-md" />,
+	img: ({ src, alt }) => <img src={typeof src === "string" ? src : undefined} alt={alt ?? ""} className="max-w-full rounded-sm" />,
 };
 
 export const Markdown = memo(function Markdown({ text, className }: { text: string; className?: string }) {

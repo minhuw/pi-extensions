@@ -11,6 +11,7 @@ import { useShortcuts } from "../lib/keyboard";
 import type { Entry, Turn } from "../lib/types";
 import { useViewState } from "../lib/viewState";
 import { useScrollMargin } from "../lib/virtual";
+import { KindBullet } from "../trace/parts";
 import { buildTimeline, type TimelineItem } from "./timeline";
 import { TimelineItemView } from "./TimelineItemView";
 
@@ -64,7 +65,7 @@ function WorkStrip({ turn, expanded, onToggle }: { turn: Turn; expanded: boolean
 			type="button"
 			aria-expanded={expanded}
 			onClick={onToggle}
-			className="-mx-2 mt-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-sm px-2 py-0.5 text-left text-[13px] text-muted hover:bg-hover"
+			className="tnum -mx-2 mt-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-sm px-2 py-0.5 text-left text-[13px] text-muted hover:bg-hover"
 			data-work-strip={turn.index}
 		>
 			<span aria-hidden="true" className="w-3 text-[11px]">
@@ -99,8 +100,8 @@ function TurnHead({
 	return (
 		<div
 			className={cx(
-				"rounded-t-md border-x border-t px-5 pt-3.5 pb-1.5 transition-colors duration-700",
-				active ? "border-accent/40" : "border-line",
+				"border-t px-5 pt-3.5 pb-1.5 transition-colors duration-700",
+				active ? "border-ink" : "border-line",
 				highlighted && "bg-accent-soft",
 			)}
 			data-turn={turn.index}
@@ -108,8 +109,9 @@ function TurnHead({
 			data-highlighted={highlighted || undefined}
 		>
 			<div className="mb-1.5 flex items-center gap-2 text-[12px] text-muted">
-				<span className="mono tnum font-semibold text-k-user">#{turn.index + 1}</span>
-				<Icon name={start.icon} size={13} className="text-k-user" />
+				<KindBullet family="user" />
+				<span className="tnum font-semibold text-ink">#{turn.index + 1}</span>
+				<Icon name={start.icon} size={13} className="text-muted" />
 				<span title={turn.customType} data-turn-start={turn.customType ?? "prompt"}>
 					{start.label}
 				</span>
@@ -121,14 +123,14 @@ function TurnHead({
 	);
 }
 
-function TurnFoot({ turn, active }: { turn: Turn; active: boolean }) {
+function TurnFoot({ turn }: { turn: Turn }) {
 	return (
 		<div className="pb-4">
-			<div className={cx("rounded-b-md border-x border-b px-5 pb-3.5", active ? "border-accent/40" : "border-line", turn.finalText ? "pt-2" : "pt-1")}>
+			<div className={cx("px-5 pb-3.5", turn.finalText ? "pt-2" : "pt-1")}>
 				{turn.finalText && (
 					<div className="border-t border-line pt-3" data-final-answer={turn.index}>
 						<div className="mb-1 flex items-center gap-2 text-[12px] text-muted">
-							<Icon name="sparkle" size={13} className="text-k-llm" />
+							<KindBullet family="llm" size={14} />
 							Answer
 						</div>
 						<Markdown text={turn.finalText} className="text-[15px]" />
@@ -152,7 +154,7 @@ function ItemShell({
 }) {
 	return (
 		<div
-			className={cx("border-x px-5 transition-colors duration-700", active ? "border-accent/40" : "border-line", highlighted && "bg-accent-soft")}
+			className={cx("px-5 transition-colors duration-700", active && "shadow-[inset_1px_0_0_var(--color-ink)]", highlighted && "bg-accent-soft")}
 			data-entry-seq={seq}
 			data-highlighted={highlighted || undefined}
 		>
@@ -394,7 +396,7 @@ export function TurnList({
 		return (
 			<div className="space-y-6" aria-busy="true" aria-label="Loading prompts">
 				{[0, 1].map((i) => (
-					<div key={i} className="rounded-md border border-line px-6 py-5">
+					<div key={i} className="border-t border-line px-5 py-5">
 						<Skeleton className="mb-3 h-3 w-24" />
 						<SkeletonLines lines={3} />
 					</div>
@@ -451,7 +453,7 @@ export function TurnList({
 								)}
 							</ItemShell>
 						) : row.type === "foot" ? (
-							<TurnFoot turn={row.turn} active={isActive} />
+							<TurnFoot turn={row.turn} />
 						) : (
 							<div className="py-2" aria-busy="true" aria-label="Loading more prompts">
 								<SkeletonLines lines={2} />

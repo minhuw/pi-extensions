@@ -293,7 +293,7 @@ export async function checkRelay(browser: Ui, t: RelayTargets): Promise<void> {
 		checkEqual(await browser.page.$eval(`[data-relay-event="${hopEvent.id}"]`, (node) => node.getAttribute("data-status")), "rejected", "the dashboard's status of the cut chain message");
 		checkEqual(await browser.page.$eval(`[data-relay-event="${lateId}"]`, (node) => node.getAttribute("data-status")), "expired", "the dashboard's status of the late note");
 		check((await browser.textOf(`[data-online-session="${B.sessionId}"]`)).includes(B.name), "B's row does not show its name");
-		check((await browser.textOf("[data-online-count]")).includes("2"), "the sidebar does not count 2 online sessions");
+		check((await browser.textOf("[data-online-count]")).includes("2"), "the sign band does not count 2 online sessions");
 		for (const each of ["light", "dark"] as const) {
 			await browser.setTheme(each);
 			await browser.page.$eval("[data-scroll-root]", (root) => { root.scrollTop = 0; }).catch(() => {});

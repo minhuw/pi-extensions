@@ -1,45 +1,29 @@
-import { Icon, type IconName } from "../components/icons";
-import { colorOf, Tag, tagColorClasses, type TagColor } from "../components/Tag";
+import { Icon } from "../components/icons";
+import { Tag } from "../components/Tag";
 import { cx } from "../components/ui";
 import { childLabel } from "../lib/labels";
 import type { ChildSession } from "../lib/types";
-import type { FamilyNode } from "./model";
+import { KindBullet } from "../trace/parts";
+import type { FamilyNode, FamilyTree } from "./model";
 
 export type Kind = "main" | "subagent" | "herder";
 
-/** The trajectory palette's color of each kind, for the agent tree's timeline bars. */
+/**
+ * Each kind's timing bar: a subagent is the agent record kind, so its bar is the agent line colour; a main session and
+ * a Herder step are not record kinds, so theirs are ink.
+ */
 export const KIND_CLASSES: Record<Kind, { bar: string }> = {
-	main: { bar: "bg-k-user" },
+	main: { bar: "bg-ink" },
 	subagent: { bar: "bg-k-agent" },
-	herder: { bar: "bg-k-shell" },
+	herder: { bar: "bg-ink" },
 };
 
-/** The fleet's agents and Herder's roles keep one color each; any other agent type gets its own from its name. */
-const TYPE_COLORS: Record<string, TagColor> = {
-	main: "blue",
-	recon: "green",
-	worker: "purple",
-	reviewer: "pink",
-	expert: "yellow",
-	planner: "brown",
-	implementer: "purple",
-	verifier: "green",
-	subagent: "gray",
-};
-
-/** A kind of agent's tag color: a Herder step's is its role's. */
-export function typeColor(type: string): TagColor {
-	const role = type.replace(/ step$/, "");
-	return TYPE_COLORS[role] ?? colorOf(role);
-}
-
-const KIND_ICONS: Record<Kind, IconName> = { main: "message", subagent: "agent", herder: "herder" };
-
-/** A session's page icon, in its kind's color. */
-export function KindIcon({ kind, type }: { kind: Kind; type: string }) {
+/** A session's mark: the agent bullet where a subagent starts, the Herder mark for a step, a page for a main session. */
+export function KindIcon({ kind }: { kind: Kind }) {
+	if (kind === "subagent") return <KindBullet family="agent" />;
 	return (
-		<span className={cx("flex size-5 shrink-0 items-center justify-center rounded-[5px]", tagColorClasses(typeColor(type)))} aria-hidden="true">
-			<Icon name={KIND_ICONS[kind]} size={12} />
+		<span className="flex size-4 shrink-0 items-center justify-center text-ink" aria-hidden="true">
+			<Icon name={kind === "herder" ? "herder" : "message"} size={13} />
 		</span>
 	);
 }
@@ -68,24 +52,58 @@ export function rowLabel(node: FamilyNode): { kind: Kind; type: string; descript
 export const TREE_INDENT = 24;
 /** Where a column's line runs: under the middle of the 18px caret column of the row one level up. */
 const TRUNK = 9;
-/** The lines' color: stronger than `border-line`, so the branches read at a glance. */
-const LINE = "border-muted/45";
+
+/** A branch's line: the agent line colour toward a subagent, ink toward a Herder step, which is no record kind. */
+export type LineTone = "agent" | "ink";
+
+const LINE_TONES: Record<LineTone, string> = { agent: "border-k-agent", ink: "border-ink" };
+
+function toneOf(node: FamilyNode | undefined): LineTone {
+	return node && sessionLabel(node.session, false).kind === "herder" ? "ink" : "agent";
+}
+
+/**
+ * The tones of a row's lines, matching `continuesAt`: at each level the trunk's, which leads on to the next sibling
+ * there; the row's own branch, which leads to the row; and the stub down to its first child.
+ */
+export function lineTones(family: FamilyTree, node: FamilyNode): { trunks: LineTone[]; own: LineTone; stub: LineTone } {
+	const trunks: LineTone[] = [];
+	for (let at: FamilyNode | undefined = node; at && trunks.length < node.depth; ) {
+		const parent: FamilyNode | undefined = at.parentId ? family.byId.get(at.parentId) : undefined;
+		if (!parent) break;
+		const next = parent.children[parent.children.indexOf(at.id) + 1];
+		trunks.unshift(toneOf(next ? family.byId.get(next) : at));
+		at = parent;
+	}
+	return { trunks, own: toneOf(node), stub: toneOf(family.byId.get(node.children[0] ?? "")) };
+}
 
 /**
  * The lines left of a row, drawn like `tree` with rounded corners: one column per level below the root, each with its
  * line under the caret of the ancestor at that level. `continues` comes from `continuesAt`: a level whose later sibling
  * follows keeps its trunk; the last column holds the row's own branch, which leaves its trunk `elbow` px below the top
- * of the row and ends `reach` px into the row's own caret column (past it, for a leaf's empty one).
+ * of the row and ends `reach` px into the row's own caret column (past it, for a leaf's empty one). `tones` comes from
+ * `lineTones`.
  */
-export function TreeLines({ continues, elbow, reach }: { continues: boolean[]; elbow: number; reach: number }) {
+export function TreeLines({
+	continues,
+	elbow,
+	reach,
+	tones,
+}: {
+	continues: boolean[];
+	elbow: number;
+	reach: number;
+	tones: { trunks: LineTone[]; own: LineTone };
+}) {
 	return continues.map((more, i) => {
 		const own = i === continues.length - 1;
 		return (
 			<span key={i} className="relative shrink-0 self-stretch" style={{ width: TREE_INDENT }} aria-hidden="true" data-tree-level={own ? (more ? "tee" : "end") : more ? "trunk" : ""}>
-				{more && <span className={cx("absolute inset-y-0 border-l", LINE)} style={{ left: TRUNK }} />}
+				{more && <span className={cx("absolute inset-y-0 border-l", LINE_TONES[tones.trunks[i] ?? "agent"])} style={{ left: TRUNK }} />}
 				{own && (
 					<span
-						className={cx("absolute top-0 rounded-bl-[7px] border-b border-l", LINE)}
+						className={cx("absolute top-0 rounded-bl-[7px] border-b border-l", LINE_TONES[tones.own])}
 						style={{ left: TRUNK, height: elbow + 0.5, width: TREE_INDENT - TRUNK + reach }}
 					/>
 				)}
@@ -95,13 +113,14 @@ export function TreeLines({ continues, elbow, reach }: { continues: boolean[]; e
 }
 
 /** The line from an open row's caret down to its first child, `from` px below the top of the row. */
-export function TreeStub({ from }: { from: number }) {
-	return <span className={cx("absolute bottom-0 border-l", LINE)} style={{ left: TRUNK, top: from }} aria-hidden="true" data-tree-stub="" />;
+export function TreeStub({ from, tone }: { from: number; tone: LineTone }) {
+	return <span className={cx("absolute bottom-0 border-l", LINE_TONES[tone])} style={{ left: TRUNK, top: from }} aria-hidden="true" data-tree-stub="" />;
 }
 
+/** A session's kind as a small ink tag: `main`, its agent type, or its Herder role. */
 export function KindPill({ kind, children }: { kind: Kind; children: string }) {
 	return (
-		<Tag color={typeColor(children)} icon={kind === "herder" ? "herder" : undefined}>
+		<Tag icon={kind === "herder" ? "herder" : undefined}>
 			{children}
 		</Tag>
 	);

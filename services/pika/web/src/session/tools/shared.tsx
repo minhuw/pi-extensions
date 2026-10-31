@@ -48,7 +48,7 @@ export function ResultImages({ result }: { result: ToolResultMessage | undefined
 					key={index}
 					src={image.src ?? (image.data ? `data:${image.mimeType};base64,${image.data}` : undefined)}
 					alt={`Tool result image ${index + 1}`}
-					className="max-h-80 max-w-full rounded-md border border-line"
+					className="max-h-80 max-w-full rounded-sm border border-line"
 				/>
 			))}
 		</div>
@@ -69,5 +69,5 @@ export function PendingResult() {
 }
 
 export function Label({ children }: { children: string }) {
-	return <div className="mt-3 mb-1 text-[12px] font-medium tracking-wide text-muted uppercase">{children}</div>;
+	return <div className="mt-3 mb-1 text-[12px] font-medium text-muted">{children}</div>;
 }

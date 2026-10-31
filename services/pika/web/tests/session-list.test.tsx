@@ -144,7 +144,7 @@ describe("session list", () => {
 	it("lists a subagent whose parent is not recorded at the top, tagged, with its own family", async () => {
 		const server = createFakeServer({
 			sessions: [
-				session("main", { title: "Refactor auth", lastAt: iso(900_000) }),
+				session("m1", { title: "Refactor auth", lastAt: iso(900_000) }),
 				child("lost", "never-uploaded", { agentType: "worker", description: "Port the parser" }, { title: "Port the CSV parser to SIMD", childCount: 1 }),
 				child("lost-r", "lost", { agentType: "recon", description: "Find the hot loops" }),
 			],
@@ -334,11 +334,11 @@ describe("session list", () => {
 		expect(screen.queryByText("On the second MacBook")).toBeNull();
 		expect(server.calls).toContain(`/api/v1/sessions?device=${STUDIO_ID}&root=true&limit=50`);
 
-		// The sidebar lists the same labels and links by id.
-		const sidebar = screen.getByRole("complementary", { name: "Sidebar" });
-		const link = within(sidebar).getByRole("link", { name: `MacBook (${OTHER_ID.slice(0, 8)})` });
+		// The list's Browse index lists the same labels and links by id.
+		const browse = screen.getByRole("navigation", { name: "Browse" });
+		const link = within(browse).getByRole("link", { name: `MacBook (${OTHER_ID.slice(0, 8)})` });
 		expect(link.getAttribute("href")).toBe(`/?device=${OTHER_ID}`);
-		expect(within(sidebar).getByRole("link", { name: "mini" }).getAttribute("href")).toBe("/?device=mini");
+		expect(within(browse).getByRole("link", { name: "mini" }).getAttribute("href")).toBe("/?device=mini");
 	});
 
 	it("shows a device filter's id until the facets name it", async () => {

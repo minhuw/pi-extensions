@@ -372,7 +372,7 @@ async function onLoginPage(browser: Ui, label: string): Promise<void> {
 }
 
 /**
- * `auth/sessions` lists the browser's session; signing out in the sidebar retires its cookie; signing in again and
+ * `auth/sessions` lists the browser's session; signing out in the sign band retires its cookie; signing in again and
  * signing out everywhere retires every session, the driver's included. The browser ends on the login page.
  */
 export async function checkBrowserSessions(browser: Ui, t: AuthTargets): Promise<void> {
@@ -387,7 +387,7 @@ export async function checkBrowserSessions(browser: Ui, t: AuthTargets): Promise
 	check((await browser.textOf(`[data-browser-session="${current[0]!.id}"]`)).includes("This browser"), "the Devices page does not mark this browser's session");
 
 	const poll = racingPoll(browser);
-	await browser.click("aside[aria-label=Sidebar] button::-p-text(Sign out)");
+	await browser.click("header[data-sign-band] button::-p-text(Sign out)");
 	await onLoginPage(browser, "signing out");
 	await poll.done();
 	checkEqual(await status(t.url, first), 401, "a read route with the cookie of a signed-out browser");

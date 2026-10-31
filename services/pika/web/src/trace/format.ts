@@ -21,6 +21,14 @@ export function formatClock(ms: number): string {
 	return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
 }
 
+/** A clock-row label: `formatClock`, with tenths of a second when ticks are less than a second apart: `42:10.5`. */
+export function formatTick(ms: number, step: number): string {
+	if (step >= 1000) return formatClock(ms);
+	const tenths = Math.max(0, Math.round(ms / 100));
+	const seconds = Math.floor(tenths / 10);
+	return tenths % 10 ? `${formatClock(seconds * 1000)}.${tenths % 10}` : formatClock(seconds * 1000);
+}
+
 function pad(n: number): string {
 	return String(n).padStart(2, "0");
 }
@@ -36,6 +44,15 @@ export function formatSpan(ms: number | undefined): string {
 	const minutes = Math.floor((seconds % 3600) / 60);
 	if (hours > 0) return `${hours}h ${pad(minutes)}m`;
 	return `${minutes}m ${pad(seconds % 60)}s`;
+}
+
+/** A network phase, finer than `formatSpan`: `310 ms`, `1.42 s`, `12.3 s`, then as `formatSpan`. */
+export function formatPhase(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "—";
+	if (ms < 1000) return `${Math.round(ms)} ms`;
+	if (ms < 10_000) return `${(ms / 1000).toFixed(2)} s`;
+	if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+	return formatSpan(ms);
 }
 
 /** An idle gap's label: `47 min`, `2.5 h`, `3 d`. */

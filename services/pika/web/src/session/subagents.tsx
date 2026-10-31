@@ -10,6 +10,7 @@ import { formatDuration, formatRelative, plural } from "../lib/format";
 import { childLabel } from "../lib/labels";
 import type { ChildSession, SessionDetail } from "../lib/types";
 import { useViewState } from "../lib/viewState";
+import { KindBullet } from "../trace/parts";
 import { SessionViewContext, useSessionView, type SessionViewContextValue } from "./context";
 import { registerToolRenderer } from "./tools/registry";
 import { argString, okResult, resultText, type ToolRenderProps } from "./tools/shared";
@@ -57,14 +58,15 @@ export function InlineSession({ child }: { child: ChildSession }) {
 	);
 	const { type, description } = childLabel(child);
 	return (
-		<div className="mt-2 border-l-2 border-line pl-4" data-inline-session={child.id}>
+		<div className="mt-2 border-l border-k-agent pl-4" data-inline-session={child.id}>
 			<div className="mb-2 flex min-w-0 items-center gap-2 text-[13px]">
-				<Pill tone="accent">{type}</Pill>
+				<KindBullet family="agent" />
+				<span className="mono shrink-0 text-[12.5px]">{type}</span>
 				<span className="min-w-0 flex-1 truncate font-medium">{description}</span>
 				<span className="shrink-0 text-muted">{formatDuration(child.durationMs)}</span>
 				<Link
 					to={`/s/${encodeURIComponent(child.id)}`}
-					className="flex shrink-0 items-center gap-1 rounded-sm px-1 text-muted hover:bg-hover hover:text-ink"
+					className="flex shrink-0 items-center gap-1 rounded-sm px-1 text-ink underline decoration-ink/30 underline-offset-[3px] hover:decoration-ink"
 				>
 					<Icon name="external" size={13} />
 					Open as page
@@ -125,10 +127,10 @@ function WorkflowTool({ call, result }: ToolRenderProps) {
 	const script = argString(call, "script");
 	const report = resultText(okResult(result));
 	return (
-		<div className="rounded-md border border-line px-4 py-3" data-workflow-card="">
+		<div className="border-l border-k-agent py-1 pl-3" data-workflow-card="">
 			<div className="flex flex-wrap items-center gap-2">
-				<Icon name="branch" className="text-muted" />
-				<Pill tone="accent">workflow</Pill>
+				<KindBullet family="agent" />
+				<span className="text-[13px] font-medium">workflow</span>
 				<span className="mono min-w-0 flex-1 truncate">{name}</span>
 				<span className="text-[13px] text-muted">{plural(children.length, "agent")}</span>
 			</div>
@@ -150,7 +152,7 @@ function WorkflowTool({ call, result }: ToolRenderProps) {
 									<>
 										<Pill>{type}</Pill>
 										<span className="min-w-0 flex-1 truncate text-ink">{description}</span>
-										<span className="shrink-0">{formatDuration(child.durationMs)}</span>
+										<span className="tnum shrink-0">{formatDuration(child.durationMs)}</span>
 									</>
 								}
 							/>

@@ -4,10 +4,11 @@ import { Icon, type IconName } from "../components/icons";
 import { cx } from "../components/ui";
 import { deviceLabel } from "../lib/devices";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
-import type { ChildSession, SessionDetail, SessionTrace, Tokens } from "../lib/types";
+import type { ChildSession, SessionDetail, SessionTrace, Tokens, TraceCompactionRecord } from "../lib/types";
 import { childLabel } from "../lib/labels";
 import { formatSpan, middleTruncate } from "./format";
-import { contextTokens, FAMILIES, FAMILY_CLASSES, FAMILY_LABELS, recordDuration, recordFamily, recordIsError, type Family } from "./kinds";
+import { contextTokens, FAMILIES, FAMILY_LABELS, recordDuration, recordFamily, recordIsError, type Family } from "./kinds";
+import { KindBullet } from "./parts";
 
 export type SessionViewMode = "trajectory" | "transcript" | "agents";
 
@@ -101,18 +102,44 @@ export function SessionChips({ session }: { session: SessionDetail }) {
 	);
 }
 
-function Tile({ kpi, label, value, sub, visual, title }: { kpi: string; label: string; value: ReactNode; sub?: ReactNode; visual?: ReactNode; title?: string }) {
+/**
+ * One figure of the totals row: the number over its label, set in tabular figures. `detail` is a labelled breakdown on
+ * the label's line; `visual` is a small graphic beside the number, which must carry its own labels. Nothing is clipped:
+ * where a tile is too narrow, the pieces wrap onto the next line and the row grows.
+ */
+function Tile({
+	kpi,
+	label,
+	value,
+	sub,
+	visual,
+	detail,
+	title,
+}: {
+	kpi: string;
+	label: string;
+	value: ReactNode;
+	sub?: ReactNode;
+	visual?: ReactNode;
+	detail?: ReactNode;
+	title?: string;
+}) {
 	return (
-		<div className="group relative flex h-[58px] min-w-0 flex-col justify-center gap-1 px-3" data-kpi={kpi} title={title}>
-			<div className="flex min-w-0 items-center gap-2">
-				<span className="truncate text-[11px] font-medium tracking-[0.04em] text-muted uppercase">{label}</span>
-			</div>
-			<div className="flex min-w-0 items-end gap-2">
-				<span className="tnum shrink-0 text-[17px] leading-none font-semibold tracking-[-0.01em]" data-kpi-value="">
+		<div className="group relative flex min-h-[62px] min-w-0 flex-col justify-center gap-1.5 px-4 py-2.5 first:pl-6" data-kpi={kpi} title={title}>
+			<div className="flex min-w-0 flex-wrap items-end gap-x-2 gap-y-1.5">
+				<span className="tnum shrink-0 text-[21px] leading-none font-semibold tracking-[-0.02em]" data-kpi-value="">
 					{value}
 				</span>
-				{sub && <span className="tnum shrink-0 text-[11.5px] leading-none whitespace-nowrap text-muted">{sub}</span>}
-				{visual && <span className="ml-auto flex min-w-0 flex-1 items-end justify-end overflow-hidden">{visual}</span>}
+				{sub && <span className="tnum shrink-0 text-[12px] leading-none whitespace-nowrap text-muted">{sub}</span>}
+				{visual && <span className="ml-auto flex max-w-full min-w-0 items-end justify-end">{visual}</span>}
+			</div>
+			<div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+				<span className="shrink-0 text-[12px] leading-none text-muted">{label}</span>
+				{detail && (
+					<span className="tnum ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-[11.5px] leading-none whitespace-nowrap text-muted">
+						{detail}
+					</span>
+				)}
 			</div>
 		</div>
 	);
@@ -125,61 +152,58 @@ function largest(values: number[], from = 0, to = values.length): number {
 	return top;
 }
 
-/** Tiny columns, one per value, aggregated to at most `max`. */
-function Columns({ values, max = 28, className }: { values: number[]; max?: number; className: string }) {
-	if (values.length < 2) return null;
-	const buckets: number[] = [];
-	const size = Math.ceil(values.length / max);
-	for (let i = 0; i < values.length; i += size) buckets.push(largest(values, i, i + size));
-	const top = Math.max(1, largest(buckets));
+/**
+ * The context window as a fixed-length bar, like a tape filling toward its length. pika does not know a model's window,
+ * so the track runs from 0 to the session's peak, both ends labelled; the fill is what the latest call read, and each
+ * compaction is a tick where the context stood when it was compacted.
+ */
+function ContextBar({ latest, peak, compactions }: { latest: number; peak: number; compactions: TraceCompactionRecord[] }) {
+	const at = (tokens: number) => `${Math.max(0, Math.min(1, tokens / peak)) * 100}%`;
 	return (
-		<span className="flex h-[18px] items-end gap-[1.5px]" aria-hidden="true">
-			{buckets.map((value, i) => (
-				<span key={i} className={cx("w-[3px] rounded-[1px] opacity-70", className)} style={{ height: `${Math.max(8, (value / top) * 100)}%` }} />
-			))}
+		<span className="flex w-[76px] shrink-0 flex-col gap-[3px]" aria-hidden="true">
+			<span className="relative h-[6px] bg-hover">
+				<span className="absolute inset-y-0 left-0 bg-ink" style={{ width: at(latest) }} />
+				{compactions.map((record) =>
+					record.tokensBefore ? <span key={record.seq} className="absolute -inset-y-[3px] w-[2px] -translate-x-1/2 bg-k-compaction" style={{ left: at(record.tokensBefore) }} /> : null,
+				)}
+			</span>
+			<span className="tnum flex justify-between text-[9.5px] leading-none text-muted">
+				<span>0</span>
+				<span>{formatCount(peak)}</span>
+			</span>
 		</span>
 	);
 }
 
-function Sparkline({ values, className }: { values: number[]; className: string }) {
-	if (values.length < 2) return null;
-	const top = Math.max(1, largest(values));
-	const w = 64;
-	const h = 18;
-	const points = values.map((value, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${(h - 1 - (value / top) * (h - 2)).toFixed(1)}`).join(" ");
-	return (
-		<svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className={cx("shrink-0", className)} aria-hidden="true">
-			<polyline points={`0,${h} ${points} ${w},${h}`} fill="currentColor" fillOpacity={0.1} stroke="none" />
-			<polyline points={points} fill="none" stroke="currentColor" strokeWidth={1.2} strokeLinejoin="round" />
-		</svg>
-	);
+/** The share of the prompt read from cache, over the whole session. */
+function cachedShare(tokens: Tokens): number | undefined {
+	const prompt = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+	return prompt > 0 && tokens.cacheRead > 0 ? tokens.cacheRead / prompt : undefined;
 }
 
+/** Token kinds as steps of ink, so the line colours stay with record kinds. */
 const TOKEN_PARTS: [keyof Tokens, string, string][] = [
-	["cacheRead", "Cache read", "bg-k-read"],
-	["cacheWrite", "Cache write", "bg-k-compaction"],
-	["input", "Input", "bg-k-user"],
-	["output", "Output", "bg-k-llm"],
+	["cacheRead", "Cache read", "bg-ink/20"],
+	["cacheWrite", "Cache write", "bg-ink/45"],
+	["input", "Input", "bg-ink/70"],
+	["output", "Output", "bg-ink"],
 ];
 
-function TokenBar({ tokens }: { tokens: Tokens }) {
-	const total = totalTokens(tokens);
-	if (!total) return null;
+/** The tokens tile's breakdown: the cached share in words, and every kind of token on hover. */
+function TokenDetail({ tokens }: { tokens: Tokens }) {
+	if (!totalTokens(tokens)) return null;
+	const share = cachedShare(tokens);
 	return (
 		<>
-			<span className="flex h-[6px] w-full max-w-[72px] min-w-[20px] overflow-hidden rounded-full bg-hover" aria-hidden="true">
-				{TOKEN_PARTS.map(([key, , color]) =>
-					tokens[key] ? <span key={key} className={cx(color, "opacity-80")} style={{ width: `${(tokens[key] / total) * 100}%` }} /> : null,
-				)}
-			</span>
+			{share !== undefined ? `${Math.round(share * 100)}% cached` : `${formatCount(tokens.output)} out`}
 			<span
 				role="tooltip"
-				className="pointer-events-none absolute top-full left-2 z-30 mt-1 hidden w-[210px] rounded-md border border-line bg-page px-3 py-2 text-[12px] shadow-[0_4px_16px_rgba(15,15,15,0.12)] group-hover:block"
+				className="pointer-events-none absolute top-full left-2 z-30 mt-1 hidden w-[210px] rounded-sm border border-ink bg-page px-3 py-2 text-[12px] shadow-[0_8px_24px_rgba(0,0,0,0.14)] group-hover:block"
 				data-token-legend=""
 			>
 				{TOKEN_PARTS.map(([key, label, color]) => (
 					<span key={key} className="flex items-center gap-2 py-px">
-						<span className={cx("size-2 rounded-[2px] opacity-80", color)} />
+						<span className={cx("size-2", color)} />
 						<span className="text-muted">{label}</span>
 						<span className="mono tnum ml-auto text-[11.5px]">{tokens[key].toLocaleString("en-US")}</span>
 					</span>
@@ -189,21 +213,19 @@ function TokenBar({ tokens }: { tokens: Tokens }) {
 	);
 }
 
-function FamilyBar({ counts }: { counts: Map<Family, number> }) {
-	const total = [...counts.values()].reduce((a, b) => a + b, 0);
-	if (!total) return null;
+/** The tool calls tile's breakdown: the three largest kinds, each as its bullet and count; all of them on hover. */
+function FamilyCounts({ counts }: { counts: Map<Family, number> }) {
+	const shown = FAMILIES.filter((f) => counts.get(f));
+	if (!shown.length) return null;
+	const top = [...shown].sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0)).slice(0, 3);
 	return (
-		<span
-			className="flex h-[6px] w-full max-w-[64px] min-w-[20px] overflow-hidden rounded-full bg-hover"
-			title={FAMILIES.filter((f) => counts.get(f))
-				.map((f) => `${FAMILY_LABELS[f]}: ${counts.get(f)}`)
-				.join("\n")}
-		>
-			{FAMILIES.map((family) =>
-				counts.get(family) ? (
-					<span key={family} className={cx(FAMILY_CLASSES[family].bar, "opacity-80")} style={{ width: `${((counts.get(family) ?? 0) / total) * 100}%` }} />
-				) : null,
-			)}
+		<span className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1" title={shown.map((f) => `${FAMILY_LABELS[f]}: ${counts.get(f)}`).join("\n")}>
+			{top.map((family) => (
+				<span key={family} className="flex shrink-0 items-center gap-1">
+					<KindBullet family={family} size={13} />
+					{formatCount(counts.get(family) ?? 0)}
+				</span>
+			))}
 		</span>
 	);
 }
@@ -219,10 +241,11 @@ function SubagentLinks({ items }: { items: ChildSession[] }) {
 					<Link
 						key={child.id}
 						to={`/s/${encodeURIComponent(child.id)}`}
-						className="inline-flex h-[18px] max-w-[84px] min-w-0 items-center truncate rounded-[3px] bg-k-agent/12 px-1.5 text-[11px] text-k-agent hover:bg-k-agent/20"
+						className="inline-flex h-[20px] max-w-[104px] min-w-0 items-center gap-1 rounded-sm pr-1 text-[12px] font-medium text-ink hover:bg-hover"
 						title={`${type} · ${description}`}
 					>
-						{type}
+						{child.link?.kind !== "herder-step" && <KindBullet family="agent" size={14} />}
+						<span className="min-w-0 truncate">{type}</span>
 					</Link>
 				);
 			})}
@@ -237,7 +260,7 @@ function SubagentLinks({ items }: { items: ChildSession[] }) {
 				</button>
 			)}
 			{open && (
-				<span className="absolute top-full right-0 z-30 mt-1 flex max-h-[320px] w-[300px] flex-col overflow-y-auto rounded-md border border-line bg-page p-1 shadow-[0_4px_16px_rgba(15,15,15,0.12)]">
+				<span className="absolute top-full right-0 z-30 mt-1 flex max-h-[320px] w-[300px] flex-col overflow-y-auto rounded-sm border border-ink bg-page p-1 shadow-[0_8px_24px_rgba(0,0,0,0.14)]">
 					{items.map((child) => {
 						const { type, description } = childLabel(child);
 						return (
@@ -247,7 +270,8 @@ function SubagentLinks({ items }: { items: ChildSession[] }) {
 								className="flex min-w-0 items-center gap-2 rounded-sm px-2 py-1 text-[12.5px] hover:bg-hover"
 								title={child.title}
 							>
-								<span className="shrink-0 font-medium text-k-agent">{type}</span>
+								{child.link?.kind !== "herder-step" && <KindBullet family="agent" size={14} />}
+								<span className="shrink-0 font-medium">{type}</span>
 								<span className="min-w-0 truncate text-muted">{description}</span>
 							</Link>
 						);
@@ -270,24 +294,27 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 	const average = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : undefined;
 	const contexts = llm.map(contextTokens);
 	const peak = largest(contexts);
+	const latest = contexts.length ? contexts[contexts.length - 1] : 0;
+	const compactions = records.filter((record): record is TraceCompactionRecord => record.kind === "compaction");
 	const turns = trace?.turns ?? [];
+	const longest = largest(turns.map((turn) => turn.durationMs));
 	const total = totalTokens(session.tokens);
 	const children = session.children;
 	return (
 		<div
-			className="mt-4 grid grid-cols-2 divide-line overflow-visible rounded-md border border-line sm:grid-cols-4 sm:divide-x xl:grid-cols-7"
+			className="mt-4 -mx-6 grid grid-cols-2 divide-line overflow-visible border-y border-line sm:grid-cols-4 sm:divide-x xl:grid-cols-7"
 			data-kpi-strip=""
 		>
-			<Tile kpi="turns" label="Turns" value={trace ? formatCount(turns.length) : "—"} visual={<Columns values={turns.map((turn) => turn.durationMs)} className="bg-k-user" />} title="Turn durations" />
+			<Tile kpi="turns" label="Turns" value={trace ? formatCount(turns.length) : "—"} detail={turns.length > 1 && longest ? `longest ${formatSpan(longest)}` : undefined} />
 			<Tile kpi="llm" label="Model calls" value={trace ? formatCount(llm.length) : "—"} sub={average !== undefined ? `avg ${formatSpan(average)}` : undefined} />
 			<Tile
 				kpi="tools"
 				label="Tool calls"
 				value={trace ? formatCount(tools.length) : "—"}
 				sub={errors > 0 ? <span className="text-red" data-kpi-errors="">{plural(errors, "error")}</span> : undefined}
-				visual={<FamilyBar counts={families} />}
+				detail={<FamilyCounts counts={families} />}
 			/>
-			<Tile kpi="tokens" label="Tokens" value={formatCount(total)} visual={<TokenBar tokens={session.tokens} />} />
+			<Tile kpi="tokens" label="Tokens" value={formatCount(total)} detail={<TokenDetail tokens={session.tokens} />} />
 			<Tile kpi="cost" label="Cost" value={formatCost(session.cost)} sub={turns.length > 1 && session.cost > 0 ? `${formatCost(session.cost / turns.length)} / turn` : undefined} />
 			<Tile
 				kpi="subagents"
@@ -297,7 +324,7 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 						<button
 							type="button"
 							onClick={onOpenTree}
-							className="-mx-1 rounded-sm px-1 hover:bg-hover hover:text-accent"
+							className="-mx-1 rounded-sm px-1 underline decoration-ink/30 underline-offset-4 hover:bg-hover hover:decoration-ink"
 							title="Show the agent tree"
 							data-open-agent-tree=""
 						>
@@ -313,8 +340,21 @@ export function KpiStrip({ session, trace, onOpenTree }: { session: SessionDetai
 				kpi="context"
 				label="Peak context"
 				value={peak ? formatCount(peak) : "—"}
-				visual={<Sparkline values={contexts} className="text-k-llm" />}
-				title="The most tokens one model call read: input, cache read, and cache write"
+				visual={peak ? <ContextBar latest={latest} peak={peak} compactions={compactions} /> : undefined}
+				detail={
+					(latest > 0 && latest < peak) || compactions.length > 0 ? (
+						<>
+							{latest > 0 && latest < peak && <span>now {formatCount(latest)}</span>}
+							{compactions.length > 0 && (
+								<span className="flex items-center gap-1">
+									<KindBullet family="compaction" size={13} />
+									{plural(compactions.length, "compaction")}
+								</span>
+							)}
+						</>
+					) : undefined
+				}
+				title="The most tokens one model call read (input, cache read, and cache write), and what the latest call read; the bar runs from 0 to that peak, and each compaction is a tick where the context stood when it was compacted"
 			/>
 		</div>
 	);
@@ -328,7 +368,7 @@ export function ViewSwitch({ view, onChange, agents = false }: { view: SessionVi
 		...(agents ? [["agents", "Agents"] as [SessionViewMode, string]] : []),
 	];
 	return (
-		<div className="flex h-7 items-center rounded-md bg-hover p-0.5" role="radiogroup" aria-label="View" data-view-switch={view}>
+		<div className="flex h-8 items-stretch overflow-hidden rounded-sm border border-ink" role="radiogroup" aria-label="View" data-view-switch={view}>
 			{options.map(([value, label]) => (
 				<button
 					key={value}
@@ -337,8 +377,9 @@ export function ViewSwitch({ view, onChange, agents = false }: { view: SessionVi
 					aria-checked={view === value}
 					onClick={() => onChange(value)}
 					className={cx(
-						"h-full rounded-[4px] px-2.5 text-[12.5px] transition-colors duration-150",
-						view === value ? "bg-page font-medium text-ink shadow-[0_1px_2px_rgba(15,15,15,0.1)]" : "text-muted hover:text-ink",
+						// The group clips its corners, so the focus ring sits inside each segment, in the segment's own text colour.
+						"px-3 text-[13px] font-medium transition-colors duration-150 not-first:border-l not-first:border-ink focus-visible:outline-current focus-visible:outline-offset-[-4px]",
+						view === value ? "bg-ink text-page" : "text-ink hover:bg-hover",
 					)}
 					data-view={value}
 				>

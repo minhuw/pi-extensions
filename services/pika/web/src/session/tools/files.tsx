@@ -63,7 +63,7 @@ export function editPairs(call: ToolRenderProps["call"]): EditPair[] {
 }
 
 const DIFF_STYLE: Record<DiffLine["kind"], { sign: string; className: string }> = {
-	add: { sign: "+", className: "bg-green-soft text-green" },
+	add: { sign: "+", className: "bg-ink/[0.07] text-ink" },
 	del: { sign: "-", className: "bg-red-soft text-red" },
 	context: { sign: " ", className: "" },
 };

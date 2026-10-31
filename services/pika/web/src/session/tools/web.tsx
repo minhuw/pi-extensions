@@ -79,12 +79,12 @@ export function LinkCard({ link }: { link: WebLink }) {
 			href={link.url}
 			target="_blank"
 			rel="noreferrer noopener"
-			className="flex min-w-0 items-start gap-3 rounded-md border border-line px-3 py-2 hover:bg-hover"
+			className="flex min-w-0 items-start gap-3 border-b border-line px-1 py-1.5 hover:bg-hover"
 			data-link-card=""
 		>
 			<Icon name="globe" className="mt-1 shrink-0 text-muted" />
 			<span className="min-w-0 flex-1">
-				<span className="block truncate text-[14px] font-medium">{link.title ?? host}</span>
+				<span className="block truncate text-[13.5px] font-medium underline decoration-ink/30 underline-offset-[3px]">{link.title ?? host}</span>
 				<span className="block truncate text-[12px] text-muted">
 					{host}
 					{rest}
@@ -107,7 +107,7 @@ export function WebTool({ call, result }: ToolRenderProps) {
 					<span className="font-medium">{query}</span>
 				</div>
 			)}
-			{links.length > 0 && <div className="mt-2 grid gap-1.5 sm:grid-cols-2">{links.map((link) => <LinkCard key={link.url} link={link} />)}</div>}
+			{links.length > 0 && <div className="mt-2 grid gap-x-6 border-t border-line sm:grid-cols-2">{links.map((link) => <LinkCard key={link.url} link={link} />)}</div>}
 			{ok && text && (
 				<Toggle className="mt-2 text-[14px]" label={<span className="text-muted">Result text</span>}>
 					<OutputBlock text={text} />
