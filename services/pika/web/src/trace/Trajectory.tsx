@@ -13,6 +13,7 @@ import { Inspector, type InspectorTab, type InspectorTarget } from "./Inspector"
 import { COST_DIAMETERS, COST_STEPS, formatCost, formatCount, plural } from "../lib/format";
 import { FAMILIES, FAMILY_LABELS, hasProviderTiming, isSubagentTool, recordFamily, recordIsError, recordKey, recordSpan, type Family } from "./kinds";
 import { Ledger, type LedgerHandle } from "./Ledger";
+import { TimeBreakdown } from "./TimeBreakdown";
 import { Overview } from "./Overview";
 import { KindBullet, PhaseSwatch } from "./parts";
 import { currentStop, initialReplay, REPLAY_SPEEDS, replayReducer, type ReplayState } from "./replay";
@@ -710,6 +711,7 @@ export function Trajectory({ sessionId, trace, live, focusSeq, onFocusHandled }:
 						onScrub={onScrub}
 					/>
 				</ErrorBoundary>
+				<TimeBreakdown trace={trace} live={live} range={range} rangeLabel={rangeLabel} onClearRange={clearRange} />
 			</section>
 			<div className="relative flex min-h-0 flex-1">
 				<div className="min-w-0 flex-1">

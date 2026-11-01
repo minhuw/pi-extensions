@@ -1,4 +1,5 @@
-import { skipToken, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { skipToken, useQueries, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { useApi, type PikaApi } from "../lib/api";
 import type { Entry, SessionTrace, TraceRecord, TraceTurn } from "../lib/types";
 import { recordSpan } from "./kinds";
@@ -84,6 +85,80 @@ export function useTrace(sessionId: string, enabled = true) {
 	const api = useApi();
 	const queryClient = useQueryClient();
 	return useQuery<SessionTrace>({ queryKey: traceKey(sessionId), queryFn: () => fetchTrace(api, sessionId, queryClient), enabled });
+}
+
+/** The most descendants `useDescendantTraces` loads; a larger family leaves the rest out. */
+export const MAX_DESCENDANTS = 400;
+
+export interface DescendantTraces {
+	/** The descendants' traces loaded so far, by session id. */
+	traces: ReadonlyMap<string, SessionTrace>;
+	/** Descendants known so far: a loaded trace names its own children, which load next. */
+	wanted: number;
+	failed: number;
+	/** Set when the family has more than `MAX_DESCENDANTS` descendants. */
+	capped: boolean;
+}
+
+const NO_TRACES: ReadonlyMap<string, SessionTrace> = new Map();
+
+/**
+ * Every descendant's trace, loaded level by level while `enabled`: the root's children, then theirs. The traces share
+ * the ledger's cache, so subagents already expanded there do not load again.
+ */
+export function useDescendantTraces(root: SessionTrace, enabled: boolean): DescendantTraces {
+	const api = useApi();
+	const queryClient = useQueryClient();
+	const [ids, setIds] = useState<string[]>([]);
+	const queries = useQueries({
+		queries: (enabled ? ids : []).map((id) => ({ queryKey: traceKey(id), queryFn: () => fetchTrace(api, id, queryClient), staleTime: 60_000 })),
+	});
+	const signature = queries.map((query) => `${query.status}:${query.dataUpdatedAt}`).join(",");
+	const loaded = useMemo(() => {
+		const traces = new Map<string, SessionTrace>();
+		let failed = 0;
+		queries.forEach((query, i) => {
+			if (query.data) traces.set(ids[i], query.data);
+			else if (query.status === "error") failed++;
+		});
+		return { traces: traces.size ? traces : NO_TRACES, failed };
+		// `signature` stands in for `queries`, a new array every render.
+	}, [ids, signature]);
+
+	const wanted = useMemo(() => {
+		const out: string[] = [];
+		const seen = new Set([root.sessionId]);
+		const queue = [root];
+		let capped = false;
+		for (let trace = queue.shift(); trace; trace = queue.shift()) {
+			const children = [
+				...trace.children.map((child) => child.sessionId),
+				...trace.records.flatMap((record) => (record.kind === "tool" && record.childSessionId ? [record.childSessionId] : [])),
+			];
+			for (const id of children) {
+				if (seen.has(id)) continue;
+				seen.add(id);
+				if (out.length >= MAX_DESCENDANTS) {
+					capped = true;
+					continue;
+				}
+				out.push(id);
+				const child = loaded.traces.get(id);
+				if (child) queue.push(child);
+			}
+		}
+		return { ids: out, capped };
+	}, [root, loaded.traces]);
+
+	useEffect(() => {
+		if (!enabled) return;
+		const known = new Set(ids);
+		const missing = wanted.ids.filter((id) => !known.has(id));
+		if (missing.length) setIds((current) => [...current, ...missing.filter((id) => !current.includes(id))]);
+	}, [enabled, wanted, ids]);
+
+	if (!enabled) return { traces: NO_TRACES, wanted: 0, failed: 0, capped: false };
+	return { traces: loaded.traces, wanted: wanted.ids.length, failed: loaded.failed, capped: wanted.capped };
 }
 
 /** An entry already loaded by the transcript's turn pages, if any. */

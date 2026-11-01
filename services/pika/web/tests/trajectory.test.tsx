@@ -624,6 +624,95 @@ describe("subagents in the ledger", () => {
 	});
 });
 
+describe("time breakdown", () => {
+	const breakdown = () =>
+		waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-breakdown]");
+			if (!node) throw new Error("no breakdown");
+			return node;
+		});
+	const kinds = (node: HTMLElement) => [...node.querySelectorAll<HTMLElement>("[data-breakdown-family]")].map((item) => item.dataset.breakdownFamily);
+	const traces = (calls: string[]) => calls.filter((call) => call.endsWith("/trace"));
+
+	it("shows time by kind under the strip map, splits subagents into their own calls on request, and remembers both choices", async () => {
+		const server = createFakeServer({ sessions: agents() });
+		const { unmount } = renderApp("/s/p1", server.fetch);
+		const strip = await breakdown();
+		expect(screen.getByRole("region", { name: "Timeline" }).contains(strip)).toBe(true);
+		expect(strip.dataset.mode).toBe("one");
+		expect(kinds(strip)).toEqual(["llm", "agent", "between"]);
+		// Grouped, the subagents' traces are not needed.
+		expect(traces(server.calls)).toEqual(["/api/v1/sessions/p1/trace"]);
+
+		const split = within(strip).getByRole("button", { name: "Split" });
+		fireEvent.click(split);
+		expect(split.getAttribute("aria-pressed")).toBe("true");
+		// Level by level, down to the worker's own recon.
+		await waitFor(() => expect(strip.querySelector("[data-breakdown-total]")?.textContent).toContain("5 sessions"));
+		expect(new Set(traces(server.calls))).toEqual(new Set(["p1", "c1", "w1", "w2", "c1n"].map((id) => `/api/v1/sessions/${id}/trace`)));
+		expect(strip.dataset.mode).toBe("split");
+		expect(kinds(strip)).toEqual(["llm", "read", "between"]);
+		expect(strip.querySelector("[data-breakdown-loading]")).toBeNull();
+
+		// The details name each kind's models and tools.
+		const toggle = within(strip).getByRole("button", { name: /By model and tool/ });
+		fireEvent.click(toggle);
+		expect(toggle.getAttribute("aria-expanded")).toBe("true");
+		const read = within(strip).getByRole("region", { name: "Read & search" });
+		expect([...read.querySelectorAll<HTMLElement>("[data-breakdown-item]")].map((item) => item.dataset.breakdownItem)).toEqual(["read"]);
+		unmount();
+
+		renderApp("/s/p1", server.fetch);
+		const again = await breakdown();
+		expect(again.dataset.mode).toBe("split");
+		expect(again.querySelector("[data-breakdown-details]")).not.toBeNull();
+	});
+
+	it("counts only the range dragged on the strip map, and clears it from its own chip", async () => {
+		const fixture = session();
+		renderApp("/s/t1", createFakeServer({ sessions: [fixture] }).fetch);
+		const strip = await breakdown();
+		const total = () => strip.querySelector("[data-breakdown-total]")?.textContent;
+		await waitFor(() => expect(rows()).toHaveLength(9));
+		const whole = total();
+		expect(whole).toContain("9 calls");
+		expect(strip.hasAttribute("data-range")).toBe(false);
+
+		// Drag over the last model call alone, as the overview lays it out in jsdom's 800 px.
+		const trace = traceOf(fixture);
+		const items = layoutOverview(trace, makeScale(foldGaps(traceIntervals(trace)), 800), overviewLanes(false));
+		const llm = items.find((item) => item.key === "l:t1:11")!;
+		const plot = document.querySelector<HTMLElement>("[data-overview-plot]")!;
+		fireEvent.pointerDown(plot, { clientX: llm.x0 - 4, clientY: 30, button: 0 });
+		fireEvent.pointerMove(plot, { clientX: llm.x1 + 4, clientY: 30 });
+		fireEvent.pointerUp(plot, { clientX: llm.x1 + 4, clientY: 30 });
+		await waitFor(() => expect(rows().map((node) => node.dataset.seq)).toEqual(["11"]));
+		expect(strip.hasAttribute("data-range")).toBe(true);
+		expect(kinds(strip).filter((kind) => kind !== "between")).toEqual(["llm"]);
+		expect(total()).toContain("1 call");
+		// It names the range as the ledger's toolbar does.
+		const label = document.querySelector("[data-clear-range] .tnum")?.textContent;
+		expect(label).toMatch(/^\d.*–\d/);
+		const chip = within(strip).getByRole("button", { name: /Clear range/ });
+		expect(chip.textContent).toContain(label!);
+
+		// Clearing it there clears it for the ledger and the strip map too.
+		fireEvent.click(chip);
+		await waitFor(() => expect(rows()).toHaveLength(9));
+		expect(document.querySelector("[data-clear-range]")).toBeNull();
+		expect(document.querySelector("[data-overview] [data-range]")).toBeNull();
+		expect(strip.hasAttribute("data-range")).toBe(false);
+		expect(total()).toBe(whole);
+	});
+
+	it("has no subagent switch for a session without subagents", async () => {
+		renderApp("/s/t1", createFakeServer({ sessions: [session()] }).fetch);
+		const strip = await breakdown();
+		expect(kinds(strip)).toEqual(expect.arrayContaining(["llm", "shell", "read", "write"]));
+		expect(within(strip).queryByRole("group", { name: "Subagents" })).toBeNull();
+	});
+});
+
 describe("trajectory virtualization", () => {
 	it("keeps a 5,000-entry session under 300 entry nodes, expanded and scrolled", async () => {
 		restore();
