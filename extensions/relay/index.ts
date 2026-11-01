@@ -80,6 +80,8 @@ export default function relayExtension(pi: ExtensionAPI): void {
 	let ttlSeconds = 300;
 	let maxTextBytes = 32 * 1024;
 	let title: string | undefined;
+	/** The repository name pika resolves for the session's cwd, once asked; undefined until then or without one. */
+	let project: { cwd: string; name?: string; pending: Promise<void> } | undefined;
 	/** What the server last heard of this session's state, name, title, and model. */
 	let reported: Partial<Pick<HelloSession, "state" | "name" | "title" | "model">> = {};
 	const seen = new Set<string>();
@@ -134,6 +136,26 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		};
 	}
 
+	/** Asks pika's registry once per cwd for the repository name; without a resolver, the folder name stays. */
+	function prepare(): Promise<void> {
+		const cwd = ctx ? cwdOf(ctx) : undefined;
+		if (cwd === undefined) return Promise.resolve();
+		if (project?.cwd !== cwd) {
+			const entry: NonNullable<typeof project> = { cwd, pending: Promise.resolve() };
+			const resolver = credentials().repository;
+			if (resolver) {
+				entry.pending = Promise.resolve().then(() => resolver(cwd)).then((info) => {
+					const name = info?.project;
+					if (typeof name === "string" && name.trim()) entry.name = name;
+				}, () => undefined);
+			}
+			project = entry;
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, timing.projectTimeoutMs); timer.unref?.(); });
+		return Promise.race([project.pending, timeout]).finally(() => clearTimeout(timer));
+	}
+
 	function hello(): HelloSession {
 		const context = ctx!;
 		for (const entry of context.sessionManager.getEntries()) {
@@ -145,7 +167,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		const info = describe();
 		reported = info;
 		return {
-			id: sessionId!, ...info, cwd: cut(cwd, 1024)!, project: cut(basename(cwd) || cwd, 255)!, host: cut(hostname(), 255)!,
+			id: sessionId!, ...info, cwd: cut(cwd, 1024)!, project: cut((project?.cwd === cwd ? project.name : undefined) || basename(cwd) || cwd, 255)!, host: cut(hostname(), 255)!,
 			piVersion: VERSION, relayVersion: RELAY_VERSION,
 		};
 	}
@@ -294,7 +316,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 		if (same && !restart) return;
 		disconnect();
 		connection = new RelayConnection({ url: current.url, token: current.token }, {
-			hello, onMessage: (frame) => guard(() => receive(frame)), onStatus: (frame) => guard(() => status(frame)),
+			prepare, hello, onMessage: (frame) => guard(() => receive(frame)), onStatus: (frame) => guard(() => status(frame)),
 			onChange: (state) => guard(() => onChange(state)), onUnsupported: (reason) => guard(() => onUnsupported(reason)),
 		});
 		connection.start();
@@ -461,7 +483,7 @@ export default function relayExtension(pi: ExtensionAPI): void {
 			promptSnippet: "List other running pi sessions reachable through pika relay",
 			parameters: Type.Object({
 				device: Type.Optional(Type.String({ description: "Only sessions on this device (its name or id)" })),
-				project: Type.Optional(Type.String({ description: "Only sessions in this project (the basename of the working directory)" })),
+				project: Type.Optional(Type.String({ description: "Only sessions in this project (the git repository's name, else the basename of the working directory)" })),
 				query: Type.Optional(Type.String({ description: "Text to find in the session id, name, title, or working directory" })),
 			}),
 			async execute(_id, params) {

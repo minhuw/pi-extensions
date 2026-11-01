@@ -63,6 +63,7 @@ The server reads TTL and heartbeat from internal configuration so tests can shor
   { type: "hello", session: { id, name?, title?, cwd, project, host, model?, state: "idle" | "busy", piVersion?, relayVersion } }
   ```
   - `id` must look like a pi session id (1–128 characters of `[A-Za-z0-9._-]`); `name`, `title`, `model` are cut to 200 characters, `cwd` to 1024, `project` and `host` to 255.
+  - `project` is the name of the git repository holding `cwd` as pika files the session: the main checkout's folder, also from a subdirectory, a linked worktree, a Herder step, or a Subagents worktree child. The extension gets it from the credentials registry's `repository(cwd)` and waits at most 3 s for it before each connect. Outside git, with an older pika without `repository`, or when it fails, `project` is the basename of `cwd`.
   - **Ownership:** the owner of a session id is, in order, the device pika's `sessions` table records for it, the device holding it online, or the device that last held it online if that was within the TTL or messages are still queued for it. A `hello` from a device other than a recorded or remembered owner closes 4403; one while the id is online from another device closes 4409. If it is online from the same device, the older connection is closed with 4410 and this one takes over.
   - The token is checked again when `hello` arrives, so a device revoked between the upgrade and `hello` is closed with 4401.
   - On success the server answers `welcome` and then pushes every queued, unexpired message for this session in acceptance order.

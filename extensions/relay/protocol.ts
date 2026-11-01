@@ -36,6 +36,8 @@ export const timing = {
 	 * before it takes the replacement for failed or cancelled and reconnects.
 	 */
 	leaveTimeoutMs: 10_000,
+	/** How long a connect waits for pika to name the session's repository before it registers the folder name. */
+	projectTimeoutMs: 3_000,
 	/** How often a session that held back a message checks whether a compaction or tree summary ended. */
 	settlePollMs: 100,
 };

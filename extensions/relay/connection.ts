@@ -18,6 +18,8 @@ export type ConnectionState =
 	| { kind: "closed" };
 
 export interface ConnectionEvents {
+	/** Awaited at each connect before the socket opens, so `hello` can use what it prepares; never rejects. */
+	prepare?(): Promise<void>;
 	/** The session as `hello` describes it, read at each connect. */
 	hello(): HelloSession;
 	onMessage(frame: MessageFrame): void;
@@ -126,6 +128,8 @@ export class RelayConnection {
 			try { this.events.onUnsupported?.(unsupported); } catch { /* as above */ }
 			return;
 		}
+		try { await this.events.prepare?.(); } catch { /* `hello` does without */ }
+		if (generation !== this.generation || this.isClosed) return;
 		let socket: WebSocket;
 		try {
 			// Node's WebSocket (undici) takes headers in its second argument; the DOM typing does not know them.

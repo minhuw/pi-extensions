@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
@@ -52,5 +53,19 @@ it("follows the credentials the pika extension publishes: at its session start, 
 	expect(credentials().current).toBeUndefined();
 	await h.session.prompt("/relay");
 	expect(notes.last!.message.split("\n")[0]).toBe("Relay is offline: pika is not logged in or is disabled; run /pika login.");
+	expect(h.errors).toEqual([]);
+}, 20_000);
+
+it("registers the git repository's name pika resolves, from a subdirectory of the checkout", async () => {
+	const repo = join(workspace.root, "my-repo");
+	const cwd = join(repo, "src");
+	await mkdir(cwd, { recursive: true });
+	const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+	execFileSync("git", ["-C", repo, "init", "-q"], { env });
+	await writeFile(join(workspace.agentDir, "pika.json"), JSON.stringify({ url: relay.url, token: TOKEN }));
+	const h = await startSession({ workspace, cwd, extensionPaths: [pikaPath], sessionManager: SessionManager.inMemory(cwd) });
+	harnesses.push(h);
+	await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "welcome");
+	expect(relay.hellos()).toEqual([expect.objectContaining({ cwd, project: "my-repo" })]);
 	expect(h.errors).toEqual([]);
 }, 20_000);

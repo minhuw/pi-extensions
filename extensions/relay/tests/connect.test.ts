@@ -3,8 +3,8 @@ import { basename, join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { VERSION } from "@earendil-works/pi-coding-agent";
-import { RELAY_VERSION, wsUrl } from "../protocol.ts";
-import { shared } from "../shared.ts";
+import { RELAY_VERSION, timing, wsUrl } from "../protocol.ts";
+import { credentials, shared } from "../shared.ts";
 import { FakeRelay, TOKEN } from "./support/relay-server.ts";
 import { Notes, setCredentials, sleep, startSession, waitFor, Workspace, type Harness } from "./support/runtime.ts";
 
@@ -48,6 +48,39 @@ it("connects after session_start with the bearer token and sends a complete hell
 		piVersion: VERSION, relayVersion: RELAY_VERSION,
 	}]);
 	expect(h.errors).toEqual([]);
+});
+
+it("registers the repository name pika's registry resolves for the cwd", async () => {
+	const registry = credentials();
+	const asked: string[] = [];
+	registry.repository = async (cwd) => { asked.push(cwd); return { project: "my-repo", repository: "https://example.com/team/my-repo" }; };
+	try {
+		setCredentials(relay.url);
+		const h = await open();
+		await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "welcome");
+		expect(relay.hellos()).toEqual([expect.objectContaining({ id: h.session.sessionId, cwd: workspace.cwd, project: "my-repo" })]);
+		expect(asked).toEqual([workspace.cwd]);
+		expect(h.errors).toEqual([]);
+	} finally { delete registry.repository; }
+});
+
+it.each([
+	{ label: "no resolver", resolver: undefined },
+	{ label: "no repository", resolver: async () => ({}) },
+	{ label: "a rejecting resolver", resolver: async () => { throw new Error("git exploded"); } },
+	{ label: "a resolver that never settles", resolver: () => new Promise<never>(() => {}) },
+])("falls back to the basename of the cwd with $label", async ({ resolver }) => {
+	const registry = credentials();
+	if (resolver) registry.repository = resolver;
+	else delete registry.repository;
+	timing.projectTimeoutMs = 200;
+	try {
+		setCredentials(relay.url);
+		const h = await open();
+		await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "welcome");
+		expect(relay.hellos()).toEqual([expect.objectContaining({ id: h.session.sessionId, project: basename(workspace.cwd) })]);
+		expect(h.errors).toEqual([]);
+	} finally { delete registry.repository; }
 });
 
 it("stays offline and without tools outside the TUI and RPC modes, and connects with tools in both", async () => {

@@ -10,7 +10,12 @@ export interface ChildSessionHook {
 
 /** pika's credentials registry; relay only reads it and listens. */
 export interface PikaCredentials { url: string; token: string; isExcluded(cwd: string): boolean }
-export interface CredentialsRegistry { current: PikaCredentials | undefined; listeners: Set<() => void> }
+export interface CredentialsRegistry {
+	current: PikaCredentials | undefined;
+	listeners: Set<() => void>;
+	/** The git repository of a cwd as pika names it; older pika versions lack it. */
+	repository?: (cwd: string) => Promise<{ project?: string; repository?: string }>;
+}
 
 /** What a relay instance lets the child hook do to it. */
 export interface Member {
