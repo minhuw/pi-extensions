@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -706,5 +707,28 @@ describe("herder:run events", () => {
 		await b.command(`resume ${runId}`);
 		expect(announced).toHaveLength(4);
 		expect(announced.every((payload) => JSON.stringify(payload) === JSON.stringify(expected))).toBe(true);
+	});
+
+	it("name the main checkout's folder as the repo for a run started in a linked worktree", async () => {
+		const fixture = createGitFixture();
+		fixtures.push(fixture);
+		const linked = realpathSync(mkdtempSync(join(tmpdir(), "herder-linked-")));
+		try {
+			const worktree = join(linked, "feature-checkout");
+			fixture.git("worktree", "add", "-q", "-b", "feature", worktree);
+			const events = createEventBus();
+			const announced: Array<{ repo: string }> = [];
+			events.on(RUN_EVENT, (payload) => announced.push(payload as { repo: string }));
+			const h = harness({ cwd: worktree, events });
+			cleanups.push(h.shutdown);
+			await h.command("add a greeting to the CLI");
+			const runId = activeRun(fixture.commonDir)!;
+			expect(openRun(fixture.commonDir, runId).journal.read()[0]).toMatchObject({ t: "run.started", repo: worktree });
+			expect(announced).toEqual([expect.objectContaining({ runId, repo: basename(fixture.dir) })]);
+			expect(basename(fixture.dir)).not.toBe(basename(worktree));
+			await h.shutdown();
+		} finally {
+			rmSync(linked, { recursive: true, force: true });
+		}
 	});
 });

@@ -49,11 +49,14 @@ afterEach(async () => {
 const emptyRuntime = () => ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false });
 
 /** An approved run held by `session-a`, whose context exposes `runtime` and `model` as a Pi session's would. */
-async function approvedRun(runtime: ModelRuntime, context: Record<string, unknown>, sessionFile?: string) {
+async function approvedRun(runtime: ModelRuntime, context: Record<string, unknown>, sessionFile?: string, linked = false) {
 	const fixture = createGitFixture();
 	fixtures.push(fixture);
+	// A linked worktree outside the checkout, under the test's temporary directory, with a folder name of its own.
+	const cwd = linked ? join(dir, "feature-checkout") : fixture.dir;
+	if (linked) fixture.git("worktree", "add", "-q", "-b", "feature", cwd);
 	const createRuntime = createRuntimeFactory({ roles: () => loadRoles({ overrideDir: join(dir, "no-role-overrides") }) });
-	const h = harness({ cwd: fixture.dir, sessionFile, context: { modelRegistry: new ModelRegistry(runtime), ...context }, options: { createRuntime } });
+	const h = harness({ cwd, sessionFile, context: { modelRegistry: new ModelRegistry(runtime), ...context }, options: { createRuntime } });
 	cleanups.push(h.shutdown);
 	await h.command("look around");
 	const run = openRun(fixture.commonDir, activeRun(fixture.commonDir)!);
@@ -68,15 +71,16 @@ const sessionFiles = (sessions: string) => existsSync(sessions) ? readdirSync(se
 
 describe("default step runner", () => {
 	it.each([
-		["the holding session's file as parent", true],
-		["no parent header when the holding session has no file", false],
-	])("persists each step session in the run with its link and %s", async (_name, withFile) => {
+		["the holding session's file as parent", true, false],
+		["no parent header when the holding session has no file", false, false],
+		["the main checkout's folder as repo when the run starts in a linked worktree", true, true],
+	])("persists each step session in the run with its link and %s", async (_name, withFile, linked) => {
 		const runtime = await emptyRuntime();
 		const faux = fauxProvider({ api: "herder-faux-api", provider: "herder-faux", models: [{ id: "main", reasoning: true }] });
 		runtime.registerNativeProvider(faux.provider);
 		faux.setResponses([fauxAssistantMessage("looked around")]);
 		const parentFile = withFile ? join(dir, "main-session.jsonl") : undefined;
-		const { fixture, h, run } = await approvedRun(runtime, { model: faux.getModel("main") }, parentFile);
+		const { fixture, h, run } = await approvedRun(runtime, { model: faux.getModel("main") }, parentFile, linked);
 
 		const step = await h.tool("herder_step", { prompt: "look around", role: "explorer", task: "T1" });
 		expect(step.details).toMatchObject({ status: "ok" });

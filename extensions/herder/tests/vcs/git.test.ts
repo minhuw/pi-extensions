@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TRAILER_FINGERPRINT, TRAILER_STEP } from "../../src/config.ts";
 import type { Vcs } from "../../src/types.ts";
-import { checkGitVersion, hasHerderTrailer, openVcs, RefConflictError, removeWorktrees, requireGit } from "../../src/vcs/git.ts";
+import { checkGitVersion, hasHerderTrailer, openVcs, RefConflictError, removeWorktrees, repositoryName, requireGit } from "../../src/vcs/git.ts";
 import { type GitFixture, withGitFixture } from "../support/git-fixture.ts";
 
 // The Vcs inherits process.env; isolate it from the developer's global and system git configuration.
@@ -89,6 +89,25 @@ describe("openVcs", () => {
 				expect(vcs.topLevel()).toBe(join(linked, "wt"));
 				expect(vcs.commonDir()).toBe(fixture.commonDir);
 				expect(vcs.currentBranch()).toBe("side");
+			} finally {
+				rmSync(linked, { recursive: true, force: true });
+			}
+		}));
+
+	it("names the repository after the main checkout's folder from its linked worktrees, bare repositories, and submodules", () =>
+		withGitFixture((fixture) => {
+			const linked = realpathSync(mkdtempSync(join(tmpdir(), "herder-linked-")));
+			try {
+				fixture.git("worktree", "add", "-q", "-b", "side", join(linked, "wt"));
+				const name = fixture.dir.split("/").at(-1);
+				expect(repositoryName(openVcs(fixture.dir).commonDir())).toBe(name);
+				expect(repositoryName(openVcs(join(linked, "wt")).commonDir())).toBe(name);
+				expect(repositoryName("/srv/git/tool.git")).toBe("tool");
+				expect(repositoryName("/srv/git/tool.git.git")).toBe("tool.git");
+				expect(repositoryName("/work/app/.git/modules/lib")).toBe("lib");
+				for (const invalid of ["/.git", "/srv/git/..git", "/srv/git/...git", "/srv/a\nb/.git", `/srv/${"x".repeat(256)}.git`]) {
+					expect(repositoryName(invalid)).toBeUndefined();
+				}
 			} finally {
 				rmSync(linked, { recursive: true, force: true });
 			}

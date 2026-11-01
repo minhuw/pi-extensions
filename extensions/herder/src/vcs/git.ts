@@ -152,6 +152,18 @@ function createCommit(cwd: string, tree: string, parents: string[], message: str
 /** Whether any line of `message` looks like a `Herder-*` trailer; no delivered commit may carry one. */
 export const hasHerderTrailer = (message: string) => /^herder-[\w-]*\s*:/im.test(message);
 
+/**
+ * The repository's name from its git common dir: the main checkout's folder name for `<checkout>/.git` (shared by every
+ * linked worktree), else the common dir's own name without one trailing `.git` (bare repositories, submodules).
+ * Undefined when the name is empty, `.` or `..`, holds a control character or path separator, or exceeds 255 bytes.
+ */
+export function repositoryName(commonDir: string): string | undefined {
+	const base = basename(commonDir);
+	const name = base === ".git" ? basename(dirname(commonDir)) : base.replace(/\.git$/, "");
+	if (!name || name === "." || name === ".." || /[\x00-\x1f\x7f/\\]/.test(name) || Buffer.byteLength(name, "utf8") > 255) return undefined;
+	return name;
+}
+
 /** Removes every Herder worktree and stale registration under `dir` (a run's `<common>/herder/worktrees/<runId>/`). */
 export function removeWorktrees(vcs: Vcs, dir: string): void {
 	vcs.removeWorktree(dir);

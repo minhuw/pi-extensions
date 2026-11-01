@@ -31,7 +31,7 @@ export interface PiRunnerOptions {
 	/**
 	 * The run the sessions belong to. When given, each session is a Pi session file in `dir` that starts with a
 	 * `pi-extensions.session-link` entry; otherwise sessions stay in memory. `parentSessionFile` becomes the header's
-	 * `parentSession`.
+	 * `parentSession`; `repo` is the repository's name, which the link carries as `herder.repo`.
 	 */
 	sessions?: { dir: string; runId: string; repo: string; parentSessionId?: string; parentSessionFile?: string };
 }

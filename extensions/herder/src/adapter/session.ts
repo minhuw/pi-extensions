@@ -9,7 +9,7 @@ import { ACTIVITY_EVENT, ACTIVITY_REQUEST_EVENT, LOCK_HEARTBEAT_MS, LOCK_STALE_M
 import { acquireLock, type LockOptions, type RunLock } from "../run/lock.ts";
 import { activeRun, listRuns, openRun, type RunStore } from "../run/store.ts";
 import type { AgentRunner, Vcs } from "../types.ts";
-import { openVcs } from "../vcs/git.ts";
+import { openVcs, repositoryName } from "../vcs/git.ts";
 import { ActivityBoard } from "./activity.ts";
 import { BackgroundLaunch, followUpText } from "./background.ts";
 import { confirmLong } from "./confirm.ts";
@@ -33,7 +33,7 @@ export interface HerderOptions {
 	runEventDelayMs?: number;
 }
 
-/** The `herder:run` payload; `repo` is the basename of the repository's top-level directory. */
+/** The `herder:run` payload; `repo` is the repository's name, the main checkout's folder name even from a linked worktree. */
 export interface RunAnnouncement { runId: string; runDir: string; journalPath: string; goalPath: string; planPath: string; repo: string; title: string }
 
 /**
@@ -73,9 +73,9 @@ export function requireApproved(held: Held): RunState {
 	return state;
 }
 
-/** Basename of the repository's top level; that of the journaled path when git cannot answer. */
+/** The repository's name from its git common dir; else the top level's basename, else that of the journaled path. */
 function repoName(vcs: Vcs, run: RunStore): string {
-	try { return basename(vcs.topLevel()); } catch { return basename(run.state().repo ?? ""); }
+	try { return repositoryName(vcs.commonDir()) ?? basename(vcs.topLevel()); } catch { return basename(run.state().repo ?? ""); }
 }
 
 export const busy = (held: Held) => Boolean(held.launch || held.launching || held.ops.size);
