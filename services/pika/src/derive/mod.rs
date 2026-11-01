@@ -98,6 +98,20 @@ pub fn refresh_repositories(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Repairs projects from older clients whose cwd identifies a managed worktree. Metadata still takes precedence.
+pub fn refresh_worktree_projects(tx: &Transaction) -> Result<()> {
+    let rows: Vec<(i64, String)> = tx
+        .prepare("SELECT sid, cwd FROM sessions WHERE instr(cwd, '.git') > 0")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (sid, cwd) in rows {
+        if crate::util::worktree_project(&cwd).is_some() {
+            session::refresh(tx, sid)?;
+        }
+    }
+    Ok(())
+}
+
 /// The stream's `meta` object, or `Null` when it has none or it is not JSON.
 fn stream_meta(tx: &Transaction, id: i64) -> Result<Value> {
     let meta: Option<String> =

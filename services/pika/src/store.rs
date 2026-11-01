@@ -35,6 +35,8 @@ pub const DERIVED_GENERATION: &str = "derived_generation";
 pub const SEARCH_RULES: &str = "search_rules";
 /// JSON containing the rewrite's target rules version and last scrubbed document id; only that target resumes.
 pub const RESCRUB_AFTER: &str = "search_rescrub_after";
+/// Marks the completed repair of cwd-based project names from uploads without Git metadata.
+const WORKTREE_PROJECTS_REPAIRED: &str = "worktree_projects_repaired";
 const MAX_IDLE_READERS: usize = 16;
 
 /// Tables rebuilt by `pika reindex`, in the order they are cleared.
@@ -123,6 +125,19 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         crate::derive::refresh_repositories(&tx).context("deriving session repositories")?;
         tx.commit()?;
     }
+    // This changes derivation only, not the schema. Repair existing rows once, atomically with the marker;
+    // an interrupted repair retries at the next open, and later opens need no session scan or blob replay.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let repaired = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+        [WORKTREE_PROJECTS_REPAIRED],
+        |r| r.get::<_, bool>(0),
+    )?;
+    if !repaired {
+        crate::derive::refresh_worktree_projects(&tx).context("repairing managed worktree projects")?;
+        tx.execute("INSERT INTO settings (key, value) VALUES (?1, x'01')", [WORKTREE_PROJECTS_REPAIRED])?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

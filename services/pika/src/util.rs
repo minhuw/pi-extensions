@@ -193,6 +193,22 @@ pub fn basename(path: &str) -> &str {
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
 }
 
+/// The repository visible in a managed worktree path, for uploads that predate client-side Git discovery.
+/// Only the known layouts inside `.git` carry enough information; arbitrary sibling worktrees do not.
+pub fn worktree_project(path: &str) -> Option<&str> {
+    let parts: Vec<_> = path.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+    if parts.iter().any(|part| matches!(*part, "." | "..")) {
+        return None;
+    }
+    parts.windows(5).rev().find_map(|parts| {
+        (parts[1] == ".git"
+            && matches!(parts[2], "superagent" | "herder")
+            && parts[3] == "worktrees"
+            && valid_project(parts[0]))
+        .then_some(parts[0])
+    })
+}
+
 /// Whether `name` can name a project: nonempty and not blank, at most 1024 bytes, without control characters or path
 /// separators, and other than `.` or `..`.
 pub fn valid_project(name: &str) -> bool {
@@ -307,6 +323,32 @@ mod tests {
         assert_eq!(parse_iso_ms("2024-12-03T14:00:01"), Some(1733234401000));
         assert_eq!(parse_iso_ms("1969-12-31T23:59:59.999Z"), Some(-1));
         assert_eq!(parse_iso_ms("garbage"), None);
+    }
+
+    #[test]
+    fn managed_worktree_paths_identify_the_repository() {
+        for (path, project) in [
+            ("/home/me/thesis/.git/superagent/worktrees/2-fix-fig-2-1-colours-to-current-fig-1-2", "thesis"),
+            ("/home/me/thesis/.git/superagent/worktrees/2-fix/src/figures/", "thesis"),
+            ("/home/me/widgets/.git/herder/worktrees/run-1/step-1/src", "widgets"),
+            (r"C:\code\my repo\.git\superagent\worktrees\2-fix\src", "my repo"),
+            ("/code/仓库/.git/superagent/worktrees/task", "仓库"),
+            ("/code/outer/.git/superagent/worktrees/task/inner/.git/herder/worktrees/run/step", "inner"),
+        ] {
+            assert_eq!(worktree_project(path), Some(project), "{path}");
+        }
+        for path in [
+            "/code/widgets-feature/src",
+            "/tmp/pi-agent-abcd",
+            "/code/widgets/superagent/worktrees/task",
+            "/code/widgets/.git/unknown/worktrees/task",
+            "/code/widgets/.git/superagent/worktrees",
+            "/code/widgets/.git/modules/sub",
+            "/.git/superagent/worktrees/task",
+            "/code/widgets/.git/superagent/worktrees/task/../../other",
+        ] {
+            assert_eq!(worktree_project(path), None, "{path}");
+        }
     }
 
     #[test]

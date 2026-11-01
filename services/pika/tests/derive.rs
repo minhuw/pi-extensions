@@ -483,6 +483,9 @@ fn load_repositories(env: &Env) {
         upload_meta(store, &format!("session:{id}"), "session", &cwd_session(id, &format!("/home/me/code/{id}")), meta);
     }
     upload(store, "session:plain-1", "session", &cwd_session("plain-1", "/home/me/code/plain"), 10);
+    upload(store, "session:legacy-ticket", "session", &cwd_session("legacy-ticket", "/home/me/code/widgets/.git/superagent/worktrees/2-fix-fig-2-1-colours-to-current-fig-1-2"), 10);
+    upload(store, "session:legacy-herder", "session", &cwd_session("legacy-herder", "/home/me/code/widgets/.git/herder/worktrees/run/step/src"), 10);
+    upload_meta(store, "session:explicit-ticket", "session", &cwd_session("explicit-ticket", "/code/local-folder/.git/superagent/worktrees/task"), json!({ "project": "canonical", "repository": REPO_URL }));
     upload_meta(store, &format!("herder:{RUN_ID}"), "herder-journal", &fixture("herder-journal.jsonl"), json!({ "repo": "widgets-main" }));
     let journal = [json!({ "v": 1, "t": "run.started", "at": "2026-10-22T09:00:00.000Z", "runId": "r2", "title": "T", "base": "b1", "repo": "/srv/gadgets-wt" }).to_string()];
     upload_meta(store, "herder:r2", "herder-journal", &journal, json!({ "repo": ".." }));
@@ -502,6 +505,9 @@ fn sessions_take_project_and_repository_from_stream_meta() {
         assert_eq!(session_row(store, id), (json!(id), Value::Null), "{id}");
     }
     assert_eq!(session_row(store, "plain-1"), (json!("plain"), Value::Null));
+    assert_eq!(session_row(store, "legacy-ticket"), (json!("widgets"), Value::Null));
+    assert_eq!(session_row(store, "legacy-herder"), (json!("widgets"), Value::Null));
+    assert_eq!(session_row(store, "explicit-ticket"), (json!("canonical"), json!(REPO_URL)));
 
     let runs = query(store, "SELECT run_id, repo, repo_path FROM herder_runs ORDER BY run_id");
     assert_eq!((&runs[0]["repo"], &runs[0]["repo_path"]), (&json!("widgets-main"), &json!("/home/me/code/widgets")));
@@ -542,6 +548,36 @@ fn reindex_reproduces_projects_and_repositories() {
     pika::reindex::reindex(&env.store).unwrap();
     assert_eq!(dump_derived(&env.store), incremental);
     assert_eq!(session_row(&env.store, "wt-1"), (json!("widgets"), json!(REPO_URL)));
+}
+
+/// Existing databases repair legacy managed-worktree names without replaying blobs or changing metadata priorities.
+#[test]
+fn opening_a_database_repairs_legacy_worktree_projects_once() {
+    let env = env();
+    let data = env.dir.path().join("data");
+    load_repositories(&env);
+    let expected = dump_derived(&env.store);
+    drop(env.store);
+    let conn = rusqlite::Connection::open(data.join("pika.db")).unwrap();
+    conn.execute_batch(
+        "UPDATE sessions SET project = '2-fix-fig-2-1-colours-to-current-fig-1-2' WHERE id = 'legacy-ticket';
+         UPDATE sessions SET project = 'src' WHERE id = 'legacy-herder';
+         DELETE FROM settings WHERE key = 'worktree_projects_repaired';"
+    ).unwrap();
+    drop(conn);
+
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
+    assert_eq!(store.setting("worktree_projects_repaired").unwrap(), Some(vec![1]));
+    assert_eq!(store.setting("needs_reindex").unwrap(), None);
+    assert_eq!(store.setting("derived_generation").unwrap(), None);
+    store.write(|tx| tx.execute_batch(
+        "CREATE TRIGGER no_repeated_project_repair BEFORE UPDATE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'project repair ran twice'); END;"
+    )).unwrap();
+    drop(store);
+    let store = pika::store::Store::open(&data).unwrap();
+    assert_eq!(dump_derived(&store), expected);
 }
 
 /// A version 7 server stored `meta` it did not derive from, as a newer client sent it. Opening the database with

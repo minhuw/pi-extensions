@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::search::{self, Kind};
 use super::{Line, StreamInfo, Usage, int_field, str_field, string_field, time_field};
-use crate::util::{basename, cut_chars, parse_json_lenient, valid_project, valid_repository};
+use crate::util::{basename, cut_chars, parse_json_lenient, valid_project, valid_repository, worktree_project};
 
 pub const LINK_CUSTOM_TYPE: &str = "pi-extensions.session-link";
 const TITLE_CHARS: usize = 120;
@@ -91,13 +91,14 @@ fn load_session(tx: &Transaction, sid: i64) -> Result<SessionRow> {
 }
 
 fn save_session(tx: &Transaction, s: &SessionRow) -> Result<()> {
-    // The repository name the client resolved for the session's cwd, then a Herder step's repository, then the cwd.
+    // Prefer Git metadata, then a Herder link, then a repository encoded in a managed worktree path.
     let meta = super::stream_meta(tx, s.sid)?;
     let project = str_field(&meta, "project")
         .filter(|p| valid_project(p))
-        .or_else(|| s.link.as_ref().and_then(|l| l.get("herder")).and_then(|h| str_field(h, "repo")))
-        .or(s.cwd.as_deref())
-        .map(|p| basename(p).to_owned());
+        .or_else(|| s.link.as_ref().and_then(|l| l.get("herder")).and_then(|h| str_field(h, "repo")).map(basename))
+        .or_else(|| s.cwd.as_deref().and_then(worktree_project))
+        .or_else(|| s.cwd.as_deref().map(basename))
+        .map(str::to_owned);
     let repository = str_field(&meta, "repository").filter(|r| valid_repository(r));
     let title = s.name.clone().filter(|n| !n.trim().is_empty()).or_else(|| s.first_prompt.clone());
     tx.prepare_cached(

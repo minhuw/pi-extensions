@@ -133,7 +133,9 @@ describe("resolveRepository", () => {
 		const root = await realpath(await mkdtemp(join(tmpdir(), "pika-repo-")));
 		const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
 		try {
-			const { subdir, worktree } = await makeRepo(root);
+			const { repo, subdir, worktree } = await makeRepo(root);
+			const ticket = join(repo, ".git", "superagent", "worktrees", "2-fix-fig-2-1-colours-to-current-fig-1-2");
+			git(repo, "worktree", "add", "-q", "-b", "ticket", ticket);
 			const other = join(root, "other");
 			await mkdir(other);
 			git(other, "init", "-q");
@@ -141,6 +143,7 @@ describe("resolveRepository", () => {
 			process.env.GIT_WORK_TREE = other;
 			expect(await resolveRepository(subdir)).toEqual({ project: "my-repo", repository: NORMALIZED });
 			expect(await resolveRepository(join(worktree, "src"))).toEqual({ project: "my-repo", repository: NORMALIZED });
+			expect(await resolveRepository(join(ticket, "src"))).toEqual({ project: "my-repo", repository: NORMALIZED });
 			const plain = join(root, "plain");
 			await mkdir(plain);
 			expect(await resolveRepository(plain)).toEqual({});
