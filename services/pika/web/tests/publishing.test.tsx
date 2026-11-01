@@ -9,8 +9,8 @@ import { row, session } from "./support/trajectory";
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 /** Only the public namespace is forwarded to this fixture's session data; private requests are recorded too. */
-function publicServer() {
-	const source = createFakeServer({ sessions: [session()] });
+function publicServer(sessions = [session()]) {
+	const source = createFakeServer({ sessions });
 	const calls: string[] = [];
 	const fetchImpl: typeof fetch = async (input, init) => {
 		const url = String(input);
@@ -105,6 +105,14 @@ describe("project publishing", () => {
 		const breadcrumb = screen.getByRole("navigation", { name: "Breadcrumb" });
 		expect(within(breadcrumb).getByRole("link", { name: "pika" }).getAttribute("href")).toBe("/public/?project=pika");
 		expect(server.calls.some((call) => call.startsWith("/api/v1/"))).toBe(false);
+	});
+
+	it("links a published session to its repository", async () => {
+		const published = session();
+		published.detail = { ...published.detail, repository: "https://github.com/minhuw/pi-extensions" };
+		renderApp("/public/s/t1", publicServer([published]).fetch);
+		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" });
+		expect(link.getAttribute("href")).toBe("https://github.com/minhuw/pi-extensions");
 	});
 
 	it("shows an unavailable session publicly without sending the visitor to login", async () => {

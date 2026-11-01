@@ -48,6 +48,51 @@ function CopyPath({ path }: { path: string }) {
 	);
 }
 
+/**
+ * How to show a session's repository link: GitHub's mark and the repository's path on GitHub, a generic link with the
+ * host elsewhere. Nothing for a value that is not an http(s) URL.
+ */
+export function repositoryLink(url: string | undefined): { href: string; label: string; github: boolean } | undefined {
+	if (!url) return undefined;
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return undefined;
+	}
+	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+	const github = parsed.hostname === "github.com" || parsed.hostname === "www.github.com";
+	const path = decodeURIComponentSafe(parsed.pathname.replace(/^\/+|\/+$/g, ""));
+	return { href: parsed.href, label: github && path ? path : [parsed.host, path].filter(Boolean).join("/"), github };
+}
+
+function decodeURIComponentSafe(text: string): string {
+	try {
+		return decodeURIComponent(text);
+	} catch {
+		return text;
+	}
+}
+
+function RepositoryLink({ url }: { url?: string }) {
+	const repository = repositoryLink(url);
+	if (!repository) return null;
+	return (
+		<a
+			href={repository.href}
+			target="_blank"
+			rel="noopener noreferrer"
+			className="inline-flex h-6 max-w-[260px] min-w-0 items-center gap-1.5 rounded-sm px-1.5 text-[12.5px] text-muted hover:bg-hover"
+			title={repository.href}
+			aria-label={repository.github ? `Open ${repository.label} on GitHub` : `Open the repository ${repository.label}`}
+			data-repository=""
+		>
+			<Icon name={repository.github ? "github" : "external"} size={13} className="shrink-0 opacity-80" data-icon={repository.github ? "github" : "external"} />
+			<span className="truncate text-ink/80">{repository.label}</span>
+		</a>
+	);
+}
+
 /** The line of chips under the title: where, when, how long, which models, and the session's parents. */
 export function SessionChips({ session }: { session: SessionDetail }) {
 	const link = session.link;
@@ -64,6 +109,7 @@ export function SessionChips({ session }: { session: SessionDetail }) {
 					<span className="truncate text-ink/80">{session.project || "—"}</span>
 				</Chip>
 			</Link>
+			<RepositoryLink url={session.repository} />
 			<CopyPath path={session.cwd} />
 			<Chip icon="calendar" title={formatDateTime(session.startedAt)}>
 				<span data-started="">{formatRelative(session.startedAt)}</span>

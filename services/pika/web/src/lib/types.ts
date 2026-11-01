@@ -51,6 +51,11 @@ export interface SessionSummary {
 	link?: SessionLink;
 	childCount: number;
 	herderRunId?: string;
+	/**
+	 * The web URL of the session's git repository, without credentials; missing from older servers, for sessions outside
+	 * git or without a usable remote, and when the client did not send it.
+	 */
+	repository?: string;
 }
 
 export type ChildSession = SessionSummary & { parentToolCallId?: string };

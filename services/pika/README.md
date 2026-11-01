@@ -117,7 +117,7 @@ The protocol and the read API are specified in [`docs/SPEC.md`](docs/SPEC.md).
 
 ### Publishing projects
 
-Open **Settings → Published projects** and publish the projects you want to share. Every project starts private. Publishing includes all existing and future trajectories with that project name, across machines and directories; pika currently identifies projects by the repository or working directory basename.
+Open **Settings → Published projects** and publish the projects you want to share. Every project starts private. Publishing includes all existing and future trajectories with that project name, across machines and directories. A session's project is its git repository's name, the main checkout's folder, so sessions in subdirectories, linked worktrees, Herder steps, and Subagents worktree children of a published repository are published with it; outside git it is the working directory's basename. Session pages also link to the repository's web page when its remote has one, on public pages too.
 
 The public gallery is at `<url>/public`, a project's gallery at `<url>/public?project=<name>`, and an individual trajectory at `<url>/public/s/<sessionId>`. Visitors need no login and can search published trajectories (`<url>/public/search`), replay them, inspect model and tool records, and read transcripts. Publishing exposes the session's prompts, responses, thinking, tool inputs and outputs, images, raw entries, and metadata, with credentials scrubbed (see [Redaction](#redaction)). Captured provider request payloads remain private, and the public UI has no relay or management controls.
 

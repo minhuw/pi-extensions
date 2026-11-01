@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildTimeline } from "../src/session/timeline";
+import { repositoryLink } from "../src/trace/Header";
 import {
 	assistantMessage,
 	customMessage,
@@ -159,6 +160,50 @@ describe("session view", () => {
 		renderApp("/s/s1", createFakeServer({ sessions: [unnamed] }).fetch);
 		await screen.findByRole("heading", { name: "Fix the failing test" });
 		expect(device().textContent).toBe("mini");
+	});
+
+	it("links to the session's repository, with GitHub's mark on GitHub", async () => {
+		const withRepository = (repository: string | undefined) => {
+			const session = sessionFixture();
+			session.detail = { ...session.detail, repository };
+			return createFakeServer({ sessions: [session] }).fetch;
+		};
+		const repositoryLink = () => document.querySelector<HTMLAnchorElement>("[data-session-chips] [data-repository]");
+
+		const github = renderApp("/s/s1", withRepository("https://github.com/minhuw/pi-extensions"));
+		const link = await screen.findByRole("link", { name: "Open minhuw/pi-extensions on GitHub" });
+		expect(link).toBe(repositoryLink());
+		expect(link.getAttribute("href")).toBe("https://github.com/minhuw/pi-extensions");
+		expect([link.getAttribute("target"), link.getAttribute("rel"), link.getAttribute("title")]).toEqual([
+			"_blank",
+			"noopener noreferrer",
+			"https://github.com/minhuw/pi-extensions",
+		]);
+		expect(link.textContent).toBe("minhuw/pi-extensions");
+		expect(link.querySelector("svg")?.getAttribute("data-icon")).toBe("github");
+		github.unmount();
+
+		const other = renderApp("/s/s1", withRepository("https://gitlab.example.com/team/proj"));
+		const generic = await screen.findByRole("link", { name: "Open the repository gitlab.example.com/team/proj" });
+		expect(generic.textContent).toBe("gitlab.example.com/team/proj");
+		expect(generic.querySelector("svg")?.getAttribute("data-icon")).toBe("external");
+		other.unmount();
+
+		for (const repository of [undefined, "javascript:alert(1)", "not a url"]) {
+			const view = renderApp("/s/s1", withRepository(repository));
+			await screen.findByRole("heading", { name: "Fix the failing test" });
+			expect(repositoryLink()).toBeNull();
+			view.unmount();
+		}
+	});
+
+	it("labels repository links by their path on GitHub and by host and path elsewhere", () => {
+		expect(repositoryLink("https://www.github.com/a/b/")).toEqual({ href: "https://www.github.com/a/b/", label: "a/b", github: true });
+		expect(repositoryLink("https://github.com")?.label).toBe("github.com");
+		expect(repositoryLink("http://10.0.0.2:3000/team/proj")).toEqual({ href: "http://10.0.0.2:3000/team/proj", label: "10.0.0.2:3000/team/proj", github: false });
+		expect(repositoryLink("https://git.example.com/caf%C3%A9")?.label).toBe("git.example.com/café");
+		expect(repositoryLink("https://github.com.evil.example/a/b")?.github).toBe(false);
+		for (const value of [undefined, "", "ftp://github.com/a/b", "data:text/html,hi", "//github.com/a/b"]) expect(repositoryLink(value)).toBeUndefined();
 	});
 
 	it("expands a turn into a timeline loaded from that turn's entries", async () => {
