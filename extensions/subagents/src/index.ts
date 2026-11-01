@@ -18,13 +18,16 @@ import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
-import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AgentManager, assertValidSpawnCwd, isTopLevelAgent } from "./agent-manager.js";
+import { resolveChildSessionRoot } from "./agent-runner.js";
+import { validateReopenSessionFile } from "./reopen.js";
+import { validateLinkData } from "./child-session-hooks.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getEnabledTypes, getFallbackSubagent, isDefaultsDisabled, isModelVisible, NO_FALLBACK, registerAgents, resolveEnabledType, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
-import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
+import { type RpcHandle, registerRpcHandlers, type SendDelivery } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { registerSubagentHost, releaseSubagentHost, resolveSubagentHostModel, type SubagentHost, type SubagentTelemetry, type SubagentTypeDescriptor } from "./host-registry.js";
@@ -511,6 +514,7 @@ export default function (pi: ExtensionAPI) {
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
+    if (record.notifyParent === false) { widget.update(); return; }
     // Built now, so a resume before the send cannot rewrite it. A record that
     // cannot be formatted is skipped, as a failed send always was.
     try {
@@ -529,7 +533,7 @@ export default function (pi: ExtensionAPI) {
     (records, partial) => {
       for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
 
-      const members = records.filter(r => !r.resultConsumed).flatMap(r => {
+      const members = records.filter(r => !r.resultConsumed && r.notifyParent !== false).flatMap(r => {
         try {
           return [{ id: r.id, text: formatTaskNotification(r, 300, showCost), details: buildNotificationDetails(r, 300, agentActivity.get(r.id)) }];
         } catch { return []; /* as in sendIndividualNudge */ }
@@ -591,6 +595,10 @@ export default function (pi: ExtensionAPI) {
       error: record.error,
       status: record.status,
       toolUses: record.toolUses,
+      // This run's tool calls only (spawn, resume, or reopen); `toolUses` is cumulative.
+      runToolUses: record.runToolUses ?? 0,
+      ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
+      ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
       durationMs,
       tokens,
       usage,
@@ -653,7 +661,10 @@ export default function (pi: ExtensionAPI) {
   };
 
   const manager = new AgentManager((record) => {
-    emitTelemetry(record, "completed");
+    // A run can settle after this runtime was replaced (`/reload`, a session
+    // switch): `pi` then throws "ctx is stale", which must not escape as an
+    // unhandled error from the agent's settlement.
+    try { emitTelemetry(record, "completed"); } catch { /* stale runtime */ }
     // Owned children — nested, or a workflow's — report only through their
     // owner: the parent's scoped tools, or the workflow's card, notification
     // and dialog. Keep them out of top-level lifecycle, transcript,
@@ -682,8 +693,9 @@ export default function (pi: ExtensionAPI) {
       ...(spawningToolCallId !== undefined ? { toolCallId: spawningToolCallId } : {}),
     });
 
-    // Skip notification if result was already consumed via get_subagent_result
-    if (record.resultConsumed) {
+    // Skip notification if result was already consumed via get_subagent_result,
+    // or the spawner asked never to be notified (`notifyParent: false`).
+    if (record.resultConsumed || record.notifyParent === false) {
       agentActivity.delete(record.id);
       widget.markFinished(record.id);
       fleet.onAgentFinished(record.id);
@@ -717,10 +729,14 @@ export default function (pi: ExtensionAPI) {
       fleet.update();
     }
     // Emit started event when agent transitions to running (including from queue)
+    // A resumed or reopened run's session is known here; a fresh spawn's is
+    // created after this fires, so its first event carries none.
     pi.events.emit("subagents:started", {
       id: record.id,
       type: record.type,
       description: record.description,
+      ...(record.sessionId !== undefined ? { sessionId: record.sessionId } : {}),
+      ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
     });
   }, (record, info) => {
     emitTelemetry(record, "compacted");
@@ -791,7 +807,8 @@ export default function (pi: ExtensionAPI) {
   const descriptorFor = (name: string): SubagentTypeDescriptor | undefined => {
     const resolved = resolveType(name);
     const config = resolved ? getAgentConfig(resolved) : undefined;
-    if (!resolved || !config || config.enabled === false) return undefined;
+    // Host callers present these to models, so hidden types stay out.
+    if (!resolved || !config || !isModelVisible(config)) return undefined;
     const declared = config.builtinToolNames;
     return {
       name: resolved,
@@ -888,7 +905,8 @@ export default function (pi: ExtensionAPI) {
     // envelopes at the RPC boundary. Reload first so an agent file added mid
     // session is spawnable here too, not only through the Agent tool.
     reloadCustomAgents();
-    const dispatch = resolveSpawnType(type);
+    // Trusted callers only, so `model_visible: false` types are spawnable here.
+    const dispatch = resolveSpawnType(type, { includeHidden: true });
     if (!dispatch.ok) throw new Error(dispatch.message);
     // Every programmatic spawn lands here — cross-extension RPC, both `@handle`
     // mention paths, and the `Symbol.for("pi-subagents:manager")` registry — and
@@ -923,8 +941,19 @@ export default function (pi: ExtensionAPI) {
     // Internal too: a forged value would hide an RPC-spawned agent inside
     // someone else's workflow, and take it out of the concurrency pool with it.
     delete safeOptions.workflowId;
-    // Names a tool call in the parent session; only the tool paths know it.
-    delete safeOptions.parentToolCallId;
+    // Names a tool call in the parent session. Accepted from callers since
+    // protocol 3 (written to the session link and the session record).
+    if (safeOptions.parentToolCallId !== undefined && typeof safeOptions.parentToolCallId !== "string") {
+      throw new Error("parentToolCallId must be a string");
+    }
+    for (const key of ["notifyParent", "retain"] as const) {
+      if (safeOptions[key] !== undefined && typeof safeOptions[key] !== "boolean") {
+        throw new Error(`${key} must be a boolean`);
+      }
+    }
+    if (safeOptions.linkData !== undefined) safeOptions.linkData = validateLinkData(safeOptions.linkData);
+    // Reopen-only: keeps a reopened file's model, meaningless without one.
+    delete safeOptions.keepSessionModel;
     delete safeOptions.depth;
     delete safeOptions.maxSubagentDepth;
     delete safeOptions.configCwd;
@@ -943,6 +972,74 @@ export default function (pi: ExtensionAPI) {
     // pool and could defer it behind a queue whose gate nobody is holding.
     delete safeOptions.blocking;
     return spawnResolved(piRef, ctxRef, type, prompt, safeOptions);
+  };
+
+  /**
+   * `subagents:rpc:send`: steer a running or queued top-level agent, or resume
+   * a settled one in the background through the same path as the Agent tool's
+   * background resume (so the record's `notifyParent` holds). Ids only, live
+   * records only — a tombstone or a record from before a restart is unknown.
+   */
+  const sendToAgent = async (id: string, text: string): Promise<SendDelivery> => {
+    const record = typeof id === "string" ? manager.getRecord(id) : undefined;
+    if (!record) throw new Error(`Unknown agent "${id}"`);
+    if (record.owner || !isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+    if (typeof text !== "string") throw new Error("text must be a string");
+    if (record.status === "running" || record.status === "queued") {
+      if (!manager.steer(record.id, text)) throw new Error("Agent is not running");
+      return "steered";
+    }
+    const ctx = currentCtx;
+    if (!ctx) throw new Error("No active session");
+    if (!record.session) throw new Error(`Agent "${id}" has no session to resume`);
+    const resumed = await startBackgroundResume(ctx, record, text, {
+      outputTranscript: getAgentConfig(record.type)?.outputTranscript ?? getOutputTranscriptDefault(),
+      maxTurns: resumeTurnLimit(record),
+    });
+    // Only a run that started between the status check and here gets refused.
+    if (!resumed) throw new Error("Agent is still running");
+    return "resumed";
+  };
+
+  /** Options `subagents:rpc:reopen` accepts; anything else is ignored. */
+  const REOPEN_OPTION_KEYS = ["description", "name", "cwd", "notifyParent", "retain", "isBackground", "bypassQueue", "thinkingLevel"] as const;
+
+  /**
+   * `subagents:rpc:reopen`: a new top-level run on a persisted child session.
+   * The file is caller-named, so it is validated before it reaches the trusted
+   * reopen path (`spawnResolved` with `resumeSessionFile`), which the RPC spawn
+   * strips. No second session-link entry is written: the file has its own.
+   */
+  const reopenAgent = (piRef: unknown, ctxRef: unknown, sessionFile: unknown, type: unknown, prompt: unknown, rawOptions: unknown): string => {
+    const ctx = ctxRef as ExtensionContext;
+    reloadCustomAgents();
+    // Strict: an existing conversation must not continue under a substitute.
+    const resolvedType = resolveEnabledType(type, { includeHidden: true });
+    if (!resolvedType) {
+      throw new Error(`Unknown or disabled agent type: ${JSON.stringify(type) ?? String(type)}. Available: ${getEnabledTypes().join(", ") || "(none)"}.`);
+    }
+    if (typeof prompt !== "string") throw new Error("prompt must be a string");
+    if (rawOptions !== undefined && rawOptions !== null && (typeof rawOptions !== "object" || Array.isArray(rawOptions))) {
+      throw new Error("options must be an object");
+    }
+    const given = (rawOptions ?? {}) as Record<string, unknown>;
+    const options: Record<string, unknown> = {};
+    for (const key of REOPEN_OPTION_KEYS) if (given[key] !== undefined && given[key] !== null) options[key] = given[key];
+    for (const key of ["notifyParent", "retain", "isBackground", "bypassQueue"] as const) {
+      if (options[key] !== undefined && typeof options[key] !== "boolean") throw new Error(`${key} must be a boolean`);
+    }
+    for (const key of ["description", "name", "thinkingLevel"] as const) {
+      if (options[key] !== undefined && typeof options[key] !== "string") throw new Error(`${key} must be a string`);
+    }
+    assertValidSpawnCwd(options.cwd);
+    const root = resolveChildSessionRoot(resolvedType, ctx, (options.cwd as string | undefined) ?? ctx.cwd);
+    const file = validateReopenSessionFile(sessionFile, root);
+    return spawnResolved(piRef, ctx, resolvedType, prompt, {
+      ...options,
+      description: (options.description as string | undefined) ?? `Reopened ${resolvedType} session`,
+      resumeSessionFile: file,
+      keepSessionModel: true,
+    });
   };
 
   /**
@@ -1041,6 +1138,8 @@ export default function (pi: ExtensionAPI) {
             outbox.cancel(record.id);
             return true;
           },
+          send: sendToAgent,
+          reopen: reopenAgent,
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -1192,7 +1291,8 @@ export default function (pi: ExtensionAPI) {
       // continuing it, and the new record would re-tombstone under the
       // substitute, so the handle would never find its way back.
       reloadCustomAgents();
-      const dispatch = resolveSpawnType(entry.type);
+      // An existing agent's own type, so hidden types are reopened too.
+      const dispatch = resolveSpawnType(entry.type, { includeHidden: true });
       if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
         // The tombstone stays: re-enabling the agent makes the handle work
         // again, which a drop would foreclose.
@@ -1329,6 +1429,8 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
+    rpcHandle?.unsubSend();
+    rpcHandle?.unsubReopen();
     rpcHandle = undefined;
     currentCtx = undefined;
     // The registration token prevents a child activation from releasing the

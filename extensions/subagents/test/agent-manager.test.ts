@@ -2331,19 +2331,25 @@ describe("AgentManager — background resume", () => {
     expect(resumeAgent).not.toHaveBeenCalled();
   });
 
-  it("foreground resume is unchanged: awaits inline and does not fire onComplete", async () => {
+  // Local change (protocol 3): a foreground resume reports lifecycle like every
+  // other run, but marks its result consumed — the inline caller has it — so
+  // the completion callback still notifies no one.
+  it("foreground resume awaits inline and reports lifecycle without a notification", async () => {
     const onComplete = vi.fn();
-    manager = new AgentManager(onComplete);
+    const onStart = vi.fn();
+    manager = new AgentManager(onComplete, undefined, onStart);
     const id = await spawnSettled(manager);
     onComplete.mockClear();
+    onStart.mockClear();
 
     vi.mocked(resumeAgent).mockResolvedValue({ text: "inline result" } as any);
     const record = await manager.resume(id, "sync");
 
     expect(record?.status).toBe("completed");
     expect(record?.result).toBe("inline result");
-    // Foreground resume returns its result inline and never notified (historical).
-    expect(onComplete).not.toHaveBeenCalled();
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete.mock.calls[0][0].resultConsumed).toBe(true);
   });
 
   // A detached resume returns while the record is still "running", so nothing

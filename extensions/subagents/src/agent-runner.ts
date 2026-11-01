@@ -27,6 +27,7 @@ import { forwardAbortSignal } from "./abort-signal.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildSubagentSessionLink, childSessionHookFactories, getChildSessionHooks, SESSION_LINK_CUSTOM_TYPE } from "./child-session-hooks.js";
 import { buildParentContext, extractText } from "./context.js";
+import { loadBoundedContextFiles } from "./context-files.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
@@ -477,6 +478,17 @@ export interface RunOptions {
    */
   resumeSessionFile?: string;
   /**
+   * With `resumeSessionFile`: keep the reopened session's own model (when the
+   * registry still has it) and thinking level instead of the type's, as an
+   * in-memory resume does. An explicit `model` / `thinkingLevel` still wins.
+   */
+  keepSessionModel?: boolean;
+  /**
+   * Extra top-level keys merged into the child's `pi-extensions.session-link`
+   * entry. Validated by the spawn boundary (plain JSON, no standard-field keys).
+   */
+  linkData?: Record<string, unknown>;
+  /**
    * True when another agent spawned this one. Only top-level agents get a
    * handle, so only they can be reopened by name — which is the whole reason
    * `rememberAgents` persists a session at all. A nested run's transcript would
@@ -764,6 +776,19 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
 }
 
 /** Where a child's session file goes: agent frontmatter, then the environment, then settings. */
+/**
+ * The directory every persisted top-level child of `type` lands under: the
+ * configured session dir (agent frontmatter, environment, settings — as
+ * `runAgent` resolves it), else pi's sessions root, which holds the per-cwd
+ * default directories `SessionManager.create` derives. `cwd` is the child's
+ * working directory; config is read from the parent session's project.
+ */
+export function resolveChildSessionRoot(type: string, ctx: ExtensionContext, cwd: string): string {
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted?.() === true });
+  return resolveChildSessionDir(getAgentConfig(type)?.sessionDir, cwd, settingsManager) ?? join(agentDir, "sessions");
+}
+
 export function resolveChildSessionDir(
   agentSessionDir: string | undefined,
   cwd: string,
@@ -842,10 +867,17 @@ export async function runAgent(
     }
   }
 
+  // `context_files: true` loads the child's own AGENTS.md chain. In append mode
+  // the child then builds its own Pi prompt (tools, guidelines, its context
+  // files, skills) with this agent's text as an addendum: the parent's prompt
+  // carries the PARENT's context files, which belong to another directory.
+  const loadContextFiles = agentConfig?.contextFiles === true;
+  const ownPrompt = loadContextFiles && agentConfig?.promptMode === "append";
+
   // Build system prompt from agent config
   let systemPrompt: string;
   if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
+    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras, { addendumOnly: ownPrompt });
   } else {
     // Direct runner callers may bypass registry dispatch; use the built-in worker prompt.
     const fallback = DEFAULT_AGENTS.get("worker");
@@ -969,9 +1001,18 @@ export async function runAgent(
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
-    noContextFiles: true,
-    systemPromptOverride: () => systemPrompt,
-    appendSystemPromptOverride: () => [],
+    noContextFiles: !loadContextFiles,
+    // The loader's cwd is the config root (the parent's project for a `cwd`
+    // spawn); context files come from where the child actually works.
+    ...(loadContextFiles && {
+      agentsFilesOverride: () => ({ agentsFiles: loadBoundedContextFiles(effectiveCwd, agentDir) }),
+    }),
+    // Own-prompt mode keeps pi's normal base (a discovered SYSTEM.md, else the
+    // default with tools and guidelines) and APPEND_SYSTEM.md, as a main
+    // session would, and appends this agent's text.
+    ...(ownPrompt
+      ? { appendSystemPromptOverride: (base: string[]) => [...base, systemPrompt] }
+      : { systemPromptOverride: () => systemPrompt, appendSystemPromptOverride: () => [] }),
   });
   await runInChildSessionContext(() => loader.reload());
   options.signal?.throwIfAborted();
@@ -1052,7 +1093,9 @@ export async function runAgent(
   );
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  // Undefined for a session-model reopen, so pi restores the saved level.
+  const keepSessionModel = options.keepSessionModel === true && options.resumeSessionFile !== undefined;
+  const thinkingLevel = options.thinkingLevel ?? (keepSessionModel ? undefined : agentConfig?.thinking);
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -1193,6 +1236,14 @@ export async function runAgent(
         })
       : SessionManager.inMemory(effectiveCwd);
 
+  // A reopen keeps the conversation's model when it is still available.
+  let sessionModel = model;
+  if (keepSessionModel && !options.model) {
+    const saved = sessionManager.buildSessionContext().model;
+    const restored = saved ? ctx.modelRegistry?.find(saved.provider, saved.modelId) : undefined;
+    if (restored) sessionModel = restored;
+  }
+
   // ExtensionContext still exposes the compatibility facade; share its runtime
   // so child sessions retain the parent's dynamically registered providers.
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: ModelRuntime }).runtime;
@@ -1202,7 +1253,7 @@ export async function runAgent(
     sessionManager,
     settingsManager: sessionSettingsManager,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
-    model,
+    model: sessionModel,
     tools: sessionTools,
     customTools: [...nestedTools, ...structuredTools],
     resourceLoader: loader,
@@ -1227,7 +1278,7 @@ export async function runAgent(
       workflowId: options.workflowId,
       agentType: type,
       description: options.description,
-    }));
+    }, options.linkData));
   }
 
   // Pin service tier after session construction (streamFunction is live).
@@ -1279,7 +1330,11 @@ export async function runAgent(
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
   // After the tool scope's first renarrow above: these are the tools the model
   // is actually offered on its first turn.
-  const toolUse = trackRequiredToolUse(session, type, options.signal);
+  // A reopened conversation is a continuation, not a spawn run: like a resume,
+  // it may answer a follow-up in text alone.
+  const toolUse = options.resumeSessionFile
+    ? { unsubscribe: () => {}, failure: () => undefined as string | undefined }
+    : trackRequiredToolUse(session, type, options.signal);
 
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);

@@ -1,10 +1,10 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result and stop the run — all over the `pi.events` bus, without importing this package directly. Four request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`), eleven lifecycle events, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, message it, reopen its saved conversation and stop the run — all over the `pi.events` bus, without importing this package directly. Six request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:send`, `subagents:rpc:reopen`), eleven lifecycle events, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
-For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what protocol version `2` does and does not promise.
+For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what each protocol version does and does not promise. The current version is `3`.
 
 ## Spawn options
 
@@ -29,17 +29,22 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 | `invocation` | AgentInvocation | Resolved snapshot used for UI display |
 | `signal` | AbortSignal | Aborting it stops the subagent |
 | `onSpawned` / `onQueued` / `onCompaction` / `onBeforeWorktreeCleanup` | functions | Fire as documented on `SpawnOptions` |
+| `notifyParent` | boolean | `false`: no parent completion notification for any run of this agent — the spawn, every `send` resume, and a `reopen` that sets it again. Lifecycle events and `subagents:record` entries are unchanged. Stored on the record. Since protocol 3 |
+| `retain` | boolean | Exempts the settled record from the 10-minute completed-agent cleanup, so `send` keeps reaching it. Session boundaries (`session_start`, `session_before_switch`) and shutdown still remove it. Since protocol 3 |
+| `parentToolCallId` | string | The parent session's tool call that started this agent. Written to the child's session link and to `subagents:record` as `toolCallId`. Stripped before protocol 3 |
+| `linkData` | object | Extra top-level keys merged into the child's `pi-extensions.session-link` entry (written only while a child-session hook is registered). Must be a plain object of JSON values, at most 8 KiB as UTF-8 JSON, with no key from the standard link (`kind`, `parentSessionId`, `parentSessionFile`, `parentToolCallId`, `agentId`, `parentAgentId`, `workflowId`, `agentType`, `description`); a copy is taken at spawn. Since protocol 3 |
 
 **Silently stripped** — set these and nothing happens, with no error and no note. Each deletion is a deliberate guard, and the reasons are worth knowing because they say what the surface refuses to let a caller forge:
 
 | Field | Why it is taken away |
 |---|---|
 | `parentAgentId` | Ownership. A forged parent hides your agent under someone else's nested tools |
+| `keepSessionModel` | Internal to `reopen`: keeps a reopened file's saved model. Meaningless without a session file, which a spawn cannot name |
 | `workflowId` | A forged value would hide an RPC-spawned agent inside someone else's workflow — and take it out of the concurrency pool with it |
 | `depth`, `maxSubagentDepth` | The nesting cap is inherited, not declared |
 | `configCwd` | Config-discovery root; only nested launches may set it |
 | `rootSessionId` | Names a transcript directory, so a forged value is a path-traversal primitive |
-| `resumeSessionFile` | Worse: it names a file to **open and replay** as a conversation. Dispatcher only, and only from a path this extension itself recorded |
+| `resumeSessionFile` | Worse: it names a file to **open and replay** as a conversation. Only the mention dispatcher (from a path this extension recorded) and `subagents:rpc:reopen` (after validating the path, below) set it |
 | `reclaim` | Bypasses handle allocation, so a forged value would duplicate a live agent's name and make `@handle` ambiguous |
 | `blocking` | Every spawn through here is detached. A forged `blocking` would charge it to the foreground pool and defer it behind a queue whose gate nobody is holding |
 
@@ -47,6 +52,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 Four things that are not obvious from the tables:
 
+- **Agent types a model cannot name are spawnable here.** An agent with `model_visible: false` (the embedded `ticket` agent is one) is absent from the `Agent` tool, nested tools, `@type` mentions, workflows, schedules, the subagent host's descriptors and the fallback, but `spawn`, `reopen` and the registry's `spawn` accept it. The fallback itself never lands on a hidden type.
 - **Nothing is required at runtime.** `description` is non-optional in TypeScript and never validated. A spawn with no `options` at all is legal and is what "returns agent id on success" in `test/cross-extension-rpc.test.ts` pins.
 - **`bypassQueue` is not stripped.** Its own doc comment scopes it to the scheduler and the `/agents` generator, but a bus caller can set it and skip the `maxConcurrent` check.
 - **`structuredOutput` is documented "set only by the workflow host"** (its field comment on `SpawnOptions`) and is also not stripped.
@@ -88,6 +94,25 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Agent is owned by another agent or workflow` | stop handler |
 | `Agent is not running` | stop handler. The record exists, so it has already settled |
 | `Agent not found or still running` | consume handler |
+| `parentToolCallId must be a string` / `notifyParent must be a boolean` / `retain must be a boolean` | `spawnTopLevel`, `src/index.ts` |
+| `linkData must be a plain object` | `validateLinkData`, `src/child-session-hooks.ts` |
+| `linkData key "<key>" collides with a standard session-link field` | `validateLinkData` |
+| `linkData is not JSON-serializable: <path> is <what>` (e.g. `linkData.f is a function`, `linkData.n is NaN`, `linkData.d is a Date object`, `… is a circular reference`) | `validateLinkData` |
+| `linkData is too large: <n> bytes as JSON (limit 8192)` | `validateLinkData` |
+| `Unknown agent "<id>"` | send handler (`sendToAgent`, `src/index.ts`) — never existed, evicted, or from before a restart |
+| `Agent is owned by another agent or workflow` | send handler, as for stop |
+| `text must be a string` | send handler |
+| `Agent "<id>" has no session to resume` | send handler — a settled record whose run never created a session (a startup failure, a stop while queued) |
+| `Agent is still running` | send handler — a resume raced a run that started after the status check |
+| `Unknown or disabled agent type: <json>. Available: <list>.` | reopen handler (`reopenAgent`, `src/index.ts`). Strict: no fallback |
+| `prompt must be a string` / `options must be an object` / `<key> must be a boolean` / `<key> must be a string` | reopen handler |
+| `sessionFile must be an absolute path: <json>` | `validateReopenSessionFile`, `src/reopen.ts` |
+| `sessionFile does not exist: "<path>"` | `validateReopenSessionFile` |
+| `sessionFile is not a regular file: "<path>"` | `validateReopenSessionFile` |
+| `sessionFile is not a .jsonl file: "<path>"` | `validateReopenSessionFile` |
+| `sessionFile is outside the subagent session directory "<root>": "<path>"` | `validateReopenSessionFile` |
+| `sessionFile does not start with a Pi session header: "<path>"` | `validateReopenSessionFile` |
+| `sessionFile is not a child session (its header has no parentSession): "<path>"` | `validateReopenSessionFile` |
 
 Three things the table cannot show:
 
@@ -105,6 +130,45 @@ Two asymmetries to know about, stated as they are:
 - **Consume checks `parentAgentId` but not `workflowId`** (`consumeResult`, `src/index.ts`). A workflow-owned agent's result can be marked consumed over the bus even though the same agent cannot be stopped.
 
 The same predicate silently scopes the events. **Every lifecycle event is top-level only** — `subagents:started`, `:completed`, `:failed` and `:compacted` all return early for nested and workflow-owned agents (the `isTopLevelAgent` checks in the `AgentManager` callbacks, `src/index.ts`). A workflow's children are invisible on the bus: you will see the workflow's own agents come and go without a single event.
+
+## Messaging an agent: `subagents:rpc:send`
+
+`{ requestId, agentId, text }` → `{ success: true, data: { delivery: "steered" | "resumed" } }`.
+
+- A **running or queued** top-level agent is steered (`AgentManager.steer`): the message lands after its current tool call, or, for a queued agent, as soon as its session exists.
+- A **settled** agent whose record is still live is resumed in the background through the same path as the `Agent` tool's background resume (`startBackgroundResume`): a new run on the same session, with its own `subagents:started` and `subagents:completed`/`failed`, the agent's own turn limit, and its stored `notifyParent`.
+- An id with **no live record** — never existed, evicted by the 10-minute cleanup or a session boundary, or from before a restart — answers exactly `{ success: false, error: 'Unknown agent "<id>"' }`. Use `reopen` with the session file from an earlier event to continue that conversation.
+- A nested or workflow-owned agent is refused like `stop`. Ids only; `@handle`s are not resolved.
+
+## Reopening a saved conversation: `subagents:rpc:reopen`
+
+`{ requestId, sessionFile, type, prompt, options? }` → `{ success: true, data: { id } }`. Starts a **new** top-level agent (a new id) whose session is the persisted child session in `sessionFile`, continued with `prompt`. It goes through the same trusted path as an `@handle` reopen (`spawnResolved` with `resumeSessionFile`), so it gets the widget, lifecycle events and transcript of any spawn; it writes no second session-link entry, since the file already has one.
+
+`type` must name exactly one **enabled** agent type, hidden (`model_visible: false`) or not; there is no fallback. Accepted `options`: `description` (default `Reopened <type> session`), `name`, `cwd`, `notifyParent`, `retain`, `isBackground`, `bypassQueue`, `thinkingLevel`. Any other key is ignored (`linkData`, `model`, `parentToolCallId` included).
+
+The file is validated, in this order, before anything runs:
+
+1. an absolute path;
+2. that exists and is a regular file (`stat`, so a symlink to a regular file passes this step);
+3. with the `.jsonl` extension;
+4. whose real path is inside the real path of the **child session root** — any subdirectory is fine. The root is resolved as the runner resolves a persisted top-level child's session directory (`resolveChildSessionRoot`, `src/agent-runner.ts`): the type's `session_dir` frontmatter (relative to the child's cwd, `options.cwd` or the session's), else `PI_CODING_AGENT_SESSION_DIR`, else the `sessionDir` setting of the parent project, else `<agentDir>/sessions` — the parent of the per-cwd directories pi derives by default. A symlink inside the root pointing outside it is refused here;
+5. whose first line is a Pi session header (`"type": "session"`) with a non-empty `parentSession` — it was written as a child session.
+
+The reopened run keeps the **session's** saved model (when the registry still has it) and thinking level rather than the type's, as an in-memory resume does; `options.thinkingLevel` overrides the level. Like a resume, a reopen is not checked by `require_tool_use`. The run's cwd is `options.cwd`, else the parent session's cwd — not the cwd in the file's header.
+
+## Lifecycle payloads
+
+`subagents:started` fires for every run of a top-level agent: an RPC or registry spawn, an `Agent`-tool spawn, a background or foreground resume (including `send`), a reopen, and a queued agent when it starts. It carries `{ id, type, description }`, plus `sessionId` and `sessionFile` once the agent has a session — so a resume or reopen has them, a fresh spawn's first event does not.
+
+`subagents:completed` and `subagents:failed` fire for every settled run, including a foreground resume and a stop while queued (`failed`, `status: "stopped"`; it never started, so it has no `subagents:started`). Besides `id`, `type`, `description`, `result`, `error`, `status`, `toolUses`, `durationMs`, `tokens` and `usage`, they carry:
+
+| Field | Notes |
+|---|---|
+| `runToolUses` | Tool calls of this run only — spawn, resume, or reopen. `toolUses` stays cumulative over the record's runs; a reopened agent's starts at zero |
+| `sessionId?` | The child session's id, when it has one |
+| `sessionFile?` | Its session file, when persisted (the default; always while a child-session hook is registered) — what `reopen` takes |
+
+Settlement during shutdown stays silent: callers handle their own shutdown.
 
 ## The notification race
 
@@ -124,6 +188,8 @@ When a background agent finishes, pi-subagents sends the user a completion notif
 
 Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel sits outside the `subagents:rpc:ping` version handshake on purpose (the comment on the consume handler, `src/cross-extension-rpc.ts`), so you can send it unconditionally and an older pi-subagents with no handler simply keeps notifying.
 
+`notifyParent: false` sidesteps the race entirely: such an agent never notifies, on any run, and still emits its lifecycle events and writes its `subagents:record`. A foreground resume and a stop while queued also never notify — their settle is reported for lifecycle only.
+
 Consumption is not terminal. An `@handle` steer un-consumes the record (the mention handler, `src/index.ts`) because the agent's reply to that message still needs relaying. A background resume (`AgentManager.resume`) does too, because the record is starting a new run, and so does handing a foreground agent to the background (`AgentManager.sendToBackground`), because its result now has to reach the parent as a notification.
 
 One related thing that lives nowhere else: on every top-level settle, pi-subagents writes a session entry — not an event — via `pi.appendEntry("subagents:record", …)` (the manager's completion callback, `src/index.ts`), carrying `id`, `type`, `description`, `status`, `result`, `error`, `startedAt` and `completedAt`. It exists for cross-extension history reconstruction. It is append-only history, not something to react to.
@@ -136,7 +202,7 @@ One related thing that lives nowhere else: on every top-level settle, pi-subagen
 |---|---|---|
 | `waitForAll()` | `() => Promise<void>` | Resolves when nothing is running. **All** agents, including ones you did not spawn — a shutdown barrier, not a join |
 | `hasRunning()` | `() => boolean` | |
-| `spawn(pi, ctx, type, prompt, options)` | `=> string` | **Is** `spawnTopLevel`, so the strip list above applies identically |
+| `spawn(pi, ctx, type, prompt, options)` | `=> string` | **Is** `spawnTopLevel`, so the strip list and `linkData` validation above apply identically, and hidden types are spawnable |
 | `getRecord(id)` | `=> AgentRecord \| undefined` | Filtered through `isTopLevelAgent`, so someone else's child comes back `undefined` rather than leaking |
 
 The slot is claimed by the first activation only; subagent sessions re-activate this extension in the same process, and unconditionally overwriting would point the registry at a short-lived child manager whose shutdown would then delete the root session's entry ([#128](https://github.com/tintinweb/pi-subagents/pull/128)). Child activations leave it alone, and shutdown releases it only if this activation claimed it (`ownsManagerRegistry`, checked in the `session_shutdown` handler).
@@ -145,13 +211,15 @@ Prefer the bus. The registry has no reply envelope, no version, and no availabil
 
 ## Protocol versions
 
-`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `2` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
+`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `3` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
 
-Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` channel.
+Version `3` (this fork) adds, and a ping answering `3` promises: the `send` and `reopen` channels; the spawn options `notifyParent`, `retain`, `parentToolCallId` (previously stripped) and `linkData`; `model_visible: false` types spawnable over RPC; and the lifecycle changes above (`subagents:started` for every run, `completed`/`failed` for foreground resumes and queued stops, `runToolUses`, `sessionId`, `sessionFile`).
 
-> A `ping` that answers `2` does not tell you whether `consume` exists, whether model scope is enforced, or whether stop checks ownership.
+Between `2` and `3`, several things shipped **without a bump**, because they were additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` channel.
 
-So: send `consume` unconditionally and ignore the outcome — an older build has no handler and simply keeps notifying, which is exactly why it was left outside the handshake. And treat every error envelope as authoritative rather than trying to predict which checks are in force.
+> A `ping` that answers `2` does not tell you whether `consume` exists, whether model scope is enforced, or whether stop checks ownership. One that answers `3` has all of them.
+
+So: send `consume` unconditionally and ignore the outcome — an older build has no handler and simply keeps notifying, which is exactly why it was left outside the handshake. Check for `3` before relying on `send`, `reopen` or the protocol-3 spawn options: an older build ignores the options silently (and strips `parentToolCallId`) and never answers the new channels. Treat every error envelope as authoritative rather than trying to predict which checks are in force.
 
 ## Availability
 
@@ -170,8 +238,10 @@ This document has no test of its own, so it is worth knowing which claims are ac
 | `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings, model resolution and scope enforcement |
 | `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
+| `tests/rpc-protocol-v3.test.ts` | Real extension, scripted runner | Version 3; hidden types refused by every model-facing path and spawnable over RPC; the protocol-3 spawn options and `linkData` errors; `send` delivery and its errors; `reopen` validation strings and its happy path after eviction; lifecycle payloads including queued stops |
+| `tests/ticket-agent.test.ts` | Real runner and loader | The `ticket` agent's prompt, tools and nested allowlist; the context-file stop rule; `linkData` and `parentToolCallId` in a real session link |
 
-Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings, `subagents:ready`'s `{}` payload, consume's handle resolution, and its missing `workflowId` check.
+Not pinned anywhere, so treat them as descriptions rather than contracts: the `SpawnOptions.cwd` error strings (except through `reopen`), `subagents:ready`'s `{}` payload, consume's handle resolution, and its missing `workflowId` check.
 
 ## Reference implementation
 

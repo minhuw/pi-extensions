@@ -290,6 +290,9 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   // Both values: the embedded recon/worker/reviewer set it, so an ejected copy
   // must keep the guard, and an explicit `false` must survive a round trip.
   if (cfg.requireToolUse !== undefined) fmFields.push(`require_tool_use: ${cfg.requireToolUse}`);
+  // Both values round-trip; the embedded `ticket` agent sets both.
+  if (cfg.modelVisible !== undefined) fmFields.push(`model_visible: ${cfg.modelVisible}`);
+  if (cfg.contextFiles !== undefined) fmFields.push(`context_files: ${cfg.contextFiles}`);
   // Also only reachable through a package agent: no built-in default sets
   // either. Omitting them would have the ejected copy silently stop persisting
   // its session, or write it somewhere else.

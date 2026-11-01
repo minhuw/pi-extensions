@@ -113,11 +113,43 @@ export function isValidTypeIn(registry: Map<string, AgentConfig>, type: string):
   return registry.get(key)?.enabled !== false;
 }
 
-/** Get all enabled type names in a registry (for spawning and tool descriptions). */
+/** Whether a model may name this agent: enabled and not `model_visible: false`. */
+export function isModelVisible(config: AgentConfig | undefined): boolean {
+  return config !== undefined && config.enabled !== false && config.modelVisible !== false;
+}
+
+/**
+ * Type names a model may name, in a registry: enabled and model-visible. What
+ * every model-facing path lists and resolves against — the Agent tool, nested
+ * tools, mentions, workflows, schedules and the subagent host.
+ */
 export function getAvailableTypesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.entries()]
+    .filter(([_, config]) => isModelVisible(config))
+    .map(([name]) => name);
+}
+
+/** Every enabled type name in a registry, model-visible or not (trusted spawns). */
+export function getEnabledTypesIn(registry: Map<string, AgentConfig>): string[] {
   return [...registry.entries()]
     .filter(([_, config]) => config.enabled !== false)
     .map(([name]) => name);
+}
+
+/**
+ * Options for type resolution. `includeHidden` admits `model_visible: false`
+ * types — set only by trusted programmatic paths (cross-extension RPC, the
+ * manager registry, reopening an existing agent's conversation). The fallback
+ * never resolves to a hidden type either way.
+ */
+export interface TypeResolutionOptions {
+  includeHidden?: boolean;
+}
+
+/** The registry a resolution may see: everything, or only model-visible entries. */
+function viewFor(registry: Map<string, AgentConfig>, options?: TypeResolutionOptions): Map<string, AgentConfig> {
+  if (options?.includeHidden) return registry;
+  return new Map([...registry].filter(([_, config]) => config.modelVisible !== false));
 }
 
 /**
@@ -143,11 +175,15 @@ function resolveUnambiguousKeyIn(registry: Map<string, AgentConfig>, name: strin
 export function resolveEnabledTypeIn(
   registry: Map<string, AgentConfig>,
   requested: unknown,
+  options?: TypeResolutionOptions,
 ): string | undefined {
   const raw = typeof requested === "string" ? requested.trim() : "";
   if (!raw) return undefined;
-  const key = resolveUnambiguousKeyIn(registry, raw);
-  return key !== undefined && registry.get(key)?.enabled !== false ? key : undefined;
+  // A hidden type is absent from a model-facing view, so a model naming it gets
+  // the same "unknown" answer as a typo — and cannot shadow-match its case.
+  const view = viewFor(registry, options);
+  const key = resolveUnambiguousKeyIn(view, raw);
+  return key !== undefined && view.get(key)?.enabled !== false ? key : undefined;
 }
 
 /** Outcome of resolving a caller-supplied `subagent_type` into a spawnable type. */
@@ -174,11 +210,13 @@ export type SpawnTypeResolution =
 export function resolveSpawnTypeIn(
   registry: Map<string, AgentConfig>,
   requested: unknown,
+  options?: TypeResolutionOptions,
 ): SpawnTypeResolution {
   const raw = typeof requested === "string" ? requested.trim() : "";
-  const available = () => getAvailableTypesIn(registry).join(", ") || "(none)";
+  const available = () =>
+    (options?.includeHidden ? getEnabledTypesIn(registry) : getAvailableTypesIn(registry)).join(", ") || "(none)";
 
-  const key = resolveEnabledTypeIn(registry, raw);
+  const key = resolveEnabledTypeIn(registry, raw, options);
   if (key !== undefined) return { ok: true, type: key };
 
   // A missing type follows the same policy as a wrong one rather than always
@@ -198,8 +236,10 @@ export function resolveSpawnTypeIn(
     // An explicitly configured fallback that is itself unusable is a
     // misconfiguration, not a second chance to guess — say so rather than
     // quietly dropping to worker.
-    const fallbackKey = resolveUnambiguousKeyIn(registry, configured);
-    if (fallbackKey === undefined || registry.get(fallbackKey)?.enabled === false) {
+    // Model-visible types only: a fallback is a guess on the caller's behalf,
+    // and must never land on an agent the model is not allowed to name.
+    const fallbackKey = resolveEnabledTypeIn(registry, configured);
+    if (fallbackKey === undefined) {
       return {
         ok: false,
         message:
@@ -216,9 +256,17 @@ export function resolveSpawnTypeIn(
     : { ok: false, message: `${reason} Default fallback "worker" is unknown or disabled. Available: ${available()}.` };
 }
 
-/** Resolve a caller-supplied agent type against the process-wide registry. */
-export function resolveSpawnType(requested: unknown): SpawnTypeResolution {
-  return resolveSpawnTypeIn(agents, requested);
+/**
+ * Resolve a caller-supplied agent type against the process-wide registry.
+ * Model-facing unless `includeHidden` is set (trusted programmatic spawns).
+ */
+export function resolveSpawnType(requested: unknown, options?: TypeResolutionOptions): SpawnTypeResolution {
+  return resolveSpawnTypeIn(agents, requested, options);
+}
+
+/** The canonical key of exactly one enabled type, never the fallback; see `resolveEnabledTypeIn`. */
+export function resolveEnabledType(requested: unknown, options?: TypeResolutionOptions): string | undefined {
+  return resolveEnabledTypeIn(agents, requested, options);
 }
 
 /** Resolve a type name case-insensitively. Returns the canonical key or undefined. */
@@ -231,9 +279,14 @@ export function getAgentConfig(name: string): AgentConfig | undefined {
   return getAgentConfigIn(agents, name);
 }
 
-/** Get all enabled type names (for spawning and tool descriptions). */
+/** Enabled, model-visible type names — what a model may name (tool descriptions, mentions). */
 export function getAvailableTypes(): string[] {
   return getAvailableTypesIn(agents);
+}
+
+/** Every enabled type name, hidden ones included — what a trusted spawn may name. */
+export function getEnabledTypes(): string[] {
+  return getEnabledTypesIn(agents);
 }
 
 /** Get all type names including disabled (for UI listing). */

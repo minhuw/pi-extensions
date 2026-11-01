@@ -129,8 +129,10 @@ describe("agent type registry", () => {
       }
     });
 
+    // The embedded `ticket` agent is a default too, but model-hidden, so it is
+    // not one of the four fleet names (`getAvailableTypes()` above).
     it("getDefaultAgentNames returns default agent names", () => {
-      expect(getDefaultAgentNames()).toEqual(DEFAULT_AGENT_NAMES);
+      expect(getDefaultAgentNames()).toEqual([...DEFAULT_AGENT_NAMES, "ticket"]);
     });
 
     it("BUILTIN_TOOL_NAMES includes all built-in tools", () => {

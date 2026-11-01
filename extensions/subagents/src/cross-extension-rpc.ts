@@ -1,8 +1,8 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, and consume RPCs over the pi.events event bus,
- * using per-request scoped reply channels.
+ * Exposes ping, spawn, stop, consume, send, and reopen RPCs over the pi.events
+ * event bus, using per-request scoped reply channels.
  *
  * Reply envelope follows pi-mono convention:
  *   success → { success: true, data?: T }
@@ -10,7 +10,7 @@
  *
  * @see docs/rpc.md — the caller-facing integration reference: spawn options
  * (including the fields spawnTopLevel strips), every error string, the
- * completion-notification race, and what protocol version 2 does not promise.
+ * completion-notification race, and what each protocol version promises.
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
@@ -30,7 +30,10 @@ export type RpcReply<T = void> =
   | { success: false; error: string };
 
 /** RPC protocol version — bumped when the envelope or method contracts change. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
+
+/** How `subagents:rpc:send` delivered a message. */
+export type SendDelivery = "steered" | "resumed";
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
 export interface SpawnCapable {
@@ -50,6 +53,17 @@ export interface SpawnCapable {
    * one. False when there is no such agent, or it has not settled yet.
    */
   consumeResult(id: string): boolean;
+  /**
+   * Deliver `text` to a top-level agent: steer a running or queued one, or
+   * start a background resume of a settled one. Throws with a caller-facing
+   * message (`Unknown agent "<id>"` when there is no live record).
+   */
+  send(id: string, text: string): Promise<SendDelivery>;
+  /**
+   * Start a new top-level run on a persisted child session reopened from
+   * `sessionFile`. Validates everything and throws with a caller-facing message.
+   */
+  reopen(pi: unknown, ctx: unknown, sessionFile: unknown, type: unknown, prompt: unknown, options: unknown): string;
 }
 
 export interface RpcDeps {
@@ -64,6 +78,8 @@ export interface RpcHandle {
   unsubSpawn: () => void;
   unsubStop: () => void;
   unsubConsume: () => void;
+  unsubSend: () => void;
+  unsubReopen: () => void;
 }
 
 /**
@@ -91,7 +107,7 @@ function handleRpc<P extends { requestId: string }>(
 }
 
 /**
- * Register ping, spawn, stop, and consume RPC handlers on the event bus.
+ * Register ping, spawn, stop, consume, send, and reopen RPC handlers on the event bus.
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
@@ -209,5 +225,26 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume };
+  // Message a top-level agent by id: steered while it runs or waits in the
+  // queue, resumed in the background once it has settled.
+  const unsubSend = handleRpc<{ requestId: string; agentId: string; text: string }>(
+    events, "subagents:rpc:send", async ({ agentId, text }) => {
+      if (!getCtx()) throw new Error("No active session");
+      return { delivery: await manager.send(agentId, text) };
+    },
+  );
+
+  // Continue a persisted child session (one this extension wrote) as a new
+  // top-level background agent.
+  const unsubReopen = handleRpc<{ requestId: string; sessionFile: string; type: string; prompt: string; options?: unknown }>(
+    events, "subagents:rpc:reopen", async ({ sessionFile, type, prompt, options }) => {
+      const ctx = getCtx();
+      if (!ctx) throw new Error("No active session");
+      const id = manager.reopen(pi, ctx, sessionFile, type, prompt, options);
+      await manager.awaitStartup(id);
+      return { id };
+    },
+  );
+
+  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSend, unsubReopen };
 }

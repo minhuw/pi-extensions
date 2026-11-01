@@ -88,7 +88,7 @@ const MAX_TOMBSTONES = 100;
  * directory — curated errors instead of TypeErrors from path/fs internals
  * (RPC callers send arbitrary JSON: null, numbers, file paths).
  */
-function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | null {
+export function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | null {
   if (cwd == null) return;
   if (typeof cwd !== "string" || !isAbsolute(cwd)) {
     throw new Error(`SpawnOptions.cwd must be an absolute path: "${String(cwd)}"`);
@@ -318,6 +318,14 @@ interface SpawnOptions {
   rootSessionId?: string;
   /** The spawner's tool call: the Agent call, a nested Agent call, or the workflow call. */
   parentToolCallId?: string;
+  /** `false`: never notify the parent of this agent's runs. Stored on the record. */
+  notifyParent?: boolean;
+  /** Exempt the record from the 10-minute completed-agent cleanup. */
+  retain?: boolean;
+  /** Extra session-link keys; validated by `spawnTopLevel`. */
+  linkData?: Record<string, unknown>;
+  /** With `resumeSessionFile`: keep the saved session's model and thinking (reopen). Internal. */
+  keepSessionModel?: boolean;
 }
 
 interface ResumeOptions {
@@ -584,6 +592,9 @@ export class AgentManager {
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
       parentToolCallId: options.parentToolCallId,
+      notifyParent: options.notifyParent,
+      retain: options.retain,
+      runToolUses: 0,
     };
     this.agents.set(id, record);
     // After the insert, so `takenHandles()` already counts this record's own
@@ -763,6 +774,7 @@ export class AgentManager {
     record.chargedPool = this.poolFor(record);
     record.status = "running";
     record.startedAt = Date.now();
+    record.runToolUses = 0;
     record.startGate = undefined;
     this.chargePool(record.chargedPool, 1);
 
@@ -846,6 +858,8 @@ export class AgentManager {
       serviceTier: getAgentConfig(type)?.serviceTier ?? options.serviceTier,
       structuredOutput: options.structuredOutput,
       resumeSessionFile: options.resumeSessionFile,
+      keepSessionModel: options.keepSessionModel,
+      linkData: options.linkData,
       nested: record.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
       // Worktree wins for the working dir (the agent must run in the copy —
@@ -866,6 +880,7 @@ export class AgentManager {
           const index = record.activeTools.indexOf(activity.toolName);
           if (index >= 0) record.activeTools.splice(index, 1);
           record.toolUses++;
+          record.runToolUses = (record.runToolUses ?? 0) + 1;
         }
         options.onToolActivity?.(activity);
         this.onUpdate?.(record);
@@ -1306,6 +1321,9 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.runToolUses = 0;
+    // Lifecycle parity with every other run: started now, settled below.
+    try { this.onStart?.(record); } catch { /* ignore start side-effect errors */ }
     // Fresh controller, as on the detached path: `abort()` fires whatever
     // `record.abortController` holds, and the spawn's has long settled — so a
     // stop from `/agents` or the caller's Esc would mark the record stopped
@@ -1334,6 +1352,7 @@ export class AgentManager {
             const index = record.activeTools.indexOf(activity.toolName);
             if (index >= 0) record.activeTools.splice(index, 1);
             record.toolUses++;
+            record.runToolUses = (record.runToolUses ?? 0) + 1;
           }
           options?.onToolActivity?.(activity);
           this.onUpdate?.(record);
@@ -1359,6 +1378,11 @@ export class AgentManager {
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+
+    // The inline caller receives this run's result, so its settle notifies no
+    // one (as `settleRun` does for a foreground spawn) — it reports lifecycle only.
+    record.resultConsumed = true;
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
 
     return record;
   }
@@ -1421,6 +1445,7 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
+    record.runToolUses = 0;
     if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
 
@@ -1468,6 +1493,7 @@ export class AgentManager {
           const index = record.activeTools.indexOf(activity.toolName);
           if (index >= 0) record.activeTools.splice(index, 1);
           record.toolUses++;
+          record.runToolUses = (record.runToolUses ?? 0) + 1;
         }
         options.onToolActivity?.(activity);
         this.onUpdate?.(record);
@@ -1608,13 +1634,17 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record || (record.owner && !allowOwned)) return false;
 
-    // Remove from queue if queued. No decrement — the slot was never taken —
-    // and no onComplete, matching what a queued background abort has always
-    // done; a blocking caller learns of the stop from its own tool result.
+    // Remove from queue if queued. No decrement — the slot was never taken.
+    // The settle is reported for lifecycle (a `subagents:failed` event and the
+    // session record) but marked consumed, so it still notifies no one, as a
+    // queued abort never has; a blocking caller learns of the stop from its
+    // own tool result.
     if (record.status === "queued") {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      record.resultConsumed = true;
+      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       return true;
     }
 
@@ -1671,6 +1701,9 @@ export class AgentManager {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      // Kept for its owner to message or reopen; session boundaries and
+      // disposal still remove it.
+      if (record.retain) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }

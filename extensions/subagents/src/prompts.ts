@@ -51,6 +51,9 @@ export interface PromptExtras {
  *
  * @param parentSystemPrompt  The parent agent's effective system prompt (for append mode).
  * @param extras  Optional extra sections to inject (memory, preloaded skills).
+ * @param options.addendumOnly  Append mode only: return just what follows the
+ *   inherited prompt (bridge, tag, env, instructions, extras), for a child that
+ *   builds its own Pi prompt instead of cloning the parent's (`context_files`).
  */
 export function buildAgentPrompt(
   config: AgentConfig,
@@ -58,6 +61,7 @@ export function buildAgentPrompt(
   env: EnvInfo,
   parentSystemPrompt?: string,
   extras?: PromptExtras,
+  options?: { addendumOnly?: boolean },
 ): string {
   const activeAgentTag = `<active_agent name="${config.name}"/>\n\n`;
 
@@ -118,12 +122,16 @@ You are operating as a sub-agent invoked to handle a specific task.
       ? `\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`
       : "";
 
+    const addendum = bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + customSection + extrasSuffix;
+    // The child builds its own Pi prompt and appends this as an addendum.
+    if (options?.addendumOnly) return addendum;
+
     // Place shared/stable content first so the LLM's KV cache can reuse the
     // inherited prefix across all subagent invocations. The parent prompt is
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
     // with the parent session, maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + customSection + extrasSuffix;
+    return identity + "\n\n" + addendum;
   }
 
   // "replace" mode — env header + the config's full system prompt

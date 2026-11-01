@@ -87,6 +87,8 @@ export function parseAgentDefinition(
     memory: parseMemory(fm.memory),
     isolation: parseIsolation(fm.isolation),
     requireToolUse: fm.require_tool_use != null ? fm.require_tool_use === true : undefined,
+    modelVisible: fm.model_visible != null ? fm.model_visible !== false : undefined,
+    contextFiles: fm.context_files != null ? fm.context_files === true : undefined,
     enabled: fm.enabled !== false,  // default true; explicitly false disables
     source,
     sourcePath: path,

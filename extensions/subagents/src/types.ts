@@ -92,6 +92,23 @@ export interface AgentConfig {
    * not checked, since they may answer a follow-up in text. Off by default.
    */
   requireToolUse?: boolean;
+  /**
+   * `false` keeps the type out of every model-facing path: the Agent tool's
+   * description and execution, the fallback, nested tools, `@type` mentions,
+   * workflows, scheduled jobs, and the subagent host's descriptors. Trusted
+   * programmatic spawns (cross-extension RPC, the manager registry) and `/agents`
+   * still see it. Default (undefined) = visible.
+   */
+  modelVisible?: boolean;
+  /**
+   * Load AGENTS.md / CLAUDE.md context files as a main session would: the agent
+   * dir's global file, then the child's cwd and its ancestors, stopping at the
+   * first directory that contains a `.git` entry (a linked worktree's root has a
+   * `.git` file). Default off. In append mode it also makes the child build its
+   * own Pi system prompt instead of cloning the parent's, whose context files
+   * belong to the parent's directory.
+   */
+  contextFiles?: boolean;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
   /** false = agent is hidden from the registry */
@@ -259,6 +276,16 @@ export interface AgentRecord {
    * or the workflow call. Unlike `toolCallId`, it never drives notifications.
    */
   parentToolCallId?: string;
+  /**
+   * `false`: no parent completion notification for any run of this agent
+   * (spawn, resume, reopen). Lifecycle events and `subagents:record` entries
+   * are unaffected. Set at spawn; carried through resumes.
+   */
+  notifyParent?: boolean;
+  /** Exempt from the 10-minute completed-agent cleanup (not from session boundaries or disposal). */
+  retain?: boolean;
+  /** Tool calls of the current (or last settled) run only; `toolUses` is cumulative. */
+  runToolUses?: number;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
   /**
