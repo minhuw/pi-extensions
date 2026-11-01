@@ -112,7 +112,8 @@ pub fn detail(conn: &Connection, detail: &mut super::sessions::SessionDetail) ->
 
 pub fn trace(conn: &Connection, trace: &mut super::trace::Trace) -> ReadResult<()> {
     let mut children = Vec::new();
-    for child in trace.children.drain(..) {
+    for mut child in trace.children.drain(..) {
+        child.ticket = None;
         if visible(conn, &child.session_id)? {
             children.push(child);
         }

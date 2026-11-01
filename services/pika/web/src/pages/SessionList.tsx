@@ -11,6 +11,8 @@ import { cx, EmptyState, ErrorState, Page, PageTitle, Pill, Skeleton } from "../
 import { ApiError, useApi, type SessionFilters } from "../lib/api";
 import { deviceLabel, deviceOptions } from "../lib/devices";
 import { Tag } from "../components/Tag";
+import { TicketBadge } from "../components/Ticket";
+import { linkTicket } from "../lib/tickets";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
 import { isLive } from "../lib/liveness";
 import type { SessionSummary, Tokens } from "../lib/types";
@@ -165,6 +167,7 @@ function SessionCard({ session, depth = 0, lines, tones, parent, tree, toggle, s
 						</span>
 					)}
 					{(tree || orphan) && <KindPill kind={kind}>{type}</KindPill>}
+					<TicketBadge ticket={linkTicket(session.link)} />
 					{orphan && (
 						<span className="flex shrink-0" data-parent-missing="">
 							<Tag color="yellow" icon="alert" title="pika has no record of the session that started this one: it was not uploaded, or not yet">

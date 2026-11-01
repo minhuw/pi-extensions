@@ -15,6 +15,7 @@ import {
 	userMessage,
 } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
+import { BATCH_REPORT, ticketFamily } from "./support/tickets";
 import { createFakeServer, type FakeSession } from "./support/server";
 
 function sessionFixture(): FakeSession {
@@ -311,5 +312,67 @@ describe("buildTimeline", () => {
 		const later = { ...prompt, id: "c2", content: "follow-up" };
 		const items = buildTimeline([entry(1, prompt), entry(2, later)], 1);
 		expect(items.map((item) => `${item.kind}:${item.seq}`)).toEqual(["custom-message:2"]);
+	});
+});
+
+describe("superagent tickets in the transcript", () => {
+	it("renders report turns, a batched report, an in-turn report, and the ticket_create card with its ticket", async () => {
+		renderApp("/s/main?view=transcript", createFakeServer({ sessions: ticketFamily() }).fetch);
+		await screen.findByRole("heading", { name: "Release router" });
+		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn="${index}"]`)!;
+		await waitFor(() => expect(head(4)).toBeTruthy());
+		const label = (index: number) => head(index).querySelector<HTMLElement>("[data-turn-start]")!.textContent;
+		expect([label(0), label(1), label(2), label(3), label(4)]).toEqual(["Prompt 1", "Ticket #1 ready", "2 ticket reports", "Prompt 4", "Relay message"]);
+		expect(head(1).querySelector("[data-bullet] [data-glyph]")?.getAttribute("data-glyph")).toBe("branch");
+		const batch = head(2).querySelector<HTMLElement>("[data-report-list]")!;
+		expect(batch.dataset.reportList).toBe("2");
+		expect([...batch.querySelectorAll("[data-report]")].map((node) => node.textContent)).toEqual(["#2 questionAdd retries", "#3 mergedBump deps"]);
+		// A batch keeps its text behind a toggle; the relay turn's text shows as before.
+		expect(within(head(2)).queryByText(/back off exponentially/)).toBeNull();
+		expect(BATCH_REPORT).toContain("back off exponentially");
+		expect(within(head(4)).getByText(/please rebase/)).toBeTruthy();
+
+		// The in-turn report, steered into turn 4, is one entry with its tag and reason.
+		fireEvent.click(head(3).querySelector<HTMLElement>("[data-work-strip]")!);
+		const inTurn = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-report-message]");
+			if (!node) throw new Error("no report message");
+			return node;
+		});
+		expect(inTurn.textContent).toContain("Ticket #2 blocked");
+		expect(inTurn.querySelector<HTMLElement>("[data-report-tag]")?.dataset.reportTone).toBe("failure");
+		expect(inTurn.textContent).toContain("Waiting on a decision.");
+
+		// ticket_create calls render as ticket cards with the ticket's badge, branch, and background note.
+		fireEvent.click(head(0).querySelector<HTMLElement>("[data-work-strip]")!);
+		const tool = await waitFor(() => {
+			const nodes = document.querySelectorAll<HTMLElement>("[data-tool='ticket']");
+			if (nodes.length !== 3) throw new Error("no ticket tools");
+			return nodes[1];
+		});
+		fireEvent.click(within(tool).getAllByRole("button")[0]);
+		const card = await waitFor(() => {
+			const node = tool.querySelector<HTMLElement>("[data-ticket-card]");
+			if (!node) throw new Error("no ticket card");
+			return node;
+		});
+		expect(card.querySelector("[data-ticket-badge]")?.textContent).toBe("#2");
+		expect(card.textContent).toContain("pi/2-add-retries");
+		expect(card.querySelector("[data-ran-past]")?.textContent).toBe("background · ran 6m 57s after the call returned");
+		expect(within(card).getByRole("link", { name: "Open session →" }).getAttribute("href")).toBe("/s/tk2");
+		expect(card.querySelector("[data-inline-toggle='tk2']")).not.toBeNull();
+	});
+
+	it("shows the ticket badge in a ticket session's header", async () => {
+		renderApp("/s/tk3", createFakeServer({ sessions: ticketFamily() }).fetch);
+		await screen.findByRole("heading", { name: "Ticket 3" });
+		const chip = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-session-chips] [data-ticket-chip] [data-ticket-badge]");
+			if (!node) throw new Error("no ticket chip");
+			return node;
+		});
+		expect(chip.textContent).toBe("#3");
+		expect(chip.getAttribute("title")).toBe("Ticket #3 · pi/3-bump-deps");
+		expect(within(document.querySelector<HTMLElement>("[data-session-chips]")!).getByRole("link", { name: /Parent session/ }).getAttribute("href")).toBe("/s/main");
 	});
 });

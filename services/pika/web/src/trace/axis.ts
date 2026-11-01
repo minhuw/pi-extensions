@@ -314,6 +314,8 @@ export interface OverviewItem {
 	phases?: LlmPhases;
 	turnIndex?: number;
 	childId?: string;
+	/** A child's branch row in the subagents band. */
+	agentRow?: number;
 }
 
 export interface LaneBox {
@@ -321,6 +323,62 @@ export interface LaneBox {
 	label: string;
 	y0: number;
 	y1: number;
+	/** The subagents band: how many branch rows it holds, each `rowHeight` tall with `rowGap` between. */
+	rows?: number;
+	rowHeight?: number;
+	rowGap?: number;
+}
+
+/** Concurrent children get their own branch rows, up to this many; the last one also takes every child that fits no other. */
+export const MAX_AGENT_ROWS = 4;
+
+export interface AgentRows {
+	/** Rows in use, at least 1. */
+	rows: number;
+	/** Each drawn child's row, by session id. */
+	rowOf: Map<string, number>;
+	/** Children placed on the last row over another, since every row was busy. */
+	overflow: number;
+}
+
+/**
+ * Packs the children's branches into rows, greedily by start: each child takes the first row free by its start (a row
+ * whose last child ended no later), else a new row, up to `MAX_AGENT_ROWS`; past that, the last row takes it, over
+ * whatever runs there. Children without a start are not drawn and get no row. Packing by time, not pixels, keeps the
+ * rows the same at every zoom.
+ */
+export function packChildren(trace: Pick<SessionTrace, "records" | "children">): AgentRows {
+	const spans = trace.children
+		.map((child) => ({ child, ...childSpan(trace, child) }))
+		.filter((span): span is typeof span & { start: number } => span.start !== undefined && Number.isFinite(span.start))
+		.sort((a, b) => a.start - b.start || (a.child.sessionId < b.child.sessionId ? -1 : a.child.sessionId > b.child.sessionId ? 1 : 0));
+	const ends: number[] = [];
+	const rowOf = new Map<string, number>();
+	let overflow = 0;
+	for (const span of spans) {
+		const end = Math.max(span.start, span.end ?? span.start);
+		let row = ends.findIndex((rowEnd) => rowEnd <= span.start);
+		if (row < 0 && ends.length < MAX_AGENT_ROWS) {
+			row = ends.length;
+			ends.push(end);
+		} else if (row < 0) {
+			row = MAX_AGENT_ROWS - 1;
+			overflow++;
+			ends[row] = Math.max(ends[row], end);
+		} else ends[row] = end;
+		rowOf.set(span.child.sessionId, row);
+	}
+	return { rows: Math.max(1, ends.length), rowOf, overflow };
+}
+
+/** The vertical extent of branch row `row` in the subagents band. */
+export function agentRowBox(box: LaneBox, row: number): { y0: number; y1: number } {
+	const rows = box.rows ?? 1;
+	const gap = box.rowGap ?? 0;
+	const height = box.rowHeight ?? (box.y1 - box.y0 - gap * (rows - 1)) / rows;
+	const r = Math.max(0, Math.min(rows - 1, row));
+	const y0 = box.y0 + r * (height + gap);
+	return { y0, y1: y0 + height };
 }
 
 /**
@@ -329,7 +387,21 @@ export interface LaneBox {
  * The bands do not overlap, so a pointer always means one row. With `provider`, a row above the model calls holds the
  * provider's side of each timed call, as the far lifeline of a sequence diagram, and the rows below move down.
  */
-export function overviewLanes(compact: boolean, provider = false): LaneBox[] {
+export function overviewLanes(compact: boolean, provider = false, agentRows = 1): LaneBox[] {
+	const lanes = baseLanes(compact, provider);
+	const agents = lanes[lanes.length - 1];
+	const rows = Math.max(1, Math.min(MAX_AGENT_ROWS, Math.floor(agentRows) || 1));
+	const rowHeight = agents.y1 - agents.y0;
+	const rowGap = compact ? 1 : 2;
+	agents.rows = rows;
+	agents.rowHeight = rowHeight;
+	agents.rowGap = rowGap;
+	agents.y1 = agents.y0 + rows * rowHeight + (rows - 1) * rowGap;
+	return lanes;
+}
+
+/** The bands with one subagent row; `overviewLanes` grows the last for more. */
+function baseLanes(compact: boolean, provider: boolean): LaneBox[] {
 	if (compact && provider) {
 		return [
 			{ lane: "turns", label: "Turns", y0: 1, y1: 10 },
@@ -442,6 +514,7 @@ export function layoutOverview(trace: SessionTrace, scale: Scale, lanes: LaneBox
 			items.push({ key, lane: "llm", family, error: false, x0: x0 - 1, x1: x0 + 2, y0: box.llm.y0, y1: box.llm.y1, start, end, record });
 		}
 	}
+	const packing = packChildren(trace);
 	for (const child of trace.children) {
 		const span = childSpan(trace, child);
 		if (span.start === undefined) continue;
@@ -450,6 +523,8 @@ export function layoutOverview(trace: SessionTrace, scale: Scale, lanes: LaneBox
 		if (outside(start, end)) continue;
 		const x0 = scale.x(start);
 		const x1 = Math.max(x0 + 2, scale.x(end));
+		const agentRow = Math.min(packing.rowOf.get(child.sessionId) ?? 0, (box.agents.rows ?? 1) - 1);
+		const { y0, y1 } = agentRowBox(box.agents, agentRow);
 		items.push({
 			key: `child:${child.sessionId}`,
 			lane: "agents",
@@ -457,11 +532,12 @@ export function layoutOverview(trace: SessionTrace, scale: Scale, lanes: LaneBox
 			error: false,
 			x0,
 			x1,
-			y0: box.agents.y0,
-			y1: box.agents.y1,
+			y0,
+			y1,
 			start,
 			end,
 			childId: child.sessionId,
+			agentRow,
 		});
 	}
 	return items;

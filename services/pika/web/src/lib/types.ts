@@ -29,6 +29,22 @@ export interface SessionLink {
 	agentType?: string;
 	description?: string;
 	herder?: HerderLink;
+	/** A superagent ticket's child: `{ ticketId, branch, title }`, as its creator wrote it; read it with `linkTicket`. */
+	superagent?: unknown;
+}
+
+/** A superagent ticket's metadata, validated. */
+export interface TicketInfo {
+	id: number;
+	branch?: string;
+	title?: string;
+}
+
+/** A `superagent-report` turn's report header: `#<ticketId> <kind> · <title>`. */
+export interface TraceTurnReport {
+	ticketId: number;
+	kind: string;
+	title: string;
 }
 
 export interface SessionSummary {
@@ -211,6 +227,8 @@ export interface TraceTurn {
 	toolErrors: number;
 	cost: number;
 	tokens: Tokens;
+	/** For a `superagent-report` turn, every report's header, read from the whole text; older servers omit it. */
+	reports?: TraceTurnReport[];
 }
 
 /** A model call: `start` is the assistant message's timestamp, `end` its entry's. */
@@ -292,6 +310,8 @@ export interface TraceChild {
 	tokens: Tokens;
 	cost: number;
 	title: string;
+	/** A superagent ticket's metadata from its link; owner namespace only. */
+	ticket?: TicketInfo;
 }
 
 /**

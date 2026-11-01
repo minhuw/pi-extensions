@@ -102,7 +102,7 @@ Child-session creators (Subagents, Herder) append this custom entry to the child
   "herder":{"runId":"…","stepKey":"…","stepId":"…","task":"…?","role":"…","attempt":1,"launch":1,"repo":"…?"}
 }}
 ```
-`herder` is present only for Herder steps. The server derives session links from this entry, and falls back to the session header's `parentSession`.
+`herder` is present only for Herder steps. The server derives session links from this entry, and falls back to the session header's `parentSession`. Other top-level keys are kept in the stored link (`SessionSummary.link`); superagent's ticket children add `"superagent":{"ticketId":1,"branch":"pi/1-…","title":"…"}` with `agentType: "ticket"` and `parentToolCallId` the `ticket_create` call.
 
 ## Child-session hook (in process; extensions never import each other)
 - `globalThis[Symbol.for("pi-extensions.child-session-hooks")]` is a `Set` of `{ name: string, extensionFactory: (pi: ExtensionAPI) => void }`. Whoever needs it first creates it.
@@ -172,10 +172,10 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   ```
   { sessionId, startedAt?, lastAt?,
     turns: [{ index, startSeq, endSeq, at?, durationMs, userText, customType?,
-              modelCalls, toolCalls, toolErrors, cost, tokens }],
+              modelCalls, toolCalls, toolErrors, cost, tokens, reports? }],
     records: (Llm | Tool | Compaction | BranchSummary)[],
     children: [{ sessionId, parentToolCallId?, agentType?, description?, kind, startedAt?, lastAt?,
-                 entryCount, tokens, cost, title }] }
+                 entryCount, tokens, cost, title, ticket? }] }
   Llm           = { kind: "llm", seq, turn?, start?, end?, sentAt?, responseAt?, firstTokenAt?, firstToken?,
                     model?, provider?, stopReason?, error?,
                     input, output, cacheRead, cacheWrite, cost, requestId?, text?, thinking?, toolCalls }
@@ -185,12 +185,14 @@ Every path is under `{base}/api/v1/`. Cursors are opaque strings, and `limit` de
   BranchSummary = { kind: "branch-summary", seq, turn?, at? }
   ```
   - `turns` are the session's turns as `GET sessions/:id/turns` gives them, without `finalText`, with `userText` cut to 200 characters.
+  - `reports` is present on a turn whose `customType` is `superagent-report`: `[{ ticketId, kind, title }]`, at most 50, one per report header in the whole (in public, scrubbed) prompt before it is cut. A header is a line `#<ticketId> <kind> · <title>` that opens the text or follows a blank line, with `ticketId` from 1 to 1,000,000,000 and `kind` 1 to 32 lowercase letters or `-`; titles are trimmed, control characters become spaces, and they are cut to 200 characters. Other lines are ignored.
   - `records` are sorted by `seq`. A tool call has its assistant message's seq and follows it, in the message's order; a tool result without its call has the result's seq.
   - An `llm` record is an assistant message. `start` is its `timestamp`, which pi sets when the request starts. `end` is `start + durationMs` when the message has pi's `durationMs` (the time to the end of the response), otherwise the entry's `timestamp`, which pi writes once the response has ended. Times outside the years 1970 to 9999 and a `durationMs` that is negative, not finite, or over 7 days are left out. A line in the blob store is read only when it decompresses to at most 4 MiB; a longer or unreadable one (logged once per request) gives its record no `text`, `thinking`, `durationMs`, or `tokensBefore`. `text` is its first non-empty text block and `thinking: true` marks a thinking block; `error` is its `errorMessage`; `toolCalls` counts its tool calls.
   - `sentAt`, `responseAt`, `firstTokenAt`, and `firstToken` are the `timing` of the captured request the call links to (the one `requestId` names), as stored. A time more than 60,000 ms before `start` or more than 1,000 ms after `end`, when they are known, is left out, and `firstToken` is left out with `firstTokenAt`. A call without a linked request, or whose request has no timing, has none of them.
   - A `tool` record's `start` and `end` are the times of the entries of its call and result, and `durationMs` is their difference; a call without a result has no `end`. `summary` comes from the arguments: for `bash`, `shell`, and `powershell`, the command's first line; for `read`, the path, plus `:offset-limit`, `:offset`, or `:-limit` for the arguments given; for `write` and `edit`, the path; for `grep`, `find`, `ls`, and `glob`, `<pattern> in <path>`, or whichever is given; for `web_search`, the query; for `web_fetch`, the URL; for `Agent`, `<subagent_type>: <description>`. For any other tool, such as `mcp__server__tool`, and when those arguments are missing, it is the first string argument of at most 160 characters, else the first line of the first string argument, else `""`. Tool names match case-insensitively. Arguments that are not a JSON object give `""`. Control characters become spaces, and `summary` and `text` are trimmed and cut to 160 characters. `childSessionId` is the first child (by `startedAt`, children without one last, then by id) whose `parentToolCallId` is the call's id.
   - `compaction` and `branch-summary` records are those entries; `tokensBefore` is the compaction's.
-  - `children` are the child sessions as `GET sessions/:id` lists them, except that those without `startedAt` come last, with the link's `agentType` and `description`. `kind` is `herder-step` for a Herder step session (link kind `herder-step` or a Herder run id), otherwise `subagent`.
+  - `children` are the child sessions as `GET sessions/:id` lists them, except that those without `startedAt` come last, with the link's `agentType` and `description`. `kind` is `herder-step` for a Herder step session (link kind `herder-step` or a Herder run id), otherwise `subagent`. `ticket` is `{ id, branch?, title? }` from the link's `superagent` object: `id` is its `ticketId` when that is a JSON integer from 1 to 1,000,000,000 (else there is no `ticket`); `branch` and `title` are kept when they are strings that are non-blank after trimming (control characters become spaces), `branch` only when at most 255 characters, `title` cut to 200. Public traces never have `ticket`, as they omit `link`.
+- **Superagent in the UI:** `superagent-report` messages (one report, or `details: { batch: [...] }`) are labelled "Ticket #N <kind>", or "N ticket reports" for a batch, in turn headers and in the turn they were steered into, each report as its `#N kind` tag (attention kinds `question`, `ready`, `waiting`, `merge-handed` in the agent colour; `failed`, `blocked`, `merge-refused` red; `merged`, `dropped` grey) and title; in-turn messages read their `details`, turns the trace's `reports` or the text's headers. `ticket_create` is an agent-spawning tool: the child whose `parentToolCallId` is its call nests under it, and a child whose `lastAt` is over a second after the call's end is marked "background · ran <duration> after the call returned". The trace overview packs concurrent children greedily into up to 4 branch rows, the last also holding the overflow.
 - **`GET sessions/:id/export`** returns the verbatim JSONL, byte-identical to the original file.
 - **`GET requests/:id`** returns `{ id, sessionId, fidelity, provider, api, model, at, complete, payload }`, where `payload` is the reconstructed request. Block text is spliced in verbatim, so escapes of unpaired UTF-16 surrogates in context messages come back exactly as the client split them.
 - **Herder runs:**

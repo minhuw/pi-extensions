@@ -461,6 +461,51 @@ async fn turns_started_by_an_extension_message_name_its_type() {
     assert_eq!(updates(&app, id, "").await["turns"], json!(turns));
 }
 
+/// A `superagent-report` turn's trace lists every report's header, read from the whole text, also in public.
+#[tokio::test]
+async fn trace_turns_list_superagent_reports() {
+    let app = app(None);
+    let id = "router";
+    let filler = "Long summary. ".repeat(30);
+    let batch = format!(
+        "#3 ready · Fix the parser\n{filler}\n\n#4 question · Which API?\n{filler}\n\n#5 merged · Bump deps sk-ant-api03-{}\nMerged.",
+        "A".repeat(40)
+    );
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-23T08:00:00.000Z", "cwd": "/w/reports" }),
+        json!({ "type": "custom_message", "id": "c1", "parentId": null, "timestamp": "2026-10-23T08:01:00.000Z",
+                "customType": "superagent-report", "content": batch, "display": true,
+                "details": { "batch": [{ "ticketId": 3, "kind": "ready" }] } }),
+        json!({ "type": "message", "id": "a1", "parentId": "c1", "timestamp": "2026-10-23T08:01:01.000Z",
+                "message": assistant("Noted.", "gpt-5", 2) }),
+        json!({ "type": "custom_message", "id": "c2", "parentId": "a1", "timestamp": "2026-10-23T08:02:00.000Z",
+                "customType": "relay-message", "content": "#7 ready · not a report", "display": true }),
+        json!({ "type": "message", "id": "a2", "parentId": "c2", "timestamp": "2026-10-23T08:02:01.000Z",
+                "message": assistant("Ok.", "gpt-5", 3) }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let turns = trace["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["customType"], "superagent-report");
+    assert_eq!(turns[0]["userText"].as_str().unwrap().chars().count(), 200);
+    let key = format!("sk-ant-api03-{}", "A".repeat(40));
+    assert_eq!(
+        turns[0]["reports"],
+        json!([
+            { "ticketId": 3, "kind": "ready", "title": "Fix the parser" },
+            { "ticketId": 4, "kind": "question", "title": "Which API?" },
+            { "ticketId": 5, "kind": "merged", "title": format!("Bump deps {key}") },
+        ])
+    );
+    assert!(turns[1].get("reports").is_none());
+    assert_eq!(publish(&app, "reports", true, None).await.status, StatusCode::OK);
+    let public = public_json(&app, &format!("sessions/{id}/trace")).await;
+    let reports = public["turns"][0]["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 3);
+    assert_eq!(reports[2]["title"], "Bump deps [REDACTED:API_KEY]");
+}
+
 /// `GET sessions/:id` without `children`.
 async fn summary_of(app: &App, id: &str) -> Value {
     let mut detail = app.json(&format!("sessions/{id}")).await;
@@ -1645,6 +1690,77 @@ async fn trace_children_kinds_and_order() {
         .collect();
     assert_eq!(children, [("c-timed", "subagent", true), ("b-step", "herder-step", true), ("a-timeless", "subagent", false)]);
     assert_eq!(trace["records"][1]["childSessionId"], "c-timed");
+}
+
+/// A ticket child's link `superagent` data reaches the owner's trace as `ticket`, validated; public traces never carry it.
+#[tokio::test]
+async fn trace_children_carry_ticket_metadata_for_the_owner_only() {
+    let app = app(None);
+    let id = "main";
+    let values = [
+        json!({ "type": "session", "version": 3, "id": id, "timestamp": "2026-10-24T08:00:00.000Z", "cwd": "/home/me/tickets" }),
+        json!({ "type": "message", "id": "a1", "parentId": null, "timestamp": "2026-10-24T08:00:05.000Z",
+                "message": { "role": "assistant", "stopReason": "toolUse",
+                             "content": [{ "type": "toolCall", "id": "tc1", "name": "ticket_create", "arguments": { "title": "Fix it" } }] } }),
+        json!({ "type": "message", "id": "r1", "parentId": "a1", "timestamp": "2026-10-24T08:00:06.000Z",
+                "message": { "role": "toolResult", "toolCallId": "tc1", "toolName": "ticket_create", "isError": false,
+                             "content": [{ "type": "text", "text": "#3 created" }] } }),
+    ];
+    app.upload(DEVICE, &skey(id), "session", &lines(&values)).await;
+    let child = |child: &str, at: &str, superagent: Value| {
+        lines(&[
+            json!({ "type": "session", "version": 3, "id": child, "timestamp": at, "cwd": "/home/me/tickets" }),
+            json!({ "type": "custom", "id": "l1", "parentId": null, "customType": "pi-extensions.session-link",
+                    "data": { "kind": "subagent", "parentSessionId": id, "parentToolCallId": "tc1", "agentType": "ticket",
+                              "description": "#3 Fix it", "superagent": superagent } }),
+        ])
+    };
+    let long = "x".repeat(300);
+    let children = [
+        ("t1-good", "2026-10-24T08:00:05.500Z", json!({ "ticketId": 3, "branch": "pi/3-fix-it", "title": " Fix\nit " })),
+        ("t2-string-id", "2026-10-24T08:00:06.000Z", json!({ "ticketId": "3", "branch": "pi/3", "title": "t" })),
+        ("t3-float-id", "2026-10-24T08:00:07.000Z", json!({ "ticketId": 1.5, "branch": "pi/1" })),
+        ("t4-negative", "2026-10-24T08:00:08.000Z", json!({ "ticketId": -1 })),
+        ("t5-not-object", "2026-10-24T08:00:09.000Z", json!([3, "pi/3"])),
+        ("t6-bad-fields", "2026-10-24T08:00:10.000Z", json!({ "ticketId": 6, "branch": long, "title": 42 })),
+        ("t7-long-title", "2026-10-24T08:00:11.000Z", json!({ "ticketId": 7, "branch": 7, "title": long })),
+    ];
+    for (child_id, at, superagent) in &children {
+        app.upload(DEVICE, &skey(child_id), "session", &child(child_id, at, superagent.clone())).await;
+    }
+    let trace = app.json(&format!("sessions/{id}/trace")).await;
+    let tickets: Vec<(&str, Option<&Value>)> = trace["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["sessionId"].as_str().unwrap(), c.get("ticket")))
+        .collect();
+    let x200 = "x".repeat(200);
+    assert_eq!(
+        tickets,
+        [
+            ("t1-good", Some(&json!({ "id": 3, "branch": "pi/3-fix-it", "title": "Fix it" }))),
+            ("t2-string-id", None),
+            ("t3-float-id", None),
+            ("t4-negative", None),
+            ("t5-not-object", None),
+            ("t6-bad-fields", Some(&json!({ "id": 6 }))),
+            ("t7-long-title", Some(&json!({ "id": 7, "title": x200 }))),
+        ]
+    );
+    // The owner's summary keeps the whole link.
+    let detail = app.json("sessions/t1-good").await;
+    assert_eq!(detail["link"]["superagent"]["ticketId"], 3);
+
+    assert_eq!(publish(&app, "tickets", true, None).await.status, StatusCode::OK);
+    let trace = public_json(&app, &format!("sessions/{id}/trace")).await;
+    assert_eq!(trace["children"].as_array().unwrap().len(), children.len());
+    assert!(trace["children"].as_array().unwrap().iter().all(|c| c.get("ticket").is_none()));
+    assert!(!trace.to_string().contains("pi/3-fix-it"));
+    let detail = public_json(&app, "sessions/t1-good").await;
+    assert!(detail.get("link").is_none());
+    let tree = public_json(&app, &format!("sessions/{id}/tree")).await;
+    assert!(!tree.to_string().contains("pi/3-fix-it"));
 }
 
 async fn public(app: &App, path: &str) -> Reply {

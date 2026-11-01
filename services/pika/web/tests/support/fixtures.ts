@@ -50,8 +50,8 @@ export function userMessage(text: string, at = 1000): RawEntry {
 }
 
 /** An extension's message, such as relay's `relay-message`; a turn it starts carries its `customType`. */
-export function customMessage(customType: string, content: string, at = 1000): RawEntry {
-	return { type: "custom_message", id: nextId(), parentId: null, timestamp: iso(at), customType, content, display: true };
+export function customMessage(customType: string, content: string, at = 1000, details?: unknown): RawEntry {
+	return { type: "custom_message", id: nextId(), parentId: null, timestamp: iso(at), customType, content, display: true, ...(details !== undefined ? { details } : {}) };
 }
 
 export function assistantMessage(content: unknown[], at = 2000, extra: Record<string, unknown> = {}): RawEntry {

@@ -2,6 +2,7 @@
 import type { SessionTrace, TraceChild, TraceRecord, TraceToolRecord, TraceTurn } from "../lib/types";
 import type { Interval } from "./axis";
 import {
+	childRanPast,
 	isSubagentTool,
 	recordBadge,
 	recordFamily,
@@ -50,7 +51,16 @@ export type LedgerRow =
 			/** For model calls: the tools they called, by name. */
 			calls?: string[];
 	  }
-	| { type: "child"; key: string; child: TraceChild; parentSessionId: string; depth: number; expanded: boolean }
+	| {
+			type: "child";
+			key: string;
+			child: TraceChild;
+			parentSessionId: string;
+			depth: number;
+			expanded: boolean;
+			/** How long the child ran after its spawning call returned, by its own last time. */
+			ranPastMs?: number;
+	  }
 	| { type: "status"; key: string; depth: number; status: "loading" | "error" | "empty" | "deep"; sessionId: string; error?: unknown };
 
 export interface ChildTraceState {
@@ -191,7 +201,7 @@ export function buildLedger(input: LedgerInput): LedgerRow[] {
 			const children = isSubagentTool(record) ? childrenOf(trace, record) : [];
 			const open = children.length > 0 && expanded.has(key);
 			rows.push({ type: "record", key, record, sessionId: trace.sessionId, depth: 0, turnIndex, window, children, expanded: open, calls: record.kind === "llm" ? calls.get(record.seq) : undefined });
-			if (open) pushChildren(rows, key, children, 1, input, ancestors);
+			if (open) pushChildren(rows, key, children, 1, input, ancestors, record.kind === "tool" ? record : undefined);
 		}
 	};
 
@@ -211,7 +221,15 @@ export function buildLedger(input: LedgerInput): LedgerRow[] {
 	return rows;
 }
 
-function pushChildren(rows: LedgerRow[], parentKey: string, children: TraceChild[], depth: number, input: LedgerInput, ancestors: string[]) {
+function pushChildren(
+	rows: LedgerRow[],
+	parentKey: string,
+	children: TraceChild[],
+	depth: number,
+	input: LedgerInput,
+	ancestors: string[],
+	call?: TraceToolRecord,
+) {
 	if (children.length === 1) {
 		pushChildRecords(rows, parentKey, children[0], depth, input, ancestors);
 		return;
@@ -219,7 +237,7 @@ function pushChildren(rows: LedgerRow[], parentKey: string, children: TraceChild
 	for (const child of children) {
 		const key = `${parentKey}>${child.sessionId}`;
 		const open = input.expanded.has(key);
-		rows.push({ type: "child", key, child, parentSessionId: ancestors[ancestors.length - 1], depth, expanded: open });
+		rows.push({ type: "child", key, child, parentSessionId: ancestors[ancestors.length - 1], depth, expanded: open, ranPastMs: childRanPast(call, child) });
 		if (open) pushChildRecords(rows, key, child, depth + 1, input, ancestors);
 	}
 }
@@ -263,7 +281,7 @@ function pushChildRecords(rows: LedgerRow[], parentKey: string, child: TraceChil
 			turnIndex: record.turn,
 			calls: record.kind === "llm" ? calls.get(record.seq) : undefined,
 		});
-		if (open) pushChildren(rows, key, grandchildren, depth + 1, input, nested);
+		if (open) pushChildren(rows, key, grandchildren, depth + 1, input, nested, record.kind === "tool" ? record : undefined);
 	}
 }
 

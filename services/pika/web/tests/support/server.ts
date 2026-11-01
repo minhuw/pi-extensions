@@ -122,6 +122,26 @@ function traceSummary(name: string, args: Json): string | undefined {
 	return [...summary.replace(/[\u0000-\u001f\u007f]/g, " ")].slice(0, 160).join("");
 }
 
+/** The server's ticket rule, written out again: `superagent.ticketId` an integer 1..1e9, string branch (≤255) and title (cut to 200). */
+function ticketOfLink(link: unknown): { id: number; branch?: string; title?: string } | undefined {
+	const data = isObject(link) && isObject(link.superagent) ? link.superagent : undefined;
+	const id = data?.ticketId;
+	if (typeof id !== "number" || !Number.isInteger(id) || id < 1 || id > 1_000_000_000) return undefined;
+	const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : undefined);
+	const branch = text(data?.branch);
+	const title = text(data?.title);
+	return { id, ...(branch && [...branch].length <= 255 ? { branch } : {}), ...(title ? { title: [...title].slice(0, 200).join("") } : {}) };
+}
+
+/** The server's report headers of a `superagent-report` turn: `#<id> <kind> · <title>` lines opening the text or a paragraph. */
+function reportHeaders(text: string): { ticketId: number; kind: string; title: string }[] {
+	return text
+		.split(/\n\s*\n/)
+		.map((paragraph) => /^#(\d+) ([a-z-]+)(?: · (.*))?$/.exec(paragraph.trim().split("\n")[0].trim()))
+		.filter((match): match is RegExpExecArray => match !== null && Number(match[1]) >= 1)
+		.map((match) => ({ ticketId: Number(match[1]), kind: match[2], title: (match[3] ?? "").trim() }));
+}
+
 /** `GET sessions/:id/trace`, derived from a fake session's entries, turns, and children. */
 export function traceOf(session: FakeSession): SessionTrace {
 	const turnOf = (seq: number) => session.turns.find((turn) => turn.startSeq <= seq && seq <= turn.endSeq)?.index;
@@ -197,7 +217,7 @@ export function traceOf(session: FakeSession): SessionTrace {
 				isError: resultMessage?.isError === true,
 				...(summary !== undefined ? { summary } : {}),
 				...(resultMessage ? { outputSize: output.reduce((n, block) => n + (typeof block.text === "string" ? block.text.length : 0), 0) } : {}),
-				...(child && name === "Agent" ? { childSessionId: child.id } : {}),
+				...(child && (name === "Agent" || name === "ticket_create") ? { childSessionId: child.id } : {}),
 			});
 		}
 	}
@@ -219,6 +239,7 @@ export function traceOf(session: FakeSession): SessionTrace {
 			durationMs: turn.durationMs,
 			userText: turn.userText.slice(0, 200),
 			...(turn.customType ? { customType: turn.customType } : {}),
+			...(turn.customType === "superagent-report" ? { reports: reportHeaders(turn.userText) } : {}),
 			modelCalls: turn.modelCalls,
 			toolCalls: turn.toolCalls,
 			toolErrors: turn.toolErrors,
@@ -237,6 +258,7 @@ export function traceOf(session: FakeSession): SessionTrace {
 			tokens: child.tokens,
 			cost: child.cost,
 			title: child.title,
+			...(ticketOfLink(child.link) ? { ticket: ticketOfLink(child.link) } : {}),
 		})),
 	};
 }

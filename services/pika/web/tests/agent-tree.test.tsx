@@ -5,6 +5,7 @@ import { LIVE_WINDOW_MS, TRACE_REFRESH_MS } from "../src/session/live";
 import { entry, header, iso, summary, turn, userMessage } from "./support/fixtures";
 import { mockLayout, renderApp } from "./support/render";
 import { createFakeServer, treeOf, type FakeSession } from "./support/server";
+import { ticketFamily } from "./support/tickets";
 
 /** The session page and its views load on demand, which takes longer than the default second on a busy machine. */
 const LOAD_MS = 4000;
@@ -279,5 +280,20 @@ describe("the agent tree", () => {
 		expect(within(rowOf("a")).getByRole("link", { name: "Session a" }).getAttribute("href")).toBe("/public/s/a?view=agents");
 		expect(calls).toContain("/api/public/v1/sessions/a1/tree");
 		expect(calls.some((call) => call.startsWith("/api/v1/"))).toBe(false);
+	});
+});
+
+describe("superagent tickets in the agent tree", () => {
+	it("lists three tickets and a ticket's grandchildren, each ticket with its #N badge and branch", async () => {
+		renderApp("/s/main?view=agents", createFakeServer({ sessions: ticketFamily() }).fetch);
+		await tree();
+		await waitFor(() => expect(rows()).toEqual([["main", "0"], ["tk1", "1"], ["g1", "2"], ["g2", "2"], ["tk2", "1"], ["tk3", "1"]]), { timeout: LOAD_MS });
+		const badge = rowOf("tk2").querySelector<HTMLElement>("[data-ticket-badge]")!;
+		expect(badge.textContent).toBe("#2");
+		expect(badge.getAttribute("title")).toBe("Ticket #2 · pi/2-add-retries");
+		// The title, not the description that repeats the number.
+		expect(within(rowOf("tk2")).getByRole("link", { name: "Add retries" })).toBeTruthy();
+		expect(rowOf("g1").querySelector("[data-ticket-badge]")).toBeNull();
+		expect(rowOf("main").querySelector("[data-ticket-badge]")).toBeNull();
 	});
 });

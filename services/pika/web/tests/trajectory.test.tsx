@@ -10,6 +10,7 @@ import { mockLayout, renderApp } from "./support/render";
 import { anthropicPayload, modelRequest } from "./support/requests";
 import { createFakeServer, traceOf, type FakeSession } from "./support/server";
 import { entryCalls, inspector, key, row, rows, selected, session, slideOver } from "./support/trajectory";
+import { ticketFamily } from "./support/tickets";
 
 function child(id: string, parent: string, toolCallId: string, link: Partial<SessionLink>, at: number): ChildSession {
 	return {
@@ -753,5 +754,55 @@ describe("trajectory virtualization", () => {
 		expect(Math.max(...rows().map((node) => Number(node.dataset.seq)))).toBeGreaterThan(4000);
 		// Nothing but the trace was fetched.
 		expect(entryCalls(server.calls)).toEqual([]);
+	});
+});
+
+describe("superagent tickets in the trajectory", () => {
+	it("nests each ticket under its ticket_create call, notes that it ran past the call, and labels report turns", async () => {
+		renderApp("/s/main", createFakeServer({ sessions: ticketFamily() }).fetch);
+		await waitFor(() => expect(document.querySelectorAll("[data-ledger-row][data-kind='agent']")).toHaveLength(3), { timeout: 4000 });
+		const calls = [...document.querySelectorAll<HTMLElement>("[data-ledger-row][data-kind='agent']")];
+		expect(calls.map((node) => node.querySelector("[data-badge]")?.textContent)).toEqual(["TICKET", "TICKET", "TICKET"]);
+		expect(calls.map((node) => node.querySelector("[data-ticket-badge]")?.textContent)).toEqual(["#1", "#2", "#3"]);
+		expect(calls[1].querySelector("[data-ticket-badge]")?.getAttribute("title")).toBe("Ticket #2 · pi/2-add-retries");
+		// Calls returned at 3 s; ticket 1 last worked at 243 s.
+		expect(calls[0].querySelector("[data-ran-past]")?.textContent).toBe("background · ran 4m after the call returned");
+		expect(calls[1].querySelector("[data-ran-past]")?.textContent).toBe("background · ran 6m 57s after the call returned");
+
+		// Expanding a ticket nests its records, including its own Agent calls, under the call.
+		fireEvent.click(within(calls[0]).getByRole("button", { name: "Expand subagent" }));
+		await waitFor(() => expect(document.querySelectorAll("[data-ledger-row][data-depth='1']").length).toBeGreaterThan(0));
+		const nested = [...document.querySelectorAll<HTMLElement>("[data-ledger-row][data-depth='1']")];
+		expect(nested.filter((node) => node.dataset.kind === "agent").map((node) => node.querySelector("[data-badge]")?.textContent)).toEqual(["AGENT", "AGENT"]);
+		// The nested records keep the ticket's own times: its last one is minutes after the call's end.
+		expect(nested.at(-1)?.dataset.seq).toBe("6");
+
+		// Report turns name the ticket, its kind, and its title; a batch is one header listing each report.
+		const head = (index: number) => document.querySelector<HTMLElement>(`[data-turn='${index}'][data-turn-head]`)!;
+		expect(head(1).querySelector("[data-turn-reports]")?.textContent).toBe("#1 readyFix the parser");
+		expect([...head(1).querySelectorAll("[data-report-tag]")].map((node) => (node as HTMLElement).dataset.reportTone)).toEqual(["attention"]);
+		const batch = head(2).querySelector<HTMLElement>("[data-turn-reports]")!;
+		expect(batch.dataset.turnReports).toBe("2");
+		expect(batch.textContent).toContain("2 ticket reports");
+		expect([...batch.querySelectorAll<HTMLElement>("[data-report-tag]")].map((node) => `${node.textContent}:${node.dataset.reportTone}`)).toEqual([
+			"#2 question:attention",
+			"#3 merged:settled",
+		]);
+		// Relay turns are unchanged.
+		expect(head(4).querySelector("[data-turn-reports]")).toBeNull();
+		expect(head(4).querySelector("[data-turn-start]")?.getAttribute("title")).toBe("relay-message");
+	});
+
+	it("gives concurrent tickets their own overview rows, the subagents label on the first", async () => {
+		renderApp("/s/main", createFakeServer({ sessions: ticketFamily() }).fetch);
+		const overview = await waitFor(() => {
+			const node = document.querySelector<HTMLElement>("[data-overview]");
+			if (!node) throw new Error("no overview");
+			return node;
+		});
+		const gutter = overview.querySelector<HTMLElement>("[data-overview-rows]")!;
+		expect([...gutter.querySelectorAll("span")].map((node) => node.textContent)).toEqual(["Turns", "Model calls", "Tools", "Subagents"]);
+		// Three rows of 16 px with 2 px between, instead of one band: 68 + 52 + 5.
+		expect(gutter.style.height).toBe("125px");
 	});
 });

@@ -3,8 +3,10 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useScrollRoot } from "../components/Layout";
 import { Markdown } from "../components/Markdown";
-import { cx, EmptyState, ErrorState, Pill, Skeleton, SkeletonLines } from "../components/ui";
+import { ReportList } from "../components/Ticket";
+import { cx, EmptyState, ErrorState, Pill, Skeleton, SkeletonLines, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
+import { turnReports } from "../lib/tickets";
 import { formatCost, formatDateTime, formatDuration, plural } from "../lib/format";
 import { useShortcuts } from "../lib/keyboard";
 import type { Entry, Turn } from "../lib/types";
@@ -90,6 +92,7 @@ function TurnHead({
 }) {
 	const { turn } = row;
 	const start = turnStart(turn);
+	const reports = turnReports(turn);
 	return (
 		<div
 			className={cx(
@@ -109,7 +112,19 @@ function TurnHead({
 				</span>
 				<span className="tnum ml-auto">{formatDateTime(turn.at)}</span>
 			</div>
-			{turn.userText ? <Markdown text={turn.userText} className="text-[15px]" /> : <div className="text-muted italic">(empty prompt)</div>}
+			{reports.length ? (
+				<>
+					<ReportList reports={reports} className="my-1" />
+					{/* The reports' own text, which says what each ticket needs; open for one report, closed for a batch. */}
+					<Toggle className="mt-1 text-[14px]" defaultOpen={reports.length === 1} label={<span className="text-muted">{reports.length === 1 ? "Report" : "Reports"}</span>}>
+						<Markdown text={turn.userText} className="text-[14px]" />
+					</Toggle>
+				</>
+			) : turn.userText ? (
+				<Markdown text={turn.userText} className="text-[15px]" />
+			) : (
+				<div className="text-muted italic">(empty prompt)</div>
+			)}
 			<WorkStrip turn={turn} expanded={row.expanded} onToggle={onToggle} />
 		</div>
 	);

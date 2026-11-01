@@ -68,6 +68,66 @@ pub struct TraceTurn {
     pub tool_errors: i64,
     pub cost: f64,
     pub tokens: Tokens,
+    /// For a `superagent-report` turn: each report's header line, read from the whole prompt before it is cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reports: Option<Vec<TurnReport>>,
+}
+
+/// The `#<ticketId> <kind> · <title>` line that starts each report of a `superagent-report` message.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnReport {
+    pub ticket_id: i64,
+    pub kind: String,
+    pub title: String,
+}
+
+/// The custom message type of superagent's ticket reports.
+pub const REPORT_TYPE: &str = "superagent-report";
+/// At most this many reports are read from one message.
+pub const MAX_REPORTS: usize = 50;
+/// A report kind is at most this long.
+const REPORT_KIND_CHARS: usize = 32;
+
+/// The reports of a `superagent-report` message's text: each line `#<ticketId> <kind> · <title>` that starts the text
+/// or follows a blank line, with an id from 1 to `TICKET_ID_MAX` and a kind of lowercase letters and `-`. Titles are
+/// cut to `TICKET_TITLE_CHARS`.
+pub fn reports_of(text: &str) -> Vec<TurnReport> {
+    let mut reports = Vec::new();
+    let mut starts = true;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            starts = true;
+            continue;
+        }
+        if std::mem::take(&mut starts) {
+            if let Some(report) = report_line(line) {
+                reports.push(report);
+                if reports.len() == MAX_REPORTS {
+                    break;
+                }
+            }
+        }
+    }
+    reports
+}
+
+fn report_line(line: &str) -> Option<TurnReport> {
+    let rest = line.strip_prefix('#')?;
+    let (id, rest) = rest.split_once(' ')?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let ticket_id = id.parse::<i64>().ok().filter(|id| (1..=TICKET_ID_MAX).contains(id))?;
+    let (kind, title) = rest.split_once(" · ").map_or((rest.trim_end_matches(" ·"), ""), |(k, t)| (k, t));
+    let valid = |c: char| c.is_ascii_lowercase() || c == '-';
+    if kind.is_empty() || kind.chars().count() > REPORT_KIND_CHARS || !kind.chars().all(valid) {
+        return None;
+    }
+    let mut title = one_line(title);
+    cut_to(&mut title, TICKET_TITLE_CHARS);
+    Some(TurnReport { ticket_id, kind: kind.to_owned(), title })
 }
 
 #[derive(Debug, Serialize)]
@@ -189,13 +249,51 @@ pub struct TraceChild {
     pub tokens: Tokens,
     pub cost: f64,
     pub title: String,
+    /// The link's `superagent` data, validated; owner namespace only (a public trace never has it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<TraceTicket>,
+}
+
+/// A superagent ticket child's metadata, from its link's `superagent: { ticketId, branch, title }`.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceTicket {
+    pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// The highest ticket id taken; a larger or non-integer `ticketId` gives no ticket.
+pub const TICKET_ID_MAX: i64 = 1_000_000_000;
+/// A longer branch name is left out (a cut one would name another branch).
+pub const TICKET_BRANCH_CHARS: usize = 255;
+/// A ticket title is cut to this many characters.
+pub const TICKET_TITLE_CHARS: usize = 200;
+
+/// The ticket of a link's data: `superagent.ticketId` must be an integer from 1 to `TICKET_ID_MAX`; `branch` and
+/// `title` are kept when they are strings, non-blank after `one_line`, the branch at most `TICKET_BRANCH_CHARS`
+/// characters and the title cut to `TICKET_TITLE_CHARS`. Anything else is ignored.
+pub fn ticket_of(data: &str) -> Option<TraceTicket> {
+    let value: Value = serde_json::from_str(data).ok()?;
+    let sa = value.get("superagent")?.as_object()?;
+    let id = sa.get("ticketId")?.as_i64().filter(|id| (1..=TICKET_ID_MAX).contains(id))?;
+    let text = |key: &str| sa.get(key).and_then(Value::as_str).map(one_line).filter(|s| !s.is_empty());
+    let branch = text("branch").filter(|b| b.chars().count() <= TICKET_BRANCH_CHARS);
+    let title = text("title").map(|mut t| {
+        cut_to(&mut t, TICKET_TITLE_CHARS);
+        t
+    });
+    Some(TraceTicket { id, branch, title })
 }
 
 pub(crate) const SESSION_SQL: &str = "SELECT sid, started_at, last_at, entry_count FROM sessions WHERE id = ?1";
 
 /// `?2` is how many characters of `user_text` to read: `USER_TEXT_CHARS`, or all of it for a published trace, which is
-/// scrubbed before it is cut.
-pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq, substr(t.user_text, 1, ?2), t.at, t.duration_ms,
+/// scrubbed before it is cut. A `superagent-report` turn's is read whole, for its `reports`.
+pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq,
+         CASE WHEN e.custom_type = 'superagent-report' THEN t.user_text ELSE substr(t.user_text, 1, ?2) END, t.at, t.duration_ms,
          t.model_calls, t.tool_calls, t.tool_errors, t.cost, t.input, t.output, t.cache_read, t.cache_write, e.custom_type
      FROM turns t LEFT JOIN entries e ON e.sid = t.sid AND e.seq = t.start_seq AND e.type = 'custom_message'
      WHERE t.sid = ?1 ORDER BY t.idx";
@@ -219,7 +317,7 @@ pub(crate) const SUMMARIES_SQL: &str = "SELECT e.seq, e.type, e.turn, e.ts, l.da
      WHERE e.sid = ?1 AND e.type IN ('compaction', 'branch_summary') ORDER BY e.seq";
 
 pub(crate) const CHILDREN_SQL: &str = "SELECT s.id, s.started_at, s.last_at, s.entry_count, s.input, s.output, s.cache_read,
-         s.cache_write, s.cost, s.title, s.herder_run_id, l.parent_tool_call_id, l.agent_type, l.description, l.kind
+         s.cache_write, s.cost, s.title, s.herder_run_id, l.parent_tool_call_id, l.agent_type, l.description, l.kind, l.data
      FROM sessions s LEFT JOIN session_links l USING (sid)
      WHERE s.parent_session_id = ?1 ORDER BY s.started_at IS NULL, s.started_at, s.id";
 
@@ -260,6 +358,9 @@ fn cut_to(s: &mut String, max: usize) {
 /// `one_line` ends in a non-blank, so cutting it keeps what cutting before trimming would.
 pub fn cut(trace: &mut Trace) {
     for turn in &mut trace.turns {
+        if turn.custom_type.as_deref() == Some(REPORT_TYPE) {
+            turn.reports = Some(reports_of(&turn.user_text));
+        }
         cut_to(&mut turn.user_text, USER_TEXT_CHARS);
     }
     for record in &mut trace.records {
@@ -568,6 +669,7 @@ fn turn_row(r: &Row) -> rusqlite::Result<TraceTurn> {
         cost: r.get(9)?,
         tokens: Tokens { input: r.get(10)?, output: r.get(11)?, cache_read: r.get(12)?, cache_write: r.get(13)? },
         custom_type: r.get(14)?,
+        reports: None,
     })
 }
 
@@ -587,6 +689,7 @@ fn child_row(r: &Row) -> rusqlite::Result<TraceChild> {
         tokens: Tokens { input: r.get(4)?, output: r.get(5)?, cache_read: r.get(6)?, cache_write: r.get(7)? },
         cost: r.get(8)?,
         title: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        ticket: text_ref(r, 15)?.and_then(ticket_of),
     })
 }
 
@@ -685,7 +788,12 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
     let user_chars = if public { i64::MAX } else { USER_TEXT_CHARS as i64 };
     let turns =
         tx.prepare_cached(TURNS_SQL)?.query_map((sid, user_chars), turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let children = tx.prepare_cached(CHILDREN_SQL)?.query_map([id], child_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut children =
+        tx.prepare_cached(CHILDREN_SQL)?.query_map([id], child_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if public {
+        // Link data is owner-only, like `SessionSummary.link`.
+        children.iter_mut().for_each(|child| child.ticket = None);
+    }
     // A workflow call can start several children; the tool record names the first.
     let mut child_of: HashMap<&str, &str> = HashMap::new();
     for child in &children {
@@ -811,6 +919,22 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResu
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn report_headers_and_ticket_data() {
+        let r = |id, kind: &str, title: &str| TurnReport { ticket_id: id, kind: kind.into(), title: title.into() };
+        let text = "#3 ready · Fix the parser\nTests pass.\n#9 failed · not a header, inside a report\n\n  #4 merge-refused · Bump deps  \n\n#x ready · bad id\n\n#0 ready · zero\n\n#5 Ready · upper\n\n#6 waiting";
+        assert_eq!(reports_of(text), [r(3, "ready", "Fix the parser"), r(4, "merge-refused", "Bump deps"), r(6, "waiting", "")]);
+        assert_eq!(reports_of(&"#1 ready · t\n\n".repeat(80)).len(), MAX_REPORTS);
+        assert_eq!(reports_of(&format!("#2 ready · {}", "y".repeat(300)))[0].title.chars().count(), TICKET_TITLE_CHARS);
+        assert!(reports_of("plain text").is_empty());
+
+        assert_eq!(ticket_of(r#"{"superagent":{"ticketId":2,"branch":"pi/2-x","title":"X"}}"#), Some(TraceTicket { id: 2, branch: Some("pi/2-x".into()), title: Some("X".into()) }));
+        assert_eq!(ticket_of(r#"{"superagent":{"ticketId":2000000000}}"#), None);
+        assert_eq!(ticket_of(r#"{"superagent":null}"#), None);
+        assert_eq!(ticket_of("not json"), None);
+        assert_eq!(ticket_of(r#"{"superagent":{"ticketId":2,"branch":"  "}}"#), Some(TraceTicket { id: 2, branch: None, title: None }));
+    }
 
     #[test]
     fn summaries_by_tool_family() {

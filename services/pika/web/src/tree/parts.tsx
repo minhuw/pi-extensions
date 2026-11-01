@@ -2,6 +2,7 @@ import { Icon } from "../components/icons";
 import { Tag } from "../components/Tag";
 import { cx } from "../components/ui";
 import { childLabel } from "../lib/labels";
+import { linkTicket } from "../lib/tickets";
 import type { ChildSession } from "../lib/types";
 import { KindBullet } from "../trace/parts";
 import type { FamilyNode, FamilyTree } from "./model";
@@ -40,7 +41,7 @@ export function sessionLabel(session: ChildSession, top: boolean): { kind: Kind;
 	return {
 		kind: link?.kind === "herder-step" || link?.herder ? "herder" : "subagent",
 		type,
-		description: link?.description || session.title || description || "Untitled session",
+		description: linkTicket(link)?.title || link?.description || session.title || description || "Untitled session",
 	};
 }
 

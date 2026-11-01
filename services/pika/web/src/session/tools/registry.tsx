@@ -5,6 +5,7 @@ import { AgentTool, GenericTool } from "./agent";
 import { BashTool } from "./bash";
 import { CodemodeTool, EditTool, ReadTool, toolPath, WriteTool } from "./files";
 import { argString, type ToolRenderProps } from "./shared";
+import { TicketCreateTool } from "./ticket";
 import { WebTool } from "./web";
 
 export interface ToolName {
@@ -70,6 +71,13 @@ const builtins: ToolRenderer[] = [
 		match: (name) => name.server === undefined && name.base === "Agent",
 		summary: (call) => argString(call, "description"),
 		Component: AgentTool,
+	},
+	{
+		id: "ticket",
+		icon: "agent",
+		match: (name) => name.server === undefined && name.base === "ticket_create",
+		summary: (call) => argString(call, "title"),
+		Component: TicketCreateTool,
 	},
 ];
 

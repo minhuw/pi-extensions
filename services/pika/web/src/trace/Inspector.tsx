@@ -5,7 +5,9 @@ import { Icon } from "../components/icons";
 import { JsonTree } from "../components/JsonTree";
 import { Markdown } from "../components/Markdown";
 import { modelTextClass } from "../components/ModelName";
+import { ReportList, TicketBadge } from "../components/Ticket";
 import { Callout, cx, ErrorState, SkeletonLines, Toggle } from "../components/ui";
+import { traceTicket, turnReports } from "../lib/tickets";
 import { ContextView } from "../context/ContextDrawer";
 import { useApi } from "../lib/api";
 import { formatCount, formatDateTime, plural } from "../lib/format";
@@ -396,9 +398,17 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 		);
 	} else if (target.kind === "child") {
 		const { child } = target;
+		const ticket = traceTicket(child);
 		bullet = <KindBullet family="agent" size={20} />;
-		name = child.agentType ?? "subagent";
-		summary = <div className="text-[13px] text-ink/80">{child.description ?? child.title}</div>;
+		name = ticket ? (
+			<>
+				<TicketBadge ticket={ticket} className="mr-1.5" />
+				{child.agentType ?? "ticket"}
+			</>
+		) : (
+			(child.agentType ?? "subagent")
+		);
+		summary = <div className="text-[13px] text-ink/80">{ticket?.title ?? child.description ?? child.title}</div>;
 		status = (
 			<span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">
 				{formatSpan(spanBetween(child.startedAt, child.lastAt))}
@@ -426,8 +436,10 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 	} else {
 		const { turn } = target;
 		const start = turnStart(turn);
+		const reports = turnReports(turn);
 		bullet = <KindBullet family="user" glyph={start.glyph} size={20} />;
 		name = start.label;
+		if (reports.length) summary = <ReportList reports={reports} />;
 		status = (
 			<span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">
 				{formatSpan(turn.durationMs)}

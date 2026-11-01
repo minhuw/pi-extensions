@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { drawGlyph, type GlyphName } from "../components/glyphs";
+import { TicketBadge } from "../components/Ticket";
 import { cx } from "../components/ui";
 import { COST_DIAMETERS, costStep, formatCost, formatCount, plural } from "../lib/format";
+import { backgroundLabel, traceTicket, turnReports } from "../lib/tickets";
 import type { SessionTrace } from "../lib/types";
 import {
+	agentRowBox,
 	axisTicks,
 	centreWindow,
 	clampWindow,
@@ -14,6 +17,7 @@ import {
 	makeScale,
 	MIN_WINDOW_MS,
 	overviewLanes,
+	packChildren,
 	panWindow,
 	providerY,
 	tickStep,
@@ -28,7 +32,7 @@ import {
 	type Scale,
 } from "./axis";
 import { formatClockTime, formatElapsed, formatGap, formatPhase, formatSpan, formatTick, plainLine } from "./format";
-import { hasProviderTiming, recordDuration, recordKey, recordName, recordSpan, recordSummary, turnStart, type Family } from "./kinds";
+import { childRanPast, hasProviderTiming, recordDuration, recordKey, recordName, recordSpan, recordSummary, spawningCall, turnStart, type Family } from "./kinds";
 import { KindBadge, KindBullet } from "./parts";
 
 const FAMILY_VARS: Record<Family | "turn" | "error" | "thinking", string> = {
@@ -302,7 +306,8 @@ function drawBase(
 	ctx.clearRect(0, 0, scale.width, height);
 	const lane = Object.fromEntries(lanes.map((l) => [l.lane, l])) as Record<OverviewItem["lane"], (typeof lanes)[number]>;
 	const trunk = trunkY(lanes);
-	const branchY = (lane.agents.y0 + lane.agents.y1) / 2;
+	// Each child's branch runs along its own row of the subagents band; concurrent children are packed apart.
+	const branchY = (item: OverviewItem) => (item.y0 + item.y1) / 2;
 	const children = new Map(trace.children.map((child) => [child.sessionId, child]));
 	const turns = items.filter((item) => item.lane === "turns");
 	const llms = items.filter((item) => item.lane === "llm" && item.record?.kind === "llm");
@@ -378,9 +383,10 @@ function drawBase(
 		ctx.fillText(station.text, station.x0 + 3, (lane.turns.y0 + barTop) / 2 + 0.5);
 	}
 
-	// Branch lines: each child leaves the trunk where it started and runs as long as it worked. Subagents are the
-	// agent kind and take its line colour; Herder steps are not a record kind, so their branches are ink.
-	const branches = items.filter((item) => item.lane === "agents").sort((a, b) => a.x0 - b.x0);
+	// Branch lines: each child leaves the trunk where it started and runs as long as it worked, by its own times, also
+	// past the call that spawned it. Subagents are the agent kind and take its line colour; Herder steps are not a
+	// record kind, so their branches are ink. Lower rows are drawn first, so an upper row's line crosses over them.
+	const branches = items.filter((item) => item.lane === "agents").sort((a, b) => (b.agentRow ?? 0) - (a.agentRow ?? 0) || a.x0 - b.x0);
 	const isStep = (item: OverviewItem) => (item.childId ? children.get(item.childId)?.kind === "herder-step" : false);
 	ctx.lineWidth = compact ? 1.5 : 2;
 	ctx.lineCap = "round";
@@ -388,10 +394,11 @@ function drawBase(
 		const r = 4;
 		ctx.strokeStyle = isStep(item) ? palette.ink : palette.agent;
 		ctx.beginPath();
+		const y = branchY(item);
 		ctx.moveTo(item.x0, trunk);
-		ctx.lineTo(item.x0, branchY - r);
-		ctx.quadraticCurveTo(item.x0, branchY, item.x0 + r, branchY);
-		ctx.lineTo(Math.max(item.x0 + r, item.x1), branchY);
+		ctx.lineTo(item.x0, y - r);
+		ctx.quadraticCurveTo(item.x0, y, item.x0 + r, y);
+		ctx.lineTo(Math.max(item.x0 + r, item.x1), y);
 		ctx.stroke();
 	}
 	ctx.lineCap = "butt";
@@ -488,23 +495,27 @@ function drawBase(
 		const item = branches[i];
 		const r = compact ? 5 : 6.5;
 		const step = isStep(item);
+		const y = branchY(item);
 		if (step) {
 			// A Herder step stops at an open station ring.
 			ctx.beginPath();
-			ctx.arc(item.x0, branchY, r - 1, 0, Math.PI * 2);
+			ctx.arc(item.x0, y, r - 1, 0, Math.PI * 2);
 			ctx.fillStyle = palette.page;
 			ctx.fill();
 			ctx.strokeStyle = palette.ink;
 			ctx.lineWidth = 2;
 			ctx.stroke();
-		} else bullet(ctx, item.x0, branchY, r, palette.agent, palette.agentInk, "agent", palette.page);
+		} else bullet(ctx, item.x0, y, r, palette.agent, palette.agentInk, "agent", palette.page);
 		if (compact || !item.childId) continue;
 		const child = children.get(item.childId);
-		const next = branches[i + 1];
+		// The label runs to the next branch on the same row.
+		const next = branches.find((other) => other !== item && (other.agentRow ?? 0) === (item.agentRow ?? 0) && other.x0 > item.x0);
 		const room = (next ? next.x0 : scale.width) - item.x0 - r - 12;
 		if (room < 36) continue;
-		const type = step ? `${child?.agentType || "Herder"} step` : child?.agentType || "Subagent";
-		const name = [type, child?.description].filter(Boolean).join(" · ");
+		const ticket = traceTicket(child);
+		const kind = step ? `${child?.agentType || "Herder"} step` : child?.agentType || "Subagent";
+		const type = ticket ? `#${ticket.id} ${kind}` : kind;
+		const name = [type, ticket?.title ?? child?.description].filter(Boolean).join(" · ");
 		ctx.font = `500 11px ${CANVAS_FONT}`;
 		// A label names at least the agent's type, whole; a cut that leaves no description to read keeps only the type.
 		if (ctx.measureText(type).width > room) continue;
@@ -513,9 +524,9 @@ function drawBase(
 		const tx = item.x0 + r + 5;
 		const tw = ctx.measureText(text).width;
 		ctx.fillStyle = palette.page;
-		ctx.fillRect(tx - 2, branchY - 7, tw + 4, 14);
+		ctx.fillRect(tx - 2, y - 7, tw + 4, 14);
 		ctx.fillStyle = palette.ink;
-		ctx.fillText(text, tx, branchY + 0.5);
+		ctx.fillText(text, tx, y + 0.5);
 	}
 }
 
@@ -662,7 +673,8 @@ export function Overview({
 	const theme = usePaintVersion();
 	// The provider row only once some model call has its first token timed; older sessions keep the layout they had.
 	const timed = useMemo(() => hasProviderTiming(trace), [trace]);
-	const lanes = useMemo(() => overviewLanes(compact, timed), [compact, timed]);
+	const packing = useMemo(() => packChildren(trace), [trace]);
+	const lanes = useMemo(() => overviewLanes(compact, timed, packing.rows), [compact, timed, packing.rows]);
 	const height = lanes[lanes.length - 1].y1 + (compact ? 3 : 5);
 	const clockHeight = compact ? 14 : 16;
 	const axis = useMemo(() => foldGaps(traceIntervals(trace)), [trace]);
@@ -925,11 +937,28 @@ export function Overview({
 								compact ? "text-[9.5px]" : "text-[11px]",
 								row.lane === "agents" && trace.children.length === 0 ? "text-muted/60" : "text-muted",
 							)}
-							style={{ top: (row.y0 + row.y1) / 2 }}
+							style={{ top: row.lane === "agents" ? (agentRowBox(row, 0).y0 + agentRowBox(row, 0).y1) / 2 : (row.y0 + row.y1) / 2 }}
 						>
 							{row.lane === "agents" && stepsOnly ? "Herder steps" : row.label}
 						</span>
 					))}
+					{packing.overflow > 0 &&
+						lanes
+							.filter((row) => row.lane === "agents")
+							.map((row) => {
+								const last = agentRowBox(row, (row.rows ?? 1) - 1);
+								return (
+									<span
+										key="agents-overflow"
+										className={cx("absolute left-0 -translate-y-1/2 leading-none whitespace-nowrap text-muted", compact ? "text-[9.5px]" : "text-[11px]")}
+										style={{ top: (last.y0 + last.y1) / 2 }}
+										data-overview-overflow={packing.overflow}
+										title={`${plural(packing.overflow, "child", "children")} share this row with another`}
+									>
+										+{packing.overflow} more
+									</span>
+								);
+							})}
 				</div>
 				{/* Zoom controls beside the clock row: the keyboard's way to zoom, and the mouse's without a modifier. */}
 				<div className="flex items-center gap-[2px]" style={{ height: clockHeight }} role="group" aria-label="Timeline zoom" data-overview-zoom="">
@@ -1126,7 +1155,9 @@ function OverviewTooltip({ item, x, y, width, origin, trace }: { item: OverviewI
 				<>
 					<div className="flex min-w-0 items-center gap-2">
 						<KindBadge family="user" glyph={turn ? turnStart(turn).glyph : undefined} label={`#${(item.turnIndex ?? 0) + 1}`} />
-						<span className="min-w-0 truncate font-medium">{turn ? plainLine(turn.userText) : "Turn"}</span>
+						<span className="min-w-0 truncate font-medium">
+							{turn && turnReports(turn).length ? turnStart(turn).label : turn ? plainLine(turn.userText) : "Turn"}
+						</span>
 					</div>
 					<div className="tnum mt-1 flex flex-wrap gap-x-3 text-muted">
 						<span>{formatClockTime(item.start)}</span>
@@ -1147,10 +1178,18 @@ function OverviewTooltip({ item, x, y, width, origin, trace }: { item: OverviewI
 							<KindBullet family="agent" />
 						)}
 						<span className="shrink-0 font-medium">{child?.kind === "herder-step" ? "Herder step" : "Subagent"}</span>
+						<TicketBadge ticket={traceTicket(child)} />
 						{child?.agentType && <span className="min-w-0 truncate text-muted">{child.agentType}</span>}
 					</div>
-					{child?.description && <div className="mt-1 line-clamp-2 text-muted">{child.description}</div>}
+					{(traceTicket(child)?.title ?? child?.description) && (
+						<div className="mt-1 line-clamp-2 text-muted">{traceTicket(child)?.title ?? child?.description}</div>
+					)}
 					<div className="tnum mt-1 text-muted">{formatSpan((item.end ?? item.start) - item.start)}</div>
+					{child && childRanPast(spawningCall(trace, child), child) !== undefined && (
+						<div className="tnum text-muted" data-tooltip-ran-past="">
+							{backgroundLabel(childRanPast(spawningCall(trace, child), child)!)}
+						</div>
+					)}
 				</>
 			)}
 		</div>

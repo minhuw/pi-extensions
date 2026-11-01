@@ -1,6 +1,7 @@
 import type { GlyphName } from "../components/glyphs";
 import type { SessionTrace, TraceChild, TraceLlmRecord, TraceRecord, TraceToolRecord, TraceTurn } from "../lib/types";
 import { parseToolName } from "../session/tools/registry";
+import { ranPastCall, REPORT_TYPE, reportsLabel, turnReports } from "../lib/tickets";
 
 /** The categorical palette: every family has a `--color-k-<family>` theme token. */
 export type Family = "user" | "llm" | "shell" | "read" | "write" | "other" | "agent" | "compaction";
@@ -77,7 +78,8 @@ const READ = new Set([
 	"rg",
 ]);
 const WRITE = new Set(["edit", "write", "apply_patch", "codemode", "multiedit", "multi_edit", "notebookedit"]);
-const AGENT = new Set(["agent", "subagentworkflow", "task"]);
+/** Tools whose calls spawn child sessions; `ticket_create` starts a superagent ticket that outlives its call. */
+const AGENT = new Set(["agent", "subagentworkflow", "task", "ticket_create"]);
 
 export function toolFamily(name: string): Family {
 	const parsed = parseToolName(name);
@@ -136,6 +138,7 @@ const BADGES: Record<string, string> = {
 	agent: "AGENT",
 	task: "AGENT",
 	subagentworkflow: "FLOW",
+	ticket_create: "TICKET",
 };
 
 /** A 2-5 letter type label: `LLM`, `BASH`, `READ`, `MCP`, … */
@@ -255,6 +258,22 @@ export function childSpan(trace: Pick<SessionTrace, "records">, child: TraceChil
 	return { start, end: end ?? start };
 }
 
+/** The tool call that spawned a child, if the trace has it. */
+export function spawningCall(trace: Pick<SessionTrace, "records">, child: TraceChild): TraceToolRecord | undefined {
+	return trace.records.find(
+		(record): record is TraceToolRecord => record.kind === "tool" && (record.callId === child.parentToolCallId || record.childSessionId === child.sessionId),
+	);
+}
+
+/**
+ * How long a child kept running after its spawning call returned, by the child's own last time: a background agent such
+ * as a superagent ticket. Undefined when it did not, or when either time is unknown.
+ */
+export function childRanPast(call: TraceToolRecord | undefined, child: TraceChild): number | undefined {
+	if (!call) return undefined;
+	return ranPastCall(recordSpan(call).end, child.lastAt);
+}
+
 export function recordDuration(record: TraceRecord): number | undefined {
 	if (record.kind === "tool" && record.durationMs !== undefined) return record.durationMs;
 	const { start, end } = recordSpan(record);
@@ -333,9 +352,14 @@ export function isSubagentTool(record: TraceRecord): record is TraceToolRecord {
 }
 
 /** How a turn started: a user prompt, a relay message, or another extension's message. */
-export function turnStart(turn: Pick<TraceTurn, "customType" | "index">): { glyph: GlyphName; label: string } {
+export function turnStart(
+	turn: Pick<TraceTurn, "customType" | "index"> & Partial<Pick<TraceTurn, "userText" | "reports">>,
+): { glyph: GlyphName; label: string } {
 	if (turn.customType === undefined) return { glyph: "prompt", label: `Prompt ${turn.index + 1}` };
 	if (turn.customType === "relay-message") return { glyph: "relay", label: "Relay message" };
+	if (turn.customType === REPORT_TYPE) {
+		return { glyph: "branch", label: reportsLabel(turnReports({ customType: turn.customType, userText: turn.userText ?? "", reports: turn.reports })) };
+	}
 	return { glyph: "extension", label: "Extension message" };
 }
 

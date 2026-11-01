@@ -30,7 +30,7 @@ export type TimelineItem = Base &
 		| { kind: "note"; icon: "model" | "sparkle" | "tag" | "pencil" | "info"; text: string }
 		| { kind: "compaction"; summary: string; tokensBefore?: number }
 		| { kind: "branch-summary"; summary: string }
-		| { kind: "custom-message"; customType: string; content: unknown }
+		| { kind: "custom-message"; customType: string; content: unknown; details?: unknown }
 		| { kind: "raw"; label: string }
 	);
 
@@ -139,6 +139,7 @@ export function buildTimeline(entries: Entry[], promptSeq?: number): TimelineIte
 						entry,
 						customType: str(message.customType) ?? "custom",
 						content: message.content,
+						details: message.details,
 						hidden: message.display === false,
 					});
 				} else if (role === "compactionSummary") {
@@ -203,6 +204,7 @@ export function buildTimeline(entries: Entry[], promptSeq?: number): TimelineIte
 					entry,
 					customType: str(raw.customType) ?? "custom",
 					content: raw.content,
+					details: raw.details,
 					hidden: raw.display === false,
 				});
 				break;

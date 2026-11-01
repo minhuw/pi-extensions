@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useNavigate } from "react-router";
 import { Icon } from "../components/icons";
 import { PikaLink as Link } from "../components/PikaLink";
+import { TicketBadge } from "../components/Ticket";
 import { Callout, cx, ErrorState, Pill } from "../components/ui";
+import { linkTicket } from "../lib/tickets";
 import { ApiError, useApi } from "../lib/api";
 import { formatCost, formatCount, formatDateTime, formatDuration, plural, totalTokens } from "../lib/format";
 import { useViewState } from "../lib/viewState";
@@ -99,6 +101,7 @@ function TreeRow({ node, lines, family, current, open, focused, register, onTogg
 				</span>
 				{kind === "subagent" && <KindBullet family="agent" />}
 				<KindPill kind={kind}>{type}</KindPill>
+				<TicketBadge ticket={linkTicket(node.session.link)} />
 				{current ? (
 					<span className="min-w-0 truncate font-medium" title={node.session.title || description}>
 						{description}

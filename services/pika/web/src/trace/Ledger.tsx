@@ -3,7 +3,9 @@ import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayou
 import { FilterChip, MenuCheck } from "../components/FilterChip";
 import { PikaLink as Link } from "../components/PikaLink";
 import { Icon } from "../components/icons";
+import { ReportTag, TicketBadge } from "../components/Ticket";
 import { cx, Skeleton } from "../components/ui";
+import { backgroundLabel, reportKindLabel, TICKET_CREATE_TOOL, traceTicket, turnReports } from "../lib/tickets";
 import { formatCount, formatCost, plural } from "../lib/format";
 import type { TraceChild, TraceRecord, TraceTurn } from "../lib/types";
 import type { Interval } from "./axis";
@@ -12,6 +14,7 @@ import { LedgerHelp } from "./Help";
 import { formatBytes, formatClockTime, formatElapsed, formatFineCost, formatInstant, formatSpan, plainLine, spanBetween } from "./format";
 import {
 	cacheHit,
+	childRanPast,
 	FAMILIES,
 	FAMILY_CLASSES,
 	FAMILY_LABELS,
@@ -243,6 +246,20 @@ const RecordRow = memo(function RecordRow({
 	const hit = cacheHit(record);
 	const subagent = row.children.length > 0;
 	const firstChild: TraceChild | undefined = row.children[0];
+	const ticket = row.children.length === 1 ? traceTicket(firstChild) : undefined;
+	// A background child, such as a superagent ticket, keeps working after its call returned: by the latest child.
+	let ranPast: number | undefined;
+	let childLast: number | undefined;
+	if (subagent && record.kind === "tool") {
+		for (const child of row.children) {
+			const ms = childRanPast(record, child);
+			if (ms !== undefined && (ranPast === undefined || ms > ranPast)) {
+				ranPast = ms;
+				childLast = child.lastAt;
+			}
+		}
+	}
+	const agentSummary = subagent && record.kind === "tool" && toolName(record).toLowerCase() !== TICKET_CREATE_TOOL && record.summary?.includes(":");
 	return (
 		<div
 			className={cx(rowBase, rowTone(state), state.fresh && "row-in")}
@@ -269,7 +286,8 @@ const RecordRow = memo(function RecordRow({
 				<Rails depth={depth} />
 				{/* The bullet's glyph tells a read from a grep or an ls, so only subagents, which expand, lead with a mark. */}
 				{subagent && <Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />}
-				{subagent && record.kind === "tool" && record.summary?.includes(":") ? (
+				{ticket && <TicketBadge ticket={ticket} />}
+				{agentSummary && record.kind === "tool" && record.summary ? (
 					<>
 						<span className="shrink-0 font-medium">{record.summary.split(":")[0]}</span>
 						<span className="min-w-0 truncate text-muted">{record.summary.slice(record.summary.indexOf(":") + 1).trim()}</span>
@@ -291,6 +309,11 @@ const RecordRow = memo(function RecordRow({
 						)}
 					</>
 				)}
+				{ranPast !== undefined && (
+					<span className="shrink-0 font-normal" data-ran-past={ranPast}>
+						<Chip tone="muted">{backgroundLabel(ranPast)}</Chip>
+					</span>
+				)}
 				{subagent && row.children.length > 1 && <Chip tone="muted">{row.children.length} agents</Chip>}
 				{subagent && firstChild && row.children.length === 1 && (
 					<Link
@@ -306,7 +329,7 @@ const RecordRow = memo(function RecordRow({
 			</span>
 			{columns.waterfall && (
 				<span className="h-full px-1">
-					<WaterfallBar record={record} window={window} running={running} />
+					<WaterfallBar record={record} window={window} running={running} tail={childLast} />
 				</span>
 			)}
 			<Num className="text-ink">{running ? "…" : formatSpan(recordDuration(record)).replace("—", "")}</Num>
@@ -353,6 +376,7 @@ const ChildRow = memo(function ChildRow({
 }) {
 	const { child, depth } = row;
 	const tokens = child.tokens.input + child.tokens.output + child.tokens.cacheRead + child.tokens.cacheWrite;
+	const ticket = traceTicket(child);
 	return (
 		<div
 			className={cx(rowBase, rowTone(state))}
@@ -374,11 +398,17 @@ const ChildRow = memo(function ChildRow({
 			<span className="relative flex h-full min-w-0 items-center gap-1.5" style={{ paddingLeft: depth * INDENT }}>
 				<Rails depth={depth} />
 				<Chevron open={row.expanded} onClick={() => onToggle(row.key)} label={row.expanded ? "Collapse subagent" : "Expand subagent"} />
+				<TicketBadge ticket={ticket} />
 				<span className="shrink-0 font-medium">{child.agentType ?? (child.kind === "herder-step" ? "step" : "subagent")}</span>
-				<span className="min-w-0 truncate font-normal text-muted">{child.description ?? child.title}</span>
+				<span className="min-w-0 truncate font-normal text-muted">{ticket?.title ?? child.description ?? child.title}</span>
 				<span className="shrink-0 font-normal">
 					<Chip tone="muted">{formatCount(child.entryCount)} entries</Chip>
 				</span>
+				{row.ranPastMs !== undefined && (
+					<span className="shrink-0 font-normal" data-ran-past={row.ranPastMs}>
+						<Chip tone="muted">{backgroundLabel(row.ranPastMs)}</Chip>
+					</span>
+				)}
 				<Link
 					to={`/s/${encodeURIComponent(child.sessionId)}`}
 					onClick={(event) => event.stopPropagation()}
@@ -417,6 +447,7 @@ const TurnRow = memo(function TurnRow({
 	const tokens = turn.tokens.input + turn.tokens.output + turn.tokens.cacheRead + turn.tokens.cacheWrite;
 	const firstLine = plainLine(turn.userText);
 	const records = turn.modelCalls + turn.toolCalls;
+	const reports = turnReports(turn);
 	return (
 		<div
 			className={cx(
@@ -442,9 +473,25 @@ const TurnRow = memo(function TurnRow({
 			</span>
 			{/* The prompt takes the waterfall's column too; the strip map shows each turn's shape. */}
 			<span className="flex min-w-0 items-center gap-2" style={columns.waterfall ? { gridColumn: "span 2" } : undefined}>
-				<span className="min-w-0 flex-1 truncate text-ink" title={turn.userText}>
-					{firstLine || <span className="text-muted italic">(empty prompt)</span>}
-				</span>
+				{reports.length ? (
+					<span
+						className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden"
+						title={reports.map((report) => `#${report.ticketId} ${reportKindLabel(report.kind)} · ${report.title}`).join("\n")}
+						data-turn-reports={reports.length}
+					>
+						{reports.length > 1 && <span className="shrink-0 font-medium text-ink">{start.label}</span>}
+						{reports.map((report, i) => (
+							<span key={`${report.ticketId}:${i}`} className="flex min-w-0 shrink items-center gap-1" data-report={report.ticketId}>
+								<ReportTag report={report} />
+								<span className={cx("truncate text-ink", reports.length > 1 && "max-w-[18ch]")}>{report.title}</span>
+							</span>
+						))}
+					</span>
+				) : (
+					<span className="min-w-0 flex-1 truncate text-ink" title={turn.userText}>
+						{firstLine || <span className="text-muted italic">(empty prompt)</span>}
+					</span>
+				)}
 				<span
 					className="tnum shrink-0 text-[12px] text-muted"
 					title={`${plural(turn.modelCalls, "model call")} · ${plural(turn.toolCalls, "tool call")}`}

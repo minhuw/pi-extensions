@@ -11,8 +11,10 @@ import {
 	isFullWindow,
 	layoutOverview,
 	makeScale,
+	MAX_AGENT_ROWS,
 	MIN_WINDOW_MS,
 	overviewLanes,
+	packChildren,
 	panWindow,
 	tickStep,
 	traceIntervals,
@@ -21,11 +23,13 @@ import {
 	zoomWindow,
 } from "../src/trace/axis";
 import { formatClock, formatElapsed, formatFineCost, formatGap, formatPhase, formatSpan, formatTick, middleTruncate } from "../src/trace/format";
-import { cacheHit, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordGlyph, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName } from "../src/trace/kinds";
+import { cacheHit, childRanPast, childSpan, hasProviderTiming, llmPhases, recordBadge, recordFamily, recordGlyph, recordKey, recordName, recordSummary, showsToolName, toolFamily, toolName, turnStart } from "../src/trace/kinds";
 import { currentStop, initialReplay, replayReducer, type ReplayState } from "../src/trace/replay";
 import { buildLedger, defaultTurnExpanded, matchesFilter, NO_FILTER, rowForSeq, type LedgerInput } from "../src/trace/rows";
-import { assistantMessage, entry, header, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
+import { backgroundLabel, linkTicket, reportsFromDetails, reportTone, traceTicket, turnReports } from "../src/lib/tickets";
+import { assistantMessage, entry, header, iso, summary, toolCall, toolResultMessage, turn, userMessage } from "./support/fixtures";
 import { traceOf } from "./support/server";
+import { BATCH_REPORT, CALLS_RETURN, MAIN, ticketFamily } from "./support/tickets";
 
 const T = 1_800_000_000_000;
 
@@ -715,5 +719,79 @@ describe("the fake server's trace", () => {
 		expect(tools[2]).not.toHaveProperty("end");
 		expect(tools[3]).toMatchObject({ childSessionId: "kid" });
 		expect(t.children).toMatchObject([{ sessionId: "kid", parentToolCallId: "d", agentType: "worker", kind: "subagent" }]);
+	});
+});
+
+describe("superagent tickets in the trace", () => {
+	const family = ticketFamily();
+	const main = traceOf(family[0]);
+
+	it("packs concurrent children into separate rows, caps them, and keeps a lone child on one row", () => {
+		const packing = packChildren(main);
+		expect(packing.rows).toBe(3);
+		expect([...packing.rowOf.values()].sort()).toEqual([0, 1, 2]);
+		expect(packing.overflow).toBe(0);
+		const lanes = overviewLanes(false, false, packing.rows);
+		const items = layoutOverview(main, makeScale(foldGaps(traceIntervals(main)), 1200), lanes).filter((item) => item.lane === "agents");
+		expect(new Set(items.map((item) => item.y0)).size).toBe(3);
+		// Grandchildren stay in their ticket's trace.
+		expect(items.map((item) => item.childId).sort()).toEqual(["tk1", "tk2", "tk3"]);
+		// The branch runs by the child's own times, past the call.
+		const tk2 = items.find((item) => item.childId === "tk2")!;
+		expect(tk2.end).toBe(Date.parse(iso(420_000)));
+
+		const child = (id: string, start: number, end: number): TraceChild => ({
+			sessionId: id, kind: "subagent", startedAt: T + start, lastAt: T + end, entryCount: 1, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, title: id,
+		});
+		const many = { records: [], children: [0, 1, 2, 3, 4, 5].map((i) => child(`k${i}`, i, 100)) };
+		expect(packChildren(many)).toMatchObject({ rows: MAX_AGENT_ROWS, overflow: 2 });
+		// Sequential children reuse a row.
+		expect(packChildren({ records: [], children: [child("a", 0, 10), child("b", 10, 20)] }).rows).toBe(1);
+		expect(overviewLanes(false, false, 1)).toEqual(overviewLanes(false));
+		expect(overviewLanes(false, false, 1).at(-1)).toMatchObject({ y0: 68, y1: 84 });
+	});
+
+	it("treats ticket_create as an agent-spawning tool and nests its child, which ran past the call", () => {
+		const call = main.records.find((record): record is TraceToolRecord => record.kind === "tool" && record.callId === "tc2")!;
+		expect(toolFamily("ticket_create")).toBe("agent");
+		expect(recordBadge(call)).toBe("TICKET");
+		expect(call.childSessionId).toBe("tk2");
+		const kid = main.children.find((c) => c.sessionId === "tk2")!;
+		expect(kid.ticket).toEqual({ id: 2, branch: "pi/2-add-retries", title: "Add retries" });
+		expect(childRanPast(call, kid)).toBe(420_000 - CALLS_RETURN);
+		expect(backgroundLabel(childRanPast(call, kid)!)).toBe("background · ran 6m 57s after the call returned");
+		const key = recordKey(MAIN, call);
+		const rows = buildLedger({ trace: main, turnOverrides: new Map(), expanded: new Set([key]), childTrace: () => ({ status: "pending" }) });
+		const index = rows.findIndex((row) => row.key === key);
+		expect(rows[index]).toMatchObject({ type: "record", children: [{ sessionId: "tk2" }], expanded: true });
+		expect(rows[index + 1]).toMatchObject({ type: "status", status: "loading", sessionId: "tk2", depth: 1 });
+		// Other tools never spawn.
+		expect(toolFamily("ticket_status")).toBe("other");
+	});
+
+	it("labels report turns by ticket and kind, a batch as one, and leaves relay turns alone", () => {
+		const [, single, batch, , relay] = main.turns;
+		expect(turnStart(single)).toEqual({ glyph: "branch", label: "Ticket #1 ready" });
+		expect(turnStart(batch).label).toBe("2 ticket reports");
+		expect(turnReports(batch).map((r) => `${r.ticketId}:${r.kind}:${reportTone(r.kind)}`)).toEqual(["2:question:attention", "3:merged:settled"]);
+		expect(turnStart(relay)).toEqual({ glyph: "relay", label: "Relay message" });
+		expect(turnStart({ index: 0, customType: "herder:prompt" }).label).toBe("Extension message");
+		expect(reportTone("merge-refused")).toBe("failure");
+		// Without the server's list, the headers come from the text.
+		expect(turnReports({ customType: "superagent-report", userText: BATCH_REPORT }).length).toBe(2);
+	});
+
+	it("validates ticket data defensively", () => {
+		expect(linkTicket({ kind: "subagent", superagent: { ticketId: 4, branch: "pi/4", title: " T\n " } })).toEqual({ id: 4, branch: "pi/4", title: "T" });
+		for (const superagent of [{ ticketId: "4" }, { ticketId: 0 }, { ticketId: 1.5 }, [4], null, "x", { ticketId: 2e9 }]) {
+			expect(linkTicket({ kind: "subagent", superagent })).toBeUndefined();
+		}
+		expect(linkTicket({ kind: "subagent", superagent: { ticketId: 5, branch: "b".repeat(300), title: 7 } })).toEqual({ id: 5 });
+		expect(linkTicket({ kind: "subagent", superagent: { ticketId: 5, title: "t".repeat(300) } })?.title).toHaveLength(200);
+		expect(traceTicket({ ticket: { id: -1 } as never })).toBeUndefined();
+		expect(reportsFromDetails({ batch: [{ ticketId: 2, kind: "ready", title: "A" }, { ticketId: "x", kind: "ready" }, { ticketId: 3, kind: "BAD" }] })).toEqual([
+			{ ticketId: 2, kind: "ready", title: "A" },
+		]);
+		expect(reportsFromDetails({ nothing: true })).toBeUndefined();
 	});
 });

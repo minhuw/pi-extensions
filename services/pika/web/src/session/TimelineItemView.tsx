@@ -2,8 +2,10 @@ import { useEffect, type ReactNode } from "react";
 import { CodeBlock } from "../components/code";
 import { Icon, type IconName } from "../components/icons";
 import { Markdown } from "../components/Markdown";
+import { ReportList } from "../components/Ticket";
 import { Callout, cx, Pill, Toggle } from "../components/ui";
 import { useApi } from "../lib/api";
+import { messageReports, REPORT_TYPE, reportsLabel } from "../lib/tickets";
 import { formatCount, formatTime } from "../lib/format";
 import { useViewState } from "../lib/viewState";
 import { formatFineCost, formatSpan } from "../trace/format";
@@ -277,7 +279,25 @@ export function TimelineItemView({ item, highlighted = false }: { item: Timeline
 					</Toggle>
 				</Callout>
 			);
-		case "custom-message":
+		case "custom-message": {
+			if (item.customType === REPORT_TYPE) {
+				const text = contentText(item.content);
+				const reports = messageReports(item.details, text);
+				// A ticket's report steered into a running turn: one entry for the whole batch.
+				return (
+					<div className={cx("border-l border-k-agent py-0.5 pl-3", item.hidden && "opacity-80")} data-report-message={reports.length}>
+						<div className="mb-1 text-[12px] text-muted">
+							<span className="font-medium text-ink">{reportsLabel(reports)}</span> · <span className="mono">{item.customType}</span>
+						</div>
+						<ReportList reports={reports} detail />
+						{text && (
+							<Toggle className="mt-1 text-[14px]" label={<span className="text-muted">{reports.length > 1 ? "Reports" : "Report"}</span>}>
+								<Markdown text={text} className="text-[14px]" />
+							</Toggle>
+						)}
+					</div>
+				);
+			}
 			return (
 				<div className={cx("border-l border-line py-0.5 pl-3", item.hidden && "opacity-80")}>
 					<div className="mb-1 text-[12px] text-muted">
@@ -286,6 +306,7 @@ export function TimelineItemView({ item, highlighted = false }: { item: Timeline
 					<Markdown text={contentText(item.content)} className="text-[14px]" />
 				</div>
 			);
+		}
 		case "raw":
 			return <RawEntry item={item} />;
 	}

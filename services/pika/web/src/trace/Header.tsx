@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { PikaLink as Link } from "../components/PikaLink";
 import { Icon, type IconName } from "../components/icons";
+import { TicketBadge } from "../components/Ticket";
 import { cx } from "../components/ui";
+import { linkTicket } from "../lib/tickets";
 import { deviceLabel } from "../lib/devices";
 import { formatCost, formatCount, formatDateTime, formatDuration, formatRelative, plural, totalTokens } from "../lib/format";
 import type { ChildSession, SessionDetail, SessionTrace, Tokens, TraceCompactionRecord } from "../lib/types";
@@ -132,6 +134,11 @@ export function SessionChips({ session }: { session: SessionDetail }) {
 					Parent session
 					<span className="text-muted">· {what}</span>
 				</Link>
+			)}
+			{linkTicket(link) && (
+				<span className="mx-0.5 inline-flex h-6 items-center" data-ticket-chip="">
+					<TicketBadge ticket={linkTicket(link)} />
+				</span>
 			)}
 			{session.herderRunId && (
 				<Link

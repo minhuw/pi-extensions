@@ -269,7 +269,11 @@ export function PhaseSwatch({ phase, className }: { phase: "waiting" | "streamin
 }
 
 /** The record's bar on its turn's time scale. */
-export function WaterfallBar({ record, window, running }: { record: TraceRecord; window?: Interval; running?: boolean }) {
+/**
+ * A record's bar on its row's time scale. `tail`, a later time, extends a spawning call with a dashed line to when its
+ * child last worked, cut at the window's edge.
+ */
+export function WaterfallBar({ record, window, running, tail }: { record: TraceRecord; window?: Interval; running?: boolean; tail?: number }) {
 	const { start, end } = recordSpan(record);
 	if (!window || start === undefined) return <span className="block h-full" />;
 	const span = Math.max(1, window.end - window.start);
@@ -289,6 +293,13 @@ export function WaterfallBar({ record, window, running }: { record: TraceRecord;
 				)}
 				style={{ left: `${left * 100}%`, width: `${width * 100}%`, opacity: error ? 0.9 : 0.75 }}
 			/>
+			{tail !== undefined && tail > stop && (
+				<span
+					className="absolute top-1/2 -translate-y-1/2 border-t-2 border-dashed border-k-agent"
+					style={{ left: `${(left + width) * 100}%`, width: `${Math.max(0, Math.min(1, (tail - window.start) / span) - left - width) * 100}%` }}
+					data-waterfall-tail=""
+				/>
+			)}
 		</span>
 	);
 }

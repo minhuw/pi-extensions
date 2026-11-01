@@ -4,6 +4,7 @@ import type { SessionLink, SessionTree } from "../src/lib/types";
 import { iso, summary } from "./support/fixtures";
 import { mockLayout, renderApp, scrollMain } from "./support/render";
 import { createFakeServer, type FakeSession } from "./support/server";
+import { ticketFamily } from "./support/tickets";
 
 /** The session page and its views load on demand, which takes longer than the default second on a busy machine. */
 const LOAD_MS = 4000;
@@ -385,5 +386,19 @@ describe("session list", () => {
 		scrollMain(48 * 72);
 		await waitFor(() => expect(server.calls).toContain("/api/v1/sessions?root=true&cursor=50&limit=50"));
 		expect(document.querySelectorAll("[data-session-row]").length).toBeLessThan(100);
+	});
+});
+
+describe("superagent tickets in the session list", () => {
+	it("badges the nested cards of ticket children with #N", async () => {
+		renderApp("/?children=1", createFakeServer({ sessions: ticketFamily() }).fetch);
+		const tree = await family("main");
+		await waitFor(() => expect(familyRows(tree).map(([id]) => id)).toEqual(expect.arrayContaining(["tk1", "tk2", "tk3"])), { timeout: LOAD_MS });
+		for (const id of [1, 2, 3]) {
+			const badge = familyRow(`tk${id}`).querySelector<HTMLElement>("[data-ticket-badge]")!;
+			expect(badge.textContent).toBe(`#${id}`);
+			expect(badge.getAttribute("title")).toContain(`pi/${id}-`);
+		}
+		expect(within(familyRow("tk3")).getByText("Bump deps")).toBeTruthy();
 	});
 });
