@@ -148,6 +148,9 @@ pub struct ToolRecord {
     pub duration_ms: Option<i64>,
     pub is_error: bool,
     pub summary: String,
+    /// Original public arguments live only until response redaction, before summary selection and formatting.
+    #[serde(skip)]
+    pub(super) arguments: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_size: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,7 +193,9 @@ pub struct TraceChild {
 
 pub(crate) const SESSION_SQL: &str = "SELECT sid, started_at, last_at, entry_count FROM sessions WHERE id = ?1";
 
-pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq, substr(t.user_text, 1, 200), t.at, t.duration_ms,
+/// `?2` is how many characters of `user_text` to read: `USER_TEXT_CHARS`, or all of it for a published trace, which is
+/// scrubbed before it is cut.
+pub(crate) const TURNS_SQL: &str = "SELECT t.idx, t.start_seq, t.end_seq, substr(t.user_text, 1, ?2), t.at, t.duration_ms,
          t.model_calls, t.tool_calls, t.tool_errors, t.cost, t.input, t.output, t.cache_read, t.cache_write, e.custom_type
      FROM turns t LEFT JOIN entries e ON e.sid = t.sid AND e.seq = t.start_seq AND e.type = 'custom_message'
      WHERE t.sid = ?1 ORDER BY t.idx";
@@ -239,15 +244,48 @@ fn times(started_at: Option<i64>, last_at: i64, entry_count: i64) -> (Option<i64
     (if has_time { started_at.or(last) } else { None }, last)
 }
 
-/// Replaces control characters with spaces, trims, and cuts to `SUMMARY_CHARS` characters, mapping only the characters
-/// it keeps.
+/// Trims blanks and control characters and replaces the control characters left with spaces. It does not cut: `cut`
+/// does, after a published trace is scrubbed, since a credential cut in two is no longer recognised.
 fn one_line(s: &str) -> String {
     let blank = |c: char| c.is_whitespace() || c.is_control();
-    let s = s.trim_start_matches(blank);
-    let cut = cut_chars(s, SUMMARY_CHARS);
-    // As if the whole string were trimmed before cutting: the end is trimmed only when nothing but blanks follows.
-    let cut = if s[cut.len()..].chars().all(blank) { cut.trim_end_matches(blank) } else { cut };
-    cut.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    s.trim_matches(blank).chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+fn cut_to(s: &mut String, max: usize) {
+    let len = cut_chars(s, max).len();
+    s.truncate(len);
+}
+
+/// Cuts `userText` to `USER_TEXT_CHARS` characters and `text` and `summary` to `SUMMARY_CHARS`. A text trimmed by
+/// `one_line` ends in a non-blank, so cutting it keeps what cutting before trimming would.
+pub fn cut(trace: &mut Trace) {
+    for turn in &mut trace.turns {
+        cut_to(&mut turn.user_text, USER_TEXT_CHARS);
+    }
+    for record in &mut trace.records {
+        match record {
+            Record::Llm(LlmRecord { text: Some(text), .. }) => cut_to(text, SUMMARY_CHARS),
+            Record::Tool(record) => cut_to(&mut record.summary, SUMMARY_CHARS),
+            _ => {}
+        }
+    }
+}
+
+/// Finishes a public trace after its original text and arguments have been scrubbed together. Formatting is last:
+/// collapsing newlines or selecting a command's first line earlier can hide an unterminated PEM from the rules.
+pub(super) fn finish_public(trace: &mut Trace) {
+    for record in &mut trace.records {
+        match record {
+            Record::Llm(LlmRecord { text: Some(text), .. }) => *text = one_line(text),
+            Record::Tool(record) => {
+                if let Some(args) = record.arguments.take() {
+                    record.summary = tool_summary(record.name.as_deref().unwrap_or(""), &args);
+                }
+            }
+            _ => {}
+        }
+    }
+    cut(trace);
 }
 
 fn first_line(s: &str) -> &str {
@@ -289,8 +327,8 @@ trait ArgSource {
     fn string(&self, key: &str) -> Option<Cow<'_, str>>;
     /// The value of `key`, if it is a number, or else a non-blank string, trimmed.
     fn number(&self, key: &str) -> Option<String>;
-    /// The string values, in order.
-    fn strings(&self) -> impl Iterator<Item = Cow<'_, str>>;
+    /// The string values with their keys, in order.
+    fn strings(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)>;
 }
 
 /// Lenient parses of arguments that the borrowed parse rejects, and tests.
@@ -307,8 +345,8 @@ impl ArgSource for Value {
         }
     }
 
-    fn strings(&self) -> impl Iterator<Item = Cow<'_, str>> {
-        self.as_object().into_iter().flat_map(|o| o.values()).filter_map(Value::as_str).map(Cow::Borrowed)
+    fn strings(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> {
+        self.as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.as_str(), Cow::Borrowed(v.as_str()?))))
     }
 }
 
@@ -341,8 +379,8 @@ impl ArgSource for Args<'_> {
         }
     }
 
-    fn strings(&self) -> impl Iterator<Item = Cow<'_, str>> {
-        self.0.iter().filter_map(|(_, v)| raw_string(v))
+    fn strings(&self) -> impl Iterator<Item = (&str, Cow<'_, str>)> {
+        self.0.iter().filter_map(|(k, v)| Some((k.as_ref(), raw_string(v)?)))
     }
 }
 
@@ -354,7 +392,7 @@ fn arg_str<'a>(args: &'a impl ArgSource, keys: &[&str]) -> Option<Cow<'a, str>> 
 /// argument.
 fn first_string(args: &impl ArgSource) -> Option<String> {
     let mut first = None;
-    for s in args.strings().filter(|s| !s.trim().is_empty()) {
+    for (_, s) in args.strings().filter(|(_, s)| !s.trim().is_empty()) {
         if s.chars().nth(SUMMARY_CHARS).is_none() {
             return Some(one_line(&s));
         }
@@ -393,7 +431,7 @@ fn tool_summary(name: &str, args: &impl ArgSource) -> String {
     text.or_else(|| first_string(args)).unwrap_or_default()
 }
 
-/// The summary of a tool call from its stored arguments, which are JSON; anything but an object summarizes as empty.
+/// The owner's summary from stored arguments, which are JSON; anything but an object summarizes as empty.
 fn arguments_summary(name: &str, arguments: &str) -> String {
     match serde_json::from_str::<Args>(arguments) {
         Ok(args) => tool_summary(name, &args),
@@ -436,14 +474,14 @@ struct AssistantFacts {
     duration_ms: Option<f64>,
 }
 
-fn assistant_facts(line: &str) -> AssistantFacts {
+fn assistant_facts(line: &str, public: bool) -> AssistantFacts {
     let from_blocks = |types: &mut dyn Iterator<Item = (Option<&str>, Option<&str>)>, duration_ms| {
         let mut facts = AssistantFacts { duration_ms, ..AssistantFacts::default() };
         for (ty, text) in types {
             match ty {
                 Some("thinking") => facts.thinking = true,
                 Some("text") if facts.text.is_none() => {
-                    facts.text = text.filter(|t| !t.trim().is_empty()).map(one_line);
+                    facts.text = text.filter(|t| !t.trim().is_empty()).map(|t| if public { t.to_owned() } else { one_line(t) });
                 }
                 _ => {}
             }
@@ -521,7 +559,7 @@ fn turn_row(r: &Row) -> rusqlite::Result<TraceTurn> {
         index: r.get(0)?,
         start_seq: r.get(1)?,
         end_seq: r.get(2)?,
-        user_text: cut_chars(&r.get::<_, String>(3)?, USER_TEXT_CHARS).to_owned(),
+        user_text: r.get(3)?,
         at: r.get(4)?,
         duration_ms: r.get(5)?,
         model_calls: r.get(6)?,
@@ -616,19 +654,25 @@ pub fn trace_if_changed(
     if unchanged(&fingerprint) {
         return Ok((fingerprint, None));
     }
-    let trace = build(tx, blobs, id)?;
+    let trace = build(tx, blobs, id, false)?;
     Ok((fingerprint, Some(trace)))
 }
 
 pub fn trace(conn: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
+    trace_scoped(conn, blobs, id, false)
+}
+
+/// The trace; a `public` one keeps original text and structured arguments for `redaction::trace` to scrub in one
+/// scope after publication filtering, then select, format and cut summaries.
+pub fn trace_scoped(conn: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResult<Trace> {
     // One snapshot for every table.
     // Reuse the caller's snapshot when publication was checked in it.
     let _tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
     let tx = conn;
-    build(tx, blobs, id)
+    build(tx, blobs, id, public)
 }
 
-fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
+fn build(tx: &Connection, blobs: &BlobStore, id: &str, public: bool) -> ReadResult<Trace> {
     let (sid, started_at, last_at, entry_count): (i64, Option<i64>, i64, i64) = tx
         .prepare_cached(SESSION_SQL)?
         .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
@@ -638,7 +682,9 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
         })?;
     let (started_at, last_at) = times(started_at, last_at, entry_count);
 
-    let turns = tx.prepare_cached(TURNS_SQL)?.query_map([sid], turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let user_chars = if public { i64::MAX } else { USER_TEXT_CHARS as i64 };
+    let turns =
+        tx.prepare_cached(TURNS_SQL)?.query_map((sid, user_chars), turn_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     let children = tx.prepare_cached(CHILDREN_SQL)?.query_map([id], child_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     // A workflow call can start several children; the tool record names the first.
     let mut child_of: HashMap<&str, &str> = HashMap::new();
@@ -662,16 +708,20 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
         if let Some(call_seq) = call_seq {
             *calls_per_seq.entry(call_seq).or_default() += 1;
         }
-        let summary = match text_ref(r, 2)? {
-            Some(arguments) => arguments_summary(name.as_deref().unwrap_or(""), arguments),
-            None => String::new(),
+        let arguments = text_ref(r, 2)?;
+        let summary = if public {
+            String::new()
+        } else {
+            arguments.map(|args| arguments_summary(name.as_deref().unwrap_or(""), args)).unwrap_or_default()
         };
+        let arguments = if public { arguments.and_then(|args| parse_json_lenient(args).ok()) } else { None };
         let started: Option<i64> = r.get(7)?;
         records.push(Record::Tool(ToolRecord {
             seq,
             result_seq,
             turn: r.get(3)?,
             summary,
+            arguments,
             child_session_id: child_of.get(call_id.as_str()).map(|s| s.to_string()),
             call_id,
             name,
@@ -695,7 +745,7 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
             let ids: Vec<String> = serde_json::from_str(&ids).unwrap_or_default();
             position.extend(ids.into_iter().enumerate().map(|(i, id)| (id, i + 1)));
         }
-        let facts = line_text(r, 14, blobs, &mut failed)?.map(|line| assistant_facts(&line)).unwrap_or_default();
+        let facts = line_text(r, 14, blobs, &mut failed)?.map(|line| assistant_facts(&line, public)).unwrap_or_default();
         let (start, end) = llm_times(r.get(2)?, r.get(3)?, facts.duration_ms);
         let timing = llm_timing(text_ref(r, 17)?, start, end);
         records.push(Record::Llm(LlmRecord {
@@ -750,7 +800,11 @@ fn build(tx: &Connection, blobs: &BlobStore, id: &str) -> ReadResult<Trace> {
         };
         (r.seq(), rank)
     });
-    Ok(Trace { session_id: id.to_owned(), started_at, last_at, turns, records, children })
+    let mut trace = Trace { session_id: id.to_owned(), started_at, last_at, turns, records, children };
+    if !public {
+        cut(&mut trace);
+    }
+    Ok(trace)
 }
 
 #[cfg(test)]
@@ -760,7 +814,11 @@ mod tests {
 
     #[test]
     fn summaries_by_tool_family() {
-        let s = |name: &str, args: Value| tool_summary(name, &args);
+        let s = |name: &str, args: Value| {
+            let mut summary = tool_summary(name, &args);
+            cut_to(&mut summary, SUMMARY_CHARS);
+            summary
+        };
         assert_eq!(s("bash", json!({ "command": "\n  cargo test\n--locked", "timeout": 60 })), "cargo test");
         assert_eq!(s("read", json!({ "path": "src/a.rs", "offset": 10, "limit": 40 })), "src/a.rs:10-40");
         assert_eq!(s("read", json!({ "path": "src/a.rs", "offset": 10 })), "src/a.rs:10");
@@ -784,13 +842,13 @@ mod tests {
             "content": [{ "type": "thinking", "thinking": "hm" }, { "type": "text", "text": "  " },
                         { "type": "text", "text": "Done.\nNext" }, { "type": "toolCall", "arguments": { "x": [1] } }] } });
         assert_eq!(
-            assistant_facts(&line.to_string()),
+            assistant_facts(&line.to_string(), false),
             AssistantFacts { text: Some("Done. Next".into()), thinking: true, duration_ms: Some(1500.0) }
         );
         // A lone surrogate escape falls back to lenient parsing.
         let lenient = r#"{"message":{"content":[{"type":"text","text":"a\ud83d"}]}}"#;
-        assert_eq!(assistant_facts(lenient).text.as_deref(), Some("a\u{fffd}"));
-        assert_eq!(assistant_facts("not json"), AssistantFacts::default());
+        assert_eq!(assistant_facts(lenient, false).text.as_deref(), Some("a\u{fffd}"));
+        assert_eq!(assistant_facts("not json", false), AssistantFacts::default());
     }
 
     #[test]
@@ -824,14 +882,32 @@ mod tests {
     }
 
     #[test]
+    fn published_summaries_replace_secret_named_arguments() {
+        let summary = |name, mut args: Value| {
+            crate::redact::scrub_content(&mut args);
+            tool_summary(name, &args)
+        };
+        let arguments = r#"{"api_key":"FAKElettersOnly","region":"eu"}"#;
+        assert_eq!(arguments_summary("configure", arguments), "FAKElettersOnly");
+        // AC-1 requires the displayed value's placeholder, not dropping the field or choosing the next argument.
+        assert_eq!(summary("configure", serde_json::from_str(arguments).unwrap()), "[REDACTED]");
+        assert_eq!(summary("login", json!({ "password": "FAKEloginPhrase" })), "[REDACTED]");
+        assert_eq!(summary("bash", json!({ "command": "ls", "token": "x" })), "ls");
+        assert_eq!(summary("read", json!({ "path": "a.rs", "offset": 3 })), "a.rs:3");
+    }
+
+    #[test]
     fn one_line_replaces_control_characters_before_trimming() {
         assert_eq!(one_line("\u{1}\u{7f} abc\u{1b}"), "abc");
         assert_eq!(one_line("a\u{0}b"), "a b");
         // A blank at the cut stays unless only blanks follow it.
-        let s = format!("{} b", "a".repeat(SUMMARY_CHARS - 1));
-        assert_eq!(one_line(&s), format!("{} ", "a".repeat(SUMMARY_CHARS - 1)));
-        let s = format!("{} \u{1}\t ", "a".repeat(SUMMARY_CHARS - 1));
-        assert_eq!(one_line(&s), "a".repeat(SUMMARY_CHARS - 1));
+        let cut = |s: String| {
+            let mut s = one_line(&s);
+            cut_to(&mut s, SUMMARY_CHARS);
+            s
+        };
+        assert_eq!(cut(format!("{} b", "a".repeat(SUMMARY_CHARS - 1))), format!("{} ", "a".repeat(SUMMARY_CHARS - 1)));
+        assert_eq!(cut(format!("{} \u{1}\t ", "a".repeat(SUMMARY_CHARS - 1))), "a".repeat(SUMMARY_CHARS - 1));
     }
 
     #[test]
