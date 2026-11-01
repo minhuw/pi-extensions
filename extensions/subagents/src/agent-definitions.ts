@@ -86,6 +86,7 @@ export function parseAgentDefinition(
     isolated: fm.isolated != null ? fm.isolated === true : undefined,
     memory: parseMemory(fm.memory),
     isolation: parseIsolation(fm.isolation),
+    requireToolUse: fm.require_tool_use != null ? fm.require_tool_use === true : undefined,
     enabled: fm.enabled !== false,  // default true; explicitly false disables
     source,
     sourcePath: path,

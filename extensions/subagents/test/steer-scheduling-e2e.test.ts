@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,20 @@ const BLOCKING_TOOL_EXTENSION = fileURLToPath(
 );
 const COMPLETION_MARKER = "BACKGROUND_COMPLETION_VISIBLE";
 const BLOCKING_TOOL_CONTROL = Symbol.for("pi-subagents:test:blocking-tool");
+
+/**
+ * The children here only reply with the marker. The embedded worker requires a
+ * tool call (`require_tool_use`), so these scheduling tests use a text-only
+ * project agent that opts out, keeping their model-call counts exact.
+ */
+const TEXT_CHILD = "text-child";
+function writeTextChildAgent(dir: string): void {
+  mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+  writeFileSync(
+    join(dir, ".pi", "agents", `${TEXT_CHILD}.md`),
+    `---\ndescription: "Replies with text only."\nrequire_tool_use: false\n---\nReply with the text you are asked for.\n`,
+  );
+}
 
 function parentHasCompletion(context: Context): boolean {
   return context.messages.some(
@@ -41,6 +55,7 @@ describe("background completion steering scheduling", () => {
 
   it("finishes a blocking tool batch, then delivers the completion before the next model call", async () => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-steer-scheduling-"));
+    writeTextChildAgent(cwd);
 
     let enteredBlockingTool: ((signal: AbortSignal | undefined) => void) | undefined;
     let completedBlockingTool: ((signal: AbortSignal | undefined) => void) | undefined;
@@ -73,6 +88,7 @@ describe("background completion steering scheduling", () => {
     });
 
     const firstParentCall = agentCall({
+      subagent_type: TEXT_CHILD,
       description: "background child",
       prompt: "Reply with the completion marker.",
       run_in_background: true,
@@ -168,6 +184,7 @@ describe("background completion steering scheduling", () => {
 
   it("delivers children that finished during one tool batch together, in one message", async () => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-steer-scheduling-"));
+    writeTextChildAgent(cwd);
 
     let release!: () => void;
     let entered!: () => void;
@@ -198,8 +215,8 @@ describe("background completion steering scheduling", () => {
         parentModelCalls++;
         if (parentModelCalls === 1) {
           return [
-            agentCall({ description: "first child", prompt: "first", run_in_background: true }, { id: "agent-1" }),
-            agentCall({ description: "second child", prompt: "second", run_in_background: true }, { id: "agent-2" }),
+            agentCall({ subagent_type: TEXT_CHILD, description: "first child", prompt: "first", run_in_background: true }, { id: "agent-1" }),
+            agentCall({ subagent_type: TEXT_CHILD, description: "second child", prompt: "second", run_in_background: true }, { id: "agent-2" }),
             { type: "toolCall" as const, id: "blocking-call", name: "blocking_tool", arguments: {} },
           ];
         }

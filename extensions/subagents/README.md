@@ -33,6 +33,7 @@ Do **not** also install `npm:@tintinweb/pi-subagents` in the same Pi profile. Af
 - **Package discovery is opt-in:** `packageAgents` and `packageWorkflows` default to `false`. Enable either in `subagents.json` (or specify a package allowlist) to discover explicitly declared resources from configured packages. Project trust still applies.
 - **Nested delegation is opt-in per agent:** the new upstream delegation controls are available, but the embedded fleet does not gain recursive delegation automatically.
 - **Scripted workflows are disabled by default pending reliability fixes:** `SubagentWorkflow`, the workflow inspector menu entry, and startup workflow execution are off unless `workflowsEnabled: true` is explicitly configured. Existing explicit opt-ins remain supported; set `workflowsEnabled: false` to disable them. Reload while no agents are running to apply changes to tool registration. When enabled, orchestration still requires an explicit user request.
+- **Tool-requiring roles fail runs without tool calls:** agent frontmatter `require_tool_use: true` makes a run that ends normally (would be `completed` or `steered`) without calling a single tool settle as `error`: "<type> finished without calling any tool, though its role requires tools; the model may not have received its tool definitions. Its reply is kept below. Retry, or check the model route." The reply stays as the result. This catches a model route that drops the child's tool definitions, where the child answers "I have no tools available" and would otherwise look like a finished run. Only an agent's spawn run is checked: a resume may answer a follow-up in text alone. The rule is skipped when the run starts with no active tools. Embedded `recon`, `worker`, and `reviewer` set it; `expert` and custom agents default to off. It applies to top-level, nested, and workflow children, and ejecting keeps the field.
 - **Background completion delivery changed:** upstream now batches completions at the parent's turn boundary, with an idle-parent delivery path, rather than relying only on a short notification timer.
 - **Local integrations remain:** service tiers, scoped host/telemetry ownership, Orca busy-state coordination, and compact invocation/model metadata.
 - **External agents:** agents other extensions publish in the shared `pi-extensions.external-agents` registry, such as [Herder](../herder/README.md)'s steps, appear in the widget under their own group heading, in the fleet list, and in `/agents → Running agents`. Their live conversation opens read-only: Subagents cannot stop, steer, or background them. Each Pi session sees only the agents it started. The contract is documented in `src/external-agents.ts`.
@@ -57,9 +58,9 @@ Select an existing agent type with `subagent_type` (`agentType` in workflows). I
 
 | Type | Job | Tools | Model defaults |
 | --- | --- | --- | --- |
-| `recon` | Read-only reconnaissance; compressed handoff | read-only | `openai/gpt-6-luna`, thinking `max`, fast tier |
-| `worker` | Bounded implementation and verification | coding tools | inherit parent |
-| `reviewer` | Read-only severity-ranked review | read-only | inherit parent |
+| `recon` | Read-only reconnaissance; compressed handoff | read-only; must call a tool | `openai/gpt-6-luna`, thinking `max`, fast tier |
+| `worker` | Bounded implementation and verification | coding tools; must call a tool | inherit parent |
+| `reviewer` | Read-only severity-ranked review | read-only; must call a tool | inherit parent |
 | `expert` | Read-only advice on plans, designs, tradeoffs, and complicated technical questions; selected by user/parent for difficult judgment, not routine questions | read-only | `magpie/gpt-6-astra`, thinking `xhigh`, no tier override |
 
 A custom `expert.md` overrides the embedded Expert through normal agent discovery. `disableDefaultAgents: true` hides Expert along with the other built-ins; custom agents remain available.

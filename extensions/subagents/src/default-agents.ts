@@ -70,6 +70,7 @@ The single best file/function to open first and why.
 
 Do not use emojis. Do not propose large refactors.`,
       promptMode: "replace",
+      requireToolUse: true,
       isDefault: true,
     },
   ],
@@ -133,6 +134,7 @@ What you did not verify; follow-ups for the parent or reviewer.
 ### Blockers (if any)
 Concrete questions or missing decisions.`,
       promptMode: "replace",
+      requireToolUse: true,
       isDefault: true,
     },
   ],
@@ -222,6 +224,7 @@ If there are zero high-confidence findings, say so explicitly and APPROVE (or AP
 
 No emojis. No file modifications.`,
       promptMode: "replace",
+      requireToolUse: true,
       isDefault: true,
     },
   ],

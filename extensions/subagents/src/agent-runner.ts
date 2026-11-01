@@ -660,6 +660,35 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
   return undefined;
 }
 
+/** The error for a tool-requiring run that called no tool. */
+export function noToolUseFailure(type: string): string {
+  return `${type} finished without calling any tool, though its role requires tools; the model may not have `
+    + "received its tool definitions. Its reply is kept below. Retry, or check the model route.";
+}
+
+/**
+ * Guard for agents with `require_tool_use`: counts the spawn run's tool calls
+ * and, when it started with at least one active tool yet called none, yields a
+ * failure. Only the first run is checked: a resume may rightly answer a
+ * follow-up in text alone. Call right before prompting, once the tool scope is
+ * settled. A run
+ * that is aborted or stopped is settled by the manager's precedence first; the
+ * failure is only reported for a run whose signal did not fire.
+ */
+function trackRequiredToolUse(session: AgentSession, type: SubagentType, signal?: AbortSignal) {
+  const required = getAgentConfig(type)?.requireToolUse === true
+    && (session.getActiveToolNames?.()?.length ?? 0) > 0;
+  if (!required) return { unsubscribe: () => {}, failure: () => undefined as string | undefined };
+  let calls = 0;
+  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    if (event.type === "tool_execution_end") calls++;
+  });
+  return {
+    unsubscribe,
+    failure: () => calls === 0 && signal?.aborted !== true ? noToolUseFailure(type) : undefined,
+  };
+}
+
 /** The per-run callbacks a spawn and a resume share, plus the resolved turn limit. */
 type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
   /** Already resolved: undefined = unlimited. */
@@ -1248,6 +1277,9 @@ export async function runAgent(
   options.onSessionCreated?.(session);
 
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+  // After the tool scope's first renarrow above: these are the tools the model
+  // is actually offered on its first turn.
+  const toolUse = trackRequiredToolUse(session, type, options.signal);
 
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
@@ -1283,6 +1315,7 @@ export async function runAgent(
     }
   } finally {
     run.unsubscribe();
+    toolUse.unsubscribe();
     collector.unsubscribe();
     cleanupAbort();
   }
@@ -1301,7 +1334,7 @@ export async function runAgent(
     session,
     aborted: run.aborted,
     steered: run.steered,
-    failure: finalTurnError(session, startLen) ?? structuredFailure,
+    failure: finalTurnError(session, startLen) ?? structuredFailure ?? toolUse.failure(),
     ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
     ...(structuredRetried ? { structuredRetried } : {}),
   };
@@ -1338,6 +1371,7 @@ export async function resumeAgent(
     cleanupAbort();
   }
 
+  // No `require_tool_use` check: a resume may answer a follow-up in text alone.
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
     failure: finalTurnError(session, startLen),

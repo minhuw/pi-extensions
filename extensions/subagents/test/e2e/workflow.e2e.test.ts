@@ -106,7 +106,11 @@ describe("Workflow end to end", () => {
         if (!isParent) {
           childPrompts.push(asText(context));
           childSystemPrompts.push(getCurrentSystemPrompt(context.messages));
-          return fauxText("SUBAGENT-DONE");
+          // Workflow children default to the worker, which must call a tool
+          // (`require_tool_use`): one read-only call, then the answer.
+          return context.messages.at(-1)?.role === "toolResult"
+            ? fauxText("SUBAGENT-DONE")
+            : fauxToolCall("ls", { path: "." });
         }
         return asText(context).includes("Task ID")
           ? fauxText("workflow launched")

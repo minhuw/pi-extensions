@@ -84,6 +84,14 @@ export interface AgentConfig {
    * "off" refuses one even when the caller asks (frontmatter outranks params).
    */
   isolation?: IsolationMode;
+  /**
+   * The role needs tools: a spawn run that ends normally without calling any
+   * tool is reported as an error rather than a completion (a model that never
+   * received its tool definitions otherwise looks like a successful, empty run).
+   * Applies only when the run started with at least one active tool; resumes are
+   * not checked, since they may answer a follow-up in text. Off by default.
+   */
+  requireToolUse?: boolean;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
   /** false = agent is hidden from the registry */
