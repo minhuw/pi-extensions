@@ -73,6 +73,7 @@ it.each([
 	const registry = credentials();
 	if (resolver) registry.repository = resolver;
 	else delete registry.repository;
+	const projectTimeoutMs = timing.projectTimeoutMs;
 	timing.projectTimeoutMs = 200;
 	try {
 		setCredentials(relay.url);
@@ -80,7 +81,10 @@ it.each([
 		await waitFor(() => relay.online(h.session.sessionId) !== undefined, 5_000, "welcome");
 		expect(relay.hellos()).toEqual([expect.objectContaining({ id: h.session.sessionId, project: basename(workspace.cwd) })]);
 		expect(h.errors).toEqual([]);
-	} finally { delete registry.repository; }
+	} finally {
+		delete registry.repository;
+		timing.projectTimeoutMs = projectTimeoutMs;
+	}
 });
 
 it("stays offline and without tools outside the TUI and RPC modes, and connects with tools in both", async () => {
