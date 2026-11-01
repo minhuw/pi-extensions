@@ -1,12 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link, Outlet, useLocation, useNavigate } from "react-router";
+import { useRef, useState } from "react";
+import { Link, Outlet, useLocation } from "react-router";
 import { ApiContext, ApiError, useApi } from "../lib/api";
 import { inGuestView, setGuestView } from "../lib/guestView";
-import { useShortcuts } from "../lib/keyboard";
 import { useTheme } from "../lib/theme";
 import { Icon } from "./icons";
-import { BAND_CONTROL, NavItem, ScrollRootContext, SignBand, ThemeToggle } from "./Layout";
+import { BAND_CONTROL, BAND_NAV, BAND_NAV_END, BandSearch, NavItem, ScrollRootContext, SignBand, ThemeToggle, useBandSearchShortcut } from "./Layout";
 
 /** Anonymous pages have their own client and cache, even when the browser is also signed in. */
 export function PublicLayout() {
@@ -27,9 +26,9 @@ export function PublicLayout() {
 	const location = useLocation();
 	const ownerPage = (location.pathname.replace(/^\/public(?=\/|$)/, "") || "/") + location.search;
 	const [guestView] = useState(inGuestView);
-	const navigate = useNavigate();
-	// As in the owner's band, `/` opens search; the search page handles it itself by focusing its input.
-	useShortcuts(location.pathname === "/public/search" ? {} : { "/": () => navigate("/public/search") });
+	const searchRef = useRef<HTMLInputElement>(null);
+	// As in the owner's band, `/` goes to search.
+	useBandSearchShortcut("/public/search", searchRef);
 	return (
 		<ApiContext.Provider value={api}>
 			<QueryClientProvider client={queryClient}>
@@ -42,7 +41,7 @@ export function PublicLayout() {
 								<Link to={`/login?next=${encodeURIComponent(ownerPage)}`} onClick={() => setGuestView(false)} className={BAND_CONTROL}>
 									{guestView ? (
 										<>
-											<Icon name="eye" />
+											<Icon name="eye" size={15} />
 											Exit guest view
 										</>
 									) : (
@@ -52,13 +51,13 @@ export function PublicLayout() {
 							</>
 						}
 					>
-						<nav className="flex min-w-0 items-stretch overflow-x-auto [scrollbar-width:none]" aria-label="Public">
-							<NavItem to="/public" icon="sessions" end>
+						<nav className={BAND_NAV} aria-label="Public">
+							<NavItem to="/public" icon="sessions" end within={["/public/s/"]}>
 								Public trajectories
 							</NavItem>
-							<NavItem to="/public/search" icon="search" hint="/">
-								Search
-							</NavItem>
+							<div className={BAND_NAV_END}>
+								<BandSearch path="/public/search" label="Search published trajectories" inputRef={searchRef} />
+							</div>
 						</nav>
 					</SignBand>
 					<main ref={setScrollRoot} className="relative min-h-0 min-w-0 flex-1 overflow-y-auto" data-scroll-root="">

@@ -207,6 +207,12 @@ export const Icons = {
 			<path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v3.5c0 .3-.2.5-.5.5H3c-.3 0-.5-.2-.5-.5V5c0-.3.2-.5.5-.5h3.5" />
 		</Svg>
 	),
+	// A door frame with an arrow leaving it.
+	signOut: (p: IconProps) => (
+		<Svg {...p}>
+			<path d="M6.5 2.5h-3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3M7 8h6.5M10.5 5l3 3-3 3" />
+		</Svg>
+	),
 	download: (p: IconProps) => (
 		<Svg {...p}>
 			<path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10" />

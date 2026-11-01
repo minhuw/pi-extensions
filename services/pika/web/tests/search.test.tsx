@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSnippet } from "../src/lib/snippet";
 import type { Entry, SearchHit, Turn } from "../src/lib/types";
 import { SEARCH_DEBOUNCE_MS, SESSION_LIMIT, Snippet } from "../src/pages/Search";
@@ -230,6 +230,55 @@ describe("search page", () => {
 	});
 });
 
+describe("band search", () => {
+	const field = (name = "Search every session") => screen.findByRole("searchbox", { name });
+
+	it("opens the search page with what was typed, where its tab then stands in for the field", async () => {
+		const server = createFakeServer({ sessions: sessions(), hits: HITS });
+		renderApp("/", server.fetch);
+		await screen.findByText("Fix the base path");
+		const input = await field();
+		expect(input.closest("[role='search']")?.getAttribute("aria-label")).toBe("Search every session");
+		fireEvent.change(input, { target: { value: "base" } });
+		fireEvent.submit(input.closest("form")!);
+
+		const page = await screen.findByRole("searchbox", { name: "Search" });
+		expect(page).toHaveProperty("value", "base");
+		await waitFor(() => expect(server.calls).toContain("/api/v1/search?q=base&group=session&prefix=true&limit=20"));
+		expect(document.querySelector("[data-band-search]")).toBeNull();
+		const nav = screen.getByRole("navigation", { name: "Main" });
+		expect(within(nav).getByRole("link", { name: "Search" }).getAttribute("aria-current")).toBe("page");
+		// Settings sits with search at the band's right, after it.
+		const links = within(nav).getAllByRole("link").map((link) => link.getAttribute("href"));
+		expect(links.slice(-2)).toEqual(["/search", "/settings"]);
+	});
+
+	it("opens the search page itself for an empty query", async () => {
+		renderApp("/", createFakeServer({ sessions: sessions(), hits: HITS }).fetch);
+		const input = await field();
+		fireEvent.change(input, { target: { value: "   " } });
+		fireEvent.submit(input.closest("form")!);
+		expect(await screen.findByText("Search every session")).toBeTruthy();
+		expect(await screen.findByRole("searchbox", { name: "Search" })).toHaveProperty("value", "");
+	});
+
+	it("is focused by / where it shows, and Escape clears and leaves it", async () => {
+		renderApp("/", createFakeServer({ sessions: sessions(), hits: HITS }).fetch);
+		await screen.findByText("Fix the base path");
+		const input = await field();
+		// jsdom lays nothing out, so every element reads as hidden, as the field is on phones; here it shows.
+		vi.spyOn(input, "getClientRects").mockReturnValue([new DOMRect(0, 0, 300, 32)] as unknown as DOMRectList);
+		fireEvent.keyDown(window, { key: "/" });
+		expect(document.activeElement).toBe(input);
+		expect(screen.getByText("Fix the base path")).toBeTruthy();
+
+		fireEvent.change(input, { target: { value: "base" } });
+		fireEvent.keyDown(input, { key: "Escape" });
+		expect(input).toHaveProperty("value", "");
+		expect(document.activeElement).not.toBe(input);
+	});
+});
+
 describe("public search", () => {
 	/** Only the public namespace reaches the fixture's data; anything else is recorded and refused. */
 	function publicServer() {
@@ -266,6 +315,17 @@ describe("public search", () => {
 		fireEvent.keyDown(window, { key: "/" });
 		expect(await screen.findByText("Search published trajectories")).toBeTruthy();
 		expect(screen.getByRole("searchbox", { name: "Search" })).toBeTruthy();
+	});
+
+	it("searches published trajectories from the public band", async () => {
+		const server = publicServer();
+		renderApp("/public", server.fetch);
+		const input = await screen.findByRole("searchbox", { name: "Search published trajectories" });
+		fireEvent.change(input, { target: { value: "base" } });
+		fireEvent.submit(input.closest("form")!);
+		await screen.findAllByText("base", { selector: "mark" });
+		expect(server.calls).toContain("/api/public/v1/search?q=base&group=session&prefix=true&limit=20");
+		expect(within(screen.getByRole("navigation", { name: "Public" })).getByRole("link", { name: "Search" }).getAttribute("aria-current")).toBe("page");
 	});
 
 	it("is where the owner's guest view of search goes, with the query", async () => {

@@ -56,6 +56,20 @@ describe("logo", () => {
 		expect(home.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 
+	it("keeps a section's tab current on the pages inside it, and its own page the only current page", async () => {
+		const server = createFakeServer({ sessions: [{ detail: summary("s1", { title: "Fix the parser" }), turns: [], entries: [] }], runs: [run()] });
+		const current = (name: string) => within(screen.getByRole("navigation", { name: "Main" })).getByRole("link", { name }).getAttribute("aria-current");
+		const { unmount } = renderApp("/", server.fetch);
+		await screen.findByRole("navigation", { name: "Main" });
+		expect(current("Sessions")).toBe("page");
+		unmount();
+
+		renderApp("/s/s1", server.fetch);
+		await screen.findByRole("heading", { name: "Fix the parser", level: 1 });
+		expect(current("Sessions")).toBe("true");
+		expect(current("Herder runs")).toBeNull();
+	});
+
 	it("is the favicon, inline so any base path works", () => {
 		const href = /<link rel="icon"[^>]*href="([^"]*)"/.exec(INDEX_HTML)?.[1] ?? "";
 		const prefix = "data:image/svg+xml,";
