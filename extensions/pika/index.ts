@@ -3,6 +3,7 @@ import { getAgentDir, VERSION, type ExtensionAPI, type ExtensionCommandContext, 
 import { isAssistant, SessionCapture } from "./capture.ts";
 import { isExcluded, loadConfig, type ConfigResult } from "./config.ts";
 import { publishCredentials } from "./credentials.ts";
+import { resolveRepository } from "./repository.ts";
 import { abortBinds, bindOnce } from "./device-key.ts";
 import { isPlainRemote, login, type LoginControl, readConfigFile, writeConfigFile } from "./login.ts";
 import { acquireUploader, currentUploader, releaseUploader, type Uploader, type UploaderOptions } from "./uploader.ts";
@@ -150,7 +151,7 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		return undefined;
 	}
 
-	function start(ctx: ExtensionContext, uploader: Uploader): void {
+	function start(ctx: ExtensionContext): void {
 		const manager = ctx.sessionManager;
 		const sessionId = manager.getSessionId();
 		const file = manager.getSessionFile();
@@ -160,9 +161,17 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		const existing = captures.get(sessionId);
 		if (existing) { existing.owner = self; return; }
 		const key = `session:${sessionId}`;
-		captures.set(sessionId, new SessionCapture(sessionId, key, currentUploader, self));
+		const capture = new SessionCapture(sessionId, key, currentUploader, self);
+		captures.set(sessionId, capture);
 		const parentSession = manager.getHeader()?.parentSession;
-		void uploader.openStream({ key, kind: "session", path: file, meta: { sessionId, cwd, ...(parentSession ? { parentSession } : {}) } });
+		// The stream opens once git named the repository, so its first batch carries the name; the
+		// stream reads the session file from its start, so lines written meanwhile are not lost.
+		capture.opened = resolveRepository(cwd).then((repository) => {
+			// `/pika logout` stopped the capture meanwhile; a shutting-down session waits for this.
+			if (shared().captures.get(sessionId) !== capture) return;
+			const meta = { sessionId, cwd, ...(parentSession ? { parentSession } : {}), ...repository };
+			void currentUploader()?.openStream({ key, kind: "session", path: file, meta });
+		}).catch((error: unknown) => { currentUploader()?.noteError(`capture: ${errorText(error)}`); });
 	}
 
 	/** Reads the configuration and, when enabled and not excluded, captures the session from its first line. */
@@ -182,7 +191,8 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 			for (const key of excludedKeys) shared().excluded.add(key);
 			return;
 		}
-		start(ctx, enroll());
+		enroll();
+		start(ctx);
 	}
 
 	pi.on("session_start", (_event, ctx) => { ended = false; shared().open.add(self); guard(() => attach(ctx)); });
@@ -234,6 +244,9 @@ export default function pikaExtension(pi: ExtensionAPI): void {
 		// A bind still running must not keep a short-lived process, such as `pi -p`, alive after its last session.
 		shared().open.delete(self);
 		if (shared().open.size === 0) abortBinds();
+		// A stream still waiting for its repository opens before it closes and the uploader drains.
+		const opening = owned(ctx)?.opened;
+		if (opening) await opening;
 		guard(() => {
 			for (const key of excludedKeys) shared().excluded.delete(key);
 			excludedKeys = [];

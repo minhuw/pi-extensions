@@ -58,6 +58,8 @@ const modelFields = (model: ModelInfo): ModelInfo => ({
  */
 export class SessionCapture {
 	owner: object;
+	/** Settles once the session's stream is opened, or was not because the capture stopped first. */
+	opened?: Promise<void>;
 	private seq = 0;
 	private call?: Call;
 

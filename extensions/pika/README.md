@@ -7,7 +7,7 @@ pika uploads every Pi trajectory to a self-hosted pika server. The server ([`ser
 
 ## What pika records
 
-- **Sessions.** Every line of the Pi session file, verbatim, including compactions, branches, and custom entries.
+- **Sessions.** Every line of the Pi session file, verbatim, including compactions, branches, and custom entries. With them, the session's working directory, its git repository's name, and the repository's web URL with any credentials removed (see [Projects and repositories](#projects-and-repositories)).
 - **Model requests.** For each model call, the `before_provider_request` payload after every other extension has changed it, which is the body the provider received. Providers that expose no payload (for example custom `streamSimple` implementations) are recorded as `fidelity: "context"` with the full Pi context, system messages included. Each request is linked to its assistant message by timestamp and response id. Its `timing` holds when the payload was sent (`sentAt`, at `before_provider_request`), when the provider's response headers came back (`responseAt`, at `after_provider_response`), and when the first text, thinking, or tool-call token arrived (`firstTokenAt`, with its kind in `firstToken`), each in Unix epoch milliseconds and only when the transport reported that stage.
 - **Child sessions.** Subagents (top-level, nested, and workflow children) and Herder step sessions, through the [child-session hook](#child-session-hook). Each is uploaded as its own session and linked to its parent session, tool call, agent, workflow, or Herder run and step.
 - **Herder runs.** Each run's journal, and its `goal.md` and `plan.md` whenever their content changes and again after a switch to another server.
@@ -131,6 +131,14 @@ Only sessions that start or resume while pika is enabled are uploaded; older ses
 
 If pika is loaded twice in one session, for example from the package and again through the hook, only the last-loaded copy captures.
 
+### Projects and repositories
+
+Each session is filed under a project: the name of the git repository holding its working directory, wherever Pi runs in it. pika asks git for the repository's common directory (`git rev-parse --git-common-dir`); for a `.git` directory the name is the folder holding it, the main checkout's folder, so a session in a subdirectory, in a linked `git worktree`, in a Herder step's worktree, or in a Subagents `isolation: "worktree"` child is filed under the same name as one at the repository's root. A bare repository is named after its directory without `.git`. Outside git, or when git is missing or does not answer within 2 s, the server keeps the basename of the working directory.
+
+pika also uploads the repository's web URL, which the web UI links to from the session page. It comes from the `origin` remote, or the only remote when there is no `origin`: scp-like `git@host:path`, `ssh://`, and `git://` URLs become `https://host/path` without the port, and `https://` and `http://` URLs keep their scheme and port. Credentials (a user, password, or token before the `@`), query, fragment, a trailing `/`, and `.git` are removed. Local paths, `file://` URLs, hosts other than plain names or IPv4 addresses, and URLs with whitespace or control characters give no URL.
+
+git runs once per working directory and process, without prompts and without the `GIT_*` environment, so `GIT_DIR` cannot point it at another repository. The session's stream opens once git answered, so its first upload already carries both fields; lines written meanwhile are uploaded from the session file. Both travel in the session stream's `meta` as `project` and `repository`. The [exclude list](#exclude-list) still applies to the working directory.
+
 ### Delivery and the offline spool
 
 pika never blocks or fails a turn. Its handlers only enqueue work, and errors are recorded for `/pika`. Uploads run in the background as gzip batches under 8 MiB (uncompressed). A request's new blocks may go out over several batches before the request itself. A single block or session line larger than that is sent alone, so it must fit the server's `--max-body` (32 MiB by default) and the proxy's body limit.
@@ -211,12 +219,16 @@ Every field except `kind` is optional, and `herder` is present only for Herder s
 pika publishes its active server credentials for other extensions, such as [relay](../relay/README.md), which never import it:
 
 ```ts
-const registry: { current: { url: string; token: string; isExcluded(cwd: string): boolean } | undefined; listeners: Set<() => void> } =
-	(globalThis as any)[Symbol.for("pi-extensions.pika.credentials")] ??= { current: undefined, listeners: new Set() };
+const registry: {
+	current: { url: string; token: string; isExcluded(cwd: string): boolean } | undefined;
+	listeners: Set<() => void>;
+	repository?: (cwd: string) => Promise<{ project?: string; repository?: string }>;
+} = (globalThis as any)[Symbol.for("pi-extensions.pika.credentials")] ??= { current: undefined, listeners: new Set() };
 ```
 
 - `current` is set while pika is enabled with a URL and token, and `undefined` when it is disabled (including `PIKA_DISABLED=1`), logged out, or unconfigured. `isExcluded` applies the [exclude list](#exclude-list).
 - pika reads the configuration at each session start, `/pika login`, and `/pika logout`, and calls every listener after each change, including a login that switches servers. A configuration that reads the same is no change.
+- `repository(cwd)` resolves the git repository of `cwd` as pika files sessions (see [Projects and repositories](#projects-and-repositories)): `project` is its name and `repository` its web URL without credentials, both absent outside git. It is cached per cwd, never rejects, and settles within a few seconds. pika sets it whether or not it is logged in; older pika versions lack it, so callers fall back to the basename of `cwd`. relay names its sessions' project with it.
 - Either side may create the registry first.
 
 ### Herder runs

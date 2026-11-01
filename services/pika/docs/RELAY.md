@@ -139,11 +139,13 @@ pika publishes its active server credentials:
 globalThis[Symbol.for("pi-extensions.pika.credentials")] ??= { current: undefined, listeners: new Set() }
 current: { url: string, token: string, isExcluded(cwd: string): boolean } | undefined
 listeners: Set<() => void>
+repository?: (cwd: string) => Promise<{ project?: string, repository?: string }>
 ```
 
 - `current` is set when pika is enabled with a URL and token, and set to `undefined` when it is disabled (including `PIKA_DISABLED=1`), logged out, or unconfigured.
 - pika calls every listener after each change, including `/pika login` switching servers and `/pika logout`.
 - `isExcluded` applies pika's `exclude` patterns.
+- `repository(cwd)` resolves the git repository of `cwd` the way pika names its sessions: `project` is the repository's name and `repository` its web URL without credentials, both absent outside git. It is cached per cwd, never rejects, and settles within a few seconds. pika sets it whether or not it is logged in; pika versions before it lack it, so callers fall back to the basename of `cwd`.
 - Either side may create the registry object first, using `??=`, so load order does not matter.
 
 ## Extension (`extensions/relay/`)
