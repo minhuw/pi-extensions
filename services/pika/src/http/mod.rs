@@ -4,6 +4,7 @@ mod ingest;
 mod read;
 mod relay;
 mod ui;
+mod visitor;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -30,6 +31,10 @@ use crate::store::Store;
 pub struct Limits {
     login: Mutex<LoginLimiter>,
     pair_starts: Mutex<SlidingWindow>,
+    visitor_ip: Mutex<SlidingWindow>,
+    visitor_global: Mutex<SlidingWindow>,
+    /// Bound analytics work waiting on the shared SQLite writer.
+    visitor_writes: Arc<Semaphore>,
     /// One permit per password check allowed to run. The permit moves into the blocking task, so a check whose login
     /// was cancelled still holds it until argon2 finishes.
     password_checks: Arc<Semaphore>,
@@ -40,6 +45,9 @@ impl Default for Limits {
         Limits {
             login: Mutex::new(LoginLimiter::default()),
             pair_starts: Mutex::new(SlidingWindow::new(PAIR_STARTS_PER_IP, PAIR_START_WINDOW)),
+            visitor_ip: Mutex::new(SlidingWindow::new(60, std::time::Duration::from_secs(60))),
+            visitor_global: Mutex::new(SlidingWindow::new(6000, std::time::Duration::from_secs(60))),
+            visitor_writes: Arc::new(Semaphore::new(4)),
             password_checks: Arc::new(Semaphore::new(MAX_PASSWORD_CHECKS)),
         }
     }
@@ -73,6 +81,10 @@ pub struct AppState {
 impl AppState {
     /// Fails with `auth::NoPassword` in `password` mode without a password.
     pub fn new(store: Arc<Store>, config: ServerConfig) -> Result<AppState> {
+        if matches!(config.visitor_analytics, crate::config::VisitorAnalytics::Proxy | crate::config::VisitorAnalytics::Cloudflare) && !config.trust_proxy {
+            anyhow::bail!("visitor analytics proxy and cloudflare modes require --trust-proxy");
+        }
+        visitor::cleanup(&store)?;
         let auth = Auth::new(&store, &config)?;
         let relay = Arc::new(Relay::new(config.relay.clone()));
         Ok(AppState { store, auth: Arc::new(auth), config: Arc::new(config), limits: Arc::default(), relay })
@@ -110,6 +122,7 @@ pub fn router(state: AppState) -> Router {
     let login = |routes: Router<AppState>| routes.route_layer(require_login.clone());
     // Browser sessions sit under `auth/` because `sessions` is the pi session list.
     let protected = read::routes()
+        .route("/visitor-origins", get(visitor::origins))
         .route("/logout", post(auth::logout))
         .route("/auth/sessions", get(auth::sessions))
         .route("/auth/sessions/revoke-all", post(auth::revoke_all))
@@ -159,6 +172,20 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         state.auth.mode().as_str(),
         if config.trust_proxy { ", trusting X-Forwarded-For" } else { "" },
     );
+    // Rotate the daily key and expire rows even on an otherwise idle server.
+    let cleanup_store = state.store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let store = cleanup_store.clone();
+            match tokio::task::spawn_blocking(move || visitor::cleanup(&store)).await {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => tracing::error!("visitor cleanup: {e}"),
+                Err(e) => tracing::error!("visitor cleanup task: {e}"),
+            }
+        }
+    });
     let relay = state.relay.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let shutdown = {

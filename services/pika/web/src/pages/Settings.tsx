@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { BUTTON, Callout, cx, EmptyState, ErrorState, Page, PageTitle, Pill, SkeletonLines } from "../components/ui";
+import { VisitorOriginsSection } from "../components/VisitorOrigins";
 import { useApi } from "../lib/api";
 import { formatCount } from "../lib/format";
 
 const PUBLISHING_KEY = ["settings", "publishing"] as const;
 /** The published projects table's columns: the project, its trajectories, its status, and its switch. */
-const ROW = "grid grid-cols-[minmax(0,1fr)_112px_minmax(0,220px)_112px] items-center gap-x-4 px-1.5";
+const ROW = "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 px-1.5 sm:grid-cols-[minmax(0,1fr)_112px_minmax(0,220px)_112px]";
 
 export function SettingsPage() {
 	const api = useApi();
@@ -38,7 +39,7 @@ export function SettingsPage() {
 					<EmptyState title="No projects yet">Projects appear here after their first session is uploaded.</EmptyState>
 				) : (
 					<div className="mt-6">
-						<div className={cx(ROW, "h-7 items-end border-b border-ink pb-1 text-[12px] font-medium text-muted")} aria-hidden="true">
+						<div className={cx(ROW, "hidden h-7 items-end border-b border-ink pb-1 text-[12px] font-medium text-muted sm:grid")} aria-hidden="true">
 							<span>Project</span>
 							<span className="text-right">Trajectories</span>
 							<span>Status</span>
@@ -46,7 +47,7 @@ export function SettingsPage() {
 						</div>
 						<ul>
 							{settings.data.projects.map(({ project, sessionCount, published }) => (
-								<li key={project} className={cx(ROW, "min-h-9 border-b border-line py-1 text-[13px] hover:bg-hover")} data-publishing-project={project}>
+								<li key={project} className={cx(ROW, "min-h-9 gap-y-2 border-b border-line py-2 text-[13px] hover:bg-hover sm:py-1")} data-publishing-project={project}>
 									<span className="min-w-0 font-medium break-all">{project}</span>
 									<span className="tnum text-right text-muted">
 										{formatCount(sessionCount)} {sessionCount === 1 ? "trajectory" : "trajectories"}
@@ -78,6 +79,7 @@ export function SettingsPage() {
 					</div>
 				)}
 			</section>
+			<VisitorOriginsSection />
 		</Page>
 	);
 }

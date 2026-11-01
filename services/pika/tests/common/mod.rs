@@ -12,8 +12,8 @@ use tempfile::TempDir;
 pub const DEVICE: &str = "laptop";
 pub const SESSION_ID: &str = "7f3c2a10-5b1e-4c3d-9a8e-1f2e3d4c5b6a";
 pub const RUN_ID: &str = "20261021-100000-abcd";
-/// SQL that removes what schema version 8 added, for tests that rewind `user_version`.
-pub const UNDO_V8: &str = "ALTER TABLE sessions DROP COLUMN repository;";
+/// Remove versions 9 and 8 for tests that rewind `user_version`.
+pub const UNDO_V8: &str = "DROP TABLE visitor_views; DROP TABLE visitor_day_key; ALTER TABLE sessions DROP COLUMN repository;";
 /// SQL that puts back the full-text index that schema version 7 replaced, for tests that rewind `user_version`. Dropping
 /// the index needs `pika::tokenizer::register` on the connection.
 pub const UNDO_V7: &str = "DROP TABLE search_fts;

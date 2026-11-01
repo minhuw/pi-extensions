@@ -5,6 +5,7 @@ import { ApiContext, ApiError, useApi } from "../lib/api";
 import { inGuestView, setGuestView } from "../lib/guestView";
 import { useTheme } from "../lib/theme";
 import { Icon } from "./icons";
+import { useVisitorView } from "./useVisitorView";
 import { BAND_CONTROL, BAND_NAV, BAND_NAV_END, BandSearch, NavItem, ScrollRootContext, SignBand, ThemeToggle, useBandSearchShortcut } from "./Layout";
 
 /** Anonymous pages have their own client and cache, even when the browser is also signed in. */
@@ -26,6 +27,7 @@ export function PublicLayout() {
 	const location = useLocation();
 	const ownerPage = (location.pathname.replace(/^\/public(?=\/|$)/, "") || "/") + location.search;
 	const [guestView] = useState(inGuestView);
+	useVisitorView(api, location, guestView);
 	const searchRef = useRef<HTMLInputElement>(null);
 	// As in the owner's band, `/` goes to search.
 	useBandSearchShortcut("/public/search", searchRef);

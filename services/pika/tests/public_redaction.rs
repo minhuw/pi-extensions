@@ -744,11 +744,11 @@ fn indexed_with(store: &Store, credentials: &[&str]) -> Vec<String> {
 }
 
 /// Asserts the index is recorded as scrubbed under the current rules, with no rewrite left to resume, and the schema
-/// is version 8, the latest; redaction adds no migration.
+/// is version 9, the latest; redaction adds no migration.
 fn assert_current_at_version_8(store: &Store) {
     let settings = query(store, "SELECT key, CAST(value AS TEXT) AS value FROM settings WHERE key LIKE 'search%'");
     assert_eq!(settings, query(store, &format!("SELECT '{}' AS key, '{}' AS value", store::SEARCH_RULES, pika::redact::RULES_VERSION)));
-    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(8));
+    assert_eq!(one(store, "PRAGMA user_version")["user_version"], json!(9));
 }
 
 #[tokio::test]

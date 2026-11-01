@@ -24,7 +24,7 @@ pika [--data-dir DIR] <command>
 
 pika serve [--bind ADDR] [--base-path PATH] [--auth password|proxy|none] [--password-file FILE]
            [--password PASSWORD] [--cookie-secure auto|always|never] [--trust-proxy] [--max-body SIZE]
-           [--relay on|off]
+           [--relay on|off] [--visitor-analytics off|auto|direct|proxy|cloudflare]
 pika password set
 pika password clear
 pika token create <name>
@@ -61,6 +61,7 @@ Every command opens the data directory and creates it if needed. `password`, `to
 | `--password` | `PIKA_PASSWORD` | none | The password. Wins over the stored one. Empty means unset. |
 | `--cookie-secure` | `PIKA_COOKIE_SECURE` | `auto` | When the session cookie is `Secure`: `auto` when a trusted proxy reports HTTPS, `always`, or `never`. |
 | `--trust-proxy` | `PIKA_TRUST_PROXY` | off | Takes the client address from the rightmost `X-Forwarded-For` entry and HTTPS from `X-Forwarded-Proto`. Turn it on behind a reverse proxy, and only then: without a proxy, clients could pick their own address. `1`, `true`, `yes`, or `on` turn it on; `0`, `false`, `no`, `off`, or empty leave it off; any other value stops `serve` with an error. |
+| `--visitor-analytics` | `PIKA_VISITOR_ANALYTICS` | `auto` | Count public page views and select the address source automatically. Set `off` to disable collection. See [Visitor origins](#visitor-origins). |
 | `--max-body` | `PIKA_MAX_BODY` | `32MiB` | Largest ingest body, both as sent and after gzip decompression. Accepts bytes or `K`/`KiB`, `M`/`MiB`, `G`/`GiB` (all binary). |
 | `--relay` | `PIKA_RELAY` | `on` | Relay between Pi sessions (see [Relay](#relay)): `on` or `off`, with the same spellings as `--trust-proxy`, except that empty means `on`. When `off`, every relay route answers 404 `{ "error": "relay_disabled" }`. |
 
@@ -142,6 +143,22 @@ The rules are ported from [magpie](https://github.com/yetone/magpie) (MIT Licens
 The owner's view under `api/v1/`, the stored lines, entries, and blobs, and what devices upload are unchanged. The one exception is search: its index holds scrubbed text, so search, the owner's included, cannot find a credential by its value, and its snippets and session titles show the markers instead.
 
 With proxy authentication, leave `/public`, `/public/*`, `/api/public/*`, and `/assets/*` open (including your base path), while keeping `/api/v1/*` and owner pages authenticated. The [deployment examples](deploy/) include these rules. With pika's built-in password, no proxy changes are needed.
+
+### Visitor origins
+
+Visitor analytics is enabled by default and counts public gallery and trajectory views reported by the web UI. Set `PIKA_VISITOR_ANALYTICS=off` (or `--visitor-analytics off`) to disable collection. Without `--trust-proxy`, pika uses the socket address and ignores forwarding headers. With `PIKA_TRUST_PROXY=1`, it uses the rightmost `X-Forwarded-For` address, falling back to the socket address. It also uses `CF-IPCountry` when a single valid `CF-Connecting-IP` matches that forwarded address; otherwise the country is unknown. IPv4 and IPv6 addresses are supported.
+
+Behind Cloudflare Tunnel, enable Cloudflare's IP Geolocation setting so it sends the country header. If another proxy adds an address after the visitor's in `X-Forwarded-For`, configure that controlled proxy to forward the validated visitor IP as the rightmost address, or use the explicit `cloudflare` mode. Matching headers alone cannot prove a request came through Cloudflare: a generic proxy must remove or replace client-supplied `CF-Connecting-IP` and `CF-IPCountry` as well as forwarding headers. **The origin must be reachable only through the controlled proxy/tunnel** when trusting them; otherwise visitors can forge them. Existing authentication and login rate limiting continue to use their existing client-address rules.
+
+Existing `direct`, `proxy`, and `cloudflare` values remain available as explicit overrides. `direct` always uses the socket address. `proxy` uses the rightmost `X-Forwarded-For`; `cloudflare` uses `CF-Connecting-IP` and `CF-IPCountry` directly. Both forwarded overrides require `--trust-proxy`.
+
+Visit **Settings → Visitor origins** to see results. A browser must load the public page and allow its view request; crawlers, ad blockers, and owner guest mode may prevent counting. Cloudflare country is an estimate of the network location, which a VPN can change.
+
+The new database schema is version 9. An older pika binary cannot open the upgraded database; keep a backup before upgrading if you may need to roll back.
+
+The owner API reports the latest 30 UTC dates, including today. Daily visitors are estimates based on distinct IP addresses per UTC day, summed across days; they are not unique people over the whole period. Shared addresses, changing addresses, missing addresses, blocked requests, and rate limiting affect the estimate. Views without an address still count. To bound storage, at most 20,000 rows are recorded per day, including unidentified visitors. When the limit is reached, new groups contribute views to an unknown-country bucket without a project or visitor estimate; existing groups retain their detail. No GeoIP database is used; country is unknown unless Cloudflare's country header is accepted in automatic or explicit Cloudflare mode. Counts include only explicitly reported public views, not assets, polling, ingest, or other server traffic.
+
+The database stores a keyed digest, view totals, country and published project, never the raw address or User-Agent in analytics. A random 32-byte key is kept for the current UTC day to preserve deduplication across restarts, then deleted on rotation. Rows older than the 30-date window are deleted at startup, on analytics activity, and roughly once a minute while serving; when stopped, cleanup resumes at startup. SQLite WAL files, filesystem snapshots and backups may retain deleted bytes or old keys beyond this logical retention, so protect and expire them separately. During a day, someone with database access to the current key can test guesses against its digests; counts and country/project associations also reveal aggregate activity. Historical digests remain linkable across groups within the same day but use a different key each day. Disabling collection leaves existing retained history until normal cleanup.
 
 ### Relay
 
@@ -284,7 +301,7 @@ Then use `pika` in place of `ghcr.io/minhuw/pika:latest` in the commands here.
 
 ### Configuration
 
-The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, `PIKA_RELAY`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
+The image sets `PIKA_BIND=0.0.0.0:7171`, `PIKA_DATA_DIR=/data`, and `PIKA_BASE_PATH=/`, declares `/data` as a volume, and exposes 7171. Its entrypoint is `pika` and its default command is `serve`, so `docker run … ghcr.io/minhuw/pika:latest token list` runs any other command against the same volume. Pass `PIKA_AUTH`, `PIKA_PASSWORD_FILE`, `PIKA_TRUST_PROXY`, `PIKA_COOKIE_SECURE`, `PIKA_MAX_BODY`, `PIKA_RELAY`, `PIKA_VISITOR_ANALYTICS`, or `PIKA_BASE_PATH` with `-e`. The image keeps the default `PIKA_TRUST_PROXY` (off); turn it on when the published port is reachable only by your proxy, as with `-p 127.0.0.1:7171:7171`.
 
 The `HEALTHCHECK` requests `http://127.0.0.1:<port from PIKA_BIND><PIKA_BASE_PATH>/api/health` with `curl` every 30 s, normalizing the base path as the server does (`pika`, `pika/`, and `/pika/` all mean `/pika`). It reads only the environment, so set the base path and bind address with `-e PIKA_BASE_PATH` and `-e PIKA_BIND`, not as `serve --base-path` or `--bind` arguments: with a flag the server moves but the health check does not, and the container stays unhealthy. `docker ps` shows the result, and you can check it by hand:
 

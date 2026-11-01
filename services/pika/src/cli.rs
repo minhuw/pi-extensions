@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::auth::NoPassword;
-use crate::config::{self, AuthMode, CookieSecure, RelayConfig, ServerConfig};
+use crate::config::{self, AuthMode, CookieSecure, RelayConfig, ServerConfig, VisitorAnalytics};
 use crate::store::Store;
 
 #[derive(Parser)]
@@ -44,6 +44,9 @@ enum Command {
         /// Trust X-Forwarded-For and X-Forwarded-Proto from the reverse proxy.
         #[arg(long, env = "PIKA_TRUST_PROXY", value_parser = parse_switch)]
         trust_proxy: bool,
+        /// Anonymous visitor analytics (on/auto detects direct and trusted proxy sources).
+        #[arg(long, env = "PIKA_VISITOR_ANALYTICS", value_enum, default_value = "auto")]
+        visitor_analytics: VisitorAnalytics,
         /// Maximum request body size, such as 32MiB.
         #[arg(long, env = "PIKA_MAX_BODY", default_value = "32MiB")]
         max_body: String,
@@ -134,6 +137,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             password,
             cookie_secure,
             trust_proxy,
+            visitor_analytics,
             max_body,
             relay,
             relay_ttl_secs,
@@ -155,6 +159,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 password: password.filter(|p| !p.is_empty()),
                 cookie_secure,
                 trust_proxy,
+                visitor_analytics,
                 max_body: config::parse_size(&max_body)?,
                 relay: relay_config,
             };

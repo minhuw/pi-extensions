@@ -59,6 +59,18 @@ const BROWSER_SESSIONS = "auth/sessions";
 
 type Params = Record<string, string | number | boolean | null | undefined>;
 
+export type VisitorView = { page: "gallery"; project?: string } | { page: "session"; sessionId: string };
+
+export interface VisitorOrigins {
+	mode: "off" | "auto" | "direct" | "proxy" | "cloudflare";
+	days: 30;
+	views: number;
+	dailyVisitors: number;
+	daily: { date: string; views: number; dailyVisitors: number }[];
+	countries: { country: string | null; views: number; dailyVisitors: number }[];
+	projects: { project: string; views: number; dailyVisitors: number }[];
+}
+
 export interface PublishingSettings {
 	projects: { project: string; sessionCount: number; published: boolean }[];
 }
@@ -148,6 +160,14 @@ export class PikaApi {
 	/** `{base}/api/health`, outside the read API; it is always open. */
 	health(): Promise<Health> {
 		return this.fetchJson(withBase(this.base, "api/health"), "health");
+	}
+
+	visitorView(view: VisitorView): Promise<void> {
+		return this.send("visitor-view", "POST", view);
+	}
+
+	visitorOrigins(): Promise<VisitorOrigins> {
+		return this.request("visitor-origins");
 	}
 
 	publishing(): Promise<PublishingSettings> {

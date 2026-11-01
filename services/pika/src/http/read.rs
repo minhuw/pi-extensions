@@ -6,7 +6,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde::Serialize;
 use serde_json::json;
@@ -50,6 +50,7 @@ pub fn routes() -> Router<AppState> {
 pub fn public_routes() -> Router<AppState> {
     session_routes()
         .layer(Extension(Scope { public: true }))
+        .route("/visitor-view", post(super::visitor::view))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found") })
         .layer(axum::middleware::from_fn(no_store))
 }

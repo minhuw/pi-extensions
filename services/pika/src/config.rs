@@ -28,6 +28,21 @@ impl AuthMode {
     }
 }
 
+/// Source of visitor analytics addresses. Forwarded modes require a controlled proxy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VisitorAnalytics {
+    #[value(alias = "0", alias = "false", alias = "no")]
+    Off,
+    /// Select the socket or trusted proxy automatically; `on` is a convenient synonym.
+    #[default]
+    #[value(alias = "on", alias = "1", alias = "true", alias = "yes")]
+    Auto,
+    Direct,
+    Proxy,
+    Cloudflare,
+}
+
 /// When the session cookie gets the `Secure` attribute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum CookieSecure {
@@ -51,6 +66,7 @@ pub struct ServerConfig {
     pub cookie_secure: CookieSecure,
     /// Take the client address from `X-Forwarded-For` and HTTPS from `X-Forwarded-Proto`.
     pub trust_proxy: bool,
+    pub visitor_analytics: VisitorAnalytics,
     pub max_body: usize,
     pub relay: RelayConfig,
 }
@@ -127,6 +143,7 @@ impl ServerConfig {
             password: None,
             cookie_secure: CookieSecure::Auto,
             trust_proxy: false,
+            visitor_analytics: VisitorAnalytics::default(),
             max_body: DEFAULT_MAX_BODY,
             relay: RelayConfig::default(),
         }
