@@ -13,6 +13,8 @@ import {
 	FAMILY_CLASSES,
 	FAMILY_GLYPHS,
 	FAMILY_LABELS,
+	familyColor,
+	familyTint,
 	recordBadge,
 	recordFamily,
 	recordGlyph,
@@ -191,6 +193,54 @@ export function Chip({ tone = "neutral", children, title }: { tone?: "neutral" |
 			)}
 		>
 			{children}
+		</span>
+	);
+}
+
+/**
+ * A capsule tag for one fact about a record. Neutral by default; `tone` tints it in a kind's line colour, which names
+ * the record's kind, or in red for a failure. `lead` is its icon, swatch, or gauge.
+ */
+export function Tag({
+	tone = "neutral",
+	lead,
+	title,
+	children,
+	className,
+	...data
+}: {
+	tone?: Family | "error" | "neutral";
+	lead?: ReactNode;
+	title?: string;
+	children: ReactNode;
+	className?: string;
+} & { [key: `data-${string}`]: string | undefined }) {
+	const tinted = tone !== "neutral" && tone !== "error";
+	return (
+		<span
+			title={title}
+			className={cx(
+				"tnum inline-flex h-6 max-w-full min-w-0 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[12px] leading-none whitespace-nowrap",
+				tone === "neutral" && "border-line bg-soft text-ink/80",
+				tone === "error" && "border-red bg-red-soft font-medium text-red",
+				tinted && "border-[1.5px] font-medium text-ink",
+				lead !== undefined && "pl-1.5",
+				className,
+			)}
+			style={tinted ? { borderColor: familyColor(tone), background: familyTint(tone, 16) } : undefined}
+			{...data}
+		>
+			{lead !== undefined && <span className="flex shrink-0 items-center text-muted">{lead}</span>}
+			{children}
+		</span>
+	);
+}
+
+/** A share as a short gauge in a kind's line colour, for a tag's lead. */
+export function Gauge({ share, family }: { share: number; family: Family }) {
+	return (
+		<span aria-hidden="true" className="relative h-[6px] w-5 overflow-hidden rounded-full bg-ink/10">
+			<span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${Math.max(0, Math.min(1, share)) * 100}%`, background: familyColor(family) }} />
 		</span>
 	);
 }

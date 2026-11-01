@@ -116,6 +116,12 @@ const MAKERS: Record<ModelMaker, { maker: string; text: string; mark: (id: strin
 	},
 };
 
+/** The class that sets a model's name in its maker's colour, or undefined for a model pika doesn't know. */
+export function modelTextClass(model: string): string | undefined {
+	const known = modelMaker(model);
+	return known ? MAKERS[known].text : undefined;
+}
+
 /**
  * A model's name with its maker's mark after it, the name in the maker's colour. The name truncates first, so the mark
  * stays; phones, where only a letter or two of the name would fit, keep only the mark and leave the name to assistive

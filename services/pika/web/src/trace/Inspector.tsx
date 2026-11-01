@@ -1,9 +1,10 @@
-import { forwardRef, useMemo, useState, type ReactNode } from "react";
+import { forwardRef, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { PikaLink as Link } from "../components/PikaLink";
 import { CodeBlock, OutputBlock } from "../components/code";
 import { Icon } from "../components/icons";
 import { JsonTree } from "../components/JsonTree";
 import { Markdown } from "../components/Markdown";
+import { modelTextClass } from "../components/ModelName";
 import { Callout, cx, ErrorState, SkeletonLines, Toggle } from "../components/ui";
 import { ContextView } from "../context/ContextDrawer";
 import { useApi } from "../lib/api";
@@ -17,19 +18,26 @@ import { useEntry } from "./data";
 import { formatClockTime, formatElapsed, formatFineCost, formatInstant, formatSpan, spanBetween } from "./format";
 import {
 	cacheHit,
+	FAMILY_LABELS,
+	firstStringArg,
+	familyColor,
+	familyTint,
 	recordDuration,
 	recordFamily,
+	recordGlyph,
 	recordIsError,
 	recordName,
 	recordSpan,
 	recordSummary,
 	toolFamily,
+	toolGlyph,
 	toolName,
 	turnStart,
+	type Family,
 } from "./kinds";
 import { useLoadedEntry } from "./data";
 import { Ladder } from "./Ladder";
-import { callIn, Chip, CostDot, DiffStat, diffStatOf, KindBadge, KindBullet, PathChip, RunningDot } from "./parts";
+import { callIn, Chip, CostDot, DiffStat, diffStatOf, Gauge, KindBullet, PathChip, RunningDot, Tag } from "./parts";
 
 export type InspectorTab = "rendered" | "input" | "output" | "context" | "raw";
 
@@ -47,17 +55,24 @@ export function tabsFor(target: InspectorTarget | undefined): InspectorTab[] {
 	return ["rendered", "raw"];
 }
 
-function Meta({ children }: { children: ReactNode }) {
-	return <div className="tnum flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">{children}</div>;
+/** The facts under the inspector's title, as a row of tags. */
+function Tags({ children }: { children: ReactNode }) {
+	return (
+		<div className="flex flex-wrap items-center gap-1.5" data-inspector-tags="">
+			{children}
+		</div>
+	);
 }
 
-function MetaItem({ icon, children, title }: { icon?: Parameters<typeof Icon>[0]["name"]; children: ReactNode; title?: string }) {
-	return (
-		<span className="inline-flex items-center gap-1" title={title}>
-			{icon && <Icon name={icon} size={12} />}
-			{children}
-		</span>
-	);
+/** The line colour the inspector is drawn in: the inspected record's kind, or red when it failed. */
+function accentOf(target: InspectorTarget): Family | "error" {
+	if (target.kind === "record") return recordIsError(target.record) ? "error" : recordFamily(target.record);
+	return target.kind === "child" ? "agent" : "user";
+}
+
+/** A tint that a capsule's hover reads from its `--tint`; Tailwind cannot name a colour that changes per row. */
+function tinted(family: Family | "error"): CSSProperties {
+	return { borderColor: familyColor(family), "--tint": familyTint(family, 14) } as CSSProperties;
 }
 
 function Section({ title, children, right }: { title: string; children: ReactNode; right?: ReactNode }) {
@@ -72,39 +87,40 @@ function Section({ title, children, right }: { title: string; children: ReactNod
 	);
 }
 
+/** Shades of the model-call line: lightest for tokens read from cache, full for the output. */
+const USAGE: { label: string; key: "cacheRead" | "cacheWrite" | "input" | "output"; shade: number }[] = [
+	{ label: "Cache read", key: "cacheRead", shade: 30 },
+	{ label: "Cache write", key: "cacheWrite", shade: 52 },
+	{ label: "Input", key: "input", shade: 76 },
+	{ label: "Output", key: "output", shade: 100 },
+];
+
 function UsageTable({ record }: { record: Extract<TraceRecord, { kind: "llm" }> }) {
-	const prompt = record.input + record.cacheRead + record.cacheWrite;
-	const rows: [string, number, string][] = [
-		["Cache read", record.cacheRead, "bg-ink/20"],
-		["Cache write", record.cacheWrite, "bg-ink/45"],
-		["Input", record.input, "bg-ink/70"],
-		["Output", record.output, "bg-ink"],
-	];
-	const total = prompt + record.output;
+	const total = record.input + record.cacheRead + record.cacheWrite + record.output;
 	return (
 		<div data-usage="">
-			<div className="flex h-2 gap-px overflow-hidden rounded-sm bg-hover" aria-hidden="true">
-				{rows.map(([label, value, color]) => (value > 0 ? <span key={label} className={color} style={{ width: `${(value / Math.max(1, total)) * 100}%` }} /> : null))}
+			<div className="flex h-2.5 gap-[2px] overflow-hidden rounded-full bg-hover" aria-hidden="true">
+				{USAGE.map(({ label, key, shade }) =>
+					record[key] > 0 ? <span key={label} style={{ flexGrow: record[key], flexBasis: 0, background: familyTint("llm", shade) }} /> : null,
+				)}
 			</div>
-			<dl className="tnum mt-2 grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-0.5 text-[12.5px]">
-				{rows.map(([label, value, color]) => (
-					<div key={label} className="contents">
-						<dt className="flex items-center gap-1.5 text-muted">
-							<span className={cx("size-2 rounded-[1px]", color)} />
+			<ul className="mt-2.5 flex flex-wrap gap-1.5" aria-label="Tokens and cost">
+				{USAGE.map(({ label, key, shade }) => (
+					<li key={label}>
+						<Tag lead={<span className="size-2.5 rounded-full" style={{ background: familyTint("llm", shade) }} />} data-usage-part={key}>
 							{label}
-						</dt>
-						<dd className="text-right">{value.toLocaleString("en-US")}</dd>
-						<dd className="text-right text-muted">{total ? `${Math.round((value / total) * 100)}%` : ""}</dd>
-					</div>
+							<span className="font-semibold text-ink">{record[key].toLocaleString("en-US")}</span>
+							<span className="text-muted">{total ? `${Math.round((record[key] / total) * 100)}%` : ""}</span>
+						</Tag>
+					</li>
 				))}
-				<div className="contents font-medium">
-					<dt className="text-muted">Cost</dt>
-					<dd className="text-right">{formatFineCost(record.cost) || "$0"}</dd>
-					<dd className="flex items-center justify-end">
-						<CostDot cost={record.cost} scale="record" />
-					</dd>
-				</div>
-			</dl>
+				<li>
+					<Tag lead={<CostDot cost={record.cost} scale="record" />}>
+						Cost
+						<span className="font-semibold text-ink">{formatFineCost(record.cost) || "$0"}</span>
+					</Tag>
+				</li>
+			</ul>
 		</div>
 	);
 }
@@ -136,23 +152,30 @@ function LlmRendered({ record, entry, onSelectCall }: { record: Extract<TraceRec
 			)}
 			{calls.length > 0 && (
 				<Section title={plural(calls.length, "tool call")}>
-					<div className="space-y-1">
+					{/* The calls branch off the model call: stations on a line in its colour, through their bullets. */}
+					<ul className="relative space-y-1.5" data-inspector-calls="">
+						{calls.length > 1 && (
+							<span aria-hidden="true" className="absolute top-3.5 bottom-3.5 left-[12.5px] w-[2px]" style={{ background: familyColor("llm") }} />
+						)}
 						{calls.map((call) =>
 							call.type === "toolCall" ? (
-								<button
-									key={call.id}
-									type="button"
-									onClick={() => onSelectCall?.(call.id)}
-									className="flex w-full min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-left text-[12.5px] hover:bg-hover"
-								>
-									<KindBullet family={toolFamily(call.name)} size={14} />
-									<span className="shrink-0 font-medium">{call.name}</span>
-									<span className="mono min-w-0 truncate text-[12px] text-muted">{findToolRenderer(call.name).summary?.(call) ?? ""}</span>
-									<Icon name="external" size={12} className="ml-auto shrink-0 text-muted" />
-								</button>
+								<li key={call.id} className="relative">
+									<button
+										type="button"
+										onClick={() => onSelectCall?.(call.id)}
+										className="group flex h-7 w-full min-w-0 items-center gap-2 rounded-full border-[1.5px] bg-page pr-3 pl-[3px] text-left text-[12.5px] hover:bg-(--tint)"
+										style={tinted(toolFamily(call.name))}
+										title="Inspect this call"
+									>
+										<KindBullet family={toolFamily(call.name)} glyph={toolGlyph(call.name)} size={18} />
+										<span className="shrink-0 font-medium">{call.name}</span>
+										<span className="mono min-w-0 truncate text-[12px] text-muted">{findToolRenderer(call.name).summary?.(call) ?? firstStringArg(call.arguments) ?? ""}</span>
+										<Icon name="external" size={12} className="ml-auto shrink-0 text-muted group-hover:text-ink" />
+									</button>
+								</li>
 							) : null,
 						)}
-					</div>
+					</ul>
 				</Section>
 			)}
 			<Section title="Usage" right={message?.thinkingLevel && message.thinkingLevel !== "off" ? <span className="text-[12px]">thinking {message.thinkingLevel}</span> : undefined}>
@@ -202,20 +225,24 @@ function ToolRendered({
 
 function ChildList({ items }: { items: TraceChild[] }) {
 	return (
-		<div className="divide-y divide-line border-y border-line" data-inspector-children="">
+		<ul className="space-y-1.5" data-inspector-children="">
 			{items.map((child) => (
-				<Link
-					key={child.sessionId}
-					to={`/s/${encodeURIComponent(child.sessionId)}`}
-					className="flex h-8 min-w-0 items-center gap-2 px-1 text-[13px] hover:bg-hover"
-				>
-					<KindBadge family="agent" label={child.kind === "herder-step" ? "STEP" : "AGENT"} />
-					<span className="shrink-0 font-medium">{child.agentType ?? "subagent"}</span>
-					<span className="min-w-0 truncate text-muted">{child.description ?? child.title}</span>
-					<span className="tnum ml-auto shrink-0 text-[12px] text-muted">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</span>
-				</Link>
+				<li key={child.sessionId}>
+					<Link
+						to={`/s/${encodeURIComponent(child.sessionId)}`}
+						className="group flex h-8 min-w-0 items-center gap-2 rounded-full border-[1.5px] bg-page pr-3 pl-1 text-[13px] hover:bg-(--tint)"
+						style={tinted("agent")}
+					>
+						<KindBullet family="agent" size={20} />
+						<span className="shrink-0 font-medium">{child.agentType ?? "subagent"}</span>
+						{child.kind === "herder-step" && <span className="shrink-0 text-[12px] text-muted">Herder step</span>}
+						<span className="min-w-0 truncate text-muted">{child.description ?? child.title}</span>
+						<span className="tnum ml-auto shrink-0 text-[12px] text-muted">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</span>
+						<Icon name="external" size={12} className="shrink-0 text-muted group-hover:text-ink" />
+					</Link>
+				</li>
 			))}
-		</div>
+		</ul>
 	);
 }
 
@@ -282,16 +309,16 @@ function useExitLabel(target: InspectorTarget): string | undefined {
 
 function Header({ target, live, stat, onClose }: { target: InspectorTarget; live: boolean; stat?: ReturnType<typeof diffStatOf>; onClose?: () => void }) {
 	const exitLabel = useExitLabel(target);
-	let badge: ReactNode;
+	let bullet: ReactNode;
 	let name: ReactNode;
 	let summary: ReactNode = null;
-	let meta: ReactNode = null;
+	let tags: ReactNode = null;
 	let status: ReactNode = null;
 	if (target.kind === "record") {
 		const { record } = target;
 		const family = recordFamily(record);
 		const error = recordIsError(record);
-		badge = <KindBadge record={record} error={error} />;
+		bullet = <KindBullet family={family} glyph={recordGlyph(record)} model={record.kind === "llm" ? record.model : undefined} error={error} size={20} />;
 		const text = recordSummary(record);
 		if (record.kind === "tool" && text) {
 			// A tool's title is what it worked on: the path, command, pattern, or URL.
@@ -303,7 +330,8 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 				</span>
 			);
 		} else {
-			name = recordName(record);
+			// A model call is titled by its model, in its maker's colour.
+			name = record.kind === "llm" && record.model ? <span className={cx("truncate", modelTextClass(record.model))}>{record.model}</span> : recordName(record);
 			summary = text ? (
 				<div className={cx("line-clamp-3 text-[13px] [overflow-wrap:anywhere]", record.kind === "llm" && record.error ? "text-red" : "text-ink/80")}>{text}</div>
 			) : null;
@@ -312,91 +340,121 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 		const running = live && record.kind === "tool" && record.resultSeq === undefined && record.end === undefined;
 		const hit = cacheHit(record);
 		const duration = recordDuration(record);
-		status = (
-			<>
-				{error && <span className="tnum shrink-0 text-[13px] font-medium text-red">{exitLabel ?? "error"}</span>}
-				{running ? (
-					<span className="inline-flex shrink-0 items-center gap-1.5 text-[13px] text-muted">
-						<RunningDot /> running
-					</span>
-				) : (
-					duration !== undefined && <span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">{formatSpan(duration)}</span>
-				)}
-			</>
+		status = running ? (
+			<span className="inline-flex shrink-0 items-center gap-1.5 text-[13px] text-muted">
+				<RunningDot /> running
+			</span>
+		) : (
+			duration !== undefined && (
+				<span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">
+					{formatSpan(duration)}
+				</span>
+			)
 		);
-		meta = (
-			<Meta>
-				{record.kind === "tool" && <span className="mono text-[11.5px] text-ink/70">{toolName(record)}</span>}
-				<MetaItem icon="clock" title={formatInstant(start)}>
+		tags = (
+			<Tags>
+				{/* The kind, in its line colour; a tool's name beside it. */}
+				<Tag tone={family} data-kind-tag={family}>
+					{FAMILY_LABELS[family]}
+					{record.kind === "tool" && <span className="mono min-w-0 truncate text-[11.5px] font-normal">{recordName(record)}</span>}
+				</Tag>
+				{error && <Tag tone="error">{exitLabel ?? "error"}</Tag>}
+				<Tag lead={<Icon name="clock" size={12} />} title={formatInstant(start)}>
 					{formatClockTime(start)}
-					{start !== undefined && target.turn?.at !== undefined && <span className="mono text-[11px]">{formatElapsed(start - target.turn.at)}</span>}
-				</MetaItem>
+					{start !== undefined && target.turn?.at !== undefined && <span className="mono text-[11px] text-muted">{formatElapsed(start - target.turn.at)}</span>}
+				</Tag>
 				{record.kind === "llm" && (
 					<>
-						<MetaItem icon="tokens" title="Prompt → output tokens">
+						<Tag lead={<Icon name="tokens" size={12} />} title="Prompt → output tokens">
 							{formatCount(record.input + record.cacheRead + record.cacheWrite)} → {formatCount(record.output)}
-						</MetaItem>
+						</Tag>
 						{hit !== undefined && (
-							<MetaItem title="Share of the prompt read from cache">
+							<Tag lead={<Gauge share={hit} family="llm" />} title="Share of the prompt read from cache">
 								{Math.round(hit * 100)}% cached
-							</MetaItem>
+							</Tag>
 						)}
 						{record.cost > 0 && (
-							<MetaItem title="Cost">
-								<CostDot cost={record.cost} scale="record" />
+							<Tag lead={<CostDot cost={record.cost} scale="record" />} title="Cost">
 								{formatFineCost(record.cost)}
-							</MetaItem>
+							</Tag>
 						)}
-						{record.stopReason && <MetaItem>{record.stopReason}</MetaItem>}
+						{record.stopReason && <Tag title="Stop reason">{record.stopReason}</Tag>}
 					</>
 				)}
-				{stat && <DiffStat value={stat} />}
-				{record.kind === "compaction" && record.tokensBefore !== undefined && <MetaItem icon="compress">{formatCount(record.tokensBefore)} tokens before</MetaItem>}
-				<span className="mono text-[11px]">#{record.seq}</span>
-			</Meta>
+				{stat && (
+					<Tag>
+						<DiffStat value={stat} />
+					</Tag>
+				)}
+				{record.kind === "compaction" && record.tokensBefore !== undefined && (
+					<Tag lead={<Icon name="compress" size={12} />}>{formatCount(record.tokensBefore)} tokens before</Tag>
+				)}
+				<span className="mono px-1 text-[11px] text-muted" title="Entry">
+					#{record.seq}
+				</span>
+			</Tags>
 		);
 	} else if (target.kind === "child") {
 		const { child } = target;
-		badge = <KindBadge family="agent" label={child.kind === "herder-step" ? "STEP" : "AGENT"} />;
+		bullet = <KindBullet family="agent" size={20} />;
 		name = child.agentType ?? "subagent";
 		summary = <div className="text-[13px] text-ink/80">{child.description ?? child.title}</div>;
-		meta = (
-			<Meta>
-				<MetaItem icon="clock" title={formatInstant(child.startedAt)}>
+		status = (
+			<span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">
+				{formatSpan(spanBetween(child.startedAt, child.lastAt))}
+			</span>
+		);
+		tags = (
+			<Tags>
+				<Tag tone="agent" data-kind-tag="agent">
+					{child.kind === "herder-step" ? "Herder step" : FAMILY_LABELS.agent}
+				</Tag>
+				<Tag lead={<Icon name="clock" size={12} />} title={formatInstant(child.startedAt)}>
 					{formatClockTime(child.startedAt)}
-				</MetaItem>
-				<MetaItem title="Duration">{formatSpan(spanBetween(child.startedAt, child.lastAt))}</MetaItem>
-				<MetaItem icon="tokens">{formatCount(child.tokens.input + child.tokens.output + child.tokens.cacheRead + child.tokens.cacheWrite)}</MetaItem>
+				</Tag>
+				<Tag lead={<Icon name="tokens" size={12} />} title="Tokens">
+					{formatCount(child.tokens.input + child.tokens.output + child.tokens.cacheRead + child.tokens.cacheWrite)}
+				</Tag>
 				{child.cost > 0 && (
-					<MetaItem title="Cost">
-						<CostDot cost={child.cost} scale="session" />
+					<Tag lead={<CostDot cost={child.cost} scale="session" />} title="Cost">
 						{formatFineCost(child.cost)}
-					</MetaItem>
+					</Tag>
 				)}
-				<MetaItem>{plural(child.entryCount, "entry", "entries")}</MetaItem>
-			</Meta>
+				<Tag>{plural(child.entryCount, "entry", "entries")}</Tag>
+			</Tags>
 		);
 	} else {
 		const { turn } = target;
 		const start = turnStart(turn);
-		badge = <KindBadge family="user" label={`#${turn.index + 1}`} />;
+		bullet = <KindBullet family="user" glyph={start.glyph} size={20} />;
 		name = start.label;
-		meta = (
-			<Meta>
-				<MetaItem icon="clock">{formatDateTime(turn.at)}</MetaItem>
-				<MetaItem>{formatSpan(turn.durationMs)}</MetaItem>
-				<MetaItem>
-					{turn.modelCalls} LLM · {plural(turn.toolCalls, "tool")}
-				</MetaItem>
-				{turn.cost > 0 && <MetaItem icon="cost">{formatFineCost(turn.cost)}</MetaItem>}
-				{turn.toolErrors > 0 && <span className="text-red">{plural(turn.toolErrors, "error")}</span>}
-			</Meta>
+		status = (
+			<span className="tnum shrink-0 text-[13px] font-medium text-muted" title="Duration">
+				{formatSpan(turn.durationMs)}
+			</span>
+		);
+		tags = (
+			<Tags>
+				<Tag tone="user" data-kind-tag="user">
+					Turn {turn.index + 1}
+				</Tag>
+				<Tag lead={<Icon name="clock" size={12} />}>{formatDateTime(turn.at)}</Tag>
+				<Tag>
+					{plural(turn.modelCalls, "model call")} · {plural(turn.toolCalls, "tool call")}
+				</Tag>
+				{turn.cost > 0 && (
+					<Tag lead={<CostDot cost={turn.cost} scale="session" />} title="Cost">
+						{formatFineCost(turn.cost)}
+					</Tag>
+				)}
+				{turn.toolErrors > 0 && <Tag tone="error">{plural(turn.toolErrors, "error")}</Tag>}
+			</Tags>
 		);
 	}
 	return (
 		<div className="relative shrink-0 px-5 pt-3.5 pb-1">
-			<div className="flex min-w-0 items-center gap-2.5">
-				{badge}
+			<div className="flex min-w-0 items-center gap-2">
+				{bullet}
 				<h2 className="flex min-w-0 items-center truncate text-[15px] font-semibold">{name}</h2>
 				{status}
 				{onClose && (
@@ -411,7 +469,7 @@ function Header({ target, live, stat, onClose }: { target: InspectorTarget; live
 				)}
 			</div>
 			{summary && <div className="mt-1.5 min-w-0">{summary}</div>}
-			<div className="mt-2">{meta}</div>
+			<div className="mt-2.5">{tags}</div>
 		</div>
 	);
 }
@@ -451,6 +509,7 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 	const call = record?.kind === "tool" ? callIn(entry.data, record.callId) : undefined;
 	const result = resultEntry.data?.raw.message as ToolResultMessage | undefined;
 	const stat = call ? diffStatOf(call) : undefined;
+	const accent = target ? accentOf(target) : undefined;
 
 	let body: ReactNode;
 	if (!target) body = <EmptyInspector trace={trace} />;
@@ -538,6 +597,8 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 
 	return (
 		<div ref={ref} tabIndex={-1} className="flex h-full min-h-0 flex-col outline-none" data-inspector="" data-tab={target?.kind === "record" ? current : undefined}>
+			{/* The inspected record's line colour across the top, as a route sign carries its line's. */}
+			{accent && <div aria-hidden="true" className="h-[3px] shrink-0" style={{ background: familyColor(accent) }} data-inspector-accent={accent} />}
 			{target && <Header target={target} live={live} stat={stat} onClose={onClose} />}
 			{record?.kind === "llm" && <Ladder record={record} />}
 			{target && (tabs.length === 0 || preview) && <div aria-hidden="true" className="mt-2 shrink-0 border-b border-line" />}
@@ -557,7 +618,9 @@ export const Inspector = forwardRef<HTMLDivElement, InspectorProps>(function Ins
 							data-tab-button={name}
 						>
 							{TAB_LABELS[name]}
-							{name === current && <span aria-hidden="true" className="absolute inset-x-0 bottom-[-1px] h-[2px] bg-ink" />}
+							{name === current && (
+								<span aria-hidden="true" className="absolute inset-x-0 bottom-[-1px] h-[3px] rounded-t-[1px]" style={{ background: accent ? familyColor(accent) : undefined }} />
+							)}
 						</button>
 					))}
 				</div>

@@ -30,6 +30,16 @@ export const FAMILY_GLYPHS: Record<Family, GlyphName> = {
 	compaction: "compaction",
 };
 
+/** A kind's line colour as a CSS value, for drawing it where no utility class fits: tints, gradients, rules. */
+export function familyColor(family: Family | "error"): string {
+	return `var(--color-k-${family})`;
+}
+
+/** A kind's line colour mixed into the page, `percent` of it: the tint that fills tags and stations. */
+export function familyTint(family: Family | "error", percent: number): string {
+	return `color-mix(in srgb, ${familyColor(family)} ${percent}%, var(--color-page))`;
+}
+
 /**
  * Utility classes per family; written out in full so Tailwind sees them. `badge` is the bullet: the line colour with
  * its letter colour. `text` stays neutral, since several line colours are too light to set text in.
